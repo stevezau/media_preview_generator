@@ -433,10 +433,10 @@ class Worker:
                     self._done_event.set()
             return
 
-        from ..processing.multi_server import (
-            MultiServerStatus,
-            process_canonical_path,
-        )
+        from ..processing.multi_server import process_canonical_path
+
+        # Lazy: the orchestrator imports this module at load time.
+        from .orchestrator import _outcome_for_multi_server_status
 
         # Register THIS worker thread under THIS job's id so the per-job
         # log handler captures only its own messages — not a sibling job
@@ -457,20 +457,6 @@ class Worker:
             # at multi_server.py:980 ("FFmpeg start: server=... gpu=..."); this
             # one only signals the worker is now responsible for the item.
             ctx_logger.info("{} picked up: {}", self.display_name, display_name)
-
-            def _record_outcome(status: MultiServerStatus) -> ProcessingResult:
-                # MultiServerStatus → ProcessingResult mapping so per-job
-                # stat aggregations stay consistent with the rest of the
-                # WorkerPool accounting.
-                if status is MultiServerStatus.PUBLISHED:
-                    return ProcessingResult.GENERATED
-                if status is MultiServerStatus.SKIPPED:
-                    return ProcessingResult.SKIPPED_BIF_EXISTS
-                if status is MultiServerStatus.SKIPPED_NOT_INDEXED:
-                    return ProcessingResult.SKIPPED_NOT_INDEXED
-                if status is MultiServerStatus.NO_OWNERS:
-                    return ProcessingResult.NO_MEDIA_PARTS
-                return ProcessingResult.FAILED
 
             def _phase_cb(text: str) -> None:
                 # Single-writer (worker thread) → no lock needed.
@@ -615,7 +601,7 @@ class Worker:
             try:
                 ms_result = _run_once(self.gpu, self.gpu_device)
                 _capture_publishers(ms_result)
-                result = _record_outcome(ms_result.status)
+                result = _outcome_for_multi_server_status(ms_result.status)
                 self.outcome_counts[result.value] += 1
                 if result == ProcessingResult.FAILED:
                     self.failed += 1
@@ -655,7 +641,7 @@ class Worker:
                         try:
                             ms_result = _run_once(None, None)
                             _capture_publishers(ms_result)
-                            result = _record_outcome(ms_result.status)
+                            result = _outcome_for_multi_server_status(ms_result.status)
                             self.outcome_counts[result.value] += 1
                             if result == ProcessingResult.FAILED:
                                 self.failed += 1

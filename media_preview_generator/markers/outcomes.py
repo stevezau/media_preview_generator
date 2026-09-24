@@ -222,6 +222,23 @@ def replaced_own_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
     )
 
 
+def replaced_stale_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
+    """Row wording for the server's own markers ours replaced because they were made for an earlier file.
+
+    Args:
+        replaced_types: Those types (``MarkerPublisher.last_replaced_stale_types``).
+        vendor: The server's brand as users know it (``Plex``).
+
+    Returns:
+        E.g. "Replaced Plex's intro: it was detected for an earlier file"; "" when there were none.
+    """
+    types = [t for t in MarkerType if t in frozenset(replaced_types)]
+    if not types:
+        return ""
+    verb = "it was" if types == [MarkerType.INTRO] else "they were"
+    return f"Replaced {vendor}'s {' and '.join(t.value for t in types)}: {verb} detected for an earlier file"
+
+
 def lock_overrides_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
     """Inspector wording **before** a save, for a locked type this server would otherwise keep its own markers of.
 

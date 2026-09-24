@@ -1,0 +1,903 @@
+diff --git a/docs/guides.md b/docs/guides.md
+--- a/docs/guides.md
++++ b/docs/guides.md
+@@ -713,11 +713,12 @@
+ 
+ Season audio compares an episode with the other episodes of its season on disk: the video files in the same folder
+ with the same season number in their names (in a folder holding more than 40 of them, the 40 nearest by episode
+-number). The first episode of a season a job checks fingerprints every member that has no fingerprint yet, on a
+-worker (once per file; a replaced file is fingerprinted again). The rest of the season then matches from those saved
+-fingerprints, normally without taking a worker. An episode ffmpeg can't fingerprint (damaged audio, a network read that
+-stalls) is left out of the other episodes' matching for a day while the file stays unchanged; its own check and a
+-re-detect still try it.
++number). When a library spans several disks and a season is split across them, the same season folder on each of the
++library's folders counts as one season, in matching and in the Season view. The first episode of a season a job checks
++fingerprints every member that has no fingerprint yet, on a worker (once per file; a replaced file is fingerprinted
++again). The rest of the season then matches from those saved fingerprints, normally without taking a worker. An
++episode ffmpeg can't fingerprint (damaged audio, a network read that stalls) is left out of the other episodes'
++matching for a day while the file stays unchanged; its own check and a re-detect still try it.
+ 
+ A channel logo at the very start, or music under the cold open, repeats in every episode just like the theme does, so
+ season audio passes over such a stretch: one in the first 2 seconds must last at least 10 seconds, every one needs
+diff --git a/docs/llms-full.txt b/docs/llms-full.txt
+--- a/docs/llms-full.txt
++++ b/docs/llms-full.txt
+@@ -2099,11 +2099,12 @@
+ 
+ Season audio compares an episode with the other episodes of its season on disk: the video files in the same folder
+ with the same season number in their names (in a folder holding more than 40 of them, the 40 nearest by episode
+-number). The first episode of a season a job checks fingerprints every member that has no fingerprint yet, on a
+-worker (once per file; a replaced file is fingerprinted again). The rest of the season then matches from those saved
+-fingerprints, normally without taking a worker. An episode ffmpeg can't fingerprint (damaged audio, a network read that
+-stalls) is left out of the other episodes' matching for a day while the file stays unchanged; its own check and a
+-re-detect still try it.
++number). When a library spans several disks and a season is split across them, the same season folder on each of the
++library's folders counts as one season, in matching and in the Season view. The first episode of a season a job checks
++fingerprints every member that has no fingerprint yet, on a worker (once per file; a replaced file is fingerprinted
++again). The rest of the season then matches from those saved fingerprints, normally without taking a worker. An
++episode ffmpeg can't fingerprint (damaged audio, a network read that stalls) is left out of the other episodes'
++matching for a day while the file stays unchanged; its own check and a re-detect still try it.
+ 
+ A channel logo at the very start, or music under the cold open, repeats in every episode just like the theme does, so
+ season audio passes over such a stretch: one in the first 2 seconds must last at least 10 seconds, every one needs
+@@ -4266,9 +4267,10 @@
+   episode's name.
+ - `servers` — the enabled servers holding the episode, in server order: `server_id`, `server_name`, `server_type`,
+   `markers_enabled` (Intro & Credits is on there and this library is selected).
+-- `episodes` — the episodes matched as one season (same folder and season number; at most the 40 nearest in a flat
+-  folder of hundreds; extras left out), each with `path`, `name`, `episode` (`"E01"`), `known` (the app has looked at
+-  it), `duration_ms`, `intro` and `credits` (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
++- `episodes` — the episodes matched as one season (same season folder, on every disk of the library, and season
++  number; at most the 40 nearest in a flat folder of hundreds; extras left out), each with `path`, `name`, `episode`
++  (`"E01"`), `known` (the app has looked at it), `duration_ms`, `intro` and `credits`
++  (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
+   `needs_review` (any marker type in Needs review, recap and preview included) with `review_reason` (the first such
+   type's reason, `""` when none),
+   `evidence` chips (`[{source, label}]`: the sources with intro or credits evidence, markers already on servers left
+diff --git a/docs/reference.md b/docs/reference.md
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -697,9 +697,10 @@
+   episode's name.
+ - `servers` — the enabled servers holding the episode, in server order: `server_id`, `server_name`, `server_type`,
+   `markers_enabled` (Intro & Credits is on there and this library is selected).
+-- `episodes` — the episodes matched as one season (same folder and season number; at most the 40 nearest in a flat
+-  folder of hundreds; extras left out), each with `path`, `name`, `episode` (`"E01"`), `known` (the app has looked at
+-  it), `duration_ms`, `intro` and `credits` (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
++- `episodes` — the episodes matched as one season (same season folder, on every disk of the library, and season
++  number; at most the 40 nearest in a flat folder of hundreds; extras left out), each with `path`, `name`, `episode`
++  (`"E01"`), `known` (the app has looked at it), `duration_ms`, `intro` and `credits`
++  (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
+   `needs_review` (any marker type in Needs review, recap and preview included) with `review_reason` (the first such
+   type's reason, `""` when none),
+   `evidence` chips (`[{source, label}]`: the sources with intro or credits evidence, markers already on servers left
+diff --git a/docs/design/intro-credits/spec.md b/docs/design/intro-credits/spec.md
+--- a/docs/design/intro-credits/spec.md
++++ b/docs/design/intro-credits/spec.md
+@@ -244,9 +244,14 @@
+ **Matcher (v3)** for every episode pair: inverted index (±2 value shift); per shift, runs where
+ `popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, length 8–120 s; keep all non-overlapping runs. Per episode: cluster candidates
+ (start, end) within ±4 s; rank by (length ≥ 15 s, number of supporting episodes, length); require support from
+-≥ 50% of the other episodes in the group (≥ 1 when only one other). Group = the video files in the episode's folder
+-with the same parsed season number, at most the 40 nearest by episode number (a flat folder can hold hundreds;
+-server-agnostic); mixed releases in one season work (Rick and Morty S01). An intro whose points are more than half
++≥ 50% of the other episodes in the group (≥ 1 when only one other). Group = the video files in the episode's season
++folder with the same parsed season number, at most the 40 nearest by episode number (a flat folder can hold hundreds;
++server-agnostic); mixed releases in one season work (Rick and Morty S01). The season folder is read on every disk of
++the library (§14 2026-09-24): the same folder, relative to the deepest library folder holding the file (at least one
++folder down), under each other folder of every enabled server's library that holds the file, where it exists
++(`season.season_folders`, `season_videos`; library folders nested in or around that one, `/`, a folder that is the
++same directory as one already listed, and a path not in normal form are left out). The Season view and its Publish
++list the same group. An intro whose points are more than half
+ chromaprint's silence value (±2, or ≤ 6 bits apart) is dropped, and a pair that provably can't hold a run of 120 s or
+ less is skipped (two silent openings); neither changes the 118-episode numbers (`evidence/eval/phase2-harness.md`,
+ Task 7).
+@@ -2356,8 +2361,8 @@
+   agreed with season audio only scaled: Needs review → useful, 3.5 s short). The library's two other mixed seasons
+   (30 for 30 S04, Sort Of S03) get no season audio answer before or after. A release sped up with its pitch kept, and
+   rates other than 23.976/24/25, are matched as they play, as before.
+-- 2026-09-25 · **Two intro fixes: dense-core exemptions and online logos** (season audio v7; owner: automatic, at par or
+-  better than Plex). Numbers are useful / wrong / missed.
++- 2026-09-25 · **Three intro fixes: dense-core exemptions, online logos, a season on every disk** (season audio v7;
++  owner: automatic, at par or better than Plex). Numbers are useful / wrong / missed.
+   1. **Dense-core exemptions** (§5.3 guards, `season.needs_dense_core`): a cluster starting at 2–30 s that is at least
+      30 s long, and one starting after 30 s that is at least 10 s long and found by at least 2 other episodes, need no
+      dense core (a theme under dialogue matches only in patches). The limits were chosen after seeing the failures
+@@ -2374,14 +2379,23 @@
+      production the rule matches exactly those 10 rows (the other 8 stay decided by their chapters); none of the 43
+      verified online cases and none of IntroDB's intros for the 350 regression files match it. A marker composed from
+      agreeing sources is judged on its times only.
+-
+-  **Held: a season on every disk.** The owner's TV library is spread over three disks by a pool (and a fourth disk), so
+-  8,069 of 15,478 season folders hold episodes on two or three disks and today's season groups depend on where the
+-  pool put each file. Grouping the same season folder across the library's folders cost the owner's bar: held-out 175
+-  **124 / 4 / 47 → 121 / 5 / 49** (wrong 5 against Plex's 4; SPY x FAMILY S01, whose 25 episodes hold two openings,
+-  lost 10), lab 118 **91 / 10 / 17 → 90 / 8 / 20**, and Star Trek: Strange New Worlds S04E10 took a "Star Trek 60"
+-  bumper at 0.0–27.6 s over its title sequence. It comes back as its own lane with matcher changes for seasons with
+-  two openings and start-of-file bumpers.
++  3. **A season on every disk** (§5.3 group, `season.season_folders`): the owner's TV library is spread over three
++     disks by a pool (and a fourth disk), so a season's episodes are scattered: **8,069 of 15,478** season folders hold
++     episodes on two or three disks (88,966 files), not the 22 first counted from markers.db. The group now takes the
++     same season folder on each of the library's folders; the Season view, its Publish and the Season follow-up
++     job's name follow. Measured in app mode (whole folders; members without a cached fingerprint fingerprinted, so
++     both groupings use the same fingerprints): Accused **3 / 0 / 53** unchanged (one disk); lab 118 **91 / 10 / 17
++     → 90 / 8 / 20** (Outlander S08E02/E08 wrong → missed; The Sinner S03E07 missed → useful; The WONDERfools E02/E04
++     useful → missed); held-out 175 **124 / 4 / 47 → 121 / 5 / 49** (Alias S02 +5 useful, Bluey S01 +2, Dateline
++     missed → wrong; SPY x FAMILY S01 10 useful → missed: its 25 episodes hold two openings, each now found by fewer
++     than half the others); chapter set **106 / 58 / 60 → 113 / 54 / 57** (Sex and the City S04 4 wrong → useful,
++     South Park S12 +2, Glass Heart +1; Family Guy S14 and Turning Point 9/11 +3 wrong, 3 wrong → missed). All 573:
++     **+3 useful, −5 wrong, +2 missed**. Production replay: Lioness S02E08 (alone on its disk) none → **63.3–122.7 s**
++     (7 of 7, as IntroDB); Star Trek: Strange New Worlds S04E10 its title sequence 562.9–669.8 s → **0.0–27.6 s**, a
++     "Star Trek 60" bumper at the start of every S04 episode that 9 of 9 others share and that outranks the title
++     sequence (found by fewer) once the season is whole — as it already did on the S04 episodes whose own folder held
++     three others. Other answers keep their times (Lioness E01–E06, NOVA S53, From Old Country Bumpkin S02E12,
++     Deadly Influence S01E03: more support, within 0.6 s).
+ - 2026-09-25 · **Second review of the two-speed and intro fixes** (0 HIGH, 3 MED, 8 LOW; all applied).
+   - **The 25 fps server-marker rule is gone.** It stopped a server's own marker from confirming raw online times on a
+     25 fps file, and also held back native 25 fps shows (UK, European, Australian TV) whose Plex marker and IntroDB
+diff --git a/media_preview_generator/markers/inspect.py b/media_preview_generator/markers/inspect.py
+--- a/media_preview_generator/markers/inspect.py
++++ b/media_preview_generator/markers/inspect.py
+@@ -17,7 +17,7 @@
+ 
+ from ..servers.base import ServerConfig, ServerType
+ from ..servers.ownership import OwnershipMatch, apply_path_mappings
+-from .audio.season import folder_videos, season_group, season_size
++from .audio.season import season_group, season_size, season_videos
+ from .decide import DecisionStatus, shortened_by
+ from .external_ids import ids_from_path, is_season_folder
+ from .models import SERVER_SOURCES, Marker, MarkerType, Source
+@@ -917,17 +917,17 @@
+         ``folder``; ``show`` and ``season`` as the Publish job names them (the show folder's name; "Season N" or
+         "Specials"); ``servers`` (the enabled servers owning the asked file, in registry order, with
+         ``markers_enabled``: Intro & Credits on there and its library selected); ``episodes`` (the season group's
+-        files, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``, ``duration_ms``, ``intro`` and
+-        ``credits`` in ``item_payload``'s decision shape without ``shortened_by``, ``needs_review`` (any marker type
+-        in Needs review) with ``review_reason`` (the first such type's reason, intro first), ``evidence`` chips
+-        ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``: ``off`` (Intro & Credits off
+-        there, or this episode's library not selected or excluded), ``ok`` (last publish wrote markers of ours),
+-        ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``); and
+-        ``counts``: ``episodes`` (the files listed), ``total_episodes`` (the season's size before the 40-nearest
+-        cap), ``ready`` (at least one decided marker of any type: what Publish sends, even when another type is in
+-        Needs review) and ``needs_review`` (any type in Needs review).
+-    """
+-    videos = folder_videos(os.path.dirname(canonical_path))
++        files, from every disk of the library, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``,
++        ``duration_ms``, ``intro`` and ``credits`` in ``item_payload``'s decision shape without ``shortened_by``,
++        ``needs_review`` (any marker type in Needs review) with ``review_reason`` (the first such type's reason, intro
++        first), ``evidence`` chips ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``:
++        ``off`` (Intro & Credits off there, or this episode's library not selected or excluded), ``ok`` (last publish
++        wrote markers of ours), ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed``
++        or ``skipped``); and ``counts``: ``episodes`` (the files listed), ``total_episodes`` (the season's size before
++        the 40-nearest cap), ``ready`` (at least one decided marker of any type: what Publish sends, even when another
++        type is in Needs review) and ``needs_review`` (any type in Needs review).
++    """
++    videos = season_videos(canonical_path, registry.configs())
+     group = season_group(canonical_path, videos)
+     owners = list(_owners(canonical_path, registry))
+     servers = [
+diff --git a/media_preview_generator/markers/job_runner.py b/media_preview_generator/markers/job_runner.py
+--- a/media_preview_generator/markers/job_runner.py
++++ b/media_preview_generator/markers/job_runner.py
+@@ -439,12 +439,15 @@
+ 
+ 
+ def _season_job_name(paths: list[str]) -> str:
+-    folders = sorted({os.path.dirname(p) for p in paths})
+-    if len(folders) > 1:
+-        return f"Season: {len(folders)} seasons"
+-    name = os.path.basename(folders[0])
++    # By show and season folder name, not full path: a season split across a library's disks is one season
++    # (``season.season_folders``).
++    folders = {os.path.dirname(p) for p in paths}
++    seasons = sorted({(os.path.basename(os.path.dirname(f)), os.path.basename(f)) for f in folders})
++    if len(seasons) > 1:
++        return f"Season: {len(seasons)} seasons"
++    show, name = seasons[0]
+     if is_season_folder(name):
+-        return f"Season: {os.path.basename(os.path.dirname(folders[0]))} · {name}"
++        return f"Season: {show} · {name}"
+     return f"Season: {name}"
+ 
+ 
+diff --git a/media_preview_generator/markers/missing.py b/media_preview_generator/markers/missing.py
+--- a/media_preview_generator/markers/missing.py
++++ b/media_preview_generator/markers/missing.py
+@@ -23,7 +23,7 @@
+ import os
+ import threading
+ import time
+-from collections.abc import Callable, Iterable, Sequence
++from collections.abc import Callable, Iterable, Iterator, Sequence
+ from typing import TYPE_CHECKING
+ 
+ from loguru import logger
+@@ -49,31 +49,46 @@
+ _monotonic = time.monotonic
+ 
+ 
+-def disk_roots(canonical_path: str, configs: Iterable[ServerConfig]) -> tuple[str, ...]:
+-    """The disk roots a local file lies under: each enabled server's library folder holding it, and the path mapping
+-    folder that library folder came from.
+-
+-    Args:
+-        canonical_path: Local path of the file.
++def library_folders(configs: Iterable[ServerConfig]) -> Iterator[list[tuple[str, str | None]]]:
++    """Each library of every enabled server, as its local folders.
++
++    Args:
+         configs: The servers' configs.
+ 
+-    Returns:
+-        The roots, each once, in server and library order; empty when no library holds the file. ``/`` is never one:
+-        it holds entries whatever is mounted.
+-    """
+-    roots: list[str] = []
++    Yields:
++        Per library, in server and library order: each of its folders on this side of the server's path mappings (no
++        trailing ``/``), with the mapping folder it came from (None when no mapping applies).
++    """
+     for cfg in configs:
+         if not cfg.enabled:
+             continue
+         mappings = list(cfg.path_mappings or [])
+         for library in cfg.libraries:
+-            for remote in library.remote_paths:
+-                if not (remote or "").strip():
+-                    continue
+-                for local, mapping_root in path_mapping_candidates(remote, mappings):
+-                    folder = local.rstrip("/")
+-                    if folder and canonical_path.startswith(folder + "/"):
+-                        roots.extend(root for root in (mapping_root, folder) if root and root != "/")
++            yield [
++                (local.rstrip("/"), mapping_root)
++                for remote in library.remote_paths
++                if (remote or "").strip()
++                for local, mapping_root in path_mapping_candidates(remote, mappings)
++            ]
++
++
++def disk_roots(canonical_path: str, configs: Iterable[ServerConfig]) -> tuple[str, ...]:
++    """The disk roots a local file lies under: each enabled server's library folder holding it, and the path mapping
++    folder that library folder came from.
++
++    Args:
++        canonical_path: Local path of the file.
++        configs: The servers' configs.
++
++    Returns:
++        The roots, each once, in server and library order; empty when no library holds the file. ``/`` is never one:
++        it holds entries whatever is mounted.
++    """
++    roots: list[str] = []
++    for folders in library_folders(configs):
++        for folder, mapping_root in folders:
++            if folder and canonical_path.startswith(folder + "/"):
++                roots.extend(root for root in (mapping_root, folder) if root and root != "/")
+     return tuple(dict.fromkeys(roots))
+ 
+ 
+diff --git a/media_preview_generator/markers/triggers.py b/media_preview_generator/markers/triggers.py
+--- a/media_preview_generator/markers/triggers.py
++++ b/media_preview_generator/markers/triggers.py
+@@ -15,7 +15,7 @@
+ from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
+ from ..web.jobs import PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL, Job, get_job_manager, is_live_retry_chain
+ from ..web.settings_manager import get_settings_manager
+-from .audio.season import season_group
++from .audio.season import season_group, season_videos
+ from .external_ids import ids_from_path, is_season_folder
+ from .job_runner import (
+     DECIDE_AGAIN,
+@@ -396,11 +396,11 @@
+ def submit_season_publish(episode: str) -> str:
+     """Queue the Season view's "Publish": a NORMAL-priority, not forced job over the episodes of an episode's season group.
+ 
+-    The group is the one the Season view lists (``season_group``: same folder and season number, at most the 40 nearest),
+-    so a flat folder holding several seasons sends only this season. Jobs publish every decided marker, so decided
+-    episodes go to every server that doesn't show them yet and undecided ones are checked again (owner ruling R4, at
+-    NORMAL priority since 2026-09-15). While a Publish of exactly these episodes is still queued or running, that job is
+-    returned instead.
++    The group is the one the Season view lists (``season_group``: same season folder, on every disk of the library, and
++    same season number, at most the 40 nearest), so a flat folder holding several seasons sends only this season. Jobs
++    publish every decided marker, so decided episodes go to every server that doesn't show them yet and undecided ones
++    are checked again (owner ruling R4, at NORMAL priority since 2026-09-15). While a Publish of exactly these episodes
++    is still queued or running, that job is returned instead.
+ 
+     Args:
+         episode: The local path of any episode of the season, already validated by the caller.
+@@ -408,7 +408,7 @@
+     Returns:
+         The id of the new or the reused job.
+     """
+-    group = season_group(episode)
++    group = season_group(episode, season_videos(episode, _server_configs()))
+     episodes = list(group.episodes)
+     jm = get_job_manager()
+     # Shared with re-detect: a double-click on either Inspector button queues one job.
+diff --git a/media_preview_generator/markers/audio/season.py b/media_preview_generator/markers/audio/season.py
+--- a/media_preview_generator/markers/audio/season.py
++++ b/media_preview_generator/markers/audio/season.py
+@@ -1,11 +1,13 @@
+ """Season step (spec §5.3, §6.2 step 4, §6.4 items 4–5): the v3 matcher over a season's episodes, and the season's intro
+ chapters (finding F1).
+ 
+-A season group is the episodes of a file's folder with the same season number in their names, at most the 40 nearest by
+-episode number (a flat folder can hold hundreds). Fingerprinting needs a worker (CPU ffmpeg, at most two at once): the
+-first episode of a group to get one fingerprints every member that has none, so the rest of the season matches from
+-cached fingerprints on the checking threads. An episode alone in its folder (a new season's first weekly release) matches against up to four cached
+-episodes of the previous season; that answer is a hint (``Source.SEASON_AUDIO_PREVIOUS``). Neither decides alone in
++A season group is the episodes of a file's season folders with the same season number in their names, at most the 40
++nearest by episode number (a flat folder can hold hundreds). The season folders are the file's own and, in a library
++spread over several disks, the same folder under the library's other folders (``season_folders``). Fingerprinting
++needs a worker (CPU ffmpeg, at most two at once): the first episode of a group to get one fingerprints every member
++that has none, so the rest of the season matches from cached fingerprints on the checking threads. An episode alone in
++its group (a new season's first weekly release) matches against up to four cached episodes of the previous season;
++that answer is a hint (``Source.SEASON_AUDIO_PREVIOUS``). Neither decides alone in
+ phase 2 (owner, 2026-09-14). Episodes whose answer is out of date and whose intro is still undecided, or was decided
+ with that answer, are handed to the job as follow-ups, which a "Season" job decides again: by the run that fingerprints
+ the season, and by every run of an episode of the group (one that arrives decided by its chapters never matches).
+@@ -23,7 +25,7 @@
+ import math
+ import os
+ import re
+-from collections.abc import Callable, Mapping, Sequence
++from collections.abc import Callable, Iterable, Mapping, Sequence
+ from dataclasses import dataclass, field
+ from datetime import timedelta
+ from typing import TYPE_CHECKING
+@@ -34,6 +36,7 @@
+ from ...plex_client import VIDEO_EXTENSIONS
+ from ..decide import DecisionStatus, intro_chapter_length_ms, intro_chapter_limit_ms
+ from ..external_ids import ids_from_path, is_extra
++from ..missing import library_folders
+ from ..models import Candidate, FileIdentity, MarkerType, Source
+ from ..outcomes import is_kept_own
+ from ..probe import MediaProbe, ProbeError, ProbeStalledError, probe_media
+@@ -67,6 +70,7 @@
+ )
+ 
+ if TYPE_CHECKING:
++    from ...servers.base import ServerConfig
+     from ..pipeline import DetectorAnswer, LocalDetectorSpec, PipelineContext
+     from ..store import FileRecord
+ 
+@@ -166,19 +170,81 @@
+         return ()
+ 
+ 
++def season_folders(canonical_path: str, configs: Iterable[ServerConfig]) -> tuple[str, ...]:
++    """The folders a file's season is kept in: its own, and, for a library spread over several disks, the same folder
++    under each other folder of every enabled server's library holding the file, where one is there.
++
++    The season folder is taken relative to the deepest library folder holding the file, at least one folder down.
++    Library folders inside that one or around it are left out (the same relative folder there is another show's), as
++    are ``/`` and a folder that is the same directory as one already listed (a linked disk). A path that isn't in
++    normal form (``..``, ``.``, doubled or trailing slashes) keeps its own folder only, so every folder listed lies
++    inside a library folder.
++
++    Args:
++        canonical_path: Local path of one episode.
++        configs: The servers' configs.
++
++    Returns:
++        The file's own folder first, then the others sorted.
++    """
++    own = os.path.dirname(canonical_path)
++    if not os.path.isabs(own) or os.path.normpath(own) != own:
++        return (own,)
++    elsewhere: set[str] = set()
++    for folders in library_folders(configs):
++        roots = {os.path.normpath(folder) for folder, _mapping_root in folders if folder} - {"/"}
++        holding = [root for root in roots if own.startswith(root + "/")]
++        if not holding:
++            continue
++        home = max(holding, key=len)
++        relative = own[len(home) + 1 :]
++        elsewhere.update(
++            os.path.join(root, relative)
++            for root in roots
++            if root != home and not root.startswith(home + "/") and not home.startswith(root + "/")
++        )
++    found = [own]
++    seen = {os.path.realpath(own)}
++    for folder in sorted(elsewhere):
++        if not os.path.isdir(folder):
++            continue
++        real = os.path.realpath(folder)
++        if real not in seen:
++            seen.add(real)
++            found.append(folder)
++    return tuple(found)
++
++
++def season_videos(canonical_path: str, configs: Iterable[ServerConfig]) -> tuple[FolderVideo, ...]:
++    """:func:`folder_videos` of each of a file's :func:`season_folders`: what :func:`season_group` picks from.
++
++    Args:
++        canonical_path: Local path of one episode.
++        configs: The servers' configs.
++
++    Returns:
++        The videos, folder by folder.
++    """
++    return tuple(video for folder in season_folders(canonical_path, configs) for video in folder_videos(folder))
++
++
++def _server_configs(ctx: PipelineContext) -> list[ServerConfig]:
++    return list(ctx.registry.configs())
++
++
+ def season_group(canonical_path: str, videos: Sequence[FolderVideo] | None = None) -> SeasonGroup:
+     """The episodes a file is matched with (spec §5.3: the season on disk, server-agnostic).
+ 
+-    Files of its folder with the same season number in their names (files without one are a group of their own); in a
+-    folder with more than 40 of them, the 40 nearest by episode number, ties by name (by position in name order when a
+-    name carries no episode number).
++    Files of its folder (of its season's folders on every disk, given ``videos`` from :func:`season_videos`) with the
++    same season number in their names (files without one are a group of their own); with more than 40 of them, the 40
++    nearest by episode number, ties by path (by position in path order when a name carries no episode number).
+ 
+     Args:
+         canonical_path: Local path of one episode.
+-        videos: The folder's :func:`folder_videos`, when the caller already read them.
+-
+-    Returns:
+-        The folder and the group's paths, sorted, the file itself included.
++        videos: The files to pick from (:func:`season_videos`); None reads the file's own folder only.
++
++    Returns:
++        The file's own folder and the group's paths, sorted, the file itself included.
+     """
+     folder = os.path.dirname(canonical_path)
+     listed = folder_videos(folder) if videos is None else videos
+@@ -201,7 +267,7 @@
+ 
+     Args:
+         canonical_path: Local path of one episode.
+-        videos: The folder's :func:`folder_videos`, when the caller already read them.
++        videos: The files to count from (:func:`season_videos`); None reads the file's own folder only.
+ 
+     Returns:
+         The count, the file itself included.
+@@ -221,15 +287,15 @@
+     videos: Sequence[FolderVideo],
+     group_of: Callable[[str], SeasonGroup] | None = None,
+ ) -> tuple[str, ...]:
+-    """The other files of a folder whose own season group holds this file (in a flat folder, not only its group's).
++    """The other files of a season whose own season group holds this file (in a flat folder, not only its group's).
+ 
+     A group is the 40 nearest files, so a file with 39 or more others strictly between it and this one (by episode
+     number, or by name order when names carry none) can't hold it: those are all nearer to it. Only the rest are checked.
+ 
+     Args:
+         canonical_path: Local path of one episode.
+-        videos: The folder's :func:`folder_videos`.
+-        group_of: :func:`season_group` of another file of the folder, when the caller keeps them.
++        videos: The season's files (:func:`season_videos`).
++        group_of: :func:`season_group` of another file of the season, when the caller keeps them.
+ 
+     Returns:
+         Their paths, sorted.
+@@ -801,7 +867,7 @@
+ 
+ 
+ class _SeasonView:
+-    """What one run of an episode reads of its season: the folder listing, groups, previous-season files, and each
++    """What one run of an episode reads of its season: its folders' listing, groups, previous-season files, and each
+     file's signature item and signature. Kept for the run in ``ctx.run_memo`` (the pipeline drops it once a detector
+     ran), so the chapter step, the follow-ups hook, the early-stop and pending checks (``season_audio_due``) and
+     ``needs_worker`` read the season once."""
+@@ -809,14 +875,14 @@
+     def __init__(self, ctx: PipelineContext, canonical_path: str) -> None:
+         self._ctx = ctx
+         self.canonical_path = canonical_path
+-        self.videos = folder_videos(os.path.dirname(canonical_path))
++        self.videos = season_videos(canonical_path, _server_configs(ctx))
+         self.on_disk: dict[str, list] = {}
+         self._groups: dict[str, SeasonGroup] = {}
+         self._signatures: dict[str, str] = {}
+         self._previous: tuple[str, ...] | None = None
+ 
+     def group(self, path: str | None = None) -> SeasonGroup:
+-        """The season group of this run's episode, or of another file of its folder."""
++        """The season group of this run's episode, or of another file of its season."""
+         path = path or self.canonical_path
+         if path not in self._groups:
+             self._groups[path] = season_group(path, self.videos)
+@@ -1289,6 +1355,7 @@
+     signature: str,
+     *,
+     matched: Mapping[str, FileRecord],
++    group: SeasonGroup,
+ ) -> None:
+     """Ask again for the siblings whose intro is undecided, or decided with a season audio answer, and whose answer
+     was based on other season files than this run's. A sibling season audio never answered for is left alone: its own
+@@ -1296,15 +1363,15 @@
+ 
+     ``signature`` is this run's answer's; a sibling whose own group is another (a season of more than 40 episodes gives
+     each file its 40 nearest) is compared with the signature its own group has with the files this run ``matched``,
+-    since its answer never equals this run's even when nothing it used changed.
+-    """
+-    folder = os.path.dirname(rec.canonical_path)
++    since its answer never equals this run's even when nothing it used changed. Only ``group``'s episodes are asked
++    (``members`` can hold the previous season's files).
++    """
+     videos: tuple[FolderVideo, ...] | None = None
+     own_group: SeasonGroup | None = None
+     on_disk: dict[str, list] = {}
+     stale = []
+     for path, member in members.items():
+-        if member.id == rec.id or os.path.dirname(path) != folder:
++        if member.id == rec.id or path not in group.episodes:
+             continue
+         answer = ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO)
+         if answer is None or answer == signature:
+@@ -1312,7 +1379,7 @@
+         if _intro_settled(ctx, member):
+             continue
+         if videos is None:
+-            videos = folder_videos(folder)
++            videos = season_videos(rec.canonical_path, _server_configs(ctx))
+             own_group = season_group(rec.canonical_path, videos)
+         group = season_group(path, videos)
+         if group.episodes != own_group.episodes and answer == _signature(
+@@ -1406,7 +1473,7 @@
+     ffmpeg = chromaprint_ffmpeg(getattr(ctx.config, "ffmpeg_path", None))
+     if ffmpeg is None:
+         raise DetectorUnavailableError("no ffmpeg with chromaprint")
+-    group = season_group(rec.canonical_path)
++    group = season_group(rec.canonical_path, season_videos(rec.canonical_path, _server_configs(ctx)))
+ 
+     def fingerprint_of(member: FileRecord, retime: float | None = None) -> np.ndarray | None:
+         """A group file's fingerprint (retimed by ``retime``), computed when missing; None leaves a sibling out."""
+@@ -1511,7 +1578,7 @@
+     matched = {path: member for path, member in records.items() if path not in left_out}
+     rates = matching.rates if matching is not None else None
+     signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched, rates=rates)
+-    _request_redecide(ctx, rec, records, signature, matched=matched)
++    _request_redecide(ctx, rec, records, signature, matched=matched, group=group)
+     if left_out_changed:
+         # The sibling's own run in this job reads it again, and its request for this file would be dropped as one of
+         # the job's own items: the job asks for this file after it finishes (season_audio_answer_outdated).
+@@ -1538,7 +1605,8 @@
+     answer = ctx.store.get_detector_run(rec.id, Source.SEASON_AUDIO) if rec is not None else None
+     if answer is None or _intro_settled(ctx, rec):
+         return False
+-    signature = _signature(ctx, _signature_paths(canonical_path, season_group(canonical_path)))
++    group = season_group(canonical_path, season_videos(canonical_path, _server_configs(ctx)))
++    signature = _signature(ctx, _signature_paths(canonical_path, group))
+     return answer != signature and ctx.store.get_detector_failure(rec.id, Source.SEASON_AUDIO) != signature
+ 
+ 
+diff --git a/tests/markers/test_inspect.py b/tests/markers/test_inspect.py
+--- a/tests/markers/test_inspect.py
++++ b/tests/markers/test_inspect.py
+@@ -2316,6 +2316,24 @@
+         assert len(payload["episodes"]) == listed
+         assert (payload["counts"]["episodes"], payload["counts"]["total_episodes"]) == (listed, files)
+ 
++    def test_a_season_split_over_two_disks_of_the_library_lists_both(self, tmp_path, store):
++        disks = [tmp_path / "media" / f"disk{n}" / "TV Shows" for n in (1, 2)]
++        paths = []
++        for disk, episodes in zip(disks, ((8,), (1, 2)), strict=True):
++            folder = disk / "Lioness (2023)" / "Season 02"
++            folder.mkdir(parents=True)
++            for e in episodes:
++                (folder / f"Lioness (2023) - S02E{e:02d}.mkv").write_bytes(b"x")
++                paths.append(str(folder / f"Lioness (2023) - S02E{e:02d}.mkv"))
++        library = Library("1", "TV Shows", (str(disks[0]), str(disks[1])))
++        reg = _registry(server_config("plex-1", ServerType.PLEX, libraries=[library]))
++
++        payload = inspect.season_payload(paths[0], registry=reg, store=store)
++
++        assert payload["folder"] == os.path.dirname(paths[0])
++        assert [e["path"] for e in payload["episodes"]] == sorted(paths)
++        assert (payload["counts"]["episodes"], payload["counts"]["total_episodes"]) == (3, 3)
++
+     def test_a_failed_publish_keeps_its_last_markers_but_is_failed(self, season):
+         intro = Marker(T.INTRO, 127_000, 157_000, ("skipdb",))
+         rec = self._decide(season.store, season.paths[0], intro)
+diff --git a/tests/markers/test_season_followups.py b/tests/markers/test_season_followups.py
+--- a/tests/markers/test_season_followups.py
++++ b/tests/markers/test_season_followups.py
+@@ -84,6 +84,13 @@
+     def test_several_seasons_are_named_by_count(self, env):
+         create = self._run(env, [_item(ep(S1, 9))], [ep(S1, 1), ep(S2, 1)])
+         assert create.call_args.kwargs["library_name"] == "Season: 2 seasons"
++
++    def test_one_season_split_over_two_disks_is_named_as_one_season(self, env):
++        disk2 = S1.replace("/media/", "/media2/", 1)
++        assert disk2 != S1
++        create = self._run(env, [_item(ep(S1, 9))], [ep(S1, 1), ep(disk2, 2)])
++        assert create.call_args.kwargs["file_paths"] == [ep(S1, 1), ep(disk2, 2)]
++        assert create.call_args.kwargs["library_name"] == "Season: Show (2020) {tvdb-1} · Season 01"
+ 
+     def test_a_flat_show_folder_is_named_after_the_show(self, env):
+         flat = "/media/tv/Show (2020) {tvdb-1}"
+diff --git a/tests/markers/test_triggers.py b/tests/markers/test_triggers.py
+--- a/tests/markers/test_triggers.py
++++ b/tests/markers/test_triggers.py
+@@ -645,7 +645,7 @@
+     or running."""
+ 
+     @pytest.fixture
+-    def jm(self, tmp_path, monkeypatch):
++    def jm(self, tmp_path, monkeypatch, settings):
+         from media_preview_generator.web.jobs import JobManager
+ 
+         jm = JobManager(config_dir=str(tmp_path / "config"))
+@@ -731,6 +731,18 @@
+         second = triggers.submit_season_publish(season[0])
+         assert second != first
+         assert jm.get_job(second).config["file_paths"] == [*season, e04]
++
++    def test_a_season_split_over_two_disks_of_the_library_sends_both(self, jm, settings, tmp_path):
++        disks = [tmp_path / f"disk{n}" / "TV Shows" for n in (1, 2)]
++        (e8,) = self._files(disks[0] / "Lioness" / "Season 02", "Lioness - S02E08.mkv")
++        others = self._files(disks[1] / "Lioness" / "Season 02", "Lioness - S02E01.mkv", "Lioness - S02E02.mkv")
++        library = {"id": "1", "name": "TV Shows", "remote_paths": [str(disks[0]), str(disks[1])]}
++        settings["media_servers"] = [_server("plex-1", "plex", markers=PLEX_CONFIRMED, libraries=[library])]
++
++        job = jm.get_job(triggers.submit_season_publish(e8))
++
++        assert job.config["file_paths"] == sorted([e8, *others])
++        assert job.library_name == "Intro & Credits: Lioness · Season 2"
+ 
+     @pytest.mark.parametrize(
+         ("source", "paths", "force"),
+diff --git a/tests/markers/audio/test_season.py b/tests/markers/audio/test_season.py
+--- a/tests/markers/audio/test_season.py
++++ b/tests/markers/audio/test_season.py
+@@ -3115,7 +3115,7 @@
+         if state in ("undecided", "kept-own"):
+             # The two other predicates on the same conditions: after a job, and a run re-deciding its siblings.
+             assert season.season_audio_answer_outdated(ctx, e2) is listed
+-            season._request_redecide(ctx, recs[e1], {e2: sibling}, "newer", matched={})
++            season._request_redecide(ctx, recs[e1], {e2: sibling}, "newer", matched={}, group=season.season_group(e1))
+             assert ctx.take_followups() == ([e2] if listed else [])
+ 
+     def test_a_new_episode_of_a_long_season_asks_again_only_for_siblings_it_changed(self, store, show):
+diff --git a/tests/markers/audio/test_season_folders.py b/tests/markers/audio/test_season_folders.py
+new file mode 100644
+--- /dev/null
++++ b/tests/markers/audio/test_season_folders.py
+@@ -0,0 +1,238 @@
++"""A season kept on several disks of one library (spec §5.3): the season group is the same season folder under every
++folder of each enabled server's library that holds the file. Prod's TV Shows library spans four disks and 22 season
++folders are split across them; Lioness S02E08, alone on one disk, matched nothing until its folders were merged (with
++them: 63.3-122.7 s, which all 7 other episodes agree with, as IntroDB does)."""
++
++from __future__ import annotations
++
++import os
++import re
++import zlib
++
++import numpy as np
++import pytest
++
++from media_preview_generator.markers.audio import POINT_S, season
++from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
++from media_preview_generator.markers.models import FileIdentity, MarkerType, Source
++from media_preview_generator.markers.store import MarkerStore
++from media_preview_generator.servers.base import Library, ServerType
++from tests.markers.audio.test_season import DUR, INTRO, N_POINTS, SEASON_RAW, _Audio, _spec
++from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
++from tests.markers.test_pipeline import _ctx, _run
++
++SHOW = "Lioness (2023) {tvdb-1}"
++OFFSETS = {e: at for e, at in zip(range(1, 9), (510, 300, 720, 95, 610, 410, 880, 160), strict=True)}
++
++
++def _library(*folders: str, sid: str = "plex-1", stype: ServerType = ServerType.PLEX, **kwargs):
++    return server_config(sid, stype, libraries=[Library("1", "TV Shows", tuple(folders))], **kwargs)
++
++
++def _episodes(root, season_no: int, *episodes: int, show: str = SHOW) -> list[str]:
++    folder = root / show / f"Season {season_no:02d}"
++    folder.mkdir(parents=True, exist_ok=True)
++    paths = []
++    for e in episodes:
++        path = folder / f"{show.split(' {')[0]} - S{season_no:02d}E{e:02d}.mkv"
++        path.write_bytes(b"x" * (100 + e))
++        paths.append(str(path))
++    return paths
++
++
++@pytest.fixture
++def store(tmp_path):
++    s = MarkerStore(str(tmp_path / "markers.db"))
++    yield s
++    s.close()
++
++
++@pytest.fixture
++def disks(tmp_path):
++    """Two disks of one "TV Shows" library, under the tmp "media" folder."""
++    roots = [tmp_path / "media" / f"disk{n}" / "TV Shows" for n in (1, 2)]
++    for root in roots:
++        root.mkdir(parents=True)
++    return roots
++
++
++class TestSeasonFolders:
++    def test_the_same_season_folder_on_another_disk_of_the_library_is_listed_after_the_files_own(self, disks):
++        (e8,) = _episodes(disks[0], 2, 8)
++        others = _episodes(disks[1], 2, 1, 2)
++        folders = season.season_folders(e8, [_library(str(disks[0]), str(disks[1]))])
++        assert folders == (os.path.dirname(e8), os.path.dirname(others[0]))
++
++    @pytest.mark.parametrize("asked", [0, 1], ids=["from-disk1", "from-disk2"])
++    def test_either_disk_lists_both(self, disks, asked):
++        paths = [_episodes(disks[0], 1, 1)[0], _episodes(disks[1], 1, 2)[0]]
++        folders = season.season_folders(paths[asked], [_library(str(disks[0]), str(disks[1]))])
++        assert folders == (os.path.dirname(paths[asked]), os.path.dirname(paths[1 - asked]))
++
++    def test_another_season_or_no_folder_there_adds_nothing(self, disks):
++        (e1,) = _episodes(disks[0], 2, 1)
++        _episodes(disks[1], 1, 1)  # the show is on disk 2, but only its first season
++        assert season.season_folders(e1, [_library(str(disks[0]), str(disks[1]))]) == (os.path.dirname(e1),)
++
++    def test_a_file_under_no_library_or_a_disabled_server_keeps_its_own_folder(self, disks, tmp_path):
++        (e1,) = _episodes(disks[0], 1, 1)
++        _episodes(disks[1], 1, 2)
++        own = (os.path.dirname(e1),)
++        assert season.season_folders(e1, []) == own
++        assert season.season_folders(e1, [_library(str(tmp_path / "elsewhere"), str(disks[1]))]) == own
++        assert season.season_folders(e1, [_library(str(disks[0]), str(disks[1]), enabled=False)]) == own
++
++    def test_only_the_libraries_holding_the_file_count_and_theirs_add_up(self, disks, tmp_path):
++        third = tmp_path / "media" / "disk3" / "TV Shows"
++        (e1,) = _episodes(disks[0], 1, 1)
++        (e2,) = _episodes(disks[1], 1, 2)
++        (e3,) = _episodes(third, 1, 3)
++        configs = [
++            _library(str(disks[0]), str(disks[1])),
++            _library(str(disks[0]), str(third), sid="jf-1", stype=ServerType.JELLYFIN),
++            _library(str(disks[1]), str(third), sid="emby-1", stype=ServerType.EMBY),  # doesn't hold e1
++        ]
++        assert season.season_folders(e1, configs) == tuple(os.path.dirname(p) for p in (e1, e2, e3))
++
++    def test_path_mappings_give_the_library_folders_on_this_side(self, disks):
++        (e1,) = _episodes(disks[0], 1, 1)
++        (e2,) = _episodes(disks[1], 1, 2)
++        mappings = [
++            {"remote_prefix": "/tv", "local_prefix": str(disks[0])},
++            {"remote_prefix": "/tv", "local_prefix": str(disks[1])},
++        ]
++        cfg = server_config("plex-1", ServerType.PLEX, libraries=[Library("1", "TV Shows", ("/tv",))])
++        cfg.path_mappings = mappings
++        assert season.season_folders(e1, [cfg]) == (os.path.dirname(e1), os.path.dirname(e2))
++
++    def test_a_library_folder_inside_or_around_the_one_holding_the_file_is_not_another_disk(self, tmp_path):
++        tv = tmp_path / "media" / "tv"
++        anime = tv / "Anime"
++        (e1,) = _episodes(anime, 1, 1, show="Show {tvdb-1}")
++        (_same_name,) = _episodes(tv, 1, 2, show="Show {tvdb-1}")  # tv/Show {tvdb-1}/Season 01: another show
++        (_nested,) = _episodes(anime / "Anime", 1, 3, show="Show {tvdb-1}")
++        folders = season.season_folders(e1, [_library(str(tv), str(anime))])
++        assert folders == (os.path.dirname(e1),)
++
++    def test_a_path_that_isnt_normal_keeps_its_own_folder(self, disks):
++        (e1,) = _episodes(disks[0], 1, 1)
++        _episodes(disks[1], 1, 2)
++        odd = e1.replace(f"{os.sep}{SHOW}{os.sep}", f"{os.sep}{SHOW}{os.sep}..{os.sep}{SHOW}{os.sep}")
++        assert ".." in odd.split(os.sep)
++        assert season.season_folders(odd, [_library(str(disks[0]), str(disks[1]))]) == (os.path.dirname(odd),)
++
++    def test_a_file_directly_in_a_library_folder_keeps_its_own(self, disks):
++        e1 = str(disks[0] / "Loose - S01E01.mkv")
++        open(e1, "wb").close()
++        open(disks[1] / "Other - S01E01.mkv", "wb").close()
++        assert season.season_folders(e1, [_library(str(disks[0]), str(disks[1]))]) == (str(disks[0]),)
++
++    def test_a_disk_that_links_to_one_already_listed_is_not_listed_twice(self, disks, tmp_path):
++        (e1,) = _episodes(disks[0], 1, 1)
++        link = tmp_path / "media" / "disk1-link"
++        link.symlink_to(disks[0])
++        assert season.season_folders(e1, [_library(str(disks[0]), str(link))]) == (os.path.dirname(e1),)
++
++    def test_the_root_folder_is_never_a_disk(self, disks):
++        (e1,) = _episodes(disks[0], 1, 1)
++        assert season.season_folders(e1, [_library("/", str(disks[0]))]) == (os.path.dirname(e1),)
++
++
++class TestSeasonGroupAcrossDisks:
++    def test_the_group_and_its_size_take_every_disks_episodes_sorted(self, disks):
++        (e8,) = _episodes(disks[0], 2, 8)
++        others = _episodes(disks[1], 2, 1, 2, 3)
++        configs = [_library(str(disks[0]), str(disks[1]))]
++        videos = season.season_videos(e8, configs)
++        assert season.season_group(e8, videos) == season.SeasonGroup(os.path.dirname(e8), tuple(sorted([e8, *others])))
++        assert season.season_size(e8, videos) == 4
++        assert season.groups_holding(e8, videos) == tuple(sorted(others))
++
++
++def _points(path: str) -> np.ndarray:
++    episode = int(re.search(r"S\d\dE(\d\d)", path).group(1))
++    body = np.random.default_rng(zlib.crc32(path.encode())).integers(0, 2**32, size=N_POINTS, dtype=np.uint64)
++    body = body.astype("<u4")
++    body[OFFSETS[episode] : OFFSETS[episode] + 240] = INTRO
++    return body
++
++
++def _planted_ms(path: str) -> tuple[int, int]:
++    at = OFFSETS[int(re.search(r"S\d\dE(\d\d)", path).group(1))]
++    return round(at * POINT_S * 1000), round((at + 239) * POINT_S * 1000)
++
++
++class TestSeasonAudioAcrossDisks:
++    """The Lioness shape: E08 alone on disk 1, E01-E07 on disk 2."""
++
++    @pytest.fixture
++    def lioness(self, disks, store):
++        (e8,) = _episodes(disks[0], 2, 8)
++        others = _episodes(disks[1], 2, *range(1, 8))
++        registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
++        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
++        return e8, others, ctx
++
++    def test_the_episode_alone_on_its_disk_matches_the_other_disks_episodes(self, lioness, store):
++        e8, others, ctx = lioness
++        with _Audio(points=_points) as audio:
++            _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
++        assert sorted(audio.computed) == sorted([e8, *others])
++        (cand,) = [c for c in store.get_evidence(store.get_file(e8).id) if c.source is Source.SEASON_AUDIO]
++        start, end = _planted_ms(e8)
++        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
++        assert (cand.origin, cand.confidence) == ("7/7", 1.0)
++        # The previous season is asked only for an episode alone in its group.
++        assert not [c for c in store.get_evidence(store.get_file(e8).id) if c.source is Source.SEASON_AUDIO_PREVIOUS]
++
++    def test_an_episode_on_the_other_disk_counts_the_lone_one_too(self, lioness, store):
++        e8, others, ctx = lioness
++        with _Audio(points=_points):
++            _run(ctx, others[0], {"plex-1": ready_publisher()}, stage="process")
++        (cand,) = [c for c in store.get_evidence(store.get_file(others[0]).id) if c.source is Source.SEASON_AUDIO]
++        assert cand.origin == "7/7"
++        assert store.get_file(e8) is not None and store.get_fingerprint(store.get_file(e8).id, "intro") is not None
++
++    def test_an_answer_made_before_the_other_disks_episode_arrived_is_asked_again(self, disks, store):
++        others = _episodes(disks[1], 2, *range(1, 8))
++        registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
++        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
++        with _Audio(points=_points):
++            _run(ctx, others[0], {"plex-1": ready_publisher()}, stage="process")
++            assert ctx.take_followups() == []
++            (e8,) = _episodes(disks[0], 2, 8)
++            _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
++        assert ctx.take_followups() == [others[0]]
++
++    def test_a_run_asks_again_for_a_sibling_on_the_other_disk_but_not_for_the_previous_season(self, disks, store):
++        (e8,) = _episodes(disks[0], 2, 8)
++        (e1,) = _episodes(disks[1], 2, 1)
++        (s1e1,) = _episodes(disks[1], 1, 1)
++        registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
++        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
++        recs = {}
++        for path in (e8, e1, s1e1):
++            st = os.stat(path)
++            recs[path] = store.upsert_file(
++                FileIdentity(path, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
++            )
++            store.set_detector_run(recs[path].id, Source.SEASON_AUDIO, "older")
++            undecided = TypeDecision(MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources disagree")
++            store.save_decisions(recs[path].id, {MarkerType.INTRO: undecided}, settings_fingerprint="x")
++        group = season.season_group(e8, season.season_videos(e8, registry.configs()))
++        assert group.episodes == tuple(sorted([e8, e1]))
++
++        season._request_redecide(ctx, recs[e8], {e1: recs[e1], s1e1: recs[s1e1]}, "newer", matched={}, group=group)
++
++        assert ctx.take_followups() == [e1]
++
++    def test_the_stored_signature_names_every_disks_episodes(self, lioness, store):
++        e8, others, ctx = lioness
++        with _Audio(points=_points):
++            _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
++            answer = store.get_detector_run(store.get_file(e8).id, Source.SEASON_AUDIO)
++            group = season.SeasonGroup(os.path.dirname(e8), tuple(sorted([e8, *others])))
++            assert answer == season._signature(ctx, season._signature_paths(e8, group))
++            assert season.season_audio_answer_outdated(ctx, e8) is False
++            os.utime(others[3], ns=(1, 1))  # a sibling on the other disk changed
++            assert season.season_audio_answer_outdated(ctx, e8) is True

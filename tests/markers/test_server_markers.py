@@ -44,7 +44,8 @@ class TestPlex:
             _src(T.CREDITS, 1156521, 1186521, "plex-1"),
             _src(T.CREDITS, 1294044, None, "plex-1"),
         ]
-        server.get_markers.assert_called_once_with("7")
+        # Evidence is unknown while the library hides a type; what clients see is what Plex serves.
+        server.get_markers.assert_called_once_with("7", unknown_if_hidden=not include_ours)
 
     def test_final_flag_only_changes_credits(self):
         # "Runs to the end" only means something for credits; an intro keeps its end whatever the flag says.
@@ -69,6 +70,68 @@ class TestPlex:
         server = create_autospec(PlexServer, instance=True)
         server.get_markers.return_value = None
         assert read_server_markers(server, _cfg(ServerType.PLEX), "7") is None
+
+
+class TestPlexLibraryHidingMarkers:
+    """Plex serves no marker of a type, ours included, while the item's library has its own setting for that type off
+    (``enableIntroMarkerGeneration`` / ``enableCreditsMarkerGeneration``). Its empty answer then says nothing, so the
+    evidence read is unknown (None), never "none there" ([]).
+
+    Driven through a real ``PlexServer`` with only its connection mocked, so the library read is the one the job makes.
+    """
+
+    ITEM = (
+        '<MediaContainer librarySectionID="2"><Video ratingKey="7" librarySectionID="2">{markers}</Video>'
+        "</MediaContainer>"
+    )
+    INTRO_XML = '<Marker type="intro" startTimeOffset="990" endTimeOffset="29306"/>'
+
+    @staticmethod
+    def _plex(markers_xml: str, intro: str, credits: str):
+        import xml.etree.ElementTree as ET
+        from unittest.mock import patch
+
+        server = PlexServer(_cfg(ServerType.PLEX))
+        conn = MagicMock()
+
+        def query(path, **_kwargs):
+            if path.startswith("/library/metadata/"):
+                return ET.fromstring(TestPlexLibraryHidingMarkers.ITEM.format(markers=markers_xml))
+            assert path == "/library/sections/2/prefs"
+            return ET.fromstring(
+                f'<MediaContainer><Setting id="enableIntroMarkerGeneration" value="{intro}"/>'
+                f'<Setting id="enableCreditsMarkerGeneration" value="{credits}"/></MediaContainer>'
+            )
+
+        conn.query.side_effect = query
+        return server, patch.object(PlexServer, "_connect", return_value=conn)
+
+    @pytest.mark.parametrize(("intro", "credits"), [("0", "1"), ("1", "0"), ("0", "0")])
+    def test_a_setting_off_is_unknown_not_none(self, intro, credits):
+        server, connected = self._plex("", intro, credits)
+        with connected:
+            assert read_server_markers(server, _cfg(ServerType.PLEX), "7") is None
+
+    def test_a_setting_off_hides_markers_plex_does_have(self):
+        server, connected = self._plex(self.INTRO_XML, "1", "0")
+        with connected:
+            assert read_server_markers(server, _cfg(ServerType.PLEX), "7", duration_ms=None) is None
+
+    def test_settings_on_and_no_markers_is_none_there(self):
+        server, connected = self._plex("", "1", "1")
+        with connected:
+            assert read_server_markers(server, _cfg(ServerType.PLEX), "7") == []
+
+    def test_settings_on_returns_the_markers(self):
+        server, connected = self._plex(self.INTRO_XML, "1", "1")
+        with connected:
+            assert read_server_markers(server, _cfg(ServerType.PLEX), "7") == [_src(T.INTRO, 990, 29306, "plex-1")]
+
+    def test_what_clients_see_is_what_plex_serves(self):
+        # The Inspector: with the setting off, clients really do see no marker.
+        server, connected = self._plex("", "0", "0")
+        with connected:
+            assert read_server_markers(server, _cfg(ServerType.PLEX), "7", include_ours=True) == []
 
 
 class TestItemWideMarkersOfOtherVersions:

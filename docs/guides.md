@@ -343,6 +343,7 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. A batch never waits more than **10 minutes** from its first file, though: a steady stream of imports would otherwise hold it until the stream stopped. Files that arrive once that limit is reached start the next batch.
 4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3 and initial delay of 30 s; the delay setting scales every wait, so 60 s gives 2 m → 4 m → 10 m, and more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
+6. A file that a newer file has already replaced when its job runs isn't retried: Sonarr or Radarr imported the same episode or movie again under a new name, and the new file is in the same folder. The Files panel shows it as **Gone from disk**, and the newer file gets its own preview. Any other missing file is retried as usual.
 
 ### Prerequisites
 
@@ -721,11 +722,22 @@ re-detect still try it.
 
 A channel logo at the very start, or music under the cold open, repeats in every episode just like the theme does, so
 season audio passes over such a stretch: one in the first 2 seconds must last at least 10 seconds, every one needs
-about 8 seconds where the episodes' audio matches closely, and one starting in the first 30 seconds must end on the
-same picture in the episodes it repeats in. That check decodes 3 seconds of video from the episode and two others once,
+about 8 seconds where the episodes' audio matches closely (except one starting after the first 2 seconds that lasts
+30 seconds or more, or one after the first 30 seconds that lasts 10 seconds or more and that at least 2 other episodes
+share: a theme under dialogue matches only in patches), and one starting in the first 30 seconds must end on the same
+picture in the episodes it repeats in. An online database's intro that starts in the first 2 seconds and lasts under 10
+seconds (a streaming service's logo) is ignored for the same reason, and so is a server plugin's copy of one. That
+check decodes 3 seconds of video from the episode and two others once,
 on a worker (its GPU when it has one), and saves the answer. A show whose title card after the cold open lasts only a
 few seconds gets no intro, as with Plex's own detection. After updating, one job decides every intro that came from
 season audio again (a locked one is left alone) and takes any that no longer holds off your servers.
+
+A season can mix releases that play at slightly different speeds: European broadcasts and some web releases play the
+whole episode a little faster than the film release. Season audio notices this, matches those episodes at the speed
+of the rest of the season, then gives their intro in their own time. Online databases' times come from whichever
+release their users timed, so on such a file they are read at the file's speed only when that is what makes them
+agree with the file's own evidence. The published times are always the file's own. After updating, one job decides
+the episodes in **Needs review** again.
 
 Saved fingerprints take up to about 28 KB per episode. When an Intro & Credits job completes (except Season, retry and
 verify jobs), a cleanup starts in the background, at most once an hour. It looks for up to 2,000 fingerprinted files on
@@ -825,11 +837,23 @@ first time you turn it on for a Plex server:
   markers go to keeps its own and shows one: the row says **"Keeping Plex's credits"** and the Inspector **"Kept
   Plex's own marker"**. **Check servers** still watches that marker: once Plex no longer has it, or the server is
   switched to **Use ours**, it runs the file, which then reads it and writes ours.
-- Plex detects in a library only when its server setting (Settings → Library → *Generate intro / credits video
-  markers*) **and** the library's own setting (Edit library → Advanced → *Enable intro / credits detection*) are on.
-  With **Use ours**, **Servers → Edit → Setup Health** lists the Intro & Credits libraries where both are on, each
-  with a **Turn off** that switches off only that library's own setting. With **Keep Plex's** it doesn't warn. See
-  [Setup Health](guides/previews-readiness.md#intro-credits).
+- **Keep Plex's** only keeps Plex's markers of a type that can be right for the file. When every one of them is
+  impossible — it starts or ends after the file does, or has no length — Plex hasn't really processed the file: the
+  file is read for that type and ours are written. Where on the file Plex put a marker is never second-guessed.
+- Plex keeps an item's markers when its file is replaced (a Sonarr or Radarr upgrade, say), so they can be the old
+  file's. A type counts as **made for an earlier file** when Plex's database has no record of detecting it on the file
+  it has now and its markers are older than that file. Such a type doesn't stop the file being read, and Plex's marker
+  isn't used as a second opinion. When the file gives an answer, ours replaces Plex's marker (row message e.g.
+  "Replaced Plex's intro: it was detected for an earlier file"); when it gives none, **Keep Plex's** keeps Plex's,
+  which is still the closest there is. The job log marks those markers **(made for an earlier file)**. When Plex's
+  database can't tell this time (busy, or an older Plex marker agent), every Plex marker counts as before and the next
+  run asks again.
+- **Don't turn off a library's own *Intro markers* / *Credits markers* setting** (Edit library → Advanced). While
+  it is off, Plex hides every skip marker of that type in the library, ours included, so nobody sees a skip button
+  there. **Servers → Edit → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
+  Plex detecting on its own, set its server-wide *Generate intro video markers* / *Generate credits video markers*
+  (Settings → Library) to **Never** instead: Setup Health offers **Set server-wide to Never** for that. With **Keep
+  Plex's** it doesn't suggest it. See [Setup Health](guides/previews-readiness.md#intro-credits).
 - **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
   type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
   server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.

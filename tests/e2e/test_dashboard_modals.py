@@ -496,7 +496,7 @@ class TestJobModalFilesTabStickiness:
         expect(page.locator("#logsModal")).to_be_visible(timeout=2000)
 
     def _close_modal(self, page: Page) -> None:
-        page.evaluate("() => bootstrap.Modal.getInstance(document.getElementById('logsModal')).hide()")
+        page.evaluate("() => hideModalSafely(document.getElementById('logsModal'))")
         expect(page.locator("#logsModal")).to_be_hidden(timeout=2000)
 
     def test_reopening_on_files_tab_auto_loads_results(self, dashboard_page: Page) -> None:

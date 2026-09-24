@@ -60,11 +60,14 @@ class MediaProbe:
         chapters: Chapters in container order.
         start_time_ms: The container's first timestamp. Recorded-TV ``.ts`` files carry a PCR base (30000 s measured),
             and frame timestamps read with ``-copyts`` are that much later than the file's own seconds.
+        frame_rate: The first video stream's frame rate (cover art left out), None when there is none or ffprobe
+            reports none (``markers.speed``: a 25 fps release of a film-rate show plays 4.3 % fast).
     """
 
     duration_ms: int | None
     chapters: tuple[Chapter, ...]
     start_time_ms: int | None = None
+    frame_rate: float | None = None
 
 
 def stuck_processes(reaper_name: str) -> int:
@@ -171,7 +174,9 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         ProbeTimeoutError: ffprobe ran past ``timeout_s``.
         ProbeError: ffprobe missing, failed or returned invalid JSON.
     """
-    cmd = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_chapters", path]
+    entries = "stream=codec_type,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic"
+    cmd = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_chapters",
+           "-show_entries", entries, path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
     try:
         data = json.loads(stdout or "")
@@ -188,8 +193,34 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         chapters.append(Chapter(start, _ms(raw.get("end_time")), str(tags.get("title") or "")))
     fmt = data.get("format") or {}
     return MediaProbe(
-        duration_ms=_ms(fmt.get("duration")), chapters=tuple(chapters), start_time_ms=_ms(fmt.get("start_time"))
+        duration_ms=_ms(fmt.get("duration")),
+        chapters=tuple(chapters),
+        start_time_ms=_ms(fmt.get("start_time")),
+        frame_rate=_video_frame_rate(data.get("streams")),
     )
+
+
+def _rate(value: object) -> float | None:
+    """An ffprobe rate such as ``24000/1001`` as a number; None for ``0/0``, ``N/A`` or anything unreadable."""
+    try:
+        numerator, denominator = (float(part) for part in str(value).split("/"))
+    except ValueError:
+        return None
+    if denominator <= 0 or numerator <= 0 or not math.isfinite(numerator / denominator):
+        return None
+    return numerator / denominator
+
+
+def _video_frame_rate(streams: object) -> float | None:
+    """The first video stream's average frame rate, or its base rate when it reports no average; cover art (an
+    attached picture) doesn't count."""
+    for stream in streams if isinstance(streams, list) else []:
+        if not isinstance(stream, dict) or stream.get("codec_type") != "video":
+            continue
+        if (stream.get("disposition") or {}).get("attached_pic"):
+            continue
+        return _rate(stream.get("avg_frame_rate")) or _rate(stream.get("r_frame_rate"))
+    return None
 
 
 @dataclass(frozen=True)
@@ -268,20 +299,23 @@ class VideoPacket:
 
 @dataclass(frozen=True)
 class VideoPackets:
-    """The main video stream's codec and first packet headers.
+    """The main video stream's codec, pixel format and first packet headers.
 
     Attributes:
         codec: ffprobe's ``codec_name`` for the stream (``h264``, ``vp9``), None when the file has no video stream or
             ffprobe names none.
         packets: The packets in the file's order.
+        pix_fmt: ffprobe's ``pix_fmt`` for the stream (``yuv420p``, ``yuv420p10le``), None when it names none.
     """
 
     codec: str | None
     packets: tuple[VideoPacket, ...]
+    pix_fmt: str | None = None
 
 
 def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 60.0) -> VideoPackets:
-    """The codec and the first ``packets`` packet headers of the file's main video stream, from one ffprobe.
+    """The codec, pixel format and first ``packets`` packet headers of the file's main video stream, from one
+    ffprobe.
 
     Read from the start of the file up to those packets (not the whole file), and nothing is decoded. ``V`` leaves out
     cover art and thumbnails, which are single-picture streams.
@@ -293,7 +327,8 @@ def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 6
         timeout_s: Hard timeout, as for :func:`probe_media`.
 
     Returns:
-        The stream's codec, and its packets: fewer when the stream is shorter, none when the file has no video.
+        The stream's codec and pixel format, and its packets: fewer when the stream is shorter, none when the file
+        has no video.
 
     Raises:
         ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
@@ -301,7 +336,7 @@ def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 6
         ProbeError: ffprobe missing, failed or returned something other than its JSON packet and stream lists.
     """
     cmd = [ffprobe, "-v", "error", "-select_streams", "V:0", "-read_intervals", f"%+#{packets}",
-           "-show_entries", "packet=pts_time,flags:stream=codec_name", "-of", "json", path]  # fmt: skip
+           "-show_entries", "packet=pts_time,flags:stream=codec_name,pix_fmt", "-of", "json", path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
     try:
         data = json.loads(stdout or "")
@@ -314,9 +349,11 @@ def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 6
     if not isinstance(streams, list) or not all(isinstance(stream, dict) for stream in streams):
         raise ProbeError(f"ffprobe returned an unexpected stream list for {path}")
     codec = streams[0].get("codec_name") if streams else None
+    pix_fmt = streams[0].get("pix_fmt") if streams else None
     return VideoPackets(
         codec if isinstance(codec, str) and codec else None,
         tuple(VideoPacket(_seconds(packet.get("pts_time")), "K" in str(packet.get("flags", ""))) for packet in raw),
+        pix_fmt if isinstance(pix_fmt, str) and pix_fmt else None,
     )
 
 

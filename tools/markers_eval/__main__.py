@@ -37,12 +37,15 @@ def _end_pictures(args: argparse.Namespace) -> DecodedEndPictures:
 
 
 def cmd_reproduce(args: argparse.Namespace) -> int:
+    cache = _cache(args)
     report = reproduce(
         load_v3_results(),
-        points=_cache(args).points,
+        points=cache.points,
         end_pictures=_end_pictures(args),
         with_reference=not args.no_reference,
         full_folder=args.full_folder,
+        speed=cache.speed,
+        retimed=cache.retimed,
     )
     summary = {
         "mode": "full folder" if args.full_folder else "eval lists",
@@ -72,7 +75,10 @@ def cmd_reproduce(args: argparse.Namespace) -> int:
 def cmd_season_truth(args: argparse.Namespace) -> int:
     raw = json.loads(Path(args.truth).read_text())
     truth = {path: (float(value[0]), float(value[1])) if value else None for path, value in raw.items()}
-    report = season_truth(truth, points=_cache(args).points, end_pictures=_end_pictures(args))
+    cache = _cache(args)
+    report = season_truth(
+        truth, points=cache.points, end_pictures=_end_pictures(args), speed=cache.speed, retimed=cache.retimed
+    )
     summary = {"files": len(truth), "tally": report.tally.as_dict(), "none_ok": report.none_ok}
     passed = True
     if args.expect:

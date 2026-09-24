@@ -152,14 +152,12 @@ def _owner_label(matches: list, server_configs: list) -> str:
 
 
 def _outcome_for_multi_server_status(status) -> ProcessingResult:
-    """Map a :class:`MultiServerStatus` to the legacy ProcessingResult.
+    """Map a :class:`MultiServerStatus` to the ProcessingResult a file's row and counters use.
 
-    Mirrors ``Worker._record_outcome`` so the multi-server dispatch path
-    (which bypasses :class:`Worker` and calls ``process_canonical_path``
-    directly) can persist file-result rows with the same outcome strings
-    the Files panel filters on. Without this the multi-server scan path
-    skipped ``record_file_result`` entirely and the panel stayed empty
-    for the duration of the run.
+    The one mapping for both stages: the dispatcher's checking stage (which calls ``process_canonical_path`` without a
+    :class:`Worker`) and ``Worker._process_item`` both record through it, so a file gets the same outcome string
+    whichever stage finished it. ``SKIPPED_FILE_NOT_FOUND`` keeps its own outcome in both, since job_runner's retry
+    scan looks for it.
     """
     from ..processing.multi_server import MultiServerStatus
 
@@ -171,6 +169,8 @@ def _outcome_for_multi_server_status(status) -> ProcessingResult:
         return ProcessingResult.SKIPPED_NOT_INDEXED
     if status is MultiServerStatus.SKIPPED_FILE_NOT_FOUND:
         return ProcessingResult.SKIPPED_FILE_NOT_FOUND
+    if status is MultiServerStatus.SKIPPED_SOURCE_GONE:
+        return ProcessingResult.SKIPPED_SOURCE_GONE
     if status is MultiServerStatus.NO_OWNERS:
         return ProcessingResult.NO_MEDIA_PARTS
     return ProcessingResult.FAILED
@@ -1168,6 +1168,7 @@ def _format_outcome_summary(aggregate_outcome: dict) -> str:
         ("skipped_bif_exists", "{n} already existed"),
         ("skipped_not_indexed", "{n} not indexed yet"),
         ("skipped_file_not_found", "{n} not found"),
+        ("skipped_source_gone", "{n} gone from disk"),
         ("skipped_excluded", "{n} excluded"),
         ("skipped_invalid_hash", "{n} invalid hash"),
         ("failed", "{n} failed"),

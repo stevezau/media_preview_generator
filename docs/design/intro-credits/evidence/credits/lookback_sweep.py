@@ -91,7 +91,14 @@ def _run(module, decode, duration_s, is_episode, tail_s, earliest_s=None, first_
     def recording(path: str, **kwargs: object) -> list:
         calls.append(kwargs)
         rows = decode(path, **kwargs)
-        if first_step_floor_s is not None and kwargs["keyframes_only"] and sum(c["keyframes_only"] for c in calls) == 2:
+        # The first step is the second 320x180 keyframe pass; a build with the 640x360 reading makes more of them.
+        first_pass = [c for c in calls if c["keyframes_only"] and c.get("scale", 1) == 1]
+        if (
+            first_step_floor_s is not None
+            and kwargs["keyframes_only"]
+            and kwargs.get("scale", 1) == 1
+            and len(first_pass) == 2
+        ):
             rows = [r for r in rows if r[0] >= first_step_floor_s]
         return rows
 

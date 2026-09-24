@@ -9,10 +9,14 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from ..models import Marker, MarkerType
+
+if TYPE_CHECKING:
+    from ..decide import FileLimits
 
 # Versions of one item that decided a type within this of each other show one marker set (spec §6.3).
 VERSION_AGREEMENT_MS = 2_000
@@ -304,6 +308,9 @@ class MarkerPublisher(ABC):
     # anyway because the user locked them, although the server is set to keep its own (spec §5.5 rule 1). The caller
     # says so in the server's row; empty whenever nothing of the server's own was taken off it.
     last_replaced_own_types: frozenset[MarkerType] = frozenset()
+    # Set by every successful ``write``: the types whose server's own markers were made for an earlier file at the
+    # item's path and were replaced by ours although the server keeps its own (Plex). The caller says so in the row.
+    last_replaced_stale_types: frozenset[MarkerType] = frozenset()
     # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
     # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin, Emby).
     last_item_files: tuple[str, ...] | None = None
@@ -400,6 +407,26 @@ class MarkerPublisher(ABC):
             failed_in_a_row = failed_in_a_row + 1 if out[item_id] is None else 0
         return out
 
+    # Set by ``types_not_made_for_file``: its None meant this setup can never tell (a Plex marker agent older than the
+    # answer: its item read works but carries no ``stale_types``), not a passing problem such as a busy database. The
+    # agent reports only its version and protocols, and its version didn't change with that field, so only a read can
+    # tell; the pipeline stops asking such a server for the rest of the job.
+    stale_types_unanswerable: bool = False
+
+    def types_not_made_for_file(self, item_id: str) -> frozenset[MarkerType] | None:
+        """The types whose own markers the server shows for this item were made for an earlier file at its path.
+
+        Plex keeps an item's markers when its file is replaced, so they can describe the old file. Only Plex's
+        database can tell (``plex_db``); every other server answers None.
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            Those types (empty when none are); None when this server can't tell.
+        """
+        return None
+
     @abstractmethod
     def write(
         self,
@@ -411,6 +438,7 @@ class MarkerPublisher(ABC):
         canonical_path: str,
         own_previous: list[Marker] | None = None,
         kept_types: frozenset[MarkerType] = frozenset(),
+        limits: FileLimits | None = None,
     ) -> list[Marker]:
         """Make the server item show the calling file's decided ``markers``, as far as the server allows.
 
@@ -429,6 +457,8 @@ class MarkerPublisher(ABC):
             kept_types: The types the last write kept as the server's own (recorded ``last_kept_types``). Servers that
                 can't tell our markers from their own (Plex) never touch those while the server is set to keep them;
                 others ignore it.
+            limits: The calling file's limits (``decide.FileLimits``). Plex never keeps its own markers of a type when
+                every one of them can't be right for the file (``decide.unusable_server_marker``); others ignore it.
 
         Returns:
             The markers that are ours on the server item after the call, sorted by start (empty when none are).

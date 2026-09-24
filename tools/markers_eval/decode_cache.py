@@ -176,8 +176,13 @@ class DecodeCache:
         start_time_s: float | None = None,
         keep_every: int | None = None,
         drop_non_key: bool = False,
+        scale: int = 1,
+        download_format: str | None = None,
     ) -> list[frames.Row]:
         """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection backend.
+
+        The command carries the frame size and the format GPU surfaces are downloaded in, so a tail's 640x360 read
+        (``scale`` 2) is a decode of its own, and so is a stream whose format changed.
 
         Rows are kept under the backend that counted them. A decode whose backend changed on the way (a GPU helper
         demoted to the CPU mid-decode) or can't be told (no count was made) is used but not kept. A decode that starts
@@ -190,7 +195,8 @@ class DecodeCache:
         """
         command, _ = frames.decode_command(
             ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
-            gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key,
+            gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key, scale=scale,
+            download_format=download_format,
         )  # fmt: skip
         if start_time_s is None:
             start_time_s = self.container_start_s(path, ffmpeg, cancel_check=cancel_check)
@@ -218,6 +224,7 @@ class DecodeCache:
                 path, ffmpeg=ffmpeg, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps,
                 gpu=gpu, gpu_device_path=gpu_device_path, detect_boxes=detect_boxes, cancel_check=cancel_check,
                 timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every, drop_non_key=drop_non_key,
+                scale=scale, download_format=download_format,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})

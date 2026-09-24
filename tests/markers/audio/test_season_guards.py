@@ -14,7 +14,14 @@ import numpy as np
 import pytest
 
 from media_preview_generator.markers.audio import POINT_S, season
-from media_preview_generator.markers.audio.matcher import Hit, IntroCandidate, IntroSegment, file_hits, intro_for
+from media_preview_generator.markers.audio.matcher import (
+    Hit,
+    IntroCandidate,
+    IntroSegment,
+    file_hits,
+    intro_candidates,
+    intro_for,
+)
 
 EPISODES = 5  # a quorum of 2 of the 4 others
 TITLE_AT = (70.0, 85.0, 100.0, 110.0, 120.0)  # the title card floats after a cold open of varying length
@@ -49,8 +56,10 @@ class Plant:
         body[_pts(start) + shared] = _noise(self.seed, _pts(self.length_s))[shared]
 
 
-def _season(*plants: Plant, length_s: float = 240.0) -> tuple[list[str], dict[str, np.ndarray]]:
-    files = [f"/tv/Accused (2020)/Season 03/Accused (2020) - S03E{e:02d}.mkv" for e in range(1, EPISODES + 1)]
+def _season(
+    *plants: Plant | Choppy, length_s: float = 240.0, episodes: int = EPISODES
+) -> tuple[list[str], dict[str, np.ndarray]]:
+    files = [f"/tv/Accused (2020)/Season 03/Accused (2020) - S03E{e:02d}.mkv" for e in range(1, episodes + 1)]
     points = {}
     for i, path in enumerate(files):
         body = _noise(1_000 + i, _pts(length_s))
@@ -96,6 +105,33 @@ def _near(segment: IntroSegment | None, start: float, end: float) -> bool:
 
 
 TITLE_CARD = Plant(2, TITLE_AT, 12.0)
+EARLY_AT = (5.0, 8.0, 11.0, 14.0, 17.0)  # a stretch starting between 2 s and 30 s
+
+
+@dataclass(frozen=True)
+class Choppy:
+    """A stretch with no dense core that the matcher still finds whole: ``pieces`` shared pieces of ``piece_s`` (under
+    the 8 s core) 1.5 s apart (bridged by the matcher's 3.5 s gap), at one start for all or one per episode."""
+
+    seed: int
+    at: float | tuple[float | None, ...]
+    pieces: int
+    piece_s: float = 6.0
+
+    @property
+    def length_s(self) -> float:
+        return self.pieces * self.piece_s + (self.pieces - 1) * 1.5
+
+    def starts(self, episodes: int = EPISODES) -> list[float | None]:
+        return [self.at] * episodes if isinstance(self.at, float) else list(self.at)
+
+    def into(self, body: np.ndarray, episode: int) -> None:
+        start = self.at if isinstance(self.at, float) else self.at[episode]
+        if start is None:
+            return
+        step, piece = _pts(self.piece_s + 1.5), _pts(self.piece_s)
+        shared = np.concatenate([np.arange(k * step, k * step + piece) for k in range(self.pieces)])
+        body[_pts(start) + shared] = _noise(self.seed, self.pieces * step)[shared]
 
 
 class TestAccusedShapes:
@@ -188,6 +224,72 @@ class TestQuorumAsToday:
         assert guarded == [None] * EPISODES
 
 
+class TestDenseCoreExemptions:
+    """Where a stretch needs no dense core (owner 2026-09-24): one starting at 2-30 s that is at least 30 s long, and
+    one starting after 30 s that is at least 10 s long and found by at least 2 other episodes. A music bed under the
+    cold open (Accused S04E06: 8.8 s at the start) and a recap only one other episode shares (The Fall season 3) still
+    need theirs. Each stretch here is choppy (no piece reaches the 8 s core), so only an exemption keeps it."""
+
+    @pytest.mark.parametrize(
+        ("at", "pieces", "piece_s", "kept"),
+        [
+            (EARLY_AT, 4, 6.45, True),
+            (EARLY_AT, 4, 6.3, False),
+            (0.0, 5, 6.0, False),
+            (1.9, 5, 6.0, False),
+            (2.1, 5, 6.0, True),
+            (30.0, 2, 6.0, False),
+            (31.0, 2, 6.0, True),
+            (TITLE_AT, 2, 4.4, True),
+            (TITLE_AT, 2, 4.1, False),
+        ],
+        ids=[
+            "early-30.3s",
+            "early-29.7s",
+            "36s-at-0",
+            "36s-at-1.9s",
+            "36s-at-2.1s",
+            "13.5s-at-30s-is-early",
+            "13.5s-at-31s-is-later",
+            "later-10.3s",
+            "later-9.7s",
+        ],
+    )
+    def test_a_stretch_with_no_dense_core_is_kept_only_where_exempt(self, at, pieces, piece_s, kept):
+        stretch = Choppy(20, at, pieces, piece_s)
+        files, points = _season(stretch)
+        matcher, guarded = _answers(files, points, Pictures())
+        ends = [s + stretch.length_s - POINT_S for s in stretch.starts()]
+        assert all(_near(seg, s, e) for seg, s, e in zip(matcher, stretch.starts(), ends, strict=True))
+        assert all(
+            season.dense_core_s(f, c, points) < season.MIN_DENSE_CORE_S for f, c in _first_clusters(files, points)
+        )
+        assert guarded == (matcher if kept else [None] * EPISODES)
+
+    @pytest.mark.parametrize(("shared_by", "kept"), [(3, True), (2, False)], ids=["2-others", "1-other"])
+    def test_a_later_stretch_needs_its_core_when_only_one_other_episode_has_it(self, shared_by, kept):
+        at = (40.0, 50.0, 60.0)[:shared_by] + (None,) * (3 - shared_by)
+        files, points = _season(Choppy(20, at, 3), episodes=3)
+        matcher, guarded = _answers(files, points, Pictures())
+        holders = range(shared_by)
+        assert all(matcher[i] is not None and matcher[i].support == shared_by - 1 for i in holders)
+        assert all(guarded[i] == (matcher[i] if kept else None) for i in holders)
+
+    def test_an_early_stretch_kept_without_a_core_still_needs_the_same_end_picture(self):
+        files, points = _season(Choppy(20, 12.0, 5))
+        pictures = Pictures(12.0)
+        matcher, guarded = _answers(files, points, pictures)
+        assert all(_near(seg, 12.0, 47.9) for seg in matcher)
+        assert guarded == [None] * EPISODES
+        assert pictures.asked and all(abs(start - 12.0) < 1.0 for start in pictures.asked)
+
+
+def _first_clusters(files, points):
+    """Each episode's best ranked cluster, as the guards see it."""
+    runs_between = _runs(points)
+    return [(f, intro_candidates(file_hits(f, files, runs_between))[0]) for f in files]
+
+
 def _pair(a_points, b_points, start_s, end_s, shift_s):
     """Points for "a" and "b" and one candidate of "a" matched with "b" at ``shift_s``."""
     candidate = IntroCandidate(IntroSegment(start_s, end_s, 1), (Hit(start_s, end_s, "b", start_s + shift_s),))
@@ -208,7 +310,8 @@ class TestDenseCore:
 
     @pytest.mark.parametrize(("hole_at", "passes"), [(_pts(7.4), False), (_pts(8.6), True)])
     def test_the_longest_dense_stretch_must_be_8_s(self, hole_at, passes):
-        files, points = _season(Plant(2, TITLE_AT, 12.0, hole=(hole_at, 6)))
+        # Early and under 30 s: the one place a 12 s stretch still needs its core (see TestDenseCoreExemptions).
+        files, points = _season(Plant(2, EARLY_AT, 12.0, hole=(hole_at, 6)))
         matcher, guarded = _answers(files, points, Pictures())
         assert all(seg is not None for seg in matcher)  # the matcher bridges the hole
         assert guarded == (matcher if passes else [None] * EPISODES)
@@ -220,7 +323,7 @@ class TestDenseCore:
         points = {"a": a}
         members = []
         for partner, core_pts in (("b", 40), ("c", 90), ("d", 150)):
-            b = _noise(hash(partner) % 1000, 400)
+            b = _noise(ord(partner), 400)  # a fixed seed: hash() of a str changes per process
             b[50 : 50 + core_pts] = shared[:core_pts]
             points[partner] = b
             members.append(Hit(50 * POINT_S, 249 * POINT_S, partner, 50 * POINT_S))

@@ -25,11 +25,12 @@ from .config.validation import MAX_CPU_THREADS
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 17
+_CURRENT_SCHEMA_VERSION = 18
 
-#: Set by v16 and v17: once the job manager runs, the app queues the one job that decides the files in Intro & Credits'
-#: Needs review, those waiting for their item's other versions and those whose intro rests on season audio again
-#: (``web.app``). Cleared when that job completes
+#: Set by v16, v17 and v18: once the job manager runs, the app queues the one job that decides the files in Intro &
+#: Credits' Needs review, those waiting for their item's other versions, those whose intro rests on season audio and
+#: those whose intro or credits rests on an online answer and a server's own marker alone again
+#: (``triggers.submit_decide_again``, from ``web.app``). Cleared when that job completes
 #: (``markers.job_runner``), so a start after a failed, cancelled or interrupted one queues it again, and a start with
 #: Intro & Credits off everywhere leaves it for later.
 DECIDE_AGAIN_KEY = "_markers_decide_again"
@@ -407,6 +408,10 @@ def _migrate_schema(sm) -> None:
                review again from their stored answers.
         v17 -- Asks the next start to decide the files whose intro rests on season audio again: its guards against
                network idents and cold-open music changed which repeated stretch it takes.
+        v18 -- Asks the next start to decide the files in Needs review, those whose intro rests on season audio and
+               those whose intro or credits rests on an online answer and a server's own marker alone again: season
+               audio matches 25 fps and film-rate releases of one season at one speed, online times are read on
+               such a file's own clock, and a Plex marker made for an earlier file counts for nothing.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -473,6 +478,8 @@ def _migrate_schema(sm) -> None:
         _run(16, _migrate_to_v16)
     if current < 17:
         _run(17, _migrate_to_v17)
+    if current < 18:
+        _run(18, _migrate_to_v18)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -1552,6 +1559,31 @@ def _migrate_to_v17(sm) -> list:
     :data:`DECIDE_AGAIN_KEY` so that run comes now, in the decide-again job, which also lists the files whose unlocked
     intro was decided with a season audio answer (``markers.job_runner._items_to_decide_again``). An intro that no
     longer holds comes off the servers there; a locked one is never touched.
+
+    Runs once, gated on ``_schema_version``.
+
+    Returns:
+        No notes: nothing in the settings changes, and the job's own log says what it decided.
+    """
+    sm.set(DECIDE_AGAIN_KEY, True)
+    return []
+
+
+def _migrate_to_v18(sm) -> list:
+    """Have the files in Needs review, those whose intro rests on season audio, and those whose intro or credits rests
+    on an online answer and a server's own marker alone decided again (owner, 2026-09-24).
+
+    A 25 fps release of a film-rate show plays 4.3 % fast. Season audio matches a season that mixes such releases with
+    film-rate ones at one speed (``markers.audio.season.SeasonClock``), where version 5 matched no pair across the two
+    speeds, and IntroDB/TheIntroDB times timed on a release at the other speed are read on the file's own clock
+    (``markers.decide``): Bones seasons 5-8 sat in Needs review with "sources disagree". Season audio version 7 also
+    lets a long early stretch, and a later one found by at least 2 other episodes, pass without a dense core, and an
+    online intro that is a logo at the file's start (under 10 s, from its first 2 s) no longer counts. A pair of an
+    online answer and a server's own marker alone may be film-rate times confirmed by a Plex marker made for an earlier
+    file of the item: on the file's run Plex's answer is read again and flagged (``Candidate.stale``), or, from a Plex
+    server that shows our markers now, an older version's answer stops counting (``pipeline._drop_older_reader_answer``).
+    A stored older answer is matched again on the file's next run anyway; this sets :data:`DECIDE_AGAIN_KEY` so that
+    run comes now, in the decide-again job (``markers.job_runner._items_to_decide_again``).
 
     Runs once, gated on ``_schema_version``.
 

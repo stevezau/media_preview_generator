@@ -36,7 +36,16 @@ from tests.markers.test_pipeline import EPISODE_IDS, MOVIE_IDS, _clients, _ctx, 
 DUR = 1_321_472
 N_POINTS = int(fingerprint.window_s(DUR) / POINT_S)
 INTRO = np.random.default_rng(42).integers(0, 2**32, size=240, dtype=np.uint64).astype("<u4")
-OFFSETS = {"S01E01": 300, "S01E02": 520, "S01E03": 710, "S01E04": 90, "S02E01": 400, "S02E02": 900, "S02E03": 150}
+OFFSETS = {
+    "S01E01": 300,
+    "S01E02": 520,
+    "S01E03": 710,
+    "S01E04": 90,
+    "S01E05": 600,
+    "S02E01": 400,
+    "S02E02": 900,
+    "S02E03": 150,
+}
 SEASON_RAW = {"sources": [{"id": "theintrodb", "enabled": False}], "detect": {"intro": True, "credits": False}}
 SIL = season.SILENCE_POINT
 
@@ -90,12 +99,21 @@ def show(tmp_path):
 
 class _Audio:
     """Patches ffmpeg (fingerprints), ffprobe of other episodes, the chromaprint check and the end-picture decode (every
-    pair of pictures alike unless ``share`` says otherwise)."""
+    pair of pictures alike unless ``share`` says otherwise).
 
-    def __init__(self, fail: set[str] | None = None, points=fake_points, share=lambda *_args: 1.0):
+    ``rates`` gives files a video frame rate (the rest have none); ``retimed(path, retime)`` is a file's fingerprint
+    with its audio retimed to another speed, and ``fail_retimed`` the files whose retimed fingerprint ffmpeg fails on.
+    """
+
+    def __init__(self, fail: set[str] | None = None, points=fake_points, share=lambda *_args: 1.0, rates=None,
+                 retimed=None, fail_retimed: set[str] | None = None):  # fmt: skip
         self.computed: list[str] = []
+        self.retimes: list[tuple[str, float]] = []
         self.fail = fail or set()
+        self.fail_retimed = fail_retimed or set()
         self.points = points
+        self.retimed = retimed
+        self.rates = rates or {}
         self.share = share
         self.compared: list[tuple] = []
 
@@ -103,16 +121,25 @@ class _Audio:
         self.compared.append((target, partner, start_s, end_s, offset_s))
         return self.share(target, partner, start_s, end_s, offset_s)
 
-    def compute(self, path, duration_ms, *, ffmpeg, cancel_check=None):
+    def compute(self, path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
+        if retime is not None:
+            self.retimes.append((path, retime))
+            if path in self.fail_retimed:
+                raise fingerprint.FingerprintError("ffmpeg exited 1")
+            return self.retimed(path, retime)
         self.computed.append(path)
         if path in self.fail:
             raise fingerprint.FingerprintError("ffmpeg exited 1")
         return self.points(path)
 
+    def probe(self, path, **_kwargs):
+        """ffprobe of a file: its duration and frame rate, no chapters."""
+        return MediaProbe(DUR, (), frame_rate=self.rates.get(path))
+
     def __enter__(self):
         self._patches = [
             patch.object(fingerprint, "compute_fingerprint", side_effect=self.compute),
-            patch.object(season, "probe_media", return_value=MediaProbe(DUR, ())),
+            patch.object(season, "probe_media", side_effect=self.probe),
             patch.object(season, "chromaprint_ffmpeg", return_value="/usr/lib/jellyfin-ffmpeg/ffmpeg"),
             patch.object(season.end_picture.Reader, "share", autospec=True, side_effect=self._share),
         ]
@@ -267,8 +294,9 @@ class TestSeasonAudio:
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
         marker = store.get_markers(store.get_file(e1).id)[MarkerType.INTRO]
-        # IntroDB ranks first in the user's order and sets the agreed end; season audio's later start shortens the skip.
-        assert marker == Marker(MarkerType.INTRO, cand.start_ms, end + 3_000, ("introdb", "season_audio"))
+        # Season audio reads this file, so it sets the agreed end though IntroDB ranks first in the user's order
+        # (IntroDB's times are another release's); its later start shortens the skip.
+        assert marker == Marker(MarkerType.INTRO, cand.start_ms, cand.end_ms, ("introdb", "season_audio"))
         assert pub.write.call_args.args[1] == [marker]
 
     def test_a_current_answer_is_not_matched_again(self, store, show):
@@ -369,7 +397,7 @@ class TestSeasonAudio:
 
     def test_the_detector_is_registered_with_the_season_audio_source_and_version(self):
         spec = _spec()
-        assert (spec.source, spec.types, spec.version) == (Source.SEASON_AUDIO, frozenset({MarkerType.INTRO}), 5)
+        assert (spec.source, spec.types, spec.version) == (Source.SEASON_AUDIO, frozenset({MarkerType.INTRO}), 7)
         assert spec.stored_sources == {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
         assert (spec.due, spec.needs_worker) == (season.season_audio_due, season.season_audio_needs_worker)
 
@@ -629,6 +657,480 @@ def _end_picture_keys(store):
 
 def _decided(mtype, start, end, decided_by=("skipdb",)):
     return TypeDecision(mtype, DecisionStatus.DECIDED, Marker(mtype, start, end, decided_by), None, "single source")
+
+
+FILM = 24000 / 1001
+TO_FILM = FILM / 25  # a 25 fps episode's own seconds per second at film speed
+TO_PAL = 25 / FILM  # a film-rate episode's own seconds per second at 25 fps
+# The theme as a 25 fps release fingerprints it: 4.3 % fast and pitched up, so nothing like the film-rate recording.
+SPED_UP = noise(25, 240)
+CLOCK_AT = (
+    2400  # where a retimed fingerprint holds the theme, in points at its group's speed: about 5 min in, as Bones's
+)
+
+
+def _episode_code(path: str) -> str:
+    return re.search(r"S\d\dE\d\d", path).group(0)
+
+
+def speed_points(pal):
+    """Own-speed fingerprints: film-rate episodes hold the theme at OFFSETS, the 25 fps ones (``pal``) the sped-up
+    one."""
+
+    def points(path):
+        body = fake_points(path)
+        if path in pal:
+            at = OFFSETS[_episode_code(path)]
+            body[at : at + 240] = SPED_UP
+        return body
+
+    return points
+
+
+def retimed_points(path, retime):
+    """A retimed fingerprint: slowed to film speed it holds the film-rate theme, sped up to 25 fps the sped-up one.
+
+    Its noise is seeded from the file's name, not its tmp path: a seed that changed with every run made about 1 run
+    in 100 fail, when the noise next to the theme matched a partner's within the matcher's 3.5 s gap and stretched
+    the run."""
+    body = noise(zlib.crc32(os.path.basename(path).encode()) ^ 0x5A5A, N_POINTS)
+    body[CLOCK_AT : CLOCK_AT + 240] = INTRO if retime < 1 else SPED_UP
+    return body
+
+
+def own_ms(retime, at=CLOCK_AT):
+    """Where a retimed fingerprint's theme plays in the file's own milliseconds."""
+    return round(at * POINT_S * retime * 1000), round((at + 239) * POINT_S * retime * 1000)
+
+
+class TestMixedSpeeds:
+    """A season mixing 25 fps releases with film-rate ones (Bones S05-S08: FUZEER WEB at 25 fps beside 23.976
+    Blu-rays). The files that play at another speed than most of the group are fingerprinted with their audio
+    retimed to it, and what they match is read back at their own speed."""
+
+    def test_a_25_fps_episode_among_film_rate_ones_matches_its_audio_slowed_to_film_speed(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            out, _ = _run(_season_ctx(store, e4), e4, {"plex-1": ready_publisher()}, stage="process",
+                          probe_effect=audio.probe)  # fmt: skip
+        assert audio.retimes == [(e4, pytest.approx(TO_FILM))]
+        (cand,) = _evidence(store, e4, Source.SEASON_AUDIO)
+        start, end = own_ms(TO_FILM)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        assert cand.origin == "3/3"
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert store.get_markers(store.get_file(e4).id)[MarkerType.INTRO] == Marker(
+            MarkerType.INTRO, cand.start_ms, cand.end_ms, ("season_audio",)
+        )
+
+    def test_a_film_rate_episode_among_25_fps_ones_matches_its_audio_sped_up(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: 25.0, e2: 25.0, e3: 25.0, e4: FILM}
+        with _Audio(points=speed_points({e1, e2, e3}), rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e4), e4, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        assert audio.retimes == [(e4, pytest.approx(TO_PAL))]
+        (cand,) = _evidence(store, e4, Source.SEASON_AUDIO)
+        start, end = own_ms(TO_PAL)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        assert cand.origin == "3/3"
+
+    def test_the_film_rate_episodes_count_the_retimed_one_as_support(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        start, end = planted_ms(e1)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        assert cand.origin == "3/3"
+        assert audio.retimes == [(e4, pytest.approx(TO_FILM))]
+
+    def test_a_group_at_one_speed_fingerprints_nothing_retimed(self, store, show):
+        paths = show(1, 4)
+        with _Audio(points=speed_points(set(paths)), rates=dict.fromkeys(paths, 25.0)) as audio:
+            _run(_season_ctx(store, paths[0]), paths[0], {"plex-1": ready_publisher()}, stage="process",
+                 probe_effect=audio.probe)  # fmt: skip
+        assert audio.retimes == []
+        (cand,) = _evidence(store, paths[0], Source.SEASON_AUDIO)
+        assert cand.origin == "3/3"
+        assert all(store.get_frame_rate(store.get_file(p).id) == (True, 25.0) for p in paths)
+
+    @pytest.mark.parametrize("rate", [None, 29.97, 50.0], ids=["unknown", "29.97", "50"])
+    def test_a_file_of_unknown_or_other_rate_is_matched_as_it_plays(self, store, show, rate):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: rate}
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        assert audio.retimes == []
+        (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert cand.origin == "2/3"
+
+    def test_retimed_pairs_are_cached_apart_from_the_files_own_speed_pairs(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        ctx = _season_ctx(store, e4)
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            _run(ctx, e4, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            with patch.object(season, "pair_runs", side_effect=AssertionError("recomputed")):
+                _detect_and_store(ctx, store.get_file(e4))
+        a, d = store.get_file(e1), store.get_file(e4)
+        clock = season.SeasonClock(FILM, {e4: TO_FILM})
+        assert store.get_season_pair(a.id, d.id, season.SEASON_AUDIO_VERSION) is None
+        assert store.get_season_pair(a.id, d.id, clock.pair_version(e1, e4)) is not None
+
+    def test_each_sides_speed_names_its_pairs_version(self):
+        film, pal = (
+            season.SeasonClock(FILM, {"/b": TO_FILM, "/c": TO_FILM}),
+            season.SeasonClock(25.0, {"/b": TO_PAL, "/c": TO_PAL}),
+        )
+        versions = [
+            clock.pair_version(x, y) for clock in (film, pal) for x, y in (("/b", "/a"), ("/a", "/b"), ("/b", "/c"))
+        ]
+        assert len(set(versions)) == 6  # one retimed side either way round, or both, at either speed
+        own = season.SEASON_AUDIO_VERSION
+        assert (
+            film.pair_version("/a", "/d")
+            == pal.pair_version("/a", "/d")
+            == season.SeasonClock().pair_version("/a", "/b")
+            == own
+        )
+        assert own not in versions
+
+    def test_a_pair_with_both_sides_retimed_is_matched_and_cached_at_the_groups_speed(self, store, show):
+        # Two film-rate episodes in a season of 25 fps ones: both are sped up, and their own pair is matched sped up.
+        e1, e2, e3, e4, e5 = show(1, 5)
+        rates = {e1: FILM, e2: FILM, e3: 25.0, e4: 25.0, e5: 25.0}
+        with _Audio(points=speed_points({e3, e4, e5}), rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        assert sorted(audio.retimes) == [(e1, pytest.approx(TO_PAL)), (e2, pytest.approx(TO_PAL))]
+        (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert cand.origin == "4/4"
+        start, end = own_ms(TO_PAL)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        both = season.SeasonClock(25.0, {e1: TO_PAL, e2: TO_PAL}).pair_version(e1, e2)
+        a, b = store.get_file(e1), store.get_file(e2)
+        assert store.get_season_pair(a.id, b.id, both) is not None
+
+    def test_a_sibling_whose_rate_turns_out_to_be_25_fps_is_matched_again_retimed(self, store, show):
+        # e5 is a 25 fps release whose rate wasn't known when e4 was matched: then it was matched as it plays.
+        e1, e2, e3, e4, e5 = show(1, 5)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0, e5: None}
+        ctx = _season_ctx(store, e4)
+        with _Audio(points=speed_points({e4, e5}), rates=rates, retimed=retimed_points) as audio:
+            _run(ctx, e4, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            assert _evidence(store, e4, Source.SEASON_AUDIO)[0].origin == "3/4"
+            fifth = store.get_file(e5)
+            store.set_frame_rate(fifth.id, 25.0, identity=(fifth.size, fifth.mtime_ns))
+            fourth = store.get_file(e4)
+            assert season.season_audio_due(fourth, _season_ctx(store, e4)) is True
+            _detect_and_store(_season_ctx(store, e4), fourth)
+        assert _evidence(store, e4, Source.SEASON_AUDIO)[0].origin == "4/4"
+        both = season.SeasonClock(FILM, {e4: TO_FILM, e5: TO_FILM}).pair_version(e4, e5)
+        assert store.get_season_pair(fourth.id, fifth.id, both) is not None
+
+    def test_a_sibling_left_out_for_its_failed_retimed_fingerprint_makes_the_answer_due_once_it_is_made(
+        self, store, show
+    ):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points, fail_retimed={e4}) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            first = store.get_file(e1)
+            assert _evidence(store, e1, Source.SEASON_AUDIO)[0].origin == "2/2"
+            assert season.season_audio_due(first, _season_ctx(store, e1)) is False  # current: nothing else to match
+            assert season.season_audio_needs_worker(first, _season_ctx(store, e1)) is False  # e4 failed lately
+            fourth = store.get_file(e4)
+            store.set_fingerprint(fourth.id, size=fourth.size, mtime_ns=fourth.mtime_ns,
+                                  window=fingerprint.fingerprint_window(TO_FILM), start_s=0.0,
+                                  length_s=fingerprint.window_s(DUR), algorithm=1,
+                                  points=retimed_points(e4, TO_FILM).tobytes())  # fmt: skip
+            assert season.season_audio_due(first, _season_ctx(store, e1)) is True
+            _detect_and_store(_season_ctx(store, e1), first)
+        assert _evidence(store, e1, Source.SEASON_AUDIO)[0].origin == "3/3"
+
+    def test_a_cancel_while_a_sibling_is_fingerprinted_at_the_seasons_speed_stores_no_answer(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        cancelled = threading.Event()
+
+        def retimed(path, retime):
+            cancelled.set()  # the user cancels while ffmpeg reads e4 at film speed
+            raise fingerprint.FingerprintError("Fingerprinting cancelled")
+
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, probe_effect=audio.probe)  # probes
+            rec = store.get_file(e1)
+            with pytest.raises(pipeline.DetectorUnavailableError, match="cancelled"):
+                season.detect_season_audio(rec, ctx=_season_ctx(store, e1), cancel_check=cancelled.is_set)
+        assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None
+        assert store.member_fingerprint_failed_at(FileIdentity(e4, *_identity(e4))) is None
+
+    def test_the_episodes_own_rate_is_read_before_it_is_matched_when_it_was_stored_before_frame_rates(
+        self, store, show, tmp_path
+    ):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: None}  # e1's run reads e4 as a file of unknown rate
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            assert audio.retimes == []
+            fourth = store.get_file(e4)
+            with sqlite3.connect(tmp_path / "markers.db") as older_build:  # e4 stored before frame rates were read
+                older_build.execute("DELETE FROM frame_rates WHERE file_id=?", (fourth.id,))
+            audio.rates[e4] = 25.0
+            with patch.object(season, "probe_media", side_effect=audio.probe) as probe:
+                # Read inline, like the file's own probe; at 25 fps it needs a retimed fingerprint: a worker's job.
+                assert season.season_audio_needs_worker(fourth, _season_ctx(store, e4)) is True
+            probe.assert_called_once_with(e4, ffprobe="ffprobe")
+            assert store.get_frame_rate(fourth.id) == (True, 25.0)
+            (cand,) = _detect_and_store(_season_ctx(store, e4), fourth)
+        assert audio.retimes == [(e4, pytest.approx(TO_FILM))]
+        start, end = own_ms(TO_FILM)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        assert cand.origin == "3/3"
+
+    def test_the_detector_reads_the_episodes_own_rate_when_it_runs_first(self, store, show, tmp_path):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        rec = store.upsert_file(FileIdentity(e4, *_identity(e4)), duration_ms=DUR, season_key=None, is_movie=False)
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            (cand,) = _detect_and_store(_season_ctx(store, e4), rec)
+        assert store.get_frame_rate(rec.id) == (True, 25.0)
+        assert (e4, pytest.approx(TO_FILM)) in audio.retimes
+        start, end = own_ms(TO_FILM)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+
+    def test_an_episode_whose_own_rate_cant_be_read_is_matched_as_it_plays_and_read_again_after_a_day(
+        self, store, show, tmp_path
+    ):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            fourth = store.get_file(e4)
+            with sqlite3.connect(tmp_path / "markers.db") as older_build:
+                older_build.execute("DELETE FROM frame_rates WHERE file_id=?", (fourth.id,))
+            with patch.object(season, "probe_media", side_effect=ProbeError("ffprobe exited 1")) as probe:
+                assert season.season_audio_needs_worker(fourth, _season_ctx(store, e4)) is False
+                assert season.season_audio_needs_worker(fourth, _season_ctx(store, e4)) is False
+            probe.assert_called_once()  # remembered for a day
+        assert store.get_frame_rate(fourth.id) == (False, None)
+        assert store.member_probe_failed_at(FileIdentity(e4, *_identity(e4))) is not None
+
+    def test_a_previous_season_file_at_the_other_speed_is_matched_retimed(self, store, show):
+        s1 = show(1, 4)
+        (s2e1,) = show(2, 1)
+        for path in s1:
+            rec = store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR,
+                                    season_key=os.path.dirname(path), is_movie=False)  # fmt: skip
+            data = speed_points({s1[3]})(path).tobytes()
+            store.set_fingerprint(rec.id, size=rec.size, mtime_ns=rec.mtime_ns, window="intro", start_s=0.0,
+                                  length_s=fingerprint.window_s(DUR), algorithm=1, points=data)  # fmt: skip
+            store.set_frame_rate(rec.id, 25.0 if path == s1[3] else FILM, identity=(rec.size, rec.mtime_ns))
+
+        # The lone episode's own theme plays where the retimed previous-season file holds it at film speed.
+        def s2e1_points(path):
+            return retimed_points("x", TO_FILM) if path == s2e1 else speed_points({s1[3]})(path)
+
+        with _Audio(points=s2e1_points, rates={s2e1: FILM}, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, s2e1), s2e1, {"plex-1": ready_publisher()}, stage="process",
+                 probe_effect=audio.probe)  # fmt: skip
+        assert audio.retimes == [(s1[3], pytest.approx(TO_FILM))]
+        (hint,) = _evidence(store, s2e1, Source.SEASON_AUDIO_PREVIOUS)
+        assert hint.origin == "4/4"
+
+    def test_a_rate_learned_later_makes_the_answer_due_and_needs_a_worker_for_the_retimed_fingerprint(
+        self, store, show
+    ):
+        e1, e2, e3, e4 = show(1, 4)
+        ctx = _season_ctx(store, e1)
+        with _Audio(points=speed_points({e4}), retimed=retimed_points) as audio:  # no rates known yet
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            first = store.get_file(e1)
+            assert _evidence(store, e1, Source.SEASON_AUDIO)[0].origin == "2/3"
+            assert season.season_audio_due(first, ctx) is False
+            assert season.season_audio_needs_worker(first, ctx) is False
+            for path, rate in ((e1, FILM), (e2, FILM), (e3, FILM), (e4, 25.0)):
+                rec = store.get_file(path)
+                store.set_frame_rate(rec.id, rate, identity=(rec.size, rec.mtime_ns))
+            assert season.season_audio_due(first, ctx) is True
+            assert season.season_audio_needs_worker(first, ctx) is True  # e4's retimed fingerprint isn't made yet
+            _detect_and_store(ctx, first)
+            assert audio.retimes == [(e4, pytest.approx(TO_FILM))]
+            assert season.season_audio_needs_worker(first, ctx) is False
+            assert season.season_audio_needs_worker(store.get_file(e2), ctx) is False
+        assert _evidence(store, e1, Source.SEASON_AUDIO)[0].origin == "3/3"
+
+    def test_a_member_known_from_before_frame_rates_needs_a_worker_to_read_its_rate(self, store, show, tmp_path):
+        e1, e2, e3 = show(1, 3)
+        rates = dict.fromkeys((e1, e2, e3), FILM)
+        ctx = _season_ctx(store, e1)
+        with _Audio(rates=rates) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            with sqlite3.connect(tmp_path / "markers.db") as older_build:
+                older_build.execute("DELETE FROM frame_rates WHERE file_id=?", (store.get_file(e2).id,))
+            assert season.season_audio_needs_worker(store.get_file(e1), ctx) is True
+            _detect_and_store(ctx, store.get_file(e1))
+            assert store.get_frame_rate(store.get_file(e2).id) == (True, FILM)
+            assert season.season_audio_needs_worker(store.get_file(e1), ctx) is False
+
+    def test_a_member_whose_rate_cant_be_read_stays_in_at_an_unknown_speed_and_holds_no_worker(
+        self, store, show, tmp_path
+    ):
+        e1, e2, e3 = show(1, 3)
+        rates = dict.fromkeys((e1, e2, e3), FILM)
+        ctx = _season_ctx(store, e1)
+        with _Audio(rates=rates) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            with sqlite3.connect(tmp_path / "markers.db") as older_build:
+                older_build.execute("DELETE FROM frame_rates WHERE file_id=?", (store.get_file(e2).id,))
+
+            def probe(path, **kwargs):
+                if path == e2:
+                    raise ProbeError("ffprobe exited 1")
+                return audio.probe(path)
+
+            with patch.object(season, "probe_media", side_effect=probe):
+                (cand,) = _detect_and_store(ctx, store.get_file(e1))
+                assert season.season_audio_needs_worker(store.get_file(e1), ctx) is False
+        assert cand.origin == "2/2"  # e2 still counts
+        assert store.get_frame_rate(store.get_file(e2).id) == (False, None)
+        assert store.member_probe_failed_at(FileIdentity(e2, *_identity(e2))) is not None
+
+    @pytest.mark.parametrize(("effect", "worker"), [("stalled", True), ("failed", False)])
+    def test_the_episodes_own_rate_left_unread_inline_sends_it_to_a_worker_unless_the_read_failed(
+        self, store, show, tmp_path, effect, worker
+    ):
+        # ffprobes stuck on earlier files leave the rate unread (nothing blamed): a worker reads it, rather than the
+        # checking thread matching the season at an unknown speed. A read that failed isn't tried again for a day.
+        e1, e2, e3 = show(1, 3)
+        rates = dict.fromkeys((e1, e2, e3), FILM)
+        ctx = _season_ctx(store, e1)
+        with _Audio(rates=rates) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+            with sqlite3.connect(tmp_path / "markers.db") as older_build:
+                older_build.execute("DELETE FROM frame_rates WHERE file_id=?", (store.get_file(e1).id,))
+
+            def probe(path, **kwargs):
+                if path == e1:
+                    if effect == "stalled":
+                        raise ProbeStalledError(f"Not reading {path}: 2 earlier ffprobes are still stuck")
+                    raise ProbeError("ffprobe exited 1")
+                return audio.probe(path)
+
+            with patch.object(season, "probe_media", side_effect=probe):
+                assert season.season_audio_needs_worker(store.get_file(e1), ctx) is worker
+        assert store.get_frame_rate(store.get_file(e1).id) == (False, None)
+
+    def test_an_answer_names_the_rates_its_files_were_matched_at(self, store, show):
+        # A sibling's rate read by its own run after this run's match was made (e2: film, then 25 fps) doesn't enter
+        # this answer: the answer still says film for it, so it comes due and is matched again at the new speed.
+        e1, e2, e3 = show(1, 3)
+        rates = dict.fromkeys((e1, e2, e3), FILM)
+        real = season._matching
+
+        def then_e2_reads_as_25_fps(*args, **kwargs):
+            found = real(*args, **kwargs)
+            if kwargs["previous_files"] is None:  # the detector's match, not needs_worker's
+                rec = store.get_file(e2)
+                store.set_frame_rate(rec.id, 25.0, identity=(rec.size, rec.mtime_ns))
+            return found
+
+        ctx = _season_ctx(store, e3)
+        with _Audio(rates=rates) as audio, patch.object(season, "_matching", side_effect=then_e2_reads_as_25_fps):
+            _run(ctx, e3, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        assert store.get_frame_rate(store.get_file(e2).id) == (True, 25.0)
+        assert season.season_audio_due(store.get_file(e3), _season_ctx(store, e3)) is True
+
+    def test_a_member_whose_retimed_fingerprint_fails_is_left_out(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points, fail_retimed={e4}) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert cand.origin == "2/2"
+        assert store.member_fingerprint_failed_at(FileIdentity(e4, *_identity(e4))) is not None
+
+    def test_the_episodes_own_retimed_fingerprint_failing_gives_no_answer_this_time(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        rec = store.upsert_file(FileIdentity(e4, *_identity(e4)), duration_ms=DUR, season_key=None, is_movie=False)
+        store.set_frame_rate(rec.id, 25.0, identity=(rec.size, rec.mtime_ns))
+        with (
+            _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points, fail_retimed={e4}),
+            pytest.raises(pipeline.DetectorUnavailableError, match="ffmpeg exited 1"),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e4))
+        assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is not None
+        assert _evidence(store, e4, Source.SEASON_AUDIO) == []
+
+    def test_the_end_picture_check_reads_each_file_at_its_own_seconds(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        rates = {e1: FILM, e2: FILM, e3: 25.0}
+
+        def points(path):
+            body = early_points(path)
+            if path == e3:
+                body[EARLY_OFFSETS["S01E03"] : EARLY_OFFSETS["S01E03"] + 240] = SPED_UP
+            return body
+
+        def retimed(path, retime):
+            body = noise(zlib.crc32(os.path.basename(path).encode()) ^ 0x5A5A, N_POINTS)  # see retimed_points
+            body[100:340] = INTRO  # 12.4 s at film speed: early, so its end picture is checked
+            return body
+
+        with _Audio(points=points, rates=rates, retimed=retimed) as audio:
+            _run(_season_ctx(store, e3), e3, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        (cand,) = _evidence(store, e3, Source.SEASON_AUDIO)
+        start, end = own_ms(TO_FILM, at=100)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        by_partner = {partner: (s, e, offset) for target, partner, s, e, offset in audio.compared if target == e3}
+        assert set(by_partner) == {e1, e2}
+        for partner in (e1, e2):
+            s, e, offset = by_partner[partner]
+            assert (round(s * 1000), round(e * 1000)) == (cand.start_ms, cand.end_ms)
+            # Aligned at the stretch's end, where the pictures are compared: the partner's own end minus this one's.
+            partner_end_s = (EARLY_OFFSETS[_episode_code(partner)] + 239) * POINT_S
+            assert offset == pytest.approx(partner_end_s - cand.end_ms / 1000, abs=POINT_S)
+
+    def test_a_new_seasons_only_25_fps_episode_is_matched_with_the_film_rate_previous_season(self, store, show):
+        s1 = show(1, 4)
+        (s2e1,) = show(2, 1)
+        for path in s1:
+            rec = store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR,
+                                    season_key=os.path.dirname(path), is_movie=False)  # fmt: skip
+            data = fake_points(path).tobytes()
+            store.set_fingerprint(rec.id, size=rec.size, mtime_ns=rec.mtime_ns, window="intro", start_s=0.0,
+                                  length_s=fingerprint.window_s(DUR), algorithm=1, points=data)  # fmt: skip
+            store.set_frame_rate(rec.id, FILM, identity=(rec.size, rec.mtime_ns))
+        with _Audio(points=speed_points({s2e1}), rates={s2e1: 25.0}, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, s2e1), s2e1, {"plex-1": ready_publisher()}, stage="process",
+                 probe_effect=audio.probe)  # fmt: skip
+        assert audio.retimes == [(s2e1, pytest.approx(TO_FILM))]
+        (hint,) = _evidence(store, s2e1, Source.SEASON_AUDIO_PREVIOUS)
+        start, end = own_ms(TO_FILM)
+        assert abs(hint.start_ms - start) <= 500 and abs(hint.end_ms - end) <= 500
+        assert hint.origin == "4/4"
+
+    def test_a_25_fps_episode_publishes_its_own_times_when_introdb_has_the_film_rate_ones(self, store, show):
+        # Bones S07E01: the theme plays 310-338 s in the 25 fps file; IntroDB, timed on a 23.976 release, says 324-354.
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        film_start, film_end = round(CLOCK_AT * POINT_S * 1000), round((CLOCK_AT + 239) * POINT_S * 1000) + 1_000
+        pub = ready_publisher()
+        ctx = _season_ctx(store, e4, SEASON_RAW, clients=_introdb_answer(film_start, film_end))
+        with _Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points) as audio:
+            out, _ = _run(ctx, e4, {"plex-1": pub}, stage="process", probe_effect=audio.probe)
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        rec = store.get_file(e4)
+        decision = store.get_decisions(rec.id)[MarkerType.INTRO]
+        assert (decision.status, decision.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, season_audio")
+        (cand,) = _evidence(store, e4, Source.SEASON_AUDIO)
+        marker = store.get_markers(rec.id)[MarkerType.INTRO]
+        # IntroDB's scaled start may be the later one; the end is season audio's, which reads this file.
+        assert marker == Marker(MarkerType.INTRO, max(cand.start_ms, round(film_start * TO_FILM)),
+                                cand.end_ms, ("introdb", "season_audio"))  # fmt: skip
+        assert pub.write.call_args.args[1] == [marker]
 
 
 class TestWeeklyReleases:
@@ -906,7 +1408,7 @@ class TestFailures:
                         all_waiting.set()
             return real_ensure(store_, rec_, **kwargs)
 
-        def compute(path, duration_ms, *, ffmpeg, cancel_check=None):
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
             audio.computed.append(path)
             if path == broken:
                 all_waiting.wait(10)  # every sibling's step is at the broken file before ffmpeg fails on it
@@ -945,7 +1447,7 @@ class TestFailures:
         rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
         cancelled = threading.Event()
 
-        def compute(path, duration_ms, *, ffmpeg, cancel_check=None):
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
             if path == e2:
                 cancelled.set()  # the user cancels while ffmpeg reads E2
                 raise fingerprint.FingerprintError("Fingerprinting cancelled")
@@ -963,7 +1465,7 @@ class TestFailures:
         e1, e2, e3 = show(1, 3)
         rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
 
-        def compute(path, duration_ms, *, ffmpeg, cancel_check=None):
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
             audio.computed.append(path)
             if path == e2:
                 raise fingerprint.FingerprintStalledError("2 earlier fingerprint ffmpegs are still stuck")
@@ -996,7 +1498,8 @@ class TestFailures:
             pytest.raises(pipeline.DetectorUnavailableError, match="still stuck"),
         ):
             season.detect_season_audio(rec, ctx=_season_ctx(store, e1))
-        assert probed == [e2]  # E3 would meet the same stall: not tried
+        # Its own frame rate first (a record from before frame rates were read), then E2; E3 would meet the same stall.
+        assert probed == [e1, e2]
         assert store.member_probe_failed_at(FileIdentity(e2, *_identity(e2))) is None
         assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
 
@@ -1193,6 +1696,7 @@ class TestFailures:
     def test_a_stale_season_audio_answer_can_still_hold_a_chapter_in_review(self, store, show, detectors, chromaprint):
         (path,) = show(1, 1)
         rec = store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=None, is_movie=False)
+        store.set_frame_rate(rec.id, None, identity=(rec.size, rec.mtime_ns))  # probed as this build probes a file
         intro_chapter = chapter_candidates(_chapter_probe(60_000, at_ms=0))  # an "Intro" chapter at 0-60 s
         store.replace_evidence(rec.id, Source.CHAPTERS, intro_chapter, version=CHAPTER_RULES_VERSION)
         store.replace_evidence(rec.id, Source.INTRODB, [Candidate(MarkerType.INTRO, 300_000, 390_000, Source.INTRODB)])
@@ -1323,6 +1827,7 @@ def _store_fingerprint(store, path, points):
                             is_movie=False)  # fmt: skip
     store.set_fingerprint(rec.id, size=rec.size, mtime_ns=rec.mtime_ns, window="intro", start_s=0.0,
                           length_s=fingerprint.window_s(DUR), algorithm=1, points=points.tobytes())  # fmt: skip
+    store.set_frame_rate(rec.id, None, identity=(rec.size, rec.mtime_ns))  # probed, as this build probes every member
     return rec
 
 

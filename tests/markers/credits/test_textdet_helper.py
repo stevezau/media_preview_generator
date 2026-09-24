@@ -420,12 +420,14 @@ def boxes_for(count, shift=0):
 
 
 class FakeDetector:
-    def __init__(self, counts, per_frame_s, clock, shift=0):
+    def __init__(self, counts, per_frame_s, clock, shift=0, large_shift=0):
         self.counts, self.per_frame_s, self.clock, self.shift = counts, per_frame_s, clock, shift
+        self.large_shift = large_shift
 
     def detect(self, frames):
         self.clock.now += self.per_frame_s * len(frames)
-        return [boxes_for(n, self.shift) for n in self.counts[: len(frames)]]
+        shift = self.large_shift if frames.shape[1] > 180 else self.shift
+        return [boxes_for(n, shift) for n in self.counts[: len(frames)]]
 
 
 class Clock:
@@ -455,6 +457,28 @@ def test_self_test_needs_the_same_boxes_and_more_speed(gpu_counts, gpu_shift, gp
     result = th.self_test(gpu, FakeDetector([1, 0, 3], 0.018, clock), frames, clock=clock, warmup=1)
     assert (result.use_gpu, result.same_boxes) == (use_gpu, same)
     assert result.cpu_ms == pytest.approx(18.0) and result.gpu_ms == pytest.approx(gpu_s * 1000)
+
+
+@pytest.mark.parametrize(("large_shift", "use_gpu"), [(0, True), (40, False)], ids=["same", "other-places"])
+def test_the_self_test_compares_the_boxes_at_640x360_too(large_shift, use_gpu):
+    # The detector's larger reading sends 640x360 frames to the same helper. A GPU that finds the CPU's boxes at
+    # 320x180 and other ones at 640x360 would answer differently from the CPU on every file read at that size.
+    clock = Clock()
+    frames = np.zeros((3, 180, 320), np.uint8)
+    large = np.zeros((2, 360, 640), np.uint8)
+    gpu = FakeDetector([1, 0, 3], 0.005, clock, large_shift=large_shift)
+    result = th.self_test(gpu, FakeDetector([1, 0, 3], 0.018, clock), frames, clock=clock, warmup=1,
+                          large_frames=large)  # fmt: skip
+    assert (result.same_boxes, result.same_boxes_large, result.use_gpu) == (True, not large_shift, use_gpu)
+    assert result.gpu_ms == pytest.approx(5.0)  # timed on the 320x180 frames only: what the helper mostly serves
+    if not use_gpu:
+        assert result.cpu_reason() == "the GPU was finding different boxes than the CPU at 640x360"
+
+
+def test_the_self_tests_larger_frames_are_the_detectors_larger_reading():
+    from media_preview_generator.markers.credits import detector
+
+    assert th.SELFTEST_LARGE_SCALE == detector.RETRY_SCALE
 
 
 def test_the_self_test_warms_both_detectors_before_timing():
@@ -675,16 +699,18 @@ def test_boxes_that_differ_in_any_round_fail_the_self_test():
 class StubDetector:
     """A stand-in :class:`textdet.TextDetector` that costs a fixed time per frame on a fake clock."""
 
-    def __init__(self, counts, ms_per_frame, clock, *, backend, fail_after=None, shift=0):
+    def __init__(self, counts, ms_per_frame, clock, *, backend, fail_after=None, shift=0, large_shift=0):
         self.counts, self.ms_per_frame, self.clock = counts, ms_per_frame, clock
         self.backend, self._fail_after, self._calls, self.shift = backend, fail_after, 0, shift
+        self.large_shift = large_shift
 
     def detect(self, frames):
         self._calls += 1
         if self._fail_after is not None and self._calls > self._fail_after:
             raise RuntimeError("the device was lost")
         self.clock.now += self.ms_per_frame * len(frames) / 1000.0
-        return [boxes_for(n, self.shift) for n in self.counts[: len(frames)]]
+        shift = self.large_shift if frames.shape[1] > 180 else self.shift
+        return [boxes_for(n, shift) for n in self.counts[: len(frames)]]
 
 
 class StubTextDet:
@@ -708,6 +734,7 @@ class StubTextDet:
         cpu_ms=10.0,
         gpu_counts=None,
         gpu_shift=0,
+        gpu_large_shift=0,
         webgpu_error=None,
         cpu_error=None,
         gpu_fail_after=None,
@@ -716,8 +743,9 @@ class StubTextDet:
         self.devices = [SimpleNamespace(device=SimpleNamespace(metadata={"pci_bus_id": pci})) for pci in addresses]
         self.gpu_ms, self.cpu_ms = gpu_ms, cpu_ms
         self.gpu_counts = gpu_counts if gpu_counts is not None else list(range(th.SELFTEST_FRAMES))
-        self.gpu_shift = gpu_shift
+        self.gpu_shift, self.gpu_large_shift = gpu_shift, gpu_large_shift
         self.cpu_counts = list(range(th.SELFTEST_FRAMES))
+        self.frame_sizes: list[tuple] = []
         self.webgpu_error, self.cpu_error, self.gpu_fail_after = webgpu_error, cpu_error, gpu_fail_after
         self.cpu_sessions: list[tuple] = []
         self.webgpu_sessions: list = []
@@ -743,10 +771,12 @@ class StubTextDet:
         if backend == "cpu":
             return StubDetector(self.cpu_counts, self.cpu_ms, self.clock, backend="cpu")
         return StubDetector(self.gpu_counts, self.gpu_ms, self.clock, backend="webgpu",
-                            fail_after=self.gpu_fail_after, shift=self.gpu_shift)  # fmt: skip
+                            fail_after=self.gpu_fail_after, shift=self.gpu_shift,
+                            large_shift=self.gpu_large_shift)  # fmt: skip
 
-    def synthetic_frames(self, count=20):
-        return np.zeros((count, 180, 320), np.uint8)
+    def synthetic_frames(self, count=20, scale=1):
+        self.frame_sizes.append((count, scale))
+        return np.zeros((count, 180 * scale, 320 * scale), np.uint8)
 
 
 class TestHelperProcessBackendChoice:
@@ -773,9 +803,11 @@ class TestHelperProcessBackendChoice:
         assert detector.backend == "webgpu"
         assert ready == {
             "backend": "webgpu",
-            "selftest": {"gpu_ms": 1.0, "cpu_ms": 10.0, "ratio": 0.1, "same_boxes": True},
+            "selftest": {"gpu_ms": 1.0, "cpu_ms": 10.0, "ratio": 0.1, "same_boxes": True, "same_boxes_large": True},
             "reason": "",
         }
+        # 20 frames at 320x180 timed, and 8 at 640x360 compared.
+        assert stub.frame_sizes == [(th.SELFTEST_FRAMES, 1), (th.SELFTEST_LARGE_FRAMES, th.SELFTEST_LARGE_SCALE)]
 
     def test_a_slower_gpu_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=20.0, cpu_ms=10.0)
@@ -790,7 +822,8 @@ class TestHelperProcessBackendChoice:
         stub = StubTextDet(clock, gpu_ms=10.0, cpu_ms=10.0)
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
-        assert ready["selftest"] == {"gpu_ms": 10.0, "cpu_ms": 10.0, "ratio": 1.0, "same_boxes": True}
+        assert ready["selftest"] == {"gpu_ms": 10.0, "cpu_ms": 10.0, "ratio": 1.0, "same_boxes": True,
+                                     "same_boxes_large": True}  # fmt: skip
         assert ready["reason"] == (
             "the GPU wasn't at least 10% faster than the CPU (median 10.0 vs 10.0 ms per frame; GPU/CPU 1.0 per round)"
         )
@@ -811,6 +844,13 @@ class TestHelperProcessBackendChoice:
         assert detector.backend == "cpu"
         assert ready["reason"] == "the GPU was finding different boxes than the CPU"
         assert ready["selftest"]["same_boxes"] is False
+
+    def test_a_gpu_that_finds_other_boxes_at_640x360_serves_from_the_cpu(self, clock):
+        stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0, gpu_large_shift=40)
+        detector, ready = self._start(stub)
+        assert detector.backend == "cpu"
+        assert ready["reason"] == "the GPU was finding different boxes than the CPU at 640x360"
+        assert (ready["selftest"]["same_boxes"], ready["selftest"]["same_boxes_large"]) == (True, False)
 
     def test_a_self_test_that_fails_part_way_through_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_fail_after=2)
@@ -882,7 +922,7 @@ class TestShutdown:
         env.pool.close_all()
         worker.join(30)
         assert not worker.is_alive()
-        assert len(failed) == 1 and isinstance(failed[0], th.TextDetUnavailableError)
+        assert len(failed) == 1 and isinstance(failed[0], th.TextDetShuttingDownError)
         assert "shutting down" in str(failed[0])
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
@@ -907,7 +947,7 @@ class TestShutdown:
         env.pool.close_all()
         worker.join(30)
         assert not worker.is_alive()
-        assert len(failed) == 1 and isinstance(failed[0], th.TextDetUnavailableError)
+        assert len(failed) == 1 and isinstance(failed[0], th.TextDetShuttingDownError)
         assert str(failed[0]) == "Text detection is shutting down"
 
     @pytest.mark.parametrize(("gpu", "device"), [(None, None), ("NVIDIA", "cuda:0")], ids=["cpu", "gpu"])
@@ -923,7 +963,7 @@ class TestShutdown:
             return helper
 
         monkeypatch.setattr(th, "_start", start_then_close)
-        with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
+        with pytest.raises(th.TextDetShuttingDownError, match="shutting down"):
             env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path=device)
         assert env.pool._helpers == {}
         assert env.procs[0].wait(timeout=10) is not None
@@ -932,9 +972,9 @@ class TestShutdown:
         env = envs()
         assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         env.pool.close_all()
-        with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
+        with pytest.raises(th.TextDetShuttingDownError, match="shutting down"):
             env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
-        with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
+        with pytest.raises(th.TextDetShuttingDownError, match="shutting down"):
             env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0")
         assert len(env.specs) == 1
 

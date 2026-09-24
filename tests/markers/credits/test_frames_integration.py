@@ -45,6 +45,28 @@ def clip(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
+def ten_bit_clip(tmp_path_factory):
+    """The same roll as ``clip``, as 10-bit HEVC (a 4K HDR release's format): P010 surfaces on a GPU."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg")
+    if not pathlib.Path(FONT).is_file():
+        pytest.skip("no DejaVuSans font for the credit roll")
+    if "libx265" not in subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout:
+        pytest.skip("no HEVC encoder")
+    path = tmp_path_factory.mktemp("credits-10bit") / "clip.mkv"
+    story = "mandelbrot=size=640x360:rate=24,trim=duration=20,setpts=PTS-STARTPTS"
+    roll = f"color=c=black:size=640x360:rate=24:duration=20,drawtext=fontfile={FONT}:text='DIRECTED BY A NAME':fontcolor=white:fontsize=14:x=(w-tw)/2:y=h-20*t"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-f", "lavfi", "-i", story, "-f", "lavfi", "-i", roll, "-filter_complex",
+         "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "libx265", "-x265-params", "keyint=48:log-level=error",
+         "-pix_fmt", "yuv420p10le", str(path)],
+        check=True,
+    )  # fmt: skip
+    return ffmpeg, str(path)
+
+
+@pytest.fixture(scope="module")
 def recording(tmp_path_factory):
     """A recorded-TV style .ts whose timestamps start 30000 s in, like a DVB capture's PCR base."""
     ffmpeg = shutil.which("ffmpeg")
@@ -109,12 +131,14 @@ def vp9_clips(tmp_path_factory):
 
 
 def _thinned_rows(ffmpeg, path, thinning, **kwargs):
-    return _intra_rows(ffmpeg, path, keep_every=thinning.keep_every, drop_non_key=thinning.drop_non_key, **kwargs)
+    return _intra_rows(ffmpeg, path, keep_every=thinning.keep_every, drop_non_key=thinning.drop_non_key,
+                       download_format=thinning.download_format, **kwargs)  # fmt: skip
 
 
 def _pixels(planes):
-    """Stands in for text detection: each frame's pixel sum, so a decoded frame can be compared exactly."""
-    return [int(plane.sum()) for plane in planes]
+    """Stands in for text detection: each frame's pixel sum as its one box's first number, so a decoded frame can be
+    compared exactly."""
+    return [((int(plane.sum()), 0, 0, 0),) for plane in planes]
 
 
 def _intra_rows(ffmpeg, path, **kwargs):
@@ -159,9 +183,10 @@ def test_vaapi_gives_the_same_timestamps(clip):
         pytest.skip("no Intel or AMD render node")
     device, gpu = node
     cpu = _rows(clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu=None, gpu_device_path=None)
-    vaapi = _rows(clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu=gpu, gpu_device_path=device)
+    vaapi = _rows(clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu=gpu, gpu_device_path=device,
+                  download_format="nv12")  # fmt: skip
     assert [r[0] for r in vaapi] == [r[0] for r in cpu]
-    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, vaapi, strict=True))
+    assert vaapi == cpu  # the same frames, so the same luma to the tenth
 
 
 @pytest.mark.gpu
@@ -169,17 +194,63 @@ def test_cuda_gives_the_same_timestamps(clip):
     if shutil.which("nvidia-smi") is None:
         pytest.skip("no NVIDIA GPU")
     cpu = _rows(clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu=None, gpu_device_path=None)
-    gpu = _rows(
-        clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu="NVIDIA", gpu_device_path="cuda:0"
-    )
+    gpu = _rows(clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu="NVIDIA",
+                gpu_device_path="cuda:0", download_format="nv12")  # fmt: skip
     assert [r[0] for r in gpu] == [r[0] for r in cpu]
-    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    assert gpu == cpu  # the same frames, so the same luma to the tenth
+
+
+def test_a_10_bit_stream_is_downloaded_as_p010(ten_bit_clip):
+    ffmpeg, path = ten_bit_clip
+    assert frames.keyframe_thinning(path, ffmpeg) == frames.KeyframeThinning(None, False, "p010le")
+
+
+def _all_rows(clip, *, scale, **kwargs):
+    ffmpeg, path = clip
+    window = {"start_s": 3.0, "length_s": None, "keyframes_only": True, "fps": None}
+    keyframes = frames.decode_rows(path, ffmpeg=ffmpeg, detect_boxes=_pixels, scale=scale, **window, **kwargs)
+    window = {"start_s": 20.0, "length_s": 8.0, "keyframes_only": False, "fps": 1}
+    return keyframes + frames.decode_rows(path, ffmpeg=ffmpeg, detect_boxes=_pixels, scale=scale, **window, **kwargs)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
+@pytest.mark.parametrize("clip_name", ["clip", "ten_bit_clip"], ids=["8-bit", "10-bit"])
+def test_cuda_reads_the_frames_the_cpu_reads(request, clip_name, scale):
+    # Every path scales the decoded frame with the same scaler: NVDEC's surfaces, downloaded whole in the stream's own
+    # format (NV12 or P010), become the CPU decode's frames exactly -- keyframes and 1 fps alike, at either size.
+    if shutil.which("nvidia-smi") is None:
+        pytest.skip("no NVIDIA GPU")
+    clip = request.getfixturevalue(clip_name)
+    download = frames.keyframe_thinning(clip[1], clip[0]).download_format
+    assert download == ("nv12" if clip_name == "clip" else "p010le")
+    cpu = _all_rows(clip, scale=scale, gpu=None, gpu_device_path=None, download_format=download)
+    gpu = _all_rows(clip, scale=scale, gpu="NVIDIA", gpu_device_path="cuda:0", download_format=download)
+    assert len(cpu) > 10 and gpu == cpu
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
+@pytest.mark.parametrize("clip_name", ["clip", "ten_bit_clip"], ids=["8-bit", "10-bit"])
+def test_vaapi_reads_the_frames_the_cpu_reads(request, clip_name, scale):
+    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    node = vaapi_node()
+    if node is None:
+        pytest.skip("no Intel or AMD render node")
+    device, vendor = node
+    clip = request.getfixturevalue(clip_name)
+    download = frames.keyframe_thinning(clip[1], clip[0]).download_format
+    cpu = _all_rows(clip, scale=scale, gpu=None, gpu_device_path=None, download_format=download)
+    gpu = _all_rows(clip, scale=scale, gpu=vendor, gpu_device_path=device, download_format=download)
+    assert len(cpu) > 10 and gpu == cpu
 
 
 @pytest.mark.parametrize(("name", "stride"), [("all-i.mkv", 48), ("mjpeg.avi", 50), ("gop48.mkv", None)])
 def test_intra_only_streams_are_told_from_their_packets(intra_clips, name, stride):
+    # The H.264s are yuv420p (NV12 surfaces on a GPU); the MJPEG's yuvj420p is left to ffmpeg's own download.
     ffmpeg, clips = intra_clips
-    assert frames.keyframe_thinning(clips[name], ffmpeg) == frames.KeyframeThinning(stride, False)
+    download = None if name == "mjpeg.avi" else "nv12"
+    assert frames.keyframe_thinning(clips[name], ffmpeg) == frames.KeyframeThinning(stride, False, download)
 
 
 @pytest.mark.parametrize(("name", "stride"), [("all-i.mkv", 48), ("mjpeg.avi", 50)])
@@ -199,7 +270,9 @@ def test_only_the_measured_stream_is_thinned(intra_clips):
     # pass would find no frames and store "no credits" for the file.
     ffmpeg, clips = intra_clips
     path = clips["two-streams.mkv"]
-    assert frames.keyframe_thinning(path, ffmpeg) == frames.KeyframeThinning(50, False)
+    # The format is the first stream's too (the MJPEG's), so ffmpeg downloads the stream it does decode itself: a
+    # download format guessed from another stream would fail the GPU decode.
+    assert frames.keyframe_thinning(path, ffmpeg) == frames.KeyframeThinning(50, False, None)
     every = _intra_rows(ffmpeg, path, gpu=None, gpu_device_path=None)
     assert [row[0] for row in every] == [4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]  # the 2 s GOP's keyframes
     assert _intra_rows(ffmpeg, path, gpu=None, gpu_device_path=None, keep_every=50) == every
@@ -211,9 +284,11 @@ def test_cuda_thins_an_intra_only_pass_the_same_way(intra_clips):
         pytest.skip("no NVIDIA GPU")
     ffmpeg, clips = intra_clips
     cpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=None, gpu_device_path=None, keep_every=48)
-    gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu="NVIDIA", gpu_device_path="cuda:0", keep_every=48)
+    gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu="NVIDIA", gpu_device_path="cuda:0", keep_every=48,
+                      download_format="nv12")  # fmt: skip
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == [3.0 + 2 * i for i in range(9)]
-    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    # The surfaces downloaded whole and scaled by the CPU's own scaler: the frames the CPU decode gives, exactly.
+    assert gpu == cpu
 
 
 @pytest.mark.gpu
@@ -224,9 +299,10 @@ def test_vaapi_thins_an_intra_only_pass_the_same_way(intra_clips):
     device, vendor = node
     ffmpeg, clips = intra_clips
     cpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=None, gpu_device_path=None, keep_every=48)
-    gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=vendor, gpu_device_path=device, keep_every=48)
+    gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=vendor, gpu_device_path=device, keep_every=48,
+                      download_format="nv12")  # fmt: skip
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == [3.0 + 2 * i for i in range(9)]
-    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    assert gpu == cpu
 
 
 VP9_KEYFRAMES = [4.0 + 2 * i for i in range(8)]  # a keyframe every 2 s, read from 3 s
@@ -239,7 +315,7 @@ VP9_KEYFRAMES = [4.0 + 2 * i for i in range(8)]  # a keyframe every 2 s, read fr
 )  # fmt: skip
 def test_a_vp9_stream_is_told_from_the_packet_probe(vp9_clips, name, thinning):
     ffmpeg, clips = vp9_clips
-    assert frames.keyframe_thinning(clips[name], ffmpeg) == frames.KeyframeThinning(*thinning)
+    assert frames.keyframe_thinning(clips[name], ffmpeg) == frames.KeyframeThinning(*thinning, "nv12")
 
 
 @pytest.mark.parametrize("name", ["gop48.webm", "gop48.mkv"])
@@ -275,11 +351,11 @@ def test_cuda_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
     if shutil.which("nvidia-smi") is None:
         pytest.skip("no NVIDIA GPU")
     ffmpeg, clips = vp9_clips
-    drop = frames.KeyframeThinning(None, True)
+    drop = frames.KeyframeThinning(None, True, "nv12")
     cpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=None, gpu_device_path=None)
     gpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu="NVIDIA", gpu_device_path="cuda:0")
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == VP9_KEYFRAMES
-    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    assert gpu == cpu
     # No keyframe in the window: a GPU failure, so the worker reruns the file on the CPU (which reads no roll).
     with pytest.raises(frames.GpuDecodeError, match="decoded no frames"):
         _thinned_rows(ffmpeg, clips["one-key.webm"], drop, gpu="NVIDIA", gpu_device_path="cuda:0")
@@ -293,10 +369,10 @@ def test_vaapi_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
         pytest.skip("no Intel or AMD render node")
     device, vendor = node
     ffmpeg, clips = vp9_clips
-    drop = frames.KeyframeThinning(None, True)
+    drop = frames.KeyframeThinning(None, True, "nv12")
     cpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=None, gpu_device_path=None)
     gpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=vendor, gpu_device_path=device)
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == VP9_KEYFRAMES
-    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    assert gpu == cpu
     with pytest.raises(frames.GpuDecodeError, match="decoded no frames"):
         _thinned_rows(ffmpeg, clips["one-key.webm"], drop, gpu=vendor, gpu_device_path=device)

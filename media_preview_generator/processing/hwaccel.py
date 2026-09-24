@@ -28,8 +28,9 @@ def hwaccel_decode_args(gpu: str | None, gpu_device_path: str | None, *, keep_on
     Args:
         gpu: The worker's GPU type (``NVIDIA``, ``INTEL``, ``AMD``, ``WINDOWS_GPU``, ``APPLE``…), None on a CPU worker.
         gpu_device_path: ``cuda:<index>`` for NVIDIA, a ``/dev/dri`` render node for VAAPI GPUs.
-        keep_on_gpu: Keep decoded frames as GPU surfaces so a GPU scale filter (``scale_cuda`` / ``scale_vaapi``) can
-            shrink them before download.
+        keep_on_gpu: Keep decoded frames as GPU surfaces for the filter graph: a GPU scale filter (``scale_cuda`` /
+            ``scale_vaapi``) shrinks them before download, or ``hwdownload`` takes them whole after ``fps`` has picked
+            the ones kept (Intro & Credits' frames, ``markers.credits.frames``).
 
     Returns:
         The arguments and whether decode runs on the GPU; no arguments for a CPU worker or a GPU without a usable

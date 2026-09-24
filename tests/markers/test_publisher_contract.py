@@ -1073,8 +1073,17 @@ class TestReadBackVerify:
         assert item.kept() == (set() if setting == "restore" else {"credits"})
         assert item.commits == (2 if setting == "restore" else 1)
 
-    @pytest.mark.parametrize(("setting", "outcome"), [("restore", "published"), ("keep_plex", "up_to_date")])
-    def test_a_plex_row_next_to_ours_counts_as_replaced(self, plex_item, setting, outcome):
+    @pytest.mark.parametrize(
+        ("setting", "stored", "outcome", "plex_shown"),
+        [
+            ("restore", (600_000, 660_000), "published", None),
+            ("keep_plex", (600_000, 660_000), "up_to_date", ("credits", 602_000, 658_000)),
+            # Credits after the end of the 22-minute file can't be right: Plex hasn't processed it, so ours go back.
+            ("keep_plex", (1_330_000, 1_340_000), "published", None),
+        ],
+        ids=["restore", "keep-plexs", "keep-plexs-cant-be-right"],
+    )
+    def test_a_plex_row_next_to_ours_counts_as_replaced(self, plex_item, setting, stored, outcome, plex_shown):
         # Plex added its own credits beside ours: two credits markers show, so ours no longer stand alone.
         item = plex_item(versions=("1080p",))
         item.cfg.markers["plex"]["on_plex_redetect"] = setting
@@ -1083,19 +1092,16 @@ class TestReadBackVerify:
         item._sql(
             (
                 "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, "
-                "thumb_url, created_at, extra_data) VALUES (7, 563, 9, 'credits', 600000, 660000, '', 0, '')",
+                "thumb_url, created_at, extra_data) "
+                f"VALUES (7, 563, 9, 'credits', {stored[0]}, {stored[1]}, '', 0, '')",
             ),
             PLEX_NUMBERING,
         )
         assert _outcomes(item.run("1080p")) == [outcome]
-        expected = (
-            [SHOWN_INTRO, SHOWN_CREDITS]
-            if setting == "restore"
-            else [SHOWN_INTRO, ("credits", 602_000, 658_000), SHOWN_CREDITS]
-        )
+        expected = [SHOWN_INTRO, SHOWN_CREDITS] if plex_shown is None else [SHOWN_INTRO, plex_shown, SHOWN_CREDITS]
         assert sorted(item.served(), key=lambda s: s[1]) == sorted(expected, key=lambda s: s[1])
         # Kept per type: the credits rows (Plex's, and ours beside it) are left alone; the intro stays ours.
-        assert item.kept() == ({"credits"} if setting == "keep_plex" else set())
+        assert item.kept() == (set() if plex_shown is None else {"credits"})
 
     def test_keep_plex_still_restores_markers_that_are_simply_gone(self, plex_item):
         item = plex_item(versions=("1080p",))

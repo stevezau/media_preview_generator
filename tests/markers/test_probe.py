@@ -68,6 +68,8 @@ def test_parses_duration_and_chapters_and_passes_exact_args():
         "json",
         "-show_format",
         "-show_chapters",
+        "-show_entries",
+        "stream=codec_type,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic",
         "/m/a.mkv",
     ]
     assert kwargs == {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
@@ -94,6 +96,54 @@ def test_container_start_time(fmt, expected):
     # Credits timestamps are read with -copyts, so the container's own start has to be subtracted from them.
     with patch(RUN, return_value=_ok({"format": fmt, "chapters": []})):
         assert probe_media("/m/a.ts", ffprobe="ffprobe").start_time_ms == expected
+
+
+def _video(avg, r="0/0", attached_pic=0, codec_type="video"):
+    return {
+        "codec_type": codec_type,
+        "avg_frame_rate": avg,
+        "r_frame_rate": r,
+        "disposition": {"attached_pic": attached_pic},
+    }
+
+
+@pytest.mark.parametrize(
+    ("streams", "expected"),
+    [
+        ([_video("25/1", "25/1")], 25.0),
+        ([_video("24000/1001", "24000/1001")], 24000 / 1001),
+        ([_video("0/0", "25/1")], 25.0),  # no average reported: the base rate
+        ([_video("2997/125", "24000/1001")], 23.976),  # the average wins when there is one
+        ([_video("90000/1", "90000/1", attached_pic=1), _video("25/1")], 25.0),  # cover art is no picture to play
+        ([_video("0/0", codec_type="audio"), _video("24/1")], 24.0),
+        ([_video("0/0", codec_type="audio")], None),  # no video stream
+        ([_video("0/0", "0/0")], None),
+        ([_video("N/A", "N/A")], None),
+        ([_video("25/0", "x/y")], None),
+        ([], None),
+    ],
+    ids=[
+        "25",
+        "23.976",
+        "base-rate",
+        "average-first",
+        "cover-art",
+        "audio-first",
+        "audio-only",
+        "zero",
+        "n/a",
+        "junk",
+        "no-streams",
+    ],  # fmt: skip
+)
+def test_the_first_video_streams_frame_rate(streams, expected):
+    with patch(RUN, return_value=_ok({"format": {"duration": "60"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").frame_rate == expected
+
+
+def test_no_stream_list_is_no_frame_rate():
+    with patch(RUN, return_value=_ok({"format": {"duration": "60"}, "chapters": []})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").frame_rate is None
 
 
 def test_missing_duration_is_none():
@@ -378,20 +428,21 @@ class TestVideoPackets:
     def test_reads_the_codec_and_first_packets_of_the_main_video_stream_only(self):
         payload = {"packets": [{"pts_time": "0.000000", "flags": "K__"}, {"pts_time": "0.041667", "flags": "___"},
                                {"pts_time": "N/A", "flags": "K_D"}, {"flags": "K__"}, {"pts_time": "0.125000"}],
-                   "programs": [], "streams": [{"codec_name": "vp9"}]}  # fmt: skip
+                   "programs": [], "streams": [{"codec_name": "vp9", "pix_fmt": "yuv420p10le"}]}  # fmt: skip
         proc = _ok(payload)
         with patch(RUN, return_value=proc) as run:
             probed = video_packets("/m/a.webm", ffprobe="/usr/bin/ffprobe", packets=24)
         args, kwargs = run.call_args
         # V, not v: cover art is a single-picture video stream. From the start of the file, headers only; the codec
-        # comes from the same ffprobe, so the keyframe pass costs no second process per file.
+        # and pixel format come from the same ffprobe, so the keyframe pass costs no second process per file.
         assert args[0] == ["/usr/bin/ffprobe", "-v", "error", "-select_streams", "V:0", "-read_intervals", "%+#24",
-                           "-show_entries", "packet=pts_time,flags:stream=codec_name", "-of", "json", "/m/a.webm"]  # fmt: skip
+                           "-show_entries", "packet=pts_time,flags:stream=codec_name,pix_fmt", "-of", "json",
+                           "/m/a.webm"]  # fmt: skip
         assert kwargs == {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
         assert proc.communicate.call_args.kwargs == {"timeout": 60.0}
         assert probed == VideoPackets("vp9", (VideoPacket(0.0, True), VideoPacket(0.041667, False),
                                               VideoPacket(None, True), VideoPacket(None, True),
-                                              VideoPacket(0.125, False)))  # fmt: skip
+                                              VideoPacket(0.125, False)), "yuv420p10le")  # fmt: skip
 
     def test_the_count_and_the_timeout_are_the_callers(self):
         proc = _ok({"packets": []})
@@ -406,6 +457,12 @@ class TestVideoPackets:
     def test_a_file_without_video_has_no_codec_and_no_packets(self, stdout):
         with patch(RUN, return_value=_proc(stdout=stdout)):
             assert video_packets("/m/a.m4a", ffprobe="ffprobe", packets=24) == VideoPackets(None, ())
+
+    @pytest.mark.parametrize("value", ["", None, 7, ["yuv420p"]], ids=["empty", "null", "number", "list"])
+    def test_a_pixel_format_that_isnt_a_name_is_none(self, value):
+        payload = {"packets": [], "streams": [{"codec_name": "h264", "pix_fmt": value}]}
+        with patch(RUN, return_value=_ok(payload)):
+            assert video_packets("/m/a.mkv", ffprobe="ffprobe", packets=1) == VideoPackets("h264", (), None)
 
     @pytest.mark.parametrize("value", ["", None, 7, ["vp9"]], ids=["empty", "null", "number", "list"])
     def test_a_codec_name_that_isnt_a_name_is_none(self, value):

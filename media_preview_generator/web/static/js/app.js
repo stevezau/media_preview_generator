@@ -1536,6 +1536,7 @@ const STATUS_META = {
 
     // Legacy / pipeline-specific outcomes.
     skipped_file_not_found: { label: 'Not Found',     cls: 'bg-warning text-dark', tip: 'File not found on disk' },
+    skipped_source_gone:    { label: 'Gone from disk', cls: 'bg-secondary', tip: 'Replaced by a newer file before this job reached it; the newer file gets its own preview.' },
     skipped_excluded:       { label: 'Excluded',      cls: 'bg-secondary', tip: 'Path matched an exclusion rule' },
     skipped_invalid_hash:   { label: 'Invalid Hash',  cls: 'bg-warning text-dark', tip: 'Could not compute the path hash' },
     unresolved_plex:        { label: 'Not In Plex',   cls: 'bg-danger', tip: 'Could not find this item in Plex after lookup' },
@@ -1656,7 +1657,7 @@ function _renderJobFileIssues(outcome) {
     // per-server breakdown. Generated / Reused / Already-Existed are
     // intentionally excluded here: they're shown per-server now.
     if (!outcome || typeof outcome !== 'object') return '';
-    const keys = ['skipped_file_not_found', 'no_media_parts', 'skipped_excluded',
+    const keys = ['skipped_file_not_found', 'skipped_source_gone', 'no_media_parts', 'skipped_excluded',
                   'skipped_invalid_hash', 'skipped_not_indexed', 'markers_no_owners', 'failed'];
     return keys.map(function (k) {
         const n = outcome[k];
@@ -3159,6 +3160,7 @@ function _jobLibraryLabel(names, pickedCount) {
 }
 
 async function _submitNewJob(url, payload, successMessage) {
+    const opening = modalOpening(document.getElementById('newJobModal'));
     // Retry once on transient network errors ("Failed to fetch" from
     // server congestion).
     let lastError;
@@ -3166,7 +3168,7 @@ async function _submitNewJob(url, payload, successMessage) {
         try {
             await apiPost(url, payload);
 
-            bootstrap.Modal.getInstance(document.getElementById('newJobModal')).hide();
+            hideModalSafely(document.getElementById('newJobModal'), opening);
             loadJobs();
             loadJobStats();
             showToast('Job Started', successMessage, 'success');
@@ -3228,6 +3230,7 @@ function _showCheckServersAnswer(result) {
 }
 
 async function _startCheckServersJob() {
+    const opening = modalOpening(document.getElementById('newJobModal'));
     const payload = { priority: parseInt(document.getElementById('jobPriority').value, 10) || 3 };
     let result;
     try {
@@ -3236,7 +3239,7 @@ async function _startCheckServersJob() {
         showToast('Error', 'Failed to start job: ' + error.message, 'danger');
         return;
     }
-    bootstrap.Modal.getInstance(document.getElementById('newJobModal')).hide();
+    hideModalSafely(document.getElementById('newJobModal'), opening);
     _showCheckServersAnswer(result);
 }
 
@@ -3603,6 +3606,7 @@ function showManualTriggerModal() {
 }
 
 async function startManualJob() {
+    const opening = modalOpening(document.getElementById('manualTriggerModal'));
     // Selections come from chips (search/browse) plus any manually pasted lines.
     const chipPaths = _manualSelections.flatMap(s => s.paths);
     const typed = (document.getElementById('manualFilePaths').value || '')
@@ -3627,7 +3631,7 @@ async function startManualJob() {
         };
         if (serverId) payload.server_id = serverId;
         await apiPost('/api/jobs/manual', payload);
-        bootstrap.Modal.getInstance(document.getElementById('manualTriggerModal')).hide();
+        hideModalSafely(document.getElementById('manualTriggerModal'), opening);
         loadJobs();
         loadJobStats();
         let label;
@@ -3863,7 +3867,7 @@ function _buildOutcomeTooltip(outcome) {
     var keys = ['generated', 'skipped_bif_exists', 'skipped_not_indexed',
                 'markers_published', 'markers_up_to_date', 'markers_needs_review', 'markers_waiting',
                 'markers_skipped', 'markers_none', 'markers_no_owners',
-                'skipped_file_not_found', 'skipped_excluded',
+                'skipped_file_not_found', 'skipped_source_gone', 'skipped_excluded',
                 'skipped_invalid_hash', 'failed', 'no_media_parts'];
     var lines = [];
     for (var i = 0; i < keys.length; i++) {
@@ -4104,6 +4108,63 @@ function appConfirm(message, opts = {}) {
         modalEl.addEventListener('hidden.bs.modal', onHidden);
         modal.show();
     });
+}
+
+// Bootstrap ignores hide() while a dialog is still opening (the backdrop fades in, then the dialog), so hiding one on
+// a quick answer — a save that returns within that ~0.5 s — left it on screen over finished work. Dialogs are tracked
+// from their own events, which bubble to the document: still opening, open (from show until hide), and how many times
+// each has opened, so a late answer can tell whether the dialog it was for is still the one on screen.
+const _openingModals = new WeakSet();
+const _openModals = new WeakSet();
+const _modalOpenings = new WeakMap();
+document.addEventListener('show.bs.modal', (event) => {
+    if (event.defaultPrevented) return;
+    _openingModals.add(event.target);
+    _openModals.add(event.target);
+    _modalOpenings.set(event.target, (_modalOpenings.get(event.target) || 0) + 1);
+});
+document.addEventListener('shown.bs.modal', (event) => _openingModals.delete(event.target));
+document.addEventListener('hide.bs.modal', (event) => {
+    if (!event.defaultPrevented) _openModals.delete(event.target);
+});
+document.addEventListener('hidden.bs.modal', (event) => {
+    _openingModals.delete(event.target);
+    _openModals.delete(event.target);
+});
+
+/**
+ * Which opening of a dialog a request starts in, to pass to {@link hideModalSafely} with its answer.
+ *
+ * @param {HTMLElement|null} modalEl - The modal's element.
+ * @returns {{count: number}|null} That opening; null when the dialog isn't open (or missing).
+ */
+function modalOpening(modalEl) {
+    if (!modalEl || !_openModals.has(modalEl)) return null;
+    return { count: _modalOpenings.get(modalEl) || 0 };
+}
+
+/**
+ * Hide a Bootstrap modal, waiting for it to finish opening first when it hasn't yet.
+ *
+ * Use it wherever a dialog is hidden after an async answer rather than a click, passing the opening the request
+ * started in ({@link modalOpening}): an answer that comes after the user closed that dialog (and maybe opened it
+ * again) leaves it alone.
+ *
+ * @param {HTMLElement|null} modalEl - The modal's element; nothing happens when it's missing.
+ * @param {{count: number}|null} [opening] - The opening the request started in; omitted: hide whatever is open.
+ */
+function hideModalSafely(modalEl, opening) {
+    if (!modalEl || !window.bootstrap) return;
+    if (opening !== undefined) {
+        const sameOpening = opening && opening.count === (_modalOpenings.get(modalEl) || 0);
+        if (!sameOpening || !_openModals.has(modalEl)) return;
+    }
+    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    if (_openingModals.has(modalEl)) {
+        modalEl.addEventListener('shown.bs.modal', () => modal.hide(), { once: true });
+    } else {
+        modal.hide();
+    }
 }
 
 function showToast(title, message, type = 'info') {

@@ -1,9 +1,10 @@
 """Frames of a file's ending for credit text detection (spec §5.4): the keyframes of the tail, then one frame a second
 just before the coarse answer. Decoded with the worker's GPU through the same hwaccel arguments as previews.
 
-Only 320×180 NV12 leaves ffmpeg and only the Y plane is kept; each chunk of frames goes to text detection as it
-arrives, so memory stays bounded whatever the file's keyframe spacing. A row keeps the boxes that chunk found, not
-only how many (``rule_j.Row``); they come from the same detection call, so they cost no extra decoding or detection.
+Only 320×180 NV12 leaves ffmpeg (or a whole multiple of it, ``scale``) and only the Y plane is kept; each chunk of
+frames goes to text detection as it arrives, so memory stays bounded whatever the file's keyframe spacing. A row keeps
+the boxes that chunk found, not only how many (``rule_j.Row``); they come from the same detection call, so they cost no
+extra decoding or detection. Whatever the scale, a row's boxes are in the 320×180 frame's own pixels.
 """
 
 from __future__ import annotations
@@ -60,13 +61,21 @@ INTRA_ONLY_SPACING_S = 2.0
 # a hwaccel), measured per codec in phase3-harness.md.
 SKIP_FRAME_IGNORED = frozenset({"vp9"})
 _Y_BYTES = FRAME_W * FRAME_H
-_NV12_BYTES = _Y_BYTES * 3 // 2
 # Every showinfo line is matched, `pts_time:NOPTS` included: a line that can't be read has to drop its own frame's row,
 # never shift later frames onto an earlier frame's timestamp.
 _PTS_RE = re.compile(rb"pts_time:(\S+)")
-# The GPU scale filters below exist only for these vendors; any other VAAPI node decodes on the GPU but downloads each
-# frame, or a wasted GpuDecodeError run on unscalable GPU surfaces would follow.
-_GPU_SCALE_VENDORS = ("NVIDIA", "INTEL", "AMD")
+# The GPUs whose decoded frames stay surfaces for the filter graph to download (CUDA, and VAAPI on Intel and AMD);
+# any other GPU decodes and lets ffmpeg download each frame itself, as it does for a stream whose surface format isn't
+# known (``DOWNLOAD_FORMATS``).
+_SURFACE_VENDORS = ("NVIDIA", "INTEL", "AMD")
+# The surface format CUDA and VAAPI decode each stream's pixel format into, which hwdownload has to be told: 8-bit
+# 4:2:0 into NV12, 10-bit 4:2:0 into P010. Any other (4:2:2, 4:4:4, 12-bit, and MJPEG's full-range yuvj420p, whose
+# VAAPI JPEG surfaces aren't reliably NV12) is left to ffmpeg to download: a wrong guess fails the GPU decode.
+DOWNLOAD_FORMATS = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}
+# Spare VAAPI decoder surfaces for the frames the filter graph holds while it downloads them: a 4K VAAPI decode failed
+# without them (measured on the plex host's Intel GPU, 2026-09-24). Not on CUDA, which never needed them: its
+# scale_cuda chain held more frames than hwdownload alone does, and each spare is a full-size NVDEC surface.
+EXTRA_HW_FRAMES = 8
 _POLL_S = 0.1
 _KILL_WAIT_S = 5.0
 _READER_JOIN_S = 2.0
@@ -90,15 +99,18 @@ class DecodeCancelledError(Exception):
 
 
 class KeyframeThinning(NamedTuple):
-    """Which packets of the first ordinary video stream the keyframe pass drops before the decoder.
+    """What the first ordinary video stream's first packets say about reading it: which packets the keyframe pass
+    drops before the decoder, and the format its decoded GPU surfaces are downloaded in.
 
     Attributes:
         keep_every: Decode one packet in this many (an intra-only stream), or None.
         drop_non_key: Drop every packet not flagged as a keyframe (a codec in ``SKIP_FRAME_IGNORED``).
+        download_format: The surfaces' format (``DOWNLOAD_FORMATS``), or None: ffmpeg downloads each frame itself.
     """
 
     keep_every: int | None = None
     drop_non_key: bool = False
+    download_format: str | None = None
 
 
 def tail_length_s(*, is_episode: bool, tv_s: int | None = None, movie_s: int | None = None) -> float:
@@ -132,10 +144,27 @@ def tail_start_s(duration_ms: int, *, tail_s: float) -> float:
     return max(0.0, duration_ms / 1000.0 - tail_s)
 
 
-def _scale_filter(gpu: str | None, hw_active: bool, keep_on_gpu: bool) -> str:
-    if hw_active and keep_on_gpu and gpu == "NVIDIA":
+def _scale_filter(download_format: str | None, scale: int) -> str:
+    """The one scaler every path ends in: the whole decoded frame to ``scale`` times 320x180 by the nearest pixel.
+
+    Each vendor's own scaler blurs differently (``scale_cuda`` all but samples, ``scale_vaapi`` and swscale's default
+    bicubic average), and credit text a few pixels tall was boxed on one vendor and lost on another; the same software
+    scaler on every path gives bit-identical frames on NVIDIA, Intel and the CPU. ``download_format`` names the surfaces
+    the filter graph downloads first, or is None when the frames arrive already downloaded.
+    """
+    size = f"scale={FRAME_W * scale}:{FRAME_H * scale}:flags=neighbor,format=nv12"
+    return size if download_format is None else f"hwdownload,format={download_format},{size}"
+
+
+def _vendor_scale_filter(gpu: str | None, surfaces: bool) -> str:
+    """Each vendor's own scaler to 320x180: ``scale_cuda`` or ``scale_vaapi`` on surfaces, swscale's default otherwise.
+
+    Only the end-picture check (``markers.audio.end_picture``) reads frames this way: season audio was measured on
+    these commands, and it moves to :func:`_scale_filter` only with a measurement of its own.
+    """
+    if surfaces and gpu == "NVIDIA":
         return f"scale_cuda={FRAME_W}:{FRAME_H}:format=nv12,hwdownload,format=nv12"
-    if hw_active and keep_on_gpu:
+    if surfaces:
         return f"scale_vaapi=w={FRAME_W}:h={FRAME_H}:format=nv12,hwdownload,format=nv12"
     return f"scale={FRAME_W}:{FRAME_H},format=nv12"
 
@@ -152,6 +181,9 @@ def decode_command(
     gpu_device_path: str | None,
     keep_every: int | None = None,
     drop_non_key: bool = False,
+    scale: int = 1,
+    download_format: str | None = None,
+    vendor_scaler: bool = False,
 ) -> tuple[list[str], bool]:
     """The spec §5.4 ffmpeg command for one decode.
 
@@ -170,16 +202,31 @@ def decode_command(
         drop_non_key: Drop that stream's packets not flagged as keyframes before the decoder (the keyframe pass of a
             codec whose decoder ignores ``-skip_frame``). With neither, every packet is decoded and the command is
             exactly the spec's.
+        scale: Decode frames this many times 320×180 (2: 640×360), on the same scaler.
+        download_format: The format of the stream's decoded GPU surfaces (``KeyframeThinning.download_format``). On
+            CUDA and VAAPI (``_SURFACE_VENDORS``) the frames then stay surfaces until the filter graph downloads them,
+            after ``fps`` has picked the ones kept; None, or any other GPU, lets ffmpeg download each frame itself.
+        vendor_scaler: Scale 320x180 frames with each vendor's own scaler instead (:func:`_vendor_scale_filter`, the
+            end-picture check's); ``scale`` and ``download_format`` are then not read.
 
     Returns:
         The argv, and whether decode runs on the GPU.
     """
-    keep_on_gpu = gpu in _GPU_SCALE_VENDORS
-    decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
-    video_filter = _scale_filter(gpu, decode.active, keep_on_gpu)
+    if vendor_scaler:
+        keep_on_gpu = gpu in _SURFACE_VENDORS
+        decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
+        surfaces = False  # no spare surfaces: the command stays the one season audio was measured on
+        video_filter = _vendor_scale_filter(gpu, keep_on_gpu and decode.active)
+    else:
+        keep_on_gpu = gpu in _SURFACE_VENDORS and download_format is not None
+        decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
+        surfaces = keep_on_gpu and decode.active
+        video_filter = _scale_filter(download_format if surfaces else None, scale)
     if fps:
         video_filter = f"fps={fps},{video_filter}"
     command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", str(FFMPEG_THREADS), *decode.args]
+    if surfaces and gpu != "NVIDIA":
+        command += ["-extra_hw_frames", str(EXTRA_HW_FRAMES)]
     drops = (["not(key)"] if drop_non_key else []) + ([f"mod(n\\,{keep_every})"] if keep_every else [])
     if drops:
         # An input bitstream filter (ffmpeg 7.1+) drops the packets between the demuxer and the decoder: thinned by a
@@ -293,7 +340,11 @@ def keyframe_thinning(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool
     except ProbeError as exc:
         logger.debug("Couldn't read the video packets of {}, so it is read the ordinary way: {}", name, exc)
         return KeyframeThinning()
-    return KeyframeThinning(_intra_only_stride(probed.packets, name), probed.codec in SKIP_FRAME_IGNORED)
+    return KeyframeThinning(
+        _intra_only_stride(probed.packets, name),
+        probed.codec in SKIP_FRAME_IGNORED,
+        DOWNLOAD_FORMATS.get(probed.pix_fmt or ""),
+    )
 
 
 def _intra_only_stride(packets: tuple[VideoPacket, ...], name: str) -> int | None:
@@ -310,13 +361,14 @@ def _intra_only_stride(packets: tuple[VideoPacket, ...], name: str) -> int | Non
     return stride if stride > 1 else None
 
 
-def _read_frames(stream: BinaryIO, frames: queue.Queue, stop: threading.Event) -> None:
-    """Reader thread: each whole frame's Y plane into the bounded queue, then ``_END``.
+def _read_frames(stream: BinaryIO, frames: queue.Queue, stop: threading.Event, y_bytes: int = _Y_BYTES) -> None:
+    """Reader thread: each whole frame's Y plane (``y_bytes`` long) into the bounded queue, then ``_END``.
 
     Every put waits for room for as long as it takes (text detection on the consumer side can take longer per chunk than
     the reader takes to fill the queue), so neither a frame nor the end marker is ever dropped. Only ``stop`` (the
     consumer gave up) ends a wait.
     """
+    nv12_bytes = y_bytes * 3 // 2
 
     def put(item: object) -> bool:
         while not stop.is_set():
@@ -329,10 +381,10 @@ def _read_frames(stream: BinaryIO, frames: queue.Queue, stop: threading.Event) -
 
     try:
         while not stop.is_set():
-            data = stream.read(_NV12_BYTES)
-            if len(data) < _NV12_BYTES:
+            data = stream.read(nv12_bytes)
+            if len(data) < nv12_bytes:
                 break  # end of stream (a partial trailing frame is dropped)
-            if not put(data[:_Y_BYTES]):
+            if not put(data[:y_bytes]):
                 return
     except (OSError, ValueError):
         pass
@@ -384,13 +436,15 @@ def run_decode(
     timeout_s: float = DECODE_TIMEOUT_S,
     chunk_frames: int = CHUNK_FRAMES,
     name: str = "",
+    scale: int = 1,
 ) -> list[Row]:
     """Run one decode and read its text boxes chunk by chunk.
 
     Args:
         command: From :func:`decode_command`.
         hw_active: Decode runs on the GPU (a failure is then a :class:`GpuDecodeError`).
-        detect_boxes: Text boxes for (n, 180, 320) uint8 luma planes, one ``(left, top, right, bottom)`` tuple per box.
+        detect_boxes: Text boxes for (n, 180 × scale, 320 × scale) uint8 luma planes, one ``(left, top, right, bottom)``
+            tuple per box in those planes' pixels.
         pts_offset_s: The container's own first timestamp, subtracted from every row so they are seconds from the start
             of the file (see :func:`container_start_s`). Required, and 0.0 only for a container that starts at 0: a
             default would quietly hand back a recording's raw timestamps, tens of thousands of seconds out.
@@ -400,10 +454,12 @@ def run_decode(
             a worker.
         chunk_frames: Frames per text detection request.
         name: The file's name for messages.
+        scale: The frames are this many times 320×180 (the command's own ``scale``).
 
     Returns:
-        ``(pts, box count, luma, boxes)`` per frame, in decode order. A frame ffmpeg gave no timestamp for is left out;
-        the frames around it keep their own.
+        ``(pts, box count, luma, boxes)`` per frame, in decode order, the boxes in the 320×180 frame's pixels at every
+        scale (each index divided by ``scale``), which is what rule J's pixel numbers are measured in. A frame ffmpeg
+        gave no timestamp for is left out; the frames around it keep their own.
 
     Raises:
         DecodeCancelledError: Cancelled (ffmpeg is killed).
@@ -418,17 +474,25 @@ def run_decode(
     pending: list[bytes] = []
     stop = threading.Event()
     # Two chunks in flight (7.4 MB of luma at 64 frames). Unbounded, a decoder faster than text detection would buffer
-    # the whole tail: 671 keyframes on the measured 4K movie, 39 MB per worker.
+    # the whole tail: 671 keyframes on the measured 4K movie, 39 MB per worker. At scale 2 :func:`decode_rows` asks for
+    # a quarter of the frames per chunk, so the queue and each chunk's copies on the way to the helper (the planes,
+    # their bytes, the request) hold the same bytes as at 320x180, about 22 MB per worker at the peak.
     frames: queue.Queue = queue.Queue(maxsize=chunk_frames * 2)
     deadline = time.monotonic() + timeout_s
 
     def flush() -> None:
-        planes = np.frombuffer(b"".join(pending), dtype=np.uint8).reshape(len(pending), FRAME_H, FRAME_W)
+        planes = np.frombuffer(b"".join(pending), dtype=np.uint8).reshape(
+            len(pending), FRAME_H * scale, FRAME_W * scale
+        )
         found = detect_boxes(planes)
         if len(found) != len(pending):
             raise FrameDecodeError(f"text detection answered {len(found)} frames' boxes for {len(pending)} frames")
         try:
-            boxes.extend(tuple((int(a), int(b), int(c), int(d)) for a, b, c, d in frame) for frame in found)
+            # Floor division keeps inclusive indices inclusive: 0..639 across becomes 0..319.
+            boxes.extend(
+                tuple((int(a) // scale, int(b) // scale, int(c) // scale, int(d) // scale) for a, b, c, d in frame)
+                for frame in found
+            )
         except (TypeError, ValueError) as exc:
             # The helper's own answer is checked before it gets here; this is any other text detector's, and the
             # caller only handles the decode errors this module names.
@@ -443,8 +507,9 @@ def run_decode(
         except OSError as exc:
             raise FrameDecodeError(f"could not run {command[0]} for {name}: {exc}") from exc
         reader = threading.Thread(
-            target=_read_frames, args=(proc.stdout, frames, stop), daemon=True, name="credits-frames"
-        )
+            target=_read_frames, args=(proc.stdout, frames, stop, _Y_BYTES * scale * scale), daemon=True,
+            name="credits-frames",
+        )  # fmt: skip
         reader.start()
         try:
             while True:
@@ -514,8 +579,10 @@ def decode_rows(
     start_time_s: float | None = None,
     keep_every: int | None = None,
     drop_non_key: bool = False,
+    scale: int = 1,
+    download_format: str | None = None,
 ) -> list[Row]:
-    """:func:`decode_command` then :func:`run_decode` (other arguments as there).
+    """:func:`decode_command` then :func:`run_decode` (other arguments as there; ``scale`` goes to both).
 
     Rows come back as seconds from the start of the file, whatever timestamps the container carries.
 
@@ -540,12 +607,16 @@ def decode_rows(
         raise DecodeCancelledError(f"cancelled before decoding {name}")
     command, hw_active = decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
-        gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key,
+        gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key, scale=scale,
+        download_format=download_format,
     )  # fmt: skip
     offset_s = (
         container_start_s(path, ffmpeg, timeout_s=min(PROBE_TIMEOUT_S, timeout_s))
         if start_time_s is None
         else start_time_s
     )
+    # A quarter of the frames per text detection request at 640x360: the same pixels, so the helper's per-request
+    # timeout (``textdet_helper.REQUEST_TIMEOUT_S``, sized for 64 frames at 320x180) and the frame queue's bytes hold.
     return run_decode(command, hw_active=hw_active, detect_boxes=detect_boxes, cancel_check=cancel_check,
-                      timeout_s=timeout_s, pts_offset_s=offset_s, name=name)  # fmt: skip
+                      timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale,
+                      chunk_frames=max(1, CHUNK_FRAMES // (scale * scale)))  # fmt: skip

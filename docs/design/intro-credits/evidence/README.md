@@ -2,7 +2,8 @@
 
 Everything the design spec (`../spec.md`) cites lives here. Nothing important lives in a
 session scratchpad. **Local-only (gitignored, public repo):** every `*.json`/`*.jsonl` truth set and result (they list
-real library file paths), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framechecks/`, `lab/env`, `lab/synth/`,
+real library file paths), every `*.log` and `*.tsv` and any folder's `local/` (run logs, file lists and text outputs;
+same reason), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framechecks/`, `lab/env`, `lab/synth/`,
 `online/skipdb-dump.json`, `plugins/emby-4.10/embylibs/`, the phase-3 harness caches
 (`eval/phase3_credits_gpu.json`, `eval/phase3_credits_cpu.json` — details with file paths; the counts and folder
 names those support are in `eval/phase3-harness.md`), and `credits/bench/` (the phase-3 measurement scripts' raw
@@ -25,6 +26,13 @@ tokens: chmod 600, never commit, never paste into docs.
 | `eval/` (phase 4) | AniSkip and anime chapter measurements | `aniskip-facts.md` (AniSkip measured and not taken; the rule 8 independence test), `phase4-chapters.md` (`Ending` and lone generic `Intro` chapters); the scripts behind the first are in `online/phase4/` |
 | `lab/` (phase 4) | The Plex marker agent's lab row | `phase4-row12-agent.md`, `phase4_row12_agent.py`, `phase4_row12_up.sh` (two containers: the app without Plex's config volume, the agent with it) |
 | `history/` | Superseded spec revisions and old report copies | `spec-rev2-2026-09-13.md` |
+| **`speed/`** (2026-09-24/25) | Two playback speeds: Bones S05–S08 (25 fps WEB + 23.976 Blu-ray), retimed fingerprints, online times on the file's clock; the regression sets at decide level | `README.md` (numbers), `bones_truth.py`, `bones_decide_r2.py`, `decide_sets.py`; **`integration-proof/`** (the same proofs on the integrated tree: Bones 82 / 0 / 0) |
+| **`stale-plex-markers/`** | Plex markers made for an earlier file at the path (`plex_db._types_not_made_for_file`): validation against Sonarr's imports, the frame-checked live check on production, Bones' Plex rows | `README.md`, `validation/`, `live-check/`, `bones/` |
+| **`plex-marker-settings/`** | Plex's own marker settings (Setup Health's "Turn on" per library, server-wide "Never"), types a library hides | `README.md`, **`plexprefs.sh`** (prod settings; token read at run time, never printed), `probe_*.py`, `sweep*.sql` |
+| **`intro-guards/`** | Season audio v7: dense-core exemptions and the online-logo rule; the production replay | `README.md`, `t3_sets.py`, `t3_fix2_prod.py`, `prod-replay/kq_*.py` |
+| **`intro-end/`** | §5.5 rule 13 (an intro's end is this file's); the #310 library chapter set at decide level; **the Alias S02E09 miss** (open) | `README.md`, `redecide.py`, `dump_libchap.py`, `decide_libchap.py` |
+| **`season-across-disks/`** | **Held fix 3**: a season grouped across the library's disks. The patch, its notes, what it cost the bar and what must change before it comes back | **`README.md`**, **`fix3_season_across_disks.patch`**, `t3_sets_merged.py`, `t3_prod.py`, `t3_split.py` |
+| `credits/` (2026-09-24/25) | Credits text version 4 | **`small-text-retry.md`** (the write-up; **"Before release"**: the plex-host checks still owed; **the Accused epilogue-card gap**), `small_text_retry.py`, `small-text-retry/` (`force640.py`, `stretch_probe.py`), **`vendor-scaler/`** (one scaler on every vendor; `mpgverify/`), `credit-text-alone/` (a measured proposal, not taken) |
 | `screenshots/` | UI and lab screenshots cited by the results files | `phase1/`, `phase2/` (e.g. `task10-r3-*.png` Emby versions in the web player), `final-review/` (the owner's final-review changes of 2026-09-19; `capture.py` retakes them on the real app with the e2e fixtures' synthetic data) |
 
 ## Lab servers

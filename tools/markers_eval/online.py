@@ -118,6 +118,7 @@ def online_verdicts(
     level: str,
     extra: Mapping[tuple[str, int, int], list[Candidate]] | None = None,
     g3: bool = True,
+    frame_rates: Mapping[tuple[str, int, int], float | None] | None = None,
 ) -> list[dict]:
     """Per case and type: the verdict (useful / late / wrong / missed) and what decided it.
 
@@ -128,6 +129,8 @@ def online_verdicts(
         level: ``high`` or ``medium``.
         extra: More candidates per ``case_key``.
         g3: Ruling G3 on (shipped) or off.
+        frame_rates: Each case's file's probed video frame rate per ``case_key``, which the app's decisions read online
+            times on the file's clock by (``decide`` rule 12); a case without one is decided without it.
 
     Returns:
         One entry per case and type with a truth: key, show, season, episode, type, verdict, the decided segment
@@ -144,7 +147,8 @@ def online_verdicts(
         if "skipdb" in order:
             candidates += skipdb._candidates(skipdb_segments(case, dump))
         candidates += (extra or {}).get(case_key(case), [])
-        ctx = DecisionContext(int(case["dur"] * 1000), False, level, frozenset(TYPES), order)
+        rate = (frame_rates or {}).get(case_key(case))
+        ctx = DecisionContext(int(case["dur"] * 1000), False, level, frozenset(TYPES), order, frame_rate=rate)
         with g3_rule(g3):
             decisions = decide(candidates, ctx, {})
         for mtype in TYPES:
@@ -176,9 +180,10 @@ def run_online(
     level: str,
     extra: Mapping[tuple[str, int, int], list[Candidate]] | None = None,
     g3: bool = True,
+    frame_rates: Mapping[tuple[str, int, int], float | None] | None = None,
 ) -> dict[str, Counter]:
     """Counts per type (``intro``, ``credits``): useful / late / wrong / missed (not decided). See ``online_verdicts``."""
-    return tally(online_verdicts(results, dump, order=order, level=level, extra=extra, g3=g3))
+    return tally(online_verdicts(results, dump, order=order, level=level, extra=extra, g3=g3, frame_rates=frame_rates))
 
 
 def plex_online(results: list[dict], baseline: Mapping[tuple[str, int, int], list[PlexMarker]]) -> dict[str, Counter]:

@@ -109,6 +109,9 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
         (m for m in ms if m.type in pub.supported_types), key=lambda m: (m.start_ms, m.type.value)
     )
     pub.projection_note.return_value = ""
+    # None of the server's markers were made for an earlier file (tests of "can't tell" set None).
+    pub.types_not_made_for_file.return_value = frozenset()
+    pub.stale_types_unanswerable = False
 
     def succeed(item_id, markers, **kwargs):
         ours = pub.project(markers)
@@ -122,6 +125,8 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     pub.write.side_effect = pub.succeed
     pub.last_write_changed = True
     pub.last_kept_types = frozenset()
+    pub.last_replaced_own_types = frozenset()
+    pub.last_replaced_stale_types = frozenset()
     # The Plex publisher records the item's versions on every write that has markers to leave; the pipeline writes a
     # Plex item recorded without them once more.
     pub.last_item_files = ("/plex/item-7.mkv",) if name == "plex_db" else None
@@ -154,7 +159,15 @@ class FakePlexItems:
         pub = ready_publisher(name, atomic_writes=True)
 
         def write(
-            item_id, markers, *, previous, duration_ms, canonical_path, own_previous=None, kept_types=frozenset()
+            item_id,
+            markers,
+            *,
+            previous,
+            duration_ms,
+            canonical_path,
+            own_previous=None,
+            kept_types=frozenset(),
+            limits=None,
         ):
             self.calls.append(
                 {

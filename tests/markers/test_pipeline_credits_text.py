@@ -278,6 +278,20 @@ class TestStoredAnswers:
         out, _ = _run(ctx_for(store, media), media, pubs(), stage="check")
         assert out is not None and len(find.calls) == 1
 
+    @pytest.mark.parametrize(
+        "answer", [(), (Candidate(T.CREDITS, 2_000_000, None, Source.CREDITS_TEXT),)], ids=["nothing-found", "found"]
+    )
+    def test_every_answer_of_version_3_is_read_again(self, monkeypatch, store, media, find, answer):
+        # Version 4 scales every decode path the same way and reads a tail without an answer again at 640x360, so a
+        # found start can move as well as a "nothing found". A 2_279_000 ms episode is one the look-back's own re-ask
+        # passes over (test_a_nothing_found_from_the_one_step_build_...): only the version sends it back.
+        with monkeypatch.context() as patched:
+            patched.setattr(detector, "CREDITS_TEXT_VERSION", 3)
+            rec = self._stored_by_the_one_step_build(store, media, answer, duration=2_279_000)
+            assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == 3
+        out, _ = _run(ctx_for(store, media), media, pubs(), probe=_probe(duration=2_279_000), stage="check")
+        assert out is None and find.calls == []  # None: handed to a worker to decode
+
     def test_a_gpu_decode_failure_reaches_the_workers_cpu_rerun(self, store, media, find):
         find.answer = frames.GpuDecodeError("the GPU decoded no frames")
         with pytest.raises(CodecNotSupportedError):
@@ -426,9 +440,9 @@ class TestCreditsWindow:
     def test_automatic_stores_the_answer_under_the_version_it_always_had(self, store, media):
         spec = detector.credits_text_spec()
         rec = store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False)
-        assert detector.CREDITS_TEXT_VERSION == 3
-        assert spec.answer_version(rec, ctx_for(store, media)) == 3
-        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 3
+        assert detector.CREDITS_TEXT_VERSION == 4
+        assert spec.answer_version(rec, ctx_for(store, media)) == 4
+        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 4
 
     def test_an_answer_read_on_another_window_is_read_again_and_stored_under_the_new_one(self, store, media, find):
         _run(ctx_for(store, media), media, pubs(), stage="process")
@@ -453,9 +467,10 @@ class TestCreditsWindow:
         assert len(find.calls) == 2 and find.calls[1]["tail_s"] == 450.0
 
     def test_an_answer_stored_before_the_setting_existed_is_not_read_again_on_automatic(self, store, media, find):
-        # An install that upgrades and keeps Automatic: version 3, exactly what the old build stored.
+        # An install that upgrades and keeps Automatic: CREDITS_TEXT_VERSION alone, exactly what a build from before
+        # the setting stored.
         _run(ctx_for(store, media), media, pubs(), stage="process")
-        assert store.evidence_version(store.get_file(media).id, Source.CREDITS_TEXT) == 3
+        assert store.evidence_version(store.get_file(media).id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
         out, _ = _run(ctx_for(store, media, credits_window={"tv_s": None}), media, pubs(), stage="check")
         assert out is not None and len(find.calls) == 1
 

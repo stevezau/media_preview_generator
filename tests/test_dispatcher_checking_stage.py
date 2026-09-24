@@ -193,6 +193,48 @@ def test_checked_item_file_result_routes_to_its_job():
         dispatcher.shutdown()
 
 
+def test_checked_item_gone_from_disk_is_a_finished_skip_with_its_reason():
+    """A webhook file replaced by a newer one before the check: counted as gone from disk (not failed, not not-found, so
+    job_runner queues no retry), never handed to a processing worker, and its Files-panel row carries the reason."""
+    from media_preview_generator.processing.generator import set_file_result_callback
+
+    message = "Skipped: replaced by a newer file (Slow Horses - S06E02.mkv)"
+    pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+    dispatcher = JobDispatcher(pool)
+    gen_calls: list[str] = []
+    rows: list[tuple] = []
+
+    def pcp(**kwargs):
+        if kwargs.get("check_only"):
+            return _ms("skipped_source_gone", canonical_path=kwargs["canonical_path"], message=message)
+        gen_calls.append(kwargs["canonical_path"])
+        return _ms("generated", canonical_path=kwargs["canonical_path"])
+
+    set_file_result_callback(lambda *args: rows.append(args), job_id="j-gone")
+    try:
+        with patch(PCP, side_effect=pcp):
+            tracker = dispatcher.submit_items(
+                job_id="j-gone",
+                items=_pi_list_or_passthrough([("k1", "Slow Horses S06E02", "episode")]),
+                config=_make_config(),
+                registry=MagicMock(),
+            )
+            assert tracker.wait(timeout=10)
+    finally:
+        set_file_result_callback(None, job_id="j-gone")
+        dispatcher.shutdown()
+
+    assert gen_calls == []
+    assert tracker.successful == 1
+    assert tracker.failed == 0
+    assert tracker.outcome_counts["skipped_source_gone"] == 1
+    assert tracker.outcome_counts["skipped_file_not_found"] == 0
+    assert tracker.outcome_counts["failed"] == 0
+    assert [(outcome, reason) for _path, outcome, reason, _worker, _servers in rows] == [
+        ("skipped_source_gone", message)
+    ]
+
+
 def test_check_forwards_resolved_pin_to_process_canonical_path():
     """D34 shape: the check call must forward the resolved per-item pin as
     server_id_filter, exactly like the processing worker — a wrong pin here

@@ -149,3 +149,19 @@ def test_the_harness_decides_in_the_apps_source_order():
     for source in raw["sources"]:
         source["enabled"] = True
     assert pipeline._decision_order(load_global(validate_global(raw, None)[0])) == THEINTRODB_ORDER == ORDER
+
+
+def test_the_probed_frame_rate_reaches_the_decision(monkeypatch):
+    e1 = _ep("e1", truth=(310.0, 338.5))
+    seen = []
+    real = decide_module.decide
+
+    def spy(candidates, ctx, locked):
+        seen.append(ctx.frame_rate)
+        return real(candidates, ctx, locked)
+
+    monkeypatch.setattr("tools.markers_eval.decisions.decide", spy)
+    baseline = {e1.file: [PlexMarker("intro", 310_500, 338_000, False)]}
+    compare_with_plex([e1], {e1.file: (310.0, 338.0, 3, 3)}, baseline, frame_rate={e1.file: 25.0}.get)
+    compare_with_plex([e1], {e1.file: (310.0, 338.0, 3, 3)}, baseline)
+    assert seen == [25.0, 25.0, None, None]  # High and Medium, with the probe and without

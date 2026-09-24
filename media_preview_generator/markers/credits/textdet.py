@@ -322,19 +322,21 @@ class TextDetector:
         return [len(found) for found in self.detect(planes)]
 
 
-def synthetic_frames(count: int = 20) -> np.ndarray:
-    """Deterministic 320×180 luma frames for the GPU self-test: dark cards with white names, bright gradients with and
-    without a caption. No real footage."""
-    frames = np.zeros((count, FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
+def synthetic_frames(count: int = 20, scale: int = 1) -> np.ndarray:
+    """Deterministic luma frames for the GPU self-test, ``scale`` times 320×180: dark cards with white names, bright
+    gradients with and without a caption, the same picture drawn larger at a larger scale. No real footage."""
+    width = FRAME_WIDTH * scale
+    frames = np.zeros((count, FRAME_HEIGHT * scale, width), dtype=np.uint8)
     for i in range(count):
         frame = frames[i]
         if i % 2 == 0:
             frame[:] = 8
             for line in range(1 + i % 4):
-                cv2.putText(frame, f"NAME {i:02d} {line}", (40 + 3 * line, 40 + 30 * line), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6, 235, 1, cv2.LINE_AA)  # fmt: skip
+                cv2.putText(frame, f"NAME {i:02d} {line}", ((40 + 3 * line) * scale, (40 + 30 * line) * scale),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6 * scale, 235, scale, cv2.LINE_AA)  # fmt: skip
         else:
-            frame[:] = np.linspace(60, 200, FRAME_WIDTH, dtype=np.uint8)[None, :]
+            frame[:] = np.linspace(60, 200, width, dtype=np.uint8)[None, :]
             if i % 3 == 0:
-                cv2.putText(frame, "CAPTION", (100, 160), cv2.FONT_HERSHEY_DUPLEX, 0.7, 20, 2, cv2.LINE_AA)
+                cv2.putText(frame, "CAPTION", (100 * scale, 160 * scale), cv2.FONT_HERSHEY_DUPLEX, 0.7 * scale, 20,
+                            2 * scale, cv2.LINE_AA)  # fmt: skip
     return frames

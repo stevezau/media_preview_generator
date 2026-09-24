@@ -128,10 +128,11 @@ class ProcessingResult(Enum):
     # hasn't indexed it yet) rather than truly already-on-disk. The
     # retry queue eventually re-runs these.
     SKIPPED_NOT_INDEXED = "skipped_not_indexed"
-    # Deprecated: not produced by the unified pipeline (commit b4c3739) but
-    # kept so legacy serialised job state still parses. Aggregator code
-    # reads them via ``outcome.get(..., 0)`` and harmlessly returns 0.
+    # Source missing on disk; job_runner retries these rows (a webhook's file may still be copying in).
     SKIPPED_FILE_NOT_FOUND = "skipped_file_not_found"
+    # The webhook's file was replaced by a newer file in its folder: a finished skip, never retried.
+    SKIPPED_SOURCE_GONE = "skipped_source_gone"
+    # Not produced by the unified pipeline (commit b4c3739); kept so legacy serialised job state still parses.
     SKIPPED_EXCLUDED = "skipped_excluded"
     SKIPPED_INVALID_HASH = "skipped_invalid_hash"
     FAILED = "failed"

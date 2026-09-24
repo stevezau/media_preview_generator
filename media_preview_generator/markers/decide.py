@@ -15,6 +15,7 @@ from enum import Enum
 from itertools import combinations
 
 from .models import SERVER_SOURCES, Candidate, Marker, MarkerType, Source
+from .speed import online_time_scale
 
 INTRO_END_TOLERANCE_MS = 5_000
 CREDITS_START_TOLERANCE_MS = 10_000
@@ -96,6 +97,19 @@ _WHY_NOT_ALONE = {
     Source.SERVER_MARKERS_IMPORTED: _SERVER_ALONE,
 }
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
+# IntroDB and TheIntroDB take no duration: their times come from whichever release their users timed, so on a file at
+# the other speed of a PAL speed-up they run 4.3 % off (Bones S07E01, 25 fps: IntroDB 324-354 s from a 23.976 release,
+# the file's own theme 310-338 s). An importer plugin's copy of them is the same times. SkipDB matches the file's
+# duration, so its times are this file's.
+_TIMED_ON_ANY_RELEASE = frozenset({Source.INTRODB, Source.THEINTRODB})
+_TIMED_ON_ANY_RELEASE_COPY = "introdb"
+# An IntroDB or TheIntroDB intro (or an importer plugin's copy of one) starting in the first 2 s and shorter than 10 s
+# is a logo at the start of the file, not the show's intro (The Fixers: IntroDB gives Netflix's "N", 0-7 s, for all
+# 10 episodes, where season audio finds the theme at 263.0-284.8 s on E01). Season audio passes over the same
+# stretches of its own (``audio.season``'s ``FILE_START_S`` and ``MIN_FILE_START_LENGTH_S``, which a test keeps equal
+# to these); none of 43 verified online intros is one.
+ONLINE_LOGO_BEFORE_MS = 2_000
+MIN_ONLINE_INTRO_AT_START_MS = 10_000
 SHORTENED_NOTE = "shortened to the server's own marker"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
 _ENUM_ORDER = {source: i for i, source in enumerate(Source)}
@@ -122,6 +136,9 @@ class DecisionContext:
         credits_window_ms: The credits window the user chose for this file's kind, 0 for Automatic. Credits starting
             within it are sane even where the last-25% rule would refuse them, for the same reason: a window the user
             widened must not decode more only for the answer to be discarded.
+        frame_rate: The file's video frame rate, None when unknown. On a 25 fps or film-rate file an IntroDB or
+            TheIntroDB answer timed on a release at the other speed is read on this file's clock
+            (:func:`_on_file_clock`).
     """
 
     duration_ms: int
@@ -132,6 +149,7 @@ class DecisionContext:
     intro_chapter_limit_ms: int | None = None
     movie_credits_max_from_end_ms: int = MOVIE_CREDITS_MAX_FROM_END_MS
     credits_window_ms: int = 0
+    frame_rate: float | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +191,23 @@ def sanity_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
     Returns:
         A short reason why the candidate is implausible, or None when it passes every check.
     """
+    problem = _times_problem(candidate, ctx)
+    if problem is None and _is_online_logo(candidate, ctx.duration_ms):
+        return "online intro shorter than 10 s from the file's first 2 s: a logo at the start of the file"
+    return problem
+
+
+def _is_online_logo(candidate: Candidate, duration_ms: int) -> bool:
+    """An intro of IntroDB, TheIntroDB or an importer plugin's copy of them (:func:`timed_on_any_release`) starting in
+    the first 2 s and shorter than 10 s (``ONLINE_LOGO_BEFORE_MS``)."""
+    if candidate.type is not MarkerType.INTRO or not timed_on_any_release(candidate):
+        return False
+    length = resolve_end_ms(candidate, duration_ms) - candidate.start_ms
+    return candidate.start_ms < ONLINE_LOGO_BEFORE_MS and length < MIN_ONLINE_INTRO_AT_START_MS
+
+
+def _times_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
+    """:func:`sanity_problem`'s checks of the times alone, whichever source gave them."""
     d = ctx.duration_ms
     start = candidate.start_ms
     if d <= 0:
@@ -211,6 +246,54 @@ def sanity_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
             movie_credits_max_from_end_ms=ctx.movie_credits_max_from_end_ms,
         ):
             return f"movie credits start more than {ctx.movie_credits_max_from_end_ms // 1000} s before the end"
+    return None
+
+
+@dataclass(frozen=True)
+class FileLimits:
+    """The facts about one file that a server's own marker is checked against (:func:`unusable_server_marker`).
+
+    Plain values so they travel to the Plex marker agent with a write; a new reason's facts are added here.
+
+    Attributes:
+        duration_ms: The file's duration; 0 or less when unknown.
+    """
+
+    duration_ms: int
+
+
+def unusable_server_marker(candidate: Candidate, limits: FileLimits) -> str | None:
+    """Why a server's own marker can't be right for this file at all, or None when it may be.
+
+    "Keep Plex's" means using Plex's marker when Plex has already processed the file, and a server's marker stops our
+    detection of its type for the same reason. Only an impossible marker is refused: one that starts before 0 or past
+    the end of the file, ends past it (beyond the same 2 s clamp our answers get), ends before it starts, or is
+    shorter than any real segment. That came from another cut of the file or a bad analysis, so the server counts as
+    not having processed it. The placement rules our own answers must also pass (where an intro or credits may sit)
+    are left out: the server may know its file better. Each new reason is added here, which the pipeline and Plex's
+    publisher both call.
+
+    Args:
+        candidate: The server's marker, in the times the server serves.
+        limits: This file's limits.
+
+    Returns:
+        The reason, or None when the marker may be kept (always, for a file of unknown length).
+    """
+    d = limits.duration_ms
+    if d <= 0:
+        return None
+    start, end = candidate.start_ms, candidate.end_ms
+    if start < 0:
+        return "negative start"
+    if start >= d:
+        return "starts past the end of the file"
+    if end is not None and end < start:
+        return "ends before it starts"
+    if end is not None and end > d + EOF_CLAMP_MS:
+        return "ends past the end of the file"
+    if resolve_end_ms(candidate, d) - start < MIN_SEGMENT_MS:
+        return "segment too short"
     return None
 
 
@@ -407,9 +490,10 @@ def _composed_marker(mtype: MarkerType, checked: int, other: int, sources: set[S
 
 
 def _marker_is_sane(marker: Marker, ctx: DecisionContext) -> bool:
-    """Whether a composed marker passes :func:`sanity_problem` (a candidate's source never affects sanity)."""
+    """Whether a composed marker's times pass :func:`sanity_problem`. The online-logo check judges an online answer as
+    it came, not a marker composed from one it kept and another source's edge, so it isn't asked here."""
     probe = Candidate(marker.type, marker.start_ms, marker.end_ms, Source(marker.decided_by[0]))
-    return sanity_problem(probe, ctx) is None
+    return _times_problem(probe, ctx) is None
 
 
 def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionContext) -> tuple[Marker, Candidate]:
@@ -425,10 +509,16 @@ def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionC
 
     decided_by names the winner, whichever candidate(s) supplied the unchecked edge, and every
     other confirming candidate that directly agrees with the winner, in source order.
+
+    An intro's or recap's end: with a confirming source that reads this file (``_READS_THE_FILE``), an answer
+    :func:`timed_on_any_release` doesn't supply it, whatever the order -- its times come from another release (South
+    Park S01: IntroDB's 30.0 s and season audio's 33.6 s agree, the theme ends at 35.5 s). Credits keep the order.
     """
     confirmed = [c for c in cluster if any(_group(o) != _group(c) and _agree(c, o, ctx.duration_ms) for o in cluster)]
     confirmed_non_server = [c for c in confirmed if c.source not in SERVER_SOURCES]
-    winner = min(confirmed_non_server, key=_sort_key(ctx))
+    rank = _sort_key(ctx)
+    file_edge = mtype in _START_SEGMENTS and any(c.source in _READS_THE_FILE for c in confirmed_non_server)
+    winner = min(confirmed_non_server, key=lambda c: (file_edge and timed_on_any_release(c), rank(c)))
     other_edge, edge_suppliers = _safer_other_edge(mtype, confirmed, ctx)
     agreeing_with_winner = [c for c in confirmed if _agree(winner, c, ctx.duration_ms)]
     sources = {c.source for c in [winner, *edge_suppliers, *agreeing_with_winner]}
@@ -645,13 +735,94 @@ def _only_audio_and_server_markers(sources: set[Source]) -> bool:
     return bool(sources <= _AUDIO_OR_SERVER and sources & SERVER_SOURCES and sources - SERVER_SOURCES)
 
 
-def _sane_of_type(mtype: MarkerType, candidates: list[Candidate], ctx: DecisionContext) -> list[Candidate]:
-    return [c for c in candidates if c.type is mtype and sanity_problem(c, ctx) is None]
+def timed_on_any_release(candidate: Candidate) -> bool:
+    """Whether a candidate's times may come from another release than this file: IntroDB, TheIntroDB, or an importer
+    plugin's copy of them (they take no duration)."""
+    if candidate.source is Source.SERVER_MARKERS_IMPORTED:
+        return candidate.copied_from == _TIMED_ON_ANY_RELEASE_COPY
+    return candidate.source in _TIMED_ON_ANY_RELEASE
 
 
-def _decide_type(mtype: MarkerType, candidates: list[Candidate], ctx: DecisionContext) -> TypeDecision:
-    of_type = [c for c in candidates if c.type is mtype]
-    sane = _sane_of_type(mtype, candidates, ctx)
+def file_clock_may_matter(candidates: Iterable[Candidate], duration_ms: int) -> bool:
+    """Whether reading online times on the file's clock (:func:`_on_file_clock`) can change a decision: an answer
+    :func:`timed_on_any_release` has a candidate of its type from another independent group to agree with, and as it
+    is it agrees with none of them or its times fall outside the file. A raw reading that agrees is kept unscaled, so
+    the file's frame rate can't move it.
+
+    Args:
+        candidates: A file's evidence (of the sources turned on).
+        duration_ms: The file's duration; 0 or less when unknown (then any disagreement may matter).
+
+    Returns:
+        True when the file's frame rate is worth reading for its decision.
+    """
+    found = list(candidates)
+    for c in found:
+        if not timed_on_any_release(c):
+            continue
+        others = [o for o in found if o.type is c.type and _group(o) != _group(c)]
+        if not others:
+            continue
+        outside = duration_ms > 0 and (
+            c.start_ms >= duration_ms or (c.end_ms is not None and c.end_ms > duration_ms + EOF_CLAMP_MS)
+        )
+        if outside or not any(_agree(c, o, duration_ms) for o in others):
+            return True
+    return False
+
+
+def _on_file_clock(of_type: list[Candidate], ctx: DecisionContext) -> list[Candidate]:
+    """One type's candidates that pass :func:`sanity_problem`, with online times read on the file's own clock where
+    they were timed on a release at the other speed (``speed.online_time_scale``: a 25 fps file and a film-rate one),
+    spec §5.5 rule 12.
+
+    An answer :func:`timed_on_any_release` is read scaled only when, as it is, it agrees with no sane candidate of
+    another independent group and, scaled, it is sane and agrees with one; that includes an answer that fails sanity as
+    it is (credits timed on the longer film-rate release can start after a 25 fps file ends). A raw reading that agrees
+    is always kept: an early intro can agree both ways (4.3 % of a 60 s end is 2.6 s), and scaling it then would move an
+    edge no source reported. An answer that agrees neither way stays as it is, so it still disagrees (or, failing
+    sanity, is left out). A server's own marker counts as on any file: one made for an earlier file of the item
+    (``Candidate.stale``) is dropped as :func:`decide` starts, before this runs, and an older version's answer from a
+    Plex server showing our markers isn't stored as evidence (``pipeline._drop_older_reader_answer``).
+
+    Each answer is judged against the sane candidates as they came, so the result doesn't depend on their order.
+
+    Args:
+        of_type: One type's candidates.
+        ctx: The file's context (its duration and frame rate).
+
+    Returns:
+        The sane candidates, a scaled answer in place of its raw one.
+    """
+    sane = [c for c in of_type if sanity_problem(c, ctx) is None]
+    scale = online_time_scale(ctx.frame_rate)
+    if scale is None:
+        return sane
+    d = ctx.duration_ms
+    out = []
+    for c in of_type:
+        raw_sane = any(c is kept for kept in sane)
+        if timed_on_any_release(c):
+            others = [o for o in sane if _group(o) != _group(c)]
+            end_ms = None if c.end_ms is None else round(c.end_ms * scale)
+            scaled = replace(c, start_ms=round(c.start_ms * scale), end_ms=end_ms)
+            if (
+                not (raw_sane and any(_agree(c, o, d) for o in others))
+                and sanity_problem(scaled, ctx) is None
+                and any(_agree(scaled, o, d) for o in others)
+            ):
+                out.append(scaled)
+                continue
+        if raw_sane:
+            out.append(c)
+    return out
+
+
+def _decide_type(
+    mtype: MarkerType, of_type: list[Candidate], sane: list[Candidate], ctx: DecisionContext
+) -> TypeDecision:
+    """One type's decision from its candidates (``of_type``) and those of them read on the file's clock (``sane``,
+    :func:`_on_file_clock`)."""
     if not sane:
         reason = "no evidence" if not of_type else f"{len(of_type)} candidate(s) failed sanity checks"
         return TypeDecision(mtype, DecisionStatus.NO_EVIDENCE, None, None, reason)
@@ -693,7 +864,7 @@ def _shorten_to_server_markers(decision: TypeDecision, sane: list[Candidate], ct
 
     Args:
         decision: A decided, unlocked type.
-        sane: The type's candidates that passed :func:`sanity_problem`.
+        sane: The type's candidates as the rules read them (:func:`_on_file_clock`).
         ctx: The file's context.
 
     Returns:
@@ -796,7 +967,12 @@ def decide(
     Returns:
         A decision for every :class:`MarkerType`.
     """
+    # A server's own marker made for an earlier file at this path (``Candidate.stale``: Plex keeps an item's markers
+    # when its file is replaced) counts for nothing, as an unusable server answer: it confirms, decides and shortens
+    # nothing. Every rule below reads ``candidates``, so dropping it here is the one place decide reads the flag.
+    candidates = [c for c in candidates if not c.stale]
     out: dict[MarkerType, TypeDecision] = {}
+    on_clock: dict[MarkerType, list[Candidate]] = {}
     for mtype in MarkerType:
         lock = locked.get(mtype)
         if isinstance(lock, Marker) and lock.type is mtype:
@@ -804,10 +980,12 @@ def decide(
         elif mtype not in ctx.enabled_types:
             out[mtype] = TypeDecision(mtype, DecisionStatus.DISABLED, None, None, "detection off")
         else:
-            out[mtype] = _decide_type(mtype, candidates, ctx)
+            of_type = [c for c in candidates if c.type is mtype]
+            on_clock[mtype] = _on_file_clock(of_type, ctx)
+            out[mtype] = _decide_type(mtype, of_type, on_clock[mtype], ctx)
 
     _apply_overlap_demotions(out)
     for mtype, decision in out.items():
         if decision.status is DecisionStatus.DECIDED and not decision.marker.locked:
-            out[mtype] = _shorten_to_server_markers(decision, _sane_of_type(mtype, candidates, ctx), ctx)
+            out[mtype] = _shorten_to_server_markers(decision, on_clock[mtype], ctx)
     return out

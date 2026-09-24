@@ -36,6 +36,11 @@ class Source(str, Enum):
 
 # Markers already on a server: agreement evidence that may shorten a skip, never a sole source (spec §5.5 rule 7).
 SERVER_SOURCES: frozenset[Source] = frozenset({Source.SERVER_MARKERS, Source.SERVER_MARKERS_IMPORTED})
+# The evidence detail of a server's own marker made for an earlier file at this path (``Candidate.stale``): how the flag
+# is stored, and what the Inspector shows beside it.
+STALE_SERVER_MARKERS_DETAIL = (
+    "Made for an earlier file at this path (the file was replaced since); not a second opinion"
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,9 @@ class Candidate:
         origin: Free text: the server id for server markers, the chapter title for chapters.
         copied_from: For markers an importer plugin wrote (``server_markers_imported``): the crowd database the plugin
             imports, "introdb" (IntroDB or TheIntroDB), "skipdb" or "aniskip"; "" when it can't be told.
+        stale: For a server's own marker: it was made for an earlier file at this path (Plex keeps an item's markers
+            when its file is replaced). ``decide`` drops it on entry, so it confirms, decides and shortens nothing,
+            as an unusable server answer doesn't; stored with :data:`STALE_SERVER_MARKERS_DETAIL` as its detail.
     """
 
     type: MarkerType
@@ -64,6 +72,7 @@ class Candidate:
     confidence: float = 1.0
     origin: str = ""
     copied_from: str = ""
+    stale: bool = False
 
 
 @dataclass(frozen=True)

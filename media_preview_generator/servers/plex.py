@@ -38,12 +38,19 @@ if TYPE_CHECKING:
 
     from ..config import Config
 
-# Each library's own intro/credits detection switch (Edit library → Advanced). Plex detects in a library only when
-# this is on AND the server-wide ``Generate…MarkerBehavior`` pref isn't ``never``. Only TV libraries have the intro
-# one; both default to on.
+# Each library's own "Intro markers" / "Credits markers" setting (Edit library → Advanced). Plex detects in a library
+# only when this is on AND the server-wide ``Generate…MarkerBehavior`` pref isn't ``never``. While it is off, Plex also
+# serves no marker of that type in the library, its own or anyone else's, so no skip button shows there. Only TV
+# libraries have the intro one; both default to on.
 LIBRARY_MARKER_DETECTION_PREFS: dict[str, str] = {
     "intro": "enableIntroMarkerGeneration",
     "credits": "enableCreditsMarkerGeneration",
+}
+# Plex's server-wide detection prefs (Settings → Library → Generate intro / credits video markers). ``never`` stops its
+# own detection everywhere and leaves every marker served.
+SERVER_MARKER_DETECTION_PREFS: dict[str, str] = {
+    "intro": "GenerateIntroMarkerBehavior",
+    "credits": "GenerateCreditsMarkerBehavior",
 }
 
 
@@ -175,6 +182,11 @@ class PlexServer(MediaServer):
         # firing within milliseconds (e.g. 24-file The Dry batch with
         # 4 workers → 4 connections in 4ms).
         self._plex_lock = threading.Lock()
+        # Per library: the marker types Plex hides there (``hidden_marker_types``), kept once read for this client. A
+        # job builds its own clients, so that is once per library per run, however many workers ask at the same moment.
+        self._hidden_types: dict[str, frozenset[str]] = {}
+        self._hidden_locks: dict[str, threading.Lock] = {}
+        self._hidden_guard = threading.Lock()
 
     @property
     def type(self) -> ServerType:
@@ -1035,8 +1047,8 @@ class PlexServer(MediaServer):
 
         # --- Intro & Credits (spec §7 item 6) -----------------------
         # Built from the facts the Intro & Credits tab already asked for, never a second probe — except Plex's
-        # per-library detection switches, read fresh (see markers_readiness.marker_facts); a server with the
-        # feature off gets the one row that says so and nothing else (plan P-R6).
+        # per-library "Intro markers" / "Credits markers" settings, read fresh (see markers_readiness.marker_facts);
+        # a server with the feature off gets the one row that says so and nothing else (plan P-R6).
         from ..markers import readiness as markers_readiness
 
         marker_facts = markers_readiness.marker_facts(self, self._server_config)
@@ -2232,7 +2244,7 @@ class PlexServer(MediaServer):
         except Exception as exc:
             logger.debug("Plex marker prefs unavailable for {}: {}", self.name, exc)
             return out
-        for key, pref in (("intro", "GenerateIntroMarkerBehavior"), ("credits", "GenerateCreditsMarkerBehavior")):
+        for key, pref in SERVER_MARKER_DETECTION_PREFS.items():
             try:
                 out[key] = str(settings.get(pref).value)
             except NotFound:
@@ -2285,15 +2297,16 @@ class PlexServer(MediaServer):
                     entry[kind] = _pref_bool(getattr(by_id[pref], "value", None))
         return out
 
-    def turn_off_library_marker_detection(self, library_id: str, prefs: Collection[str]) -> str | None:
-        """Switch Plex's own intro and/or credits detection off for one library, never server-wide.
+    def turn_on_library_marker_detection(self, library_id: str, prefs: Collection[str]) -> str | None:
+        """Switch one library's own "Intro markers" and/or "Credits markers" setting back on.
 
-        The same ``PUT /library/sections/{id}/prefs`` write as :meth:`_set_bif_via_prefs_subpath`, which also works
-        for custom-agent libraries.
+        While one is off, Plex serves no marker of that type in the library, ours included. The same
+        ``PUT /library/sections/{id}/prefs`` write as :meth:`_set_bif_via_prefs_subpath`, which also works for
+        custom-agent libraries.
 
         Args:
             library_id: The section key.
-            prefs: Names from :data:`LIBRARY_MARKER_DETECTION_PREFS`, each set to off.
+            prefs: Names from :data:`LIBRARY_MARKER_DETECTION_PREFS`, each set to on.
 
         Returns:
             None on success, otherwise why not.
@@ -2322,19 +2335,102 @@ class PlexServer(MediaServer):
             return f"library {library_id} is not a movie or TV library"
         if LIBRARY_MARKER_DETECTION_PREFS["intro"] in names and section_type != "show":
             return f"library {library_id} has no intro detection: only TV libraries do"
-        url = f"/library/sections/{quote(str(library_id), safe='')}/prefs?{urlencode({name: 0 for name in names})}"
+        url = f"/library/sections/{quote(str(library_id), safe='')}/prefs?{urlencode({name: 1 for name in names})}"
         try:
             plex.query(url, method=plex._session.put)
         except Exception as exc:
             logger.warning(
-                "Could not turn off Plex's own marker detection for library {} on {!r}: {}", library_id, self.name, exc
+                "Could not turn on the marker settings of Plex library {} on {!r}: {}", library_id, self.name, exc
             )
             return str(exc)
-        logger.info("Turned off {} for Plex library {} on {!r}", ", ".join(names), library_id, self.name)
+        logger.info("Turned on {} for Plex library {} on {!r}", ", ".join(names), library_id, self.name)
         return None
 
-    def get_markers(self, item_id: str) -> list[dict] | None:
-        """Intro/credits markers Plex serves for an item (``includeMarkers=1``); None on error."""
+    def set_marker_detection_never(self, types: Collection[str]) -> str | None:
+        """Set Plex's server-wide intro and/or credits detection to Never, in one ``PUT /:/prefs``.
+
+        That stops Plex's own detection in every library while every library keeps serving its markers, unlike a
+        library's own setting turned off.
+
+        Args:
+            types: ``"intro"`` and/or ``"credits"``.
+
+        Returns:
+            None on success, otherwise why not.
+
+        Raises:
+            ValueError: ``types`` is empty or names anything else.
+        """
+        from urllib.parse import urlencode
+
+        wanted = set(types)
+        if not wanted or not wanted <= set(SERVER_MARKER_DETECTION_PREFS):
+            raise ValueError(f"types must be one or both of {sorted(SERVER_MARKER_DETECTION_PREFS)}")
+        prefs = {pref: "never" for kind, pref in SERVER_MARKER_DETECTION_PREFS.items() if kind in wanted}
+        try:
+            plex = self._connect()
+            plex.query(f"/:/prefs?{urlencode(prefs)}", method=plex._session.put)
+        except Exception as exc:
+            logger.warning("Could not set Plex's own marker detection to Never on {!r}: {}", self.name, exc)
+            return str(exc)
+        logger.info("Set {} to never on {!r}", ", ".join(prefs), self.name)
+        return None
+
+    def hidden_marker_types(self, library_id: str) -> frozenset[str] | None:
+        """The marker types Plex hides in one library: those whose own setting (Edit library → Advanced) is off.
+
+        Plex leaves every ``<Marker>`` of such a type out of what it serves for the library's items, the markers this
+        app writes included, and clients show no skip button for it. An answer is kept for this client's lifetime and
+        concurrent callers share one read; a read that failed is tried again by the next caller.
+
+        Args:
+            library_id: The section key.
+
+        Returns:
+            ``"intro"`` / ``"credits"`` for each setting that is off (empty when none is, or when the library doesn't
+            list it, like a movie library's intro), or None when the library's settings couldn't be read.
+        """
+        key = str(library_id)
+        with self._hidden_guard:
+            lock = self._hidden_locks.setdefault(key, threading.Lock())
+        with lock:
+            if key not in self._hidden_types:
+                hidden = self._read_hidden_marker_types(key)
+                if hidden is None:
+                    return None
+                self._hidden_types[key] = hidden
+            return self._hidden_types[key]
+
+    def _read_hidden_marker_types(self, library_id: str) -> frozenset[str] | None:
+        from urllib.parse import quote
+
+        from ..plex_client import retry_plex_call
+
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/sections/{quote(library_id, safe='')}/prefs")
+        except Exception as exc:
+            logger.debug("Plex library {} settings unavailable on {}: {}", library_id, self.name, exc)
+            return None
+        if root is None:
+            return None
+        values = {setting.get("id"): setting.get("value") for setting in root.iter("Setting")}
+        return frozenset(
+            kind for kind, pref in LIBRARY_MARKER_DETECTION_PREFS.items() if _pref_bool(values.get(pref)) is False
+        )
+
+    def get_markers(self, item_id: str, *, unknown_if_hidden: bool = False) -> list[dict] | None:
+        """Intro/credits markers Plex serves for an item (``includeMarkers=1``).
+
+        Args:
+            item_id: Rating key or metadata key.
+            unknown_if_hidden: Answer None while the item's library hides a marker type (:meth:`hidden_marker_types`):
+                Plex then serves no marker of that type there, its own or ours, so what it serves says nothing about
+                what the item has. False: what clients see.
+
+        Returns:
+            ``{"type", "start_ms", "end_ms", "final"}`` per intro or credits marker; None on error, or (with
+            ``unknown_if_hidden``) when the library hides a type or its settings couldn't be read.
+        """
         from ..plex_client import retry_plex_call
 
         bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
@@ -2346,6 +2442,17 @@ class PlexServer(MediaServer):
         node = next(iter(root), None) if root is not None else None
         if node is None:
             return None
+        if unknown_if_hidden:
+            library_id = node.get("librarySectionID") or root.get("librarySectionID")
+            hidden = self.hidden_marker_types(library_id) if library_id else None
+            if hidden is None or hidden:
+                logger.debug(
+                    "Plex item {}: its library {} hides {}; its markers are unknown",
+                    bare_id,
+                    library_id or "(unknown)",
+                    " and ".join(sorted(hidden)) if hidden else "markers it couldn't check",
+                )
+                return None
         out = []
         for m in node.findall("Marker"):
             if m.get("type") not in ("intro", "credits"):

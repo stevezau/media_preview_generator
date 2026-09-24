@@ -538,6 +538,74 @@ class TestStartJobAsyncRetryBranch:
             f"(retry_paths logic must not drop them); got {retry_run['webhook_paths']!r}"
         )
 
+    def test_file_missing_when_the_worker_reaches_it_spawns_a_retry(self, app, tmp_path):
+        """The file was there for the checking stage and gone when a processing worker ran it. The worker must record
+        ``skipped_file_not_found`` (not ``failed``) so job_runner retries it like any other not-found file.
+        """
+        from media_preview_generator.jobs.worker import Worker
+        from media_preview_generator.processing.multi_server import MultiServerResult, MultiServerStatus
+        from media_preview_generator.processing.types import ProcessableItem
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        path = "/data/tv/Show/Season 01/Show - S01E01.mkv"
+        not_found = MultiServerResult(
+            canonical_path=path,
+            status=MultiServerStatus.SKIPPED_FILE_NOT_FOUND,
+            message=f"Source file not found: {path}",
+        )
+        published = MultiServerResult(canonical_path=path, status=MultiServerStatus.PUBLISHED)
+        run_calls: list[dict] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            job_id = kwargs.get("job_id")
+            run_calls.append({"job_id": job_id, "webhook_paths": list(getattr(config, "webhook_paths", []) or [])})
+            worker = Worker(0, "CPU")
+            worker.assign_task(
+                ProcessableItem(canonical_path=path, server_id="plex-1"), MagicMock(), MagicMock(), job_id=job_id
+            )
+            worker.current_thread.join(timeout=5)
+            return {
+                "outcome": {key: count for key, count in worker.outcome_counts.items() if count},
+                "webhook_resolution": {
+                    "unresolved_paths": [],
+                    "skipped_paths": [],
+                    "resolved_count": 1,
+                    "total_paths": 1,
+                    "path_hints": [],
+                },
+            }
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            patch(
+                "media_preview_generator.processing.multi_server.process_canonical_path",
+                side_effect=[not_found, published],
+            ),
+            patch("media_preview_generator.plex_client.trigger_plex_partial_scan", return_value=[]),
+            patch("media_preview_generator.processing.retry_queue.BACKOFF_SCHEDULE", [1, 1, 1, 1, 1]),
+        ):
+            job = get_job_manager().create_job(library_name="The Show", config={"source": "sonarr"})
+            _start_job_async(
+                job.id,
+                config_overrides={"webhook_paths": [path], "webhook_retry_count": 3, "webhook_retry_delay": 30},
+            )
+
+        retry_jobs = [
+            j
+            for j in get_job_manager().get_all_jobs()
+            if (j.config or {}).get("is_retry") is True and (j.config or {}).get("parent_job_id") == job.id
+        ]
+        assert len(retry_jobs) == 1
+        assert retry_jobs[0].config.get("retry_attempt") == 1
+        assert run_calls == [
+            {"job_id": job.id, "webhook_paths": [path]},
+            {"job_id": retry_jobs[0].id, "webhook_paths": [path]},
+        ]
+        rows = list(get_job_manager().get_file_results(job.id, dedup_by_path=False))
+        assert [(r["file"], r["outcome"]) for r in rows] == [(path, "skipped_file_not_found"), (path, "generated")]
+
 
 class TestStartJobAsyncRetryBranchPublisherStatuses:
     """Pin the 2026-05-13 refactor's per-publisher status branching.
@@ -1420,6 +1488,76 @@ class TestStartJobAsyncRetryBranchPublisherStatuses:
             if (j.config or {}).get("is_retry") is True and (j.config or {}).get("parent_job_id") == job.id
         ]
         assert retry_jobs == [], f"Success must spawn 0 retries; got {len(retry_jobs)}"
+
+    def test_file_gone_from_disk_spawns_no_retry_and_completes_green(self, app, tmp_path):
+        """Production 2026-09-24: Plex's webhook named Slow Horses S06E02 ``-CAKES.mkv``, which Sonarr had replaced
+        a minute earlier. That row was ``skipped_file_not_found``, so the job rescanned Plex, retried for 16 minutes
+        and failed on "check path mapping configuration". A ``skipped_source_gone`` row must end the job green on its
+        first run: no Plex rescan, no retry job, no warning or error text.
+        """
+        from media_preview_generator.web.jobs import JobStatus, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        webhook_path = "/data/tv/Slow Horses/Season 06/Slow Horses - S06E02-CAKES.mkv"
+        reason = "Skipped: replaced by a newer file (Slow Horses - S06E02.mkv)"
+        run_calls: list[dict] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(
+                {
+                    "job_id": kwargs.get("job_id"),
+                    "webhook_paths": list(getattr(config, "webhook_paths", []) or []),
+                }
+            )
+            get_job_manager().record_file_result(
+                kwargs.get("job_id"), webhook_path, "skipped_source_gone", reason, "Checking"
+            )
+            return {
+                "outcome": {"skipped_source_gone": 1, "generated": 0, "failed": 0},
+                "webhook_resolution": {
+                    "unresolved_paths": [],
+                    "skipped_paths": [],
+                    "resolved_count": 1,
+                    "total_paths": 1,
+                    "path_hints": [],
+                },
+            }
+
+        with (
+            app.app_context(),
+            patch(
+                "media_preview_generator.jobs.orchestrator.run_processing",
+                side_effect=fake_run_processing,
+            ),
+            patch(
+                "media_preview_generator.plex_client.trigger_plex_partial_scan",
+                return_value=[],
+            ) as mock_rescan,
+        ):
+            job = get_job_manager().create_job(library_name="Slow Horses S06E02", config={"source": "plex"})
+            _start_job_async(
+                job.id,
+                config_overrides={
+                    "webhook_paths": [webhook_path],
+                    "webhook_retry_count": 3,
+                    "webhook_retry_delay": 30,
+                },
+            )
+
+        assert run_calls == [{"job_id": job.id, "webhook_paths": [webhook_path]}]
+        retry_jobs = [
+            j
+            for j in get_job_manager().get_all_jobs()
+            if (j.config or {}).get("is_retry") is True and (j.config or {}).get("parent_job_id") == job.id
+        ]
+        assert retry_jobs == []
+        mock_rescan.assert_not_called()
+        finished = get_job_manager().get_job(job.id)
+        assert finished.status is JobStatus.COMPLETED
+        assert finished.error is None
+        assert "resolution_summary" not in (finished.config or {})
+        rows = list(get_job_manager().get_file_results(job.id))
+        assert [(r["file"], r["outcome"], r["reason"]) for r in rows] == [(webhook_path, "skipped_source_gone", reason)]
 
 
 # ---------------------------------------------------------------------------

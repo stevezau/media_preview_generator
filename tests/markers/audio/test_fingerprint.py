@@ -77,6 +77,34 @@ def test_command_is_the_spec_command_with_thread_cap():
 
 
 @pytest.mark.parametrize(
+    ("retime", "rate"),
+    [(24000 / 1001 / 25, 46034), (25 / (24000 / 1001), 50050)],
+    ids=["pal-slowed-to-film", "film-sped-to-pal"],
+)
+def test_a_retimed_command_plays_the_audio_at_the_groups_speed(retime, rate):
+    # Resampled to 48 kHz first, so the declared rate is the same speed change whatever rate the file has.
+    assert fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", 462.5152, retime=retime) == [
+        "ffmpeg", "-nostdin", "-v", "error", "-threads", "2",
+        "-ss", "0", "-t", "462.515", "-i", "/m/a.mkv",
+        "-vn", "-sn", "-dn", "-ac", "2", "-af", f"aresample=48000,asetrate={rate}",
+        "-f", "chromaprint", "-algorithm", "1", "-fp_format", "raw", "-",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("retime", [float("nan"), float("inf"), -0.959, 0.0, 0.5, 2.0, 3.0], ids=str)
+def test_a_retime_outside_a_plausible_speed_change_starts_no_ffmpeg(retime):
+    with patch.object(fpmod.subprocess, "Popen") as popen, pytest.raises(fpmod.FingerprintError, match="retime"):
+        fpmod.compute_fingerprint("/m/a.mkv", 1_321_472, ffmpeg="ffmpeg", retime=retime)
+    popen.assert_not_called()
+
+
+def test_each_retime_has_a_window_of_its_own():
+    assert fpmod.fingerprint_window(None) == fpmod.WINDOW == "intro"
+    assert fpmod.fingerprint_window(24000 / 1001 / 25) == "intro@0.959041"
+    assert fpmod.fingerprint_window(25 / (24000 / 1001)) == "intro@1.042708"
+
+
+@pytest.mark.parametrize(
     ("stdout", "returncode", "found"),
     [
         (" D  webm_chunk  WebM Chunk Muxer\n E  chromaprint     Chromaprint\n", 0, True),
@@ -212,6 +240,14 @@ def test_compute_returns_the_raw_points():
     assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", fpmod.window_s(1_321_472))
 
 
+def test_compute_runs_the_retimed_command():
+    with patch.object(fpmod.subprocess, "Popen", return_value=_proc(stdout=b"")) as popen:
+        fpmod.compute_fingerprint("/m/a.mkv", 1_321_472, ffmpeg="ffmpeg", retime=0.95)
+    assert popen.call_args.args[0] == fpmod.fingerprint_command(
+        "ffmpeg", "/m/a.mkv", fpmod.window_s(1_321_472), retime=0.95
+    )
+
+
 def test_file_without_audio_gives_an_empty_fingerprint():
     err = b"Output file #0 does not contain any stream\n"
     with patch.object(fpmod.subprocess, "Popen", return_value=_proc(stderr=err, returncode=1)):
@@ -300,9 +336,30 @@ def test_ensure_computes_once_then_reads_the_cache(store, tmp_path):
         first = fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
         second = fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
     assert first.tolist() == second.tolist() == [5, 6]
-    compute.assert_called_once_with(rec.canonical_path, 300_000, ffmpeg="ffmpeg", cancel_check=None)
+    compute.assert_called_once_with(rec.canonical_path, 300_000, ffmpeg="ffmpeg", cancel_check=None, retime=None)
     stored = store.get_fingerprint(rec.id, "intro")
     assert (stored.start_s, stored.length_s, stored.algorithm) == (0.0, 105.0, 1)
+
+
+def test_a_retimed_fingerprint_is_computed_and_cached_beside_the_files_own(store, tmp_path):
+    rec = _record(store, tmp_path)
+    retime = 24000 / 1001 / 25
+    with patch.object(fpmod, "compute_fingerprint", return_value=np.array([7, 8], dtype="<u4")) as compute:
+        assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", retime=retime).tolist() == [7, 8]
+        assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", retime=retime).tolist() == [7, 8]
+    compute.assert_called_once_with(rec.canonical_path, 300_000, ffmpeg="ffmpeg", cancel_check=None, retime=retime)
+    stored = store.get_fingerprint(rec.id, "intro@0.959041")
+    assert (stored.start_s, stored.length_s, stored.algorithm, stored.points) == (
+        0.0,
+        105.0,
+        1,
+        bytes(np.array([7, 8], dtype="<u4")),
+    )
+    assert store.get_fingerprint(rec.id, "intro") is None
+    assert fpmod.has_cached_fingerprint(store, rec) is False
+    assert fpmod.has_cached_fingerprint(store, rec, retime=retime) is True
+    assert fpmod.cached_fingerprint(store, rec, retime=retime) == stored
+    assert fpmod.cached_fingerprint(store, rec, retime=25 / (24000 / 1001)) is None
 
 
 def test_ensure_stores_nothing_for_a_file_replaced_meanwhile(store, tmp_path):
@@ -321,7 +378,9 @@ def test_skip_is_asked_after_the_lock_and_a_cache_miss(store, tmp_path):
         compute.assert_not_called()
         fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: False)
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: True).tolist() == [5]  # cached
-    compute.assert_called_once_with(rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None)
+    compute.assert_called_once_with(
+        rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None, retime=None
+    )
 
 
 @pytest.mark.parametrize(("cancelled", "recorded"), [(False, True), (True, False)], ids=["failed", "cancelled"])
@@ -501,7 +560,9 @@ def test_a_fingerprint_made_another_way_is_computed_again(store, tmp_path, made)
     assert fpmod.has_cached_fingerprint(store, rec) is False
     with patch.object(fpmod, "compute_fingerprint", return_value=np.array([5, 6], dtype="<u4")) as compute:
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg").tolist() == [5, 6]
-    compute.assert_called_once_with(rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None)
+    compute.assert_called_once_with(
+        rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None, retime=None
+    )
     stored = store.get_fingerprint(rec.id, "intro")
     assert (stored.algorithm, stored.length_s) == (fpmod.ALGORITHM, fpmod.window_s(rec.duration_ms))
     assert fpmod.has_cached_fingerprint(store, rec) is True

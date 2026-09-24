@@ -395,6 +395,17 @@ def test_the_self_test_frames_are_the_size_the_decoder_hands_over():
     assert textdet.synthetic_frames(1).shape[1:] == (frames.FRAME_H, frames.FRAME_W)
 
 
+def test_synthetic_frames_at_twice_the_size_are_the_same_frames_drawn_larger():
+    # The self-test's check of the detector's larger reading (textdet_helper.SELFTEST_LARGE_SCALE): the same cards and
+    # captions at 640x360, so a GPU is compared on the text that reading is for.
+    small, large = textdet.synthetic_frames(4), textdet.synthetic_frames(4, scale=2)
+    assert large.shape == (4, 360, 640) and large.dtype == np.uint8
+    assert np.array_equal(large, textdet.synthetic_frames(4, scale=2))
+    halved = large.reshape(4, 180, 2, 320, 2).mean(axis=(2, 4))
+    assert np.abs(halved - small).mean() < 6  # the same picture, drawn at twice the size
+    assert all(frame.std() > 0 for frame in large[::2])  # every card frame has text on it
+
+
 def test_synthetic_frames_are_deterministic_and_mixed():
     first, second = textdet.synthetic_frames(20), textdet.synthetic_frames(20)
     assert first.shape == (20, 180, 320) and first.dtype == np.uint8

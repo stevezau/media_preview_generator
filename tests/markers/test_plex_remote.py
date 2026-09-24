@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from media_preview_generator.markers.decide import FileLimits
 from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.publishers import plex_remote
 from media_preview_generator.markers.publishers.base import (
@@ -117,6 +118,30 @@ class TestCodec:
         request = WriteRequest(7, [], [], [], None, [], (), frozenset(), False)
         assert plex_remote.write_request_from_json(plex_remote.write_request_to_json(request)) == request
 
+    def test_the_files_limits_travel_with_a_write(self):
+        # The agent runs "Keep Plex's": a kept Plex marker must fit the same limits the app checks.
+        request = WriteRequest(7, [PART], [INTRO], [], 2_498_304, [], (1,), frozenset(), True, FileLimits(2_498_304))
+
+        body = plex_remote.write_request_to_json(request)
+
+        assert body["limits"] == {"duration_ms": 2_498_304}
+        assert plex_remote.write_request_from_json(body) == request
+
+    def test_a_write_from_an_app_without_limits_checks_nothing(self):
+        body = plex_remote.write_request_to_json(WriteRequest(7, [PART], [INTRO], [], 1, [], (1,), frozenset(), True))
+        body.pop("limits", None)
+        assert plex_remote.write_request_from_json(body).limits is None
+
+    @pytest.mark.parametrize(
+        "limits",
+        ["text", {"duration_ms": "1"}, {}, {"duration_ms": True}],
+        ids=["not-an-object", "text-number", "no-duration", "bool-for-int"],
+    )
+    def test_limits_that_arent_limits_are_refused(self, limits):
+        body = plex_remote.write_request_to_json(WriteRequest(7, [PART], [INTRO], [], 1, [], (1,), frozenset(), True))
+        with pytest.raises(ValueError):
+            plex_remote.write_request_from_json({**body, "limits": limits})
+
     def test_a_write_result_round_trips(self):
         result = WriteResult(True, [INTRO], frozenset({T.INTRO}), frozenset({T.CREDITS}))
         assert plex_remote.write_result_from_json(plex_remote.write_result_to_json(result)) == result
@@ -124,6 +149,36 @@ class TestCodec:
     def test_an_item_read_round_trips(self):
         item = ItemRead(True, [PART])
         assert plex_remote.item_read_from_json(plex_remote.item_read_to_json(item)) == item
+
+    @pytest.mark.parametrize("stale", [frozenset(), frozenset({T.INTRO}), frozenset({T.INTRO, T.CREDITS})])
+    def test_an_item_reads_stale_types_and_file_times(self, stale):
+        item = ItemRead(True, [PART._replace(updated_at=1_790_207_382)], stale)
+        body = plex_remote.item_read_to_json(item)
+        assert body["stale_types"] == sorted(t.value for t in stale)
+        assert body["parts"][0]["updated_at"] == 1_790_207_382
+        assert plex_remote.item_read_from_json(body) == item
+
+    @pytest.mark.parametrize("updated_at", ["2026-09-23", True, 1.5, {}], ids=["text", "bool", "float", "object"])
+    def test_a_file_time_that_isnt_a_number_reads_as_unknown(self, updated_at):
+        body = plex_remote.part_to_json(PART)
+        body["updated_at"] = updated_at
+        assert plex_remote.part_from_json(body).updated_at is None
+
+    def test_a_write_result_says_which_stale_types_it_replaced(self):
+        result = WriteResult(True, [INTRO], frozenset(), frozenset(), frozenset({T.INTRO}))
+        body = plex_remote.write_result_to_json(result)
+        assert body["replaced_stale"] == ["intro"]
+        assert plex_remote.write_result_from_json(body) == result
+        body.pop("replaced_stale")  # an agent older than this field
+        assert plex_remote.write_result_from_json(body).replaced_stale == frozenset()
+
+    def test_an_older_agents_item_read_says_nothing_about_staleness(self):
+        # An agent from before this field: unknown, so the pipeline and Keep Plex's behave as before.
+        body = plex_remote.item_read_to_json(ItemRead(True, [PART], frozenset({T.INTRO})))
+        body.pop("stale_types")
+        for part in body["parts"]:
+            part.pop("updated_at")
+        assert plex_remote.item_read_from_json(body) == ItemRead(True, [PART], None)
 
     @pytest.mark.parametrize("files", [None, (), ("/a.mkv", "/b.mkv")], ids=["not-recorded", "empty", "two"])
     def test_a_read_back_ask_round_trips(self, files):

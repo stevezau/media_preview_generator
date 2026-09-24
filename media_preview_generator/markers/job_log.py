@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from .decide import DecisionStatus, TypeDecision, shortened_by
 from .external_ids import ids_from_path, is_season_folder
-from .models import SERVER_SOURCES, MarkerType, Source
+from .models import SERVER_SOURCES, STALE_SERVER_MARKERS_DETAIL, MarkerType, Source
 from .outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FileOutcome, ServerStatus, is_kept_own
 from .sources.online import is_budget_exhausted
 from .sources.ratelimit import RESET_TIME_LABEL
@@ -299,10 +299,21 @@ def _skip_reason(label: str, detail: str) -> str:
 
 def _answer(rows: list[EvidenceRow], empty: str) -> str:
     typed = sorted(
-        {(r.type, r.start_ms, r.end_ms) for r in rows if r.type is not None and r.start_ms is not None},
+        {
+            (r.type, r.start_ms, r.end_ms, r.detail == STALE_SERVER_MARKERS_DETAIL)
+            for r in rows
+            if r.type is not None and r.start_ms is not None
+        },
         key=lambda t: (list(MarkerType).index(t[0]), t[1], t[2] if t[2] is not None else -1),
     )
-    return ", ".join(f"{mtype.value} {_span(start, end)}" for mtype, start, end in typed) or empty
+    # A server's marker made for an earlier file is shown, but counted for nothing (``Candidate.stale``).
+    return (
+        ", ".join(
+            f"{mtype.value} {_span(start, end)}{' (made for an earlier file)' if stale else ''}"
+            for mtype, start, end, stale in typed
+        )
+        or empty
+    )
 
 
 def source_answers(

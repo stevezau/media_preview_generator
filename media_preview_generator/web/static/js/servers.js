@@ -887,14 +887,12 @@
             showToast('Run the connection test first', 'Use the Test connection button before saving.', 'warning');
             return;
         }
+        // Modal only exists on /servers; /setup inlines the form.
+        const addModalEl = document.getElementById('addServerModal');
+        const opening = modalOpening(addModalEl);
         const r = await api('POST', '/api/servers', payload);
         if (r.ok) {
-            // Modal only exists on /servers; /setup inlines the form.
-            const modalEl = document.getElementById('addServerModal');
-            if (modalEl) {
-                const modal = bootstrap.Modal.getInstance(modalEl);
-                if (modal) modal.hide();
-            }
+            hideModalSafely(addModalEl, opening);
             // Notify any listening page (the setup wizard subscribes to this
             // so it can advance from step 1 → GPU/security after an
             // Emby/Jellyfin add). Always fires; /servers ignores it.
@@ -1581,6 +1579,7 @@
     async function saveEditedServer() {
         if (!_editState) return;
         const { server } = _editState;
+        const opening = modalOpening(document.getElementById('editServerModal'));
         const result = $('#editServerResult');
         const saveBtn = $('#editServerSave');
         saveBtn.disabled = true;
@@ -1664,9 +1663,7 @@
         saveBtn.disabled = false;
         saveBtn.innerHTML = orig;
         if (r.ok) {
-            const modalEl = document.getElementById('editServerModal');
-            const inst = window.bootstrap.Modal.getInstance(modalEl);
-            if (inst) inst.hide();
+            hideModalSafely(document.getElementById('editServerModal'), opening);
             loadServers();
         } else {
             result.className = 'alert alert-danger mt-2';
@@ -2304,11 +2301,7 @@
         // when the app actually CAN'T act on this row at all. The new
         // wording names the actual place the user has to go.
         const actionsObj = check.actions || {};
-        // A row can carry one scoped fix per library instead of a row-wide one
-        // (Plex's own intro/credits detection: one Turn off per library).
-        const libraryItems = Array.isArray(check.libraries) ? check.libraries : [];
-        const hasFixAction = !!(actionsObj.enable || actionsObj.disable)
-            || libraryItems.some((lib) => lib && lib.action);
+        const hasFixAction = !!(actionsObj.enable || actionsObj.disable);
         const vendorLabel = _vendorDisplayName(serverType);
         // check.fix_where is an explicit hint from the backend (readiness.py) for rows whose fix happens
         // somewhere other than the vendor's own admin UI — today only the Plex marker agent's rows. Reading
@@ -2368,21 +2361,7 @@
             : '';
 
         const labelHtml = escapeHtml(check.label || check.id || '');
-        if (libraryItems.length > 0) {
-            // Per-library rows read top to bottom: the diff, the libraries
-            // with their own buttons, then the note on what the button does.
-            row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${valuesHtml}</div>`;
-            const body = row.querySelector('.flex-grow-1');
-            body.appendChild(_renderLibraryActions(serverId, serverType, check, libraryItems));
-            if (check.reason) {
-                const note = document.createElement('div');
-                note.className = 'text-muted mt-1';
-                note.textContent = check.reason;
-                body.appendChild(note);
-            }
-        } else {
-            row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${reasonStr}${valuesHtml}</div>`;
-        }
+        row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${reasonStr}${valuesHtml}</div>`;
 
         // Attach the rich explanation HTML to the info-icon button as
         // a DOM property — can't round-trip multi-paragraph HTML through
@@ -2446,8 +2425,14 @@
         if (!ok && fixAction) {
             const targetOn = fixDir === 'enable';
             const icon = targetOn ? 'bi-toggle-on' : 'bi-toggle-off';
-            const btn = _makeActionButton('btn-warning', icon, 'Apply recommended', check, fixDir);
-            btn.title = `Apply the recommendation — set ${check.label || check.id || 'this'} to ${targetOn ? 'On' : 'Off'}`;
+            // ``check.fix_label`` names the fix where "Apply recommended"
+            // wouldn't say what it does (Plex's "Turn on" for a library's
+            // own marker settings, "Set server-wide to Never").
+            const fixLabel = typeof check.fix_label === 'string' && check.fix_label ? check.fix_label : '';
+            const btn = _makeActionButton('btn-warning', icon, escapeHtml(fixLabel || 'Apply recommended'), check, fixDir);
+            btn.title = fixLabel
+                ? `${fixLabel} — ${check.label || check.id || 'this'}`
+                : `Apply the recommendation — set ${check.label || check.id || 'this'} to ${targetOn ? 'On' : 'Off'}`;
             btn.addEventListener('click', () => _runCheckAction(serverId, serverType, check, fixDir, btn));
             btnWrap.appendChild(btn);
         }
@@ -2468,6 +2453,9 @@
         }
         if (btnWrap.children.length > 0) {
             row.querySelector('.flex-grow-1').appendChild(btnWrap);
+        }
+        if (check.note && typeof check.note === 'object' && check.note.text) {
+            row.querySelector('.flex-grow-1').appendChild(_renderCheckNote(serverId, serverType, check));
         }
 
         // Issue #237: per-check dismiss control. Only on recommended-
@@ -2530,50 +2518,36 @@
         }
     }
 
-    // One line per library — name, what the vendor does there, and that
-    // library's own fix button. Each button acts on its library only.
-    function _renderLibraryActions(serverId, serverType, check, libraryItems) {
+    // A note under a row offering a different fix than the row's own
+    // (Plex: "Set server-wide to Never" beneath a library whose own marker
+    // setting is off). ``check.note``: {text, tooltip, button, action}.
+    // The action goes through the same confirm modal as every other one.
+    function _renderCheckNote(serverId, serverType, check) {
+        const note = check.note;
         const wrap = document.createElement('div');
-        wrap.className = 'readiness-libraries mt-1';
-        if (check.libraries_caption) {
-            const caption = document.createElement('div');
-            caption.className = 'text-muted';
-            caption.textContent = check.libraries_caption;
-            wrap.appendChild(caption);
+        wrap.className = 'readiness-note d-flex align-items-start gap-2 mt-2 p-2 rounded border bg-body-tertiary';
+        const icon = document.createElement('i');
+        icon.className = 'bi bi-info-circle text-info mt-1';
+        icon.setAttribute('aria-hidden', 'true');
+        const body = document.createElement('div');
+        body.className = 'flex-grow-1';
+        const text = document.createElement('div');
+        text.className = 'text-body-secondary';
+        text.textContent = note.text;
+        body.appendChild(text);
+        if (note.action && note.button) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-outline-info mt-1 readiness-note-action';
+            btn.innerHTML = `<i class="bi bi-toggle-off me-1"></i>${escapeHtml(note.button)}`;
+            btn.title = note.tooltip || note.button;
+            btn.setAttribute('data-bs-toggle', 'tooltip');
+            btn.addEventListener('click', () => _runAction(
+                serverId, serverType, check, note.action, btn, `${note.button}: done.`,
+            ));
+            body.appendChild(btn);
         }
-        // A table so name, detail and button line up in columns however
-        // wide the dialog is.
-        const table = document.createElement('table');
-        table.className = 'table table-sm table-borderless w-auto mb-0 mt-1';
-        const tbody = document.createElement('tbody');
-        for (const lib of libraryItems) {
-            const line = document.createElement('tr');
-            line.className = 'readiness-library align-middle';
-            line.dataset.libraryId = String(lib.id || '');
-            const name = document.createElement('td');
-            name.className = 'fw-semibold ps-0 bg-transparent';
-            name.textContent = lib.name || lib.id || '';
-            const detail = document.createElement('td');
-            detail.className = 'text-muted bg-transparent';
-            detail.textContent = lib.detail || '';
-            const cell = document.createElement('td');
-            cell.className = 'bg-transparent';
-            if (lib.action) {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'btn btn-sm btn-warning';
-                btn.innerHTML = `<i class="bi bi-toggle-off me-1"></i>${escapeHtml(lib.button || 'Turn off')}`;
-                btn.title = `${lib.button || 'Turn off'} — ${lib.name || lib.id || ''} only`;
-                btn.addEventListener('click', () => _runAction(
-                    serverId, serverType, check, lib.action, btn, `${check.label || 'Setting'}: ${lib.name || lib.id || ''} updated.`,
-                ));
-                cell.appendChild(btn);
-            }
-            line.append(name, detail, cell);
-            tbody.appendChild(line);
-        }
-        table.appendChild(tbody);
-        wrap.appendChild(table);
+        wrap.append(icon, body);
         return wrap;
     }
 
@@ -2715,12 +2689,21 @@
                 const r = await api('POST', `/api/servers/${encoded}/vendor-extraction`, body);
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
             }
-            case 'turn_off_plex_detection': {
-                // One library's own intro/credits detection switches —
-                // never Plex's server-wide prefs.
-                const r = await api('POST', `/api/servers/${encoded}/plex-marker-detection`, {
+            case 'turn_on_plex_library_markers': {
+                // One library's own "Intro markers" / "Credits markers"
+                // settings back on: while off, Plex hides every skip
+                // marker in that library, ours included.
+                const r = await api('POST', `/api/servers/${encoded}/plex-library-markers`, {
                     library_id: String(args.library_id || ''),
                     prefs: Array.isArray(args.prefs) ? args.prefs : [],
+                });
+                return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
+            }
+            case 'set_plex_detection_never': {
+                // Plex's server-wide intro/credits detection to Never:
+                // stops its own detection and hides nothing.
+                const r = await api('POST', `/api/servers/${encoded}/plex-marker-detection`, {
+                    types: Array.isArray(args.types) ? args.types : [],
                 });
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
             }
@@ -3148,6 +3131,10 @@
             for (const check of (section.checks || [])) {
                 if (check.ok !== false) continue;
                 if (scope === 'critical' && check.severity !== 'critical') continue;
+                // ``bulk: false``: a fix whose reach goes beyond its row
+                // (Plex's server-wide Never) is only applied from its own
+                // button, after its own confirmation.
+                if (check.bulk === false) continue;
                 const fixAction = _pickFixAction(check);
                 if (!fixAction) continue;
                 plan.push({
@@ -3216,6 +3203,7 @@
         const newApplyBtn = applyBtn.cloneNode(true);
         applyBtn.parentNode.replaceChild(newApplyBtn, applyBtn);
         newApplyBtn.addEventListener('click', async () => {
+            const opening = modalOpening(modalEl);
             newApplyBtn.disabled = true;
             if (cancelBtn) cancelBtn.disabled = true;
             newApplyBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Applying…';
@@ -3254,7 +3242,7 @@
             // confirmation. Keep the modal open if there were failures so
             // the user can read the per-failure detail.
             if (failCount === 0) {
-                setTimeout(() => modal.hide(), 1200);
+                setTimeout(() => hideModalSafely(modalEl, opening), 1200);
             }
             if (cancelBtn) {
                 cancelBtn.disabled = false;

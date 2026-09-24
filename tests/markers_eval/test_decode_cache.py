@@ -110,15 +110,18 @@ def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypat
     # Every part of the command is in the key: the window, the frame choice, the decode path.
     for changed in ({"start_s": 5101.0}, {"length_s": 21.0}, {"keyframes_only": False, "fps": 1}, {"gpu": None},
                     {"start_time_s": 30000.0}, {"keep_every": 48}, {"drop_non_key": True},
-                    {"keep_every": 48, "drop_non_key": True}):  # fmt: skip
+                    {"keep_every": 48, "drop_non_key": True}, {"download_format": "p010le"},
+                    {"scale": 2}):  # fmt: skip
         cache.decode_rows(str(media), **_kwargs(**changed))
-    assert len(decoder.decodes) == 9
+    assert len(decoder.decodes) == 11
+    assert decoder.decodes[-2]["download_format"] == "p010le"  # 10-bit surfaces downloaded as such: another command
+    assert decoder.decodes[-1]["scale"] == 2  # the 640x360 read of a tail is its own decode, never the 320x180 rows
     DecodeCache(tmp_path / "cache", digest="code-2", backend=lambda: "gpu cuda:0").decode_rows(str(media), **_kwargs())
-    assert len(decoder.decodes) == 10
+    assert len(decoder.decodes) == 12
     os.utime(media, ns=(1, 1))  # a replaced file is another file
     cache.decode_rows(str(media), **_kwargs())
-    assert len(decoder.decodes) == 11
-    assert (cache.decoded, cache.reused) == (10, 1)
+    assert len(decoder.decodes) == 13
+    assert (cache.decoded, cache.reused) == (12, 1)
 
 
 def test_a_reused_decode_gives_back_the_boxes_it_stored(tmp_path, monkeypatch, media):
@@ -209,7 +212,7 @@ def test_rows_are_kept_only_under_the_one_backend_that_counted_them(tmp_path, mo
 
 def test_the_packet_probe_runs_once_per_file_and_its_failures_are_not_kept(tmp_path, monkeypatch, media):
     calls = []
-    vp9_intra = frames.KeyframeThinning(48, True)
+    vp9_intra = frames.KeyframeThinning(48, True, "p010le")
 
     def thinning(path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
         calls.append((path, ffmpeg, cancel_check, timeout_s))
@@ -223,7 +226,7 @@ def test_the_packet_probe_runs_once_per_file_and_its_failures_are_not_kept(tmp_p
         cache.keyframe_thinning(str(media), "/ff")
     cancelled = object()
     assert cache.keyframe_thinning(str(media), "/ff", cancel_check=cancelled, timeout_s=12.0) == vp9_intra
-    # Both fields come back from disk, as the type the detector reads them from.
+    # Every field comes back from disk, as the type the detector reads them from.
     stored = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").keyframe_thinning(str(media), "/ff")
     assert stored == vp9_intra and isinstance(stored, frames.KeyframeThinning)
     assert calls == [(str(media), "/ff", None, frames.PROBE_TIMEOUT_S), (str(media), "/ff", cancelled, 12.0)]
@@ -280,12 +283,15 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
             timeout_s=90.0,
             keep_every=48,
             drop_non_key=True,
+            scale=2,
+            download_format="p010le",
         ),  # fmt: skip
     )
     (kwargs,) = decoder.decodes
     assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
                       "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "detect_boxes": detect_boxes, "cancel_check": None,
-                      "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48, "drop_non_key": True}  # fmt: skip
+                      "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48, "drop_non_key": True,
+                      "scale": 2, "download_format": "p010le"}  # fmt: skip
 
 
 def test_the_cache_takes_exactly_the_arguments_the_real_decode_takes():

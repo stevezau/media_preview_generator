@@ -22,7 +22,11 @@ if TYPE_CHECKING:
 # 2: an importer-plugin row names every importer plugin, not just the first (its copy's database is read from them).
 # 3: an Emby item that isn't the file's own version gives no evidence (its markers describe another cut).
 # 4: Emby's markers leave out the chapter rows our Bridge plugin wrote (its store says which), as Jellyfin's do.
-READER_VERSION = 4
+# 5: a Plex item whose library hides a marker type (its own intro or credits setting off) gives no answer; its empty
+#    answer was stored as "none there". Plex markers made for an earlier file at the path are stored flagged (the
+#    pipeline asks Plex's database), so answers stored before are read again to be flagged; one from a Plex server that
+#    shows our markers now can't be read again, so it stops counting instead (``pipeline._drop_older_reader_answer``).
+READER_VERSION = 5
 # Plex markers are one set per item: another version of the item further apart than this is another cut. Emby and
 # Jellyfin keep each version's markers on its own item (spec §3.3); Emby's reader checks instead that the item is this
 # file's own version.
@@ -93,7 +97,9 @@ def _from_plex(
     canonical_path: str | None,
 ) -> list[Candidate] | None:
     origin = config.id
-    rows = server.get_markers(item_id)
+    # A library with its own intro or credits setting off serves no marker of that type, so evidence is unknown there.
+    # The list can't say "unknown" for one type alone: a partial answer would be stored as final and never read again.
+    rows = server.get_markers(item_id, unknown_if_hidden=not include_ours)
     if rows is None:
         return None
     out = []
@@ -230,8 +236,9 @@ def read_server_markers(
         config: The server's ``ServerConfig`` (type and id).
         item_id: The server's item id.
         include_ours: False (evidence): leave out segments our Jellyfin plugin serves and chapter rows our Emby plugin
-            wrote (None when its store can't be read on an Emby that has the plugin). True: everything clients see,
-            ours included. Plex returns the same either way.
+            wrote (None when its store can't be read on an Emby that has the plugin), and give None for a Plex item
+            whose library hides a marker type (its own intro or credits setting off: Plex then serves none of that
+            type, ours included). True: everything clients see, ours included.
         duration_ms: This file's duration, when the markers are read as evidence for it. Plex serves one marker set
             per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't be read,
             gives None. Emby and Jellyfin markers belong to one version's own item: no duration check.

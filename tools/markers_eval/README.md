@@ -52,6 +52,11 @@ evidence folder ignores `*.json`).
 
 A cold cache fingerprints about 124 files (158 with `--full-folder`), one ffmpeg at a time, at 3–14 s each.
 
+Both `reproduce` and `season-truth` match a season whose files play at two speeds (25 fps and film-rate releases) the
+way the app does (`season.SeasonClock`, spec §5.3 "Two playback speeds"): each file's frame rate is read once and
+cached under `rates/` in the cache folder, and a file at the less common speed is fingerprinted once more, retimed,
+and cached beside its own fingerprint. The port-versus-reference check always matches every file as it plays.
+
 ## `season-truth`: the season step on any intro truth set
 
 Runs the app's season step on each file of a truth file, matched with its season group (`season_group`, as the app
@@ -218,7 +223,10 @@ reported as `detector_digest`). A re-run of unchanged code is free; any change t
 on every file again, even when `CREDITS_TEXT_VERSION` stays the same. A stored answer keeps the boxes rule J read the
 run without (`overlays`, from `CreditsTextResult`) beside its rows, because `epilogue_like` has to be handed them
 rather than gather them again: on the branch that reads the 120 s before the tail, `key` is the joined rows, and a
-roll that began before the tail is exactly the shape that must not be read as its own overlay.
+roll that began before the tail is exactly the shape that must not be read as its own overlay. An answer from the
+640×360 reading of a tail the 320×180 one found nothing in (`scale` 2, spec §5.4) also keeps the keyframe rows
+rule J found the run on (`runs`): that reading leaves out the text the 320×180 one had boxed, which `key` can't
+show, so `epilogue_like` finds the run on them.
 
 Each stored row is `[pts, box count, luma, [[left, top, right, bottom], ...]]`: the frame's time in seconds from the
 start of the file, how many text boxes it holds, its mean luma, and where those boxes are in the frame's own 320×180

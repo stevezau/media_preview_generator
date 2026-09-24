@@ -277,7 +277,7 @@ class JobTracker:
 
         ``result`` is the :class:`MultiServerResult` from a
         ``check_only=True`` call whose status is terminal (SKIPPED,
-        PUBLISHED pending-registration, NO_OWNERS, SKIPPED_FILE_NOT_FOUND) —
+        PUBLISHED pending-registration, NO_OWNERS, SKIPPED_FILE_NOT_FOUND, SKIPPED_SOURCE_GONE) —
         i.e. it did NOT need FFmpeg. Folds the same outcome counts +
         per-server publisher rows + Files-panel row + completion that
         ``_merge_worker_outcome`` + ``record_completion`` produce for the

@@ -25,9 +25,13 @@ from media_preview_generator.markers.audio.matcher import (
     season_intros,
 )
 from media_preview_generator.markers.audio.season import (
+    SeasonClock,
     _mostly_silence,
     guarded_pick,
     holds_no_intro,
+    in_own_time,
+    in_own_times,
+    season_clock,
     season_group,
 )
 
@@ -143,15 +147,35 @@ def season_folder_episodes(group: list[EvalEpisode]) -> list[str]:
     return sorted(set(season_group(group[0].file).episodes) | {e.file for e in group})
 
 
+# A file's playback speed (``speed.playback_speed`` of its frame rate) and its fingerprint retimed by a factor.
+Speed = Callable[[str], float | None]
+Retimed = Callable[[str, float], np.ndarray]
+
+
 class SeasonStep:
-    """The app's season step over one season's fingerprints, recording the pairs it skips and what its guards change."""
+    """The app's season step over one season's fingerprints, recording the pairs it skips and what its guards change.
+
+    With ``speed`` and ``retimed``, a season whose files play at two speeds (25 fps and film-rate releases) is matched
+    at one, as the app does (``season.SeasonClock``): each file at the other speed on its retimed fingerprint, its
+    answer read back at its own speed.
+    """
 
     def __init__(
-        self, season: str, fps: dict[str, np.ndarray], report: ReproductionReport, end_pictures: EndPictures
+        self,
+        season: str,
+        fps: dict[str, np.ndarray],
+        report: ReproductionReport,
+        end_pictures: EndPictures,
+        *,
+        speed: Speed | None = None,
+        retimed: Retimed | None = None,
     ) -> None:
-        self._season, self._fps, self._report, self._end_pictures = season, fps, report, end_pictures
+        self._season, self._report, self._end_pictures = season, report, end_pictures
         self._runs: dict[tuple[str, str], list[Run]] = {}
-        self.files = sorted(f for f, points in fps.items() if len(points))
+        audible = {f: points for f, points in fps.items() if len(points)}
+        self.clock = season_clock({f: speed(f) for f in audible}) if speed and retimed else SeasonClock()
+        self._fps = {**fps, **{f: retimed(f, factor) for f, factor in self.clock.factors.items()}}
+        self.files = sorted(audible)
 
     def runs_between(self, first: str, second: str) -> list[Run]:
         if (first, second) not in self._runs:
@@ -169,14 +193,19 @@ class SeasonStep:
     def answer(self, episode: EvalEpisode) -> tuple | None:
         if episode.file not in self.files or len(self.files) < 2:
             return None
+        factors = self.clock.factors
+        passes = self._end_pictures.for_episode(episode.file)
         picked = guarded_pick(
             episode.file,
             self.files,
             self._fps,
             self.runs_between,
-            end_picture_passes=self._end_pictures.for_episode(episode.file),
+            end_picture_passes=lambda candidate: passes(in_own_times(candidate, episode.file, factors)),
         )
         matcher = intro_for(file_hits(episode.file, self.files, self.runs_between), len(self.files) - 1)
+        silent = picked is not None and _mostly_silence(self._fps[episode.file], picked)
+        own = factors.get(episode.file)
+        picked, matcher = (None if found is None else in_own_time(found, own) for found in (picked, matcher))
         truth = episode.truth_intro
         if _as_tuple(picked) != _as_tuple(matcher):
             self._report.guards_changed.append({
@@ -184,7 +213,7 @@ class SeasonStep:
                 "matcher": _as_tuple(matcher), "matcher_verdict": _verdict(matcher, truth),
                 "step": _as_tuple(picked), "step_verdict": _verdict(picked, truth),
             })  # fmt: skip
-        if picked is not None and _mostly_silence(self._fps[episode.file], picked):
+        if silent:
             self._report.silence_dropped.append(
                 {
                     "season": self._season,
@@ -208,6 +237,8 @@ def reproduce(
     end_pictures: EndPictures,
     with_reference: bool = True,
     full_folder: bool = False,
+    speed: Speed | None = None,
+    retimed: Retimed | None = None,
 ) -> ReproductionReport:
     """Run the port (and the reference) season by season and judge the eval episodes against their truth.
 
@@ -218,6 +249,9 @@ def reproduce(
         with_reference: Also run the slow reference and compare exactly.
         full_folder: Match each season's whole folder (what the app does) instead of the eval's own file lists (at
             most 8 per season, how spec §5.3 was measured). Drift then also lists answers the larger group changed.
+        speed: A file's playback speed; with ``retimed``, the season step matches a season at one speed (the port and
+            the reference always match every file as it plays).
+        retimed: A file's fingerprint retimed by a factor.
 
     Returns:
         The report.
@@ -228,7 +262,7 @@ def reproduce(
         files = season_folder_episodes(group) if full_folder else [e.file for e in group]
         fps = {f: points(f) for f in files}
         port = {f: _as_tuple(seg) for f, seg in season_intros(fps).items()}
-        step = SeasonStep(season, fps, report, end_pictures)
+        step = SeasonStep(season, fps, report, end_pictures, speed=speed, retimed=retimed)
         if with_reference:
             reference = fp3_reference.analyse_points(fps, sorted(fps))
             for f in sorted(fps):
@@ -267,6 +301,8 @@ def season_truth(
     *,
     points: Callable[[str], np.ndarray],
     end_pictures: EndPictures,
+    speed: Speed | None = None,
+    retimed: Retimed | None = None,
 ) -> TruthReport:
     """The app's season step on each truth file, matched with its season group (``season_group``, as the app does).
 
@@ -274,6 +310,8 @@ def season_truth(
         truth: Intro (start, end) seconds per file path, None for a file with no intro (a wrong answer if it gets one).
         points: Fingerprint of a file.
         end_pictures: The season step's end-picture check.
+        speed: A file's playback speed; with ``retimed``, a season is matched at one speed (:class:`SeasonStep`).
+        retimed: A file's fingerprint retimed by a factor.
 
     Returns:
         The report.
@@ -284,7 +322,8 @@ def season_truth(
         groups.setdefault(season_group(path).episodes, []).append(path)
     for episodes, paths in groups.items():
         files = sorted(set(episodes) | set(paths))
-        step = SeasonStep(os.path.dirname(paths[0]), {f: points(f) for f in files}, ReproductionReport(), end_pictures)
+        step = SeasonStep(os.path.dirname(paths[0]), {f: points(f) for f in files}, ReproductionReport(), end_pictures,
+                          speed=speed, retimed=retimed)  # fmt: skip
         for path in paths:
             answer = step.answer(EvalEpisode(os.path.dirname(path), path, truth[path], None, None))
             if truth[path] is None:

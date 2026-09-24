@@ -154,6 +154,20 @@ def test_replace_evidence_is_scoped_to_source_and_origin(store):
     assert {(r.origin, r.type, r.detail) for r in rows} == {("plex-1", None, "no markers"), ("emby-1", T.INTRO, "")}
 
 
+def test_a_stale_server_marker_keeps_its_flag_and_says_why(store):
+    # A server's marker made for an earlier file at this path: stored with its own detail, read back flagged, so
+    # decide skips it. Fresh ones of the same answer are stored as before.
+    rec = store.upsert_file(_ident(), duration_ms=2_498_304, season_key=None, is_movie=False)
+    fresh = Candidate(T.CREDITS, 2_464_000, None, Source.SERVER_MARKERS, origin="plex-1")
+    stale = Candidate(T.INTRO, 322_622, 354_901, Source.SERVER_MARKERS, origin="plex-1", stale=True)
+
+    store.replace_evidence(rec.id, Source.SERVER_MARKERS, [stale, fresh], origin="plex-1")
+
+    assert sorted(store.get_evidence(rec.id), key=lambda c: c.start_ms) == [stale, fresh]
+    details = {r.type: r.detail for r in store.evidence_rows(rec.id)}
+    assert details == {T.INTRO: store_mod.STALE_SERVER_MARKERS_DETAIL, T.CREDITS: ""}
+
+
 def test_never_looked_up_source_has_no_fetched_at(store):
     rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
     assert store.evidence_fetched_at(rec.id, Source.THEINTRODB) is None

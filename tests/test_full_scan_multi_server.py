@@ -273,7 +273,7 @@ class TestMultiServerFullScan:
         # matches the failures list.
         assert counts.get("failed", 0) == 2, counts
         # Per-item counting maps NO_OWNERS → no_media_parts (mirrors
-        # Worker._record_outcome; ProcessingResult has no dedicated no_owners
+        # Worker._process_item's shared mapping; ProcessingResult has no dedicated no_owners
         # bucket). Still counted in exactly one bucket — just the per-file key.
         assert counts.get("no_media_parts", 0) == 1, counts
 

@@ -4,22 +4,27 @@ import itertools
 import math
 import random
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 
 from media_preview_generator.markers import decide as decide_module
+from media_preview_generator.markers.audio import season
 from media_preview_generator.markers.decide import (
     MIN_SEGMENT_MS,
     DecisionContext,
     DecisionStatus,
+    FileLimits,
     TypeDecision,
     credits_limits_ms,
     decide,
     earliest_credits_start_ms,
+    file_clock_may_matter,
     intro_chapter_length_ms,
     intro_chapter_limit_ms,
     sanity_problem,
     shortened_by,
+    unusable_server_marker,
 )
 from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
 
@@ -419,12 +424,13 @@ class TestAgreement:
     @pytest.mark.parametrize(
         ("a", "b", "expected", "detail"),
         [
-            # "a" always precedes "b" in ORDER, so a's own end (checked edge) wins; start (unchecked
-            # edge) is the later/safer of the two, a server marker's included: it may shorten the skip. `detail` is
-            # that start when decided, the start of the Needs review reason otherwise.
-            (S.THEINTRODB, S.SKIPDB, DecisionStatus.DECIDED, 128_000),
-            (S.THEINTRODB, S.SEASON_AUDIO, DecisionStatus.DECIDED, 128_000),
-            (S.SKIPDB, S.SERVER_MARKERS, DecisionStatus.DECIDED, 128_000),
+            # "a" always precedes "b" in ORDER, so a's own end (checked edge) wins -- unless "b" reads this file and
+            # "a" is timed on another release (TheIntroDB): then b's end does. The start (unchecked edge) is the
+            # later/safer of the two, a server marker's included: it may shorten the skip. `detail` is (start, end)
+            # when decided, the start of the Needs review reason otherwise.
+            (S.THEINTRODB, S.SKIPDB, DecisionStatus.DECIDED, (128_000, 157_000)),
+            (S.THEINTRODB, S.SEASON_AUDIO, DecisionStatus.DECIDED, (128_000, 160_000)),
+            (S.SKIPDB, S.SERVER_MARKERS, DecisionStatus.DECIDED, (128_000, 157_000)),
             # dependent pair = one source
             (S.THEINTRODB, S.INTRODB, DecisionStatus.NEEDS_REVIEW, "only TheIntroDB and IntroDB have the intro"),
             # an importer plugin's copy on a server is the crowd answer again
@@ -440,7 +446,7 @@ class TestAgreement:
                 DecisionStatus.NEEDS_REVIEW,
                 "only TheIntroDB and a server's imported marker have the intro",
             ),
-            (S.SKIPDB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.DECIDED, 128_000),
+            (S.SKIPDB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.DECIDED, (128_000, 157_000)),
         ],
     )
     def test_intro_pairs(self, a, b, expected, detail):
@@ -448,7 +454,7 @@ class TestAgreement:
         d = decide(cands, ctx(), {})[T.INTRO]
         assert d.status is expected
         if expected is DecisionStatus.DECIDED:
-            assert (d.marker.start_ms, d.marker.end_ms) == (detail, 157_000)
+            assert (d.marker.start_ms, d.marker.end_ms) == detail
             assert set(d.marker.decided_by) == {a.value, b.value}
             assert d.proposed is None
         else:
@@ -583,18 +589,19 @@ class TestAgreement:
         assert d.marker.decided_by == ("introdb", "server_markers")
 
     def test_unchecked_edge_supplier_is_credited_in_decided_by(self):
-        # season_audio supplies neither the checked edge (TheIntroDB wins on precedence) nor does
-        # it directly agree with the winner (diff 8s > 5s tolerance) -- but it DOES supply the
-        # published (safer, latest) start, so it must still be credited.
+        # A server's marker supplies neither the checked edge (TheIntroDB wins on precedence, and a server marker
+        # never does) nor does it directly agree with the winner (diff 8s > 5s tolerance) -- but it DOES supply the
+        # published (safer, latest) start, so it must still be credited. (Season audio here would read the file,
+        # and then SkipDB's end would be the agreed one: TestTheFilesOwnIntroEnd.)
         cands = [
             intro(S.THEINTRODB, 10_000, 40_000),
             intro(S.SKIPDB, 20_000, 44_000),
-            intro(S.SEASON_AUDIO, 30_000, 48_000),
+            intro(S.SERVER_MARKERS, 30_000, 48_000, origin="plex-1"),
         ]
         d = decide(cands, ctx(), {})[T.INTRO]
         assert d.status is DecisionStatus.DECIDED
         assert (d.marker.start_ms, d.marker.end_ms) == (30_000, 40_000)
-        assert d.marker.decided_by == ("theintrodb", "skipdb", "season_audio")
+        assert d.marker.decided_by == ("theintrodb", "skipdb", "server_markers")
 
     def test_unchecked_credits_end_comes_from_every_confirming_candidate_and_credits_its_supplier(self):
         # TheIntroDB wins the start; season_audio (16s later, so not agreeing with TheIntroDB
@@ -636,14 +643,15 @@ class TestAgreement:
     def test_bridging_source_cannot_hide_an_agreeing_pair_that_contradicts_the_result(
         self, partner, proposed_by, groups
     ):
-        # SkipDB (104s) agrees with both TheIntroDB (108s) and the pair (100s), so every agreeing
-        # set is within 5s of the next and TheIntroDB wins the merged cluster -- but publishing
-        # 60-108s would ignore two independent sources agreeing on 100s.
+        # TheIntroDB (104s) agrees with both SkipDB (108s) and the pair (100s), so every agreeing
+        # set is within 5s of the next and SkipDB wins the merged cluster (TheIntroDB, timed on another release,
+        # can't supply an intro's end beside season audio) -- but publishing 60-108s would ignore two independent
+        # sources agreeing on 100s.
         cands = [
             intro(S.SEASON_AUDIO, 60_000, 100_000),
             intro(partner, 60_000, 100_000, "plex-1"),
-            intro(S.THEINTRODB, 60_000, 108_000),
-            intro(S.SKIPDB, 60_000, 104_000),
+            intro(S.THEINTRODB, 60_000, 104_000),
+            intro(S.SKIPDB, 60_000, 108_000),
         ]
         d = decide(cands, ctx(), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
@@ -655,11 +663,13 @@ class TestAgreement:
         ("pair_end", "expected"), [(100_000, DecisionStatus.DECIDED), (99_999, DecisionStatus.NEEDS_REVIEW)]
     )
     def test_contradicting_pair_must_be_beyond_the_tolerance_of_the_result(self, pair_end, expected):
+        # SkipDB's end is the result's: TheIntroDB, timed on another release, doesn't supply an intro's end beside
+        # season audio (TestTheFilesOwnIntroEnd).
         cands = [
             intro(S.SEASON_AUDIO, 60_000, pair_end),
             intro(S.CREDITS_TEXT, 60_000, pair_end),
-            intro(S.SKIPDB, 60_000, 102_000),
-            intro(S.THEINTRODB, 60_000, 105_000),
+            intro(S.THEINTRODB, 60_000, 102_000),
+            intro(S.SKIPDB, 60_000, 105_000),
         ]
         d = decide(cands, ctx(), {})[T.INTRO]
         marker = Marker(T.INTRO, 60_000, 105_000, ("theintrodb", "skipdb", "season_audio", "credits_text"))
@@ -1531,6 +1541,19 @@ class TestSanity:
             (intro(S.SKIPDB, 0, SHORT_DUR - 2_000), False, SHORT_DUR, "runs to end of file"),
             (intro(S.SKIPDB, 0, SHORT_DUR - 2_001), False, SHORT_DUR, None),
             (Candidate(T.RECAP, 0, SHORT_DUR, S.THEINTRODB), False, SHORT_DUR, "runs to end of file"),  # explicit end
+            # -- an online intro in the first 2 s shorter than 10 s is a logo (The Fixers: Netflix's "N", 0-7 s) --
+            (intro(S.INTRODB, 0, 7_000), False, DUR, "logo at the start of the file"),
+            (intro(S.THEINTRODB, 0, 7_000), False, DUR, "logo at the start of the file"),
+            (intro(S.INTRODB, 1_999, 11_998), False, DUR, "logo at the start of the file"),  # 9_999 long
+            (intro(S.INTRODB, 1_999, 11_999), False, DUR, None),  # exactly 10 s long
+            (intro(S.INTRODB, 2_000, 9_000), False, DUR, None),  # starts at 2 s
+            (intro(S.SKIPDB, 0, 7_000), False, DUR, None),  # SkipDB matches this file's duration
+            (intro(S.CHAPTERS, 0, 7_000), False, DUR, None),  # the file's own chapters
+            (intro(S.SERVER_MARKERS, 0, 7_000), False, DUR, None),
+            # an importer plugin's copy of IntroDB is the same logo; a copy of SkipDB matches this file's duration
+            (Candidate(T.INTRO, 0, 7_000, S.SERVER_MARKERS_IMPORTED, copied_from="introdb"), False, DUR, "logo"),
+            (Candidate(T.INTRO, 0, 7_000, S.SERVER_MARKERS_IMPORTED, copied_from="skipdb"), False, DUR, None),
+            (Candidate(T.RECAP, 0, 7_000, S.THEINTRODB), False, DUR, None),  # a short "previously on" is a recap
         ],
     )
     def test_matrix(self, cand, is_movie, duration, problem):
@@ -1574,6 +1597,60 @@ class TestSanity:
     def test_clamped_end_is_used_in_marker(self):
         d = decide([credits(S.CHAPTERS, 1_300_000, 1_321_500)], ctx(), {})[T.CREDITS]
         assert d.marker.end_ms == DUR
+
+
+class TestOnlineLogoAtTheFileStart:
+    """The Fixers (Netflix): IntroDB gives 0-7 s, the "N" logo, for all 10 episodes, and season audio finds the theme
+    (E01 263.0-284.8 s, E07 205.0-227.2 s). Prod left every episode in Needs review ("sources disagree"), proposing
+    the logo. An IntroDB or TheIntroDB intro starting in the first 2 s and shorter than 10 s is now dropped as a logo,
+    the rule season audio applies to itself (``audio.season.FILE_START_S``), so season audio decides alone."""
+
+    @pytest.mark.parametrize(
+        ("duration", "audio"),
+        [(2_694_464, (263_036, 284_831)), (2_668_736, (204_955, 227_246))],
+        ids=["E01", "E07"],
+    )
+    @pytest.mark.parametrize("online", [S.INTRODB, S.THEINTRODB])
+    def test_season_audio_decides_over_an_online_logo(self, duration, audio, online):
+        cands = [intro(online, 0, 7_000), Candidate(T.INTRO, *audio, S.SEASON_AUDIO, 1.0, "9/9")]
+        d = decide(cands, ctx(publish_when="medium", duration=duration), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+        assert d.marker == Marker(T.INTRO, *audio, ("season_audio",))
+
+    @pytest.mark.parametrize("copied_from", ["introdb", "skipdb"])
+    def test_an_importer_plugins_copy_of_the_logo_doesnt_hold_season_audio_back(self, copied_from):
+        # A Jellyfin or Emby server whose importer plugin copied IntroDB's 0-7 s: without the rule the copy, a server's
+        # marker, contradicts season audio deciding alone. A SkipDB copy at 0-7 s is timed on this file: it still does.
+        copy = Candidate(T.INTRO, 0, 7_000, S.SERVER_MARKERS_IMPORTED, origin="jf-1", copied_from=copied_from)
+        cands = [intro(S.INTRODB, 0, 7_000), copy, Candidate(T.INTRO, 263_036, 284_831, S.SEASON_AUDIO, 1.0, "9/9")]
+        d = decide(cands, ctx(publish_when="medium", duration=2_694_464), {})[T.INTRO]
+        if copied_from == "introdb":
+            assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+            assert d.marker == Marker(T.INTRO, 263_036, 284_831, ("season_audio",))
+        else:
+            assert d.status is DecisionStatus.NEEDS_REVIEW and d.marker is None
+
+    def test_an_online_logo_alone_is_no_evidence_not_a_proposal(self):
+        d = decide([intro(S.INTRODB, 0, 7_000)], ctx(publish_when="medium", duration=2_694_464), {})[T.INTRO]
+        assert (d.status, d.marker, d.proposed) == (DecisionStatus.NO_EVIDENCE, None, None)
+
+    def test_a_10_s_online_intro_at_the_start_still_counts(self):
+        cands = [intro(S.INTRODB, 0, 10_000), Candidate(T.INTRO, 263_036, 284_831, S.SEASON_AUDIO, 1.0, "9/9")]
+        d = decide(cands, ctx(publish_when="medium", duration=2_694_464), {})[T.INTRO]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.reason.startswith("sources disagree") and (d.proposed.start_ms, d.proposed.end_ms) == (0, 10_000)
+
+    def test_a_marker_composed_from_a_kept_online_intro_is_not_judged_as_a_logo(self):
+        # IntroDB's 10 s (kept), ranked first, gives the end; Plex's later start makes the marker 8.5 s long.
+        order = ("introdb", *(o for o in ORDER if o != "introdb"))
+        cands = [intro(S.INTRODB, 0, 10_000), intro(S.SERVER_MARKERS, 1_500, 10_000, "plex")]
+        d = decide(cands, ctx(publish_when="medium", order=order), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, server_markers")
+        assert d.marker == Marker(T.INTRO, 1_500, 10_000, ("introdb", "server_markers"))
+
+    def test_the_limits_are_season_audios_own(self):
+        assert decide_module.ONLINE_LOGO_BEFORE_MS == round(season.FILE_START_S * 1000)
+        assert decide_module.MIN_ONLINE_INTRO_AT_START_MS == round(season.MIN_FILE_START_LENGTH_S * 1000)
 
 
 class TestRecapAndPreview:
@@ -1692,19 +1769,20 @@ class TestAgreementSearch:
     """Every maximal agreeing set is found, whatever the candidates' values or input order."""
 
     def test_pair_behind_a_same_source_neighbour_still_conflicts(self):
-        # IntroDB 113 agrees with credits_text 117 even though its IntroDB neighbour at 111
-        # doesn't; that pair (IntroDB wins, 113) conflicts with credits_text + TheIntroDB (119).
-        # Both winners are the IntroDB/TheIntroDB group, which the reason names once.
+        # IntroDB 113 agrees with SkipDB 117 even though its IntroDB neighbour at 111
+        # doesn't; that pair (IntroDB wins, 113) conflicts with SkipDB + TheIntroDB (119).
+        # Both winners are the IntroDB/TheIntroDB group, which the reason names once. (SkipDB takes the file's
+        # duration but doesn't read it, so the online answers keep their precedence here.)
         cands = [
             intro(S.INTRODB, 60_000, 111_000),
             intro(S.INTRODB, 60_000, 113_000),
-            intro(S.CREDITS_TEXT, 60_000, 117_000),
+            intro(S.SKIPDB, 60_000, 117_000),
             intro(S.THEINTRODB, 60_000, 119_000),
         ]
         d = decide(cands, ctx(), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
-        assert d.proposed == Marker(T.INTRO, 60_000, 119_000, ("theintrodb", "credits_text"))
+        assert d.proposed == Marker(T.INTRO, 60_000, 119_000, ("theintrodb", "skipdb"))
         assert d.reason == "agreeing sources conflict: introdb/theintrodb"
 
     def test_chapter_contradiction_behind_a_neighbour_is_found(self):
@@ -1848,7 +1926,20 @@ def _ref_agree(a, b, duration):
     return abs(_ref_value(a, duration) - _ref_value(b, duration)) <= _ref_tolerance(a.type)
 
 
+def _ref_timed_on_any_release(c):
+    if c.source is S.SERVER_MARKERS_IMPORTED:
+        return c.copied_from == "introdb"
+    return c.source in (S.INTRODB, S.THEINTRODB)
+
+
 def _ref_is_sane(c, x):
+    if c.type is T.INTRO and _ref_timed_on_any_release(c) and c.start_ms < 2_000:
+        if _ref_end(c, x.duration_ms) - c.start_ms < 10_000:
+            return False
+    return _ref_times_sane(c, x)
+
+
+def _ref_times_sane(c, x):
     d, start = x.duration_ms, c.start_ms
     if d <= 0 or start < 0 or start >= d:
         return False
@@ -1922,8 +2013,11 @@ def _ref_compose(members, mtype, x):
     confirmed = [c for c in members if any(_ref_group(o) != _ref_group(c) and _ref_agree(c, o, d) for o in members)]
     suppliers = [c for c in confirmed if c.source not in _REF_SERVER]
     # Checked edge: the best-ranked agreeing non-server candidate (source order first); other edge: the safer value of
-    # every confirmed candidate, server markers included (they may shorten the skip).
-    winner = min(suppliers, key=lambda c: _ref_rank(c, x))
+    # every confirmed candidate, server markers included (they may shorten the skip). An intro's or recap's end comes
+    # from a source that reads this file when one agrees: IntroDB's and TheIntroDB's times are another release's.
+    reads_file = (S.CHAPTERS, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS, S.CREDITS_TEXT)
+    file_edge = mtype in _REF_START_TYPES and any(c.source in reads_file for c in suppliers)
+    winner = min(suppliers, key=lambda c: (file_edge and _ref_timed_on_any_release(c), _ref_rank(c, x)))
     if mtype in _REF_START_TYPES:
         start, end = max(c.start_ms for c in confirmed), _ref_end(winner, d)
         edge = [c for c in confirmed if c.start_ms == start]
@@ -1973,7 +2067,7 @@ def _ref_decide_type(mtype, cands, x):
             shorter, other = _ref_shorter(mtype, _ref_marker_value(chapter), backing, x, everyone)
             own_other = chapter.start_ms if mtype in _REF_START_TYPES else chapter.end_ms
             if (other > own_other) if mtype in _REF_START_TYPES else (other < own_other):
-                if not _ref_is_sane(Candidate(mtype, shorter.start_ms, shorter.end_ms, S.CHAPTERS), x):
+                if not _ref_times_sane(Candidate(mtype, shorter.start_ms, shorter.end_ms, S.CHAPTERS), x):
                     return review(chapter, "chapters and agreeing sources disagree on the other edge")
                 result = Marker(mtype, shorter.start_ms, shorter.end_ms, shorter.decided_by)
             elif suspect:
@@ -1990,7 +2084,7 @@ def _ref_decide_type(mtype, cands, x):
             return review(ranked[0][0], f"agreeing sources conflict: {names}")
         merged = list({id(c): c for members in agreeing_sets for c in members}.values())
         result, winner = _ref_compose(merged, mtype, x)
-        if not _ref_is_sane(Candidate(mtype, result.start_ms, result.end_ms, winner.source), x):
+        if not _ref_times_sane(Candidate(mtype, result.start_ms, result.end_ms, winner.source), x):
             return review(_ref_own_marker(winner, x), "agreeing sources disagree on the other edge")
         reason = "sources agree: " + ", ".join(result.decided_by)
     else:
@@ -2031,7 +2125,7 @@ def _ref_decide_type(mtype, cands, x):
         if not all(_ref_agree(a, b, d) for a, b in itertools.combinations(own, 2)):
             return review(_ref_own_marker(proposal, x), "source disagrees with itself")
         result, _ = _ref_shorter(mtype, _ref_value(proposal, d), own, x, {proposal.source})
-        if not _ref_is_sane(Candidate(mtype, result.start_ms, result.end_ms, proposal.source), x):
+        if not _ref_times_sane(Candidate(mtype, result.start_ms, result.end_ms, proposal.source), x):
             return review(_ref_own_marker(proposal, x), "sources disagree on the other edge")
         reason = f"single source ({proposal.source.value})"
 
@@ -2070,7 +2164,7 @@ def _ref_shorten(decision, cands, x):
     decided_by = tuple(s.value for s in sorted(credited, key=lambda s: _ref_source_rank(s, x)))
     origins = sorted(o for o, v in offers.items() if v == start and o)
     note = "start shortened to the server's own marker" + (f" ({', '.join(origins)})" if origins else "")
-    if not _ref_is_sane(Candidate(mtype, start, result.end_ms, S.CHAPTERS), x):
+    if not _ref_times_sane(Candidate(mtype, start, result.end_ms, S.CHAPTERS), x):
         return TypeDecision(mtype, DecisionStatus.NEEDS_REVIEW, None, result, f"{note} fails sanity checks")
     shortened = Marker(mtype, start, result.end_ms, decided_by)
     return TypeDecision(mtype, DecisionStatus.DECIDED, shortened, None, f"{decision.reason}; {note}")
@@ -2235,6 +2329,15 @@ def _random_file(rng):
         if c.source is S.SERVER_MARKERS_IMPORTED and id(c) not in named:
             named[id(c)] = replace(c, copied_from=rng.choice(("", "introdb", "skipdb", "aniskip")))
     cands = [named.get(id(c), c) for c in cands]
+    # A tenth of the files have their intros moved into the first seconds of the file, where an online one shorter than
+    # 10 s is a logo and is left out; drawn last for the same reason.
+    if rng.random() < 0.1:
+        moved = {}
+        for c in cands:
+            if c.type is T.INTRO and id(c) not in moved:
+                start = rng.choice((0, 1_999, 2_000))
+                moved[id(c)] = replace(c, start_ms=start, end_ms=start + rng.choice((7_000, 9_999, 10_000, 12_000)))
+        cands = [moved.get(id(c), c) for c in cands]
     return cands, x, locked
 
 
@@ -2548,7 +2651,8 @@ class TestSeasonAudioSources:
         ]
         d = decide(c, self._ctx("high"), {})[MarkerType.INTRO]
         assert d.status is DecisionStatus.DECIDED
-        assert d.marker == Marker(MarkerType.INTRO, 126_000, 156_000, ("theintrodb", "season_audio", "server_markers"))
+        # Season audio reads this file, so its end is the agreed one, not TheIntroDB's (another release's times).
+        assert d.marker == Marker(MarkerType.INTRO, 126_000, 157_000, ("theintrodb", "season_audio", "server_markers"))
 
     @pytest.mark.parametrize("server", [S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
     def test_theintrodb_and_markers_on_servers_are_unchanged(self, server):
@@ -2569,7 +2673,7 @@ class TestSeasonAudioSources:
         assert d.status is DecisionStatus.DECIDED
         assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
             126_000,
-            160_000,
+            157_000,  # season audio's end: IntroDB's times are another release's
             ("introdb", "season_audio"),
         )
 
@@ -3141,3 +3245,384 @@ class TestEarliestCreditsStart:
     )
     def test_the_limits_from_the_users_windows(self, is_episode, tv_s, movie_s, expected):
         assert credits_limits_ms(is_episode=is_episode, tv_window_s=tv_s, movie_window_s=movie_s) == expected
+
+
+class TestUnusableServerMarker:
+    """A server's own marker is kept ("Keep Plex's") and stands in for our detection unless it can't be right for this
+    file at all: only the impossible cases, never the placement rules our own answers must also pass."""
+
+    BONES_DUR = 2_498_304  # Bones S07E01
+
+    @pytest.mark.parametrize(
+        ("candidate", "problem"),
+        [
+            # Plex's credits on Bones S07E01 start and end after the file does: they can never fire.
+            (Candidate(T.CREDITS, 2_578_083, 2_615_648, S.SERVER_MARKERS), "starts past the end of the file"),
+            (Candidate(T.CREDITS, 2_400_000, 2_615_648, S.SERVER_MARKERS), "ends past the end of the file"),
+            (Candidate(T.CREDITS, 2_450_000, 2_450_000, S.SERVER_MARKERS), "segment too short"),
+            (Candidate(T.CREDITS, 2_450_000, 2_440_000, S.SERVER_MARKERS), "ends before it starts"),
+            (Candidate(T.INTRO, -1, 30_000, S.SERVER_MARKERS), "negative start"),
+            (Candidate(T.CREDITS, BONES_DUR - 2_000, None, S.SERVER_MARKERS), "segment too short"),
+        ],
+        ids=["starts-past-end", "ends-past-end", "zero-length", "negative-length", "negative-start", "to-the-end-2s"],
+    )
+    def test_a_marker_that_cant_be_right_says_why(self, candidate, problem):
+        assert unusable_server_marker(candidate, FileLimits(self.BONES_DUR)) == problem
+
+    @pytest.mark.parametrize(
+        "candidate",
+        [
+            Candidate(T.CREDITS, 2_464_000, None, S.SERVER_MARKERS),
+            Candidate(T.CREDITS, 2_464_000, BONES_DUR + 1_500, S.SERVER_MARKERS),  # within the 2 s end clamp
+            Candidate(T.INTRO, 60_000, 95_000, S.SERVER_MARKERS),
+            # Placement rules are for our own answers only: Plex may know better, so these are kept.
+            Candidate(T.INTRO, 1_500_000, 1_530_000, S.SERVER_MARKERS),  # after 35% of the file
+            Candidate(T.INTRO, 10_000, 400_000, S.SERVER_MARKERS),  # longer than 5 minutes
+            Candidate(T.CREDITS, 500_000, None, S.SERVER_MARKERS),  # before the last 25%
+        ],
+        ids=[
+            "credits-to-the-end",
+            "credits-a-moment-past-the-end",
+            "intro",
+            "late-intro",
+            "long-intro",
+            "early-credits",
+        ],
+    )
+    def test_a_marker_that_can_be_right_is_usable(self, candidate):
+        assert unusable_server_marker(candidate, FileLimits(self.BONES_DUR)) is None
+
+    def test_plexs_movie_credits_twenty_minutes_before_the_end_are_usable(self):
+        # Our own answer would fail the 900 s movie cap; Plex's is kept.
+        movie_credits = Candidate(T.CREDITS, MOVIE_DUR - 1_200_000, None, S.SERVER_MARKERS)
+        assert unusable_server_marker(movie_credits, FileLimits(MOVIE_DUR)) is None
+
+    @pytest.mark.parametrize("duration_ms", [0, -1])
+    def test_a_file_of_unknown_length_leaves_every_marker_usable(self, duration_ms):
+        # Nothing to check against: Plex's marker is kept as before.
+        marker = Candidate(T.CREDITS, 2_578_083, 2_615_648, S.SERVER_MARKERS)
+        assert unusable_server_marker(marker, FileLimits(duration_ms)) is None
+
+
+class TestStaleServerMarkers:
+    """A server's own marker made for an earlier file at this path (``Candidate.stale``) counts for nothing, as an
+    unusable server answer does: it neither confirms, nor decides, nor shortens."""
+
+    def test_a_stale_server_marker_confirms_nothing(self):
+        skipdb = intro(S.SKIPDB, 127_000, 157_000)
+        fresh = intro(S.SERVER_MARKERS, 128_000, 160_000, "plex-1")
+        stale = replace(fresh, stale=True)
+
+        confirmed = decide([skipdb, fresh], ctx(), {})[T.INTRO]
+        alone = decide([skipdb], ctx(), {})[T.INTRO]
+        with_stale = decide([skipdb, stale], ctx(), {})[T.INTRO]
+
+        assert confirmed.status is DecisionStatus.DECIDED
+        assert with_stale == alone
+        assert alone.status is not DecisionStatus.DECIDED
+
+    def test_a_stale_server_marker_doesnt_shorten_a_skip(self):
+        chapters = credits(S.CHAPTERS, 1_200_000)
+        text = credits(S.CREDITS_TEXT, 1_201_000)
+        later = credits(S.SERVER_MARKERS, 1_215_000, origin="plex-1")
+        assert decide([chapters, text, replace(later, stale=True)], ctx(), {}) == decide([chapters, text], ctx(), {})
+
+
+class TestOnlineTimesFromAnotherSpeed:
+    """A 25 fps release of a film-rate show plays 4.3 % fast, so IntroDB's film-rate times run late on it (Bones
+    S07E01: the theme plays 310-338 s, IntroDB says 324-354 s), and the other way round on a film-rate file. An
+    IntroDB or TheIntroDB answer (or an importer plugin's copy of one) on a 25 fps or film-rate file is read scaled to
+    the file's own clock only when, as it is, it agrees with no other source and, scaled, it agrees with one; it then
+    counts, and publishes, at the scaled times. A server's own marker counts as it does on any file: Plex's film-rate
+    markers on the 25 fps Bones files were made for the item's earlier Blu-ray files, and such a marker is dropped
+    before decide ("made for an earlier file"), not by the file's frame rate."""
+
+    DUR = 2_498_304  # Bones S07E01
+    ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
+             "server_markers", "server_markers_imported")  # fmt: skip
+    FILM = 24000 / 1001
+    FILM_ON_PAL = FILM / 25
+
+    def _ctx(self, frame_rate, types=(MarkerType.INTRO,)):
+        return DecisionContext(self.DUR, False, "medium", frozenset(types), self.ORDER, frame_rate=frame_rate)
+
+    @staticmethod
+    def _audio(start, end):
+        return Candidate(MarkerType.INTRO, start, end, S.SEASON_AUDIO, 1.0, "11/12")
+
+    @staticmethod
+    def _plex(start, end):
+        return Candidate(MarkerType.INTRO, start, end, S.SERVER_MARKERS, origin="plex")
+
+    @pytest.mark.parametrize("online", [S.INTRODB, S.THEINTRODB])
+    def test_film_rate_times_on_a_25_fps_file_agree_once_scaled_and_publish_scaled(self, online):
+        c = [self._audio(310_000, 338_000), Candidate(MarkerType.INTRO, 324_000, 354_000, online)]
+        d = decide(c, self._ctx(25.0), {})[MarkerType.INTRO]
+        start, end = round(324_000 * self.FILM_ON_PAL), round(354_000 * self.FILM_ON_PAL)
+        assert (start, end) == (310_729, 339_500)
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, f"sources agree: {online.value}, season_audio")
+        # The scaled start is the later (shorter skip); the end is season audio's, which reads this file.
+        assert d.marker == Marker(MarkerType.INTRO, start, 338_000, (online.value, "season_audio"))
+
+    @pytest.mark.parametrize("frame_rate", [24000 / 1001, 24.0], ids=["23.976", "24"])
+    def test_pal_times_on_a_film_rate_file_agree_once_scaled(self, frame_rate):
+        # The same show the other way round: a database entry taken from a 25 fps release, on a film-rate file.
+        c = [self._audio(323_000, 352_000), Candidate(MarkerType.INTRO, 310_000, 338_000, S.INTRODB)]
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        scale = 25 / self.FILM
+        assert (round(310_000 * scale), round(338_000 * scale)) == (323_240, 352_435)
+        assert d.status is DecisionStatus.DECIDED
+        # Season audio, which reads this file, sets the end; the start is the later one (IntroDB's, scaled).
+        assert d.marker == Marker(MarkerType.INTRO, 323_240, 352_000, ("introdb", "season_audio"))
+
+    @pytest.mark.parametrize("frame_rate", [24000 / 1001, 24.0, 25.0, None], ids=["23.976", "24", "25", "unknown"])
+    def test_raw_times_that_agree_are_kept_even_where_the_scaled_ones_would_agree_too(self, frame_rate):
+        # An early intro: 4.3 % of a 60 s end is 2.6 s, inside the 5 s tolerance either way. The raw reading agrees, so
+        # it is never scaled (scaled here it would end at 62.6 s on a film-rate file: later than any source said).
+        c = [Candidate(MarkerType.INTRO, 30_000, 60_000, S.INTRODB), self._audio(31_000, 61_500)]
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, season_audio")
+        assert d.marker == Marker(MarkerType.INTRO, 31_000, 61_500, ("introdb", "season_audio"))  # season audio's end
+        assert c[0] in decide_module._on_file_clock(c, self._ctx(frame_rate))  # read as it is
+
+    def test_raw_times_of_a_25_fps_show_timed_at_its_own_speed_are_kept(self):
+        c = [self._audio(310_000, 338_000), Candidate(MarkerType.INTRO, 311_000, 339_000, S.INTRODB)]
+        d = decide(c, self._ctx(25.0), {})[MarkerType.INTRO]
+        assert d.marker == Marker(MarkerType.INTRO, 311_000, 338_000, ("introdb", "season_audio"))
+        assert c[1] in decide_module._on_file_clock(c, self._ctx(25.0))  # read as it is, not scaled
+
+    @pytest.mark.parametrize("frame_rate", [None, 29.97, 30.0, 50.0], ids=["unknown-rate", "29.97", "30", "50"])
+    def test_without_a_film_or_pal_rate_the_times_are_compared_as_they_are(self, frame_rate):
+        c = [self._audio(310_000, 338_000), Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB)]
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "sources disagree: introdb/theintrodb, season_audio",
+        )
+        assert d.proposed == Marker(MarkerType.INTRO, 324_000, 354_000, ("introdb",))
+
+    @pytest.mark.parametrize("frame_rate", [25.0, 24000 / 1001], ids=["25", "23.976"])
+    def test_an_answer_that_agrees_neither_way_still_disagrees_and_proposes_its_raw_times(self, frame_rate):
+        c = [self._audio(310_000, 338_000), Candidate(MarkerType.INTRO, 60_000, 90_000, S.INTRODB)]
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "sources disagree: introdb/theintrodb, season_audio",
+        )
+        assert d.proposed == Marker(MarkerType.INTRO, 60_000, 90_000, ("introdb",))
+
+    @pytest.mark.parametrize("frame_rate", [25.0, 24000 / 1001, None], ids=["25", "23.976", "unknown"])
+    def test_raw_online_times_a_servers_marker_agrees_with_are_kept_whatever_the_files_own_audio_says(self, frame_rate):
+        # Two agreeing sources outweigh one that disagrees, on a 25 fps file too (a marker made for an earlier file of
+        # the item, as Plex's film-rate Bones markers are, never reaches decide).
+        c = [self._audio(310_466, 338_206), Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB),
+             self._plex(322_622, 354_901)]  # fmt: skip
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, server_markers")
+        assert d.marker == Marker(MarkerType.INTRO, 324_000, 354_000, ("introdb", "server_markers"))
+
+    @pytest.mark.parametrize("frame_rate", [25.0, 24000 / 1001, None], ids=["25", "23.976", "unknown"])
+    def test_a_servers_marker_confirms_online_times_on_a_file_of_any_rate(self, frame_rate):
+        # A native 25 fps show (UK, European, Australian TV): IntroDB and Plex's own marker agree and are both right.
+        c = [Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB), self._plex(322_622, 354_901)]
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, server_markers")
+        assert d.marker == Marker(MarkerType.INTRO, 324_000, 354_000, ("introdb", "server_markers"))
+
+    def test_on_a_25_fps_file_a_servers_marker_the_files_own_check_agrees_with_still_counts(self):
+        # A 25 fps show timed at its own speed: everything agrees, the server's marker shortens the skip as usual (its
+        # later start); the end is season audio's, which reads this file.
+        c = [Candidate(MarkerType.INTRO, 300_000, 330_000, S.INTRODB), self._audio(301_000, 331_000),
+             self._plex(302_000, 329_500)]  # fmt: skip
+        d = decide(c, self._ctx(25.0), {})[MarkerType.INTRO]
+        assert d.marker == Marker(MarkerType.INTRO, 302_000, 331_000, ("introdb", "season_audio", "server_markers"))
+
+    @pytest.mark.parametrize("frame_rate", [25.0, 24000 / 1001], ids=["25", "23.976"])
+    def test_online_and_server_times_that_agree_contradict_a_chapter_at_any_rate(self, frame_rate):
+        chapter = Candidate(MarkerType.INTRO, 310_000, 338_000, S.CHAPTERS, origin="Intro")
+        c = [chapter, Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB), self._plex(322_622, 354_901)]
+        d = decide(c, self._ctx(frame_rate), {})[MarkerType.INTRO]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.reason.startswith("chapters contradicted by agreeing sources")
+
+    def test_a_lone_online_answer_still_needs_a_check_against_the_file(self):
+        c = [Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB)]
+        d = decide(c, self._ctx(25.0), {})[MarkerType.INTRO]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.proposed == Marker(MarkerType.INTRO, 324_000, 354_000, ("introdb",))
+
+    def test_skipdb_matches_the_files_own_duration_and_is_never_scaled(self):
+        c = [self._audio(310_000, 338_000), Candidate(MarkerType.INTRO, 324_000, 354_000, S.SKIPDB)]
+        d = decide(c, self._ctx(25.0), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, "sources disagree: season_audio, skipdb")
+
+    @pytest.mark.parametrize(
+        ("copied_from", "decided"), [("introdb", True), ("skipdb", False)], ids=["introdb-copy", "skipdb-copy"]
+    )
+    def test_an_importer_plugins_copy_of_introdb_is_read_like_introdb(self, copied_from, decided):
+        copy = Candidate(MarkerType.INTRO, 324_000, 354_000, S.SERVER_MARKERS_IMPORTED, origin="jf",
+                         copied_from=copied_from)  # fmt: skip
+        d = decide([self._audio(310_000, 338_000), copy], self._ctx(25.0), {})[MarkerType.INTRO]
+        if decided:
+            # Scaled, the copy agrees; being a server's marker it only lets season audio decide as it would alone.
+            assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+            assert d.marker == Marker(MarkerType.INTRO, 310_000, 338_000, ("season_audio",))
+        else:
+            assert d.status is DecisionStatus.NEEDS_REVIEW
+            assert d.reason.startswith("sources disagree")
+
+    def test_a_scaled_answer_agreeing_with_a_servers_own_marker_decides_like_a_raw_one_would(self):
+        # The server's marker was made on this file (it sits at the file's times, not IntroDB's raw ones).
+        c = [self._plex(310_000, 338_000), Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB)]
+        d = decide(c, self._ctx(25.0), {})[MarkerType.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        start, end = round(324_000 * self.FILM_ON_PAL), round(354_000 * self.FILM_ON_PAL)
+        assert d.marker == Marker(MarkerType.INTRO, start, end, ("introdb", "server_markers"))
+
+    @pytest.mark.parametrize(
+        ("text_at", "decided_by"),
+        [(2_398_000, ("introdb", "credits_text")), (2_300_000, ("credits_text",))],
+        ids=["agrees-scaled", "agrees-neither-way"],
+    )
+    def test_credits_timed_on_the_longer_film_release_are_read_scaled_though_raw_they_start_past_the_end(
+        self, text_at, decided_by
+    ):
+        # The film-rate release runs 4.3 % longer: its credits at 41:40-43:24 start after this 41:38 file ends.
+        # Scaled they start at 39:57.6; only when that agrees with another source do they count.
+        text = Candidate(MarkerType.CREDITS, text_at, None, S.CREDITS_TEXT)
+        online = Candidate(MarkerType.CREDITS, 2_500_000, 2_604_000, S.INTRODB)
+        ctx = self._ctx(25.0, types=(MarkerType.CREDITS,))
+        assert sanity_problem(online, ctx) == "starts past the end of the file"
+        d = decide([text, online], ctx, {})[MarkerType.CREDITS]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker.decided_by == decided_by
+        expected_start = round(2_500_000 * self.FILM_ON_PAL) if "introdb" in decided_by else text_at
+        assert d.marker.start_ms == expected_start
+
+    def test_the_server_marker_shortening_sees_the_answers_as_read_on_the_files_clock(self):
+        c = [self._audio(310_000, 338_000), Candidate(MarkerType.INTRO, 324_000, 354_000, S.INTRODB)]
+        with patch.object(
+            decide_module, "_shorten_to_server_markers", wraps=decide_module._shorten_to_server_markers
+        ) as sh:
+            decide(c, self._ctx(25.0), {})
+        seen = sh.call_args.args[1]
+        scaled = Candidate(MarkerType.INTRO, 310_729, 339_500, S.INTRODB)
+        assert scaled in seen and c[1] not in seen
+
+
+class TestFileClockMayMatter:
+    """The frame rate is read for a decision only when reading an online answer on the file's clock could change it:
+    the answer has a candidate of its type from another group to agree with, and doesn't agree with any as it is (a
+    raw reading that agrees is kept unscaled), or its raw times fall outside the file."""
+
+    DUR = 2_498_304  # Bones S07E01, 25 fps
+
+    @pytest.mark.parametrize(
+        ("candidates", "may_matter"),
+        [
+            ([Candidate(T.INTRO, 324_000, 354_000, S.INTRODB)], False),
+            (
+                [
+                    Candidate(T.INTRO, 324_000, 354_000, S.INTRODB),
+                    Candidate(T.CREDITS, 2_400_000, None, S.SEASON_AUDIO),
+                ],
+                False,
+            ),
+            (
+                [
+                    Candidate(T.INTRO, 324_000, 354_000, S.INTRODB),
+                    Candidate(T.INTRO, 320_000, 353_000, S.THEINTRODB),
+                ],
+                False,
+            ),
+            (
+                [
+                    Candidate(T.INTRO, 324_000, 354_000, S.INTRODB),
+                    Candidate(T.INTRO, 322_000, 352_000, S.SEASON_AUDIO),
+                ],
+                False,
+            ),
+            (
+                [
+                    Candidate(T.INTRO, 324_000, 354_000, S.INTRODB),
+                    Candidate(T.INTRO, 310_000, 338_000, S.SEASON_AUDIO),
+                ],
+                True,
+            ),
+            (
+                [
+                    Candidate(T.CREDITS, 2_520_000, 2_560_000, S.INTRODB),
+                    Candidate(T.CREDITS, 2_418_000, None, S.CREDITS_TEXT),
+                ],
+                True,
+            ),
+            (
+                [
+                    Candidate(T.CREDITS, 2_500_500, None, S.INTRODB),
+                    Candidate(T.CREDITS, 2_498_000, None, S.CREDITS_TEXT),
+                ],
+                True,
+            ),
+            (
+                [
+                    Candidate(T.INTRO, 5_000, 35_000, S.SEASON_AUDIO),
+                    Candidate(T.INTRO, 5_000, 34_000, S.CHAPTERS),
+                ],
+                False,
+            ),
+        ],
+        ids=[
+            "online-alone",
+            "another-type-only",
+            "same-group-only",
+            "agrees-as-it-is",
+            "disagrees-as-it-is",
+            "credits-disagree",
+            "starts-past-the-file",
+            "no-online-answer",
+        ],
+    )
+    def test_the_cells(self, candidates, may_matter):
+        assert file_clock_may_matter(candidates, self.DUR) is may_matter
+
+
+class TestTheFilesOwnIntroEnd:
+    """IntroDB's and TheIntroDB's times come from another release, so when a source that reads this file agrees with
+    one on an intro or recap, the agreed end is that source's. South Park S01 (held-out set): IntroDB says 0-30 s,
+    season audio 0.12-33.6 s (within the 5 s tolerance), the real end is about 35.5 s; IntroDB ranked first, so 30.0
+    won and cut the last 5 s of the theme short. Credits keep the source order: that edge is the start. A recap has no
+    source that reads the file but chapters, and chapters decide on their own path, so it has no cell of its own."""
+
+    SOUTH_PARK = [
+        intro(S.INTRODB, 0, 30_000),
+        Candidate(T.INTRO, 120, 33_600, S.SEASON_AUDIO, 1.0, "5/7"),
+    ]
+
+    @pytest.mark.parametrize("online", [S.INTRODB, S.THEINTRODB])
+    def test_season_audio_supplies_the_end_it_agrees_on(self, online):
+        cands = [replace(self.SOUTH_PARK[0], source=online), self.SOUTH_PARK[1]]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert (d.marker.start_ms, d.marker.end_ms) == (120, 33_600)
+        assert set(d.marker.decided_by) == {online.value, "season_audio"}
+
+    def test_agreeing_sources_that_dont_read_the_file_keep_the_online_end(self):
+        # A server's own marker never supplies an edge (rule 7), and it doesn't read this file for us either.
+        cands = [intro(S.INTRODB, 0, 30_000), intro(S.SERVER_MARKERS, 0, 33_000, origin="plex-1")]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert (d.status, d.marker.end_ms) == (DecisionStatus.DECIDED, 30_000)
+
+    def test_the_contradiction_check_reads_the_files_end_too(self):
+        # Chapters say 0-35.5 s. IntroDB and season audio agree on the intro; composed with IntroDB's end (30.0) they
+        # "contradicted" the chapter by 5.5 s, with season audio's (33.6) they don't.
+        cands = [intro(S.CHAPTERS, 0, 35_500), *self.SOUTH_PARK]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker.end_ms == 35_500
+
+    def test_credits_keep_the_online_start(self):
+        # Credits' checked edge is the start: the rule leaves them to the source order (IntroDB above credit text).
+        cands = [credits(S.INTRODB, 1_250_000), credits(S.CREDITS_TEXT, 1_254_000)]
+        d = decide(cands, ctx("medium"), {})[T.CREDITS]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker.start_ms == 1_250_000

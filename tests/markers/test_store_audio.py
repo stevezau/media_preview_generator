@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -225,6 +226,70 @@ class TestEndPictureFailures:
         assert store.end_picture_failed_at(FileIdentity(a.canonical_path, a.size, a.mtime_ns)) is None
 
 
+class TestFilesDecidedByOnlineAndServerMarkers:
+    """The files the decide-again job lists after settings v18: an unlocked intro or credits decided by an IntroDB or
+    TheIntroDB answer with a server's own marker and no source that reads the file (such a pair can be a marker made
+    for an earlier file and online times from a release at the other speed)."""
+
+    @pytest.mark.parametrize(
+        ("decided_by", "mtype", "locked", "listed"),
+        [
+            (("introdb", "server_markers"), MarkerType.INTRO, False, True),
+            (("theintrodb", "server_markers"), MarkerType.CREDITS, False, True),
+            (("introdb", "theintrodb", "server_markers"), MarkerType.INTRO, False, True),
+            (("introdb", "server_markers"), MarkerType.RECAP, False, False),
+            (("introdb", "server_markers"), MarkerType.INTRO, True, False),
+            (("introdb",), MarkerType.INTRO, False, False),
+            (("skipdb", "server_markers"), MarkerType.INTRO, False, False),
+            (("introdb", "server_markers_imported"), MarkerType.INTRO, False, False),
+            (("chapters", "introdb", "server_markers"), MarkerType.INTRO, False, False),
+            (("introdb", "season_audio", "server_markers"), MarkerType.INTRO, False, False),
+            (("introdb", "credits_text", "server_markers"), MarkerType.CREDITS, False, False),
+        ],
+        ids=[
+            "introdb-intro",
+            "theintrodb-credits",
+            "both-databases",
+            "recap",
+            "locked",
+            "no-server-marker",
+            "skipdb",
+            "importer-copy",
+            "with-chapters",
+            "with-season-audio",
+            "with-credit-text",
+        ],
+    )
+    def test_listed_only_for_an_unlocked_intro_or_credits_resting_on_online_and_server_markers(
+        self, store, decided_by, mtype, locked, listed
+    ):
+        rec = _file(store, "/m/S01E01.mkv")
+        marker = Marker(mtype, 10_000, 40_000, decided_by)
+        if locked:
+            store.lock_marker(rec.id, marker)
+        else:
+            decision = TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "x")
+            store.save_decisions(rec.id, {mtype: decision}, settings_fingerprint="f")
+        assert store.files_decided_by_online_and_server_markers() == (["/m/S01E01.mkv"] if listed else [])
+
+    def test_a_file_missing_from_disk_is_not_listed_and_each_file_is_listed_once(self, store):
+        both, gone = _file(store, "/m/S01E01.mkv"), _file(store, "/m/S01E02.mkv")
+        for rec in (both, gone):
+            decisions = {
+                mtype: TypeDecision(
+                    mtype,
+                    DecisionStatus.DECIDED,
+                    Marker(mtype, s, s + 30_000, ("introdb", "server_markers")),
+                    None,
+                    "x",
+                )
+                for mtype, s in ((MarkerType.INTRO, 10_000), (MarkerType.CREDITS, 1_200_000))
+            }
+            store.save_decisions(rec.id, decisions, settings_fingerprint="f")
+        store.mark_missing(gone)
+        assert store.files_decided_by_online_and_server_markers() == ["/m/S01E01.mkv"]
+
+
 class TestFilesWithSeasonAudioIntro:
     """The files the decide-again job lists after settings v17: an unlocked intro decided with season audio."""
 
@@ -262,13 +327,14 @@ class TestFilesWithSeasonAudioIntro:
 class TestRecordMember:
     CHAPTERS = [Candidate(MarkerType.INTRO, 30_000, 40_000, Source.CHAPTERS, origin="Intro")]
 
-    def _record(self, store, size, mtime, chapters=None):
+    def _record(self, store, size, mtime, chapters=None, frame_rate=25.0):
         return store.record_member(
             FileIdentity("/m/S01E02.mkv", size, mtime),
             duration_ms=1_300_000,
             season_key="/m",
             chapters=self.CHAPTERS if chapters is None else chapters,
             chapter_version=7,
+            frame_rate=frame_rate,
         )
 
     def test_a_file_never_seen_is_added_with_its_chapters(self, store):
@@ -277,6 +343,11 @@ class TestRecordMember:
             "/m/S01E02.mkv", 100, 1, 1_300_000, "/m", False)  # fmt: skip
         assert store.get_evidence(rec.id) == self.CHAPTERS
         assert store.evidence_version(rec.id, Source.CHAPTERS) == 7
+        assert store.get_frame_rate(rec.id) == (True, 25.0)
+
+    def test_a_member_without_a_video_frame_rate_is_stored_as_probed(self, store):
+        rec = self._record(store, 100, 1, frame_rate=None)
+        assert store.get_frame_rate(rec.id) == (True, None)
 
     def test_a_file_with_the_probed_identity_is_refreshed_keeping_its_decisions(self, store):
         old = store.upsert_file(
@@ -294,6 +365,7 @@ class TestRecordMember:
         assert self._record(store, 100, 1) is None
         assert store.get_file("/m/S01E02.mkv") == newer
         assert store.get_evidence(newer.id) == []
+        assert store.get_frame_rate(newer.id) == (False, None)
 
 
 class TestMemberProbeFailures:
@@ -420,6 +492,68 @@ class TestIntroChapterLimits:
         assert store.get_intro_chapter_limit(rec.id) == (True, 44_000)
         _file(store, size=200, mtime=2)
         assert store.get_intro_chapter_limit(rec.id) == (False, None)
+
+
+class TestFrameRates:
+    def test_round_trip_of_a_rate_and_of_no_rate(self, store):
+        rec = _file(store)
+        assert store.get_frame_rate(rec.id) == (False, None)
+        assert store.set_frame_rate(rec.id, 24000 / 1001, identity=(rec.size, rec.mtime_ns)) is True
+        assert store.get_frame_rate(rec.id) == (True, 24000 / 1001)
+        assert store.set_frame_rate(rec.id, None, identity=(rec.size, rec.mtime_ns)) is True
+        assert store.get_frame_rate(rec.id) == (True, None)
+
+    def test_refused_when_the_file_was_replaced_while_it_was_probed(self, store):
+        rec = _file(store)
+        _file(store, size=200, mtime=2)
+        assert store.set_frame_rate(rec.id, 25.0, identity=(rec.size, rec.mtime_ns)) is False
+        assert store.get_frame_rate(rec.id) == (False, None)
+
+    def test_a_changed_identity_forgets_the_rate(self, store):
+        rec = _file(store)
+        store.set_frame_rate(rec.id, 25.0, identity=(rec.size, rec.mtime_ns))
+        _file(store)  # the same identity again keeps it
+        assert store.get_frame_rate(rec.id) == (True, 25.0)
+        _file(store, size=200, mtime=2)
+        assert store.get_frame_rate(rec.id) == (False, None)
+
+    def test_a_rate_read_for_another_identity_than_the_rows_is_unread(self, store, tmp_path):
+        rec = _file(store)
+        store.set_frame_rate(rec.id, 25.0, identity=(rec.size, rec.mtime_ns))
+        with sqlite3.connect(tmp_path / "markers.db") as other_writer:  # a row changed without clearing the rate
+            other_writer.execute("UPDATE files SET size=999 WHERE id=?", (rec.id,))
+        assert store.get_frame_rate(rec.id) == (False, None)
+
+    @staticmethod
+    def _paired(store):
+        a, b = _file(store), _file(store, name="/m/S01E02.mkv")
+        _fp(store, a), _fp(store, b)
+        assert _pair(store, a, b, [(1.0, 20.0, 3.0, 22.0)], version=6)
+        return a, b
+
+    @pytest.mark.parametrize(
+        ("first", "second", "dropped"),
+        [(None, 25.0, True), (25.0, 24000 / 1001, True), (25.0, None, True), (25.0, 25.0, False)],
+        ids=["unread-to-25", "25-to-film", "25-to-none", "same-rate"],
+    )
+    def test_a_changed_rate_drops_the_files_matched_pairs(self, store, first, second, dropped):
+        # Its pairs may have been matched at another speed (spec §5.3 "Two playback speeds").
+        a, b = self._paired(store)
+        if first is not None:
+            store.set_frame_rate(b.id, first, identity=(b.size, b.mtime_ns))
+            _pair(store, a, b, [(1.0, 20.0, 3.0, 22.0)], version=6)
+        store.set_frame_rate(b.id, second, identity=(b.size, b.mtime_ns))
+        assert (store.get_season_pair(a.id, b.id, 6) is None) is dropped
+
+    def test_a_member_recorded_with_a_new_rate_drops_its_matched_pairs(self, store):
+        a, b = self._paired(store)
+        store.record_member(FileIdentity(b.canonical_path, b.size, b.mtime_ns), duration_ms=1_300_000,
+                            season_key="/m", chapters=[], chapter_version=7, frame_rate=25.0)  # fmt: skip
+        assert store.get_season_pair(a.id, b.id, 6) is None
+        _pair(store, a, b, [(1.0, 20.0, 3.0, 22.0)], version=6)
+        store.record_member(FileIdentity(b.canonical_path, b.size, b.mtime_ns), duration_ms=1_300_000,
+                            season_key="/m", chapters=[], chapter_version=7, frame_rate=25.0)  # fmt: skip
+        assert store.get_season_pair(a.id, b.id, 6) is not None  # the same rate again
 
 
 class TestDetectorRuns:

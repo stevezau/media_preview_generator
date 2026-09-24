@@ -15,6 +15,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 
 from ._mocks import _fulfill_json, mock_servers_list
+from .conftest import expect_modal_shown, watch_modal_shown
 
 _MEDIA_FILE = "/data/tv/South Park (1997)/Season 01/South Park S01E03.mkv"
 _DURATION = 1_322_000  # 22:02
@@ -2198,9 +2199,10 @@ class TestLockAndUnlock:
         inspector = _Inspector(authed_page, app_url, locked_payload())
         inspector.open_result()
         page = inspector.open_tab()
+        watch_modal_shown(page, "markersUnlockModal")  # its dismiss button is ignored while it fades in
         page.locator("#markersLockBtn").click()
         modal = page.locator("#markersUnlockModal")
-        expect(modal).to_be_visible()
+        expect_modal_shown(page, "markersUnlockModal")
 
         modal.locator("button", has_text="Keep them locked").click()
 

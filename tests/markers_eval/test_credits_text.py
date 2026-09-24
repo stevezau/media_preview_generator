@@ -211,6 +211,43 @@ def test_epilogue_like_reads_the_run_the_way_rule_j_did():
     assert ct.epilogue_like(rows, 90.0) is True
 
 
+def test_epilogue_like_reads_the_run_from_the_rows_rule_j_read_when_it_is_handed_them():
+    # An answer from the 640x360 reading: rule J read its keyframes without the text the 320x180 reading had boxed
+    # (an epilogue card at 80-88 s, on a night scene), which the key rows can't show. Read from the key rows, the run
+    # opens on that card at 80 s and isn't epilogue-shaped; read from the rows rule J found it on, it opens at 90 s on
+    # 12 s of cards, a black gap, then more cards -- the shape the frame check has to see.
+    card = (60, 70, 250, 84)
+    rows = [(float(t), 0, 120.0, ()) for t in range(0, 80, 2)]
+    rows += [(float(t), 1, 10.0, (card,)) for t in range(80, 90, 2)]
+    rows += [(float(t), 3, 10.0, _cards(3)) for t in range(90, 114, 2)]
+    rows += [(float(t), 0, 10.0, ()) for t in range(114, 126, 2)]
+    rows += [(float(t), 3, 10.0, _cards(3)) for t in range(126, 160, 2)]
+    run_rows = [(t, 0, luma, ()) if boxes == (card,) else (t, n, luma, boxes) for t, n, luma, boxes in rows]
+    assert rule_j.overlay_boxes(rows) == ()
+    assert ct.epilogue_like(rows, 90.0, ()) is False
+    assert ct.epilogue_like(rows, 90.0, (), run_rows) is True
+
+
+def test_epilogue_like_finds_the_run_on_the_rows_the_detector_found_it_on():
+    # A lower third over lit story, its words boxed three to a frame at 640x360 every 4 s from 5604 s to 5640 s: a run
+    # in the key rows. Only 5604 s and 5640 s hold text the 320x180 reading didn't box, 36 s apart: no run on the rows
+    # the detector finds its runs on. Found on the key rows instead, the run's first two credit frames are 36 s apart,
+    # and the verdict would be "epilogue-like" for a run the detector never answered from.
+    seen = ((42, 142, 90, 152), (95, 142, 138, 152), (42, 120, 98, 132))
+    new = ((160, 142, 200, 152), (205, 142, 240, 152), (160, 120, 230, 132))
+    rows, run_rows = [], []
+    for t in range(5500, 5700, 2):
+        if t % 4 or not 5604 <= t <= 5640:
+            rows.append((float(t), 0, 120.0, ()))
+            run_rows.append((float(t), 0, 120.0, ()))
+            continue
+        fresh = new if t in (5604, 5640) else ()
+        rows.append((float(t), 3 + len(fresh), 110.0, (*seen, *fresh)))
+        run_rows.append((float(t), len(fresh), 110.0, fresh))
+    assert rule_j.coarse_start(rows) is not None and rule_j.coarse_start(run_rows) is None
+    assert ct.epilogue_like(rows, 5604.0, (), run_rows) is False
+
+
 @pytest.mark.parametrize(
     ("text", "end", "truth", "epilogue", "reasons"),
     [
@@ -226,14 +263,16 @@ def test_epilogue_like_reads_the_run_the_way_rule_j_did():
 def test_sheet_reasons(monkeypatch, text, end, truth, epilogue, reasons):
     seen = []
 
-    def epilogue_like(rows, start, overlays):
-        seen.append(overlays)
+    def epilogue_like(rows, start, overlays, run_rows):
+        seen.append((overlays, run_rows))
         return epilogue
 
     monkeypatch.setattr(ct, "epilogue_like", epilogue_like)
-    assert ct.sheet_reasons({"text": text, "text_end": end, "truth": truth}, [], (BUG,)) == reasons
-    # The overlays the run was read without are forwarded, not re-derived: `epilogue_like`'s own docstring says why.
-    assert seen == ([] if text is None else [(BUG,)])
+    run_rows = [(5590.0, 2, 10.0, CARDS)]
+    assert ct.sheet_reasons({"text": text, "text_end": end, "truth": truth}, [], (BUG,), run_rows) == reasons
+    # The overlays and rows the run was read without and from are forwarded, not re-derived: `epilogue_like`'s own
+    # docstring says why.
+    assert seen == ([] if text is None else [((BUG,), run_rows)])
 
 
 def _row(path, text, end=None, truth=5600.0, medium=None):
@@ -376,6 +415,8 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
             ((5701.0, 2, 12.0, CARDS),),
             ((5890.0, 2, 12.0, CARDS),),
             (BUG,),
+            2,
+            ((5700.0, 1, 12.0, CARDS[:1]),),
         )
 
     monkeypatch.setattr(ct, "find_credits", find)
@@ -385,10 +426,13 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
     first = cache.result(str(media), is_episode=False)
     second = cache.result(str(media), is_episode=False)
     stored_cards = [list(box) for box in CARDS]
+    # ``scale`` says the answer came from the 640x360 reading of a tail the 320x180 one found nothing in, and
+    # ``runs`` holds the rows rule J found the run on there.
     assert first == second == {"start_s": 5702.0, "end_s": 5890.0, "key": [[5700.0, 2, 12.0, stored_cards]],
                                "fine": [[5701.0, 2, 12.0, stored_cards]],
                                "end": [[5890.0, 2, 12.0, stored_cards]],
-                               "overlays": [list(BUG)]}  # fmt: skip
+                               "overlays": [list(BUG)], "scale": 2,
+                               "runs": [[5700.0, 1, 12.0, stored_cards[:1]]]}  # fmt: skip
     assert len(calls) == 1
     assert (calls[0]["duration_ms"], calls[0]["gpu"], calls[0]["gpu_device_path"], calls[0]["is_episode"]) == (DUR, "NVIDIA", "cuda:0", False)  # fmt: skip
     monkeypatch.setattr(ct, "CREDITS_TEXT_VERSION", CREDITS_TEXT_VERSION + 1)
@@ -439,10 +483,10 @@ def test_the_detector_digest_follows_every_source_file_it_names(tmp_path):
 
 
 # Package modules the hashed files import that change no credits text answer: data classes and locks, the job
-# plumbing the detector reports through, and the Vulkan probe, which only picks the helper's device (the self-test
-# keeps a GPU whose box counts differ from the CPU's out).
-NOT_ANSWER_CODE = {"markers.models", "markers.locks", "markers.pipeline", "markers.store", "processing.generator",
-                   "gpu.vulkan_probe"}  # fmt: skip
+# plumbing the detector reports through, the Vulkan probe, which only picks the helper's device (the self-test
+# keeps a GPU whose box counts differ from the CPU's out), and the playback speeds decide reads online times by.
+NOT_ANSWER_CODE = {"markers.models", "markers.locks", "markers.pipeline", "markers.store", "markers.speed",
+                   "processing.generator", "gpu.vulkan_probe"}  # fmt: skip
 
 
 def _package_imports(path, root):
@@ -702,7 +746,17 @@ class _GateRun:
                 if path == failing_path:
                     raise RuntimeError("decode failed")
                 start = None if path in missing else GATE_ANSWERS[path]
-                return {"start_s": start, "end_s": None, "key": [], "fine": [], "end": [], "overlays": [list(BUG)]}
+                # One keyframe, the 640x360 reading's: rule J read it without a card the 320x180 reading boxed.
+                return {
+                    "start_s": start,
+                    "end_s": None,
+                    "key": [[5700.0, 2, 10.0, [list(box) for box in CARDS]]],
+                    "fine": [],
+                    "end": [],
+                    "overlays": [list(BUG)],
+                    "scale": 2,
+                    "runs": [[5700.0, 1, 10.0, [list(CARDS[1])]]],
+                }
 
         def close():
             run.closed += 1
@@ -850,12 +904,13 @@ def test_a_run_lists_and_sheets_every_answer_that_moved_since_an_earlier_run(tmp
     written = []
     monkeypatch.setattr(ct, "_write_sheet", lambda ffmpeg, path, around, out: written.append((path, around, out)))
     # Every row is worth a look on its own run; against an earlier one only the row that moved gets a sheet.
-    # The stub takes `overlays` positionally and records it: `run_credits_text` has to forward what the stored
-    # answer kept, or `epilogue_like` re-gathers them from rows that may be the joined ones.
+    # The stub takes `overlays` and `run_rows` positionally and records them: `run_credits_text` has to forward
+    # what the stored answer kept, or `epilogue_like` re-gathers them from rows that may be the joined ones, or that
+    # still hold the text the 320x180 reading boxed.
     forwarded = []
 
-    def sheet_reasons(detail, key_rows, overlays):
-        forwarded.append(overlays)
+    def sheet_reasons(detail, key_rows, overlays, run_rows):
+        forwarded.append((overlays, run_rows))
         return ["late >30 s"]
 
     monkeypatch.setattr(ct, "sheet_reasons", sheet_reasons)
@@ -868,8 +923,9 @@ def test_a_run_lists_and_sheets_every_answer_that_moved_since_an_earlier_run(tmp
     ]
     assert summary["changed"][0]["start_minus_truth"] == [-20.0, 1.0]
     assert [(path, around) for path, around, _ in written] == [("/m/X2 (2011)/X2.mkv", 5501.0)]
-    # The stored answer's own overlays, by value: forwarding the key rows, or a literal [], would pass an arity check.
-    assert forwarded and forwarded == [[BUG]] * len(forwarded)
+    # The stored answer's own overlays and rule rows, by value: forwarding the key rows, or a literal [], would pass
+    # an arity check.
+    assert forwarded and forwarded == [([BUG], [(5700.0, 1, 10.0, CARDS[1:])])] * len(forwarded)
 
 
 def test_only_the_chosen_set_is_run_and_judged(tmp_path, monkeypatch):

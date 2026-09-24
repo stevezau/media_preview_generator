@@ -95,6 +95,10 @@ docs/design/intro-credits/evidence/lab/*_truth.txt
 docs/design/intro-credits/evidence/lab/prod_plex_baseline.txt
 docs/design/intro-credits/evidence/credits/spot.txt
 docs/design/intro-credits/evidence/credits/framechecks/
+# Run logs, tables and other text outputs name real library paths: local only (a topic's outputs go in local/)
+docs/design/intro-credits/evidence/**/*.log
+docs/design/intro-credits/evidence/**/*.tsv
+docs/design/intro-credits/evidence/**/local/
 
 # Emby plugin build output (`dotnet build` locally and in CI)
 emby-plugin/bin/

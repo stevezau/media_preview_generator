@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from media_preview_generator.markers.audio import POINT_S
+from media_preview_generator.markers.speed import FILM_FPS, PAL_FPS
 from tools.markers_eval import fp3_reference
 from tools.markers_eval.data import EvalEpisode
 from tools.markers_eval.intros import reproduce
@@ -184,11 +185,14 @@ def test_the_summary_never_reports_a_port_comparison_it_skipped(monkeypatch, cap
 
     asked = []
 
-    def fake_reproduce(episodes, *, points, end_pictures, with_reference, full_folder):
+    wired = []
+
+    def fake_reproduce(episodes, *, points, end_pictures, with_reference, full_folder, speed, retimed):
         asked.append(with_reference)
+        wired.append((speed, retimed))
         return ReproductionReport(tally=Tally(*SPEC_SEASON_STEP))
 
-    monkeypatch.setattr(cli, "_cache", lambda args: SimpleNamespace(points=None))
+    monkeypatch.setattr(cli, "_cache", lambda args: SimpleNamespace(points=None, speed="speed", retimed="retimed"))
     monkeypatch.setattr(cli, "load_v3_results", lambda: [])
     monkeypatch.setattr(cli, "reproduce", fake_reproduce)
     assert cli.main(["reproduce", "--no-reference"]) == 0
@@ -196,6 +200,7 @@ def test_the_summary_never_reports_a_port_comparison_it_skipped(monkeypatch, cap
     assert cli.main(["reproduce"]) == 0
     assert json.loads(capsys.readouterr().out)["port_vs_reference"] == 0
     assert asked == [False, True]
+    assert wired == [("speed", "retimed")] * 2  # the step matches at one speed, as the app does
 
 
 def test_an_early_intro_whose_end_picture_differs_is_passed_over_and_reported():
@@ -256,6 +261,51 @@ def test_season_truth_counts_no_answer_for_no_intro_apart(tmp_path):
     assert report.tally.as_dict() == {"useful": 0, "wrong": 0, "missed": 0} and report.none_ok == 1
 
 
+def _mixed_speed_season(tmp_path):
+    """Four episodes, the fourth a 25 fps release: its own fingerprint holds a sped-up theme nothing else matches, and
+    its fingerprint slowed to film speed holds the others' theme at the points ``_fps`` planted it."""
+    fps = _truth_season(tmp_path, episodes=4)
+    files = sorted(fps)
+    fast = files[3]
+    native = dict(fps)
+    native[fast] = fps[fast].copy()
+    native[fast][140:340] = np.random.default_rng(99).integers(0, 2**32, size=200, dtype=np.uint64).astype("<u4")
+    speeds = {f: FILM_FPS for f in files[:3]} | {fast: PAL_FPS}
+    return native, fps, speeds, fast
+
+
+def test_season_truth_matches_a_file_at_another_speed_on_its_retimed_fingerprint(tmp_path):
+    from tools.markers_eval.intros import season_truth
+
+    native, film_speed, speeds, fast = _mixed_speed_season(tmp_path)
+    retimes = []
+
+    def retimed(path, factor):
+        retimes.append((path, factor))
+        return film_speed[path]
+
+    factor = FILM_FPS / PAL_FPS
+    truth = {fast: (140 * POINT_S * factor, 339 * POINT_S * factor)}
+    report = season_truth(truth, points=native.__getitem__, end_pictures=ALIKE, speed=speeds.get, retimed=retimed)
+    assert retimes == [(fast, pytest.approx(factor))]
+    assert report.tally.as_dict() == {"useful": 1, "wrong": 0, "missed": 0}
+    start, end, support = report.details[fast]["answer"]
+    assert (start, end) == (pytest.approx(truth[fast][0], abs=POINT_S), pytest.approx(truth[fast][1], abs=POINT_S))
+    assert support == 3
+    # Without the speeds the same season finds nothing for it: what the app did before.
+    before = season_truth(truth, points=native.__getitem__, end_pictures=ALIKE)
+    assert before.tally.as_dict() == {"useful": 0, "wrong": 0, "missed": 1}
+
+
+def test_a_film_rate_episode_counts_the_retimed_one_as_support_in_the_gate(tmp_path):
+    native, film_speed, speeds, fast = _mixed_speed_season(tmp_path)
+    files = sorted(native)
+    episodes = [EvalEpisode(str(Path(files[0]).parent), files[0], (110 * POINT_S, 309 * POINT_S), None, None)]
+    report = reproduce(episodes, points=native.__getitem__, end_pictures=ALIKE, with_reference=False,
+                       full_folder=True, speed=speeds.get, retimed=lambda path, factor: film_speed[path])  # fmt: skip
+    assert report.tally.as_dict() == {"useful": 1, "wrong": 0, "missed": 0}
+
+
 @pytest.mark.parametrize(("expect", "code"), [(None, 0), ("1,1", 0), ("2,1", 1), ("1,0", 1)])
 def test_the_season_truth_command_exits_on_its_expected_numbers(tmp_path, monkeypatch, capsys, expect, code):
     import json
@@ -267,7 +317,8 @@ def test_the_season_truth_command_exits_on_its_expected_numbers(tmp_path, monkey
     files = sorted(fps)
     truth_file = tmp_path / "truth.json"
     truth_file.write_text(json.dumps({files[0]: [110 * POINT_S, 309 * POINT_S], files[1]: None}))
-    monkeypatch.setattr(cli, "_cache", lambda args: SimpleNamespace(points=fps.__getitem__))
+    cache = SimpleNamespace(points=fps.__getitem__, speed=lambda path: None, retimed=None)
+    monkeypatch.setattr(cli, "_cache", lambda args: cache)
     monkeypatch.setattr(cli, "_end_pictures", lambda args: ALIKE)
     argv = ["season-truth", "--truth", str(truth_file)] + (["--expect", expect] if expect else [])
     assert cli.main(argv) == code
