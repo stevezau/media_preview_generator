@@ -194,15 +194,17 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
 
 @dataclass(frozen=True)
 class StreamStarts:
-    """Where the container and its first audio stream start.
+    """Where the container and its first audio stream start, and whether it has a picture to decode.
 
     Attributes:
         container_s: The container's first timestamp (0.0 when it reports none).
         audio_s: The first audio stream's first timestamp, None when the file has no audio stream or reports none.
+        has_video: Whether it has a video stream that isn't cover art.
     """
 
     container_s: float
     audio_s: float | None
+    has_video: bool = True
 
     @property
     def audio_offset_s(self) -> float:
@@ -212,7 +214,8 @@ class StreamStarts:
 
 
 def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> StreamStarts:
-    """The container's and the first audio stream's start times, from one ffprobe that reads only the headers.
+    """The container's and the first audio stream's start times, and whether there is a video stream, from one ffprobe
+    that reads only the headers.
 
     Args:
         path: Media file.
@@ -227,8 +230,8 @@ def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> Stream
         ProbeTimeoutError: ffprobe ran past ``timeout_s``.
         ProbeError: ffprobe missing, failed or returned something other than its JSON.
     """
-    cmd = [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "format=start_time:stream=start_time",
-           "-of", "json", path]  # fmt: skip
+    cmd = [ffprobe, "-v", "error", "-show_entries",
+           "format=start_time:stream=codec_type,start_time:stream_disposition=attached_pic", "-of", "json", path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
     try:
         data = json.loads(stdout or "")
@@ -237,10 +240,17 @@ def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> Stream
     if not isinstance(data, dict):
         raise ProbeError(f"ffprobe returned unexpected JSON for {path}: top level was {type(data).__name__}")
     streams = data.get("streams") or []
+    if not isinstance(streams, list):
+        raise ProbeError(f"ffprobe returned an unexpected stream list for {path}")
+    streams = [stream for stream in streams if isinstance(stream, dict)]
     fmt = data.get("format") or {}
-    audio = streams[0] if isinstance(streams, list) and streams and isinstance(streams[0], dict) else {}
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+    has_video = any(
+        stream.get("codec_type") == "video" and not (stream.get("disposition") or {}).get("attached_pic")
+        for stream in streams
+    )
     container = _seconds(fmt.get("start_time") if isinstance(fmt, dict) else None)
-    return StreamStarts(container or 0.0, _seconds(audio.get("start_time")))
+    return StreamStarts(container or 0.0, _seconds(audio.get("start_time")), has_video)
 
 
 @dataclass(frozen=True)

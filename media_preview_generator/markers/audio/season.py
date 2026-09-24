@@ -88,6 +88,9 @@ MAX_GROUP_EPISODES = 40
 # A season member ffprobe couldn't read, or ffmpeg couldn't fingerprint, is left out of other episodes' season steps for
 # this long (while unchanged).
 UNREADABLE_MEMBER_RETRY = timedelta(days=1)
+# A file the end-picture check couldn't read (an error, a non-zero exit, a timeout) isn't read for it again for this
+# long while unchanged: a bad partner would otherwise hold a worker for up to 150 s on every sibling's run.
+END_PICTURE_RETRY = timedelta(days=1)
 # chromaprint gives silence (and noise too quiet to hear) one constant value, so a shared quiet stretch matches like an
 # intro would (the v3 matcher keeps that behaviour).
 SILENCE_POINT = 0x256DF977
@@ -422,9 +425,9 @@ def guarded_pick(
 ) -> IntroSegment | None:
     """The best ranked of the v3 matcher's clusters for one episode that passes the guards (before the silence guard).
 
-    The clusters are walked in the matcher's ranking order (:func:`matcher.intro_candidates`); one that fails a guard
-    (too short at the file's start, no dense core, or an early one whose end picture differs) is passed over. The first
-    one left must have the matcher's quorum, as the matcher's own answer must, or there is no intro.
+    The clusters are walked in the matcher's ranking order (:func:`matcher.intro_candidates`): the walk ends, with no
+    intro, at the first cluster without the quorum; a quorum cluster that fails a guard (too short at the file's start,
+    no dense core, or an early one whose end picture differs) is passed over.
 
     Args:
         target: The episode (one of ``files``).
@@ -799,6 +802,8 @@ def _end_picture_unchecked(
         _intro(ctx, rec.canonical_path, files, records, points, _EndPictures(ctx, rec, records, decode=False))
     except _EndPictureUncheckedError:
         return True
+    except end_picture.CheckUnavailableError:
+        return False  # this episode's own file couldn't be read lately: the detector gives up without decoding
     return False
 
 
@@ -811,9 +816,15 @@ class _EndPictures:
     per file pair and stretch.
 
     With ``decode`` off (``season_audio_needs_worker``), a share not cached yet raises
-    :class:`_EndPictureUncheckedError` instead: decoding is a worker's job. With it on, a file ffprobe or ffmpeg can't
-    read gives the pair no share (stored, so it isn't read again while the files stay the same), and a cancel, a
-    stalled or timed-out read raise ``end_picture.CheckUnavailableError`` with nothing stored.
+    :class:`_EndPictureUncheckedError` instead: decoding is a worker's job. A forced re-detect reads no cached share and
+    no remembered failure, so every share is measured again.
+
+    A file ffprobe or ffmpeg couldn't read (``end_picture.ReadFailedError``) is remembered with its identity for a day
+    (``END_PICTURE_RETRY``) and not read for the check meanwhile, by this episode's run or any sibling's. It is never a
+    pass: this episode's own file makes the check unavailable (no season audio answer this time), and a partner has no
+    share, so the other partner decides; with no share at all the check is unavailable too. Only a share, or "certainly
+    no frames" (None), is cached. A cancel or stalled ffprobes raise ``end_picture.CheckUnavailableError`` with nothing
+    stored.
     """
 
     def __init__(
@@ -840,7 +851,8 @@ class _EndPictures:
 
     def __call__(self, candidate: IntroCandidate) -> bool:
         segment = candidate.segment
-        shares = []
+        shares: list[float | None] = []
+        unread = False
         for hit in end_picture.partners(candidate.members):
             partner = self._records[hit.partner]
             offset_s = hit.partner_start_s - hit.start_s
@@ -852,14 +864,46 @@ class _EndPictures:
                 round(offset_s * 1000),
             )
             if key not in self._shares:
-                cached = self._ctx.store.get_end_picture(key, end_picture.CHECK_VERSION)
-                if cached is None and not self._decode:
-                    raise _EndPictureUncheckedError(os.path.basename(self._target.canonical_path))
-                self._shares[key] = (
-                    cached.share if cached is not None else self._measure(key, segment, partner, offset_s)
-                )
+                cached = None if self._ctx.force else self._ctx.store.get_end_picture(key, end_picture.CHECK_VERSION)
+                if cached is not None:
+                    self._shares[key] = cached.share
+                else:
+                    if self._failed_lately(self._target):
+                        raise end_picture.CheckUnavailableError(
+                            f"{os.path.basename(self._target.canonical_path)} couldn't be read for its end picture "
+                            "lately"
+                        )
+                    if self._failed_lately(partner):
+                        unread = True
+                        continue
+                    if not self._decode:
+                        raise _EndPictureUncheckedError(os.path.basename(self._target.canonical_path))
+                    try:
+                        self._shares[key] = self._measure(key, segment, partner, offset_s)
+                    except end_picture.ReadFailedError as exc:
+                        failed = self._target if exc.path == self._target.canonical_path else partner
+                        self._record_failure(failed)
+                        if failed is self._target:
+                            raise end_picture.CheckUnavailableError(str(exc)) from exc
+                        unread = True
+                        continue
             shares.append(self._shares[key])
+        if unread and all(share is None for share in shares):
+            raise end_picture.CheckUnavailableError(
+                f"the end picture of {os.path.basename(self._target.canonical_path)} has no partner to compare with: "
+                "its partners couldn't be read lately"
+            )
         return end_picture.passes(shares)
+
+    def _failed_lately(self, rec: FileRecord) -> bool:
+        if self._ctx.force:
+            return False
+        failed_at = self._ctx.store.end_picture_failed_at(_identity_of(rec))
+        return failed_at is not None and self._ctx.now() - failed_at < END_PICTURE_RETRY
+
+    def _record_failure(self, rec: FileRecord) -> None:
+        now = self._ctx.now()
+        self._ctx.store.record_end_picture_failure(_identity_of(rec), now, forget_before=now - END_PICTURE_RETRY)
 
     def _measure(self, key: EndPictureKey, segment: IntroSegment, partner: FileRecord, offset_s: float) -> float | None:
         self._phase("Comparing the intro's end picture…")

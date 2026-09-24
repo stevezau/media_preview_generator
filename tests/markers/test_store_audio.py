@@ -197,6 +197,34 @@ class TestEndPictures:
         assert store.get_end_picture(EndPictureKey(a.id, b.id, 0, 30_000, 500), 1) == CachedShare(1.0)
 
 
+class TestEndPictureFailures:
+    """Files the end-picture check couldn't read, remembered with their identity for a day."""
+
+    NOW = datetime(2026, 9, 24, tzinfo=UTC)
+
+    def test_a_failure_counts_only_for_the_identity_it_was_recorded_with(self, store):
+        store.record_end_picture_failure(FileIdentity("/m/a.mkv", 1, 1), self.NOW, forget_before=self.NOW)
+        assert store.end_picture_failed_at(FileIdentity("/m/a.mkv", 1, 1)) == self.NOW
+        assert store.end_picture_failed_at(FileIdentity("/m/a.mkv", 2, 1)) is None
+        assert store.end_picture_failed_at(FileIdentity("/m/b.mkv", 1, 1)) is None
+
+    def test_recording_one_forgets_entries_that_stopped_counting(self, store):
+        store.record_end_picture_failure(FileIdentity("/m/a.mkv", 1, 1), self.NOW, forget_before=self.NOW)
+        later = self.NOW + timedelta(days=2)
+        store.record_end_picture_failure(FileIdentity("/m/b.mkv", 1, 1), later, forget_before=later - timedelta(days=1))
+        assert store.end_picture_failed_at(FileIdentity("/m/a.mkv", 1, 1)) is None
+        assert store.end_picture_failed_at(FileIdentity("/m/b.mkv", 1, 1)) == later
+
+    def test_the_fingerprint_sweep_forgets_a_gone_files_failure(self, store):
+        a = _file(store, "/m/a.mkv")
+        _fp(store, a)
+        store.record_end_picture_failure(FileIdentity(a.canonical_path, a.size, a.mtime_ns), self.NOW,
+                                         forget_before=self.NOW)  # fmt: skip
+        (check,) = store.fingerprint_checks(10)
+        store.finish_fingerprint_checks(check.file_id, [check])
+        assert store.end_picture_failed_at(FileIdentity(a.canonical_path, a.size, a.mtime_ns)) is None
+
+
 class TestFilesWithSeasonAudioIntro:
     """The files the decide-again job lists after settings v17: an unlocked intro decided with season audio."""
 

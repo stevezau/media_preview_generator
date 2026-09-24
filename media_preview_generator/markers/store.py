@@ -230,6 +230,15 @@ _SCHEMA = (
         size INTEGER NOT NULL,
         mtime_ns INTEGER NOT NULL,
         failed_at TEXT NOT NULL)""",
+    # A file season audio's end-picture check couldn't read (ffprobe failed, ffmpeg exited with an error or timed out),
+    # with the identity it had then: it isn't read for the check again (up to 150 s on a worker per episode that meets
+    # it) until that identity changes, the entry is a day old, or a forced re-detect. Meanwhile it has no share: never a
+    # pass. Not tied to a file row, like the member failures above.
+    """CREATE TABLE IF NOT EXISTS end_picture_failures (
+        canonical_path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        failed_at TEXT NOT NULL)""",
     # A server's empty (or unusable) answer for a file, asked again by Check servers: how many times it was read again
     # without markers (the backoff step; gone once the answer has markers or the file changes), when the last re-read
     # that couldn't replace the answer happened (the backoff counts from it), and when Check servers last took the
@@ -1412,8 +1421,8 @@ class MarkerStore:
     def finish_fingerprint_checks(self, checked_up_to: int, gone: Iterable[FingerprintCheck]) -> int:
         """Record a sweep's checks in one transaction: drop the cache of the files found gone, and move the cursor.
 
-        A gone file's fingerprints, the matcher runs cached with them, its end-picture checks and its unreadable-member
-        entries go. Its ``files`` row stays, with the decisions, locked markers and publish records tied to it. A file
+        A gone file's fingerprints, the matcher runs cached with them, its end-picture shares and failures, and its
+        unreadable-member entries go. Its ``files`` row stays, with the decisions, locked markers and publish records tied to it. A file
         whose row has another identity than when it was listed is left alone: a new file came to that path, and its own
         run may already have fingerprinted it.
 
@@ -1441,7 +1450,7 @@ class MarkerStore:
                 conn.execute("DELETE FROM fingerprints WHERE file_id=?", (check.file_id,))
                 for table in ("season_pairs", "season_end_pictures"):
                     conn.execute(f"DELETE FROM {table} WHERE file_a=? OR file_b=?", (check.file_id, check.file_id))
-                for table in ("member_probe_failures", "member_fingerprint_failures"):
+                for table in ("member_probe_failures", "member_fingerprint_failures", "end_picture_failures"):
                     conn.execute(f"DELETE FROM {table} WHERE canonical_path=?", (check.canonical_path,))
         return dropped
 
@@ -1734,6 +1743,34 @@ class MarkerStore:
         with self._lock:
             r = self._conn.execute(
                 "SELECT failed_at FROM member_fingerprint_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
+                (identity.canonical_path, identity.size, identity.mtime_ns),
+            ).fetchone()
+        return datetime.fromisoformat(r["failed_at"]) if r else None
+
+    def record_end_picture_failure(
+        self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
+    ) -> None:
+        """Remember that season audio's end-picture check couldn't read a file with this identity (replaces the path's
+        older entry). Entries that no longer hold a file back are forgotten in the same write, as for member failures.
+
+        Args:
+            identity: The file as it was when the read failed.
+            failed_at: When (the job's clock).
+            forget_before: Entries of any path that failed before this are removed.
+        """
+        with self._tx() as conn:
+            conn.execute("DELETE FROM end_picture_failures WHERE failed_at < ?", (forget_before.isoformat(),))
+            conn.execute(
+                "INSERT OR REPLACE INTO end_picture_failures (canonical_path, size, mtime_ns, failed_at) "
+                "VALUES (?,?,?,?)",
+                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
+            )
+
+    def end_picture_failed_at(self, identity: FileIdentity) -> datetime | None:
+        """When the end-picture check last failed to read a file with exactly this identity, or None."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT failed_at FROM end_picture_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
                 (identity.canonical_path, identity.size, identity.mtime_ns),
             ).fetchone()
         return datetime.fromisoformat(r["failed_at"]) if r else None

@@ -459,39 +459,72 @@ class TestVideoPackets:
 
 
 class TestStreamStarts:
-    """The container's and the first audio stream's start times (season audio's end-picture check)."""
+    """The container's and the first audio stream's start times, and whether there's a picture (season audio's
+    end-picture check)."""
 
-    def test_reads_only_the_headers_of_the_first_audio_stream(self):
-        proc = _ok({"streams": [{"start_time": "0.976000"}], "format": {"start_time": "0.000000"}})
+    @staticmethod
+    def _payload(fmt_start, *streams):
+        return {
+            "streams": [
+                {"codec_type": kind, "start_time": start, "disposition": {"attached_pic": int(cover)}}
+                for kind, start, cover in streams
+            ],
+            "format": {"start_time": fmt_start},
+        }
+
+    def test_reads_only_the_headers(self):
+        proc = _ok(self._payload("0.000000", ("video", "0.000000", False), ("audio", "0.976000", False)))
         with patch(RUN, return_value=proc) as run:
             starts = probe.stream_starts("/m/a.mkv", ffprobe="ffprobe", timeout_s=30.0)
         assert run.call_args.args[0] == [
-            "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "format=start_time:stream=start_time",
-            "-of", "json", "/m/a.mkv",
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=start_time:stream=codec_type,start_time:stream_disposition=attached_pic", "-of", "json", "/m/a.mkv",
         ]  # fmt: skip
         assert proc.communicate.call_args.kwargs == {"timeout": 30.0}
-        assert starts == probe.StreamStarts(0.0, 0.976)
+        assert starts == probe.StreamStarts(0.0, 0.976, True)
 
     @pytest.mark.parametrize(
-        ("payload", "offset"),
+        ("container", "audio", "offset"),
         [
             # An HBO Max release: the audio starts 0.976 s into the file, so a fingerprint's point 0 plays there.
-            ({"streams": [{"start_time": "0.976000"}], "format": {"start_time": "0.000000"}}, 0.976),
+            ("0.000000", "0.976000", 0.976),
             # The audio's start relative to the container's, not its raw timestamp.
-            ({"streams": [{"start_time": "2.000000"}], "format": {"start_time": "0.023000"}}, 1.977),
-            ({"streams": [{"start_time": "30001.5"}], "format": {"start_time": "30000.0"}}, 1.5),
+            ("0.023000", "2.000000", 1.977),
+            ("30000.0", "30001.5", 1.5),
             # Audio that starts with (or before) the container: point 0 is the file's start.
-            ({"streams": [{"start_time": "-0.021000"}], "format": {"start_time": "0.000000"}}, 0.0),
-            ({"streams": [], "format": {"start_time": "0.000000"}}, 0.0),  # no audio stream
-            ({"streams": [{"start_time": "N/A"}], "format": {}}, 0.0),
+            ("0.000000", "-0.021000", 0.0),
+            ("0.000000", None, 0.0),  # no audio stream
+            (None, "N/A", 0.0),
         ],
         ids=["hmax-late-audio", "late-audio-in-a-late-container", "recording-base", "early-audio", "no-audio", "n/a"],
     )
-    def test_the_audio_offset_is_where_the_first_audio_sample_plays(self, payload, offset):
-        with patch(RUN, return_value=_ok(payload)):
+    def test_the_audio_offset_is_where_the_first_audio_sample_plays(self, container, audio, offset):
+        streams = [("video", "0.000000", False)] + ([("audio", audio, False)] if audio else [])
+        with patch(RUN, return_value=_ok(self._payload(container, *streams))):
             assert probe.stream_starts("/m/a.mkv", ffprobe="ffprobe").audio_offset_s == pytest.approx(offset)
 
-    @pytest.mark.parametrize("stdout", ["not json", "[]"])
+    def test_the_first_audio_stream_counts_whatever_comes_before_it(self):
+        payload = self._payload(
+            "0.0", ("video", "0.0", False), ("subtitle", "0.0", False), ("audio", "1.5", False), ("audio", "3.0", False)
+        )
+        with patch(RUN, return_value=_ok(payload)):
+            assert probe.stream_starts("/m/a.mkv", ffprobe="ffprobe").audio_s == 1.5
+
+    @pytest.mark.parametrize(
+        ("streams", "has_video"),
+        [
+            ([("video", "0.0", False), ("audio", "0.0", False)], True),
+            ([("video", "0.0", True), ("audio", "0.0", False)], False),  # cover art only
+            ([("audio", "0.0", False)], False),
+            ([("video", "0.0", True), ("video", "0.0", False)], True),
+        ],
+        ids=["picture", "cover-art-only", "audio-only", "cover-art-and-picture"],
+    )
+    def test_whether_there_is_a_picture_to_decode(self, streams, has_video):
+        with patch(RUN, return_value=_ok(self._payload("0.0", *streams))):
+            assert probe.stream_starts("/m/a.mkv", ffprobe="ffprobe").has_video is has_video
+
+    @pytest.mark.parametrize("stdout", ["not json", "[]", '{"streams": "x"}'])
     def test_unreadable_output_is_a_probe_error(self, stdout):
         with patch(RUN, return_value=_proc(stdout=stdout)), pytest.raises(ProbeError):
             probe.stream_starts("/m/a.mkv", ffprobe="ffprobe")

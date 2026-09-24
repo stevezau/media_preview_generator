@@ -388,7 +388,7 @@ def _identity(path):
     return st.st_size, st.st_mtime_ns
 
 
-EARLY_OFFSETS = {"S01E01": 80, "S01E02": 100, "S01E03": 120}  # 9.9, 12.4 and 14.9 s: all checked
+EARLY_OFFSETS = {"S01E01": 80, "S01E02": 100, "S01E03": 120, "S02E01": 90}  # 9.9-14.9 s: all checked
 
 
 def early_points(path: str) -> np.ndarray:
@@ -512,6 +512,119 @@ class TestEndPictureCheck:
         with _Audio() as audio:  # fake_points: the intros start at 37, 64 and 88 s
             _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
         assert audio.compared == [] and _evidence(store, e1, Source.SEASON_AUDIO)
+
+    @staticmethod
+    def _clocked(store, path, clock, *, force=False):
+        return _ctx(
+            store, _registry(path, ServerType.PLEX), detectors=(_spec(),), settings_raw=SEASON_RAW, force=force,
+            now=lambda: clock[0],
+        )  # fmt: skip
+
+    @staticmethod
+    def _unreadable(*paths, then=1.0):
+        """A share that fails to read ``paths`` (the episode or a partner) while they are in the set."""
+        unreadable = set(paths)
+
+        def share(target, partner, *_args):
+            for path in (target, partner):
+                if path in unreadable:
+                    raise season.end_picture.ReadFailedError(path, f"ffmpeg exited 1 decoding {path} on the CPU")
+            return then
+
+        return unreadable, share
+
+    def test_an_episode_that_couldnt_be_read_is_never_a_pass_and_is_read_again_after_a_day(self, store, show):
+        # The reviewer's repro: one unreadable read of an ident used to store "no frames" and pass it for good.
+        e1, _e2, _e3 = show(1, 3)
+        clock = [datetime(2026, 9, 13, tzinfo=UTC)]
+        ctx = self._clocked(store, e1, clock)
+        unreadable, share = self._unreadable(e1, then=0.0)  # read cleanly, its pictures differ: an ident
+        with _Audio(points=early_points, share=share) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            rec = store.get_file(e1)
+            assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None  # no answer this time
+            assert store.end_picture_failed_at(FileIdentity(e1, rec.size, rec.mtime_ns)) == clock[0]
+            assert [key for key in _end_picture_keys(store) if key[0] == rec.id] == []  # nothing cached as a pass
+            unreadable.clear()
+            audio.compared.clear()
+            clock[0] += timedelta(hours=23)
+            # Within the day it isn't read again, and it still has no answer: given up on the checking thread.
+            assert season.season_audio_needs_worker(rec, ctx) is False
+            assert _run(ctx, e1, {"plex-1": ready_publisher()})[0] is not None
+            assert audio.compared == [] and store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None
+            clock[0] += timedelta(hours=2)
+            assert season.season_audio_needs_worker(rec, ctx) is True
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+        assert audio.compared and store.get_detector_run(rec.id, Source.SEASON_AUDIO) is not None
+        assert _evidence(store, e1, Source.SEASON_AUDIO) == []  # read at last: the ident is passed over
+
+    def test_a_partner_that_couldnt_be_read_has_no_share_for_a_day_and_the_other_partner_decides(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        clock = [datetime(2026, 9, 13, tzinfo=UTC)]
+        ctx = self._clocked(store, e1, clock)
+        _unreadable_now, share = self._unreadable(e2)
+        with _Audio(points=early_points, share=share) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            assert _evidence(store, e1, Source.SEASON_AUDIO)  # e3's share of 1.0 decides
+            rec2 = store.get_file(e2)
+            assert store.end_picture_failed_at(FileIdentity(e2, rec2.size, rec2.mtime_ns)) == clock[0]
+            audio.compared.clear()
+            ctx.take_followups()
+            _run(ctx, e3, {"plex-1": ready_publisher()}, stage="process")
+            # e3's partners are e1 and e2: e2 isn't read again (a bad partner held a worker for every sibling).
+            assert [(t, p) for t, p, *_ in audio.compared] == [(e3, e1)]
+            assert _evidence(store, e3, Source.SEASON_AUDIO)
+            # e2's own run: its file couldn't be read lately, so it gives up without a worker.
+            audio.compared.clear()
+            assert season.season_audio_needs_worker(rec2, ctx) is False
+            _run(ctx, e2, {"plex-1": ready_publisher()})
+            assert audio.compared == [] and store.get_detector_run(rec2.id, Source.SEASON_AUDIO) is None
+
+    def test_no_partner_that_could_be_read_leaves_no_answer(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        _unreadable_now, share = self._unreadable(e2, e3)
+        with _Audio(points=early_points, share=share):
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+        rec = store.get_file(e1)
+        assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None and _end_picture_keys(store) == []
+        for path in (e2, e3):
+            member = store.get_file(path)
+            assert store.end_picture_failed_at(FileIdentity(path, member.size, member.mtime_ns)) is not None
+
+    def test_a_forced_re_detect_reads_every_share_and_failed_file_again(self, store, show):
+        e1, e2, _e3 = show(1, 3)
+        clock = [datetime(2026, 9, 13, tzinfo=UTC)]
+        unreadable, share = self._unreadable(e2)
+        with _Audio(points=early_points, share=share) as audio:
+            _run(self._clocked(store, e1, clock), e1, {"plex-1": ready_publisher()}, stage="process")
+            first = list(audio.compared)
+            unreadable.clear()
+            audio.compared.clear()
+            forced = self._clocked(store, e1, clock, force=True)
+            rec = store.get_file(e1)
+            assert season.season_audio_needs_worker(rec, forced) is True
+            _detect_and_store(forced, rec)
+        assert sorted(first) == sorted(audio.compared) and e2 in {p for _t, p, *_ in audio.compared}
+
+    def test_a_lone_episode_needs_a_worker_for_its_previous_season_end_pictures_until_they_are_cached(
+        self, store, show
+    ):
+        s1 = show(1, 3)
+        (s2e1,) = show(2, 1)
+        recs = [_store_fingerprint(store, path, early_points(path)) for path in (*s1, s2e1)]
+        ctx = _season_ctx(store, s2e1)
+        # Every file is fingerprinted and no pair is slow: only the end pictures need the worker.
+        assert season.season_audio_needs_worker(recs[-1], ctx) is True
+        with _Audio(points=early_points) as audio:
+            _detect_and_store(ctx, recs[-1])
+        assert audio.compared and {p for t, p, *_ in audio.compared if t == s2e1} <= set(s1)
+        assert _evidence(store, s2e1, Source.SEASON_AUDIO_PREVIOUS)
+        assert season.season_audio_needs_worker(recs[-1], _season_ctx(store, s2e1)) is False
+
+
+def _end_picture_keys(store):
+    with store._lock:
+        return [tuple(r) for r in store._conn.execute("SELECT file_a, file_b FROM season_end_pictures").fetchall()]
 
 
 def _decided(mtype, start, end, decided_by=("skipdb",)):

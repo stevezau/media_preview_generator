@@ -167,48 +167,77 @@ class TestReader:
         assert probed == ["a", "b", "c"]
         assert [call[0] for call in decoder.calls] == ["a", "b", "c"]
 
-    @pytest.mark.parametrize(
-        "error",
-        [ProbeStalledError("2 earlier ffprobes are still stuck"), ProbeTimeoutError("timed out")],
-        ids=["stalled", "timed-out"],
-    )
-    def test_a_stalled_or_timed_out_probe_gives_no_verdict_this_time(self, error):
-        reader, patched = self._reader(lambda path, **_kw: (_ for _ in ()).throw(error), _Decoder())
+    def test_stalled_ffprobes_give_no_verdict_this_time_and_blame_no_file(self):
+        def stalled(path, **_kw):
+            raise ProbeStalledError("2 earlier ffprobes are still stuck")
+
+        reader, patched = self._reader(stalled, _Decoder())
         with patched, pytest.raises(ep.CheckUnavailableError):
             reader.share("a", "b", 0.0, 30.0, 0.0)
 
-    def test_a_file_ffprobe_cant_read_has_no_share(self):
+    @pytest.mark.parametrize(
+        "error", [ProbeError("ffprobe exited 1 for b"), ProbeTimeoutError("timed out")], ids=["error", "timed-out"]
+    )
+    def test_a_file_ffprobe_cant_read_is_a_failed_read_never_no_frames(self, error):
         def starts(path, **_kw):
             if path == "b":
-                raise ProbeError("no such file")
+                raise error
             return StreamStarts(0.0, None)
 
         decoder = _Decoder()
         reader, patched = self._reader(starts, decoder)
-        with patched:
-            assert reader.share("a", "b", 0.0, 30.0, 0.0) is None
-        assert decoder.calls == []
+        with patched, pytest.raises(ep.ReadFailedError) as failed:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert failed.value.path == "b" and decoder.calls == []
 
     @pytest.mark.parametrize(
-        ("error", "raised"),
+        "error",
         [
-            (frames.DecodeCancelledError("cancelled while decoding a"), True),
-            (frames.DecodeTimeoutError("decoding a timed out after 120 s"), True),
-            (frames.FrameDecodeError("ffmpeg exited 1 decoding a on the CPU"), False),
+            frames.DecodeTimeoutError("decoding b timed out after 120 s"),
+            frames.FrameDecodeError("ffmpeg exited 1 decoding b on the CPU"),  # an NFS read error, say
         ],
-        ids=["cancelled", "timed-out", "unreadable"],
+        ids=["timed-out", "non-zero-exit"],
     )
-    def test_decode_failures(self, error, raised):
-        def decoder(*_args, **_kwargs):
-            raise error
+    def test_a_decode_that_fails_is_a_failed_read_of_that_file_and_it_isnt_read_again_this_run(self, error):
+        calls = []
+
+        def decoder(path, *_args, **_kwargs):
+            calls.append(path)
+            if path == "b":
+                raise error
+            return []
 
         reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None), decoder)
         with patched:
-            if raised:
-                with pytest.raises(ep.CheckUnavailableError):
+            for _ in range(2):
+                with pytest.raises(ep.ReadFailedError) as failed:
                     reader.share("a", "b", 0.0, 30.0, 0.0)
-            else:
-                assert reader.share("a", "b", 0.0, 30.0, 0.0) is None
+                assert failed.value.path == "b"
+        assert calls == ["a", "b"]
+
+    def test_a_cancelled_decode_gives_no_verdict_and_blames_no_file(self):
+        def decoder(*_args, **_kwargs):
+            raise frames.DecodeCancelledError("cancelled while decoding a")
+
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None), decoder)
+        with patched, pytest.raises(ep.CheckUnavailableError):
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+
+    @pytest.mark.parametrize(
+        ("has_video", "frames_at", "share"),
+        [
+            ((True, False), None, None),  # the partner has no picture: certainly nothing to compare
+            ((True, True), [], None),  # ffmpeg exited cleanly with no frames there
+            ((True, True), "all", 1.0),
+        ],
+        ids=["no-video-stream", "clean-exit-no-frames", "frames"],
+    )
+    def test_certainly_no_frames_is_no_share(self, has_video, frames_at, share):
+        videos = dict(zip("ab", has_video, strict=True))
+        decoder = _Decoder() if frames_at == "all" else (lambda *_a, **_k: frames_at)
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None, videos[path]), decoder)
+        with patched:
+            assert reader.share("a", "b", 0.0, 30.0, 0.0) == share
 
     def test_a_cancelled_job_probes_nothing(self):
         probed = []

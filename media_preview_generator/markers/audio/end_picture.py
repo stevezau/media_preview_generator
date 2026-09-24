@@ -6,7 +6,8 @@ open, repeats in the audio too, but it ends over whatever each episode shows at 
 candidate are decoded at 2 fps as 64×36 grey in this episode and in its two partners with the longest matching runs, at
 their aligned times. Two frames match when their correlation is above 0.6 (two flat frames: when their mean
 brightness is within 12); the candidate passes when, in the median partner, at least 75% of the frame pairs match.
-A partner with no frames to compare doesn't count, and a candidate with none passes.
+A partner with certainly no frames to compare (no video, or none at the instants) doesn't count, and a candidate with
+none passes; a file ffprobe or ffmpeg couldn't read is never a pass (``ReadFailedError``).
 
 Decoded with the worker's GPU through the credit text decode (``credits.frames``: its hwaccel arguments, time limit,
 cancel and stall handling), 320×180 luma averaged down 5×5.
@@ -21,7 +22,7 @@ import numpy as np
 from loguru import logger
 
 from ..credits import frames
-from ..probe import ProbeError, ProbeStalledError, ProbeTimeoutError, StreamStarts, ffprobe_path_for, stream_starts
+from ..probe import ProbeError, ProbeStalledError, StreamStarts, ffprobe_path_for, stream_starts
 from .matcher import Hit
 
 # Stored with every cached share: a change to how pictures are compared makes them compared again.
@@ -52,7 +53,20 @@ Frames = list[tuple[float, np.ndarray]]
 
 
 class CheckUnavailableError(Exception):
-    """No verdict this time, and nothing to store: cancelled, or a read stalled or timed out (the mount's fault)."""
+    """No verdict this time: cancelled, a stalled mount, or a file that couldn't be read (lately)."""
+
+
+class ReadFailedError(Exception):
+    """ffprobe or ffmpeg couldn't read one file for the check: an error, a non-zero exit or a timeout. Not proof that it
+    has nothing to compare, so never a pass: the caller remembers the file for a while and reads it again later.
+
+    Attributes:
+        path: The file.
+    """
+
+    def __init__(self, path: str, message: str) -> None:
+        super().__init__(message)
+        self.path = path
 
 
 def is_early(start_s: float) -> bool:
@@ -211,8 +225,10 @@ def window(times: Sequence[float], shift_s: float) -> tuple[float, float]:
 class Reader:
     """Measures end-picture shares, reading each file's start times and each decoded stretch once.
 
-    A file ffprobe or ffmpeg can't read gives no share (None, the pair doesn't count); a cancel, and a read that stalls
-    or times out, raise :class:`CheckUnavailableError`.
+    Only a file that ffprobe and ffmpeg read cleanly gives an answer: a share, or None when there is certainly nothing
+    to compare (no video stream, or ffmpeg exited cleanly without frames at the instants). A file that couldn't be read
+    raises :class:`ReadFailedError` naming it, once per run; a cancel, and ffprobes stalled on earlier files, raise
+    :class:`CheckUnavailableError`.
     """
 
     def __init__(
@@ -233,8 +249,9 @@ class Reader:
         """
         self._ffmpeg, self._gpu, self._gpu_device_path = ffmpeg, gpu, gpu_device_path
         self._cancel_check = cancel_check
-        self._starts: dict[str, StreamStarts | None] = {}
-        self._frames: dict[tuple[str, float, float], Frames | None] = {}
+        self._starts: dict[str, StreamStarts] = {}
+        self._frames: dict[tuple[str, float, float], Frames] = {}
+        self._failed: dict[str, ReadFailedError] = {}
 
     def share(self, target: str, partner: str, start_s: float, end_s: float, offset_s: float) -> float | None:
         """The share of matching frames at the end of a candidate and the same stretch of a partner.
@@ -247,24 +264,25 @@ class Reader:
             offset_s: The partner's time minus the episode's (``Hit.partner_start_s - Hit.start_s``).
 
         Returns:
-            The share, or None when no frames could be compared.
+            The share, or None when there are certainly no frames to compare.
 
         Raises:
-            CheckUnavailableError: Cancelled, or a read stalled or timed out.
+            ReadFailedError: ffprobe or ffmpeg couldn't read one of the files (an error, a non-zero exit, a timeout).
+            CheckUnavailableError: Cancelled, or earlier ffprobes are still stuck on their files.
         """
         times = sample_times(start_s, end_s)
         own_starts, partner_starts = self._read_starts(target), self._read_starts(partner)
-        if not times or own_starts is None or partner_starts is None:
+        if not times or not own_starts.has_video or not partner_starts.has_video:
             return None
         own_shift = own_starts.audio_offset_s
         partner_shift = offset_s + partner_starts.audio_offset_s
         own = self._decoded(target, own_starts, times, own_shift)
-        theirs = self._decoded(partner, partner_starts, times, partner_shift) if own is not None else None
-        if own is None or theirs is None:
-            return None
+        theirs = self._decoded(partner, partner_starts, times, partner_shift)
         return share_alike(times, own, own_shift, theirs, partner_shift)
 
-    def _read_starts(self, path: str) -> StreamStarts | None:
+    def _read_starts(self, path: str) -> StreamStarts:
+        if path in self._failed:
+            raise self._failed[path]
         if path not in self._starts:
             if self._cancel_check and self._cancel_check():
                 raise CheckUnavailableError("cancelled")
@@ -272,14 +290,15 @@ class Reader:
                 self._starts[path] = stream_starts(
                     path, ffprobe=ffprobe_path_for(self._ffmpeg), timeout_s=PROBE_TIMEOUT_S
                 )
-            except (ProbeStalledError, ProbeTimeoutError) as exc:
+            except ProbeStalledError as exc:
                 raise CheckUnavailableError(str(exc)) from exc
-            except ProbeError as exc:
-                logger.debug("The end-picture check can't read {}: {}", os.path.basename(path), exc)
-                self._starts[path] = None
+            except ProbeError as exc:  # a timeout included
+                raise self._fail(path, exc) from exc
         return self._starts[path]
 
-    def _decoded(self, path: str, starts: StreamStarts, times: Sequence[float], shift_s: float) -> Frames | None:
+    def _decoded(self, path: str, starts: StreamStarts, times: Sequence[float], shift_s: float) -> Frames:
+        if path in self._failed:
+            raise self._failed[path]
         start_s, length_s = window(times, shift_s)
         key = (path, start_s, length_s)
         if key not in self._frames:
@@ -296,9 +315,11 @@ class Reader:
                 )
             except frames.DecodeCancelledError as exc:
                 raise CheckUnavailableError("cancelled") from exc
-            except frames.DecodeTimeoutError as exc:
-                raise CheckUnavailableError(str(exc)) from exc
-            except frames.FrameDecodeError as exc:
-                logger.debug("The end-picture check can't decode {}: {}", os.path.basename(path), exc)
-                self._frames[key] = None
+            except frames.FrameDecodeError as exc:  # a timeout or a non-zero exit on the CPU included
+                raise self._fail(path, exc) from exc
         return self._frames[key]
+
+    def _fail(self, path: str, exc: Exception) -> ReadFailedError:
+        logger.info("The end-picture check couldn't read {}: {}", os.path.basename(path), exc)
+        self._failed[path] = ReadFailedError(path, str(exc))
+        return self._failed[path]

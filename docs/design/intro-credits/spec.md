@@ -269,11 +269,15 @@ quorum, as today, and the silence guard then runs on it (`season.guarded_pick`, 
   Hit.start_s`). Each fingerprint time moves to its file's audio start (`probe.stream_starts`: the first audio stream's
   start minus the container's; an HBO Max release's audio starts 0.976 s in). Two frames match when their correlation
   is above 0.6, or, both flat (σ < 4), when their mean brightness is within 12; a pair's share is the matching part of
-  the instants with a frame in both, and the cluster passes when the median share is at least 75 %. A pair with no
-  frames to compare doesn't count; with none at all the cluster passes. Shares are cached per file pair, stretch and
-  offset in `markers.db` (`season_end_pictures`, cleared when either file changes). `season_audio_needs_worker` runs the
-  walk against that cache and says True while it would decode, so decoding happens on a worker; a stalled or timed-out
-  read gives no answer this time (nothing stored), a file ffmpeg can't read stores "no frames".
+  the instants with a frame in both, and the cluster passes when the median share is at least 75 %. A pair with
+  certainly no frames to compare (no video stream, or ffmpeg exited cleanly without frames at the instants) doesn't
+  count; with none at all the cluster passes. Shares are cached per file pair, stretch and offset in `markers.db`
+  (`season_end_pictures`, cleared when either file changes; a forced re-detect reads none). `season_audio_needs_worker`
+  runs the walk against that cache and says True while it would decode, so decoding happens on a worker. A read that
+  fails (ffprobe error, a non-zero ffmpeg exit, a timeout) is never a pass: the file is remembered for a day
+  (`end_picture_failures`, `END_PICTURE_RETRY`) and not read for the check meanwhile. This episode's own file then gives
+  no season audio answer (given up on the checking thread); a partner has no share, and the other partner decides (none
+  left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file.
 
 **Measured** on 118 episodes with studio-chapter truth ("useful" = end within 5 s and start within 15 s)
 (`evidence/eval/`):
@@ -2262,4 +2266,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   decide-again job also lists the files whose unlocked intro rests on season audio, so a published intro that no longer
   holds comes off the servers now (proven on a real Plex database: our intro rows and `pv:intros` go, Plex's own
   markers and a locked intro stay). Harness: `tools.markers_eval reproduce` gates the season step at 91 / 12 / 15;
-  `season-truth --truth <file>` runs any intro truth set (the Accused one, local-only).
+  `season-truth --truth <file>` runs any intro truth set (the Accused one, local-only). Review of PR #310 (two MEDs):
+  a read that failed once (an NFS error, a non-zero exit) was stored as "no frames", which passes, for good; now only
+  certain "no frames" is stored, a failed read is remembered for a day and is never a pass (§5.3), a partner's
+  timeout no longer holds a worker on every sibling's run, and a forced re-detect reads every share again. The
+  lone-episode (previous season) worker hand-off gained its test, and `test_end_picture_integration.py` checks the
+  offsets with real ffmpeg on mkv and mpegts with late audio. Cache keys stay the exact median times: rounding them
+  would make a verdict depend on when it was measured, and dropping "superseded" rows would ping-pong between the
+  near-identical clusters one walk meets.
