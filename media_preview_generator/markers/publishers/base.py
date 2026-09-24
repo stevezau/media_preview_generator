@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
@@ -234,6 +236,50 @@ class PublishError(Exception):
 
 class ItemNotFoundError(PublishError):
     """The server doesn't know the item (yet)."""
+
+
+class DatabaseBusyError(PublishError):
+    """The server's database stayed locked past the write's wait, by another program or another task of this app.
+
+    Nothing was written. Such a lock is usually let go within minutes, so a job tries the file again a few minutes
+    later (``outcomes.PLEX_DB_BUSY``) instead of leaving it failed until Check servers' next day. Its message ends its
+    first clause with ``NEXT_RUN``, which a job that does retry the file words as ``RETRY_SOON``.
+    """
+
+
+# What a busy database's message promises when nothing retries the file sooner (the Inspector's publish, a check), and
+# what a job that queues the file's retry says instead.
+NEXT_RUN = "trying again on the next run"
+RETRY_SOON = "this job tries again in a few minutes"
+
+_waits = threading.local()
+
+
+@contextlib.contextmanager
+def cancellable_waits(cancel_check: Callable[[], bool] | None) -> Iterator[None]:
+    """Let a publisher's lock waits on this thread stop early once ``cancel_check`` says the job was cancelled.
+
+    Plex's publisher waits minutes for a busy database, in short slices (``plex_db.WAIT_SLICE_S``) that ask
+    ``wait_cancelled`` in between; a cancelled job's threads are then free again within a slice.
+
+    Args:
+        cancel_check: True once the job is cancelled; None: waits run to their deadline.
+    """
+    before = getattr(_waits, "cancel_check", None)
+    _waits.cancel_check = cancel_check
+    try:
+        yield
+    finally:
+        _waits.cancel_check = before
+
+
+def wait_cancelled() -> bool:
+    """Whether the job this thread's lock wait is for was cancelled (``cancellable_waits``). Never raises."""
+    check = getattr(_waits, "cancel_check", None)
+    try:
+        return bool(check and check())
+    except Exception:
+        return False
 
 
 class MarkerPublisher(ABC):

@@ -15,6 +15,7 @@ from media_preview_generator.markers import job_runner, pipeline, triggers
 from media_preview_generator.markers.job_log import SEASON_RECHECK_LABEL
 from media_preview_generator.markers.pipeline import PipelineContext
 from media_preview_generator.markers.probe import Chapter, MediaProbe
+from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import ItemNotFoundError, PublishError
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.source_counts import DecidedByTally
@@ -346,6 +347,60 @@ class TestRetryThroughThePipeline:
         )
         assert [j.id for j in engine.jm.get_all_jobs() if is_user_visible_job(j)] == [first]
 
+    @pytest.mark.parametrize("frees_up", [True, False], ids=["free-by-the-retry", "busy-past-every-retry"])
+    def test_a_write_plex_s_busy_database_refused_is_retried_minutes_later_then_fails_as_before(
+        self, engine, setup, monkeypatch, frees_up
+    ):
+        # Production: another program held Plex's write lock past the job's wait; the file failed and waited a day
+        # for Check servers. Now the job retries it on the preview retries' backoff, and only then fails.
+        engine.settings["webhook_retry_count"] = 2
+        _registry, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        publisher = publishers["plex-1"]
+        busy = plex_db.plex_busy_error(121)
+        publisher.write.side_effect = busy
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(
+                library_name="Intro & Credits · Pilot", priority=2, source="sonarr", file_paths=[setup.path]
+            ).id
+            job_runner.run_intro_credits_job(first)
+            assert _outcome(engine.jm, first) == {"failed": 1}
+            [row] = engine.jm.get_file_results(first)
+            assert row["servers"][0]["message"] == (  # its retry is queued, so the row says when
+                "Plex's database was busy (held by another program) for 121 s; this job tries again in a few minutes"
+            )
+            retry = next(r for r in self._retries(engine.jm) if r.config["retry_attempt"] == 1)
+            assert retry.config["retry_delay"] == 60  # a minute, not Check servers' day
+            self._assert_chain_head_waits_for(engine.jm, first, retry, attempt=1, count=2)
+            if frees_up:
+                publisher.write.side_effect = publisher.succeed
+            self._run_retry(monkeypatch, retry)
+            if not frees_up:
+                second = next(r for r in self._retries(engine.jm) if r.config["retry_attempt"] == 2)
+                assert second.config["retry_delay"] == 120
+                self._run_retry(monkeypatch, second)
+
+        head = engine.jm.get_job(first)
+        [row] = engine.jm.get_file_results(first)
+        [server] = row["servers"]
+        if frees_up:
+            assert head.status is JobStatus.COMPLETED and head.config["last_outcome"] == "completed"
+            assert _outcome(engine.jm, first) == {"markers_published": 1}
+            assert server["status"] == "markers_written"
+            assert publisher.write.call_count == 2
+        else:
+            assert (head.status, head.config["last_outcome"]) == (JobStatus.FAILED, "exhausted")
+            assert head.error == (
+                "1 file(s) still not written to Plex's busy database after 2 retries. "
+                "Check the Files panel for the affected paths."
+            )
+            assert _outcome(engine.jm, first) == {"failed": 1}
+            # The last retry queues none: the row keeps the accurate "next run" wording.
+            assert server["status"] == "failed" and server["message"] == str(busy)
+            assert str(busy).endswith("; trying again on the next run")
+            assert publisher.write.call_count == 3
+            assert len(self._retries(engine.jm)) == 2
+
     def test_an_old_top_level_retry_job_still_runs(self, engine, setup, monkeypatch):
         # A "Retry: …" job from before retries ran in their job's row (retry_attempt, no chain) runs as it did.
         registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
@@ -667,7 +722,11 @@ class TestRealJobThread:
         )
         monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: MagicMock())
         # The real job manager stores the context's counts on the job, so those have to be real.
-        monkeypatch.setattr(job_runner, "build_context", lambda **kw: MagicMock(decided_by=DecidedByTally()))
+        monkeypatch.setattr(
+            job_runner,
+            "build_context",
+            lambda **kw: MagicMock(decided_by=DecidedByTally(), **{"take_missing.return_value": 0}),
+        )
         monkeypatch.setattr(job_runner, "kind_handlers", lambda ctx: handlers)
         items = [ProcessableItem(f"/m/{name}.mkv", "") for name in ("a", "slow", "c")]
         monkeypatch.setattr(job_runner, "build_items", lambda cfg, **kw: (items, [], {}))

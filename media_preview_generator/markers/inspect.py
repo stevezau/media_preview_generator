@@ -56,8 +56,8 @@ _END_OF_FILE_MS = 2_000
 CAPABILITY_TTL_S = 60.0
 # Problems (plugin missing, server restarting after a plugin install) usually clear up soon.
 NOT_READY_TTL_S = 5.0
-# The longest a UI capability check waits for Plex's SQLite locks, per check. ``plex_db.BUSY_TIMEOUT_S`` (30 s) is a
-# job's budget and ``capability()`` spends it twice, so an unhealthy Plex cost a Servers-page load a minute — and,
+# The longest a UI capability check waits for Plex's SQLite locks, per check. ``plex_db.BUSY_TIMEOUT_S`` (120 s) is a
+# job's budget and ``capability()`` spends it twice, so an unhealthy Plex would cost a Servers-page load minutes — and,
 # through an agent that accepts but never answers, the same again. A job keeps the full wait; a page must answer.
 UI_DB_WAIT_S = 5.0
 # How long a caller waits for a check already in flight before it is served the answer that check is refreshing.

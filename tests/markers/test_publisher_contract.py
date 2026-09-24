@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, create_autospec, patch
 
@@ -21,7 +22,7 @@ import pytest
 from media_preview_generator.markers import job_runner, pipeline, reconcile
 from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import VERSIONS_UNCHECKED, FileOutcome, kept_own_reason
+from media_preview_generator.markers.outcomes import PLEX_DB_BUSY, VERSIONS_UNCHECKED, FileOutcome, kept_own_reason
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError, Shown
@@ -380,9 +381,10 @@ class PlexItem:
             lambda path, *, ffprobe: MediaProbe(self.durations.get(path, DUR), self.chapters.get(path, ())),
         )
 
-    def run(self, version: str, *, force: bool = False, detectors=()):
+    def run(self, version: str, *, force: bool = False, detectors=(), busy_writes_retried: bool = False):
         item = ProcessableItem(canonical_path=self.paths[version], server_id="plex-1")
         ctx = _ctx(self.store, self.registry, settings_raw=NO_ONLINE, force=force, detectors=detectors)
+        ctx.busy_writes_retried = busy_writes_retried
         # A registered detector needs a worker; none of these touch the file, so the worker stage runs them here.
         return (pipeline.process_item if detectors else pipeline.check_item)(item, ctx=ctx)
 
@@ -706,6 +708,80 @@ def test_a_version_on_a_disk_that_isnt_mounted_is_still_waited_for(plex_item, tm
     assert item.served() == []
 
 
+@contextlib.contextmanager
+def _another_program_writing(db: str):
+    """Another program holding Plex's database write lock (production: a Kometa-style tool, 30.8 s)."""
+    locker = sqlite3.connect(db, isolation_level=None, check_same_thread=False)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        yield locker
+    finally:
+        if locker.in_transaction:
+            locker.execute("ROLLBACK")
+        locker.close()
+
+
+def test_a_publish_waits_out_another_program_holding_plex_s_database_past_the_old_wait(plex_item, monkeypatch):
+    # Scaled 1:60: the job's wait (120 s -> 2 s) outlasts a hold twice production's 30.8 s, which beat the old 30 s.
+    monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", plex_db.BUSY_TIMEOUT_S / 60)
+    item = plex_item(versions=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    with _another_program_writing(item.db) as locker:
+        let_go = threading.Timer(2 * 30.8 / 60, lambda: locker.execute("ROLLBACK"))
+        let_go.start()
+        out = item.run("1080p")
+        let_go.join(5)
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 1
+
+
+@pytest.mark.parametrize(
+    ("retried", "then"),
+    [(True, "this job tries again in a few minutes"), (False, "trying again on the next run")],
+    ids=["job-retries-it", "no-retry-follows"],
+)
+def test_a_publish_plex_s_busy_database_refuses_fails_with_the_cause_and_its_retry_writes_it(
+    plex_item, monkeypatch, retried, then
+):
+    monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.3)
+    item = plex_item(versions=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    with _another_program_writing(item.db):
+        out = item.run("1080p", busy_writes_retried=retried)
+    row = out.publisher_rows[0]
+    assert _outcomes(out) == ["failed"]
+    assert (row["status"], row["reason_code"]) == ("failed", PLEX_DB_BUSY)
+    # "Tries again in a few minutes" only where the job does queue the retry; otherwise the accurate "next run".
+    assert row["message"] == f"Plex's database was busy (held by another program) for 1 s; {then}"
+    assert item.store.get_publish_state(item.store.get_file(item.paths["1080p"]).id, "plex-1").message == row["message"]
+    assert job_runner.retry_reason(row) == PLEX_DB_BUSY  # the job queues the file's retry, minutes away
+    assert item.store.get_item_publish_state("plex-1", "7").status == "failed"
+    assert item.served() == [] and item.commits == 0
+    # The retry, once the other program let go, writes what a publish never refused writes.
+    assert _outcomes(item.run("1080p")) == ["published"]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 1
+    assert item.part_types() == {os.path.basename(item.paths["1080p"]): ["pv:credits", "pv:intros"]}
+
+
+def test_a_cancelled_job_stops_waiting_for_plex_s_busy_database_within_a_slice(plex_item, monkeypatch):
+    # A job's wait is 120 s; its threads must not sit it out once the user cancels the job.
+    monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 30.0)
+    item = plex_item(versions=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    cancelled = threading.Event()
+    threading.Timer(0.3, cancelled.set).start()
+    ctx = _ctx(item.store, item.registry, settings_raw=NO_ONLINE)
+    start = time.monotonic()
+    with _another_program_writing(item.db):
+        out = pipeline.check_item(
+            ProcessableItem(canonical_path=item.paths["1080p"], server_id="plex-1"),
+            ctx=ctx,
+            cancel_check=cancelled.is_set,
+        )
+    assert time.monotonic() - start < 0.3 + plex_db.WAIT_SLICE_S + 1.0
+    assert _outcomes(out) == ["failed"] and item.served() == [] and item.commits == 0
+
+
 def test_a_transient_failure_keeps_the_item_row_so_the_next_run_removes_the_credits(plex_item):
     item = plex_item(versions=("1080p",))
     path = item.paths["1080p"]
@@ -721,7 +797,10 @@ def test_a_transient_failure_keeps_the_item_row_so_the_next_run_removes_the_cred
         return real_database(publisher, read_only=read_only, deadline=deadline)
 
     with patch.object(plex_db.LocalPlexDb, "_database", busy):
-        assert _outcomes(item.run("1080p")) == ["failed"]
+        out = item.run("1080p")
+    assert _outcomes(out) == ["failed"]
+    # Only a wait for the database that ran out is retried by the job; any other failure waits for the next run.
+    assert "reason_code" not in out.publisher_rows[0] and job_runner.retry_reason(out.publisher_rows[0]) is None
     assert item.store.get_item_publish_state("plex-1", "7").status == "failed"
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
     assert _outcomes(item.run("1080p"), item.run("1080p")) == ["published", "up_to_date"]

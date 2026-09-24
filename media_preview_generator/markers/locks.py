@@ -73,3 +73,9 @@ class KeyedLocks:
                 entry[1] -= 1
                 if entry[1] == 0:
                     del self._locks[key]
+
+
+# One lock per file path, held for a job's whole run of the file (``pipeline``). Two jobs on the same file (a backfill
+# and a webhook after a replacement) take turns, so an answer gathered for the old file can never be written over the
+# new file's; the missing-file checks outside a job skip a file a job holds (``missing``).
+FILE_RUN_LOCKS = KeyedLocks()

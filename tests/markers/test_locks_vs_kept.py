@@ -746,7 +746,7 @@ class TestTheInspectorSaysItBeforeTheSave:
 
 class TestPublishNowBoundsPlexsDatabaseWait:
     def test_the_plex_publisher_is_built_with_the_requests_own_database_deadline(self, store, media, monkeypatch):
-        # plex_db.BUSY_TIMEOUT_S is a job's 30 s wait on the database locks -- longer than the whole bounded request.
+        # plex_db.BUSY_TIMEOUT_S is a job's 120 s wait on the database locks -- longer than the whole bounded request.
         reg = _registry(media, ServerType.PLEX, setting="restore")
         _known(store, media, [JOB_INTRO])
         built = {}
@@ -761,7 +761,8 @@ class TestPublishNowBoundsPlexsDatabaseWait:
             pipeline.publish_now(media, registry=reg, live_config=reg.get_config)
 
         assert built["db_timeout_s"] == pipeline.PUBLISH_NOW_DB_WAIT_S
-        assert pipeline.PUBLISH_NOW_DB_WAIT_S < plex_db.BUSY_TIMEOUT_S
+        # The Inspector's bound (ruling P-R1) stays 8 s when a job's wait grows: a web request must answer.
+        assert pipeline.PUBLISH_NOW_DB_WAIT_S == 8.0 < plex_db.BUSY_TIMEOUT_S
 
     def test_a_job_leaves_the_database_wait_where_it_was(self, tmp_path):
         from media_preview_generator.markers.publishers.factory import publisher_for

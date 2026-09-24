@@ -2158,3 +2158,44 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   "Weekly online re-check (12 files): 2 newly found online, 10 unchanged". No user setting. A timer rather than a
   pending job waiting on `retry_not_before`: a pending job older than the restart requeue's age limit (at most a day)
   isn't revived, so a week-long wait would be failed by the next restart.
+- 2026-09-24 · **Files missing from disk are marked, never deleted** (production: Sonarr deleted 11 whole series;
+  their 896 files stayed in Needs review and 1,090 of 1,697 `files` rows pointed at missing files). Nothing noticed a
+  file was gone, and `gone_from_disk` only calls a file gone while its own folder is there, which a deleted series
+  takes with it. A first build deleted such rows; review of PR #301 (2 HIGH, 2 MED) showed a deletion can't be made
+  safe: a symlink library into an rclone/zurg mount that drops, a mergerfs pool with a branch down and a stale bind
+  mount over a non-empty underlay all look exactly like a deleted series, the delete took locked and edited markers
+  with it, and an in-place upgrade's gap (Sonarr's `.partial~`, Tdarr) lost the lock too. So `files` gained
+  `missing_since` (schema 3; `_MIGRATIONS[2]`), and nothing is deleted. `missing.py` marks a file when nothing is at
+  its path, not even a symlink (`os.lstat`: a dangling link isn't missing), its library and path-mapping roots exist
+  and hold entries, and the nearest existing folder above it holds entries (a sub-mount gone empty, or a symlinked
+  folder whose target dropped, doesn't count); a missing, empty or stale root, a flat library at a bare mount point
+  or a file under no library is never marked. The row is read before the disk is checked and the mark is
+  identity-guarded, so a file stored again meanwhile stays unmarked. Marked at a job's `FILE_NOT_FOUND` (under the
+  file's run lock, 5 s bounded), by the decide-again job before it lists its files (60 s) and on the fingerprint
+  sweep's thread and schedule (2,000 files and 60 s per sweep, own cursor); the last two skip a file a job holds
+  (`locks.FILE_RUN_LOCKS.try_hold(path, 0)`). Cleared by any job that stats the file, by `upsert_file` (a new
+  identity at the path) and by the sweep. `files_in_review`, `files_waiting_for_other_versions` (decide-again),
+  `server_rechecks_due`, `files_with_undelivered_locks` and `files_in_season` skip marked rows; the Season view lists
+  files from disk. Each marking pass logs "N files are missing from disk; they're hidden from Needs review until they
+  come back". An older build refuses schema 3 ("created by a newer version").
+- 2026-09-24 · **A busy Plex database is waited for longer, blamed by name, and retried in minutes** (production:
+  another program, a Kometa-style tool, held Plex's write lock 30.8 s; 4 files failed and waited a day for Check
+  servers' `RECHECK_AFTER`). One file's `BEGIN IMMEDIATE` ran out of its 30 s; three others waited on this process's
+  lock with identical 30 s deadlines and failed "Another Intro & Credits task is still using this Plex database".
+  Now: a job's wait (`plex_db.BUSY_TIMEOUT_S`) is 120 s, the Plex marker agent's own cap; the Inspector's publish keeps
+  `PUBLISH_NOW_DB_WAIT_S` (8 s, ruling P-R1) and the UI checks `UI_DB_WAIT_S`. One deadline still covers a write's wait
+  for our lock and for Plex's (no convoy). This process's lock (`_DatabaseLock`) knows when its holder is waiting in
+  `BEGIN IMMEDIATE`, which only another program can make it do, so a task that gives up behind it fails "Plex's
+  database was busy (held by another program) for N s", N counted from the start of the busy stretch (a wait that
+  starts within 5 s of the last one giving up continues it). Every lock wait that ran out, SQLite busy included, is a
+  `DatabaseBusyError` (UNREACHABLE as before; the agent carries it as kind "busy", which an older app reads as a plain
+  refusal); its row stays **Failed** with `reason_code` `plex_db_busy`, which `job_runner.retry_reason` retries on the
+  existing retry chain (60 s, 2 min, 5 min with the default 3 retries at 30 s delay), Check servers included. A file
+  still refused after the last retry is failed as before, and Check servers' backoff takes over. Successful writes are
+  unchanged byte for byte: only the waiting, the wording and the retry changed. Review of PR #301 (LOWs): lock waits
+  run in `WAIT_SLICE_S` (1 s) slices, this process's lock and `BEGIN IMMEDIATE` alike (`PRAGMA busy_timeout` per
+  slice, the rest of the deadline once the write lock is taken), asking `base.wait_cancelled` in between, so a
+  cancelled job stops waiting within a second (`pipeline` wraps each publish in `cancellable_waits`); a busy lock
+  probe keeps its type through the report (`details["db_busy"]`), so `write()` raises `DatabaseBusyError` and the file
+  is retried; and messages keep the old "trying again on the next run" (`base.NEXT_RUN`), which a job that does queue
+  the retry words "this job tries again in a few minutes" (`PipelineContext.busy_writes_retried`).

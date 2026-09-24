@@ -308,6 +308,7 @@ def env(monkeypatch):
     monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings: gpus)
     ctx = MagicMock()
     ctx.take_budget_rechecks.return_value = ([], None)
+    ctx.take_missing.return_value = 0
     monkeypatch.setattr(job_runner, "build_context", MagicMock(return_value=ctx))
     handlers = MagicMock()
     kind_handlers = MagicMock(return_value=handlers)
@@ -398,6 +399,25 @@ class TestRun:
         self._run()
         assert env.build_context.call_args.kwargs["force"] is expected
 
+    def test_the_files_a_run_marked_missing_are_one_line_of_the_jobs_log(self, env, loguru_caplog):
+        env.ctx.take_missing.return_value = 3
+        self._run()
+        assert "3 files are missing from disk; they're hidden from Needs review until they come back" in (
+            loguru_caplog.text
+        )
+
+    def test_nothing_marked_missing_logs_no_line(self, env, loguru_caplog):
+        self._run()
+        assert "missing from disk" not in loguru_caplog.text
+
+    def test_the_decide_again_job_lists_its_files_with_the_servers_configs(self, env):
+        env.job.config = {"libraries": [], "source": "decide_again", "decide_again": True}
+        server_configs = [MagicMock(name="plex-config")]
+        env.registry.configs.return_value = server_configs
+        with patch.object(job_runner, "_items_to_decide_again", return_value=[_item()]) as listed:
+            self._run()
+        listed.assert_called_once_with(env.ctx.store, server_configs)
+
     def test_no_warnings_completes_cleanly(self, env):
         self._run()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
@@ -416,9 +436,12 @@ class TestRun:
     )
     def test_a_job_sweeps_the_fingerprint_cache_when_it_ends_unless_it_follows_another(self, env, config, items, swept):
         env.job.config = {"libraries": [], **config}
+        server_configs = [MagicMock(name="plex-config")]
+        env.registry.configs.return_value = server_configs
         with patch.object(job_runner, "start_fingerprint_sweep", return_value=True) as sweep:
             self._run(items)
-        assert sweep.call_args_list == ([call(env.ctx.store)] if swept else [])
+        # The job's server configs give the deleted-file sweep that runs first its disk roots.
+        assert sweep.call_args_list == ([call(env.ctx.store, configs=server_configs)] if swept else [])
         assert env.jm.complete_job.call_count == 1
 
     def test_the_cleanup_starts_after_the_slot_is_back_and_outside_the_jobs_log(self, env):
@@ -426,7 +449,7 @@ class TestRun:
 
         seen = []
         sweep = MagicMock(
-            side_effect=lambda store: seen.append(
+            side_effect=lambda store, **_kw: seen.append(
                 (env.gate.release.called, is_job_thread_for(threading.get_ident(), "j1"))
             )
         )
@@ -463,23 +486,25 @@ class TestRun:
         rec = store.upsert_file(FileIdentity(str(media), 1, 1), duration_ms=300_000, season_key=None, is_movie=False)
         store.set_fingerprint(rec.id, size=1, mtime_ns=1, window="intro", start_s=0.0, length_s=105.0, algorithm=1,
                               points=b"")  # fmt: skip
-        entered, unblock, real_stat = threading.Event(), threading.Event(), os.stat
+        entered, unblock, real_lstat = threading.Event(), threading.Event(), os.lstat
 
-        def stat(path, *args, **kwargs):  # a hard-mounted share that stalls: no error, no answer
+        def lstat(path, *args, **kwargs):  # a hard-mounted share that stalls: no error, no answer
             if str(path) == str(media):
                 entered.set()
                 unblock.wait(10)
-            return real_stat(path, *args, **kwargs)
+            return real_lstat(path, *args, **kwargs)
 
         sweeping_at_release = []
         env.gate.release.side_effect = lambda priority: sweeping_at_release.append(fpmod._SWEEP_LOCK.locked())
         try:
             with (
-                patch.object(fpmod.os, "stat", side_effect=stat),
+                patch.object(fpmod.os, "lstat", side_effect=lstat),
                 patch.object(store, "fingerprint_checks", wraps=store.fingerprint_checks) as listed,
             ):
                 self._run()
-                assert entered.wait(5) and fpmod._SWEEP_LOCK.locked()  # the sweep is stuck in os.stat; the job returned
+                assert (
+                    entered.wait(5) and fpmod._SWEEP_LOCK.locked()
+                )  # the sweep is stuck in os.lstat; the job returned
                 env.jm.complete_job.assert_called_once_with("j1", warning=None)
                 assert sweeping_at_release == [False]  # the slot was given back before the sweep started
                 self._run()  # the next job completes too, and starts no second sweep
@@ -1381,7 +1406,7 @@ class TestRestart:
             job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_not_called()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
-        sweep.assert_called_once_with(env.ctx.store)
+        sweep.assert_called_once_with(env.ctx.store, configs=[])
 
     def test_resumed_job_skips_unchanged_finished_files_and_carries_their_counts(self, env, finished, tmp_path):
         done = finished("a.mkv", "markers_published")
@@ -1673,6 +1698,41 @@ VERSIONS_UNCHECKED_ROW = _row(
     sid="plex-1",
     reason_code="versions_unchecked",
 )
+PLEX_DB_BUSY_ROW = _row(
+    "failed",
+    "Plex's database was busy (held by another program) for 121 s; trying again on the next run",
+    sid="plex-1",
+    reason_code="plex_db_busy",
+)
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        (NOT_IN_LIBRARY_ROW, "not_in_library"),
+        (PLEX_PASS_UNKNOWN_ROW, "plex_pass_unknown"),
+        (VERSIONS_UNCHECKED_ROW, "versions_unchecked"),
+        (PLEX_DB_BUSY_ROW, "plex_db_busy"),
+        (_row("failed", "boom", sid="plex-1"), None),  # any other failure waits for the next run, as before
+        (_row("failed", "x", sid="plex-1", reason_code="not_in_library"), None),
+        (_row("markers_waiting", "x", sid="plex-1", reason_code="plex_db_busy"), None),
+        (_row("markers_written", "x", sid="plex-1", reason_code="plex_db_busy"), None),
+        ("not a row", None),
+    ],
+    ids=[
+        "waiting-not-in-library",
+        "waiting-plex-pass",
+        "waiting-versions",
+        "failed-busy",
+        "failed-other",
+        "failed-waiting-code",
+        "waiting-busy-code",
+        "written-busy-code",
+        "not-a-dict",
+    ],
+)
+def test_retry_reason_matrix(row, reason):
+    assert job_runner.retry_reason(row) == reason
 
 
 class TestLibraryRetry:
@@ -1824,9 +1884,15 @@ class TestLibraryRetry:
             [_row("markers_written", "Not in this server's library yet", reason_code="not_in_library")],
             [_row("markers_waiting", "Not in this server's library yet")],  # the code decides, not the wording
             [_row("markers_waiting", "Plugin not installed", reason_code="plugin_missing")],
+            [
+                _row(
+                    "failed",
+                    "Plex's database was busy (held by another program) for 121 s; trying again on the next run",
+                )
+            ],
             [],
         ],
-        ids=["versions", "written", "message-without-code", "other-code", "no-rows"],
+        ids=["versions", "written", "message-without-code", "other-code", "busy-message-without-code", "no-rows"],
     )
     def test_other_rows_get_no_retry(self, env, retry_env, rows):
         retry_env.results.append(("/m/a.mkv", "markers_waiting", rows))
@@ -1933,6 +1999,46 @@ class TestLibraryRetry:
         )
         self._run(["/m/a.mkv"])
         retry_env.create.assert_called_once()
+
+    def test_a_write_plex_s_busy_database_refused_is_retried_in_a_minute(self, env, retry_env):
+        # Production: another program held Plex's write lock past the wait; the failed files waited a day for Check
+        # servers. The row stays failed; the job retries it on the preview retries' backoff.
+        retry_env.results.append(("/m/a.mkv", "failed", [PLEX_DB_BUSY_ROW]))
+        self._run(["/m/a.mkv"])
+        kwargs = retry_env.create.call_args.kwargs
+        assert (kwargs["file_paths"], kwargs["retry_attempt"], kwargs["retry_delay_s"]) == (["/m/a.mkv"], 1, 60)
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert "INFO - 1 file(s) not written to Plex's busy database yet; retry 1 of 3 in 60s (job retry-1)" in logs
+        env.jm.record_file_result.assert_called_once_with(
+            "j1", "/m/a.mkv", "failed", "", "Lookup", servers=[PLEX_DB_BUSY_ROW], server_messages=True
+        )
+
+    def test_a_file_plex_s_database_still_refuses_after_the_last_retry_stays_failed(self, env, retry_env):
+        env.job.config["retry_attempt"] = 3
+        retry_env.results.append(("/m/a.mkv", "failed", [PLEX_DB_BUSY_ROW]))
+        self._run(["/m/a.mkv"])
+        retry_env.create.assert_not_called()
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert (
+            "WARNING - 1 file(s) still not written to Plex's busy database after 3 retries; a later job for them tries "
+            "again"
+        ) in logs, logs
+
+    def test_check_servers_retries_a_write_plex_s_busy_database_refused(self, env, retry_env):
+        # Its next run is a day away for a failed item; the busy write gets the job's retry like any other job's.
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.job.library_name = reconcile.RECONCILE_JOB_NAME
+        retry_env.results.append(("/m/a.mkv", "failed", [PLEX_DB_BUSY_ROW, NOT_IN_LIBRARY_ROW]))
+        listing = MagicMock(spec=reconcile.CheckServersListing, items=[_item("/m/a.mkv")], warnings=[])
+        listing.confirmed_gone_items.return_value = set()
+        self._run(listing=listing)
+        kwargs = retry_env.create.call_args.kwargs
+        assert (kwargs["file_paths"], kwargs["source"], kwargs["retry_delay_s"]) == (["/m/a.mkv"], "reconcile", 60)
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        # Only the busy write: a server that hasn't indexed the file is left to the next Check servers run.
+        assert "INFO - 1 file(s) not written to Plex's busy database yet; retry 1 of 3 in 60s (job retry-1)" in logs
 
     @pytest.mark.parametrize("row", [NOT_IN_LIBRARY_ROW, PLEX_PASS_UNKNOWN_ROW], ids=["not-in-library", "plex-pass"])
     def test_check_servers_queues_no_retry_and_hands_the_rows_to_the_listing(self, env, retry_env, row):

@@ -12,16 +12,21 @@ import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
 
 from ..fs import gone_from_disk
 from ..locks import KeyedLocks
+from ..missing import sweep_missing_files
 from ..probe import kill_and_collect, stuck_processes
 from ..store import SEASON_PAIR_WINDOW, FileRecord, FingerprintCheck, MarkerStore, StoredFingerprint
+
+if TYPE_CHECKING:
+    from ...servers.base import ServerConfig
 
 # One name for the window, defined beside the season-pair queries that read it (the store can't import this module).
 WINDOW = SEASON_PAIR_WINDOW
@@ -367,7 +372,8 @@ def sweep_fingerprint_cache(
 
     Checks the next ``limit`` fingerprinted files, those checked longest ago first, until ``budget_s`` has passed (a slow
     network mount); the next sweep goes on from the first file left unchecked. A file whose folder is missing is kept.
-    Its ``files`` row stays either way.
+    Its ``files`` row stays either way: the missing-file sweep that runs before this one on the same thread
+    (``missing.sweep_missing_files``) marks it missing once the file's disk roots show it gone.
 
     Args:
         store: The markers store.
@@ -394,8 +400,9 @@ def sweep_fingerprint_cache(
     return store.finish_fingerprint_checks(checked_up_to, gone)
 
 
-def start_fingerprint_sweep(store: MarkerStore) -> bool:
-    """Start :func:`sweep_fingerprint_cache` on a background thread; the caller never waits for it.
+def start_fingerprint_sweep(store: MarkerStore, configs: Sequence[ServerConfig] | None = None) -> bool:
+    """Start :func:`sweep_fingerprint_cache` on a background thread, after marking the files missing from disk
+    (``missing.sweep_missing_files``) when the servers' configs are given; the caller never waits for it.
 
     Nothing starts while a sweep is running, or within ``SWEEP_MIN_GAP_S`` of the last start. A sweep still running
     after ``SWEEP_STUCK_S`` is logged as a warning when another is skipped for it, at most once per ``SWEEP_STUCK_S``.
@@ -403,6 +410,7 @@ def start_fingerprint_sweep(store: MarkerStore) -> bool:
 
     Args:
         store: The markers store.
+        configs: The servers' configs, for the disk roots the missing-file sweep checks first; None skips it.
 
     Returns:
         True when a sweep was started.
@@ -425,7 +433,9 @@ def start_fingerprint_sweep(store: MarkerStore) -> bool:
         return False
     _sweep_started_at = now
     try:
-        threading.Thread(target=_sweep_in_background, args=(store,), name="fingerprint-sweep", daemon=True).start()
+        threading.Thread(
+            target=_sweep_in_background, args=(store, configs), name="fingerprint-sweep", daemon=True
+        ).start()
     except Exception as exc:
         _SWEEP_LOCK.release()
         logger.warning("Couldn't start clearing old audio fingerprints: {}", exc)
@@ -433,8 +443,13 @@ def start_fingerprint_sweep(store: MarkerStore) -> bool:
     return True
 
 
-def _sweep_in_background(store: MarkerStore) -> None:
+def _sweep_in_background(store: MarkerStore, configs: Sequence[ServerConfig] | None) -> None:
     try:
+        if configs is not None:
+            try:
+                sweep_missing_files(store, configs)  # logs how many it marked
+            except Exception as exc:
+                logger.warning("Couldn't check markers.db for files missing from disk: {}", exc)
         dropped = sweep_fingerprint_cache(store)
         if dropped:
             logger.info("Cleared the cached audio fingerprints of {} file(s) no longer on disk", dropped)

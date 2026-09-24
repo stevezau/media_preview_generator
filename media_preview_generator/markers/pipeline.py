@@ -63,12 +63,15 @@ from .job_log import (
     source_answers,
     totals_line,
 )
+from .locks import FILE_RUN_LOCKS
 from .locks import KeyedLocks as _KeyedLocks
+from .missing import mark_if_missing
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import (
     EXTRAS_NOT_CHECKED,
     NOT_IN_LIBRARY,
     OUTCOME_KEYS,
+    PLEX_DB_BUSY,
     PLEX_PASS_UNKNOWN,
     READ_BACK_FAILED,
     REPLACED_OWN,
@@ -91,12 +94,16 @@ from .outcomes import (
 from .ownership import marker_matches, owning_servers
 from .probe import ProbeError, ffprobe_path_for, probe_media
 from .publishers.base import (
+    NEXT_RUN,
+    RETRY_SOON,
     Capability,
     CapabilityReport,
+    DatabaseBusyError,
     ItemNotFoundError,
     MarkerPublisher,
     PublishError,
     Shown,
+    cancellable_waits,
 )
 from .publishers.factory import publisher_for, supported_types_for
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
@@ -176,8 +183,8 @@ def sequence_number() -> int:
 # to this.
 PUBLISH_NOW_SERVER_TIMEOUT_S = 8
 # Plex waits on locks, not on HTTP, so its own bound is separate: ``publishers/plex_db.BUSY_TIMEOUT_S`` is a job's
-# 30 s wait, which alone outlasts the gate below. The publish-now path gives the database locks the same bound the
-# servers' HTTP calls get, so one busy Plex can't hold a web thread for half a minute.
+# 120 s wait, which alone outlasts the gate below. The publish-now path gives the database locks the same bound the
+# servers' HTTP calls get, so one busy Plex can't hold a web thread for minutes.
 PUBLISH_NOW_DB_WAIT_S = float(PUBLISH_NOW_SERVER_TIMEOUT_S)
 # A START GATE, not a cancellation: a server the fan-out hasn't STARTED by then isn't started at all. It stops one
 # unreachable server from multiplying into one wait per server; it cannot cut a server's call short once it began.
@@ -321,6 +328,8 @@ class PipelineContext:
             (``online_recheck_files``): only a file an online database now has an entry for, or whose decisions
             changed, logs lines of its own, and the job ends with one line for them all (``summary_lines``). It runs
             files as any job does.
+        busy_writes_retried: The job queues a retry for a file whose write gave up on a busy database, so its row says
+            this job tries again in a few minutes rather than on the next run (``job_runner``).
     """
 
     registry: Any
@@ -343,6 +352,7 @@ class PipelineContext:
     recheck_label: str = SEASON_RECHECK_LABEL
     decide_again: bool = False
     online_recheck: bool = False
+    busy_writes_retried: bool = False
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -399,6 +409,8 @@ class PipelineContext:
     # Whether any run of this job stored an answer, decision or file identity that differs from before
     # (``answers_changed``).
     _answers_changed: bool = field(default=False, repr=False)
+    # Files this job marked missing from disk (``take_missing``).
+    _missing: int = field(default=0, repr=False)
 
     def run_memo(self, canonical_path: str) -> dict[str, Any]:
         """Values the current run of a file reads once and reuses (a detector's folder listing and due answer).
@@ -496,6 +508,21 @@ class PipelineContext:
         with self._followups_guard:
             self._left_out_changed.add(canonical_path)
 
+    def note_missing(self) -> None:
+        """Count one file this job marked missing from disk (``missing.mark_if_missing``)."""
+        with self._summary_lock:
+            self._missing += 1
+
+    def take_missing(self) -> int:
+        """How many files this job marked missing from disk since the last call, and start counting again.
+
+        Returns:
+            The count.
+        """
+        with self._summary_lock:
+            taken, self._missing = self._missing, 0
+        return taken
+
     def take_changed_siblings_left_out(self) -> list[str]:
         """The files noted by ``note_changed_sibling_left_out``, sorted, and forget them.
 
@@ -566,9 +593,8 @@ class _Owning:
     matches: tuple[OwnershipMatch, ...]
 
 
-# Two jobs on the same file (a backfill and a webhook after a replacement) take turns, so an answer gathered for the
-# old file can never be written over the new file's.
-_PATH_LOCKS = _KeyedLocks()
+# A job's whole run of one file (``locks.FILE_RUN_LOCKS``).
+_PATH_LOCKS = FILE_RUN_LOCKS
 # Versions of one Plex item run on different threads under different path locks. Each publish reads what is ours on
 # the item, writes, and records the result; another version's publish in between would leave that record wrong and
 # our markers on the item untracked.
@@ -1948,7 +1974,13 @@ def _publish_to(
                 # Per-item failures carry no state and say nothing about the server.
                 ctx._capabilities.pop(cfg.id, None)
             store.set_item_publish_state(cfg.id, item_id, None, "failed")
-            return _not_written(ServerStatus.FAILED, str(exc), name=publisher.name, item_id=attempted_item)
+            # A database locked past the wait is usually free again within minutes: the job retries the file, and
+            # only then does the row say so.
+            busy = PLEX_DB_BUSY if isinstance(exc, DatabaseBusyError) else None
+            message = str(exc).replace(NEXT_RUN, RETRY_SOON) if busy and ctx.busy_writes_retried else str(exc)
+            return _not_written(
+                ServerStatus.FAILED, message, name=publisher.name, item_id=attempted_item, reason_code=busy
+            )
         except Exception as exc:
             logger.exception("Publishing markers to {} failed for {}", cfg.name, path)
             store.set_item_publish_state(cfg.id, item_id, None, "failed")
@@ -2226,6 +2258,9 @@ def _attempt(
     try:
         st = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
+        # Held under the file's run lock; the row is read before its disk is checked.
+        if mark_if_missing(ctx.store, ctx.store.get_file(path), list(ctx.registry.configs())):
+            ctx.note_missing()
         return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
     except OSError as exc:
         return ItemOutcome(FileOutcome.FAILED.value, f"Couldn't read the file: {type(exc).__name__}")
@@ -2234,6 +2269,8 @@ def _attempt(
 
     refresh_probe = _refreshing(ctx, path, Source.CHAPTERS)
     existing = ctx.store.get_file(path)
+    if existing is not None and existing.missing_since is not None:
+        ctx.store.clear_missing(existing.id)  # on disk again, even if this run stops before storing it
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
@@ -2433,10 +2470,11 @@ def _attempt(
     replaced = existing is not None and not unchanged
     rows = []
     for owner in owners:
-        # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 30 s.
+        # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 120 s.
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
-        row = _publish_to(owner, rec, markers, in_review, servers, ctx, phase, kept_own=kept_own)
+        with cancellable_waits(cancel_check):  # a cancelled job stops waiting for a busy database
+            row = _publish_to(owner, rec, markers, in_review, servers, ctx, phase, kept_own=kept_own)
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)

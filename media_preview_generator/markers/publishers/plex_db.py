@@ -30,8 +30,10 @@ from loguru import logger
 from ..fs import filesystem_type, gone_from_disk, is_local_filesystem, is_network_filesystem
 from ..models import Marker, MarkerType
 from .base import (
+    NEXT_RUN,
     Capability,
     CapabilityReport,
+    DatabaseBusyError,
     ItemNotFoundError,
     MarkerPublisher,
     PublishError,
@@ -39,6 +41,7 @@ from .base import (
     Shown,
     agreed_across_versions,
     compare_shown,
+    wait_cancelled,
 )
 
 if TYPE_CHECKING:
@@ -57,9 +60,17 @@ SAME_HOST_PATH_ADVICE = (
     "(on unRAID, the same /mnt/cache or /mnt/user path Plex uses)."
 )
 # The default for how long one write() waits for locks in total (this process's lock on the database, then Plex's
-# write lock) before giving up until the next run. capability() allows this twice: once for the lock probe, once for
-# its read-only checks after the Plex calls. A caller that must answer sooner passes its own ``db_timeout_s``.
-BUSY_TIMEOUT_S = 30.0
+# write lock) before giving up; a job then tries the file again a few minutes later. capability() allows this twice:
+# once for the lock probe, once for its read-only checks after the Plex calls. It is a job's wait: another program
+# writing to Plex's database (a Kometa-style tool) held its write lock 30.8 s in production, past the 30 s this was.
+# A caller that must answer sooner passes its own ``db_timeout_s`` (the Inspector's publish, ruling P-R1).
+BUSY_TIMEOUT_S = 120.0
+# A write whose wait for another program's write lock begins this soon after the previous one gave up waiting for it
+# counts the time Plex's database has been busy from where that one started (``_DatabaseLock``).
+BUSY_STRETCH_GAP_S = 5.0
+# Lock waits run in slices this long, asking between them whether the job was cancelled (``base.cancellable_waits``).
+WAIT_SLICE_S = 1.0
+WAIT_CANCELLED = "Stopped waiting for Plex's database: the job was cancelled"
 # How long a write waits to learn whether another version's file is gone from disk before treating it as still there.
 GONE_CHECK_TIMEOUT_S = 5.0
 # Check servers reads Plex items back one read-only connection each, like a single file's read-back, and leaves this
@@ -95,10 +106,93 @@ _SQLITE_ACCESS_CODES = frozenset({3, 8, 10, 14, 23, 26})
 _SQLITE_FULL = 13
 _SQLITE_CORRUPT = 11
 
-_path_locks: dict[object, threading.Lock] = {}
+
+class _DatabaseLock:
+    """This process's lock on one database file, and how long another program has kept its holder's write waiting.
+
+    While the holder's ``BEGIN IMMEDIATE`` waits for another program's write lock (Plex itself, or a tool writing to
+    Plex's database), the lock knows since when. A task of ours that gives up waiting behind that holder names the real
+    cause, not the holder. When the holder gives up too, the next write that starts waiting within
+    ``BUSY_STRETCH_GAP_S`` counts on from the same start, so every file of one busy stretch says how long it has lasted.
+    Only the thread holding the lock writes these fields; a waiter reads them to word its error.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._busy_since: float | None = None
+        self._waiting = False
+        self._gave_up_at: float | None = None
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        """``threading.Lock.acquire``."""
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        """``threading.Lock.release``."""
+        self._lock.release()
+
+    def locked(self) -> bool:
+        """``threading.Lock.locked``."""
+        return self._lock.locked()
+
+    def plex_busy_for(self, now: float) -> float | None:
+        """Seconds another program has kept this database's writes waiting, while it still does (or just did).
+
+        Args:
+            now: ``time.monotonic()``.
+
+        Returns:
+            None when no write of ours is waiting for another program's write lock, and none gave up on it within the
+            last ``BUSY_STRETCH_GAP_S``.
+        """
+        since, waiting, gave_up_at = self._busy_since, self._waiting, self._gave_up_at
+        if since is None:
+            return None
+        if waiting or (gave_up_at is not None and now - gave_up_at <= BUSY_STRETCH_GAP_S):
+            return now - since
+        return None
+
+    def start_waiting_for_plex(self) -> float:
+        """Mark the holder as waiting for another program's write lock.
+
+        Returns:
+            When the busy stretch this wait belongs to began (``time.monotonic()``).
+        """
+        now = time.monotonic()
+        if self.plex_busy_for(now) is None:
+            self._busy_since = now
+        self._waiting = True
+        return self._busy_since if self._busy_since is not None else now
+
+    def stop_waiting_for_plex(self, *, gave_up: bool) -> None:
+        """The holder's wait ended: it got the write lock (the stretch is over), or gave up on it."""
+        self._waiting = False
+        if gave_up:
+            self._gave_up_at = time.monotonic()
+        else:
+            self._busy_since = self._gave_up_at = None
+
+
+_path_locks: dict[object, _DatabaseLock] = {}
 _path_locks_guard = threading.Lock()
-# Per thread: lock keys of databases this thread has a connection open to (see shm_lock_held_elsewhere).
+# Per thread: lock keys of databases this thread has a connection open to (see shm_lock_held_elsewhere), and the
+# database lock it holds (``holding``, see ``_begin_write``).
 _thread_state = threading.local()
+
+
+def plex_busy_error(seconds: float) -> DatabaseBusyError:
+    """The failure of a write that gave up because another program kept Plex's database locked.
+
+    Args:
+        seconds: How long that program has kept this app's writes waiting.
+
+    Returns:
+        The error, UNREACHABLE like any lock wait that ran out.
+    """
+    return DatabaseBusyError(
+        f"Plex's database was busy (held by another program) for {max(1, round(seconds))} s; {NEXT_RUN}",
+        state=Capability.UNREACHABLE,
+    )
 
 
 def plex_db_path(plex_config_folder: str) -> str:
@@ -115,7 +209,7 @@ def _lock_key(db_path: str) -> object:
     return (st.st_dev, st.st_ino)
 
 
-def _db_lock(db_path: str) -> threading.Lock:
+def _db_lock(db_path: str) -> _DatabaseLock:
     """This process's lock for one database file.
 
     Closing any descriptor on a file drops every POSIX lock the process holds on it, including the locks of our own
@@ -124,20 +218,38 @@ def _db_lock(db_path: str) -> threading.Lock:
     """
     key = _lock_key(db_path)
     with _path_locks_guard:
-        return _path_locks.setdefault(key, threading.Lock())
+        return _path_locks.setdefault(key, _DatabaseLock())
 
 
 @contextlib.contextmanager
 def _holding_db_lock(db_path: str, deadline: float) -> Iterator[None]:
+    """Hold this process's lock on the database until ``deadline`` at the latest.
+
+    Waits in ``WAIT_SLICE_S`` slices, so a cancelled job (``base.cancellable_waits``) stops within one.
+
+    Raises:
+        DatabaseBusyError: The lock wasn't free in time. When its holder was itself waiting for another program's write
+            lock, the error says so and for how long (``plex_busy_error``): that, not our own task, is the cause.
+        PublishError: The job was cancelled while waiting (no state: nothing about the server).
+    """
     lock = _db_lock(db_path)
-    if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-        raise PublishError(
-            "Another Intro & Credits task is still using this Plex database; trying again on the next run",
-            state=Capability.UNREACHABLE,
-        )
+    while not lock.acquire(timeout=max(0.0, min(WAIT_SLICE_S, deadline - time.monotonic()))):
+        if time.monotonic() >= deadline:
+            busy_for = lock.plex_busy_for(time.monotonic())
+            if busy_for is not None:
+                raise plex_busy_error(busy_for)
+            raise DatabaseBusyError(
+                f"Another Intro & Credits task is still using this Plex database; {NEXT_RUN}",
+                state=Capability.UNREACHABLE,
+            )
+        if wait_cancelled():
+            raise PublishError(WAIT_CANCELLED)
+    held_before = getattr(_thread_state, "holding", None)
+    _thread_state.holding = lock
     try:
         yield
     finally:
+        _thread_state.holding = held_before
         lock.release()
 
 
@@ -185,7 +297,8 @@ def publish_error_from_sqlite(exc: sqlite3.Error) -> PublishError:
         exc: The SQLite exception.
 
     Returns:
-        UNREACHABLE for busy/locked, MISCONFIGURED for files we can't open or write, UNSUPPORTED_SCHEMA otherwise.
+        UNREACHABLE for busy/locked (a ``DatabaseBusyError``, which a job tries again a few minutes later),
+        MISCONFIGURED for files we can't open or write, UNSUPPORTED_SCHEMA otherwise.
     """
     code = getattr(exc, "sqlite_errorcode", None)  # Python 3.11+
     text = str(exc)
@@ -199,8 +312,8 @@ def publish_error_from_sqlite(exc: sqlite3.Error) -> PublishError:
         full, damaged = "disk is full" in lowered, "malformed" in lowered
         access = any(w in lowered for w in ("readonly", "unable to open", "permission", "not a database", "i/o"))
     if busy:
-        return PublishError(
-            f"Plex is busy writing its database; trying again on the next run ({text})", state=Capability.UNREACHABLE
+        return DatabaseBusyError(
+            f"Plex is busy writing its database; {NEXT_RUN} ({text})", state=Capability.UNREACHABLE
         )
     if full:
         return PublishError(
@@ -923,7 +1036,9 @@ class LocalPlexDb(PlexDatabase):
         try:
             held = shm_lock_held_elsewhere(db, deadline=deadline)
         except PublishError as exc:
-            return CapabilityReport(exc.state or Capability.UNREACHABLE, str(exc), details)
+            # A busy database stays busy through the report: write() raises it again as one, so the job retries.
+            busy = {"db_busy": True} if isinstance(exc, DatabaseBusyError) else {}
+            return CapabilityReport(exc.state or Capability.UNREACHABLE, str(exc), {**details, **busy})
         details["lock_holder"] = held
         if not held:
             return CapabilityReport(
@@ -1016,6 +1131,7 @@ class LocalPlexDb(PlexDatabase):
                 with self._database(read_only=False, deadline=deadline) as conn:
                     changed, plan = self._write_item(
                         conn,
+                        deadline,
                         request.rating_key,
                         request.parts,
                         request.wanted,
@@ -1181,9 +1297,48 @@ class LocalPlexDb(PlexDatabase):
             replaced_own=frozenset(t for t in would_keep & locked if _TYPE_TEXT[t] in replaced),
         )
 
+    @staticmethod
+    def _begin_write(conn: sqlite3.Connection, deadline: float) -> None:
+        """``BEGIN IMMEDIATE``, with this process's database lock marked as waiting for another program's write lock
+        meanwhile (``_DatabaseLock``).
+
+        Our own connections take turns under that lock, so only another program (Plex, a tool writing to its database)
+        can make this wait. SQLite's own busy wait is set to ``WAIT_SLICE_S`` at a time, asking between slices whether
+        the job was cancelled; once the write lock is taken, statements get what is left of ``deadline`` again.
+
+        Raises:
+            DatabaseBusyError: That program kept its write lock past ``deadline`` (``plex_busy_error``).
+            PublishError: The job was cancelled while waiting.
+            sqlite3.Error: Any other failure.
+        """
+        lock = getattr(_thread_state, "holding", None)
+        since = lock.start_waiting_for_plex() if lock is not None else time.monotonic()
+        gave_up = True
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                conn.execute(f"PRAGMA busy_timeout = {int(max(0.0, min(WAIT_SLICE_S, remaining)) * 1000)}")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.Error as exc:
+                    if not isinstance(publish_error_from_sqlite(exc), DatabaseBusyError):
+                        gave_up = False
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise plex_busy_error(time.monotonic() - since) from exc
+                    if wait_cancelled():
+                        raise PublishError(WAIT_CANCELLED) from exc
+            gave_up = False
+            conn.execute(f"PRAGMA busy_timeout = {int(max(0.0, deadline - time.monotonic()) * 1000)}")
+        finally:
+            if lock is not None:
+                lock.stop_waiting_for_plex(gave_up=gave_up)
+
     def _write_item(
         self,
         conn: sqlite3.Connection,
+        deadline: float,
         rating_key: int,
         parts: list[_Part],
         wanted: list[Marker],
@@ -1201,7 +1356,7 @@ class LocalPlexDb(PlexDatabase):
         """
         # BEGIN IMMEDIATE can wait the rest of the call's deadline — exactly while Plex is writing, often to this item.
         # Everything we merge is re-read after it, or Plex's fresh extra_data keys would be overwritten from a stale read.
-        conn.execute("BEGIN IMMEDIATE")
+        self._begin_write(conn, deadline)
         try:
             self._check_schema(conn)
             tag_id = self._marker_tag_id(conn)
@@ -1316,7 +1471,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             ui_details: Ask Plex for its own detection settings in ``capability()`` (the Edit dialog shows them); a job
                 doesn't need them.
             db_timeout_s: The longest a single check or write waits for the database locks; None uses
-                ``BUSY_TIMEOUT_S``. The Inspector's publish-now path shortens it, since a 30 s wait alone outlasts the
+                ``BUSY_TIMEOUT_S``. The Inspector's publish-now path shortens it, since a job's wait alone outlasts the
                 deadline a web request may take (ruling P-R1).
             db: Where the database work runs. The default opens the file this process can see; a server with a Plex
                 marker agent gets ``plex_remote.RemotePlexDb`` instead (``publishers.factory``).
@@ -1659,7 +1814,9 @@ class PlexMarkerPublisher(MarkerPublisher):
         # capability() is cached per job; these checks (lock probe included) guard every write on their own.
         local = self._local_checks(deadline=deadline)
         if not local.ready:
-            raise PublishError(local.message, state=local.state)
+            # A lock probe that gave up on a busy database stays one, so the job retries the file.
+            failure = DatabaseBusyError if local.details.get("db_busy") else PublishError
+            raise failure(local.message, state=local.state)
         item = self._db.read_item(rating_key, deadline=deadline)
         if not item.exists:
             raise ItemNotFoundError(f"Plex item {rating_key} not found in the database")
