@@ -947,7 +947,7 @@ class TestRedecideInReviewAfterUpgrade:
         assert sm.get(DECIDE_AGAIN_KEY) is True
 
     def test_every_start_until_the_job_completes_asks_for_it_and_none_after(self, tmp_path):
-        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, DECIDE_AGAIN_KEY
         from media_preview_generator.web.app import create_app
         from media_preview_generator.web.settings_manager import get_settings_manager
 
@@ -974,7 +974,7 @@ class TestRedecideInReviewAfterUpgrade:
             submit.assert_called_once_with()
         with open(os.path.join(config_dir, "settings.json")) as f:
             saved = json.load(f)
-        assert saved["_schema_version"] == 16
+        assert saved["_schema_version"] == _CURRENT_SCHEMA_VERSION
         assert "publish_when" not in saved["markers"] and saved[DECIDE_AGAIN_KEY] is True
 
         get_settings_manager(config_dir).delete(DECIDE_AGAIN_KEY)  # what the completed job does

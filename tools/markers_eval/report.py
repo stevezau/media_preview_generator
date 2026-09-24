@@ -13,7 +13,7 @@ from .cache import FingerprintCache, ProbeCache
 from .credits import CreditsReport, CreditsRows, chapter_rules, compare_credits_with_plex, title_coverage
 from .data import EvalEpisode, evidence_dir, load_v3_results
 from .decisions import audio_candidate, compare_with_plex, g3_differences, season_segments
-from .intros import SPEC_V3
+from .intros import SPEC_V3, EndPictures
 from .online import SETTINGS, case_file, case_key, load_online, online_verdicts, plex_online, tally
 from .plex import PlexMarker, load_baseline, server_candidates
 
@@ -27,14 +27,19 @@ def _counts(counts: dict[str, Counter]) -> dict[str, dict[str, int]]:
     return {mtype: dict(sorted(c.items())) for mtype, c in counts.items()}
 
 
-def _online(evidence: Path, baseline: dict[str, list[PlexMarker]], fingerprints: FingerprintCache) -> tuple[dict, dict]:
+def _online(
+    evidence: Path,
+    baseline: dict[str, list[PlexMarker]],
+    fingerprints: FingerprintCache,
+    end_pictures: EndPictures,
+) -> tuple[dict, dict]:
     results, dump = load_online(evidence)
     files = {case_key(r["case"]): case_file(r["case"], baseline.keys()) for r in results}
     found = {key: path for key, path in files.items() if path}
     cases = {case_key(r["case"]): r["case"] for r in results}
     episodes = [EvalEpisode(os.path.dirname(path), path, tuple(cases[key]["intro"]), None, None, cases[key]["dur"])
                 for key, path in found.items()]  # fmt: skip
-    segments = season_segments(episodes, points=fingerprints.points, full_folder=True)
+    segments = season_segments(episodes, points=fingerprints.points, full_folder=True, end_pictures=end_pictures)
     extra = {
         key: server_candidates(baseline[path]) + ([audio_candidate(segments[path])] if segments.get(path) else [])
         for key, path in found.items()
@@ -138,7 +143,12 @@ def _credits(evidence: Path, baseline: dict[str, list[PlexMarker]], probes: Prob
 
 
 def full_report(
-    fingerprints: FingerprintCache, *, ffprobe: str, baseline_path: Path, full_folder: bool
+    fingerprints: FingerprintCache,
+    *,
+    ffprobe: str,
+    baseline_path: Path,
+    full_folder: bool,
+    end_pictures: EndPictures,
 ) -> tuple[dict, dict, bool]:
     """Run every part of the report.
 
@@ -148,6 +158,7 @@ def full_report(
         baseline_path: Plex's markers (``plex.load_baseline``).
         full_folder: The 118-episode rows match whole season folders (the app) instead of the eval lists. Online cases
             always match whole folders.
+        end_pictures: The season step's end-picture check (``intros.DecodedEndPictures`` on real files).
 
     Returns:
         The summary (counts and folder names only), the details (file paths: local-only), and whether the shipped
@@ -156,11 +167,11 @@ def full_report(
     evidence = evidence_dir()
     baseline = load_baseline(baseline_path)
     episodes = load_v3_results()
-    segments = season_segments(episodes, points=fingerprints.points, full_folder=full_folder)
+    segments = season_segments(episodes, points=fingerprints.points, full_folder=full_folder, end_pictures=end_pictures)
     on = compare_with_plex(episodes, segments, baseline)
     off = compare_with_plex(episodes, segments, baseline, g3=False)
     differences = g3_differences(on, off)
-    online_summary, online_details = _online(evidence, baseline, fingerprints)
+    online_summary, online_details = _online(evidence, baseline, fingerprints, end_pictures)
     credits_summary, credits_details = _credits(evidence, baseline, ProbeCache(fingerprints.root, ffprobe=ffprobe))
     summary = {
         "mode": "full folder" if full_folder else "eval lists",

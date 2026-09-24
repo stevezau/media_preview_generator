@@ -27,7 +27,7 @@ from media_preview_generator.markers.decide import DecisionContext, DecisionStat
 from media_preview_generator.markers.models import SERVER_SOURCES, Candidate, MarkerType, Source
 
 from .data import EvalEpisode, by_season, episode_label
-from .intros import ReproductionReport, SeasonStep, season_folder_episodes
+from .intros import EndPictures, ReproductionReport, SeasonStep, season_folder_episodes
 from .plex import PlexMarker, first_marker, server_candidates
 from .score import Tally, judge_intro, skips_story
 
@@ -97,7 +97,11 @@ class DecisionRows:
 
 
 def season_segments(
-    episodes: list[EvalEpisode], *, points: Callable[[str], np.ndarray], full_folder: bool
+    episodes: list[EvalEpisode],
+    *,
+    points: Callable[[str], np.ndarray],
+    full_folder: bool,
+    end_pictures: EndPictures,
 ) -> dict[str, tuple[float, float, int, int] | None]:
     """The app's season step per eval episode: (start_s, end_s, support, others) or None.
 
@@ -106,6 +110,7 @@ def season_segments(
         points: Fingerprint of a file.
         full_folder: Match against the app's season group of each folder (``season_group``) instead of the eval's own
             file lists (at most 8 per season, how spec §5.3 was measured).
+        end_pictures: The season step's end-picture check (``intros.DecodedEndPictures`` on real files).
 
     Returns:
         By eval file path.
@@ -113,7 +118,7 @@ def season_segments(
     out: dict[str, tuple[float, float, int, int] | None] = {}
     for season, group in by_season(episodes).items():
         files = season_folder_episodes(group) if full_folder else [e.file for e in group]
-        step = SeasonStep(season, {f: points(f) for f in files}, ReproductionReport())
+        step = SeasonStep(season, {f: points(f) for f in files}, ReproductionReport(), end_pictures)
         others = len(step.files) - 1
         for e in group:
             seg = step.answer(e)

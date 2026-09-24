@@ -251,6 +251,34 @@ chromaprint's silence value (±2, or ≤ 6 bits apart) is dropped, and a pair th
 less is skipped (two silent openings); neither changes the 118-episode numbers (`evidence/eval/phase2-harness.md`,
 Task 7).
 
+**Guards against idents and music beds** (season audio v5, §14 2026-09-24). A network ident at the start of the file,
+or a music bed under the cold open, repeats in every episode just as the theme does, and outranks a short title card
+("Accused: Guilty or Innocent", A&E: 13 of 15 intros were the A&E logo, the logo plus the cold-open music merged across
+the 3.5 s gap bridge, or the music). The season step walks the matcher's clusters in its ranking order
+(`matcher.intro_candidates`) and takes the first that passes all three guards; the first one left must have the
+quorum, as today, and the silence guard then runs on it (`season.guarded_pick`, `season_intro`):
+- **File start**: a cluster starting in the first 2 s must be at least 10 s long.
+- **Dense core**: for each partner, the longest stretch of the cluster (its median start and end, aligned as that
+  partner's hit aligns it) where the two fingerprints differ in ≤ 6 bits with gaps of at most 4 points; the median over
+  the partners must be at least 8 s (a partner hit twice counts its longest). The matcher's runs bridge 3.5 s gaps; the
+  core doesn't.
+- **End picture** (only for a cluster starting at or before 30 s, asked last since it decodes): the last 3 s of the
+  cluster, every 0.5 s, decoded at 2 fps as 64×36 grey (the credit text decode, `credits.frames`: 320×180 luma
+  averaged 5×5, the worker's GPU then the CPU, its cancel, time limit and stall handling), in this episode and in the
+  two partners whose longest hit in the cluster is longest, at their aligned times (`Hit.partner_start_s -
+  Hit.start_s`). Each fingerprint time moves to its file's audio start (`probe.stream_starts`: the first audio stream's
+  start minus the container's; an HBO Max release's audio starts 0.976 s in). Two frames match when their correlation
+  is above 0.6, or, both flat (σ < 4), when their mean brightness is within 12; a pair's share is the matching part of
+  the instants with a frame in both, and the cluster passes when the median share is at least 75 %. A pair with
+  certainly no frames to compare (no video stream, or ffmpeg exited cleanly without frames at the instants) doesn't
+  count; with none at all the cluster passes. Shares are cached per file pair, stretch and offset in `markers.db`
+  (`season_end_pictures`, cleared when either file changes; a forced re-detect reads none). `season_audio_needs_worker`
+  runs the walk against that cache and says True while it would decode, so decoding happens on a worker. A read that
+  fails (ffprobe error, a non-zero ffmpeg exit, a timeout) is never a pass: the file is remembered for a day
+  (`end_picture_failures`, `END_PICTURE_RETRY`) and not read for the check meanwhile. This episode's own file then gives
+  no season audio answer (given up on the checking thread); a partner has no share, and the other partner decides (none
+  left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file.
+
 **Measured** on 118 episodes with studio-chapter truth ("useful" = end within 5 s and start within 15 s)
 (`evidence/eval/`):
 
@@ -259,6 +287,7 @@ Task 7).
 | v1 (longest run, 15 s min, 600 s window) | 74 (63%) | 21 | 23 |
 | v2 (+ all runs per pair, 8 s min, 50% quorum) | 84 (71%) | 17 | 17 |
 | **v3** (+ window min(900 s, 35%), prefer ≥ 15 s) — alg1 stereo | **91 (77%)** | **13** | **14** |
+| **v3 + guards** (season audio v5: file start, dense core, end picture; §14 2026-09-24) | **91 (77%)** | **12** | **15** |
 | alg4 stereo | 87 | 11 | 20 |
 | alg0 stereo | 86 | 15 | 17 |
 | front-channel mono | 80 | 20 | 18 |
@@ -284,7 +313,8 @@ from matching audio. A server marker that agrees doesn't hold season audio back 
 (§14 2026-09-24); the hint with only a server's marker stays in Needs review.
 
 Remaining failures: variable couch gag (The Simpsons), a repeated segment ahead of the real intro (Carême), title card
-10–20 s longer than the chapter (Daredevil, Outlander). Credits via audio matching: 54% precision — **rejected**.
+10–20 s longer than the chapter (Daredevil, Outlander), and 5 s title cards after a cold open (Accused S3–7: shorter
+than the matcher's 8 s runs; missed, as by Plex). Credits via audio matching: 54% precision — **rejected**.
 
 A job fingerprints the season folder's missing episodes on its workers, matches cached fingerprints inline, and
 queues a Season job for same-season episodes outside the job whose inputs changed (R3; §6.4 item 5).
@@ -2217,3 +2247,30 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     takes those first, so no promised file is cut by the cap; the guide no longer says a cancel stops the wait within
     a second through the Plex marker agent (its own wait runs out first); and the migration to schema 3 first copies
     markers.db to `markers.db.pre-v3.bak` once (SQLite's backup API), which the downgrade note tells users to put back.
+- 2026-09-24 · **Season audio guards against idents and music beds** (owner: fully automatic, at par or better than
+  Plex's own detection; rule "Proposed + dense core"). On "Accused: Guilty or Innocent" (A&E) season audio took the
+  wrong repeated stretch for 13 of 15 intros: the A&E logo, the logo plus the cold-open music merged across the 3.5 s
+  gap bridge, or the music. The season step now walks the matcher's clusters in ranking order and takes the first that
+  passes the file-start, dense-core and end-picture guards (§5.3), quorum and silence guard as before; season audio v5
+  (`SEASON_AUDIO_VERSION`) makes every stored answer due again. Measured by the prototype (useful / wrong / missed, Plex's
+  own in brackets): lab 118 **91 / 12 / 15** (23 / 15 / 80); held-out 175 **122 / 4 / 49** (69 / 4 / 102); Accused
+  **2 / 0 / 54** (0 / 0 / 56); library chapter set **109 / 59 / 56** (57 / 30 / 137). Costs: South Park S12 ×2 and
+  Rick and Morty ×1 lost; Accused S3–7's 5 s title cards remain unfound, as they are for Plex. The app's code (real
+  decodes over the prototype's sets and fingerprints) measures lab 118 and Accused identically, held-out 175
+  **123 / 4 / 48** and the library chapter set **107 / 59 / 58**. Two differences: its frame decode (the credit text
+  decode's 320×180 luma averaged to 64×36, where the prototype scaled to 64×36 in ffmpeg) keeps Rick and Morty S01E10;
+  and it moves each fingerprint time to its file's audio start (an HBO Max release's audio starts 0.976 s in), which
+  on South Park S12's mixed AMZN / HBO Max releases keeps S12E01 (now aligned with its HBO Max partners) and loses
+  S12E03, E06 and E09 (their audio runs about 2 s past the title card once aligned). Without the offset the port
+  reproduces the prototype's library chapter row exactly. Settings v17 sets the decide-again request, and the
+  decide-again job also lists the files whose unlocked intro rests on season audio, so a published intro that no longer
+  holds comes off the servers now (proven on a real Plex database: our intro rows and `pv:intros` go, Plex's own
+  markers and a locked intro stay). Harness: `tools.markers_eval reproduce` gates the season step at 91 / 12 / 15;
+  `season-truth --truth <file>` runs any intro truth set (the Accused one, local-only). Review of PR #310 (two MEDs):
+  a read that failed once (an NFS error, a non-zero exit) was stored as "no frames", which passes, for good; now only
+  certain "no frames" is stored, a failed read is remembered for a day and is never a pass (§5.3), a partner's
+  timeout no longer holds a worker on every sibling's run, and a forced re-detect reads every share again. The
+  lone-episode (previous season) worker hand-off gained its test, and `test_end_picture_integration.py` checks the
+  offsets with real ffmpeg on mkv and mpegts with late audio. Cache keys stay the exact median times: rounding them
+  would make a verdict depend on when it was measured, and dropping "superseded" rows would ping-pong between the
+  near-identical clusters one walk meets.

@@ -719,6 +719,14 @@ fingerprints, normally without taking a worker. An episode ffmpeg can't fingerpr
 stalls) is left out of the other episodes' matching for a day while the file stays unchanged; its own check and a
 re-detect still try it.
 
+A channel logo at the very start, or music under the cold open, repeats in every episode just like the theme does, so
+season audio passes over such a stretch: one in the first 2 seconds must last at least 10 seconds, every one needs
+about 8 seconds where the episodes' audio matches closely, and one starting in the first 30 seconds must end on the
+same picture in the episodes it repeats in. That check decodes 3 seconds of video from the episode and two others once,
+on a worker (its GPU when it has one), and saves the answer. A show whose title card after the cold open lasts only a
+few seconds gets no intro, as with Plex's own detection. After updating, one job decides every intro that came from
+season audio again (a locked one is left alone) and takes any that no longer holds off your servers.
+
 Saved fingerprints take up to about 28 KB per episode. When an Intro & Credits job completes (except Season, retry and
 verify jobs), a cleanup starts in the background, at most once an hour. It looks for up to 2,000 fingerprinted files on
 disk, for at most a minute, and clears the fingerprints of files that are gone (renamed by an upgrade, or deleted) while

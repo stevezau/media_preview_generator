@@ -1,5 +1,5 @@
-"""ffprobe wrapper for duration, chapters, the container's first timestamp, the main video stream's codec and first
-packet headers, and the bounded kill it shares with the fingerprint ffmpeg.
+"""ffprobe wrapper for duration, chapters, the container's and first audio stream's first timestamps, the main video
+stream's codec and first packet headers, and the bounded kill it shares with the fingerprint ffmpeg.
 
 A process stuck in an uninterruptible read on a stalled network mount can't die until that read returns, and it holds
 its pipes until then. Collecting it with a plain ``wait()`` or ``communicate()`` -- what ``subprocess.run`` does after
@@ -190,6 +190,67 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
     return MediaProbe(
         duration_ms=_ms(fmt.get("duration")), chapters=tuple(chapters), start_time_ms=_ms(fmt.get("start_time"))
     )
+
+
+@dataclass(frozen=True)
+class StreamStarts:
+    """Where the container and its first audio stream start, and whether it has a picture to decode.
+
+    Attributes:
+        container_s: The container's first timestamp (0.0 when it reports none).
+        audio_s: The first audio stream's first timestamp, None when the file has no audio stream or reports none.
+        has_video: Whether it has a video stream that isn't cover art.
+    """
+
+    container_s: float
+    audio_s: float | None
+    has_video: bool = True
+
+    @property
+    def audio_offset_s(self) -> float:
+        """How far into the file the first audio sample plays: a fingerprint's point 0 is that sample, since ffmpeg
+        doesn't pad the late start of an audio stream (measured on an mkv whose audio starts 2 s after its video)."""
+        return 0.0 if self.audio_s is None else max(0.0, self.audio_s - self.container_s)
+
+
+def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> StreamStarts:
+    """The container's and the first audio stream's start times, and whether there is a video stream, from one ffprobe
+    that reads only the headers.
+
+    Args:
+        path: Media file.
+        ffprobe: ffprobe binary.
+        timeout_s: Hard timeout, as for :func:`probe_media`.
+
+    Returns:
+        Both start times.
+
+    Raises:
+        ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
+        ProbeTimeoutError: ffprobe ran past ``timeout_s``.
+        ProbeError: ffprobe missing, failed or returned something other than its JSON.
+    """
+    cmd = [ffprobe, "-v", "error", "-show_entries",
+           "format=start_time:stream=codec_type,start_time:stream_disposition=attached_pic", "-of", "json", path]  # fmt: skip
+    stdout = _run_ffprobe(cmd, path, timeout_s)
+    try:
+        data = json.loads(stdout or "")
+    except ValueError as exc:
+        raise ProbeError(f"ffprobe returned invalid JSON for {path}") from exc
+    if not isinstance(data, dict):
+        raise ProbeError(f"ffprobe returned unexpected JSON for {path}: top level was {type(data).__name__}")
+    streams = data.get("streams") or []
+    if not isinstance(streams, list):
+        raise ProbeError(f"ffprobe returned an unexpected stream list for {path}")
+    streams = [stream for stream in streams if isinstance(stream, dict)]
+    fmt = data.get("format") or {}
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+    has_video = any(
+        stream.get("codec_type") == "video" and not (stream.get("disposition") or {}).get("attached_pic")
+        for stream in streams
+    )
+    container = _seconds(fmt.get("start_time") if isinstance(fmt, dict) else None)
+    return StreamStarts(container or 0.0, _seconds(audio.get("start_time")), has_video)
 
 
 @dataclass(frozen=True)

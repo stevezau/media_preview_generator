@@ -434,26 +434,33 @@ def submit_season_publish(episode: str) -> str:
 
 
 def submit_decide_again() -> str | None:
-    """Queue the one job that decides the files in Needs review, and those waiting for their item's other versions,
-    again.
+    """Queue the one job that decides the files in Needs review, those waiting for their item's other versions, and
+    those whose intro rests on season audio, again.
 
     Queued after the settings upgrade that removed the stricter publish rule (``upgrade._migrate_to_v16``), so the files
     it held in Needs review are published now, not only when a later job happens to list them; a file whose last
-    publish waits for its item's other versions is published again with them. It is an ordinary Intro & Credits job at
-    LOW priority: stored answers that aren't due are reused, and only what is due or from an older version is asked or
-    read again, as on any run. The job lists the files when it runs (``job_runner._items_to_decide_again``); while one
-    is queued or running, that job is returned instead.
+    publish waits for its item's other versions is published again with them. Queued again after the one that added
+    season audio's guards (``upgrade._migrate_to_v17``), so an intro that was only a network ident or cold-open music
+    is decided again, and taken off the servers, now. It is an ordinary Intro & Credits job at LOW priority: stored
+    answers that aren't due are reused, and only what is due or from an older version is asked or read again, as on any
+    run. The job lists the files when it runs (``job_runner._items_to_decide_again``); while one is queued or running,
+    that job is returned instead.
 
     Returns:
-        The job's id; None when Intro & Credits is off on every server or no file is in Needs review or waiting.
+        The job's id; None when Intro & Credits is off on every server or no file is in Needs review, waiting, or has
+        an unlocked intro decided with season audio.
     """
     if not markers_enabled_anywhere():
         logger.info("Intro & Credits is off on every server; no file in Needs review is decided again")
         return None
     store = get_marker_store()
     in_review, waiting = set(store.files_in_review()), set(store.files_waiting_for_other_versions())
-    if not in_review | waiting:
-        logger.info("No file is in Needs review or waiting for its item's other versions; nothing to decide again")
+    season_audio = set(store.files_with_season_audio_intro())
+    if not in_review | waiting | season_audio:
+        logger.info(
+            "No file is in Needs review, waiting for its item's other versions, or has an intro from season audio; "
+            "nothing to decide again"
+        )
         return None
     jm = get_job_manager()
     with _redetect_lock:
@@ -469,9 +476,11 @@ def submit_decide_again() -> str | None:
             decide_again=True,
         )
     logger.info(
-        "{} file(s) in Needs review and {} waiting for their item's other versions are decided again (job {})",
+        "{} file(s) in Needs review, {} waiting for their item's other versions and {} with an intro from season audio "
+        "are decided again (job {})",
         len(in_review),
         len(waiting - in_review),
+        len(season_audio - in_review - waiting),
         job.id[:8],
     )
     return job.id

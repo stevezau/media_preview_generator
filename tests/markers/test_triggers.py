@@ -845,6 +845,48 @@ class TestInReviewRedecide:
             "/media/tv/B/S01/e2.mkv",
         ]
 
+    @staticmethod
+    def _intro(store, path, decided_by, *, locked=False):
+        from media_preview_generator.markers.decide import TypeDecision
+        from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType
+
+        rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=1_300_000, season_key=None, is_movie=False)
+        marker = Marker(MarkerType.INTRO, 60_000, 90_000, decided_by)
+        if locked:
+            store.lock_marker(rec.id, marker)
+            return
+        decision = TypeDecision(MarkerType.INTRO, DecisionStatus.DECIDED, marker, None, "x")
+        store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="old")
+
+    def test_settings_v17_adds_the_files_whose_unlocked_intro_rests_on_season_audio(self, jm, store):
+        # Season audio's guards (§14 2026-09-24) changed its answers: those intros are decided again, and one that
+        # no longer holds comes off the servers. Other sources' intros and locked ones aren't listed.
+        from media_preview_generator.markers import job_runner
+
+        self._intro(store, "/media/tv/A/S03/e1.mkv", ("season_audio",))
+        self._intro(store, "/media/tv/A/S03/e2.mkv", ("theintrodb", "season_audio"))
+        self._intro(store, "/media/tv/A/S04/e1.mkv", ("season_audio_previous", "introdb"))
+        self._intro(store, "/media/tv/A/S03/e3.mkv", ("chapters",))
+        self._intro(store, "/media/tv/A/S03/e4.mkv", ("season_audio",), locked=True)
+        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+
+        assert triggers.submit_decide_again() == self._ic_jobs(jm)[0].id
+        assert [i.canonical_path for i in job_runner._items_to_decide_again(store)] == [
+            "/media/movies/A/a.mkv",
+            "/media/tv/A/S03/e1.mkv",
+            "/media/tv/A/S03/e2.mkv",
+            "/media/tv/A/S04/e1.mkv",
+        ]
+
+    def test_season_audio_intros_alone_are_enough(self, jm, store):
+        self._intro(store, "/media/tv/A/S03/e1.mkv", ("season_audio",))
+        assert triggers.submit_decide_again() == self._ic_jobs(jm)[0].id
+
+    def test_a_locked_season_audio_intro_alone_queues_nothing(self, jm, store):
+        self._intro(store, "/media/tv/A/S03/e1.mkv", ("season_audio",), locked=True)
+        assert triggers.submit_decide_again() is None
+        assert self._ic_jobs(jm) == []
+
     def test_files_waiting_for_their_items_other_versions_alone_are_enough(self, jm, store):
         self._last_row(
             store, "/media/movies/C/c - 4K.mkv", "waiting", "Waiting for this item's other versions to agree on: intro"

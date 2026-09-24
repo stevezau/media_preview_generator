@@ -9,6 +9,9 @@ episodes of the previous season; that answer is a hint (``Source.SEASON_AUDIO_PR
 phase 2 (owner, 2026-09-14). Episodes whose answer is out of date and whose intro is still undecided, or was decided
 with that answer, are handed to the job as follow-ups, which a "Season" job decides again: by the run that fingerprints
 the season, and by every run of an episode of the group (one that arrives decided by its chapters never matches).
+
+The matcher's clusters are walked with guards against a network ident or a cold-open music bed ahead of the title card
+(``FILE_START_S`` below); the end-picture check among them decodes video, on a worker, and its shares are cached.
 """
 
 from __future__ import annotations
@@ -35,7 +38,8 @@ from ..models import Candidate, FileIdentity, MarkerType, Source
 from ..outcomes import is_kept_own
 from ..probe import ProbeError, ProbeStalledError, probe_media
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
-from . import POINT_S
+from ..store import EndPictureKey
+from . import POINT_S, end_picture
 from .fingerprint import (
     FingerprintError,
     FingerprintSkippedError,
@@ -51,10 +55,12 @@ from .matcher import (
     MAX_GAP_S,
     MAX_INTRO_S,
     TOP_SHIFTS,
+    IntroCandidate,
     IntroSegment,
     Run,
     file_hits,
-    intro_for,
+    intro_candidates,
+    meets_quorum,
     pair_runs,
 )
 
@@ -62,14 +68,29 @@ if TYPE_CHECKING:
     from ..pipeline import DetectorAnswer, LocalDetectorSpec, PipelineContext
     from ..store import FileRecord
 
-# The season step's own version (matcher v3 plus the silence guard, the provable pair skip and the group rule): stored with
-# its answers and with cached pairs, so a change to any of them is matched again.
-SEASON_AUDIO_VERSION = 4
+# The season step's own version (matcher v3 plus the silence guard, the provable pair skip, the group rule and the
+# guards against idents and music beds): stored with its answers and with cached pairs, so a change to any of them is
+# matched again.
+SEASON_AUDIO_VERSION = 5
+# Guards on the repeated stretches season audio takes for the intro (§5.3, owner 2026-09-24): a network ident at the
+# very start of the file, or a music bed under the cold open, repeats in every episode as well as the theme does
+# ("Accused: Guilty or Innocent": 13 of 15 intros were the A&E logo, the logo plus the cold-open music, or the music).
+# A stretch starting in the first 2 s must be at least 10 s long; one starting in the first 30 s must end on the same
+# picture in the episodes it repeats in (end_picture); and every one needs a dense core: in the median partner, 8 s
+# where the two recordings match with gaps of at most 4 points (an ident followed by a music bed, merged by the
+# matcher's 3.5 s gap bridge, has none).
+FILE_START_S = 2.0
+MIN_FILE_START_LENGTH_S = 10.0
+MIN_DENSE_CORE_S = 8.0
+DENSE_CORE_GAP_PTS = 4
 MAX_PREVIOUS_SEASON_FILES = 4
 MAX_GROUP_EPISODES = 40
 # A season member ffprobe couldn't read, or ffmpeg couldn't fingerprint, is left out of other episodes' season steps for
 # this long (while unchanged).
 UNREADABLE_MEMBER_RETRY = timedelta(days=1)
+# A file the end-picture check couldn't read (an error, a non-zero exit, a timeout) isn't read for it again for this
+# long while unchanged: a bad partner would otherwise hold a worker for up to 150 s on every sibling's run.
+END_PICTURE_RETRY = timedelta(days=1)
 # chromaprint gives silence (and noise too quiet to hear) one constant value, so a shared quiet stretch matches like an
 # intro would (the v3 matcher keeps that behaviour).
 SILENCE_POINT = 0x256DF977
@@ -344,24 +365,110 @@ def _mostly_silence(points: np.ndarray, segment: IntroSegment) -> bool:
     return silence_share(points[first : last + 1]) > MAX_INTRO_SILENCE
 
 
+def dense_core_s(target: str, candidate: IntroCandidate, points: Mapping[str, np.ndarray]) -> float:
+    """How long a candidate's dense core is: per partner, the longest stretch of the candidate (its median start and
+    end) where the two recordings, aligned as the partner's hit aligns them, differ in at most 6 bits with gaps of at
+    most 4 points; the median over the partners (a partner hit more than once counts its longest).
+
+    Args:
+        target: The episode.
+        candidate: One of its clusters.
+        points: Fingerprint per file (``target``'s and its partners').
+
+    Returns:
+        Seconds; 0.0 when no partner overlaps the candidate.
+    """
+    a = np.ascontiguousarray(points[target], dtype="<u4")
+    first, last = round(candidate.segment.start_s / POINT_S), round(candidate.segment.end_s / POINT_S)
+    longest: dict[str, float] = {}
+    for hit in candidate.members:
+        b = np.ascontiguousarray(points[hit.partner], dtype="<u4")
+        shift = round((hit.partner_start_s - hit.start_s) / POINT_S)
+        lo, hi = max(first, -shift, 0), min(last, len(a), len(b) - shift)
+        if hi <= lo:
+            continue
+        differing = _POPCOUNT8[(a[lo:hi] ^ b[lo + shift : hi + shift]).view(np.uint8)].reshape(-1, 4).sum(axis=1)
+        alike = np.flatnonzero(differing <= MAX_BIT_DIFF)
+        stretch = 0
+        if len(alike):
+            breaks = np.flatnonzero(np.diff(alike) > DENSE_CORE_GAP_PTS)
+            starts = np.concatenate(([alike[0]], alike[breaks + 1]))
+            ends = np.concatenate((alike[breaks], [alike[-1]]))
+            stretch = int((ends - starts).max())
+        longest[hit.partner] = max(longest.get(hit.partner, 0.0), stretch * POINT_S)
+    return float(np.median(list(longest.values()))) if longest else 0.0
+
+
+def _passes_guards(
+    target: str,
+    candidate: IntroCandidate,
+    points: Mapping[str, np.ndarray],
+    end_picture_passes: Callable[[IntroCandidate], bool],
+) -> bool:
+    """Whether a candidate passes the guards against idents and music beds (``FILE_START_S`` above); the end picture,
+    the only one that decodes, is asked last."""
+    segment = candidate.segment
+    if segment.start_s < FILE_START_S and segment.end_s - segment.start_s < MIN_FILE_START_LENGTH_S:
+        return False
+    if dense_core_s(target, candidate, points) < MIN_DENSE_CORE_S:
+        return False
+    return not end_picture.is_early(segment.start_s) or end_picture_passes(candidate)
+
+
+def guarded_pick(
+    target: str,
+    files: Sequence[str],
+    points: Mapping[str, np.ndarray],
+    runs_between: Callable[[str, str], list[Run]],
+    *,
+    end_picture_passes: Callable[[IntroCandidate], bool],
+) -> IntroSegment | None:
+    """The best ranked of the v3 matcher's clusters for one episode that passes the guards (before the silence guard).
+
+    The clusters are walked in the matcher's ranking order (:func:`matcher.intro_candidates`): the walk ends, with no
+    intro, at the first cluster without the quorum; a quorum cluster that fails a guard (too short at the file's start,
+    no dense core, or an early one whose end picture differs) is passed over.
+
+    Args:
+        target: The episode (one of ``files``).
+        files: The group, in matching order.
+        points: Fingerprint per file (``target``'s and every other file's of ``files``).
+        runs_between: Runs for ``(earlier, later)`` (:func:`season_pair_runs`, cached).
+        end_picture_passes: The end-picture check of a cluster starting in the first 30 s (:class:`_EndPictures`).
+
+    Returns:
+        The cluster's segment with its support, or None.
+    """
+    others = len(files) - 1
+    for candidate in intro_candidates(file_hits(target, files, runs_between)):
+        if not meets_quorum(candidate.segment.support, others):
+            return None
+        if _passes_guards(target, candidate, points, end_picture_passes):
+            return candidate.segment
+    return None
+
+
 def season_intro(
     target: str,
     files: Sequence[str],
     points: Mapping[str, np.ndarray],
     runs_between: Callable[[str, str], list[Run]],
+    *,
+    end_picture_passes: Callable[[IntroCandidate], bool],
 ) -> IntroSegment | None:
-    """One episode's intro from its group: the v3 matcher's answer unless it is mostly silence.
+    """One episode's intro from its group: :func:`guarded_pick`, unless it is mostly silence.
 
     Args:
         target: The episode (one of ``files``).
         files: The group, in matching order.
-        points: Fingerprint per file (``target``'s at least).
+        points: Fingerprint per file (``target``'s and every other file's of ``files``).
         runs_between: Runs for ``(earlier, later)`` (:func:`season_pair_runs`, cached).
+        end_picture_passes: The end-picture check of a cluster starting in the first 30 s (:class:`_EndPictures`).
 
     Returns:
         The intro with its support, or None.
     """
-    segment = intro_for(file_hits(target, files, runs_between), len(files) - 1)
+    segment = guarded_pick(target, files, points, runs_between, end_picture_passes=end_picture_passes)
     if segment is not None and _mostly_silence(points[target], segment):
         return None
     return segment
@@ -619,10 +726,13 @@ def season_audio_due(rec: FileRecord, ctx: PipelineContext) -> bool:
 def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
     """Whether this episode's season audio has to run on a worker.
 
-    It does while an episode of the folder (this one included) still needs ffmpeg or ffprobe, or while a pair this
+    It does while an episode of the folder (this one included) still needs ffmpeg or ffprobe, while a pair this
     episode hasn't been matched with yet is too slow for a checking thread (:func:`slow_to_match`: long constant
-    stretches in both openings that don't provably rule out an intro). Otherwise matching is cheap enough to run inline.
-    A sibling ffmpeg failed on lately doesn't count: the step leaves it out.
+    stretches in both openings that don't provably rule out an intro), or while the season step would meet a cluster
+    starting in the first 30 s whose end picture isn't checked yet (decoding is a worker's job). That last question is
+    the season step itself, run here with the end-picture check reading only markers.db: the pairs it matches are cached
+    for the detector, whichever thread it then runs on. Otherwise matching is cheap enough to run inline. A sibling
+    ffmpeg failed on lately doesn't count: the step leaves it out.
 
     Args:
         rec: The episode.
@@ -662,10 +772,152 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
             for path in fingerprinted
             if path != rec.canonical_path
         ]
-    return any(
+    if any(
         ctx.store.get_season_pair(first.id, second.id, SEASON_AUDIO_VERSION) is None and slow_to_match(a, b)
         for (first, a), (second, b) in pairs
-    )
+    ):
+        return True
+    return _end_picture_unchecked(ctx, rec, view, fingerprinted)
+
+
+def _end_picture_unchecked(
+    ctx: PipelineContext, rec: FileRecord, view: _SeasonView, fingerprinted: dict[str, tuple[FileRecord, np.ndarray]]
+) -> bool:
+    """Whether the detector, matching the files it would match now, would decode an end picture."""
+    records = {path: member for path, (member, _) in fingerprinted.items()}
+    points = {path: cached for path, (_, cached) in fingerprinted.items()}
+    if not len(points[rec.canonical_path]):
+        return False
+    audible = sorted(path for path, cached in points.items() if len(cached))
+    if len(audible) > 1:
+        files = audible
+    elif len(view.group().episodes) == 1:
+        previous = _previous_season_points(ctx, rec.canonical_path, records, view.previous_season())
+        if not previous:
+            return False
+        files, points = [rec.canonical_path, *sorted(previous)], {**points, **previous}
+    else:
+        return False
+    try:
+        _intro(ctx, rec.canonical_path, files, records, points, _EndPictures(ctx, rec, records, decode=False))
+    except _EndPictureUncheckedError:
+        return True
+    except end_picture.CheckUnavailableError:
+        return False  # this episode's own file couldn't be read lately: the detector gives up without decoding
+    return False
+
+
+class _EndPictureUncheckedError(Exception):
+    """A cluster's end picture isn't checked yet and the check was asked not to decode (``needs_worker``)."""
+
+
+class _EndPictures:
+    """The end-picture check (:mod:`end_picture`) of one episode's clusters, each partner's share cached in markers.db
+    per file pair and stretch.
+
+    With ``decode`` off (``season_audio_needs_worker``), a share not cached yet raises
+    :class:`_EndPictureUncheckedError` instead: decoding is a worker's job. A forced re-detect reads no cached share and
+    no remembered failure, so every share is measured again.
+
+    A file ffprobe or ffmpeg couldn't read (``end_picture.ReadFailedError``) is remembered with its identity for a day
+    (``END_PICTURE_RETRY``) and not read for the check meanwhile, by this episode's run or any sibling's. It is never a
+    pass: this episode's own file makes the check unavailable (no season audio answer this time), and a partner has no
+    share, so the other partner decides; with no share at all the check is unavailable too. Only a share, or "certainly
+    no frames" (None), is cached. A cancel or stalled ffprobes raise ``end_picture.CheckUnavailableError`` with nothing
+    stored.
+    """
+
+    def __init__(
+        self,
+        ctx: PipelineContext,
+        target: FileRecord,
+        records: Mapping[str, FileRecord],
+        *,
+        decode: bool,
+        gpu: str | None = None,
+        gpu_device_path: str | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+        phase: Callable[[str], None] | None = None,
+    ) -> None:
+        self._ctx, self._target, self._records, self._decode = ctx, target, records, decode
+        self._phase = phase or (lambda _text: None)
+        self._reader = end_picture.Reader(
+            ffmpeg=getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg",
+            gpu=gpu,
+            gpu_device_path=gpu_device_path,
+            cancel_check=cancel_check,
+        )
+        self._shares: dict[EndPictureKey, float | None] = {}
+
+    def __call__(self, candidate: IntroCandidate) -> bool:
+        segment = candidate.segment
+        shares: list[float | None] = []
+        unread = False
+        for hit in end_picture.partners(candidate.members):
+            partner = self._records[hit.partner]
+            offset_s = hit.partner_start_s - hit.start_s
+            key = EndPictureKey(
+                self._target.id,
+                partner.id,
+                round(segment.start_s * 1000),
+                round(segment.end_s * 1000),
+                round(offset_s * 1000),
+            )
+            if key not in self._shares:
+                cached = None if self._ctx.force else self._ctx.store.get_end_picture(key, end_picture.CHECK_VERSION)
+                if cached is not None:
+                    self._shares[key] = cached.share
+                else:
+                    if self._failed_lately(self._target):
+                        raise end_picture.CheckUnavailableError(
+                            f"{os.path.basename(self._target.canonical_path)} couldn't be read for its end picture "
+                            "lately"
+                        )
+                    if self._failed_lately(partner):
+                        unread = True
+                        continue
+                    if not self._decode:
+                        raise _EndPictureUncheckedError(os.path.basename(self._target.canonical_path))
+                    try:
+                        self._shares[key] = self._measure(key, segment, partner, offset_s)
+                    except end_picture.ReadFailedError as exc:
+                        failed = self._target if exc.path == self._target.canonical_path else partner
+                        self._record_failure(failed)
+                        if failed is self._target:
+                            raise end_picture.CheckUnavailableError(str(exc)) from exc
+                        unread = True
+                        continue
+            shares.append(self._shares[key])
+        if unread and all(share is None for share in shares):
+            raise end_picture.CheckUnavailableError(
+                f"the end picture of {os.path.basename(self._target.canonical_path)} has no partner to compare with: "
+                "its partners couldn't be read lately"
+            )
+        return end_picture.passes(shares)
+
+    def _failed_lately(self, rec: FileRecord) -> bool:
+        if self._ctx.force:
+            return False
+        failed_at = self._ctx.store.end_picture_failed_at(_identity_of(rec))
+        return failed_at is not None and self._ctx.now() - failed_at < END_PICTURE_RETRY
+
+    def _record_failure(self, rec: FileRecord) -> None:
+        now = self._ctx.now()
+        self._ctx.store.record_end_picture_failure(_identity_of(rec), now, forget_before=now - END_PICTURE_RETRY)
+
+    def _measure(self, key: EndPictureKey, segment: IntroSegment, partner: FileRecord, offset_s: float) -> float | None:
+        self._phase("Comparing the intro's end picture…")
+        share = self._reader.share(
+            self._target.canonical_path, partner.canonical_path, segment.start_s, segment.end_s, offset_s
+        )
+        self._ctx.store.set_end_picture(
+            key,
+            end_picture.CHECK_VERSION,
+            share,
+            identity_a=(self._target.size, self._target.mtime_ns),
+            identity_b=(partner.size, partner.mtime_ns),
+        )
+        return share
 
 
 def _intro(
@@ -674,6 +926,7 @@ def _intro(
     files: list[str],
     records: dict[str, FileRecord],
     points: dict[str, np.ndarray],
+    end_pictures: _EndPictures,
 ) -> IntroSegment | None:
     def runs_between(first: str, second: str) -> list[Run]:
         a, b = records[first], records[second]
@@ -691,7 +944,24 @@ def _intro(
         )
         return runs
 
-    return season_intro(target, files, points, runs_between)
+    return season_intro(target, files, points, runs_between, end_picture_passes=end_pictures)
+
+
+def _previous_season_points(
+    ctx: PipelineContext,
+    canonical_path: str,
+    records: dict[str, FileRecord],
+    previous_files: Sequence[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """The previous season's files a lone episode is matched with: current records with a cached fingerprint that
+    isn't empty (each record is added to ``records``)."""
+    previous: dict[str, np.ndarray] = {}
+    for path in previous_season_files(canonical_path) if previous_files is None else previous_files:
+        member = _current_record(ctx, path)
+        cached = _cached_points(ctx, member)
+        if member is not None and cached is not None and len(cached):
+            records[path], previous[path] = member, cached
+    return previous
 
 
 def _candidate(segment: IntroSegment, others: int, source: Source) -> Candidate:
@@ -828,13 +1098,14 @@ def detect_season_audio(
     """Match this episode's opening against its season (or, alone, the previous season's cached episodes).
 
     A sibling ffmpeg can't fingerprint is remembered, and other episodes' steps leave it out for a day while it stays
-    unchanged; this episode's own fingerprint is always tried.
+    unchanged; this episode's own fingerprint is always tried. A cluster starting in the first 30 s whose end picture
+    isn't checked yet is decoded here (:class:`_EndPictures`).
 
     Args:
         rec: The episode (its identity matches the disk: the pipeline just checked).
         ctx: The job's context.
-        gpu: Unused (chromaprint is CPU only).
-        gpu_device_path: Unused.
+        gpu: The worker's GPU type for the end-picture decode (chromaprint is CPU only), None on the CPU.
+        gpu_device_path: The worker's device.
         phase_callback: Worker row step text.
         cancel_check: True once the job is cancelled.
         pause_check: Unused (a paused job doesn't block a worker).
@@ -845,7 +1116,8 @@ def detect_season_audio(
 
     Raises:
         DetectorUnavailableError: No chromaprint ffmpeg, this episode couldn't be fingerprinted, earlier fingerprint
-            ffmpegs or ffprobes are still stuck on their files (the season stops there), or cancelled.
+            ffmpegs or ffprobes are still stuck on their files (the season stops there), an end-picture read stalled or
+            timed out, or cancelled.
     """
     from ..pipeline import DetectorAnswer, DetectorUnavailableError
 
@@ -916,25 +1188,33 @@ def detect_season_audio(
     phase("Matching season audio…")
     candidates: list[Candidate] = []
     previous_used: set[str] = set()
+    end_pictures = _EndPictures(
+        ctx,
+        rec,
+        records,
+        decode=True,
+        gpu=gpu,
+        gpu_device_path=gpu_device_path,
+        cancel_check=cancel_check,
+        phase=phase,
+    )
     audible = sorted(p for p, pts in points.items() if len(pts))
-    if len(own) and len(audible) > 1:
-        segment = _intro(ctx, rec.canonical_path, audible, records, points)
-        if segment is not None:
-            candidates.append(_candidate(segment, len(audible) - 1, Source.SEASON_AUDIO))
-    elif len(own) and len(group.episodes) == 1:
-        previous: dict[str, np.ndarray] = {}
-        for path in previous_season_files(rec.canonical_path):
-            member = _current_record(ctx, path)
-            cached = _cached_points(ctx, member)
-            if member is not None and cached is not None and len(cached):
-                records[path], previous[path] = member, cached
-        previous_used = set(previous)
-        if previous:
-            # The order few_siblings.py measured: this episode first, then the previous season's files by path.
-            files = [rec.canonical_path, *sorted(previous)]
-            segment = _intro(ctx, rec.canonical_path, files, records, {**points, **previous})
+    try:
+        if len(own) and len(audible) > 1:
+            segment = _intro(ctx, rec.canonical_path, audible, records, points, end_pictures)
             if segment is not None:
-                candidates.append(_candidate(segment, len(previous), Source.SEASON_AUDIO_PREVIOUS))
+                candidates.append(_candidate(segment, len(audible) - 1, Source.SEASON_AUDIO))
+        elif len(own) and len(group.episodes) == 1:
+            previous = _previous_season_points(ctx, rec.canonical_path, records)
+            previous_used = set(previous)
+            if previous:
+                # The order few_siblings.py measured: this episode first, then the previous season's files by path.
+                files = [rec.canonical_path, *sorted(previous)]
+                segment = _intro(ctx, rec.canonical_path, files, records, {**points, **previous}, end_pictures)
+                if segment is not None:
+                    candidates.append(_candidate(segment, len(previous), Source.SEASON_AUDIO_PREVIOUS))
+    except end_picture.CheckUnavailableError as exc:
+        raise DetectorUnavailableError(str(exc)) from exc
 
     matched = {path: records[path] for path in points.keys() | previous_used}
     signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched)

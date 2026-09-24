@@ -20,13 +20,18 @@ Runs the app's v3 matcher (`markers/audio/matcher.py`) and the pure-Python refer
 the app's own ffmpeg command. It checks these things:
 
 - The port must return exactly what the reference returns for every episode.
-- The app's season step (`markers/audio/season.py`: the matcher, the silence guard, and pairs it skips because they
-  provably hold no intro) must score at least spec §5.3's 91 / 13 / 14 useful / wrong / missed. "Useful" means the
-  end is within 5 s and the start within 15 s of the chapter truth. `matcher_tally` is the matcher alone.
+- The app's season step (`markers/audio/season.py`: the matcher, its guards against idents and music beds, the silence
+  guard, and pairs it skips because they provably hold no intro) must score at least 91 / 12 / 15 useful / wrong /
+  missed (spec §5.3, §14 2026-09-24; the matcher alone was 91 / 13 / 14). "Useful" means the end is within 5 s and the
+  start within 15 s of the chapter truth. `matcher_tally` is the matcher alone, and `guards_changed` lists the answers
+  the guards changed, with both verdicts.
 - No skipped pair may hold a run of 120 s or less in the matcher's answer (`skipped_pairs`), and the silence guard may
   not drop an answer that was useful (`silence_dropped`).
 - Drift lists the matcher answers that differ from the stored v3 segments by more than two points. It is reported, but
   it doesn't fail the gate.
+
+The guards' end-picture check decodes the real files, like a worker: `--decode gpu` (the default, NVIDIA on
+`--gpu-device cuda:0`) or `--decode cpu`. Each share is measured once per run.
 
 ```bash
 cd /home/data/workspace/plex_generate_vid_previews
@@ -47,6 +52,22 @@ evidence folder ignores `*.json`).
 
 A cold cache fingerprints about 124 files (158 with `--full-folder`), one ffmpeg at a time, at 3–14 s each.
 
+## `season-truth`: the season step on any intro truth set
+
+Runs the app's season step on each file of a truth file, matched with its season group (`season_group`, as the app
+does), with real end-picture decodes. The truth is local-only JSON, `{"<file>": [start_s, end_s]}`, with `null` for a
+file that has no intro (an answer there counts as wrong; none counts as `none_ok`). The Accused set of §14 2026-09-24
+(57 episodes of "Accused: Guilty or Innocent", truth from frame checks) goes in `evidence/eval/accused_truth.json`:
+
+```bash
+cd /home/data/workspace/plex_generate_vid_previews
+nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval season-truth --ffmpeg /usr/bin/ffmpeg \
+  --truth docs/design/intro-credits/evidence/eval/accused_truth.json --expect 2,0
+```
+
+`--expect useful,wrong` makes it exit 1 below that many useful or above that many wrong (Accused: 2 / 0 / 54, as
+measured). `--json`, `--cache`, `--decode` and `--gpu-device` work as for `reproduce`.
+
 ## `report`: our decisions against Plex's own markers, online cases, credits chapter rules
 
 ```bash
@@ -56,6 +77,8 @@ nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval report --ffmpeg /us
 nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval report --ffmpeg /usr/bin/ffmpeg --full-folder \
   --json docs/design/intro-credits/evidence/eval/phase2_report_full_folder.json
 ```
+
+Its season audio answers come from the same season step, end-picture decodes included (`--decode`, `--gpu-device`).
 
 It prints a summary with counts and show or movie names only. `--json` writes per-file details, which hold file paths,
 so keep that file local. With a warm cache a run takes about a minute. Exit 0 means the shipped rules pass the gate

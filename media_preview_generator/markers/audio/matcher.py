@@ -31,7 +31,14 @@ _GAP_PTS = int(MAX_GAP_S / POINT_S)
 _MATCHES_PER_CHUNK = 1 << 18
 _POPCOUNT8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 
-Hit = tuple[float, float, str]
+
+class Hit(NamedTuple):
+    """One run on the target episode's side, with the episode it matched and where the run starts there."""
+
+    start_s: float
+    end_s: float
+    partner: str
+    partner_start_s: float
 
 
 class Run(NamedTuple):
@@ -49,6 +56,13 @@ class IntroSegment(NamedTuple):
     start_s: float
     end_s: float
     support: int
+
+
+class IntroCandidate(NamedTuple):
+    """One cluster of an episode's hits: the segment it would publish and the hits it was made of."""
+
+    segment: IntroSegment
+    members: tuple[Hit, ...]
 
 
 def _popcount32(x: np.ndarray) -> np.ndarray:
@@ -143,14 +157,18 @@ def file_hits(target: str, files: Sequence[str], runs_between: Callable[[str, st
         runs_between: Runs for ``(earlier, later)``; asked only in that order.
 
     Returns:
-        ``(start_s, end_s, partner)`` on the target's side, runs over 120 s left out.
+        Each run on the target's side with its partner and the partner's start, runs over 120 s left out.
     """
     k = list(files).index(target)
     hits: list[Hit] = []
     for earlier in files[:k]:
-        hits.extend((r.b_start_s, r.b_end_s, earlier) for r in runs_between(earlier, target) if not _too_long(r))
+        hits.extend(
+            Hit(r.b_start_s, r.b_end_s, earlier, r.a_start_s) for r in runs_between(earlier, target) if not _too_long(r)
+        )
     for later in files[k + 1 :]:
-        hits.extend((r.a_start_s, r.a_end_s, later) for r in runs_between(target, later) if not _too_long(r))
+        hits.extend(
+            Hit(r.a_start_s, r.a_end_s, later, r.b_start_s) for r in runs_between(target, later) if not _too_long(r)
+        )
     return hits
 
 
@@ -171,8 +189,8 @@ def intro_for(hits: Sequence[Hit], others: int) -> IntroSegment | None:
     tol = CLUSTER_TOLERANCE_S
     best: IntroSegment | None = None
     best_key: tuple | None = None
-    for s, e, _ in hits:
-        cluster = [(s2, e2, p) for s2, e2, p in hits if abs(s2 - s) <= tol and abs(e2 - e) <= tol]
+    for s, e, *_ in hits:
+        cluster = [(s2, e2, p) for s2, e2, p, *_ in hits if abs(s2 - s) <= tol and abs(e2 - e) <= tol]
         support = len({p for _, _, p in cluster})
         key = ((e - s) >= PREFERRED_MIN_S, support, e - s)
         if best_key is None or key > best_key:
@@ -183,6 +201,38 @@ def intro_for(hits: Sequence[Hit], others: int) -> IntroSegment | None:
     if best is not None and best.support < max(1, QUORUM * others):
         return None
     return best
+
+
+def meets_quorum(support: int, others: int) -> bool:
+    """Whether a cluster is supported by half of the other episodes (at least one), as :func:`intro_for` requires."""
+    return support >= max(1, QUORUM * others)
+
+
+def intro_candidates(hits: Sequence[Hit]) -> list[IntroCandidate]:
+    """Every cluster of one episode's hits, in :func:`intro_for`'s ranking order.
+
+    One cluster per hit, as :func:`intro_for` builds them (the same cluster can appear once per hit it holds), ranked
+    by that hit's (≥ 15 s, supporting episodes, length), ties in hit order. The first one is :func:`intro_for`'s
+    answer before its quorum check.
+
+    Args:
+        hits: From :func:`file_hits`.
+
+    Returns:
+        The clusters with their median start/end, support and member hits, best first.
+    """
+    tol = CLUSTER_TOLERANCE_S
+    ranked: list[tuple[tuple, IntroCandidate]] = []
+    for hit in hits:
+        s, e = hit.start_s, hit.end_s
+        cluster = tuple(h for h in hits if abs(h.start_s - s) <= tol and abs(h.end_s - e) <= tol)
+        support = len({h.partner for h in cluster})
+        segment = IntroSegment(
+            float(np.median([h.start_s for h in cluster])), float(np.median([h.end_s for h in cluster])), support
+        )
+        ranked.append((((e - s) >= PREFERRED_MIN_S, support, e - s), IntroCandidate(segment, cluster)))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)  # stable: equal keys keep hit order, as intro_for's first max
+    return [candidate for _, candidate in ranked]
 
 
 def season_intros(points: Mapping[str, np.ndarray]) -> dict[str, IntroSegment | None]:

@@ -25,10 +25,11 @@ from .config.validation import MAX_CPU_THREADS
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 16
+_CURRENT_SCHEMA_VERSION = 17
 
-#: Set by v16: once the job manager runs, the app queues the one job that decides the files in Intro & Credits' Needs
-#: review (and those waiting for their item's other versions) again (``web.app``). Cleared when that job completes
+#: Set by v16 and v17: once the job manager runs, the app queues the one job that decides the files in Intro & Credits'
+#: Needs review, those waiting for their item's other versions and those whose intro rests on season audio again
+#: (``web.app``). Cleared when that job completes
 #: (``markers.job_runner``), so a start after a failed, cancelled or interrupted one queues it again, and a start with
 #: Intro & Credits off everywhere leaves it for later.
 DECIDE_AGAIN_KEY = "_markers_decide_again"
@@ -404,6 +405,8 @@ def _migrate_schema(sm) -> None:
         v15 -- Seeds Intro & Credits (markers) defaults, disabled per server.
         v16 -- Drops the removed ``markers.publish_when`` and asks the next start to decide the files in Needs
                review again from their stored answers.
+        v17 -- Asks the next start to decide the files whose intro rests on season audio again: its guards against
+               network idents and cold-open music changed which repeated stretch it takes.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -468,6 +471,8 @@ def _migrate_schema(sm) -> None:
         _run(15, _migrate_to_v15)
     if current < 16:
         _run(16, _migrate_to_v16)
+    if current < 17:
+        _run(17, _migrate_to_v17)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -1536,6 +1541,25 @@ def _migrate_to_v16(sm) -> list:
     if markers["publish_when"] != "high":
         return []
     return ["v16: removed the Intro & Credits publish rule High; every file is decided at Medium's rules now"]
+
+
+def _migrate_to_v17(sm) -> list:
+    """Have the files whose intro rests on season audio decided again (owner ruling 2026-09-24).
+
+    Season audio's version 5 passes over a repeated stretch that is only a network ident, or music under the cold
+    open, where version 4 took it for the intro (``markers.audio.season``: 13 of 15 intros of one A&E show were such a
+    stretch). A stored answer from version 4 is matched again on the file's next run anyway; this sets
+    :data:`DECIDE_AGAIN_KEY` so that run comes now, in the decide-again job, which also lists the files whose unlocked
+    intro was decided with a season audio answer (``markers.job_runner._items_to_decide_again``). An intro that no
+    longer holds comes off the servers there; a locked one is never touched.
+
+    Runs once, gated on ``_schema_version``.
+
+    Returns:
+        No notes: nothing in the settings changes, and the job's own log says what it decided.
+    """
+    sm.set(DECIDE_AGAIN_KEY, True)
+    return []
 
 
 # =========================================================================

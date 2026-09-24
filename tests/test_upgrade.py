@@ -2760,8 +2760,7 @@ class TestMigrateToV15:
 
         settings_manager.apply_changes(updates={"_schema_version": 14})
         _migrate_schema(settings_manager)
-        assert _CURRENT_SCHEMA_VERSION == 16
-        assert settings_manager.get("_schema_version") == 16
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
         assert "publish_when" not in settings_manager.get("markers")
         notice = settings_manager.get("_pending_migration_notice") or {}
         assert notice.get("notes", []) == []
@@ -2818,7 +2817,7 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 16
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 17
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[16]]
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
@@ -2829,3 +2828,32 @@ class TestMigrateToV16:
         _migrate_schema(settings_manager)
         assert settings_manager.get(DECIDE_AGAIN_KEY) is None
         assert settings_manager.get("markers")["publish_when"] == "high"  # untouched now; validate_global ignores it
+
+
+class TestMigrateToV17:
+    """Season audio's guards against idents and cold-open music (owner, 2026-09-24): the next start decides the files
+    whose intro rests on season audio again (``DECIDE_AGAIN_KEY``), so an intro that was only an ident comes off now."""
+
+    def test_it_asks_for_the_decide_again_job_and_changes_nothing_else(self, settings_manager):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v17
+
+        block = {"detect": {"intro": True, "credits": True, "recap": False}}
+        settings_manager.apply_changes(updates={"markers": dict(block)})
+        assert _migrate_to_v17(settings_manager) == []
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get("markers") == block
+
+    @pytest.mark.parametrize("start", [15, 16], ids=["from-v15", "from-v16"])
+    def test_the_schema_step_runs_once_and_leaves_no_user_note(self, settings_manager, start):
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, DECIDE_AGAIN_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": start})
+        _migrate_schema(settings_manager)
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 17
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
+
+        # The completed job clears the request; a later start at v17 doesn't ask again.
+        settings_manager.delete(DECIDE_AGAIN_KEY)
+        _migrate_schema(settings_manager)
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
