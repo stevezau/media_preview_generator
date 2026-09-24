@@ -1351,6 +1351,33 @@ class TestReconcileGpuWorkers:
         assert sum(w._pending_removal for w in pool.workers) == 2
         assert len(pool.workers) == 3
 
+    @pytest.mark.parametrize(
+        ("reenabled_count", "added", "still_retiring"),
+        [(1, 0, 1), (2, 0, 0), (3, 1, 0)],
+        ids=["fewer-than-busy", "same-as-busy", "more-than-busy"],
+    )
+    def test_reconcile_reenable_while_busy_keeps_the_busy_workers(self, reenabled_count, added, still_retiring):
+        # Turning the GPU off flags both busy workers; turning it back on before they finish must keep them. Before
+        # the flagged workers counted as gone, re-enabling saw 2 workers, changed nothing, and the sweep left 0.
+        pool = self._busy_gpu_pool(2)
+        busy = list(pool.workers)
+        pool.reconcile_gpu_workers([])
+
+        result = pool.reconcile_gpu_workers(self._gpus(reenabled_count))
+        flagged = sum(w._pending_removal for w in pool.workers)
+        for w in busy:
+            w.is_busy = False
+        retired = pool._apply_deferred_removals()
+
+        assert result == {"added": added, "removed": 0, "deferred": 0}
+        assert flagged == still_retiring
+        assert retired == still_retiring
+        kept = min(reenabled_count, len(busy))
+        assert pool.workers[:kept] == busy[:kept]
+        assert len(pool.workers) == reenabled_count
+        assert all(w.gpu_device == self.DEVICE for w in pool.workers)
+        assert not any(w._pending_removal for w in pool.workers)
+
     def test_reconcile_added_gpu_workers_wired_to_done_event(self):
         """Workers the reconcile adds must wake the dispatch loop when they finish, like start-up workers."""
         selected_gpus = [("NVIDIA", "/dev/dri/renderD128", {"name": "GPU0", "workers": 1})]
