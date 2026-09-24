@@ -165,4 +165,4 @@ def setup_wizard():
     if settings.is_setup_complete() and is_authenticated() and not request.args.get("rerun"):
         return redirect(url_for("main.index"))
 
-    return render_template("setup.html")
+    return render_template("setup.html", max_cpu_threads=MAX_CPU_THREADS)

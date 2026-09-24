@@ -934,7 +934,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 pool.reconcile_gpu_workers(fresh_gpus)
                             # The saved count, not the job's config: a CPU count saved while no pool existed
                             # had nothing to resize. The pool is registered above, so a later save finds it.
-                            pool.reconcile_cpu_workers(fresh_settings.cpu_threads)
+                            # Read and resize under the settings lock so a save landing in between isn't undone
+                            # (same lock order as the save hook: settings, then the pool's own lock).
+                            with fresh_settings.locked():
+                                pool.reconcile_cpu_workers(fresh_settings.cpu_threads)
                         except Exception:
                             logger.debug(
                                 "Could not reconcile pool on dispatch",

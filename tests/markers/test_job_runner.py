@@ -405,6 +405,16 @@ class TestRun:
         self._run()
         assert order == ["pool", ("cpu", 4), "submit"]
 
+    def test_the_saved_cpu_count_is_read_and_applied_under_the_settings_lock(self, env):
+        # A save landing between the read and the resize would otherwise be undone by this job's stale count.
+        env.sm.cpu_threads = 4
+        order = []
+        env.sm.locked.return_value.__enter__.side_effect = lambda *a: order.append("lock")
+        env.sm.locked.return_value.__exit__.side_effect = lambda *a: order.append("unlock")
+        env.dispatcher.worker_pool.reconcile_cpu_workers.side_effect = lambda n: order.append(("cpu", n))
+        self._run()
+        assert order == ["lock", ("cpu", 4), "unlock"]
+
     @pytest.mark.parametrize(("force", "expected"), [(True, True), (False, False), (None, False), ("", False)])
     def test_force_from_job_config_reaches_the_pipeline_context(self, env, force, expected):
         env.job.config = {"libraries": [], "force": force}

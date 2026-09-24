@@ -261,6 +261,15 @@ class TestPageRoutes:
         assert b"gpu_config_panel.js" in body
         assert b"servers.js" in body
 
+    def test_setup_cpu_input_max_comes_from_max_cpu_threads(self, client):
+        # Patched to a value the template can't have hard-coded, so the rendered max must come from the constant.
+        with patch("media_preview_generator.web.routes.pages.MAX_CPU_THREADS", 7):
+            resp = client.get("/setup")
+        assert resp.status_code == 200
+        body = resp.data.decode()
+        cpu_input = body[body.index('id="cpuThreads"') :].split(">", 1)[0]
+        assert 'max="7"' in cpu_input
+
     def test_setup_page_inlines_connection_form_partial(self, client):
         """The Emby/Jellyfin connection form is rendered inline inside the
         wizard card (not in a modal popup). Assert the expected markers

@@ -262,16 +262,59 @@ class TestJobStartReconcilesCpuWorkers:
         # Saved while no pool existed, so the save had nothing to resize; the job's config snapshot still says 2.
         _save(app, {"cpu_threads": 4})
         assert get_dispatcher() is None
+        callback = self._capture_pool_callback(app, tmp_path, cpu_threads=2)
+
+        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
+        callback(pool)
+
+        assert len(_cpu_workers(pool)) == 4
+
+    def test_save_landing_during_job_start_leaves_pool_at_saved_count(self, app, tmp_path):
+        _save(app, {"cpu_threads": 2})
+        callback = self._capture_pool_callback(app, tmp_path, cpu_threads=2)
+        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
+        job_start_read = threading.Event()
+        save_done = threading.Event()
+        job_start: dict = {}
+        real_get = SettingsManager.get
+
+        def get_then_let_the_save_run(self, key, default=None):
+            # Job start reads the saved 2, then waits while a save stores and applies 5. Without the lock job start
+            # then applies its stale 2. With it, the save can't store 5 until job start has finished applying 2.
+            value = real_get(self, key, default)
+            if key == "cpu_threads" and threading.get_ident() == job_start.get("thread"):
+                job_start_read.set()
+                save_done.wait(timeout=1.0)
+            return value
+
+        def start_job() -> None:
+            job_start["thread"] = threading.get_ident()
+            callback(pool)
+
+        with patch.object(SettingsManager, "get", get_then_let_the_save_run):
+            starter = threading.Thread(target=start_job)
+            starter.start()
+            assert job_start_read.wait(timeout=5)
+            save_status = _save(app, {"cpu_threads": 5}).status_code
+            save_done.set()
+            starter.join(timeout=10)
+
+        assert save_status == 200
+        assert _saved_cpu_threads(app) == 5
+        assert len(_cpu_workers(pool)) == 5
+
+    @staticmethod
+    def _capture_pool_callback(app, tmp_path, *, cpu_threads: int):
+        """Start a preview job with run_processing stubbed; return the worker_pool_callback it was handed."""
         captured: dict = {}
         stale_config = MagicMock(
-            cpu_threads=2,
+            cpu_threads=cpu_threads,
             gpu_threads=0,
             path_mappings=[],
             tmp_folder=str(tmp_path),
             plex_url="http://test",
             plex_token="token",
         )
-
         with (
             patch(
                 "media_preview_generator.jobs.orchestrator.run_processing",
@@ -287,11 +330,7 @@ class TestJobStartReconcilesCpuWorkers:
         ):
             resp = app.test_client().post("/api/jobs", json={}, headers={"X-Auth-Token": TOKEN})
         assert resp.status_code == 201
-
-        pool = WorkerPool(gpu_workers=0, cpu_workers=stale_config.cpu_threads, selected_gpus=[])
-        captured["worker_pool_callback"](pool)
-
-        assert len(_cpu_workers(pool)) == 4
+        return captured["worker_pool_callback"]
 
 
 class TestWorkersApiSavesCpuCount:
