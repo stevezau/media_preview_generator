@@ -480,3 +480,38 @@ class TestWorkersApiConcurrency:
         assert responses == [200, 200]
         assert _saved_cpu_threads(app) == 4
         assert len(_cpu_workers(pool)) == 4
+
+
+class TestConcurrentSettingsSaves:
+    def test_pool_ends_at_the_last_saved_cpu_count(self, app):
+        pool = _live_pool(app, cpu=2)
+        first_read_its_count = threading.Event()
+        second_save_done = threading.Event()
+        first_save: dict = {}
+        real_get = SettingsManager.get
+
+        def get_then_let_the_second_save_run(self, key, default=None):
+            # The first save's hook reads its own count (3), then waits while the second save stores and applies 4.
+            # Without the lock the first hook then applies its stale 3. With it, the second save can't store 4
+            # until the first hook has finished applying 3.
+            value = real_get(self, key, default)
+            if key == "cpu_threads" and value == 3 and threading.get_ident() == first_save.get("thread"):
+                first_read_its_count.set()
+                second_save_done.wait(timeout=1.0)
+            return value
+
+        def save_three() -> None:
+            first_save["thread"] = threading.get_ident()
+            first_save["status"] = _save(app, {"cpu_threads": 3}).status_code
+
+        with patch.object(SettingsManager, "get", get_then_let_the_second_save_run):
+            first = threading.Thread(target=save_three)
+            first.start()
+            assert first_read_its_count.wait(timeout=5)
+            second_status = _save(app, {"cpu_threads": 4}).status_code
+            second_save_done.set()
+            first.join(timeout=10)
+
+        assert (first_save["status"], second_status) == (200, 200)
+        assert _saved_cpu_threads(app) == 4
+        assert len(_cpu_workers(pool)) == 4

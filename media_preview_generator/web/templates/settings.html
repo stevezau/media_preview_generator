@@ -203,7 +203,7 @@
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many items the CPU processes at the same time, in addition to any GPU workers. Each worker keeps one job busy at a time. Set to 0 to disable CPU processing entirely."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control has-stepper" id="cpuThreads"
-                               min="0" max="32" value="1">
+                               min="0" max="{{ max_cpu_threads }}" value="1">
                         <div class="form-text">Parallel preview jobs to run on the CPU.</div>
                     </div>
                 </div>

@@ -3,6 +3,7 @@
 from flask import redirect, render_template, request, session, url_for
 from loguru import logger
 
+from ...config import MAX_CPU_THREADS
 from ..auth import is_auth_external, is_authenticated, login_required, start_signed_in_session, validate_token
 from . import main
 from ._helpers import limiter
@@ -55,7 +56,7 @@ def logout():
 @login_required
 def settings():
     """Settings page."""
-    return render_template("settings.html")
+    return render_template("settings.html", max_cpu_threads=MAX_CPU_THREADS)
 
 
 @main.route("/logs")

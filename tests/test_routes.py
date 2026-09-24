@@ -162,6 +162,15 @@ class TestPageRoutes:
         assert resp.status_code == 302
         assert "/login" in resp.headers.get("Location", "")
 
+    def test_settings_cpu_input_max_comes_from_max_cpu_threads(self, authed_client):
+        # Patched to a value the template can't have hard-coded, so the rendered max must come from the constant.
+        with patch("media_preview_generator.web.routes.pages.MAX_CPU_THREADS", 7):
+            resp = authed_client.get("/settings")
+        assert resp.status_code == 200
+        body = resp.data.decode()
+        cpu_input = body[body.index('id="cpuThreads"') :].split(">", 1)[0]
+        assert 'max="7"' in cpu_input
+
     def test_settings_accessible_when_authenticated(self, authed_client):
         resp = authed_client.get("/settings")
         assert resp.status_code == 200

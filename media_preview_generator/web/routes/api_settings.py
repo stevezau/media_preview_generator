@@ -95,7 +95,11 @@ def _reconcile_live_cpu_workers(settings) -> int:
         pool = _get_shared_worker_pool()
         if pool is None:
             return 0
-        return pool.reconcile_cpu_workers(settings.cpu_threads)["retiring"]
+        # Read the saved count and resize under the settings lock, which every save takes: no save can land between
+        # the read and the resize, so the last hook to run leaves the pool at the last saved count. Only the pool's
+        # own lock is taken inside it; nothing holding that lock reads settings.
+        with settings.locked():
+            return pool.reconcile_cpu_workers(settings.cpu_threads)["retiring"]
     except Exception:
         logger.warning(
             "Could not resize the live worker pool to the new CPU worker count. "
