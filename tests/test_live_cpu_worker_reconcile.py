@@ -531,6 +531,19 @@ class TestCpuWorkerCountLimit:
         assert len(_cpu_workers(pool)) == 32
         assert _loader_thread_errors(app) == []
 
+    def test_workers_api_remove_from_above_the_maximum_lands_on_the_maximum(self, app):
+        # A count saved before the cap existed: a decrease goes straight to the maximum, as the stepper does.
+        pool = _live_pool(app, cpu=40)
+
+        resp = _scale(app, "remove", "CPU", 1)
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (8, 0, 0)
+        assert _saved_cpu_threads(app) == 32
+        assert len(_cpu_workers(pool)) == 32
+        assert _loader_thread_errors(app) == []
+
     def test_system_config_reports_the_maximum_for_the_dashboard_stepper(self, app):
         from media_preview_generator.config import MAX_CPU_THREADS
 

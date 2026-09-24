@@ -1239,7 +1239,8 @@ def _change_saved_cpu_worker_count(worker_pool, delta: int) -> tuple[dict, int, 
 
     Args:
         worker_pool: The shared WorkerPool.
-        delta: Workers to add (positive) or remove (negative). The count doesn't go below 0.
+        delta: Workers to add (positive) or remove (negative). The count doesn't go below 0, and a decrease
+            from a count saved above ``MAX_CPU_THREADS`` (before the cap existed) lands on the maximum at most.
 
     Returns:
         ``(summary, previous, target)``: the pool's reconcile summary (``added``, ``removed``, ``deferred``,
@@ -1251,7 +1252,9 @@ def _change_saved_cpu_worker_count(worker_pool, delta: int) -> tuple[dict, int, 
     with get_settings_manager().locked() as settings:
         previous = settings.cpu_threads
         target = max(0, previous + delta)
-        if delta > 0 and target > MAX_CPU_THREADS:
+        if delta < 0:
+            target = min(target, MAX_CPU_THREADS)
+        elif target > MAX_CPU_THREADS:
             return None, previous, target
         settings.cpu_threads = target
         return worker_pool.reconcile_cpu_workers(target), previous, target
@@ -1318,7 +1321,7 @@ def remove_workers_global():
         result = {
             "removed": summary["removed"],
             "scheduled": summary["deferred"],
-            "unavailable": count - (previous - target),
+            "unavailable": max(0, count - previous),
         }
     else:
         result = worker_pool.remove_workers(worker_type, count)
