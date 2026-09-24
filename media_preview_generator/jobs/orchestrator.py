@@ -627,6 +627,9 @@ def _dispatch_processable_items(
             selected_gpus=sel,
         )
     dispatcher = get_dispatcher(worker_pool)
+    # Another job may have created the dispatcher since the check above; its pool is the one that runs, so it's
+    # the one to register (an unused pool registered here would be what Settings saves resize).
+    worker_pool = dispatcher.worker_pool
 
     # Reconcile the (possibly reused/stale) pool to the current GPU config —
     # the same hook the webhook/single-Plex path uses so worker counts track
@@ -1847,6 +1850,9 @@ def run_processing(
                 elif worker_pool is None:
                     worker_pool = _create_worker_pool()
                 dispatcher = get_dispatcher(worker_pool)
+                # Another job may have created the dispatcher since the check above; its pool is the one that runs,
+                # so it's the one to register (an unused pool registered here would be what Settings saves resize).
+                worker_pool = dispatcher.worker_pool
 
                 # Reconcile the pool with the latest settings.  The pool
                 # may have been created minutes ago with stale config
