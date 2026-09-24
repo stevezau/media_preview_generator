@@ -1194,8 +1194,9 @@ def generate_images(
     # Check if we have HDR Format. Note: Sometimes it can be returned as "None" (string) hence the check for None type or "None" (String)
     if media_info.video_tracks:
         hdr_fmt = media_info.video_tracks[0].hdr_format
+        transfer = media_info.video_tracks[0].transfer_characteristics
         if hdr_fmt != "None" and hdr_fmt is not None:
-            if is_dv_no_backward_compat(hdr_fmt):
+            if is_dv_no_backward_compat(hdr_fmt, transfer):
                 # Dolby Vision Profile 5 (no HDR10 base layer).
                 # Only libplacebo can handle these — there is no
                 # backward-compat HDR10 stream for zscale/tonemap to
@@ -1290,9 +1291,9 @@ def generate_images(
                         base_scale=base_scale,
                     )
             elif is_dolby_vision(hdr_fmt):
-                # Dolby Vision Profile 7/8 with HDR10 backward-compat
-                # base layer.  FFmpeg reads the HDR10 base layer by
-                # default, so the standard zscale/tonemap chain works
+                # Dolby Vision Profile 7/8/10 with an HDR10 or HLG
+                # backward-compat base layer.  FFmpeg reads the base layer
+                # by default, so the standard zscale/tonemap chain works
                 # correctly.  This avoids all libplacebo/RPU complexity.
                 logger.info(
                     "Dolby Vision with HDR10 fallback detected for {}; using HDR10 base layer for tone mapping (hdr_format={!r})",
@@ -1312,7 +1313,7 @@ def generate_images(
                 # (50-200 nits) map to tiny linear values that barely
                 # get tone mapped → dark output.
                 path_kind = "hdr10_zscale"
-        elif is_hdr_transfer(media_info.video_tracks[0].transfer_characteristics):
+        elif is_hdr_transfer(transfer):
             # PQ or HLG with no HDR metadata, so MediaInfo leaves
             # HDR_Format empty.  Without tone mapping the thumbnails come
             # out washed out.  The tonemap filter falls back to a default
@@ -1320,7 +1321,7 @@ def generate_images(
             logger.info(
                 "HDR transfer detected for {} without HDR metadata; using zscale tone mapping (transfer={!r})",
                 video_file,
-                media_info.video_tracks[0].transfer_characteristics,
+                transfer,
             )
             path_kind = "hdr10_zscale"
 

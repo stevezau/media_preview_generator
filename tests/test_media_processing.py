@@ -1413,46 +1413,45 @@ class TestMediaInfoImport:
 
 
 class TestDVNoBackwardCompat:
-    """Test Dolby Vision Profile 5 / no-backward-compat detection."""
+    """Test Dolby Vision Profile 5 / no-backward-compat detection.
+
+    Field pairs are real ``(hdr_format, transfer_characteristics)`` values
+    from libmediainfo 24.12.  MediaInfo keeps the profile tag in
+    ``HDR_Format_Profile``, so ``hdr_format`` alone cannot tell Profile 5
+    from Profile 8.1; the declared transfer can.
+    """
 
     @pytest.mark.parametrize(
-        "hdr_format,expected",
+        "hdr_format,transfer,expected",
         [
-            # DV Profile 5 — no backward compat → True
-            ("Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU", True),
-            ("Dolby Vision, Version 1.0, dvhe.05.09, BL+RPU", True),
-            # DV Profile 4 — explicitly unsafe for zscale (M3)
-            ("Dolby Vision, Version 1.0, dvhe.04.06, BL+EL+RPU", True),
-            # DV Profile 4 with misleading 'compatible' keyword (M3 regression)
-            (
-                "Dolby Vision, Version 1.0, dvhe.04.06, BL+EL+RPU, not backward compatible",
-                True,
-            ),
-            # AV1 DV Profile 5 (M4)
-            ("Dolby Vision, Version 1.0, dvav.05.09, BL+RPU", True),
-            # AV1 DV set/entry (M4)
-            ("Dolby Vision, Version 2.0, dvav.se.09, BL+RPU", True),
-            # DV Profile 8 with HDR10 compat → False
-            (
-                "Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2086",
-                False,
-            ),
-            # DV Profile 7 with HDR10 compat → False
-            ("Dolby Vision / HDR10 / SMPTE ST 2086", False),
-            # DV with HLG compat → False
-            ("Dolby Vision, HLG compatible", False),
-            # Plain HDR10 (no DV) → False
-            ("HDR10", False),
-            ("SMPTE ST 2086, HDR10 compatible / SMPTE ST 2094 App 4", False),
-            # None / empty → False
-            (None, False),
-            ("None", False),
-            ("", False),
+            # True Profile 5 (IPTPQc2): the stream declares no transfer.
+            pytest.param("Dolby Vision", None, True, id="p5"),
+            pytest.param("Dolby Vision / Dolby Vision", None, True, id="p5-listed-twice"),
+            # Profile 8.1 web release without the ST 2086 SEI: an HDR10 base despite plain "Dolby Vision".
+            pytest.param("Dolby Vision", "PQ", False, id="p8-no-st2086"),
+            pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", False, id="p8-st2086"),
+            pytest.param("Dolby Vision / SMPTE ST 2094 App 4", "PQ", False, id="p8-hdr10plus"),
+            # Profile 8.4: HLG base layer.
+            pytest.param("Dolby Vision", "HLG", False, id="p84-hlg"),
+            # Profile 7 and AV1 Profile 10 report the same hdr_format shape as Profile 8.1.
+            pytest.param("Dolby Vision / SMPTE ST 2086 / SMPTE ST 2086", "PQ", False, id="p7-or-av1-p10"),
+            # Profile 5 profile tag on an HDR10 base (mislabelled file): the PQ base is tone mapped as HDR10.
+            pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", False, id="p5-mislabelled-hdr10-base"),
+            # Standards' names for the transfer curves are accepted too.
+            pytest.param("Dolby Vision", "SMPTE ST 2084", False, id="p8-transfer-standard-name"),
+            # Not Dolby Vision.
+            pytest.param("SMPTE ST 2086", "PQ", False, id="hdr10"),
+            pytest.param("SMPTE ST 2094 App 4", "PQ", False, id="hdr10plus"),
+            pytest.param(None, "HLG", False, id="hlg-no-hdr-format"),
+            pytest.param(None, "BT.709", False, id="sdr"),
+            pytest.param(None, None, False, id="none"),
+            pytest.param("None", None, False, id="none-string"),
+            pytest.param("", None, False, id="empty"),
         ],
     )
-    def test_detection(self, hdr_format: str, expected: bool) -> None:
-        """_is_dv_no_backward_compat correctly classifies various hdr_format strings."""
-        assert _is_dv_no_backward_compat(hdr_format) is expected
+    def test_detection(self, hdr_format: str | None, transfer: str | None, expected: bool) -> None:
+        """_is_dv_no_backward_compat classifies each real MediaInfo field pair."""
+        assert _is_dv_no_backward_compat(hdr_format, transfer) is expected
 
 
 class TestIsDolbyVision:
@@ -1581,8 +1580,12 @@ class TestProactiveDVSkip:
         gpu=None,
         gpu_device_path=None,
         vulkan_device_info=None,
+        transfer_characteristics=None,
     ):
         """Shared helper: run generate_images and return the FFmpeg args.
+
+        ``transfer_characteristics`` defaults to ``None``, which is what a
+        true Profile 5 stream declares; Profile 7/8 callers pass ``"PQ"``.
 
         ``vulkan_device_info`` patches ``get_vulkan_device_info`` for the
         duration of the call.  Defaults to a healthy hardware device so
@@ -1597,7 +1600,9 @@ class TestProactiveDVSkip:
         mock_run.return_value = MagicMock(returncode=0)
 
         mock_info = MagicMock()
-        mock_info.video_tracks = [MagicMock(hdr_format=hdr_format_str)]
+        mock_info.video_tracks = [
+            MagicMock(hdr_format=hdr_format_str, transfer_characteristics=transfer_characteristics)
+        ]
         mock_mediainfo.parse.return_value = mock_info
 
         mock_proc = MagicMock()
@@ -1683,7 +1688,7 @@ class TestProactiveDVSkip:
         Intel UHD 770.  See issue #212.
         """
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5.mkv",
             mock_detect,
             mock_glob,
@@ -1781,7 +1786,7 @@ class TestProactiveDVSkip:
         keep the libplacebo path there.
         """
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5.mkv",
             mock_detect,
             mock_glob,
@@ -1844,7 +1849,7 @@ class TestProactiveDVSkip:
         the HEVC decoder can still saturate CPU cores.
         """
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5.mkv",
             mock_detect,
             mock_glob,
@@ -1915,7 +1920,7 @@ class TestProactiveDVSkip:
         thumbnails get a green and purple tint.
         """
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5_sw_vulkan.mkv",
             mock_detect,
             mock_glob,
@@ -1986,7 +1991,7 @@ class TestProactiveDVSkip:
         is not usable" and must route to the fps+scale chain.
         """
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5_no_vulkan.mkv",
             mock_detect,
             mock_glob,
@@ -2046,7 +2051,7 @@ class TestProactiveDVSkip:
         from this path would regress the speedup.
         """
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5_nvidia.mkv",
             mock_detect,
             mock_glob,
@@ -2116,7 +2121,7 @@ class TestProactiveDVSkip:
     ):
         """DV Profile 5 with no GPU configured stays on software decode."""
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            "Dolby Vision",
             "/test/dv_profile5_cpu.mkv",
             mock_detect,
             mock_glob,
@@ -2167,7 +2172,7 @@ class TestProactiveDVSkip:
     ):
         """DV Profile 8 with HDR10 fallback uses zscale/tonemap on the HDR10 base layer."""
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2086",
+            "Dolby Vision / SMPTE ST 2086",
             "/test/dv_profile8_hdr10.mkv",
             mock_detect,
             mock_glob,
@@ -2181,6 +2186,7 @@ class TestProactiveDVSkip:
             mock_mediainfo,
             temp_dir,
             mock_config,
+            transfer_characteristics="PQ",
         )
 
         # Profile 7/8 uses the HDR10 base layer — no libplacebo needed
@@ -2217,7 +2223,7 @@ class TestProactiveDVSkip:
     ):
         """DV + HDR10+ (the Severance scenario from #178) uses zscale via HDR10 base layer."""
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2094 App 4",
+            "Dolby Vision / SMPTE ST 2094 App 4",
             "/test/dv_hdr10plus.mkv",
             mock_detect,
             mock_glob,
@@ -2231,6 +2237,7 @@ class TestProactiveDVSkip:
             mock_mediainfo,
             temp_dir,
             mock_config,
+            transfer_characteristics="PQ",
         )
 
         assert "-init_hw_device" not in args
@@ -2266,7 +2273,7 @@ class TestProactiveDVSkip:
     ):
         """DV Profile 8 on GPU uses CUDA hwaccel + zscale (reads HDR10 base layer)."""
         args = self._run_generate(
-            "Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2086",
+            "Dolby Vision / SMPTE ST 2086",
             "/test/dv_gpu.mkv",
             mock_detect,
             mock_glob,
@@ -2281,6 +2288,7 @@ class TestProactiveDVSkip:
             temp_dir,
             mock_config,
             gpu="NVIDIA",
+            transfer_characteristics="PQ",
         )
 
         # Profile 7/8 with HDR10 fallback — standard path with GPU decode
@@ -2333,7 +2341,7 @@ class TestLibplaceboFallback:
 
         # MediaInfo: DV Profile 5
         mock_info = MagicMock()
-        mock_info.video_tracks = [MagicMock(hdr_format="Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU")]
+        mock_info.video_tracks = [MagicMock(hdr_format="Dolby Vision", transfer_characteristics=None)]
         mock_mediainfo.parse.return_value = mock_info
 
         # First FFmpeg call (libplacebo) fails, second (DV-safe) succeeds
@@ -3009,16 +3017,15 @@ class TestHdrVersusSdrFilterChain:
             pytest.param(
                 "SMPTE ST 2094 App 4, Version 1, HDR10+ Profile B compatible", "PQ", "BT.2020", "HDR", id="hdr10plus"
             ),
-            pytest.param(
-                "Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2086",
-                "PQ",
-                "BT.2020",
-                "HDR",
-                id="dv-profile8",
-            ),
-            pytest.param("Dolby Vision, Version 1.0, dvhe.05.06, BL+RPU", None, None, "DV5", id="dv-profile5"),
-            # The PQ transfer must not pull a DV5 file off libplacebo onto zscale (green output).
-            pytest.param("Dolby Vision, Version 1.0, dvhe.05.06, BL+RPU", "PQ", "BT.2020", "DV5", id="dv-profile5-pq"),
+            pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", "BT.2020", "HDR", id="dv-profile8"),
+            # Profile 8.1 web release without the ST 2086 SEI (The Lion King, DSNP): plain "Dolby Vision", PQ base.
+            pytest.param("Dolby Vision", "PQ", "BT.2020", "HDR", id="dv-profile8-no-st2086"),
+            pytest.param("Dolby Vision", "HLG", "BT.2020", "HDR", id="dv-profile84-hlg"),
+            # True Profile 5 (IPTPQc2) declares no transfer or primaries.
+            pytest.param("Dolby Vision", None, None, "DV5", id="dv-profile5"),
+            # Profile 5 tag on a plain HDR10 base (Falling for Christmas): the HDR10 chain gives the right colours;
+            # the Profile 5 reshaping turns reds yellow.
+            pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", "BT.2020", "HDR", id="dv-profile5-hdr10-base"),
             # Lab file: Cosmos Laundromat HDR (Netflix Open Content) — PQ, P3 primaries, no HDR metadata.
             pytest.param(None, "PQ", "Display P3", "HDR", id="pq-no-hdr-format-p3"),
             pytest.param(None, "PQ", "BT.2020", "HDR", id="pq-no-hdr-format"),
@@ -3046,9 +3053,9 @@ class TestGpuScaleOptimisation:
     """
 
     @staticmethod
-    def _run(mock_mediainfo, mock_popen, mock_config, *, gpu, gpu_device, hdr_fmt):
+    def _run(mock_mediainfo, mock_popen, mock_config, *, gpu, gpu_device, hdr_fmt, transfer=None):
         info = MagicMock()
-        info.video_tracks = [MagicMock(hdr_format=hdr_fmt)]
+        info.video_tracks = [MagicMock(hdr_format=hdr_fmt, transfer_characteristics=transfer)]
         mock_mediainfo.parse.return_value = info
         proc = MagicMock()
         proc.poll.side_effect = [None, 0]
@@ -3196,7 +3203,7 @@ class TestGpuScaleOptimisation:
             mock_config,
             gpu="NVIDIA",
             gpu_device="cuda",
-            hdr_fmt="Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+            hdr_fmt="Dolby Vision",
         )
         vf = args[args.index("-vf") + 1]
         # DV5 libplacebo chain: fps dropper runs FIRST (before hwupload)
@@ -3474,7 +3481,7 @@ class TestCancellation:
         mock_run.return_value = MagicMock(returncode=1)
 
         mock_info = MagicMock()
-        mock_info.video_tracks = [MagicMock(hdr_format="Dolby Vision / SMPTE ST 2086")]
+        mock_info.video_tracks = [MagicMock(hdr_format="Dolby Vision / SMPTE ST 2086", transfer_characteristics="PQ")]
         mock_mediainfo.parse.return_value = mock_info
 
         mock_proc = MagicMock()
@@ -3839,12 +3846,15 @@ class TestSkipFrameInitialDefaults:
         mock_detect,
         mock_glob,
         temp_dir,
+        transfer_characteristics=None,
     ):
         """Wire mocks so a single FFmpeg Popen call returns success."""
         mock_run.return_value = MagicMock(returncode=0)
 
         mock_info = MagicMock()
-        mock_info.video_tracks = [MagicMock(hdr_format=hdr_format_str)]
+        mock_info.video_tracks = [
+            MagicMock(hdr_format=hdr_format_str, transfer_characteristics=transfer_characteristics)
+        ]
         mock_mediainfo.parse.return_value = mock_info
 
         mock_proc = MagicMock()
@@ -3958,6 +3968,7 @@ class TestSkipFrameInitialDefaults:
             mock_detect,
             mock_glob,
             temp_dir,
+            transfer_characteristics="PQ",
         )
 
         generate_images("/test/video.mkv", temp_dir, None, None, mock_config)

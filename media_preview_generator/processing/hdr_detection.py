@@ -61,48 +61,31 @@ def is_dolby_vision(hdr_format: str | None) -> bool:
     return "dolby vision" in hdr_format.lower()
 
 
-def is_dv_no_backward_compat(hdr_format: str | None) -> bool:
-    """Detect Dolby Vision content without a backward-compatible HDR base layer.
+def is_dv_no_backward_compat(hdr_format: str | None, transfer_characteristics: str | None) -> bool:
+    """Detect Dolby Vision content without a backward-compatible base layer (Profile 5).
 
-    DV Profile 5 (and similar) uses IPT-PQ transfer characteristics with
-    no HDR10/HLG fallback.  These files **must** be processed via
-    libplacebo because there is no HDR10 base layer for zscale/tonemap.
+    A Profile 5 base layer is IPTPQc2: its stream declares no transfer
+    curve, so the zscale/tonemap chain cannot read it and only
+    libplacebo's Dolby Vision reshaping gives correct colours.  Profiles
+    7, 8.1, 8.4 and AV1 Profile 10 carry an HDR10 or HLG base layer and
+    declare PQ or HLG, which the zscale chain tone maps directly.
 
-    DV Profile 7/8 (with HDR10 fallback) returns ``False`` here and can
-    safely use the standard zscale/tonemap chain on the HDR10 base layer.
+    The transfer curve is the signal, not ``hdr_format``: MediaInfo keeps
+    the profile tag (``dvhe.05``) in ``HDR_Format_Profile``, and an
+    ``SMPTE ST 2086`` entry in ``hdr_format`` only means the file carries
+    HDR10 static metadata.  Profile 8.1 web releases often ship without
+    it, so ``hdr_format`` reads plain ``"Dolby Vision"`` for them too.
 
     Args:
         hdr_format: Value of ``MediaInfo.video_tracks[0].hdr_format``.
+        transfer_characteristics: Value of
+            ``MediaInfo.video_tracks[0].transfer_characteristics``.
 
     Returns:
-        bool: ``True`` if content is DV without backward compat,
-              ``False`` otherwise.
+        bool: ``True`` for Dolby Vision whose stream declares no PQ or
+              HLG transfer, ``False`` otherwise.
     """
-    if not hdr_format or hdr_format == "None":
-        return False
-
-    hdr_lower = hdr_format.lower()
-
-    if "dolby vision" not in hdr_lower:
-        return False
-
-    # Profiles that use IPT-PQ transfer — no backward-compat base layer.
-    # Profile 5 (HEVC): dvhe.05  |  Profile 4 (HEVC, non-backward-compat): dvhe.04
-    # AV1 DV Profile 5: dvav.05  |  AV1 DV set/entry: dvav.se
-    dv_unsafe_profiles = ["dvhe.05", "dvhe.04", "dvav.05", "dvav.se"]
-    if any(tag in hdr_lower for tag in dv_unsafe_profiles):
-        return True
-
-    backward_compat_keywords = [
-        "hdr10",
-        "hlg",
-        "pq10",
-        "smpte st 2086",
-        "smpte st 2094",
-        "compatible",
-        "compat",
-    ]
-    return not any(kw in hdr_lower for kw in backward_compat_keywords)
+    return is_dolby_vision(hdr_format) and not is_hdr_transfer(transfer_characteristics)
 
 
 def detect_dolby_vision_rpu_error(stderr_lines: list[str]) -> bool:
