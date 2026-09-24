@@ -174,9 +174,7 @@ def rescan_gpus():
     try:
         with _gpu_cache_lock:
             _gpu_cache["result"] = None
-        _ensure_gpu_cache()
-        with _gpu_cache_lock:
-            gpus = _gpu_cache["result"] or []
+        gpus = _ensure_gpu_cache()
         return jsonify({"gpus": gpus})
     except Exception:
         logger.exception(
@@ -197,9 +195,7 @@ def get_system_status():
     of the process. Call clear_gpu_cache() to force a re-scan.
     """
     try:
-        _ensure_gpu_cache()
-        with _gpu_cache_lock:
-            gpus = _gpu_cache["result"] or []
+        gpus = _ensure_gpu_cache()
 
         job_manager = get_job_manager()
         running_job = job_manager.get_running_job()
