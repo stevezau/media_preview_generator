@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING
 import requests
 from loguru import logger
 
-from ..bif_reader import unpack_bif_to_jpegs
+from ..bif_reader import read_bif_metadata, unpack_bif_to_jpegs
 from ..config import resolve_frame_interval
 from ..output import BifBundle, EmbyBifAdapter, JellyfinTrickplayAdapter, PlexBundleAdapter
 from ..output.base import OutputAdapter
@@ -712,12 +712,23 @@ def _make_item_id_resolver(canonical_path: str, phase_callback=None):
     return resolve
 
 
+def _frame_extraction_key(config: Config) -> tuple[int, int, str]:
+    """Return the settings that shape extracted frames, for the frame cache to match on.
+
+    Interval, JPEG quality and tone-map algorithm are the only config values
+    ``generate_images`` feeds into FFmpeg that change the JPGs; the scale is
+    fixed at 320x240.
+    """
+    return (config.plex_bif_frame_interval, config.thumbnail_quality, config.tonemap_algorithm)
+
+
 def _try_reuse_existing_bif(
     publishers: list[tuple[MediaServer, OutputAdapter, str | None]],
     canonical_path: str,
     out_dir: str,
     probe_bundle_factory,
     resolve_item_id,
+    frame_interval_ms: int,
 ) -> int:
     """Unpack the first fresh ``.bif`` we can find from a publisher into ``out_dir``.
 
@@ -730,7 +741,11 @@ def _try_reuse_existing_bif(
 
     "Same" = ``outputs_fresh_for_source`` returns True. That helper checks
     the ``.meta`` sidecar's source mtime/inode fingerprint, so a re-encoded
-    source file invalidates the reuse path correctly.
+    source file invalidates the reuse path correctly. The BIF must also
+    have been made at the current interval: Plex's ``index-sd.bif`` path
+    doesn't encode it, so after an interval change the old BIF still looks
+    fresh. Its header interval is the only record; quality and tone map
+    aren't recorded, so those are accepted as-is.
 
     Args:
         publishers: ``[(server, adapter, item_id_hint), ...]`` from the
@@ -743,6 +758,8 @@ def _try_reuse_existing_bif(
         resolve_item_id: Per-dispatch memoising resolver from
             :func:`_make_item_id_resolver` so repeated calls across
             sub-phases don't re-burn slow Jellyfin Pass 2 enumerations.
+        frame_interval_ms: Interval the frames must have been taken at. A BIF
+            whose header says otherwise is skipped.
 
     Returns:
         Frame count when a reusable BIF was found and unpacked. Zero when
@@ -783,6 +800,26 @@ def _try_reuse_existing_bif(
                 # The BIF exists but the source has changed since it was
                 # written — using these stale frames would give the user
                 # previews from the *previous* version of the file. Pass.
+                continue
+            try:
+                bif_interval_ms = read_bif_metadata(candidate_str).frame_interval_ms
+            except Exception as exc:
+                logger.warning(
+                    "BIF reuse: could not read the header of {} ({}: {}); falling back to FFmpeg.",
+                    candidate_str,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            if bif_interval_ms != frame_interval_ms:
+                logger.info(
+                    "BIF reuse: skipping {} (server={}) — it has a frame every {} ms, but the current "
+                    "setting is every {} ms.",
+                    candidate_str,
+                    server.name,
+                    bif_interval_ms,
+                    frame_interval_ms,
+                )
                 continue
             try:
                 os.makedirs(out_dir, exist_ok=True)
@@ -1660,6 +1697,7 @@ def process_canonical_path(
 
         _cache_root = _tempfile.gettempdir()
     cache = get_frame_cache(base_dir=os.path.join(_cache_root, "frame_cache"))
+    extraction_key = _frame_extraction_key(config)
     cache_hit: bool = False
     cleanup_path: str | None = None
     generation_lock = None
@@ -1688,7 +1726,7 @@ def process_canonical_path(
             # Skipped for regenerate: it must re-extract, so it never reads
             # the cache — but it still holds the lock (above) because it
             # writes to the shared slot.
-            cached = cache.get(canonical_path)
+            cached = cache.get(canonical_path, extraction_key=extraction_key)
             if cached is not None:
                 tmp_path = str(cached.frame_dir)
                 frame_count = cached.frame_count
@@ -1723,12 +1761,18 @@ def process_canonical_path(
                 unpack_dest,
                 _probe_bundle,
                 resolve_item_id,
+                frame_interval_ms=config.plex_bif_frame_interval * 1000,
             )
             if recovered:
                 tmp_path = unpack_dest
                 frame_count = recovered
                 cache_hit = True
-                cache.put(canonical_path, frame_dir=Path(unpack_dest), frame_count=recovered)
+                cache.put(
+                    canonical_path,
+                    frame_dir=Path(unpack_dest),
+                    frame_count=recovered,
+                    extraction_key=extraction_key,
+                )
                 _phase("Reusing sibling BIF")
                 logger.info(
                     "Frames: REUSED from existing BIF for {} ({} frames, no FFmpeg)",
@@ -1845,7 +1889,7 @@ def process_canonical_path(
         # intended: it just re-extracted into the (now emptied) shared dir,
         # so the entry it writes describes exactly the frames on disk.
         if not cache_hit and use_frame_cache:
-            cache.put(canonical_path, frame_dir=Path(tmp_path), frame_count=frame_count)
+            cache.put(canonical_path, frame_dir=Path(tmp_path), frame_count=frame_count, extraction_key=extraction_key)
 
         # ``width``/``height`` are documentation-only on BifBundle —
         # adapters that need real frame dimensions (Jellyfin tile-grid)

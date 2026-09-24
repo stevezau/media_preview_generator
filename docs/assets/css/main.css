@@ -395,13 +395,37 @@ hr {
   display: none;
 }
 
-@media (max-width: 900px) {
+/* The full nav__links row still doesn't fit down to 900px (measured: 58px over at 905,
+   clearing at 965) even with the pill labels below trimmed, so the burger takes over
+   65px later than it used to. */
+@media (max-width: 965px) {
   .nav__links,
   .search-btn kbd {
     display: none;
   }
   .nav__burger {
     display: inline-grid;
+  }
+
+  /* Pages with no #sidebar for the burger to open (site.js) get these same links back as a
+     dropdown instead. Positioned off `.nav`'s own sticky box, not `.nav__inner`'s, so it can
+     span edge-to-edge without adding to any flex item's width. */
+  .nav__links.is-open {
+    display: flex;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.5rem var(--gutter) 1rem;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .nav__links.is-open .nav__link {
+    padding: 0.8rem 0.2rem;
   }
 }
 
@@ -411,9 +435,9 @@ hr {
    icon, which keeps its aria-label; the coffee goes before anything
    structural, and it is still in the footer. */
 /* The Star and Coffee words need ~110px the full nav row does not have below 1180px (measured: 24px
-   over at 1100, 215px at 901). Once the nav links collapse into the burger at 900 there is room for
+   over at 1100, 215px at 901). Once the nav links collapse into the burger at 965 there is room for
    the words again, until the 600px pass sheds every label. */
-@media (min-width: 901px) and (max-width: 1180px), (max-width: 600px) {
+@media (min-width: 966px) and (max-width: 1180px), (max-width: 600px) {
   .nav-pill {
     width: 34px;
     padding: 0;
@@ -1605,7 +1629,9 @@ figcaption {
   }
 }
 
-@media (max-width: 900px) {
+/* Matches the nav's own burger breakpoint (965px, see the nav rules above): below it the burger
+   is the only way to reach the sidebar, so the sidebar has to already be collapsed there too. */
+@media (max-width: 965px) {
   .docs {
     grid-template-columns: minmax(0, 1fr);
   }

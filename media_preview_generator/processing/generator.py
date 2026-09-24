@@ -1194,8 +1194,9 @@ def generate_images(
     # Check if we have HDR Format. Note: Sometimes it can be returned as "None" (string) hence the check for None type or "None" (String)
     if media_info.video_tracks:
         hdr_fmt = media_info.video_tracks[0].hdr_format
+        transfer = media_info.video_tracks[0].transfer_characteristics
         if hdr_fmt != "None" and hdr_fmt is not None:
-            if is_dv_no_backward_compat(hdr_fmt):
+            if is_dv_no_backward_compat(hdr_fmt, transfer):
                 # Dolby Vision Profile 5 (no HDR10 base layer).
                 # Only libplacebo can handle these — there is no
                 # backward-compat HDR10 stream for zscale/tonemap to
@@ -1229,20 +1230,24 @@ def generate_images(
                 vk_is_software = vulkan_info.is_software
                 if vk_is_software or vk_device is None:
                     logger.warning(
-                        "Dolby Vision Profile 5 file {} needs a real GPU with Vulkan to produce "
-                        "correctly-coloured thumbnails. No working Vulkan device was found "
+                        "Dolby Vision Profile 5 file {} (hdr_format={!r}, transfer={!r}) needs a real GPU "
+                        "with Vulkan to produce correctly-coloured thumbnails. No working Vulkan device was found "
                         "(detected device: {!r}), so this file's thumbnails will have the wrong colours, "
                         "a green and purple tint. The file is still processed. See the dashboard "
                         "notification centre for steps to enable Vulkan.",
                         video_file,
+                        hdr_fmt,
+                        transfer,
                         vk_device,
                     )
                     dv5_software_fallback = True
                 else:
                     logger.info(
-                        "Dolby Vision Profile 5 detected for {}; using libplacebo tone mapping (hdr_format={!r})",
+                        "Dolby Vision Profile 5 detected for {}; using libplacebo tone mapping "
+                        "(hdr_format={!r}, transfer={!r})",
                         video_file,
                         hdr_fmt,
+                        transfer,
                     )
                     use_libplacebo = True
                     # Pick the DV5 filter chain based on GPU vendor.
@@ -1290,21 +1295,23 @@ def generate_images(
                         base_scale=base_scale,
                     )
             elif is_dolby_vision(hdr_fmt):
-                # Dolby Vision Profile 7/8 with HDR10 backward-compat
-                # base layer.  FFmpeg reads the HDR10 base layer by
-                # default, so the standard zscale/tonemap chain works
+                # Dolby Vision Profile 7/8/10 with an HDR10 or HLG
+                # backward-compat base layer.  FFmpeg reads the base layer
+                # by default, so the standard zscale/tonemap chain works
                 # correctly.  This avoids all libplacebo/RPU complexity.
                 logger.info(
-                    "Dolby Vision with HDR10 fallback detected for {}; using HDR10 base layer for tone mapping (hdr_format={!r})",
+                    "Dolby Vision with an HDR10/HLG base layer detected for {}; tone mapping the base layer "
+                    "(hdr_format={!r}, transfer={!r})",
                     video_file,
                     hdr_fmt,
+                    transfer,
                 )
             # For both DV-with-fallback (above) and non-DV HDR, use
             # the zscale/tonemap chain.  Skip for DV5 software fallback:
             # zscale on a DV5 stream (no HDR10 base) produces a green
             # overlay, so the default fps+scale chain is used instead.
             if not use_libplacebo and not dv5_software_fallback:
-                # HDR10 or DV Profile 7/8 (HDR10 base layer).  zscale
+                # HDR10, HLG or DV with an HDR10/HLG base layer.  zscale
                 # tonemap chain.  npl=100 (SDR reference white) is the
                 # standard value for PQ-to-linear conversion.  Using
                 # MaxCLL here would normalise all luminance to the
@@ -1312,7 +1319,7 @@ def generate_images(
                 # (50-200 nits) map to tiny linear values that barely
                 # get tone mapped → dark output.
                 path_kind = "hdr10_zscale"
-        elif is_hdr_transfer(media_info.video_tracks[0].transfer_characteristics):
+        elif is_hdr_transfer(transfer):
             # PQ or HLG with no HDR metadata, so MediaInfo leaves
             # HDR_Format empty.  Without tone mapping the thumbnails come
             # out washed out.  The tonemap filter falls back to a default
@@ -1320,7 +1327,7 @@ def generate_images(
             logger.info(
                 "HDR transfer detected for {} without HDR metadata; using zscale tone mapping (transfer={!r})",
                 video_file,
-                media_info.video_tracks[0].transfer_characteristics,
+                transfer,
             )
             path_kind = "hdr10_zscale"
 

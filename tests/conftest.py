@@ -207,7 +207,9 @@ def media_fixture():
       - ``"dv8"``     — DV Profile 8.1 (HDR10 base layer)
       - ``"dv_p5_hdr_format"`` — NOT a file: the ``hdr_format`` string
         that pymediainfo returns for a DV Profile 5 clip, suitable for
-        mocking in unit tests that don't need real bytes.
+        mocking in unit tests that don't need real bytes.  Profile 8.1
+        without ST 2086 reports the same string; only the transfer
+        (``None`` for Profile 5, ``"PQ"`` for 8.1) tells them apart.
 
     Fail-loud if the requested key is missing — tests should call
     ``pytest.importorskip`` or mark themselves skipped when the fixture
@@ -221,7 +223,7 @@ def media_fixture():
         "dv8": base / "dv_profile8_tiny.mkv",
     }
     sentinels = {
-        "dv_p5_hdr_format": "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",
+        "dv_p5_hdr_format": "Dolby Vision",
     }
 
     def resolve(key: str):
@@ -402,7 +404,7 @@ def create_mock_ffmpeg_process(returncode=0, duration=60.0, create_images=True, 
     return mock_proc
 
 
-def create_mock_mediainfo(has_hdr=False, hdr_format_override=None, duration=60.0):
+def create_mock_mediainfo(has_hdr=False, hdr_format_override=None, duration=60.0, transfer_characteristics=None):
     """
     Helper function to create a mock MediaInfo object.
 
@@ -410,9 +412,11 @@ def create_mock_mediainfo(has_hdr=False, hdr_format_override=None, duration=60.0
         has_hdr: Whether video has HDR format (sets ``"HDR10"`` if True)
         hdr_format_override: Explicit ``hdr_format`` string.  When provided,
             this value is used verbatim and *has_hdr* is ignored.  Useful for
-            testing Dolby Vision variants, e.g.
-            ``"Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU"``.
+            testing Dolby Vision variants, e.g. ``"Dolby Vision"`` or
+            ``"Dolby Vision / SMPTE ST 2086"``.
         duration: Video duration in seconds
+        transfer_characteristics: Declared transfer curve, e.g. ``"PQ"``.
+            Dolby Vision without a PQ or HLG transfer takes the Profile 5 path.
 
     Returns:
         MagicMock: Mocked MediaInfo object
@@ -425,6 +429,7 @@ def create_mock_mediainfo(has_hdr=False, hdr_format_override=None, duration=60.0
         video_track.hdr_format = hdr_format_override
     else:
         video_track.hdr_format = "HDR10" if has_hdr else None
+    video_track.transfer_characteristics = transfer_characteristics
     video_track.maximum_content_light_level = None  # MaxCLL — override in tests as needed
     video_track.duration = duration * 1000  # milliseconds
     video_track.width = 1920
@@ -465,15 +470,13 @@ def mock_mediainfo_hdr():
 @pytest.fixture
 def mock_mediainfo_dv_profile5():
     """Create a mock MediaInfo for Dolby Vision Profile 5 (no backward compat)."""
-    return create_mock_mediainfo(hdr_format_override="Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU")
+    return create_mock_mediainfo(hdr_format_override="Dolby Vision", transfer_characteristics=None)
 
 
 @pytest.fixture
 def mock_mediainfo_dv_with_hdr10():
     """Create a mock MediaInfo for Dolby Vision Profile 8 with HDR10 compat."""
-    return create_mock_mediainfo(
-        hdr_format_override=("Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2086")
-    )
+    return create_mock_mediainfo(hdr_format_override="Dolby Vision / SMPTE ST 2086", transfer_characteristics="PQ")
 
 
 @pytest.fixture(autouse=True)
