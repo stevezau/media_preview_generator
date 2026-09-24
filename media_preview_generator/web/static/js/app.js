@@ -3746,8 +3746,11 @@ function settingsKeyForWorkerType(workerType) {
 
 async function scaleWorkersGlobal(workerType, direction) {
     const currentCount = getWorkerCountForType(workerType);
-    const newCount = Math.max(0, currentCount + direction);
-    if (newCount === currentCount || newCount > getWorkerMaxForType(workerType)) return;
+    const maxCount = getWorkerMaxForType(workerType);
+    let newCount = Math.max(0, currentCount + direction);
+    // A count saved above the maximum (before the cap existed) steps down to the maximum first.
+    if (direction < 0) newCount = Math.min(newCount, maxCount);
+    if (newCount === currentCount || (direction > 0 && newCount > maxCount)) return;
 
     const settingsKey = settingsKeyForWorkerType(workerType);
 
