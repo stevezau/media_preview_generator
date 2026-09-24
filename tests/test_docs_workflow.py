@@ -2,8 +2,10 @@
 
 A Pages deploy replaces the whole site, and every Jellyfin install of the plugin polls
 /jellyfin-plugin/manifest.json on it. These pin the order that makes a deploy safe: build the
-site, THEN place and validate the live manifest (failing the job if it can't), THEN upload and
-deploy; and a plugin release still deploys through this same workflow.
+site, THEN build the manifest from the plugin-v* releases (failing the job if it can't), THEN
+upload and deploy; a plugin release still deploys through this same workflow; and no deploy
+reads the live manifest back or hands one over, so any deploy can replace any other without
+losing a version.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ DOCS_TEST_FILES = [
     "tests/test_thumbnail_quality_copy.py",
 ]
 COLLECT_ONLY = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-cov", "-n", "0", "-p", "no:cacheprovider"]
+MANIFEST_STEP = "Build Jellyfin plugin manifest from releases"
 PAGES_WORKFLOWS = [
     ".github/workflows/docs.yml",
     ".github/workflows/jellyfin-plugin.yml",
@@ -66,20 +69,29 @@ def _step(steps: list[dict], name: str) -> tuple[int, dict]:
 class TestDeployOrder:
     def test_manifest_is_placed_after_the_build_and_before_upload(self, steps: list[dict]) -> None:
         build, _ = _step(steps, "Build site")
-        manifest, _ = _step(steps, "Place and validate Jellyfin plugin manifest")
+        manifest, _ = _step(steps, MANIFEST_STEP)
         upload, _ = _step(steps, "Upload Pages artifact")
         deploy, _ = _step(steps, "Deploy to GitHub Pages")
         assert build < manifest < upload < deploy
 
-    def test_manifest_step_always_runs_and_fails_closed(self, steps: list[dict]) -> None:
-        _, step = _step(steps, "Place and validate Jellyfin plugin manifest")
+    def test_manifest_step_always_runs_the_builder_and_fails_closed(self, steps: list[dict]) -> None:
+        _, step = _step(steps, MANIFEST_STEP)
+        run = step["run"]
         assert "if" not in step
-        assert "set -euo pipefail" in step["run"]
-        assert 'curl -fsSL --retry 3 "$LIVE_MANIFEST_URL"' in step["run"]
-        assert "must only come from the plugin release" in step["run"]
-        # The JSON check: a 200 carrying an HTML error page or "[]" must not be deployed either.
-        assert "if not isinstance(data, list) or not data:" in step["run"]
-        assert "refusing to deploy" in step["run"]
+        assert "set -euo pipefail" in run
+        assert "must only come from build_jellyfin_manifest.py" in run
+        # The builder exits non-zero without writing on any failure (tests/test_build_jellyfin_manifest.py);
+        # set -e turns that into a failed job, so the upload and deploy after it never run.
+        builder = re.search(r"python scripts/build_jellyfin_manifest\.py (.+)", run.replace("\\\n", " "))
+        assert builder, run
+        assert '--repo "$GITHUB_REPOSITORY"' in builder.group(1)
+        assert "--template jellyfin-plugin/manifest.template.json" in builder.group(1)
+        assert '--out "$target"' in builder.group(1)
+        assert 'readonly target="site/jellyfin-plugin/manifest.json"' in run
+        assert "||" not in run  # nothing swallows the builder's exit code
+        assert "curl" not in run and "mediapreviewgenerator.dev" not in run
+        assert step["env"] == {"GH_TOKEN": "${{ github.token }}"}
+        assert (REPO_ROOT / "scripts" / "build_jellyfin_manifest.py").is_file()
 
     def test_no_deploy_step_is_skippable_or_allowed_to_fail(self, steps: list[dict]) -> None:
         # continue-on-error would let a deploy go out without a valid manifest; an `if:` on the build,
@@ -105,9 +117,6 @@ class TestDeployOrder:
         assert (REPO_ROOT / "docs" / "Gemfile.lock").is_file()
         assert (REPO_ROOT / "docs" / ".ruby-version").is_file()
 
-    def test_live_manifest_url_ends_at_the_manifest_path(self) -> None:
-        assert _load("docs.yml")["env"]["LIVE_MANIFEST_URL"].endswith("/jellyfin-plugin/manifest.json")
-
     def test_deploys_are_serialised_in_the_pages_group(self) -> None:
         job = _load("docs.yml")["jobs"]["deploy"]
         assert job["concurrency"] == {"group": "pages", "cancel-in-progress": False}
@@ -119,15 +128,27 @@ class TestDeployOrder:
 
 
 class TestPluginReleaseShipsTheSite:
-    def test_plugin_release_deploys_through_docs_yml_with_its_manifest(self) -> None:
+    def test_plugin_release_deploys_through_docs_yml_after_its_release(self) -> None:
         jobs = _load("jellyfin-plugin.yml")["jobs"]
         callers = [job for job in jobs.values() if job.get("uses") == "./.github/workflows/docs.yml"]
         assert len(callers) == 1
-        assert callers[0]["with"]["manifest_artifact"] == "jellyfin-plugin-manifest"
+        assert callers[0]["needs"] == "build-release"
+        assert callers[0]["with"] == {"docs_ref": "dev"}
 
-    def test_docs_yml_accepts_what_the_plugin_release_passes(self) -> None:
-        inputs = _triggers(_load("docs.yml"))["workflow_call"]["inputs"]
-        assert {"manifest_artifact", "docs_ref"} <= set(inputs)
+    def test_docs_yml_accepts_only_the_docs_ref(self) -> None:
+        docs = _load("docs.yml")
+        assert set(_triggers(docs)["workflow_call"]["inputs"]) == {"docs_ref"}
+        assert "env" not in docs
+
+    @pytest.mark.parametrize("workflow", ["docs.yml", "jellyfin-plugin.yml"])
+    def test_no_job_fetches_or_hands_over_a_manifest(self, workflow: str) -> None:
+        # A deploy that ships a fetched or handed-over copy is how a cancelled plugin deploy lost a
+        # version for good. No curl/wget at all, because the old fetch named its URL through a variable.
+        for job_id, job in _load(workflow)["jobs"].items():
+            for step in job.get("steps", []):
+                assert not re.search(r"\b(curl|wget)\b", step.get("run", "")), (job_id, step.get("name"))
+                uses = step.get("uses", "")
+                assert not uses.startswith(("actions/upload-artifact", "actions/download-artifact")), (job_id, uses)
 
 
 class TestDocsOnlyChangesAreTested:

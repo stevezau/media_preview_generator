@@ -26,13 +26,16 @@ data → intent pages → images → repo metadata → verify with real retrieva
 
 Pages serves `https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json` (older installs use the
 github.io address, which 301s there),
-which every Jellyfin install of the plugin polls. `.github/workflows/jellyfin-plugin.yml`
-(`publish-pages`) builds it by fetching the LIVE manifest and patching in the new release
-(version, checksum, zip URL — values that only exist at plugin-release time). A Pages deploy
-replaces the whole site, so:
+which every Jellyfin install of the plugin polls. A Pages deploy replaces the whole site, so:
 
-- The docs deploy must fetch the live manifest and ship it at the same path, and must FAIL
-  (deploy nothing) if that fetch fails.
+- The manifest is built from the `plugin-v*` GitHub releases on every deploy, docs or plugin
+  release (`scripts/build_jellyfin_manifest.py`: version, MD5 and zip URL from each release's
+  assets, plugin metadata from `jellyfin-plugin/manifest.template.json`), and shipped at the same
+  path. The deploy must FAIL (deploy nothing) on a download error, a digest mismatch or zero
+  versions. Nothing reads the live copy back, so a cancelled or failed deploy loses no version:
+  the next deploy lists the releases itself. (Until 2026-09-24 docs deploys re-shipped the live
+  manifest and only the plugin release added versions, so GitHub cancelling that pending deploy
+  dropped a version for good.)
 - The plugin release must also ship the docs site, or a plugin release wipes the docs.
 - Both paths go through one reusable workflow with a shared `pages` concurrency group.
 
