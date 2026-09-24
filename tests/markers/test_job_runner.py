@@ -416,6 +416,24 @@ class TestRun:
         self._run()
         assert order == ["lock", "read", ("cpu", 4), "unlock"]
 
+    def test_the_saved_gpu_config_is_read_and_applied_under_the_settings_lock(self, env, monkeypatch):
+        # The GPU selection passed to get_or_create_dispatcher is read before the lock; it's read again, and
+        # applied, under it so a save landing in between isn't undone.
+        env.sm.cpu_threads = 2
+        order = []
+
+        def build_selected_gpus(settings):
+            order.append("gpus read")
+            return env.gpus
+
+        monkeypatch.setattr(job_runner, "_build_selected_gpus", build_selected_gpus)
+        env.sm.locked.return_value.__enter__.side_effect = lambda *a: order.append("lock")
+        env.sm.locked.return_value.__exit__.side_effect = lambda *a: order.append("unlock")
+        env.dispatcher.worker_pool.reconcile_gpu_workers.side_effect = lambda gpus: order.append(("gpu", gpus))
+        env.dispatcher.worker_pool.reconcile_cpu_workers.side_effect = lambda n: order.append(("cpu", n))
+        self._run()
+        assert order == ["gpus read", "lock", "gpus read", ("gpu", env.gpus), ("cpu", 2), "unlock"]
+
     @pytest.mark.parametrize(("force", "expected"), [(True, True), (False, False), (None, False), ("", False)])
     def test_force_from_job_config_reaches_the_pipeline_context(self, env, force, expected):
         env.job.config = {"libraries": [], "force": force}

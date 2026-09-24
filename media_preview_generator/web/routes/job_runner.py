@@ -928,15 +928,18 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             return
                         job_manager.set_active_worker_pool(job_id, pool)
                         try:
+                            from ._helpers import _ensure_gpu_cache
+
                             fresh_settings = get_settings_manager()
-                            fresh_gpus = _build_selected_gpus(fresh_settings)
-                            if fresh_gpus:
-                                pool.reconcile_gpu_workers(fresh_gpus)
-                            # The saved count, not the job's config: a CPU count saved while no pool existed
-                            # had nothing to resize. The pool is registered above, so a later save finds it.
-                            # Read and resize under the settings lock so a save landing in between isn't undone
-                            # (same lock order as the save hook: settings, then the pool's own lock).
+                            _ensure_gpu_cache()
+                            # The saved settings, not the job's config: a count saved while no pool existed had
+                            # nothing to resize. The pool is registered above, so a later save finds it. Read and
+                            # resize under the settings lock so a save landing in between isn't undone (same lock
+                            # order as the save hook: settings, then the pool's own lock).
                             with fresh_settings.locked():
+                                fresh_gpus = _build_selected_gpus(fresh_settings)
+                                if fresh_gpus:
+                                    pool.reconcile_gpu_workers(fresh_gpus)
                                 pool.reconcile_cpu_workers(fresh_settings.cpu_threads)
                         except Exception:
                             logger.debug(

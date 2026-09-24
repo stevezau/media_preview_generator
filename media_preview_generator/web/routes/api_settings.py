@@ -61,14 +61,18 @@ def _reconcile_live_gpu_workers(settings) -> None:
     newly enabled GPUs are added without requiring a restart.
     """
     try:
+        from ._helpers import _ensure_gpu_cache
         from .api_jobs import _get_shared_worker_pool
         from .job_runner import _build_selected_gpus
 
         pool = _get_shared_worker_pool()
         if pool is None:
             return
-        new_selected = _build_selected_gpus(settings)
-        pool.reconcile_gpu_workers(new_selected)
+        # Detect GPUs (slow the first time) before taking the lock. Then read gpu_config and resize under it, the
+        # same way the CPU count is handled, so a concurrent save can't be undone by this one's stale config.
+        _ensure_gpu_cache()
+        with settings.locked():
+            pool.reconcile_gpu_workers(_build_selected_gpus(settings))
     except Exception:
         logger.warning(
             "Could not reconcile the live worker pool with the new GPU settings. "

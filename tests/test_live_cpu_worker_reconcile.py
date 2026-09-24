@@ -89,6 +89,22 @@ def _saved_cpu_threads(app) -> int:
         return get_settings_manager().cpu_threads
 
 
+def _gpu_config(workers: int) -> list[dict]:
+    return [{"device": GPU_DEVICE, "enabled": True, "workers": workers, "ffmpeg_threads": 2}]
+
+
+def _fake_detected_gpu():
+    """Stand in for GPU detection, so selections come from the saved gpu_config (not a patched result)."""
+    from media_preview_generator.web.routes import _helpers
+
+    return patch.dict(_helpers._gpu_cache, {"result": [{"type": "nvidia", "device": GPU_DEVICE, "name": "Fake GPU"}]})
+
+
+def _gpu_workers_in(value) -> int | None:
+    entries = value if isinstance(value, list) else []
+    return next((e.get("workers") for e in entries if isinstance(e, dict) and e.get("device") == GPU_DEVICE), None)
+
+
 class TestSaveSettingsReconcilesCpuWorkers:
     def test_live_pool_resized_when_cpu_threads_saved(self, app):
         pool = _live_pool(app, cpu=2)
@@ -302,6 +318,44 @@ class TestJobStartReconcilesCpuWorkers:
         assert save_status == 200
         assert _saved_cpu_threads(app) == 5
         assert len(_cpu_workers(pool)) == 5
+
+    def test_save_landing_during_job_start_leaves_pool_at_saved_gpu_config(self, app, tmp_path):
+        with _fake_detected_gpu():
+            _save(app, {"gpu_config": _gpu_config(1)})
+            callback = self._capture_pool_callback(app, tmp_path, cpu_threads=1)
+            pool = WorkerPool(gpu_workers=1, cpu_workers=0, selected_gpus=[("nvidia", GPU_DEVICE, dict(GPU_INFO))])
+            job_start_read = threading.Event()
+            save_done = threading.Event()
+            job_start: dict = {}
+            real_get = SettingsManager.get
+
+            def get_then_let_the_save_run(self, key, default=None):
+                # Job start reads the saved 1-worker config, then waits while a save stores and applies 4. Without
+                # the lock job start then applies its stale 1.
+                value = real_get(self, key, default)
+                if (
+                    key == "gpu_config"
+                    and threading.get_ident() == job_start.get("thread")
+                    and not job_start_read.is_set()
+                ):
+                    job_start_read.set()
+                    save_done.wait(timeout=1.0)
+                return value
+
+            def start_job() -> None:
+                job_start["thread"] = threading.get_ident()
+                callback(pool)
+
+            with patch.object(SettingsManager, "get", get_then_let_the_save_run):
+                starter = threading.Thread(target=start_job)
+                starter.start()
+                assert job_start_read.wait(timeout=5)
+                save_status = _save(app, {"gpu_config": _gpu_config(4)}).status_code
+                save_done.set()
+                starter.join(timeout=10)
+
+        assert save_status == 200
+        assert len(_gpu_workers(pool)) == 4
 
     @staticmethod
     def _capture_pool_callback(app, tmp_path, *, cpu_threads: int):
@@ -554,3 +608,41 @@ class TestConcurrentSettingsSaves:
         assert (first_save["status"], second_status) == (200, 200)
         assert _saved_cpu_threads(app) == 4
         assert len(_cpu_workers(pool)) == 4
+
+    def test_pool_ends_at_the_last_saved_gpu_config(self, app):
+        pool = _live_pool(app, cpu=0, gpu=1)
+        first_read_its_config = threading.Event()
+        second_save_done = threading.Event()
+        first_save: dict = {}
+        real_get = SettingsManager.get
+
+        def get_then_let_the_second_save_run(self, key, default=None):
+            # The first save's GPU hook reads its own config (3 workers), then waits while the second save stores
+            # and applies 4. Without the lock the first hook then applies its stale 3.
+            value = real_get(self, key, default)
+            if (
+                key == "gpu_config"
+                and _gpu_workers_in(value) == 3
+                and threading.get_ident() == first_save.get("thread")
+                and not first_read_its_config.is_set()
+            ):
+                first_read_its_config.set()
+                second_save_done.wait(timeout=1.0)
+            return value
+
+        def save_three() -> None:
+            first_save["thread"] = threading.get_ident()
+            first_save["status"] = _save(app, {"gpu_config": _gpu_config(3)}).status_code
+
+        with _fake_detected_gpu(), patch.object(SettingsManager, "get", get_then_let_the_second_save_run):
+            first = threading.Thread(target=save_three)
+            first.start()
+            assert first_read_its_config.wait(timeout=5)
+            second_status = _save(app, {"gpu_config": _gpu_config(4)}).status_code
+            second_save_done.set()
+            first.join(timeout=10)
+
+        assert (first_save["status"], second_status) == (200, 200)
+        with app.app_context():
+            assert _gpu_workers_in(get_settings_manager().gpu_config) == 4
+        assert len(_gpu_workers(pool)) == 4
