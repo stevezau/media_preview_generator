@@ -45,11 +45,8 @@ def test_no_old_host_outside_the_allowlist() -> None:
 def test_site_and_manifest_urls_use_the_custom_domain() -> None:
     config = yaml.safe_load((REPO_ROOT / "docs" / "_config.yml").read_text(encoding="utf-8"))
     assert config["url"] == "https://mediapreviewgenerator.dev"
-    docs_yml = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "docs.yml").read_text(encoding="utf-8"))
-    assert docs_yml["env"]["LIVE_MANIFEST_URL"] == NEW_MANIFEST
     release = (REPO_ROOT / ".github" / "workflows" / "jellyfin-plugin.yml").read_text(encoding="utf-8")
-    assert f'PREV_URL="{NEW_MANIFEST}"' in release
-    # The release notes' links too, and the URL the app registers on real Jellyfin servers.
+    # The release notes' and job summary's links, and the URL the app registers on real Jellyfin servers.
     manifests = re.findall(r"https://[^\s\"'`)]+/jellyfin-plugin/manifest\.json", release)
-    assert len(manifests) >= 3 and set(manifests) == {NEW_MANIFEST}
+    assert len(manifests) >= 2 and set(manifests) == {NEW_MANIFEST}
     assert JellyfinServer.PLUGIN_REPO_URL == NEW_MANIFEST

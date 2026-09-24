@@ -5,9 +5,6 @@ description: Detects intros and end credits once per file and adds Skip Intro an
   Emby through its own plugin.
 ---
 
-> [!NOTE]
-> Intro & Credits is in the `dev` image (`stevezzau/media_preview_generator:dev`) now, and in `latest` from the next release.
-
 Media Preview Generator detects where each file's intro and end credits are and sends those points to Plex, Emby and Jellyfin, so viewers get a skip button. It detects each file once and sends the same answer to every server that has the file. On Jellyfin and Emby it works through its own plugin. It runs in the same Docker container that makes your preview thumbnails, and it stays off until you turn it on for a server.
 
 ## What viewers get, and what each server needs

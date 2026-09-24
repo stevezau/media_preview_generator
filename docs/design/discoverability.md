@@ -26,13 +26,17 @@ data → intent pages → images → repo metadata → verify with real retrieva
 
 Pages serves `https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json` (older installs use the
 github.io address, which 301s there),
-which every Jellyfin install of the plugin polls. `.github/workflows/jellyfin-plugin.yml`
-(`publish-pages`) builds it by fetching the LIVE manifest and patching in the new release
-(version, checksum, zip URL — values that only exist at plugin-release time). A Pages deploy
-replaces the whole site, so:
+which every Jellyfin install of the plugin polls. A Pages deploy replaces the whole site, so:
 
-- The docs deploy must fetch the live manifest and ship it at the same path, and must FAIL
-  (deploy nothing) if that fetch fails.
+- The manifest is built from the `plugin-v*` GitHub releases on every deploy, docs or plugin
+  release (`scripts/build_jellyfin_manifest.py`: version, MD5 and zip URL from each release's
+  assets, plugin metadata from `jellyfin-plugin/manifest.template.json` as it was at the newest
+  listed release's tag, so text edited on `dev` ships only with the next plugin release), and
+  shipped at the same path. The deploy must FAIL (deploy nothing) on a download error, a digest
+  mismatch, a template it can't read at that tag, or zero versions. Nothing reads the live copy back, so a cancelled or failed deploy loses no version:
+  the next deploy lists the releases itself. (Until 2026-09-24 docs deploys re-shipped the live
+  manifest and only the plugin release added versions, so GitHub cancelling that pending deploy
+  dropped a version for good.)
 - The plugin release must also ship the docs site, or a plugin release wipes the docs.
 - Both paths go through one reusable workflow with a shared `pages` concurrency group.
 
@@ -68,7 +72,9 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 ## Switching to a custom domain (checklist — done 2026-09-23)
 
 1. `site_url` in `mkdocs.yml`; the domain itself is set in the repo's Pages settings (Actions deploys, no CNAME file).
-2. `LIVE_MANIFEST_URL` in `.github/workflows/docs.yml` and `PREV_URL` in `jellyfin-plugin.yml`.
+2. The manifest URL in `.github/workflows/jellyfin-plugin.yml` (release notes and job summary) and `PLUGIN_REPO_URL`
+   in `media_preview_generator/servers/jellyfin.py`. (At the 2026-09-23 switch this also meant `LIVE_MANIFEST_URL`
+   in `docs.yml` and `PREV_URL` in `jellyfin-plugin.yml`; the 2026-09-24 manifest rebuild removed both.)
 3. The absolute docs URLs in `README.md`, `DOCKERHUB_README.md`, `llms.txt`, `pyproject.toml`; regenerate
    `llms-full.txt` (`python scripts/generate_llms_full.py`).
 4. Existing Jellyfin installs point at the github.io manifest URL. GitHub Pages 301s project URLs to the
