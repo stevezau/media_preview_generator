@@ -68,7 +68,7 @@ What that needs:
 > [!WARNING]
 > Don't turn trickplay extraction off on a library. When `EnableTrickplayImageExtraction` is off, Jellyfin deletes the `.trickplay` folders on its next refresh, including ones this app wrote. The app asks you to type a confirmation before it will flip that setting.
 
-The **Previews Readiness** panel (Servers → edit the Jellyfin server) checks all of these and can fix them in one click. See [Previews Readiness](guides/previews-readiness.md).
+The **Setup Health** tab (Servers → edit the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](guides/previews-readiness.md).
 
 ## When you need the Media Preview Bridge plugin
 

@@ -18,7 +18,7 @@ Guides for the web interface, automation and webhooks, HDR handling, and trouble
 ## Contents
 
 - [Web Interface](#web-interface)
-- [Previews readiness (per-check toggles & explanations)](guides/previews-readiness.md)
+- [Setup Health (per-check toggles & explanations)](guides/previews-readiness.md)
 - [Webhook Integration](#webhook-integration)
 - [Auto-trigger from Plex (no Sonarr/Radarr)](#auto-trigger-from-plex-no-sonarrradarr)
 - [Intro & Credits](#intro--credits)
@@ -159,7 +159,7 @@ Access settings at `/settings` to manage:
 > For per-server settings audits (Plex FSEvent flags, Jellyfin trickplay flags,
 > Media Preview Bridge plugin presence, Plex config folder writability, path
 > mappings), open **Servers → Edit → Setup Health**. Full per-check reference:
-> [Previews Readiness guide](guides/previews-readiness.md).
+> [Setup Health guide](guides/previews-readiness.md).
 
 The Settings page and the Automation page's **Triggers** tab **save automatically as you edit** — there's no Save button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
 
@@ -811,7 +811,7 @@ first time you turn it on for a Plex server:
   markers*) **and** the library's own setting (Edit library → Advanced → *Enable intro / credits detection*) are on.
   With **Use ours**, **Servers → Edit → Setup Health** lists the Intro & Credits libraries where both are on, each
   with a **Turn off** that switches off only that library's own setting. With **Keep Plex's** it doesn't warn. See
-  [Previews Readiness](guides/previews-readiness.md#intro-credits).
+  [Setup Health](guides/previews-readiness.md#intro-credits).
 - **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
   type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
   server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.
@@ -846,7 +846,7 @@ The agent only ever writes the marker rows of one item into Plex's library datab
 on a local disk of its own machine, a database schema it doesn't know, and a Plex that has no marker list yet, with the
 same messages a same-machine setup gives. While it isn't answering, markers wait in this app and the next Intro &
 Credits run sends them. Setup Health shows a row for it (see
-[Previews Readiness](guides/previews-readiness.md#intro-credits)).
+[Setup Health](guides/previews-readiness.md#intro-credits)).
 
 ### Jellyfin: the Media Preview Bridge plugin
 
@@ -1224,7 +1224,7 @@ Use this table to diagnose common failures quickly.
 |---------|--------------|-----|
 | `Skipping as file not found` | Path mapping mismatch between a media server and this container | Verify the server's per-entry mappings in [Path Mappings](reference.md#path-mappings) (each Plex/Emby/Jellyfin entry has its own list). |
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
-| `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Previews Readiness surfaces this per-Plex-server. |
+| `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
 | Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Check **Settings → Processing Options → Incoming job priority** is **High** (the default) so webhook jobs take the reserved slot instead of queueing. Otherwise wait for a slot to free up (priority-ordered), raise the cap, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |

@@ -57,7 +57,7 @@ To shorten the wait, make sure the server notices new files quickly:
 - Plex: turn on the FSEvent library-update settings.
 - Emby and Jellyfin: turn on real-time monitoring.
 
-[Previews Readiness](guides/previews-readiness.md) checks these.
+[Setup Health](guides/previews-readiness.md) checks these.
 
 ## Upgrades
 

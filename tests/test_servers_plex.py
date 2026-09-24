@@ -2243,7 +2243,7 @@ class TestPlexMarkersReadiness(_MarkerReadinessHarness):
         assert row["severity"] == "critical"
         assert row["ok"] is False
         assert (row["current"], row["recommended"]) == ("not active", "active")
-        assert row["reason"] == "Markers are still written, but nobody sees a skip button."
+        assert row["reason"] == "Nothing is written until the server has Plex Pass."
         assert row["tooltip"] == ("Plex only shows Skip Intro and Skip Credits to viewers on a server with Plex Pass.")
         # Nothing this app can toggle → no actions, so the card shows the shipped "Change in Plex UI" badge.
         assert row["actions"] == {}

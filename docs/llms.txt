@@ -37,7 +37,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - GPUs: NVIDIA (CUDA), Intel and AMD (VAAPI) on Linux; only NVIDIA on Windows (WSL2); none on macOS. Without a GPU it runs on CPU workers.
 - HDR10, HLG and HDR10+ are tone-mapped; Dolby Vision 7 and 8 use their HDR10 layer; Dolby Vision 5 needs a hardware Vulkan driver in the container.
 - Frame interval 1-60 s (default 10; Plex's own default is 2); thumbnail quality 1-10 (default 4; lower = sharper).
-- Intro & Credits (dev image until the next release): finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (viewers need Plex Pass; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
+- Intro & Credits (dev image until the next release): finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
 
 ## Docs
 
@@ -54,7 +54,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - [HDR and Dolby Vision previews](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/): tone mapping and the Profile 5 caveat
 - [Skip Intro and Skip Credits](https://mediapreviewgenerator.dev/skip-intro-credits/): what each server needs, how intros and credits are found, Needs review, limits
 - [Guides and troubleshooting](https://mediapreviewgenerator.dev/guides/): web UI, webhooks, schedules, HDR, CPU fallback
-- [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/): every server setting that decides whether previews show up
+- [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/): every server setting that decides whether previews show up
 - [Multi-server](https://mediapreviewgenerator.dev/multi-server/): output formats, webhook routing, retries, the Jellyfin plugin
 - [Reference](https://mediapreviewgenerator.dev/reference/): settings, environment variables, path mappings, REST API
 - [FAQ](https://mediapreviewgenerator.dev/faq/): Windows, GPUs, RAM, skipped files

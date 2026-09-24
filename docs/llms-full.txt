@@ -37,7 +37,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - GPUs: NVIDIA (CUDA), Intel and AMD (VAAPI) on Linux; only NVIDIA on Windows (WSL2); none on macOS. Without a GPU it runs on CPU workers.
 - HDR10, HLG and HDR10+ are tone-mapped; Dolby Vision 7 and 8 use their HDR10 layer; Dolby Vision 5 needs a hardware Vulkan driver in the container.
 - Frame interval 1-60 s (default 10; Plex's own default is 2); thumbnail quality 1-10 (default 4; lower = sharper).
-- Intro & Credits (dev image until the next release): finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (viewers need Plex Pass; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
+- Intro & Credits (dev image until the next release): finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
 
 # Full documentation
 
@@ -68,7 +68,7 @@ Media Preview Generator makes Plex, Emby and Jellyfin preview thumbnails on your
 - **Starts per file.** Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex, Emby and Jellyfin webhooks, or any JSON with a path. A new episode gets its previews without waiting for a nightly task.
 - **One decode, every server.** With Plex and Jellyfin on the same library, each file is read once and both servers get their own output.
 - **Skips what's already done.** A small file next to each preview records the source's size and date. A quality upgrade from Radarr is redone; an untouched file is skipped.
-- **Says why previews don't show.** Previews Readiness checks each server's settings, explains the ones that stop previews appearing, and offers to fix them one library at a time.
+- **Says why previews don't show.** Setup Health checks each server's settings, explains the ones that stop previews appearing, and offers to fix them one library at a time.
 - **Skip Intro and Skip Credits.** Finds intros and end credits from the file's chapters, online skip databases, the season's theme song or the credit roll itself, then sends the markers to every server. When it isn't sure, the file waits for your review instead of getting a guess.
 
 ## Works with
@@ -223,8 +223,8 @@ tool isn't competing with a redundant CPU job:
 - **Emby** — Emby can make its own thumbnails during library scans. Turn
   off its scan-time thumbnail extraction and chapter-image extraction on
   each library (`ExtractTrickplayImagesDuringLibraryScan` and
-  `ExtractChapterImagesDuringLibraryScan`). The Previews
-  Readiness card recommends this and turns them off when you click
+  `ExtractChapterImagesDuringLibraryScan`). The Setup
+  Health tab recommends this and turns them off when you click
   **Disable**; the app never changes them on its own.
 - **Jellyfin** — keep **"Trickplay image extraction"** *enabled* on each
   library (Jellyfin only reads this app's published tiles when that flag is
@@ -236,7 +236,7 @@ tool isn't competing with a redundant CPU job:
     lets Jellyfin pick up the tiles on its next library scan. Off means new
     previews wait for Jellyfin's daily trickplay task (3 AM by default).
 
-The Previews Readiness card (Servers → Edit → Setup Health) checks all of
+The Setup Health tab (Servers → Edit) checks all of
 these and can toggle them for you.
 
 > [!TIP]
@@ -763,11 +763,11 @@ Facts tagged with a reference such as P1 link to their source, and the Sources l
 | **Servers covered** | Plex, Emby and Jellyfin, any mix and number. One decode per file. | Plex | Jellyfin | Emby |
 | **HDR / Dolby Vision** | Tone-maps HDR10, HLG, HDR10+. Dolby Vision 7/8 uses the HDR10 layer. Dolby Vision 5 needs a GPU with a hardware Vulkan driver; on NVIDIA that means the `graphics` capability. | Plex staff: not tone-mapped on all systems. Users report washed-out HDR and green Dolby Vision. [P3][p3] | Tone-mapped only if transcoding tone mapping is on. [J3][j3] Green Dolby Vision is still user-reported in 2026. [J4][j4] | Tone mapping is now done in Emby's core (user reports). [E3][e3] |
 | **Output location** | Each server's own location: Plex data folder; Emby BIF next to the video; Jellyfin tiles next to the video, or in Jellyfin's data folder with the plugin | BIF files in Plex's data folder [P4][p4] [P2][p2] | Jellyfin's data folder, or next to the video when "save with media" is on [J1][j1] | Next to the video or in Emby's metadata folder [E4][e4] |
-| **Skip Intro / Skip Credits** | Plex, Emby and Jellyfin, detected once per file. Plex viewers still need Plex Pass, and the app runs on the Plex machine or uses the Plex marker agent. Skip Intro on Emby still needs Premiere. Emby and Jellyfin need this app's plugin. [Details](https://mediapreviewgenerator.dev/skip-intro-credits/) | TV intros, and credits on episodes and movies. Needs Plex Pass for the server's admin and for each viewer (or their Plex Home). [P7][p7] [P8][p8] | No detection of its own. Since 10.10 it stores skip segments that a plugin makes, and its web player offers to skip them. Jellyfin's own plugin makes them from chapter names. [J6][j6] | Detects TV intros, one season at a time. Skip Intro is an Emby Premiere feature. [E7][e7] [E5][e5] |
+| **Skip Intro / Skip Credits** | Plex, Emby and Jellyfin, detected once per file. Plex needs Plex Pass on the server and for viewers, and the app runs on the Plex machine or uses the Plex marker agent. Skip Intro on Emby still needs Premiere. Emby and Jellyfin need this app's plugin. [Details](https://mediapreviewgenerator.dev/skip-intro-credits/) | TV intros, and credits on episodes and movies. Needs Plex Pass for the server's admin and for each viewer (or their Plex Home). [P7][p7] [P8][p8] | No detection of its own. Since 10.10 it stores skip segments that a plugin makes, and its web player offers to skip them. Jellyfin's own plugin makes them from chapter names. [J6][j6] | Detects TV intros, one season at a time. Skip Intro is an Emby Premiere feature. [E7][e7] [E5][e5] |
 | **Setup** | Docker container, GPU passthrough, mounts, path mappings if paths differ, server sign-in | One setting | Per-library setting plus trickplay options | Per-library setting |
 | **Price** | Free, MIT licence | Free. No Plex Pass needed. [P5][p5] | Free, open source | Free. No Emby Premiere needed. [E5][e5] |
 
-The mounts depend on the server: Plex's data folder read-write for Plex, and the media folder read-write for Emby and for Jellyfin's default layout. Jellyfin output needs Jellyfin 10.10 or newer. See [Volume Mounts](https://mediapreviewgenerator.dev/getting-started/#volume-mounts) and [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/#version).
+The mounts depend on the server: Plex's data folder read-write for Plex, and the media folder read-write for Emby and for Jellyfin's default layout. Jellyfin output needs Jellyfin 10.10 or newer. See [Volume Mounts](https://mediapreviewgenerator.dev/getting-started/#volume-mounts) and [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#version).
 
 > [!NOTE]
 > "One decode per file" does not mean one shared file. Each server still gets its own output, in its own format and place. The saving is the expensive step: the video is decoded and scaled once, not once per server. See [Per-vendor output formats](https://mediapreviewgenerator.dev/multi-server/#per-vendor-output-formats).
@@ -991,7 +991,7 @@ For Docker Compose, Unraid and permission problems with `/dev/dri`, see:
 
 ## What Plex needs
 
-- **Plex's data folder, mounted read-write** at `/plex`. This is the folder that contains `Cache`, `Media` and `Metadata`. BIFs are written inside it, at `Media/localhost/<hash>/…/Indexes/index-sd.bif`. A read-only mount blocks every write. The **Plex config folder** check in [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/#plex-config-folder) tells you if it's wrong.
+- **Plex's data folder, mounted read-write** at `/plex`. This is the folder that contains `Cache`, `Media` and `Metadata`. BIFs are written inside it, at `Media/localhost/<hash>/…/Indexes/index-sd.bif`. A read-only mount blocks every write. The **Plex config folder** check in [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#plex-config-folder) tells you if it's wrong.
 - **The media, visible to the container.** Read-only is fine for Plex, because nothing is written next to the video.
 - **Path mappings** if Plex and the container see the media at different paths. See [Path Mappings](https://mediapreviewgenerator.dev/reference/#path-mappings).
 - **Plex's own generation off.** Set **Settings → Library → Generate video preview thumbnails** to **Never**, so Plex doesn't redo the work.
@@ -1095,7 +1095,7 @@ What that needs:
 > [!WARNING]
 > Don't turn trickplay extraction off on a library. When `EnableTrickplayImageExtraction` is off, Jellyfin deletes the `.trickplay` folders on its next refresh, including ones this app wrote. The app asks you to type a confirmation before it will flip that setting.
 
-The **Previews Readiness** panel (Servers → edit the Jellyfin server) checks all of these and can fix them in one click. See [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/).
+The **Setup Health** tab (Servers → edit the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/).
 
 ## When you need the Media Preview Bridge plugin
 
@@ -1163,7 +1163,7 @@ When Sonarr or Radarr upgrades a file, the old file's BIF is removed. A companio
 2. **Mount the media folder read-write.** The BIF is written beside each video, so a `:ro` mount makes every write fail with "permission denied". Set `PUID`/`PGID` to a user that can write there. Emby doesn't need Plex's `/plex` mount.
 3. Add the Emby server in the setup wizard or under **Servers**. Use the server URL plus a username and password, or an API key.
 4. Add **path mappings** if Emby and the container see the media at different paths ([Path Mappings](https://mediapreviewgenerator.dev/reference/#path-mappings)).
-5. Open the server's **Previews Readiness** panel. It recommends turning off Emby's own scan-time thumbnail extraction and chapter-image extraction, so Emby doesn't repeat the work. It also recommends turning on real-time monitoring, so new files are noticed quickly. Each is one click ([details](https://mediapreviewgenerator.dev/guides/previews-readiness/#vendor-extraction)).
+5. Open the server's **Setup Health** tab. It recommends turning off Emby's own scan-time thumbnail extraction and chapter-image extraction, so Emby doesn't repeat the work. It also recommends turning on real-time monitoring, so new files are noticed quickly. Each is one click ([details](https://mediapreviewgenerator.dev/guides/previews-readiness/#vendor-extraction)).
 
 ## Triggers for Emby
 
@@ -1247,7 +1247,7 @@ To shorten the wait, make sure the server notices new files quickly:
 - Plex: turn on the FSEvent library-update settings.
 - Emby and Jellyfin: turn on real-time monitoring.
 
-[Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/) checks these.
+[Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/) checks these.
 
 ## Upgrades
 
@@ -1358,7 +1358,7 @@ Media Preview Generator detects where each file's intro and end credits are and 
 
 ## What viewers get, and what each server needs
 
-- **Plex.** Skip Intro and Skip Credits buttons. Viewers need Plex Pass, or a Plex Home whose admin has it: without it, Plex hides skip buttons altogether. Plex has no way for another app to add markers, so the app writes them into Plex's own database and asks you to confirm once per server first. That only works on the Plex machine, so either run the app there or run the small [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) container next to Plex.
+- **Plex.** Skip Intro and Skip Credits buttons. The server needs Plex Pass, and so do viewers, or a Plex Home whose admin has it: without it, Plex hides skip buttons altogether. Plex has no way for another app to add markers, so the app writes them into Plex's own database and asks you to confirm once per server first. That only works on the Plex machine, so either run the app there or run the small [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) container next to Plex.
 - **Jellyfin 10.11 or 12.0.** Jellyfin has no intro detection of its own: it shows skip segments that a plugin provides ([Jellyfin docs](https://jellyfin.org/docs/general/server/metadata/media-segments/)). This app's [Media Preview Bridge plugin](https://mediapreviewgenerator.dev/guides/#jellyfin-the-media-preview-bridge-plugin), the same one trickplay uses, is that plugin. Viewers get Skip Intro and Skip Credits, plus Skip Recap and Skip Preview.
 - **Emby 4.9 or 4.10.** Skip Intro, and Skip Credits through Emby's Up Next prompt. It works through this app's [Media Preview Bridge for Emby plugin](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin). Skip Intro also needs Emby Premiere, which is Emby's rule; the credits prompt works without it. Emby has no credits end, so skipping credits goes to the end of the file, past any scene after the credits.
 
@@ -1407,7 +1407,7 @@ Guides for the web interface, automation and webhooks, HDR handling, and trouble
 ## Contents
 
 - [Web Interface](https://mediapreviewgenerator.dev/guides/#web-interface)
-- [Previews readiness (per-check toggles & explanations)](https://mediapreviewgenerator.dev/guides/previews-readiness/)
+- [Setup Health (per-check toggles & explanations)](https://mediapreviewgenerator.dev/guides/previews-readiness/)
 - [Webhook Integration](https://mediapreviewgenerator.dev/guides/#webhook-integration)
 - [Auto-trigger from Plex (no Sonarr/Radarr)](https://mediapreviewgenerator.dev/guides/#auto-trigger-from-plex-no-sonarrradarr)
 - [Intro & Credits](https://mediapreviewgenerator.dev/guides/#intro--credits)
@@ -1548,7 +1548,7 @@ Access settings at `/settings` to manage:
 > For per-server settings audits (Plex FSEvent flags, Jellyfin trickplay flags,
 > Media Preview Bridge plugin presence, Plex config folder writability, path
 > mappings), open **Servers → Edit → Setup Health**. Full per-check reference:
-> [Previews Readiness guide](https://mediapreviewgenerator.dev/guides/previews-readiness/).
+> [Setup Health guide](https://mediapreviewgenerator.dev/guides/previews-readiness/).
 
 The Settings page and the Automation page's **Triggers** tab **save automatically as you edit** — there's no Save button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
 
@@ -2200,7 +2200,7 @@ first time you turn it on for a Plex server:
   markers*) **and** the library's own setting (Edit library → Advanced → *Enable intro / credits detection*) are on.
   With **Use ours**, **Servers → Edit → Setup Health** lists the Intro & Credits libraries where both are on, each
   with a **Turn off** that switches off only that library's own setting. With **Keep Plex's** it doesn't warn. See
-  [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits).
+  [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits).
 - **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
   type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
   server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.
@@ -2235,7 +2235,7 @@ The agent only ever writes the marker rows of one item into Plex's library datab
 on a local disk of its own machine, a database schema it doesn't know, and a Plex that has no marker list yet, with the
 same messages a same-machine setup gives. While it isn't answering, markers wait in this app and the next Intro &
 Credits run sends them. Setup Health shows a row for it (see
-[Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits)).
+[Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits)).
 
 ### Jellyfin: the Media Preview Bridge plugin
 
@@ -2613,7 +2613,7 @@ Use this table to diagnose common failures quickly.
 |---------|--------------|-----|
 | `Skipping as file not found` | Path mapping mismatch between a media server and this container | Verify the server's per-entry mappings in [Path Mappings](https://mediapreviewgenerator.dev/reference/#path-mappings) (each Plex/Emby/Jellyfin entry has its own list). |
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
-| `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Previews Readiness surfaces this per-Plex-server. |
+| `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
 | Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Check **Settings → Processing Options → Incoming job priority** is **High** (the default) so webhook jobs take the reserved slot instead of queueing. Otherwise wait for a slot to free up (priority-ordered), raise the cap, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
@@ -2705,14 +2705,14 @@ Open a [GitHub Issue](https://github.com/stevezau/media_preview_generator/issues
 
 ---
 
-# Previews Readiness
+# Setup Health
 Source: https://mediapreviewgenerator.dev/guides/previews-readiness/
 
-What each Previews Readiness check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails this app generates.
+What each Setup Health check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails this app generates.
 
 > [Back to Guides](https://mediapreviewgenerator.dev/guides/) · [Configuration & API Reference](https://mediapreviewgenerator.dev/reference/) · [Multi-Media-Server Guide](https://mediapreviewgenerator.dev/multi-server/)
 
-The **Previews readiness** card on the Edit Server modal is the single
+The **Setup Health** tab on the Edit Server modal is the single
 place to verify — and adjust — every server-side setting that affects
 whether this app's previews show up in Plex / Emby / Jellyfin.
 
@@ -2785,7 +2785,7 @@ works, just slower to appear.
 
 **Enable:** one-click **Install plugin**. The app adds its manifest
 URL to Jellyfin's plugin repos, queues the install, and restarts
-Jellyfin. Takes ~30 s; the readiness card polls until the plugin is
+Jellyfin. Takes ~30 s; the Setup Health card polls until the plugin is
 live.
 
 **Disable:** **Uninstall plugin** (with confirm). Removes the package
@@ -3052,8 +3052,8 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
 ### Plex
 
 - **Skip buttons need Plex Pass** (critical) / **Plex Pass is active**. Without Plex Pass Plex serves no intro or
-  credits markers at all, not ours and not its own, so nobody sees a skip button. Markers are still written and stay
-  for the day the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
+  credits markers at all, not ours and not its own, so nobody sees a skip button, and this app writes nothing to it
+  until the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
 - **Plex hasn't made its marker list yet** (critical) / **Plex's marker list is ready**. Plex only serves markers
   attached to a database row it made itself, and this app never creates that row. Turn on Plex's own intro detection
   for one library, play a file, then check again. You can turn Plex's detection back off afterwards.
@@ -3149,7 +3149,7 @@ This page covers:
 - [Library ownership and retry semantics](https://mediapreviewgenerator.dev/multi-server/#library-ownership-and-retry-semantics)
 - [Smart dedup: skipping work that's already done](https://mediapreviewgenerator.dev/multi-server/#smart-dedup-skipping-work-thats-already-done)
 - [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue)
-- [Previews Readiness — the unified "is everything set up right?" panel](https://mediapreviewgenerator.dev/multi-server/#previews-readiness--the-unified-is-everything-set-up-right-panel)
+- [Setup Health — the unified "is everything set up right?" panel](https://mediapreviewgenerator.dev/multi-server/#setup-health--the-unified-is-everything-set-up-right-panel)
 - [BIF Viewer (multi-server)](https://mediapreviewgenerator.dev/multi-server/#bif-viewer-multi-server)
 - [Plex multi-server auto-discovery](https://mediapreviewgenerator.dev/multi-server/#plex-multi-server-auto-discovery)
 - [REST API summary](https://mediapreviewgenerator.dev/multi-server/#rest-api-summary)
@@ -3301,7 +3301,7 @@ Because Emby and default-layout Jellyfin write next to the media file, this cont
 
 **Why Jellyfin's format is different.** Jellyfin (10.9 onwards) reads its own native JPG tile-grid format — *not* BIF. BIF would require users to install a third-party plugin (Jellyscrub) on their Jellyfin server. This app writes the native format, so no extra plugin is needed.
 
-**Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [previews readiness → off-media](https://mediapreviewgenerator.dev/guides/previews-readiness/#jellyfin-config-folder).
+**Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [Setup Health → off-media](https://mediapreviewgenerator.dev/guides/previews-readiness/#jellyfin-config-folder).
 
 **Required Jellyfin library settings.** Three per-library settings need to be set so Jellyfin reads the trickplay folders this app writes — most importantly **Save trickplay images to media folders** = on. The Servers page in this app has a one-click **"Disable on this server"** button that flips all three correctly. See the in-app help for what each setting does.
 
@@ -3422,13 +3422,13 @@ when the publish has already succeeded through some other path
 
 ---
 
-## Previews Readiness — the unified "is everything set up right?" panel
+## Setup Health — the unified "is everything set up right?" panel
 
 Each server has its own settings that can quietly break previews — a Jellyfin
 flag off that silently deletes published tiles, a Plex FSEvent toggle that
 stops the library noticing new files, a plugin the Media Preview Bridge needs
 to register results instantly, a Plex config mount that's accidentally
-read-only. **Previews Readiness** is the single place the UI surfaces — and
+read-only. **Setup Health** is the single place the UI surfaces — and
 fixes — all of them.
 
 **How to open it**
@@ -3448,7 +3448,7 @@ refresh. The UI requires you to type `disable trickplay` to confirm.
 
 **Per-check reference:** full list of every audit with "what it checks / why
 it matters / how to fix" lives in the
-[Previews Readiness guide](https://mediapreviewgenerator.dev/guides/previews-readiness/).
+[Setup Health guide](https://mediapreviewgenerator.dev/guides/previews-readiness/).
 
 **Scripting it.** For the underlying REST surface
 (`GET /api/servers/{id}/previews-readiness`,
@@ -4788,8 +4788,8 @@ For full design and per-vendor details see [Multi-Media-Server](https://mediapre
 | POST | `/api/servers/auth/jellyfin/quick-connect/poll` | Poll for approval |
 | POST | `/api/servers/auth/jellyfin/quick-connect/exchange` | Exchange approved secret for token |
 | GET | `/api/servers/<id>/health-check` | Per-server settings audit. Returns `{vendor, issues, issue_count, fixable_count}`; `issues[]` carries `{flag, label, severity, current, recommended, rationale, library_id, library_name, fixable}`. Works for Plex (server-wide prefs via `/:/prefs`), Emby and Jellyfin (per-library `LibraryOptions`). Replaces the older Jellyfin-only `/jellyfin/trickplay-status` route. |
-| POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Previews readiness card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
-| GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Previews readiness card on the Edit Server modal. See the [Previews readiness guide](https://mediapreviewgenerator.dev/guides/previews-readiness/). |
+| POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Setup Health card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
+| GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Setup Health card on the Edit Server modal. See the [Setup Health guide](https://mediapreviewgenerator.dev/guides/previews-readiness/). |
 | POST | `/api/servers/<id>/install-plugin` | Jellyfin and Emby (400 for Plex). Jellyfin: adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. Emby: installs Media Preview Bridge for Emby from Emby's own plugin catalog and restarts Emby; when the catalog doesn't list it, answers `ok: false, manual: true` (install the DLL by hand). Returns `{ok, steps, error, manual}`. |
 | POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's per-library **Turn off** for Plex's own intro/credits detection. Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them off with `PUT /library/sections/{id}/prefs` for that library only, never Plex's server-wide prefs. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
@@ -5224,12 +5224,12 @@ Generates video preview thumbnails for **Plex, Emby, and Jellyfin** — alone or
 ### Which Plex, Emby and Jellyfin settings should I change?
 
 - **Plex**: In Settings → Library, set **"Generate video preview thumbnails"** to **Never**.
-- **Emby**: Emby can make its own thumbnails during library scans. Turn off its scan-time thumbnail extraction and chapter-image extraction on each library (`ExtractTrickplayImagesDuringLibraryScan` and `ExtractChapterImagesDuringLibraryScan`). The readiness card recommends this; it changes them only when you click **Disable**.
+- **Emby**: Emby can make its own thumbnails during library scans. Turn off its scan-time thumbnail extraction and chapter-image extraction on each library (`ExtractTrickplayImagesDuringLibraryScan` and `ExtractChapterImagesDuringLibraryScan`). The Setup Health tab recommends this; it changes them only when you click **Disable**.
 - **Jellyfin**: In each library's settings, **enable "Trickplay image extraction"** (Jellyfin reads this app's published tiles only when this is on). For **"Extract trickplay images during library scan"**: turn it off if the Media Preview Bridge plugin is installed. Without the plugin, keep it **on** — it's how Jellyfin picks up the tiles on its next scan.
 
-The **Previews Readiness** card on the Edit Server modal audits every required
+The **Setup Health** tab on the Edit Server modal audits every required
 flag across all three vendors and offers one-click toggles — see the
-[Previews Readiness guide](https://mediapreviewgenerator.dev/guides/previews-readiness/). Destructive flips
+[Setup Health guide](https://mediapreviewgenerator.dev/guides/previews-readiness/). Destructive flips
 (like disabling Jellyfin's trickplay extraction) require typed confirmation.
 
 Disabling each vendor's built-in generation avoids duplicate work and prevents the server from using CPU for thumbnails when you want this app to handle them. The one exception is Jellyfin without the plugin, as above.
@@ -5287,7 +5287,7 @@ Yes. The app supports Plex, Emby, and Jellyfin — alone or in any combination. 
 
 Yes, on Plex, Emby and Jellyfin, once you turn it on for each server. What each server needs:
 
-- **Plex**: viewers need Plex Pass. The app runs on the same machine as Plex, or the Plex marker agent runs there for it.
+- **Plex**: needs Plex Pass on the server, and for viewers (or their Plex Home). The app runs on the same machine as Plex, or the Plex marker agent runs there for it.
 - **Jellyfin** 10.11 or 12.0: the Media Preview Bridge plugin.
 - **Emby** 4.9 or 4.10: the Media Preview Bridge for Emby plugin. Skip Intro also needs Emby Premiere, which is Emby's rule; Skip Credits doesn't.
 

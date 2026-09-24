@@ -62,7 +62,7 @@ For Docker Compose, Unraid and permission problems with `/dev/dri`, see:
 
 ## What Plex needs
 
-- **Plex's data folder, mounted read-write** at `/plex`. This is the folder that contains `Cache`, `Media` and `Metadata`. BIFs are written inside it, at `Media/localhost/<hash>/…/Indexes/index-sd.bif`. A read-only mount blocks every write. The **Plex config folder** check in [Previews Readiness](guides/previews-readiness.md#plex-config-folder) tells you if it's wrong.
+- **Plex's data folder, mounted read-write** at `/plex`. This is the folder that contains `Cache`, `Media` and `Metadata`. BIFs are written inside it, at `Media/localhost/<hash>/…/Indexes/index-sd.bif`. A read-only mount blocks every write. The **Plex config folder** check in [Setup Health](guides/previews-readiness.md#plex-config-folder) tells you if it's wrong.
 - **The media, visible to the container.** Read-only is fine for Plex, because nothing is written next to the video.
 - **Path mappings** if Plex and the container see the media at different paths. See [Path Mappings](reference.md#path-mappings).
 - **Plex's own generation off.** Set **Settings → Library → Generate video preview thumbnails** to **Never**, so Plex doesn't redo the work.

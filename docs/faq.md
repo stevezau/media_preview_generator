@@ -65,12 +65,12 @@ Generates video preview thumbnails for **Plex, Emby, and Jellyfin** — alone or
 ### Which Plex, Emby and Jellyfin settings should I change?<a id="what-plexembyjellyfin-settings-should-i-use"></a>
 
 - **Plex**: In Settings → Library, set **"Generate video preview thumbnails"** to **Never**.
-- **Emby**: Emby can make its own thumbnails during library scans. Turn off its scan-time thumbnail extraction and chapter-image extraction on each library (`ExtractTrickplayImagesDuringLibraryScan` and `ExtractChapterImagesDuringLibraryScan`). The readiness card recommends this; it changes them only when you click **Disable**.
+- **Emby**: Emby can make its own thumbnails during library scans. Turn off its scan-time thumbnail extraction and chapter-image extraction on each library (`ExtractTrickplayImagesDuringLibraryScan` and `ExtractChapterImagesDuringLibraryScan`). The Setup Health tab recommends this; it changes them only when you click **Disable**.
 - **Jellyfin**: In each library's settings, **enable "Trickplay image extraction"** (Jellyfin reads this app's published tiles only when this is on). For **"Extract trickplay images during library scan"**: turn it off if the Media Preview Bridge plugin is installed. Without the plugin, keep it **on** — it's how Jellyfin picks up the tiles on its next scan.
 
-The **Previews Readiness** card on the Edit Server modal audits every required
+The **Setup Health** tab on the Edit Server modal audits every required
 flag across all three vendors and offers one-click toggles — see the
-[Previews Readiness guide](guides/previews-readiness.md). Destructive flips
+[Setup Health guide](guides/previews-readiness.md). Destructive flips
 (like disabling Jellyfin's trickplay extraction) require typed confirmation.
 
 Disabling each vendor's built-in generation avoids duplicate work and prevents the server from using CPU for thumbnails when you want this app to handle them. The one exception is Jellyfin without the plugin, as above.
@@ -128,7 +128,7 @@ Yes. The app supports Plex, Emby, and Jellyfin — alone or in any combination. 
 
 Yes, on Plex, Emby and Jellyfin, once you turn it on for each server. What each server needs:
 
-- **Plex**: viewers need Plex Pass. The app runs on the same machine as Plex, or the Plex marker agent runs there for it.
+- **Plex**: needs Plex Pass on the server, and for viewers (or their Plex Home). The app runs on the same machine as Plex, or the Plex marker agent runs there for it.
 - **Jellyfin** 10.11 or 12.0: the Media Preview Bridge plugin.
 - **Emby** 4.9 or 4.10: the Media Preview Bridge for Emby plugin. Skip Intro also needs Emby Premiere, which is Emby's rule; Skip Credits doesn't.
 

@@ -118,8 +118,8 @@ tool isn't competing with a redundant CPU job:
 - **Emby** — Emby can make its own thumbnails during library scans. Turn
   off its scan-time thumbnail extraction and chapter-image extraction on
   each library (`ExtractTrickplayImagesDuringLibraryScan` and
-  `ExtractChapterImagesDuringLibraryScan`). The Previews
-  Readiness card recommends this and turns them off when you click
+  `ExtractChapterImagesDuringLibraryScan`). The Setup
+  Health tab recommends this and turns them off when you click
   **Disable**; the app never changes them on its own.
 - **Jellyfin** — keep **"Trickplay image extraction"** *enabled* on each
   library (Jellyfin only reads this app's published tiles when that flag is
@@ -131,7 +131,7 @@ tool isn't competing with a redundant CPU job:
     lets Jellyfin pick up the tiles on its next library scan. Off means new
     previews wait for Jellyfin's daily trickplay task (3 AM by default).
 
-The Previews Readiness card (Servers → Edit → Setup Health) checks all of
+The Setup Health tab (Servers → Edit) checks all of
 these and can toggle them for you.
 
 > [!TIP]

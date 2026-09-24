@@ -96,15 +96,16 @@ for your review.
 
 **Every server from one decode**
 - **Each server's own format.** A BIF in Plex's data folder, a BIF next to the video for Emby, and Jellyfin trickplay tiles (next to the video, or in Jellyfin's data folder with the companion plugin).
-- **Previews Readiness.** Checks each server's settings and offers fixes one library at a time.
+- **Setup Health.** Checks each server's settings and offers fixes one library at a time.
 
 **Right colours**
 - **HDR tone mapping.** Tone-maps HDR10, HLG and HDR10+, and uses the HDR10 layer of Dolby Vision profiles 7 and 8. Profile 5 needs a GPU with a hardware Vulkan driver.
 
 **Skip Intro and Skip Credits**
+- Intro & Credits is in the `dev` image (`stevezzau/media_preview_generator:dev`) now, and in `latest` from the next release.
 - **Found once, sent to every server.** Finds intros and end credits from the file's chapters, online skip databases (TheIntroDB, IntroDB.app, SkipDB), the season's theme song or the credit roll itself (read on the GPU when that's faster), then sends the markers to every server. When it isn't sure, the file waits for your review instead of getting a guess. Off until you [turn it on](docs/guides.md#turning-it-on) for a server.
 - **Yours to correct.** Tools → Intro & Credits adjusts, adds and locks a file's markers by hand, and Setup Health checks each server's Intro & Credits setup.
-- **Plex.** Viewers need Plex Pass. The app runs on the Plex machine, or next to it through the [Plex marker agent](plex-marker-agent/README.md).
+- **Plex.** Needs Plex Pass on the server, and for viewers (or their Plex Home). The app runs on the Plex machine, or next to it through the [Plex marker agent](plex-marker-agent/README.md).
 - **Jellyfin.** Jellyfin 10.11 or 12.0, with the Media Preview Bridge plugin (the one trickplay uses).
 - **Emby.** Emby 4.9 or 4.10, with the Media Preview Bridge for Emby plugin. Skip Intro needs Emby Premiere; Skip Credits doesn't.
 
@@ -112,7 +113,7 @@ for your review.
 
 It sits next to Sonarr, Radarr and Tdarr and takes over the media server's own preview job. Once it
 runs, the server's own generation is the same work done twice. The app's
-[Previews Readiness](docs/guides/previews-readiness.md) panel says which setting to turn off on each
+[Setup Health](docs/guides/previews-readiness.md) tab says which setting to turn off on each
 server, and which to leave on: switching Jellyfin's trickplay off deletes the tiles this app wrote.
 If your server's own generator keeps up, you don't need this: see
 [how it compares](https://mediapreviewgenerator.dev/comparison/).
@@ -173,7 +174,7 @@ It's free and MIT licensed. Helping is optional.
 
 ## Get help
 
-- **Previews don't show up?** Open the server's Previews Readiness panel in the app. It names the setting that's in the way.
+- **Previews don't show up?** Open the server's Setup Health tab in the app. It names the setting that's in the way.
 - **Not sure it's a bug?** Ask in [Discussions](https://github.com/stevezau/media_preview_generator/discussions).
 - **Found a bug?** [Open an issue](https://github.com/stevezau/media_preview_generator/issues/new?labels=bug) with the app version and what you tried.
 
@@ -187,7 +188,7 @@ MIT, see [LICENSE](LICENSE). Recent development is AI-assisted (Claude); every c
      because CI doesn't run on pushes to `main`: a `branch=main` badge would show one old run forever. -->
 [build-shield]: https://img.shields.io/github/actions/workflow/status/stevezau/media_preview_generator/ci.yml?branch=dev&event=push&style=for-the-badge&label=build&labelColor=a06a00
 [build-url]: https://github.com/stevezau/media_preview_generator/actions/workflows/ci.yml?query=branch%3Adev+event%3Apush
-[release-shield]: https://img.shields.io/github/v/release/stevezau/media_preview_generator?filter=!plugin-v*&style=for-the-badge&label=release&color=a06a00
+[release-shield]: https://img.shields.io/github/v/release/stevezau/media_preview_generator?style=for-the-badge&label=release&color=a06a00
 [release-url]: https://github.com/stevezau/media_preview_generator/releases
 [codecov-shield]: https://img.shields.io/codecov/c/github/stevezau/media_preview_generator?style=for-the-badge&labelColor=a06a00
 [codecov-url]: https://codecov.io/gh/stevezau/media_preview_generator

@@ -68,6 +68,11 @@ class TestReadme:
         assert (query.get("branch"), query.get("event")) == (["dev"], ["push"])
         assert "actions/workflows/ci.yml?query=branch%3Adev+event%3Apush" in README
 
+    def test_release_badge_shows_githubs_latest_release(self) -> None:
+        # Plugin releases are never marked "latest" (#297), so GitHub's latest is the app's. A `filter=`
+        # makes shields.io pick the newest matching tag by date instead, and that was an emby-plugin tag.
+        assert "filter" not in parse_qs(urlsplit(_shields()["release"]).query)
+
     def test_hero_is_the_players_image_with_a_disclosing_caption(self) -> None:
         assert "docs/images/players-3up.webp" in README
         assert re.search(r"<sub>[^<]*test servers[^<]*</sub>", README)
@@ -116,11 +121,12 @@ class TestLlmsTxt:
             assert re.search(rf"^- \[[^\]]+\]\({re.escape(url)}\): \S", docs, re.MULTILINE), url
 
     def test_dev_image_note_and_llms_clause_are_removed_together(self) -> None:
-        # Until Intro & Credits reaches a release, the pages say it's in the dev image and llms.txt says
-        # so too. At release all three go; this fails if only some of them do.
+        # Until Intro & Credits reaches a release, the pages and the README say it's in the dev image and
+        # llms.txt says so too. At release they all go; this fails if only some of them do. The Docker Hub
+        # README follows the README (TestDockerHubReadme).
         llms_says_dev = "(dev image until the next release)" in LLMS
         note = "Intro & Credits is in the `dev` image"
-        pages = [REPO_ROOT / "docs" / "skip-intro-credits.md", REPO_ROOT / "docs" / "faq.md"]
+        pages = [REPO_ROOT / "docs" / "skip-intro-credits.md", REPO_ROOT / "docs" / "faq.md", REPO_ROOT / "README.md"]
         assert [p.name for p in pages if (note in p.read_text(encoding="utf-8")) != llms_says_dev] == []
 
     def test_has_a_status_line_and_a_bold_distinction(self) -> None:

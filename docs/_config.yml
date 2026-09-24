@@ -69,7 +69,7 @@ nav:
     blurb: The web UI, webhooks, schedules and troubleshooting
     header: true
     children:
-      - title: Previews Readiness
+      - title: Setup Health
         url: /guides/previews-readiness/
   - title: Multi-server
     url: /multi-server/

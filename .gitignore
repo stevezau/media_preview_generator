@@ -107,3 +107,6 @@ docs/_site/
 docs/.jekyll-cache/
 docs/.bundle/
 docs/vendor/
+
+# benchmark_previews.py output: private until a quiet-GPU rerun is approved; publish with git add -f
+docs/benchmark/

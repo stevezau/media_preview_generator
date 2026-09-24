@@ -38,7 +38,7 @@ When Sonarr or Radarr upgrades a file, the old file's BIF is removed. A companio
 2. **Mount the media folder read-write.** The BIF is written beside each video, so a `:ro` mount makes every write fail with "permission denied". Set `PUID`/`PGID` to a user that can write there. Emby doesn't need Plex's `/plex` mount.
 3. Add the Emby server in the setup wizard or under **Servers**. Use the server URL plus a username and password, or an API key.
 4. Add **path mappings** if Emby and the container see the media at different paths ([Path Mappings](reference.md#path-mappings)).
-5. Open the server's **Previews Readiness** panel. It recommends turning off Emby's own scan-time thumbnail extraction and chapter-image extraction, so Emby doesn't repeat the work. It also recommends turning on real-time monitoring, so new files are noticed quickly. Each is one click ([details](guides/previews-readiness.md#vendor-extraction)).
+5. Open the server's **Setup Health** tab. It recommends turning off Emby's own scan-time thumbnail extraction and chapter-image extraction, so Emby doesn't repeat the work. It also recommends turning on real-time monitoring, so new files are noticed quickly. Each is one click ([details](guides/previews-readiness.md#vendor-extraction)).
 
 ## Triggers for Emby
 

@@ -45,7 +45,7 @@ OFF_TOOLTIP = "Turn it on in the Intro & Credits tab to send intro and credits m
 
 PASS_LABEL = "Skip buttons need Plex Pass"
 PASS_LABEL_OK = "Plex Pass is active"
-PASS_REASON = "Markers are still written, but nobody sees a skip button."
+PASS_REASON = "Nothing is written until the server has Plex Pass."
 PASS_TOOLTIP = "Plex only shows Skip Intro and Skip Credits to viewers on a server with Plex Pass."
 
 TAG_ROW_LABEL = "Plex hasn't made its marker list yet"
@@ -569,8 +569,7 @@ def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
                     "<p><strong>What it checks:</strong> whether this Plex server has an active Plex Pass.</p>"
                     "<p><strong>Why it matters:</strong> a server without Plex Pass serves no intro or credits "
                     "markers at all — not ours, not its own — so no viewer ever sees a Skip Intro or Skip "
-                    "Credits button. Markers are still written and stay in place for the day the server has a "
-                    "Pass.</p>"
+                    "Credits button. This app writes nothing to it until the server has a Pass.</p>"
                     "<p><strong>Viewers need one too:</strong> a Plex Pass on the server isn't enough on its "
                     "own — the account watching needs Plex Pass or to be in your Plex Home.</p>"
                 ),

@@ -24,7 +24,7 @@
   icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>
 - title: Says why previews don't show
   body: >-
-    Previews Readiness checks each server's settings, explains the ones that stop previews appearing,
+    Setup Health checks each server's settings, explains the ones that stop previews appearing,
     and offers to fix them one library at a time.
   icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 13l2 2 4-4"/></svg>
 - title: Skip Intro and Skip Credits

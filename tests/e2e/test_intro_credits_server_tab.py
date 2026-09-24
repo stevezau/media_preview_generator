@@ -1319,7 +1319,7 @@ class TestSetupHealthMarkerRows:
         must_fix = authed_page.locator("#editReadinessBody details[data-tier='critical']")
         expect(must_fix).to_contain_text("Intro & Credits", timeout=5000)
         expect(must_fix).to_contain_text("Skip buttons need Plex Pass")
-        expect(must_fix).to_contain_text("Markers are still written, but nobody sees a skip button.")
+        expect(must_fix).to_contain_text("Nothing is written until the server has Plex Pass.")
         expect(must_fix).to_contain_text("not active")
         expect(must_fix).to_contain_text("active")
         # Nothing this app can toggle → the shipped badge, and no "Manual" chip.

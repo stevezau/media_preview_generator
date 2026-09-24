@@ -2342,11 +2342,6 @@ function updateActiveJobs(runningJobs, force) {
         const isPaused = !!job.paused || markersPause === 'all';
         const retryEta = job.progress && job.progress.retry_eta;
         const retryWaitTotal = job.progress && job.progress.retry_wait_total;
-        // Same job.config fields _renderRetryChip reads — kept local rather
-        // than shared because this block only needs them for the
-        // "Attempt N of M" caption below.
-        const retryAttempt = job.config && typeof job.config.retry_attempt === 'number' ? job.config.retry_attempt : 0;
-        const maxRetries = job.config && typeof job.config.max_retries === 'number' ? job.config.max_retries : 0;
         // Worker has picked the job up but is sleeping out the retry
         // backoff — render this as its own state, not as "Running 0%."
         const isRetryWaiting = !isPaused && !!retryEta && new Date(retryEta).getTime() > Date.now() - 1500;

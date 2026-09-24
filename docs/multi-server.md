@@ -31,7 +31,7 @@ This page covers:
 - [Library ownership and retry semantics](#library-ownership-and-retry-semantics)
 - [Smart dedup: skipping work that's already done](#smart-dedup-skipping-work-thats-already-done)
 - [Slow-backoff retry queue](#slow-backoff-retry-queue)
-- [Previews Readiness — the unified "is everything set up right?" panel](#previews-readiness--the-unified-is-everything-set-up-right-panel)
+- [Setup Health — the unified "is everything set up right?" panel](#setup-health--the-unified-is-everything-set-up-right-panel)
 - [BIF Viewer (multi-server)](#bif-viewer-multi-server)
 - [Plex multi-server auto-discovery](#plex-multi-server-auto-discovery)
 - [REST API summary](#rest-api-summary)
@@ -183,7 +183,7 @@ Because Emby and default-layout Jellyfin write next to the media file, this cont
 
 **Why Jellyfin's format is different.** Jellyfin (10.9 onwards) reads its own native JPG tile-grid format — *not* BIF. BIF would require users to install a third-party plugin (Jellyscrub) on their Jellyfin server. This app writes the native format, so no extra plugin is needed.
 
-**Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [previews readiness → off-media](guides/previews-readiness.md#jellyfin-config-folder).
+**Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [Setup Health → off-media](guides/previews-readiness.md#jellyfin-config-folder).
 
 **Required Jellyfin library settings.** Three per-library settings need to be set so Jellyfin reads the trickplay folders this app writes — most importantly **Save trickplay images to media folders** = on. The Servers page in this app has a one-click **"Disable on this server"** button that flips all three correctly. See the in-app help for what each setting does.
 
@@ -304,13 +304,13 @@ when the publish has already succeeded through some other path
 
 ---
 
-## Previews Readiness — the unified "is everything set up right?" panel
+## Setup Health — the unified "is everything set up right?" panel<a id="previews-readiness--the-unified-is-everything-set-up-right-panel"></a>
 
 Each server has its own settings that can quietly break previews — a Jellyfin
 flag off that silently deletes published tiles, a Plex FSEvent toggle that
 stops the library noticing new files, a plugin the Media Preview Bridge needs
 to register results instantly, a Plex config mount that's accidentally
-read-only. **Previews Readiness** is the single place the UI surfaces — and
+read-only. **Setup Health** is the single place the UI surfaces — and
 fixes — all of them.
 
 **How to open it**
@@ -330,7 +330,7 @@ refresh. The UI requires you to type `disable trickplay` to confirm.
 
 **Per-check reference:** full list of every audit with "what it checks / why
 it matters / how to fix" lives in the
-[Previews Readiness guide](guides/previews-readiness.md).
+[Setup Health guide](guides/previews-readiness.md).
 
 **Scripting it.** For the underlying REST surface
 (`GET /api/servers/{id}/previews-readiness`,
