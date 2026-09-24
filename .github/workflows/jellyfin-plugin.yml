@@ -16,7 +16,8 @@ on:
 #      DLL + zip + attachment on ONE GitHub release (tag plugin-v<10.11 version>)
 #   2. publish-site  → calls docs.yml, which builds the docs site from
 #      `dev`, rebuilds jellyfin-plugin/manifest.json from every plugin-v*
-#      release (this one included) and deploys both via the official Pages
+#      release (failing unless this one is listed with both zips) and
+#      deploys both via the official Pages
 #      Actions API (no branch push, so repo branch-protection rules don't
 #      apply). A Pages deploy replaces the whole site, so the manifest and
 #      the docs always ship together. Any later docs deploy builds the same
@@ -52,6 +53,9 @@ jobs:
           - abi: "12.0"
             dotnet: "10.0.x"
             tfm: "net10.0"
+    # Both rows write the same value.
+    outputs:
+      release_version: ${{ steps.ver.outputs.release_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,3 +174,6 @@ jobs:
     uses: ./.github/workflows/docs.yml
     with:
       docs_ref: dev
+      # The deploy fails unless this release is in the manifest with both zips, so a renamed zip or tag
+      # can't let the release go green while Jellyfin users never see it.
+      require_tag: plugin-v${{ needs.build-release.outputs.release_version }}

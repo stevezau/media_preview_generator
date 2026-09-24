@@ -87,10 +87,11 @@ class TestDeployOrder:
         assert '--repo "$GITHUB_REPOSITORY"' in builder.group(1)
         assert "--template jellyfin-plugin/manifest.template.json" in builder.group(1)
         assert '--out "$target"' in builder.group(1)
+        assert '--require-tag "$REQUIRE_TAG"' in builder.group(1)
         assert 'readonly target="site/jellyfin-plugin/manifest.json"' in run
         assert "||" not in run  # nothing swallows the builder's exit code
         assert "curl" not in run and "mediapreviewgenerator.dev" not in run
-        assert step["env"] == {"GH_TOKEN": "${{ github.token }}"}
+        assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "REQUIRE_TAG": "${{ inputs.require_tag }}"}
         assert (REPO_ROOT / "scripts" / "build_jellyfin_manifest.py").is_file()
 
     def test_no_deploy_step_is_skippable_or_allowed_to_fail(self, steps: list[dict]) -> None:
@@ -136,12 +137,31 @@ class TestPluginReleaseShipsTheSite:
         callers = [job for job in jobs.values() if job.get("uses") == "./.github/workflows/docs.yml"]
         assert len(callers) == 1
         assert callers[0]["needs"] == "build-release"
-        assert callers[0]["with"] == {"docs_ref": "dev"}
+        # Its own tag, so the deploy fails unless this release's versions made it into the manifest.
+        assert callers[0]["with"] == {
+            "docs_ref": "dev",
+            "require_tag": "plugin-v${{ needs.build-release.outputs.release_version }}",
+        }
+        assert jobs["build-release"]["outputs"] == {"release_version": "${{ steps.ver.outputs.release_version }}"}
 
-    def test_docs_yml_accepts_only_the_docs_ref(self) -> None:
+    def test_docs_yml_accepts_the_docs_ref_and_the_required_tag(self) -> None:
         docs = _load("docs.yml")
-        assert set(_triggers(docs)["workflow_call"]["inputs"]) == {"docs_ref"}
+        inputs = _triggers(docs)["workflow_call"]["inputs"]
+        assert set(inputs) == {"docs_ref", "require_tag"}
+        # Docs pushes and manual runs leave it empty, which requires nothing.
+        assert inputs["require_tag"] == {
+            "description": inputs["require_tag"]["description"],
+            "type": "string",
+            "required": False,
+            "default": "",
+        }
         assert "env" not in docs
+
+    def test_the_header_says_how_to_recover_from_a_failing_manifest_step(self) -> None:
+        header = (WORKFLOWS / "docs.yml").read_text(encoding="utf-8").split("\non:", 1)[0].lower()
+        assert "delete that github release" in header
+        assert "revert it" in header
+        assert "no workflow_dispatch input" in header
 
     @pytest.mark.parametrize("workflow", ["docs.yml", "jellyfin-plugin.yml"])
     def test_no_job_fetches_or_hands_over_a_manifest(self, workflow: str) -> None:

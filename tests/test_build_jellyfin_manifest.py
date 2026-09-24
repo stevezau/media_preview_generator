@@ -13,11 +13,14 @@ import copy
 import hashlib
 import json
 import random
+import re
 import urllib.error
 from pathlib import Path
 
 import pytest
+import yaml
 
+from media_preview_generator.servers.jellyfin import JellyfinServer
 from scripts import build_jellyfin_manifest as builder
 from scripts.build_jellyfin_manifest import ManifestError, build_manifest, list_releases, main, render
 
@@ -29,6 +32,7 @@ REPO_API = "https://api.github.com/repos/stevezau/media_preview_generator"
 API = f"{REPO_API}/releases"
 CONTENTS = f"{REPO_API}/contents/{TEMPLATE_REPO_PATH}"
 PUBLISHED = "2026-06-29T04:38:25Z"
+PLUGIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "jellyfin-plugin.yml"
 
 
 def _zip_bytes(version: str) -> bytes:
@@ -336,6 +340,278 @@ class TestRaceRegression:
         assert templates.default == pristine  # nothing from an earlier build leaks into a later one
 
 
+class TestRequiredTag:
+    """The plugin release's own deploy passes its tag: that release must be listed with every ABI's zip."""
+
+    def test_a_fully_listed_required_release_changes_nothing_in_the_output(self, downloads, templates) -> None:
+        releases = [_release("10.11.0.3"), _release("10.11.0.4")]
+
+        required = build_manifest(releases, downloads, templates, require_tag="plugin-v10.11.0.4")
+
+        assert render(required) == render(build_manifest(releases, downloads, templates))
+        assert {"12.0.0.4", "10.11.0.4"} <= set(_versions(required))
+
+    def test_an_empty_required_tag_requires_nothing(self, downloads, templates) -> None:
+        manifest = build_manifest([_release("10.11.0.3")], downloads, templates, require_tag="")
+
+        assert _versions(manifest) == ["12.0.0.3", "10.11.0.3"]
+
+    @pytest.mark.parametrize(
+        "releases, message",
+        [
+            pytest.param([_release("10.11.0.3")], "plugin-v10.11.0.4 is not among the releases", id="release missing"),
+            pytest.param(
+                [_release("10.11.0.3"), _release("10.11.0.4", draft=True)], "plugin-v10.11.0.4 is a draft", id="draft"
+            ),
+            pytest.param(
+                [_release("10.11.0.3"), _release("10.11.0.4", abis=("10.11",))],
+                "no uploaded media-preview-bridge_12.0.0.4.zip",
+                id="12.0 zip missing",
+            ),
+            pytest.param(
+                [_release("10.11.0.4", abis=())],
+                "no uploaded media-preview-bridge_10.11.0.4.zip",
+                id="no zips at all",
+            ),
+        ],
+    )
+    def test_the_required_release_not_fully_listed_raises(self, downloads, templates, releases, message) -> None:
+        with pytest.raises(ManifestError, match=re.escape(message)):
+            build_manifest(releases, downloads, templates, require_tag="plugin-v10.11.0.4")
+
+    def test_a_required_zip_still_uploading_raises(self, downloads, templates) -> None:
+        release = _release("10.11.0.4")
+        release["assets"][1]["state"] = "starter"  # the 12.0 zip
+
+        with pytest.raises(ManifestError, match=re.escape("no uploaded media-preview-bridge_12.0.0.4.zip")):
+            build_manifest([release], downloads, templates, require_tag="plugin-v10.11.0.4")
+
+    def test_a_misnamed_required_zip_raises_and_names_what_the_release_has(self, downloads, templates) -> None:
+        release = _release("10.11.0.4", abis=("10.11",))
+        release["assets"].append(_asset("plugin-v10.11.0.4", "12.0.0.4", name="media-preview-bridge-12.0.0.4.zip"))
+
+        with pytest.raises(ManifestError, match=re.escape("media-preview-bridge-12.0.0.4.zip")):
+            build_manifest([release], downloads, templates, require_tag="plugin-v10.11.0.4")
+
+    @pytest.mark.parametrize("tag", ["plugin-v10.12.0.0", "plugin-v12.0.0.4", "emby-plugin-v1.0.0.0", "10.11.0.4"])
+    def test_a_required_tag_the_builder_would_skip_raises(self, downloads, templates, tag) -> None:
+        # Tags that don't look like plugin-v10.11.X.Y are skipped silently, which is only safe when nobody needs them.
+        release = _release("10.11.0.4", tag_name=tag)
+
+        with pytest.raises(ManifestError, match=re.escape(tag)):
+            build_manifest([release, _release("10.11.0.3")], downloads, templates, require_tag=tag)
+        assert downloads.fetched == []
+
+
+class TestPluginReleaseContract:
+    def test_the_builder_lists_what_jellyfin_plugin_yml_releases(self, downloads, templates) -> None:
+        # The tag, zip names and ABIs are a contract between the release workflow and the builder. Each pinned line
+        # below is one side of it: change it and this names the builder rule that must follow.
+        job = yaml.safe_load(PLUGIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["build-release"]
+        steps = {step["name"]: step for step in job["steps"]}
+        workflow_abis = {row["abi"] for row in job["strategy"]["matrix"]["include"]}
+        resolve = steps["Resolve version"]["run"]
+        release_step = steps["Create / update GitHub release"]["with"]
+
+        assert workflow_abis == set(builder.ABIS)
+        assert r'"$VERSION" =~ ^10\.11\.[0-9]+\.[0-9]+$' in resolve
+        assert 'if [[ "$ABI" == "10.11" ]]; then' in resolve
+        assert 'ROW_VERSION="$VERSION"' in resolve
+        assert 'ROW_VERSION="12.0.$(echo "$VERSION" | cut -d. -f3-4)"' in resolve
+        assert 'ZIP="media-preview-bridge_${ROW_VERSION}.zip"' in steps["Pack zip"]["run"]
+        assert release_step["tag_name"] == "plugin-v${{ steps.ver.outputs.release_version }}"
+        assert release_step["files"] == "jellyfin-plugin/${{ steps.pack.outputs.zip }}"
+
+        version = "10.11.7.3"
+        tag = f"plugin-v{version}"
+        row_versions = {abi: version if abi == "10.11" else f"12.0.{version.split('.', 2)[2]}" for abi in workflow_abis}
+        release = {
+            "tag_name": tag,
+            "draft": False,
+            "published_at": PUBLISHED,
+            "assets": [_asset(tag, row_versions[abi]) for abi in sorted(workflow_abis)],
+        }
+
+        manifest = build_manifest([release], downloads, templates, require_tag=tag)
+
+        assert {(entry["version"], entry["targetAbi"]) for entry in manifest[0]["versions"]} == {
+            (row_versions[abi], builder.ABIS[abi]) for abi in workflow_abis
+        }
+
+
+GOOD_ENTRY = {
+    "version": "10.11.0.4",
+    "changelog": "Automated release for plugin-v10.11.0.4.",
+    "targetAbi": "10.11.0.0",
+    "sourceUrl": f"{DOWNLOAD}/plugin-v10.11.0.4/media-preview-bridge_10.11.0.4.zip",
+    "checksum": "9888E4AB6DEB86D431115F4CD5FC4F68",
+    "timestamp": PUBLISHED,
+}
+
+
+class TestVersionGuards:
+    def test_a_good_entry_passes(self) -> None:
+        builder._check_versions([dict(GOOD_ENTRY)])
+
+    @pytest.mark.parametrize(
+        "versions, message",
+        [
+            pytest.param([GOOD_ENTRY, dict(GOOD_ENTRY)], "listed twice", id="duplicate version"),
+            pytest.param([{**GOOD_ENTRY, "checksum": "1FFF" * 16}], "not an MD5", id="SHA-256, which Jellyfin rejects"),
+            pytest.param(
+                [{**GOOD_ENTRY, "checksum": "9888e4ab6deb86d431115f4cd5fc4f68"}], "not an MD5", id="lowercase"
+            ),
+            pytest.param([{**GOOD_ENTRY, "timestamp": None}], "missing ['timestamp']", id="no timestamp"),
+            pytest.param([{**GOOD_ENTRY, "sourceUrl": ""}], "missing ['sourceUrl']", id="empty sourceUrl"),
+            pytest.param(
+                [{k: v for k, v in GOOD_ENTRY.items() if k != "targetAbi"}], "missing ['targetAbi']", id="no targetAbi"
+            ),
+        ],
+    )
+    def test_a_bad_version_list_raises(self, versions, message) -> None:
+        with pytest.raises(ManifestError, match=re.escape(message)):
+            builder._check_versions(versions)
+
+    def test_the_same_release_listed_twice_raises(self, downloads, templates) -> None:
+        # A release published between two page fetches shifts the listing, so one can land on both pages.
+        with pytest.raises(ManifestError, match="listed twice"):
+            build_manifest([_release("10.11.0.4"), _release("10.11.0.4")], downloads, templates)
+
+    def test_a_release_without_published_at_raises(self, downloads, templates) -> None:
+        with pytest.raises(ManifestError, match=re.escape("missing ['timestamp']")):
+            build_manifest([_release("10.11.0.4", published_at=None)], downloads, templates)
+
+
+class TestTemplateIdentity:
+    @pytest.mark.parametrize(
+        "mutate, field",
+        [
+            pytest.param(lambda plugin: plugin.pop("guid"), "guid", id="no guid"),
+            pytest.param(lambda plugin: plugin.update(guid=""), "guid", id="empty guid"),
+            pytest.param(lambda plugin: plugin.pop("name"), "name", id="no name"),
+            pytest.param(lambda plugin: plugin.update(name=None), "name", id="null name"),
+        ],
+    )
+    def test_a_template_without_guid_or_name_raises(self, downloads, templates, mutate, field) -> None:
+        mutate(templates.default[0])
+
+        with pytest.raises(ManifestError, match=f"template at plugin-v10.11.0.4.*{field}"):
+            build_manifest([_release("10.11.0.4")], downloads, templates)
+
+    def test_template_guid_matches_the_plugin_and_the_app(self) -> None:
+        # Jellyfin matches catalog entries to installed plugins by this GUID, and the app finds and removes the
+        # plugin by it: a drift in any one of the three orphans installs.
+        plugin_cs = (REPO_ROOT / "jellyfin-plugin" / "Plugin.cs").read_text(encoding="utf-8")
+        plugin_guid = re.search(r'Guid Id => Guid\.Parse\("([0-9a-fA-F-]{36})"\)', plugin_cs).group(1)
+
+        assert WORKING_TREE_TEMPLATE[0]["guid"] == plugin_guid == JellyfinServer.PLUGIN_GUID
+
+
+class FakeResponse:
+    def __init__(self, body: bytes = b"[]", link: str | None = None) -> None:
+        self.body = body
+        self.headers = {"Link": link} if link else {}
+
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
+class TestHttpGet:
+    URL = f"{API}?per_page=100"
+
+    @pytest.fixture
+    def network(self, monkeypatch):
+        """Stands in for urllib.request.urlopen: plays back one scripted outcome per call, recording the requests."""
+
+        class Network:
+            def __init__(self) -> None:
+                self.outcomes: list[object] = []
+                self.requests: list[tuple[object, float]] = []
+                self.sleeps: list[float] = []
+
+            def urlopen(self, request, timeout):
+                self.requests.append((request, timeout))
+                outcome = self.outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        network = Network()
+        monkeypatch.setattr(builder.urllib.request, "urlopen", network.urlopen)
+        monkeypatch.setattr(builder.time, "sleep", network.sleeps.append)
+        return network
+
+    def _http_error(self, code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(self.URL, code, "error", {}, None)
+
+    def test_returns_the_body_and_link_header_and_sends_the_headers(self, network) -> None:
+        network.outcomes = [FakeResponse(b'[{"tag_name": "x"}]', '<next>; rel="next"')]
+
+        body, link = builder.http_get(self.URL, {"Authorization": "Bearer t"})
+
+        assert (body, link) == (b'[{"tag_name": "x"}]', '<next>; rel="next"')
+        request, timeout = network.requests[0]
+        assert request.full_url == self.URL
+        assert request.get_header("Authorization") == "Bearer t"
+        assert request.get_header("User-agent") == builder.USER_AGENT
+        assert timeout == 60
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(500, id="500"),
+            pytest.param(502, id="502"),
+            pytest.param(503, id="503"),
+            pytest.param(429, id="429 rate limited"),
+            pytest.param("network", id="network error"),
+        ],
+    )
+    def test_server_errors_rate_limits_and_network_errors_are_retried(self, network, failure) -> None:
+        error = urllib.error.URLError("connection reset") if failure == "network" else self._http_error(failure)
+        network.outcomes = [error, FakeResponse(b"ok")]
+
+        assert builder.http_get(self.URL, {}) == (b"ok", None)
+        assert len(network.requests) == 2
+        assert network.sleeps == [2]
+
+    @pytest.mark.parametrize("code", [400, 401, 403, 404, 422])
+    def test_other_client_errors_raise_at_once(self, network, code) -> None:
+        network.outcomes = [self._http_error(code), FakeResponse(b"never reached")]
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            builder.http_get(self.URL, {})
+
+        assert raised.value.code == code
+        assert len(network.requests) == 1
+        assert network.sleeps == []
+
+    @pytest.mark.parametrize("failure", [502, "network"])
+    def test_the_last_attempt_reraises(self, network, failure) -> None:
+        def error() -> urllib.error.URLError:
+            return urllib.error.URLError("timed out") if failure == "network" else self._http_error(failure)
+
+        network.outcomes = [error() for _ in range(builder.HTTP_ATTEMPTS)] + [FakeResponse(b"never reached")]
+
+        with pytest.raises(urllib.error.URLError):
+            builder.http_get(self.URL, {})
+
+        assert len(network.requests) == builder.HTTP_ATTEMPTS == 3
+        assert network.sleeps == [2, 4]
+
+    @pytest.mark.parametrize("url", ["http://github.com/x.zip", "file:///etc/passwd", "ftp://example.com/x"])
+    def test_refuses_anything_but_https(self, network, url) -> None:
+        with pytest.raises(ManifestError, match="non-HTTPS"):
+            builder.http_get(url, {})
+
+        assert network.requests == []
+
+
 class TestListReleases:
     def test_follows_next_links_so_a_plugin_release_on_page_two_is_listed(self) -> None:
         page_two = f"{API}?per_page=100&page=2"
@@ -433,6 +709,22 @@ class TestMain:
         assert all(headers["Authorization"] == "Bearer test-token" for headers in api.values())
         assert api[self.TAG_TEMPLATE_URL]["Accept"] == "application/vnd.github.raw+json"
         assert all("Authorization" not in headers for headers in zips)
+
+    def test_a_required_tag_that_is_not_listed_fails_without_writing(self, fake_http, tmp_path, capsys) -> None:
+        out = tmp_path / "manifest.json"
+
+        assert main([*self._args(str(out)), "--require-tag", "plugin-v10.11.0.5"]) == 1
+
+        assert not out.exists()
+        assert "plugin-v10.11.0.5 is not among the releases" in capsys.readouterr().err
+
+    def test_a_listed_required_tag_writes_the_same_manifest(self, fake_http, tmp_path) -> None:
+        plain, required = tmp_path / "plain.json", tmp_path / "required.json"
+
+        assert main(self._args(str(plain))) == 0
+        assert main([*self._args(str(required)), "--require-tag", "plugin-v10.11.0.4"]) == 0
+
+        assert required.read_bytes() == plain.read_bytes()
 
     def test_writes_nothing_and_fails_when_a_download_fails(self, monkeypatch, tmp_path, capsys) -> None:
         def http_get(url: str, headers: dict[str, str]) -> tuple[bytes, str | None]:

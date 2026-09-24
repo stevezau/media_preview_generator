@@ -7,7 +7,14 @@ name: Docs site — build and deploy to GitHub Pages
 # So every deploy ships the docs AND a manifest, and every deploy (push to dev, manual run, or
 # called by jellyfin-plugin.yml, which must ship the docs too or it would wipe them) rebuilds that
 # manifest from the plugin-v* GitHub releases with scripts/build_jellyfin_manifest.py.
-# If the manifest can't be built the job fails before deploying anything.
+# If the manifest can't be built the job fails before deploying anything, and the live manifest
+# stays at the last good deploy. To recover:
+#   - A new plugin release whose manifest.template.json is bad at its tag fails its own deploy (and
+#     every later one, since it is the newest release). Delete that GitHub release and its tag, fix
+#     the template on dev, and tag again.
+#   - A builder change on dev fails its own push's deploy: revert it.
+# There is deliberately no workflow_dispatch input to override either: a one-off manifest would
+# differ from every other deploy, and the next docs push would fail again anyway.
 
 on:
   push:
@@ -23,6 +30,11 @@ on:
     inputs:
       docs_ref:
         description: "Git ref to build the docs from. Empty = the triggering ref."
+        type: string
+        required: false
+        default: ""
+      require_tag:
+        description: "plugin-v* release that must be listed with every ABI's zip, or the deploy fails. Empty = none."
         type: string
         required: false
         default: ""
@@ -76,6 +88,7 @@ jobs:
         # a malformed template or zero versions.
         env:
           GH_TOKEN: ${{ github.token }}
+          REQUIRE_TAG: ${{ inputs.require_tag }}
         run: |
           set -euo pipefail
           readonly target="site/jellyfin-plugin/manifest.json"
@@ -85,7 +98,7 @@ jobs:
           fi
           mkdir -p "$(dirname "$target")"
           python scripts/build_jellyfin_manifest.py --repo "$GITHUB_REPOSITORY" \
-            --template jellyfin-plugin/manifest.template.json --out "$target"
+            --template jellyfin-plugin/manifest.template.json --out "$target" --require-tag "$REQUIRE_TAG"
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

@@ -72,7 +72,9 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 ## Switching to a custom domain (checklist — done 2026-09-23)
 
 1. `site_url` in `mkdocs.yml`; the domain itself is set in the repo's Pages settings (Actions deploys, no CNAME file).
-2. `LIVE_MANIFEST_URL` in `.github/workflows/docs.yml` and `PREV_URL` in `jellyfin-plugin.yml`.
+2. The manifest URL in `.github/workflows/jellyfin-plugin.yml` (release notes and job summary) and `PLUGIN_REPO_URL`
+   in `media_preview_generator/servers/jellyfin.py`. (At the 2026-09-23 switch this also meant `LIVE_MANIFEST_URL`
+   in `docs.yml` and `PREV_URL` in `jellyfin-plugin.yml`; the 2026-09-24 manifest rebuild removed both.)
 3. The absolute docs URLs in `README.md`, `DOCKERHUB_README.md`, `llms.txt`, `pyproject.toml`; regenerate
    `llms-full.txt` (`python scripts/generate_llms_full.py`).
 4. Existing Jellyfin installs point at the github.io manifest URL. GitHub Pages 301s project URLs to the

@@ -18,6 +18,10 @@ match GitHub's sha256 digest (or that has none), a template unreadable or malfor
 versions. A zip that isn't fully uploaded yet is left
 out with a warning; the plugin release's own deploy runs after both uploads and lists it.
 
+The plugin release's own deploy passes --require-tag with its tag. The build then also fails unless that release is
+listed with one zip per ABI, so a renamed zip or tag can't let a release go green with its versions left out. The
+manifest is the same with or without it.
+
 Usage:
     GH_TOKEN=... python scripts/build_jellyfin_manifest.py --repo OWNER/NAME \\
         --template jellyfin-plugin/manifest.template.json --out site/jellyfin-plugin/manifest.json
@@ -72,9 +76,13 @@ def _version_key(version: str) -> tuple[int, ...]:
 def _check_template(template: object, tag: str) -> dict:
     if not (isinstance(template, list) and len(template) == 1 and isinstance(template[0], dict)):
         raise ManifestError(f"template at {tag} must be a JSON list holding exactly one plugin")
-    if template[0].get("versions") != []:
+    plugin = template[0]
+    if plugin.get("versions") != []:
         raise ManifestError(f'template at {tag}: the plugin must have "versions": [] (versions come from the releases)')
-    return template[0]
+    missing = [field for field in ("guid", "name") if not isinstance(plugin.get(field), str) or not plugin[field]]
+    if missing:
+        raise ManifestError(f"template at {tag}: the plugin has no {' or '.join(missing)}")
+    return plugin
 
 
 def _verified_bytes(asset: dict, fetch_bytes: Callable[[str], bytes]) -> bytes:
@@ -101,15 +109,31 @@ def _verified_bytes(asset: dict, fetch_bytes: Callable[[str], bytes]) -> bytes:
     return data
 
 
-def _release_entries(release: dict, fetch_bytes: Callable[[str], bytes]) -> list[dict]:
-    """Manifest entries for one plugin release: one per uploaded zip, skipping zips still uploading."""
+def _release_entries(release: dict, fetch_bytes: Callable[[str], bytes], required: bool) -> list[dict]:
+    """Manifest entries for one plugin release: one per uploaded zip, skipping zips still uploading.
+
+    Args:
+        release: One plugin-v10.11.X.Y release from the GitHub API.
+        fetch_bytes: Downloads a URL; errors propagate.
+        required: The release is --require-tag's: every ABI's zip must be uploaded, or this raises.
+
+    Returns:
+        The release's manifest entries.
+
+    Raises:
+        ManifestError: ``required`` and an ABI's zip is missing, misnamed or still uploading; or a digest check fails.
+    """
     tag = release["tag_name"]
     tag_version, build = PLUGIN_TAG.fullmatch(tag).groups()
     assets = {asset.get("name"): asset for asset in release.get("assets") or []}
     entries = []
     for abi, target_abi in ABIS.items():
         version = f"{abi}.{build}"
-        asset = assets.get(f"media-preview-bridge_{version}.zip")
+        name = f"media-preview-bridge_{version}.zip"
+        asset = assets.get(name)
+        if required and (asset is None or asset.get("state") != "uploaded"):
+            present = sorted(f"{other} ({assets[other].get('state')})" for other in map(str, assets))
+            raise ManifestError(f"required release {tag} has no uploaded {name}; its assets: {present or 'none'}")
         if asset is None:
             continue  # releases before 12.0 support carry only the 10.11 zip
         if asset.get("state") != "uploaded":
@@ -151,8 +175,22 @@ def _check_versions(versions: list[dict]) -> None:
         seen.add(entry["version"])
 
 
+def _check_required_release(releases: list[dict], tag: str) -> None:
+    """Fail before any download unless ``tag`` names a published release the builder would list."""
+    if not PLUGIN_TAG.fullmatch(tag):
+        raise ManifestError(f"required tag {tag!r} isn't plugin-v10.11.X.Y, so the builder would skip its release")
+    matching = [release for release in releases if release.get("tag_name") == tag]
+    if not matching:
+        raise ManifestError(f"required release {tag} is not among the releases")
+    if any(release.get("draft") for release in matching):
+        raise ManifestError(f"required release {tag} is a draft")
+
+
 def build_manifest(
-    releases: list[dict], fetch_bytes: Callable[[str], bytes], template_at: Callable[[str], object]
+    releases: list[dict],
+    fetch_bytes: Callable[[str], bytes],
+    template_at: Callable[[str], object],
+    require_tag: str = "",
 ) -> list[dict]:
     """Build the manifest from the repository's releases.
 
@@ -160,19 +198,24 @@ def build_manifest(
         releases: Every release of the repository, as the GitHub releases API lists them.
         fetch_bytes: Downloads a URL and returns its bytes; errors propagate.
         template_at: Returns the parsed manifest.template.json as it was at a tag; errors propagate.
+        require_tag: A release that must be listed with every ABI's zip (the plugin release's own deploy).
+            Empty requires nothing. It never changes the output, only whether the build succeeds.
 
     Returns:
         The manifest: the newest listed release's template plugin with ``versions`` filled in, newest first.
 
     Raises:
-        ManifestError: A zip that fails its digest check, zero versions, or a malformed template at the tag.
+        ManifestError: A zip that fails its digest check, zero versions, a malformed template at the tag, or a
+            required release that isn't fully listed.
     """
+    if require_tag:
+        _check_required_release(releases, require_tag)
     versions = []
     listed_tags = []
     for release in releases:
         if release.get("draft") or not PLUGIN_TAG.fullmatch(release.get("tag_name") or ""):
             continue
-        entries = _release_entries(release, fetch_bytes)
+        entries = _release_entries(release, fetch_bytes, required=release["tag_name"] == require_tag)
         if entries:
             listed_tags.append(release["tag_name"])
         versions.extend(entries)
@@ -265,6 +308,11 @@ def main(argv: list[str] | None = None) -> int:
         "--template", required=True, help="repository path of manifest.template.json, read at the newest release tag"
     )
     parser.add_argument("--out", required=True, help="where to write the manifest; - for stdout")
+    parser.add_argument(
+        "--require-tag",
+        default="",
+        help="fail unless this plugin-v* release is listed with every ABI's zip; empty requires nothing",
+    )
     args = parser.parse_args(argv)
 
     api_headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
@@ -280,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             # forward the Authorization header there.
             lambda url: http_get(url, {})[0],
             lambda tag: json.loads(http_get(template_url(args.repo, args.template, tag), raw_headers)[0]),
+            require_tag=args.require_tag,
         )
     except (ManifestError, OSError, ValueError, http.client.HTTPException) as exc:
         print(f"::error::Jellyfin manifest not built, refusing to deploy: {exc}", file=sys.stderr)
