@@ -3753,31 +3753,13 @@ async function scaleWorkersGlobal(workerType, direction) {
         if (badgeEl) badgeEl.textContent = String(newCount);
         refreshWorkerScaleButtons();
 
+        // The settings save resizes the live pool itself; a follow-up
+        // /api/workers/add|remove call would change a second worker.
+        await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
         if (saveResult.warning) {
             showToast('Warning', saveResult.warning, 'warning');
-        }
-
-        const endpoint = direction > 0 ? 'add' : 'remove';
-        try {
-            const result = await apiPost(`/api/workers/${endpoint}`, {
-                worker_type: workerType,
-                count: 1
-            });
-            await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
-            if (endpoint === 'add') {
-                showToast('Workers Updated', `Added ${result.added} ${workerType} worker(s)`, 'success');
-            } else {
-                const scheduled = result.scheduled_removal || 0;
-                if (scheduled > 0) {
-                    showToast('Workers Updated', `Removed ${result.removed} ${workerType}; ${scheduled} scheduled after current tasks`, 'warning');
-                } else {
-                    showToast('Workers Updated', `Removed ${result.removed} ${workerType} worker(s)`, 'info');
-                }
-            }
-        } catch (scaleErr) {
-            if (!saveResult.warning) {
-                showToast('Setting Saved', `${workerType} workers set to ${newCount}`, 'success');
-            }
+        } else {
+            showToast('Setting Saved', `${workerType} workers set to ${newCount}`, 'success');
         }
     } catch (error) {
         const badgeEl = workerType === 'CPU' ? document.getElementById('cpuWorkers') : null;

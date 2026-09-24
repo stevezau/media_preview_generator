@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from ._mocks import (
     _fulfill_json,
@@ -91,6 +91,13 @@ class TestDashboardGpuWorkerConfig:
     def test_cpu_stepper_plus_increments_badge(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)
         captured = capture_settings_save(authed_page)
+        # The click refreshes the worker panel, which re-reads the badge from config, so config must reflect the save.
+        authed_page.route(
+            "**/api/system/config",
+            lambda r: _fulfill_json(
+                r, {"gpu_threads": 0, "cpu_threads": (captured[-1] if captured else {}).get("cpu_threads", 1)}
+            ),
+        )
         authed_page.goto(f"{app_url}/")
         authed_page.wait_for_load_state("domcontentloaded")
 
@@ -107,6 +114,55 @@ class TestDashboardGpuWorkerConfig:
         # Wait until the request landed.
         authed_page.wait_for_timeout(300)
         assert any("cpu_threads" in (c or {}) for c in captured), "POST /api/settings did not include cpu_threads"
+
+    def test_cpu_stepper_changes_one_worker_per_click(self, authed_page: Page, app_url: str) -> None:
+        """Saving cpu_threads resizes the live pool, so a click must send that save and nothing else.
+
+        A second /api/workers/add|remove call on top of the save changed two workers per click.
+        """
+        mock_dashboard_defaults(authed_page)
+        saved = {"cpu_threads": 1}
+        settings_posts: list[dict] = []
+        worker_posts: list[str] = []
+
+        def settings_handler(route: Route) -> None:
+            if route.request.method != "POST":
+                route.continue_()
+                return
+            body = route.request.post_data_json or {}
+            settings_posts.append(body)
+            saved.update(body)
+            _fulfill_json(route, {"success": True})
+
+        def workers_handler(route: Route) -> None:
+            worker_posts.append(route.request.url)
+            _fulfill_json(route, {"success": True, "added": 1, "removed": 1})
+
+        authed_page.route("**/api/settings", settings_handler)
+        authed_page.route("**/api/system/config", lambda r: _fulfill_json(r, {"gpu_threads": 0, **saved}))
+        authed_page.route("**/api/workers/**", workers_handler)
+        authed_page.goto(f"{app_url}/")
+        authed_page.wait_for_load_state("domcontentloaded")
+
+        cpu_badge = authed_page.locator("#cpuWorkers")
+        expect(cpu_badge).to_have_text("1", timeout=3000)
+        plus_btn = authed_page.locator('button.worker-scale-btn[data-worker-type="CPU"][data-direction="1"]')
+        minus_btn = authed_page.locator('button.worker-scale-btn[data-worker-type="CPU"][data-direction="-1"]')
+
+        toast_body = authed_page.locator("#toastBody")
+
+        plus_btn.click()
+        expect(cpu_badge).to_have_text("2", timeout=2000)
+        authed_page.wait_for_timeout(300)
+        assert worker_posts == [], f"the + click also resized the pool directly: {worker_posts}"
+        expect(toast_body).to_have_text("CPU workers set to 2", timeout=2000)
+
+        minus_btn.click()
+        expect(cpu_badge).to_have_text("1", timeout=2000)
+        expect(toast_body).to_have_text("CPU workers set to 1", timeout=2000)
+
+        assert settings_posts == [{"cpu_threads": 2}, {"cpu_threads": 1}]
+        assert worker_posts == [], f"the - click also resized the pool directly: {worker_posts}"
 
 
 @pytest.mark.e2e

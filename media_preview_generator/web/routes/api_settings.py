@@ -79,6 +79,30 @@ def _reconcile_live_gpu_workers(settings) -> None:
         )
 
 
+def _reconcile_live_cpu_workers(settings) -> None:
+    """Sync the live WorkerPool's CPU workers with the current cpu_threads.
+
+    After cpu_threads is persisted, resize the running pool so the new
+    count applies without a restart. Busy workers finish their current
+    task before they retire.
+    """
+    try:
+        from .api_jobs import _get_shared_worker_pool
+
+        pool = _get_shared_worker_pool()
+        if pool is None:
+            return
+        pool.reconcile_cpu_workers(settings.cpu_threads)
+    except Exception:
+        logger.warning(
+            "Could not resize the live worker pool to the new CPU worker count. "
+            "The setting was saved, but you may need to restart the app for it to take effect. "
+            "Currently-running jobs are unaffected. "
+            "See the traceback below for the underlying cause.",
+            exc_info=True,
+        )
+
+
 def _auto_pause_if_needed(settings) -> None:
     """Pause processing when all worker counts drop to zero."""
     if settings.processing_paused:
@@ -650,8 +674,8 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
 
     Hooks (in apply order):
 
-    1. **GPU worker reconciliation** — if ``gpu_config`` changed, scale the
-       live worker pool to match.
+    1. **Worker reconciliation** — if ``gpu_config`` or ``cpu_threads``
+       changed, scale the live worker pool to match.
     2. **Worker-count gate** — if total processing threads dropped to zero,
        auto-pause; if they rose above zero and we were paused, auto-resume.
        Returns the warning string for the response.
@@ -674,6 +698,8 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
     """
     if "gpu_config" in updates:
         _reconcile_live_gpu_workers(settings)
+    if "cpu_threads" in updates:
+        _reconcile_live_cpu_workers(settings)
 
     ok, thread_warning = validate_processing_thread_totals(settings.get_all())
     if not ok:

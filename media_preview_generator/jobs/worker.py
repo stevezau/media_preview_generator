@@ -1185,6 +1185,48 @@ class WorkerPool:
             logger.info("GPU reconciliation: added={}, removed={}, deferred={}", added, removed, deferred)
         return {"added": added, "removed": removed, "deferred": deferred}
 
+    def reconcile_cpu_workers(self, desired: int) -> dict:
+        """Reconcile live CPU workers against the saved CPU worker count.
+
+        Busy workers already due to retire count as gone, so raising the
+        count first cancels those pending removals and only then adds new
+        workers. Lowering it removes idle workers at once; busy ones retire
+        after their current task, via the type-level ``_pending_removals``
+        counter (CPU workers have no device to tell apart).
+
+        Args:
+            desired: Number of CPU workers the pool should settle at.
+
+        Returns:
+            Summary dict with keys ``added``, ``removed``, and ``deferred``.
+
+        """
+        desired = max(0, desired)
+        added = 0
+        removed = 0
+        deferred = 0
+        cancelled = 0
+
+        with self._workers_lock:
+            cpu_count = sum(1 for w in self.workers if w.worker_type == "CPU")
+            pending = self._pending_removals["CPU"]
+            effective = cpu_count - pending
+
+            if desired > effective:
+                cancelled = min(pending, desired - effective)
+                self._pending_removals["CPU"] = pending - cancelled
+                added = self.add_workers("CPU", desired - effective - cancelled)
+            elif desired < effective:
+                result = self.remove_workers("CPU", effective - desired)
+                removed = result["removed"]
+                deferred = result["scheduled"]
+
+        if cancelled:
+            logger.info("Kept {} busy CPU worker(s) that were due to retire", cancelled)
+        if removed or added or deferred:
+            logger.info("CPU reconciliation: added={}, removed={}, deferred={}", added, removed, deferred)
+        return {"added": added, "removed": removed, "deferred": deferred}
+
     def _find_available_worker(self, cpu_only: bool = False, *, claim: bool = False) -> Optional["Worker"]:
         """Find an available worker.
 
