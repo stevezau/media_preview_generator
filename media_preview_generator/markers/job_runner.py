@@ -32,6 +32,7 @@ from ..web.jobs import (
     get_job_manager,
     is_live_retry_chain,
 )
+from ..web.routes._helpers import _ensure_gpu_cache
 from ..web.routes.job_runner import (
     _build_selected_gpus,
     _format_eta,
@@ -1640,7 +1641,9 @@ def run_intro_credits_job(job_id: str) -> None:
                         waiting.setdefault(NOT_IN_LIBRARY, set()).add(file_path)
 
                 set_file_result_callback(on_file_result, job_id=job_id)
-                dispatcher = get_or_create_dispatcher(config, _build_selected_gpus(settings))
+                # Detected before the settings lock below, so detection never runs while it's held.
+                detected_gpus = _ensure_gpu_cache()
+                dispatcher = get_or_create_dispatcher(config, _build_selected_gpus(settings, detected=detected_gpus))
                 # The running job's pool for the per-job worker routes, as the preview runner registers it; complete_job
                 # and cancel_job clear it.
                 jm.set_active_worker_pool(job_id, dispatcher.worker_pool)
@@ -1650,7 +1653,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 # selection above was read) isn't undone.
                 try:
                     with settings.locked():
-                        selected_gpus = _build_selected_gpus(settings)
+                        selected_gpus = _build_selected_gpus(settings, detected=detected_gpus)
                         if selected_gpus:
                             dispatcher.worker_pool.reconcile_gpu_workers(selected_gpus)
                         dispatcher.worker_pool.reconcile_cpu_workers(settings.cpu_threads)

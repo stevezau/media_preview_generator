@@ -68,11 +68,12 @@ def _reconcile_live_gpu_workers(settings) -> None:
         pool = _get_shared_worker_pool()
         if pool is None:
             return
-        # Detect GPUs (slow the first time) before taking the lock. Then read gpu_config and resize under it, the
-        # same way the CPU count is handled, so a concurrent save can't be undone by this one's stale config.
-        _ensure_gpu_cache()
+        # Detect GPUs (slow the first time) before taking the lock, and use that list under it: detection never
+        # runs while the lock is held. Then read gpu_config and resize under the lock, the same way the CPU count
+        # is handled, so a concurrent save can't be undone by this one's stale config.
+        detected_gpus = _ensure_gpu_cache()
         with settings.locked():
-            pool.reconcile_gpu_workers(_build_selected_gpus(settings))
+            pool.reconcile_gpu_workers(_build_selected_gpus(settings, detected=detected_gpus))
     except Exception:
         logger.warning(
             "Could not reconcile the live worker pool with the new GPU settings. "

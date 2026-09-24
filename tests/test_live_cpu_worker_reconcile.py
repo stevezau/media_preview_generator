@@ -13,6 +13,7 @@ that a hook ran.
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -646,3 +647,98 @@ class TestConcurrentSettingsSaves:
         with app.app_context():
             assert _gpu_workers_in(get_settings_manager().gpu_config) == 4
         assert len(_gpu_workers(pool)) == 4
+
+
+class TestGpuDetection:
+    """GPU detection is slow (ffmpeg probes per GPU), so it must never run under the settings lock and must run once."""
+
+    @pytest.fixture()
+    def detections(self, monkeypatch):
+        """Stub detection with one fake GPU; record, per run, whether this thread held the settings lock."""
+        from media_preview_generator.web.routes import _helpers
+
+        runs: list[bool] = []
+
+        def detect_all_gpus(*args, **kwargs):
+            runs.append(get_settings_manager()._lock._is_owned())
+            return [("nvidia", GPU_DEVICE, {"name": "Fake GPU"})]
+
+        monkeypatch.setattr("media_preview_generator.gpu.detect.detect_all_gpus", detect_all_gpus)
+        _helpers.clear_gpu_cache()
+        yield runs
+        _helpers.clear_gpu_cache()
+
+    @staticmethod
+    def _rescan_lands_when_the_lock_is_taken():
+        """Clear the GPU cache right after the settings lock is taken, as a "Re-scan GPUs" landing then would."""
+        from media_preview_generator.web.routes import _helpers
+
+        real_locked = SettingsManager.locked
+
+        @contextmanager
+        def locked(self):
+            with real_locked(self) as sm:
+                _helpers.clear_gpu_cache()
+                yield sm
+
+        return patch.object(SettingsManager, "locked", locked)
+
+    def test_save_hook_never_detects_gpus_while_holding_the_settings_lock(self, app, detections):
+        pool = _live_pool(app, cpu=0, gpu=1)
+
+        with self._rescan_lands_when_the_lock_is_taken():
+            resp = _save(app, {"gpu_config": _gpu_config(3)})
+
+        assert resp.status_code == 200
+        assert not any(detections), f"detection ran under the settings lock: {detections}"
+        # The locked resize used the list detected before the lock, not an empty fallback.
+        assert len(_gpu_workers(pool)) == 3
+
+    def test_job_start_never_detects_gpus_while_holding_the_settings_lock(self, app, tmp_path, detections):
+        from media_preview_generator.web.routes import _helpers
+
+        _save(app, {"gpu_config": _gpu_config(2)})
+        callback = TestJobStartReconcilesCpuWorkers._capture_pool_callback(app, tmp_path, cpu_threads=1)
+        pool = WorkerPool(gpu_workers=1, cpu_workers=0, selected_gpus=[("nvidia", GPU_DEVICE, dict(GPU_INFO))])
+        # Starting the job cached the empty list its patched detection returned; start this check from a cold cache
+        # so the job-start warm-up detects the fake GPU.
+        _helpers.clear_gpu_cache()
+        detections.clear()
+
+        with self._rescan_lands_when_the_lock_is_taken():
+            callback(pool)
+
+        assert not any(detections), f"detection ran under the settings lock: {detections}"
+        assert len(_gpu_workers(pool)) == 2
+
+    def test_concurrent_callers_share_one_detection(self, monkeypatch):
+        from media_preview_generator.web.routes import _helpers
+
+        calls: list[int] = []
+        second_detection_started = threading.Event()
+
+        def detect_all_gpus(*args, **kwargs):
+            # The first detection waits until a second one starts too; with single-flight detection none does,
+            # and it gives up after 1 s.
+            calls.append(threading.get_ident())
+            if len(calls) == 1:
+                second_detection_started.wait(timeout=1.0)
+            else:
+                second_detection_started.set()
+            return [("nvidia", GPU_DEVICE, {"name": "Fake GPU"})]
+
+        monkeypatch.setattr("media_preview_generator.gpu.detect.detect_all_gpus", detect_all_gpus)
+        _helpers.clear_gpu_cache()
+        results: list = []
+        try:
+            threads = [threading.Thread(target=lambda: results.append(_helpers._ensure_gpu_cache())) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+        finally:
+            _helpers.clear_gpu_cache()
+
+        assert len(calls) == 1
+        assert len(results) == 2
+        assert results[0] == results[1] == [{"type": "nvidia", "device": GPU_DEVICE, "name": "Fake GPU"}]

@@ -1692,7 +1692,7 @@ class TestBuildSelectedGpus:
         from media_preview_generator.web.routes import _helpers
 
         _helpers._gpu_cache["result"] = []
-        monkeypatch.setattr(_helpers, "_ensure_gpu_cache", lambda: None)
+        monkeypatch.setattr(_helpers, "_ensure_gpu_cache", lambda: _helpers._gpu_cache["result"])
         yield
         _helpers._gpu_cache["result"] = None
 

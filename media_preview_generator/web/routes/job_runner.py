@@ -249,7 +249,7 @@ def _join_error_clauses(parts: list[str]) -> str:
     return ". ".join(c for c in cleaned if c)
 
 
-def _build_selected_gpus(settings) -> list:
+def _build_selected_gpus(settings, detected: list[dict] | None = None) -> list:
     """Build the selected_gpus list from gpu_config and GPU cache.
 
     Merges persisted gpu_config (enabled/workers/ffmpeg_threads per GPU)
@@ -259,16 +259,19 @@ def _build_selected_gpus(settings) -> list:
 
     Args:
         settings: SettingsManager instance.
+        detected: GPUs from ``_ensure_gpu_cache()``. Callers holding the settings lock must pass it (taken before
+            the lock) so detection, which can take seconds, never runs under that lock. When omitted, GPUs are
+            detected (or read from the cache) here.
 
     Returns:
         List of (gpu_type, gpu_device, gpu_info) tuples for enabled GPUs.
 
     """
-    from ._helpers import _ensure_gpu_cache, _gpu_cache, _gpu_cache_lock
+    if detected is None:
+        from ._helpers import _ensure_gpu_cache
 
-    _ensure_gpu_cache()
-    with _gpu_cache_lock:
-        cached_gpus = _gpu_cache["result"] or []
+        detected = _ensure_gpu_cache()
+    cached_gpus = detected
 
     gpu_config = settings.gpu_config  # list of per-GPU config dicts
 
@@ -931,13 +934,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             from ._helpers import _ensure_gpu_cache
 
                             fresh_settings = get_settings_manager()
-                            _ensure_gpu_cache()
+                            detected_gpus = _ensure_gpu_cache()
                             # The saved settings, not the job's config: a count saved while no pool existed had
                             # nothing to resize. The pool is registered above, so a later save finds it. Read and
                             # resize under the settings lock so a save landing in between isn't undone (same lock
                             # order as the save hook: settings, then the pool's own lock).
                             with fresh_settings.locked():
-                                fresh_gpus = _build_selected_gpus(fresh_settings)
+                                fresh_gpus = _build_selected_gpus(fresh_settings, detected=detected_gpus)
                                 if fresh_gpus:
                                     pool.reconcile_gpu_workers(fresh_gpus)
                                 pool.reconcile_cpu_workers(fresh_settings.cpu_threads)
