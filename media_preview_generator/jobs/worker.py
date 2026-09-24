@@ -1114,6 +1114,11 @@ class WorkerPool:
         clears their flags (they stay) and only then adds new workers, and
         lowering it again flags only workers that aren't flagged yet.
 
+        GPU removals still waiting in the type-level counter (busy workers
+        removed through ``remove_workers``, i.e. the workers API) are
+        cancelled, so the pool settles at the counts passed here: an API
+        GPU change lasts only until the next reconcile.
+
         Args:
             new_selected_gpus: List of (gpu_type, gpu_device, gpu_info) tuples
                 for GPUs that should be active.  Each gpu_info dict must
@@ -1133,6 +1138,9 @@ class WorkerPool:
         cancelled = 0
 
         with self._workers_lock:
+            api_removals_cancelled = self._pending_removals["GPU"]
+            self._pending_removals["GPU"] = 0
+
             current_by_device: dict[str, list] = defaultdict(list)
             for w in self.workers:
                 if w.worker_type == "GPU" and w.gpu_device:
@@ -1192,6 +1200,11 @@ class WorkerPool:
             self.selected_gpus = list(new_selected_gpus)
             self._next_gpu_assignment_index = 0
 
+        if api_removals_cancelled:
+            logger.info(
+                "Cancelled {} pending GPU worker removal(s) from the workers API; the saved GPU counts apply",
+                api_removals_cancelled,
+            )
         if cancelled:
             logger.info("Kept {} busy GPU worker(s) that were due to retire", cancelled)
         if removed or added or deferred:

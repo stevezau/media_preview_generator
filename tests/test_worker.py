@@ -1378,6 +1378,40 @@ class TestReconcileGpuWorkers:
         assert all(w.gpu_device == self.DEVICE for w in pool.workers)
         assert not any(w._pending_removal for w in pool.workers)
 
+    @pytest.mark.parametrize(
+        ("saved_count", "result", "retired"),
+        [
+            (2, {"added": 0, "removed": 0, "deferred": 1}, 1),
+            (3, {"added": 0, "removed": 0, "deferred": 0}, 0),
+            (4, {"added": 1, "removed": 0, "deferred": 0}, 0),
+        ],
+        ids=["saved-lower", "saved-same", "saved-higher"],
+    )
+    def test_reconcile_cancels_busy_gpu_removals_from_the_workers_api(self, saved_count, result, retired):
+        # The workers API removes a busy GPU worker through the type-level counter. The next reconcile must bring the
+        # GPU to its saved count; before, the counter outlived it and retired one more worker afterwards.
+        pool = self._busy_gpu_pool(3)
+        busy = list(pool.workers)
+        assert pool.remove_workers("GPU", 1) == {"removed": 0, "scheduled": 1, "unavailable": 0}
+
+        assert pool.reconcile_gpu_workers(self._gpus(saved_count)) == result
+        for w in busy:
+            w.is_busy = False
+
+        assert pool._apply_deferred_removals() == retired
+        assert pool._pending_removals["GPU"] == 0
+        assert len(pool.workers) == saved_count
+        assert all(w.gpu_device == self.DEVICE for w in pool.workers)
+
+    def test_reconcile_leaves_cpu_pending_removals_alone(self):
+        pool = WorkerPool(gpu_workers=1, cpu_workers=2, selected_gpus=self._gpus(1))
+        pool._pending_removals["CPU"] = 1
+
+        pool.reconcile_gpu_workers(self._gpus(1))
+
+        assert pool._pending_removals["CPU"] == 1
+        assert len([w for w in pool.workers if w.worker_type == "CPU"]) == 2
+
     def test_reconcile_added_gpu_workers_wired_to_done_event(self):
         """Workers the reconcile adds must wake the dispatch loop when they finish, like start-up workers."""
         selected_gpus = [("NVIDIA", "/dev/dri/renderD128", {"name": "GPU0", "workers": 1})]

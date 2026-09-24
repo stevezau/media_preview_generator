@@ -476,6 +476,51 @@ class TestWorkersApiSavesCpuCount:
         assert _saved_cpu_threads(app) == 2
 
 
+class TestWorkersApiGpuChangeLastsUntilTheNextSave:
+    """GPU counts are per GPU in Settings, so the API's GPU change isn't saved; the next Settings save undoes it."""
+
+    def test_settings_save_keeps_busy_gpu_workers_the_api_removed(self, app):
+        pool = _live_pool(app, cpu=0, gpu=3)
+        busy = _gpu_workers(pool)
+        for w in busy:
+            w.is_busy = True
+
+        removed = _scale(app, "remove", "GPU", 1).get_json()
+        with _fake_detected_gpu():
+            resp = _save(app, {"gpu_config": _gpu_config(3)})
+        for w in busy:
+            w.is_busy = False
+        pool._apply_deferred_removals()
+
+        assert (removed["removed"], removed["scheduled_removal"], removed["unavailable"]) == (0, 1, 0)
+        assert resp.status_code == 200
+        assert _gpu_workers(pool) == busy
+        assert pool._pending_removals["GPU"] == 0
+
+    def test_settings_save_restores_idle_gpu_workers_the_api_removed(self, app):
+        pool = _live_pool(app, cpu=0, gpu=3)
+
+        removed = _scale(app, "remove", "GPU", 2).get_json()
+        with _fake_detected_gpu():
+            resp = _save(app, {"gpu_config": _gpu_config(3)})
+
+        assert (removed["removed"], removed["scheduled_removal"], removed["unavailable"]) == (2, 0, 0)
+        assert resp.status_code == 200
+        assert len(_gpu_workers(pool)) == 3
+        assert all(w.gpu_device == GPU_DEVICE for w in _gpu_workers(pool))
+
+    def test_settings_save_drops_gpu_workers_the_api_added(self, app):
+        pool = _live_pool(app, cpu=0, gpu=1)
+
+        added = _scale(app, "add", "GPU", 2).get_json()
+        with _fake_detected_gpu():
+            resp = _save(app, {"gpu_config": _gpu_config(1)})
+
+        assert added["added"] == 2
+        assert resp.status_code == 200
+        assert len(_gpu_workers(pool)) == 1
+
+
 def _loader_thread_errors(app) -> list[str]:
     """What the config loader's thread check says about the saved CPU count (the next job runs it)."""
     from media_preview_generator.config import _validate_thread_config
