@@ -395,7 +395,10 @@ hr {
   display: none;
 }
 
-@media (max-width: 900px) {
+/* The full nav__links row still doesn't fit down to 900px (measured: 58px over at 905,
+   clearing at 965) even with the pill labels below trimmed, so the burger takes over
+   65px later than it used to. */
+@media (max-width: 965px) {
   .nav__links,
   .search-btn kbd {
     display: none;
@@ -411,9 +414,9 @@ hr {
    icon, which keeps its aria-label; the coffee goes before anything
    structural, and it is still in the footer. */
 /* The Star and Coffee words need ~110px the full nav row does not have below 1180px (measured: 24px
-   over at 1100, 215px at 901). Once the nav links collapse into the burger at 900 there is room for
+   over at 1100, 215px at 901). Once the nav links collapse into the burger at 965 there is room for
    the words again, until the 600px pass sheds every label. */
-@media (min-width: 901px) and (max-width: 1180px), (max-width: 600px) {
+@media (min-width: 966px) and (max-width: 1180px), (max-width: 600px) {
   .nav-pill {
     width: 34px;
     padding: 0;
