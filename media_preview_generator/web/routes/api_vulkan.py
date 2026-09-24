@@ -20,7 +20,7 @@ from flask import jsonify
 from loguru import logger
 
 from . import api
-from ._helpers import _ensure_gpu_cache, _gpu_cache, _gpu_cache_lock
+from ._helpers import _ensure_gpu_cache
 
 # Standard locations the Vulkan loader searches for the NVIDIA ICD JSON.
 # nvidia-container-toolkit mounts at /etc/vulkan/icd.d/; some loaders and
@@ -596,8 +596,7 @@ def get_vulkan_debug():
     env_overrides = get_vulkan_env_overrides()
     debug_buffer = get_vulkan_debug_buffer()
 
-    with _gpu_cache_lock:
-        gpus = list(_gpu_cache["result"] or [])
+    gpus = list(_ensure_gpu_cache())
 
     gpu_lines = [
         f"  - type={g.get('type', '?')} name={g.get('name', '?')} device={g.get('device', '?')}" for g in gpus

@@ -878,7 +878,9 @@ class TestGpuListSurvivesARescan:
         assert resp.status_code == 200
         assert [w["worker_type"] for w in resp.get_json()["workers"]] == ["GPU", "GPU", "CPU"]
 
-    def test_vulkan_warning_names_the_detected_gpu(self, app):
+    @pytest.fixture()
+    def software_vulkan(self):
+        """Report software-only Vulkan and an NVIDIA container without the ``graphics`` capability."""
         from media_preview_generator.gpu import _reset_vulkan_device_cache
 
         no_graphics_capability = {
@@ -887,24 +889,37 @@ class TestGpuListSurvivesARescan:
             "nvidia_icd_json_path": None,
             "libnvidia_glvkspirv_found": False,
             "libegl_nvidia_found": False,
+            "nvidia_egl_vendor_json_path": None,
+            "nvidia_drm_loaded": False,
+            "nvidia_driver_version": None,
         }
         _reset_vulkan_device_cache()
-        try:
-            with (
-                self._rescan_lands_after_the_warm_up("api_vulkan"),
-                patch(
-                    "media_preview_generator.gpu.vulkan_probe._probe_vulkan_device",
-                    return_value="llvmpipe (LLVM 18.1.3, 256 bits) (software) (0x0)",
-                ),
-                patch("media_preview_generator.web.routes.api_vulkan.glob.glob", return_value=[]),
-                patch(
-                    "media_preview_generator.web.routes.api_vulkan._diagnose_vulkan_environment",
-                    return_value=no_graphics_capability,
-                ),
-            ):
-                resp = app.test_client().get("/api/system/vulkan")
-        finally:
-            _reset_vulkan_device_cache()
+        with (
+            patch(
+                "media_preview_generator.gpu.vulkan_probe._probe_vulkan_device",
+                return_value="llvmpipe (LLVM 18.1.3, 256 bits) (software) (0x0)",
+            ),
+            patch("media_preview_generator.web.routes.api_vulkan.glob.glob", return_value=[]),
+            patch(
+                "media_preview_generator.web.routes.api_vulkan._diagnose_vulkan_environment",
+                return_value=no_graphics_capability,
+            ),
+        ):
+            yield
+        _reset_vulkan_device_cache()
+
+    def test_vulkan_warning_names_the_detected_gpu(self, app, software_vulkan):
+        with self._rescan_lands_after_the_warm_up("api_vulkan"):
+            resp = app.test_client().get("/api/system/vulkan")
 
         assert resp.status_code == 200
         assert "<strong>Your GPU:</strong> Fake GPU" in resp.get_json()["warning"]
+
+    def test_vulkan_debug_bundle_lists_the_detected_gpu(self, app, software_vulkan):
+        with self._rescan_lands_after_the_warm_up("api_vulkan"):
+            resp = app.test_client().get("/api/system/vulkan/debug")
+
+        assert resp.status_code == 200
+        bundle = resp.get_data(as_text=True)
+        assert f"  - type=NVIDIA name=Fake GPU device={GPU_DEVICE}" in bundle
+        assert "(none detected)" not in bundle
