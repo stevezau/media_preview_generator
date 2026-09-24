@@ -1371,6 +1371,8 @@ class TestRealEndToEndMultiServerFullScan:
             server_id_filter=None,
             plex_bif_frame_interval=5,
             thumbnail_interval=5,
+            thumbnail_quality=4,
+            tonemap_algorithm="hable",
             server_display_name="srv-real",
         )
 

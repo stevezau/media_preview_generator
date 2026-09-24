@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from media_preview_generator.bif_reader import read_bif_metadata
 from media_preview_generator.processing.frame_cache import (
     FrameCache,
     get_frame_cache,
@@ -19,6 +21,11 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
+
+_DURATION_S = 100  # length of the fake video the FFmpeg stand-ins "extract" from
+_SETTING_LABEL = {"plex_bif_frame_interval": "interval", "thumbnail_quality": "quality", "tonemap_algorithm": "tonemap"}
+# (interval seconds, JPEG quality, tone-map algorithm) — the settings that change the extracted frames.
+_EXTRACTION_KEY = (10, 4, "hable")
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +54,7 @@ def _seed_canonical_file(path: Path) -> None:
 class TestFrameCacheBasics:
     def test_get_returns_none_when_empty(self, tmp_path):
         cache = FrameCache(tmp_path / "cache")
-        assert cache.get("/some/file.mkv") is None
+        assert cache.get("/some/file.mkv", extraction_key=_EXTRACTION_KEY) is None
         assert len(cache) == 0
 
     def test_put_and_get_roundtrip(self, tmp_path):
@@ -59,9 +66,9 @@ class TestFrameCacheBasics:
         # dispatcher will (write directly into frame_dir_for).
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=5)
-        cache.put(str(media), frame_dir=slot, frame_count=5)
+        cache.put(str(media), frame_dir=slot, frame_count=5, extraction_key=_EXTRACTION_KEY)
 
-        entry = cache.get(str(media))
+        entry = cache.get(str(media), extraction_key=_EXTRACTION_KEY)
         assert entry is not None
         assert entry.frame_count == 5
         assert entry.frame_dir == slot
@@ -78,11 +85,11 @@ class TestFrameCacheBasics:
         media.write_bytes(b"x")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=2)
-        cache.put(str(media), frame_dir=slot, frame_count=2)
+        cache.put(str(media), frame_dir=slot, frame_count=2, extraction_key=_EXTRACTION_KEY)
 
         cache.invalidate(str(media))
 
-        assert cache.get(str(media)) is None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None
         # On-disk dir is gone too.
         assert not slot.exists()
 
@@ -93,7 +100,7 @@ class TestFrameCacheBasics:
             media.write_bytes(b"x")
             slot = cache.frame_dir_for(str(media))
             _populate_real_jpgs(slot, count=1)
-            cache.put(str(media), frame_dir=slot, frame_count=1)
+            cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
         assert len(cache) == 3
         cache.clear()
         assert len(cache) == 0
@@ -107,14 +114,14 @@ class TestCacheValidity:
         media.write_bytes(b"original")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=2)
-        cache.put(str(media), frame_dir=slot, frame_count=2)
+        cache.put(str(media), frame_dir=slot, frame_count=2, extraction_key=_EXTRACTION_KEY)
 
         # Bump mtime by writing new content.
         time.sleep(1.1)  # ensure mtime granularity catches the change
         media.write_bytes(b"newer-bigger-content")
         os.utime(media, None)
 
-        assert cache.get(str(media)) is None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None
 
     def test_ttl_expiry(self, tmp_path):
         cache = FrameCache(tmp_path / "cache", ttl_seconds=0)
@@ -122,11 +129,11 @@ class TestCacheValidity:
         media.write_bytes(b"x")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=1)
-        cache.put(str(media), frame_dir=slot, frame_count=1)
+        cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
 
         # ttl=0 so any subsequent get is past the deadline.
         time.sleep(0.01)
-        assert cache.get(str(media)) is None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None
 
     def test_missing_frame_dir_invalidates(self, tmp_path):
         cache = FrameCache(tmp_path / "cache")
@@ -134,14 +141,14 @@ class TestCacheValidity:
         media.write_bytes(b"x")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=1)
-        cache.put(str(media), frame_dir=slot, frame_count=1)
+        cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
 
         # Out-of-band rmtree (e.g. someone cleaned working_tmp).
         import shutil
 
         shutil.rmtree(slot)
 
-        assert cache.get(str(media)) is None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None
         assert len(cache) == 0  # entry was evicted on lookup
 
     def test_missing_source_file_invalidates(self, tmp_path):
@@ -150,10 +157,10 @@ class TestCacheValidity:
         media.write_bytes(b"x")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=1)
-        cache.put(str(media), frame_dir=slot, frame_count=1)
+        cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
 
         media.unlink()
-        assert cache.get(str(media)) is None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None
 
     def test_sub_second_mtime_drift_still_hits(self, tmp_path):
         """A 0.5s mtime drift counts as the SAME file — within the 1.0s
@@ -174,7 +181,7 @@ class TestCacheValidity:
 
         # Put with the actual mtime, then nudge the cached mtime by 0.5s
         # to simulate the cross-filesystem drift the tolerance protects.
-        cache.put(str(media), frame_dir=slot, frame_count=1)
+        cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
         key = list(cache._entries.keys())[0]
         original = cache._entries[key]
         cache._entries[key] = type(original)(
@@ -183,9 +190,10 @@ class TestCacheValidity:
             frame_count=original.frame_count,
             source_mtime=original.source_mtime - 0.5,  # 0.5s off — within tolerance
             cached_at=original.cached_at,
+            extraction_key=original.extraction_key,
         )
 
-        assert cache.get(str(media)) is not None, (
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is not None, (
             "0.5s mtime drift should be tolerated — NFS rounding would otherwise thrash the cache"
         )
 
@@ -196,12 +204,78 @@ class TestCacheValidity:
             frame_count=original.frame_count,
             source_mtime=original.source_mtime - 1.5,  # past tolerance
             cached_at=original.cached_at,
+            extraction_key=original.extraction_key,
         )
         # Re-populate slot since the previous get() may have evicted it
         # (it shouldn't have, but be defensive — the boundary check is
         # the assertion that matters).
         _populate_real_jpgs(slot, count=1)
-        assert cache.get(str(media)) is None, "1.5s drift should be treated as a real source change"
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None, (
+            "1.5s drift should be treated as a real source change"
+        )
+
+
+class TestExtractionSettings:
+    """Frames extracted under one interval / quality / tone map must not serve a lookup for another."""
+
+    @staticmethod
+    def _cache_with_entry(tmp_path: Path) -> tuple[FrameCache, Path, Path]:
+        cache = FrameCache(tmp_path / "cache")
+        media = tmp_path / "m.mkv"
+        media.write_bytes(b"x")
+        slot = cache.frame_dir_for(str(media))
+        _populate_real_jpgs(slot, count=2)
+        cache.put(str(media), frame_dir=slot, frame_count=2, extraction_key=_EXTRACTION_KEY)
+        return cache, media, slot
+
+    @pytest.mark.parametrize(
+        "lookup_key",
+        [
+            pytest.param((5, 4, "hable"), id="interval"),
+            pytest.param((10, 2, "hable"), id="quality"),
+            pytest.param((10, 4, "mobius"), id="tonemap"),
+        ],
+    )
+    def test_get_misses_and_evicts_when_extraction_settings_differ(self, tmp_path, lookup_key):
+        cache, media, slot = self._cache_with_entry(tmp_path)
+
+        assert cache.get(str(media), extraction_key=lookup_key) is None
+        assert len(cache) == 0
+        assert not slot.exists(), "stale frames must be removed so the next extraction starts from an empty slot"
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda cache, media, slot: cache.get(str(media)), id="get"),
+            pytest.param(lambda cache, media, slot: cache.put(str(media), frame_dir=slot, frame_count=2), id="put"),
+        ],
+    )
+    def test_raises_type_error_when_extraction_key_omitted(self, tmp_path, call):
+        """A caller that forgets the settings would silently bring the stale-frames bug back."""
+        cache, media, slot = self._cache_with_entry(tmp_path)
+
+        with pytest.raises(TypeError, match="extraction_key"):
+            call(cache, media, slot)
+
+    def test_get_hits_when_extraction_settings_match(self, tmp_path):
+        cache, media, slot = self._cache_with_entry(tmp_path)
+
+        entry = cache.get(str(media), extraction_key=(10, 4, "hable"))
+
+        assert entry is not None
+        assert entry.extraction_key == _EXTRACTION_KEY
+        assert entry.frame_dir == slot
+        assert entry.frame_count == 2
+
+    def test_get_misses_when_entry_has_no_extraction_settings(self, tmp_path):
+        """An entry without settings (the pre-fix shape) can't be matched, so it's dropped, not guessed."""
+        cache, media, slot = self._cache_with_entry(tmp_path)
+        key = next(iter(cache._entries))
+        cache._entries[key] = dataclasses.replace(cache._entries[key], extraction_key=None)
+
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is None
+        assert len(cache) == 0
+        assert not slot.exists()
 
 
 class TestLruEviction:
@@ -212,11 +286,11 @@ class TestLruEviction:
             media.write_bytes(b"x")
             slot = cache.frame_dir_for(str(media))
             _populate_real_jpgs(slot, count=1)
-            cache.put(str(media), frame_dir=slot, frame_count=1)
+            cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
         assert len(cache) == 2
         # 'a' was the first put → evicted; b and c remain.
-        assert cache.get(str(tmp_path / "a.mkv")) is None
-        assert cache.get(str(tmp_path / "b.mkv")) is not None
+        assert cache.get(str(tmp_path / "a.mkv"), extraction_key=_EXTRACTION_KEY) is None
+        assert cache.get(str(tmp_path / "b.mkv"), extraction_key=_EXTRACTION_KEY) is not None
 
     def test_get_promotes_entry_to_most_recently_used(self, tmp_path):
         cache = FrameCache(tmp_path / "cache", max_entries=2)
@@ -225,20 +299,20 @@ class TestLruEviction:
             media.write_bytes(b"x")
             slot = cache.frame_dir_for(str(media))
             _populate_real_jpgs(slot, count=1)
-            cache.put(str(media), frame_dir=slot, frame_count=1)
+            cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
 
         # Access 'a' so it's most recently used.
-        cache.get(str(tmp_path / "a.mkv"))
+        cache.get(str(tmp_path / "a.mkv"), extraction_key=_EXTRACTION_KEY)
 
         # Add 'c' — 'b' should now be the eviction victim.
         media_c = tmp_path / "c.mkv"
         media_c.write_bytes(b"x")
         slot_c = cache.frame_dir_for(str(media_c))
         _populate_real_jpgs(slot_c, count=1)
-        cache.put(str(media_c), frame_dir=slot_c, frame_count=1)
+        cache.put(str(media_c), frame_dir=slot_c, frame_count=1, extraction_key=_EXTRACTION_KEY)
 
-        assert cache.get(str(tmp_path / "b.mkv")) is None
-        assert cache.get(str(tmp_path / "a.mkv")) is not None
+        assert cache.get(str(tmp_path / "b.mkv"), extraction_key=_EXTRACTION_KEY) is None
+        assert cache.get(str(tmp_path / "a.mkv"), extraction_key=_EXTRACTION_KEY) is not None
 
     def test_eviction_removes_on_disk_frames(self, tmp_path):
         """Evicting an entry must clean up the on-disk frame dir too —
@@ -250,7 +324,7 @@ class TestLruEviction:
         media_a.write_bytes(b"x")
         slot_a = cache.frame_dir_for(str(media_a))
         _populate_real_jpgs(slot_a, count=2)
-        cache.put(str(media_a), frame_dir=slot_a, frame_count=2)
+        cache.put(str(media_a), frame_dir=slot_a, frame_count=2, extraction_key=_EXTRACTION_KEY)
         assert slot_a.is_dir()
 
         # Adding 'b' evicts 'a' — slot_a should be removed from disk.
@@ -258,7 +332,7 @@ class TestLruEviction:
         media_b.write_bytes(b"x")
         slot_b = cache.frame_dir_for(str(media_b))
         _populate_real_jpgs(slot_b, count=2)
-        cache.put(str(media_b), frame_dir=slot_b, frame_count=2)
+        cache.put(str(media_b), frame_dir=slot_b, frame_count=2, extraction_key=_EXTRACTION_KEY)
 
         assert not slot_a.exists(), "evicted entry's frame dir should be deleted from disk"
         assert slot_b.is_dir()
@@ -275,7 +349,7 @@ class TestLruEviction:
             media.write_bytes(b"x")
             slot = cache.frame_dir_for(str(media))
             _populate_real_jpgs(slot, count=1)
-            cache.put(str(media), frame_dir=slot, frame_count=1)
+            cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
         # All 50 should be retained; the disk-cap is what bounds growth now.
         assert len(cache) == 50
 
@@ -292,9 +366,9 @@ class TestLruEviction:
             media.write_bytes(b"x")
             slot = cache.frame_dir_for(str(media))
             _populate_real_jpgs(slot, count=1)
-            cache.put(str(media), frame_dir=slot, frame_count=1)
+            cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
         # 'a' is evicted from entries…
-        assert cache.get(str(tmp_path / "a.mkv")) is None
+        assert cache.get(str(tmp_path / "a.mkv"), extraction_key=_EXTRACTION_KEY) is None
         # …but the lock for the same path is still the same object —
         # i.e. lock identity preserved across the eviction.
         assert cache.generation_lock("/a.mkv") is lock_a
@@ -569,6 +643,125 @@ class TestDispatcherIntegration:
         # The single publisher succeeded.
         assert (tmp_path / "movies" / "Test-320-10.bif").exists()
 
+    @staticmethod
+    def _emby_registry(media_root: Path, interval: int) -> ServerRegistry:
+        return ServerRegistry.from_settings(
+            [
+                {
+                    "id": "emby-1",
+                    "type": "emby",
+                    "name": "Emby",
+                    "enabled": True,
+                    "url": "http://emby:8096",
+                    "auth": {"method": "api_key", "api_key": "k"},
+                    "libraries": [{"id": "1", "name": "Movies", "remote_paths": [str(media_root)], "enabled": True}],
+                    "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": interval},
+                }
+            ],
+        )
+
+    @staticmethod
+    def _recording_generate_images(calls: list[dict]):
+        """FFmpeg stand-in: writes one frame per interval of a 100 s video and records the settings it saw."""
+
+        def _gen(video_file, output_folder, gpu, gpu_device_path, config, *args, **kwargs):
+            calls.append(
+                {
+                    "interval": config.plex_bif_frame_interval,
+                    "quality": config.thumbnail_quality,
+                    "tonemap": config.tonemap_algorithm,
+                }
+            )
+            count = _DURATION_S // config.plex_bif_frame_interval
+            _populate_real_jpgs(Path(output_folder), count=count)
+            return (True, count, "h264", 1.0, 30.0, None)
+
+        return _gen
+
+    @pytest.mark.parametrize(
+        ("attr", "before", "after"),
+        [
+            pytest.param("plex_bif_frame_interval", 10, 5, id="interval"),
+            pytest.param("thumbnail_quality", 4, 2, id="quality"),
+            pytest.param("tonemap_algorithm", "hable", "mobius", id="tonemap"),
+        ],
+    )
+    def test_cache_misses_when_extraction_setting_changes(self, mock_config, tmp_path, attr, before, after):
+        mock_config.tmp_folder = str(tmp_path / "tmp")
+        mock_config.working_tmp_folder = str(tmp_path / "tmp" / "job")
+        mock_config.plex_bif_frame_interval = 10
+        mock_config.thumbnail_quality = 4
+        mock_config.tonemap_algorithm = "hable"
+        setattr(mock_config, attr, before)
+        media_root = tmp_path / "data" / "movies"
+        media = media_root / "Test (2024)" / "Test (2024).mkv"
+        _seed_canonical_file(media)
+
+        calls: list[dict] = []
+        with patch(
+            "media_preview_generator.processing.multi_server.generate_images",
+            side_effect=self._recording_generate_images(calls),
+        ):
+            r1 = process_canonical_path(
+                canonical_path=str(media), registry=self._emby_registry(media_root, 10), config=mock_config
+            )
+            first_settings = dict(calls[0])
+
+            # Settings save copies a new interval into every server's output.frame_interval, so the
+            # Emby sidecar name changes with it. Quality and tone map aren't in the name, so drop the
+            # published BIF to make the second dispatch publish again.
+            setattr(mock_config, attr, after)
+            new_interval = mock_config.plex_bif_frame_interval
+            if attr != "plex_bif_frame_interval":
+                (media.parent / "Test (2024)-320-10.bif").unlink()
+
+            r2 = process_canonical_path(
+                canonical_path=str(media), registry=self._emby_registry(media_root, new_interval), config=mock_config
+            )
+
+        assert r1.status is MultiServerStatus.PUBLISHED
+        assert r2.status is MultiServerStatus.PUBLISHED
+        assert calls == [first_settings, {**first_settings, _SETTING_LABEL[attr]: after}], (
+            f"frames extracted with {attr}={before!r} were reused after it changed to {after!r}"
+        )
+        assert [p.frame_source for p in r2.publishers] == ["extracted"]
+        bif = read_bif_metadata(str(media.parent / f"Test (2024)-320-{new_interval}.bif"))
+        assert bif.frame_interval_ms == new_interval * 1000
+        assert bif.frame_count == _DURATION_S // new_interval
+        # The re-extraction replaced the entry, stamped with the settings now in force.
+        stored = get_frame_cache().get(
+            str(media),
+            extraction_key=(new_interval, mock_config.thumbnail_quality, mock_config.tonemap_algorithm),
+        )
+        assert stored is not None
+        assert stored.frame_count == _DURATION_S // new_interval
+
+    def test_cache_hits_when_extraction_settings_unchanged(self, mock_config, tmp_path):
+        mock_config.tmp_folder = str(tmp_path / "tmp")
+        mock_config.working_tmp_folder = str(tmp_path / "tmp" / "job")
+        mock_config.plex_bif_frame_interval = 10
+        mock_config.thumbnail_quality = 4
+        mock_config.tonemap_algorithm = "hable"
+        media_root = tmp_path / "data" / "movies"
+        media = media_root / "Test (2024)" / "Test (2024).mkv"
+        _seed_canonical_file(media)
+        registry = self._emby_registry(media_root, 10)
+
+        calls: list[dict] = []
+        with patch(
+            "media_preview_generator.processing.multi_server.generate_images",
+            side_effect=self._recording_generate_images(calls),
+        ):
+            process_canonical_path(canonical_path=str(media), registry=registry, config=mock_config)
+            (media.parent / "Test (2024)-320-10.bif").unlink()
+            r2 = process_canonical_path(canonical_path=str(media), registry=registry, config=mock_config)
+
+        assert calls == [{"interval": 10, "quality": 4, "tonemap": "hable"}]
+        assert r2.status is MultiServerStatus.PUBLISHED
+        assert [p.frame_source for p in r2.publishers] == ["cache_hit"]
+        # The dispatcher stamps the entry with exactly the settings it extracted under.
+        assert get_frame_cache().get(str(media), extraction_key=(10, 4, "hable")) is not None
+
 
 class TestConfigurableFrameReuse:
     """The user-facing ``frame_reuse`` settings block drives TTL + disk cap."""
@@ -585,7 +778,7 @@ class TestConfigurableFrameReuse:
         media.write_bytes(b"x")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=2)
-        cache.put(str(media), frame_dir=slot, frame_count=2)
+        cache.put(str(media), frame_dir=slot, frame_count=2, extraction_key=_EXTRACTION_KEY)
 
         # Simulate 45 min later: rewind cached_at by 45 min.
         key = list(cache._entries.keys())[0]
@@ -596,10 +789,11 @@ class TestConfigurableFrameReuse:
             frame_count=old_entry.frame_count,
             source_mtime=old_entry.source_mtime,
             cached_at=time.time() - (45 * 60),
+            extraction_key=old_entry.extraction_key,
         )
 
         # 45 min < 60 min default TTL → still a hit.
-        assert cache.get(str(media)) is not None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is not None
 
     def test_legacy_ten_minute_ttl_when_disabled(self):
         """When the user disables frame_reuse, TTL falls back to legacy 600s."""
@@ -744,7 +938,7 @@ class TestConfigurableFrameReuse:
             media.write_bytes(b"x")
             slot = cache.frame_dir_for(str(media))
             _populate_real_jpgs(slot, count=1)
-            cache.put(str(media), frame_dir=slot, frame_count=1)
+            cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
         assert len(cache) == 5
 
         # Compute the per-entry size from disk so the assertion adapts
@@ -764,16 +958,16 @@ class TestConfigurableFrameReuse:
         media.write_bytes(b"x")
         slot = cache.frame_dir_for(str(media))
         _populate_real_jpgs(slot, count=1)
-        cache.put(str(media), frame_dir=slot, frame_count=1)
+        cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
 
         # Exactly one entry remains, and it is the newest one (the
         # always-keep-newest invariant the evictor advertises).
         assert len(cache) == 1
-        assert cache.get(str(media)) is not None
+        assert cache.get(str(media), extraction_key=_EXTRACTION_KEY) is not None
         # Every previously-inserted entry was actually evicted, not just
         # marked stale — none should resolve via .get().
         for i in range(5):
-            assert cache.get(str(tmp_path / f"f{i:03d}.mkv")) is None
+            assert cache.get(str(tmp_path / f"f{i:03d}.mkv"), extraction_key=_EXTRACTION_KEY) is None
 
     def test_get_frame_cache_reads_settings_on_first_construction(self, tmp_path):
         """The singleton's TTL is seeded from the frame_reuse settings block."""
