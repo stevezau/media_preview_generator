@@ -33,6 +33,9 @@ limiter = Limiter(
 # Detection runs once on first access; call clear_gpu_cache() to force re-scan.
 _gpu_cache: dict = {"result": None}
 _gpu_cache_lock = threading.Lock()
+# Held for a whole detection run so concurrent callers share one run instead of probing the same GPUs twice.
+# Never taken while holding the settings lock: callers that resize the pool detect first, then take that lock.
+_gpu_detect_lock = threading.Lock()
 
 
 def _param_to_bool(value, default: bool) -> bool:
@@ -91,12 +94,28 @@ def _safe_resolve_within(user_path: str, allowed_root: str) -> str | None:
     return resolved
 
 
-def _ensure_gpu_cache() -> None:
-    """Run GPU detection once and cache the result. No-op if already cached."""
+def _ensure_gpu_cache() -> list[dict]:
+    """Run GPU detection once, cache the result and return it.
+
+    Single-flight: while one caller detects, concurrent callers wait for its result instead of running their own.
+
+    Returns:
+        The detected GPUs (one dict per GPU; an empty list when none were found or detection failed). Never None,
+        even if a re-scan clears the cache right after this returns.
+    """
     with _gpu_cache_lock:
         if _gpu_cache["result"] is not None:
-            return
+            return _gpu_cache["result"]
 
+    with _gpu_detect_lock:
+        with _gpu_cache_lock:
+            if _gpu_cache["result"] is not None:
+                return _gpu_cache["result"]
+        return _detect_and_cache_gpus()
+
+
+def _detect_and_cache_gpus() -> list[dict]:
+    """Run GPU detection and store the result in the cache. Call only while holding ``_gpu_detect_lock``."""
     try:
         from ...gpu.detect import detect_all_gpus
 
@@ -111,6 +130,7 @@ def _ensure_gpu_cache() -> None:
         with _gpu_cache_lock:
             _gpu_cache["result"] = gpus
         logger.debug("GPU detection complete: {} GPU(s)", len(gpus))
+        return gpus
     except Exception as e:
         logger.warning(
             "GPU detection failed ({}: {}). "
@@ -122,6 +142,7 @@ def _ensure_gpu_cache() -> None:
         )
         with _gpu_cache_lock:
             _gpu_cache["result"] = []
+        return []
 
 
 def clear_gpu_cache() -> None:

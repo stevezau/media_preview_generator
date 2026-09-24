@@ -424,7 +424,7 @@ def get_media_servers_status():
 def get_config():
     """Get current configuration."""
     try:
-        from ...config import get_cached_config
+        from ...config import MAX_CPU_THREADS, get_cached_config
         from ..settings_manager import get_settings_manager
 
         config = get_cached_config()
@@ -440,6 +440,7 @@ def get_config():
                     "gpu_config": settings.gpu_config,
                     "gpu_threads": settings.gpu_threads,
                     "cpu_threads": settings.cpu_threads,
+                    "cpu_threads_max": MAX_CPU_THREADS,
                     "ffmpeg_threads": settings.get("ffmpeg_threads", 2),
                 }
             )
@@ -457,6 +458,7 @@ def get_config():
             "gpu_config": config.gpu_config,
             "gpu_threads": config.gpu_threads,
             "cpu_threads": config.cpu_threads,
+            "cpu_threads_max": MAX_CPU_THREADS,
             "ffmpeg_threads": config.ffmpeg_threads,
             "log_level": config.log_level,
         }

@@ -1461,6 +1461,61 @@ class TestJobDispatcherPath:
         # so the dispatcher knows which pool to schedule on.
         mock_dispatcher.submit_items.assert_called_once()
 
+    def test_lost_dispatcher_race_registers_the_dispatchers_pool(self, tmp_path):
+        """Two jobs start at once: this one finds no dispatcher and builds a pool, but the other job creates the
+        dispatcher first. This job must register the dispatcher's pool as its active pool, not its own unused one,
+        or saves during the job resize a pool nothing runs on."""
+        config = _make_config(tmp_path)
+        section = _make_section("Movies")
+        tracker = MagicMock()
+        tracker.get_result.return_value = _pool_result(completed=1)
+        winners_pool = MagicMock(name="winners_pool")
+        winner = MagicMock(worker_pool=winners_pool)
+        winner.submit_items.return_value = tracker
+        registered = []
+
+        def get_dispatcher(worker_pool=None):
+            # Nothing yet when this job looks; the other job's dispatcher exists by the time this one registers.
+            return None if worker_pool is None else winner
+
+        with (
+            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([(section, [("k1", "M1", "movie")])])),
+            patch(f"{MODULE}.WorkerPool") as MockPool,
+            patch("media_preview_generator.jobs.dispatcher.get_dispatcher", side_effect=get_dispatcher),
+        ):
+            run_processing(config, selected_gpus=[], job_id="job-b", worker_pool_callback=registered.append)
+
+        assert MockPool.return_value is not winners_pool
+        assert registered[-1] is winners_pool
+        winner.submit_items.assert_called_once()
+
+    def test_multi_server_lost_dispatcher_race_registers_the_dispatchers_pool(self):
+        """Same race on the multi-server dispatch path."""
+        from media_preview_generator.jobs.orchestrator import _dispatch_processable_items
+
+        tracker = MagicMock(completed=1)
+        tracker.get_result.return_value = _pool_result(completed=1)
+        winners_pool = MagicMock(name="winners_pool")
+        winner = MagicMock(worker_pool=winners_pool)
+        winner.submit_items.return_value = tracker
+        registered = []
+
+        def get_dispatcher(worker_pool=None):
+            return None if worker_pool is None else winner
+
+        with patch("media_preview_generator.jobs.dispatcher.get_dispatcher", side_effect=get_dispatcher):
+            _dispatch_processable_items(
+                [(None, _processable("k1", "M1"))],
+                config=SimpleNamespace(gpu_threads=0, cpu_threads=0),
+                registry=MagicMock(),
+                selected_gpus=[],
+                job_id="job-b",
+                worker_pool_callback=registered.append,
+            )
+
+        assert registered == [winners_pool]
+        winner.submit_items.assert_called_once()
+
     def test_dispatcher_creates_new_pool(self, tmp_path):
         """When no existing dispatcher, a new worker_pool is created."""
         config = _make_config(tmp_path)

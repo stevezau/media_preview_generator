@@ -966,7 +966,7 @@ class WorkerPool:
             return list(self.workers)
 
     def _create_worker(self, worker_type: str) -> "Worker":
-        """Create a worker instance with a unique ID and display name."""
+        """Create a worker with a unique ID and display name, wired to wake the dispatch loop when it finishes."""
         worker_id = self._next_worker_id
         self._next_worker_id += 1
         normalized_type = worker_type.upper()
@@ -991,11 +991,13 @@ class WorkerPool:
                 ffmpeg_threads=per_gpu_ffmpeg,
             )
             worker.display_name = f"GPU Worker {type_idx} ({gpu_name})"
+            worker._done_event = self._worker_done_event
             return worker
 
         if normalized_type == "CPU":
             worker = Worker(worker_id, "CPU")
             worker.display_name = f"CPU Worker {type_idx}"
+            worker._done_event = self._worker_done_event
             return worker
         raise ValueError(f"Unsupported worker type: {worker_type}")
 
@@ -1007,9 +1009,7 @@ class WorkerPool:
         added = 0
         with self._workers_lock:
             for _ in range(count):
-                w = self._create_worker(worker_type)
-                w._done_event = self._worker_done_event
-                self.workers.append(w)
+                self.workers.append(self._create_worker(worker_type))
                 added += 1
         if added > 0:
             logger.info("Added {} {} worker(s)", added, worker_type.upper())
@@ -1110,6 +1110,10 @@ class WorkerPool:
         ``_pending_removals`` counter which cannot distinguish between
         devices in a multi-GPU setup.
 
+        Flagged workers count as gone: raising a device's count first
+        clears their flags (they stay) and only then adds new workers, and
+        lowering it again flags only workers that aren't flagged yet.
+
         Args:
             new_selected_gpus: List of (gpu_type, gpu_device, gpu_info) tuples
                 for GPUs that should be active.  Each gpu_info dict must
@@ -1126,6 +1130,7 @@ class WorkerPool:
         added = 0
         removed = 0
         deferred = 0
+        cancelled = 0
 
         with self._workers_lock:
             current_by_device: dict[str, list] = defaultdict(list)
@@ -1149,11 +1154,13 @@ class WorkerPool:
                 _, _, info = gpu_tuple
                 desired = info.get("workers", 1)
                 current_workers = current_by_device.get(device, [])
-                current_count = len(current_workers)
+                staying = [w for w in current_workers if not w._pending_removal]
+                retiring = [w for w in current_workers if w._pending_removal]
+                current_count = len(staying)
 
                 if current_count > desired:
                     excess = current_count - desired
-                    idle_first = sorted(current_workers, key=lambda w: w.is_busy)
+                    idle_first = sorted(staying, key=lambda w: w.is_busy)
                     for w in idle_first[:excess]:
                         if w.is_busy:
                             w._pending_removal = True
@@ -1162,7 +1169,11 @@ class WorkerPool:
                             self.workers.remove(w)
                             removed += 1
                 elif current_count < desired:
-                    deficit = desired - current_count
+                    kept = retiring[: desired - current_count]
+                    for w in kept:
+                        w._pending_removal = False
+                    cancelled += len(kept)
+                    deficit = desired - current_count - len(kept)
 
                     # Temporarily add to selected_gpus so _create_worker can
                     # reference it; the list is replaced at the end of this block.
@@ -1181,9 +1192,54 @@ class WorkerPool:
             self.selected_gpus = list(new_selected_gpus)
             self._next_gpu_assignment_index = 0
 
+        if cancelled:
+            logger.info("Kept {} busy GPU worker(s) that were due to retire", cancelled)
         if removed or added or deferred:
             logger.info("GPU reconciliation: added={}, removed={}, deferred={}", added, removed, deferred)
         return {"added": added, "removed": removed, "deferred": deferred}
+
+    def reconcile_cpu_workers(self, desired: int) -> dict:
+        """Reconcile live CPU workers against the saved CPU worker count.
+
+        Busy workers already due to retire count as gone, so raising the
+        count first cancels those pending removals and only then adds new
+        workers. Lowering it removes idle workers at once; busy ones retire
+        after their current task, via the type-level ``_pending_removals``
+        counter (CPU workers have no device to tell apart).
+
+        Args:
+            desired: Number of CPU workers the pool should settle at.
+
+        Returns:
+            Summary dict with keys ``added``, ``removed``, ``deferred`` (busy
+            workers this call scheduled to retire) and ``retiring`` (every busy
+            CPU worker still due to retire, including earlier calls' ones).
+
+        """
+        desired = max(0, desired)
+        added = 0
+        removed = 0
+        deferred = 0
+        cancelled = 0
+
+        with self._workers_lock:
+            cpu_count = sum(1 for w in self.workers if w.worker_type == "CPU")
+            pending = self._pending_removals["CPU"]
+            effective = cpu_count - pending
+
+            if desired > effective:
+                cancelled = min(pending, desired - effective)
+                self._pending_removals["CPU"] = pending - cancelled
+                added = self.add_workers("CPU", desired - effective - cancelled)
+            elif desired < effective:
+                result = self.remove_workers("CPU", effective - desired)
+                removed = result["removed"]
+                deferred = result["scheduled"]
+            retiring = self._pending_removals["CPU"]
+
+        if cancelled:
+            logger.info("Kept {} busy CPU worker(s) that were due to retire", cancelled)
+        return {"added": added, "removed": removed, "deferred": deferred, "retiring": retiring}
 
     def _find_available_worker(self, cpu_only: bool = False, *, claim: bool = False) -> Optional["Worker"]:
         """Find an available worker.

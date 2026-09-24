@@ -162,6 +162,15 @@ class TestPageRoutes:
         assert resp.status_code == 302
         assert "/login" in resp.headers.get("Location", "")
 
+    def test_settings_cpu_input_max_comes_from_max_cpu_threads(self, authed_client):
+        # Patched to a value the template can't have hard-coded, so the rendered max must come from the constant.
+        with patch("media_preview_generator.web.routes.pages.MAX_CPU_THREADS", 7):
+            resp = authed_client.get("/settings")
+        assert resp.status_code == 200
+        body = resp.data.decode()
+        cpu_input = body[body.index('id="cpuThreads"') :].split(">", 1)[0]
+        assert 'max="7"' in cpu_input
+
     def test_settings_accessible_when_authenticated(self, authed_client):
         resp = authed_client.get("/settings")
         assert resp.status_code == 200
@@ -251,6 +260,15 @@ class TestPageRoutes:
         assert b"folder_picker.js" in body
         assert b"gpu_config_panel.js" in body
         assert b"servers.js" in body
+
+    def test_setup_cpu_input_max_comes_from_max_cpu_threads(self, client):
+        # Patched to a value the template can't have hard-coded, so the rendered max must come from the constant.
+        with patch("media_preview_generator.web.routes.pages.MAX_CPU_THREADS", 7):
+            resp = client.get("/setup")
+        assert resp.status_code == 200
+        body = resp.data.decode()
+        cpu_input = body[body.index('id="cpuThreads"') :].split(">", 1)[0]
+        assert 'max="7"' in cpu_input
 
     def test_setup_page_inlines_connection_form_partial(self, client):
         """The Emby/Jellyfin connection form is rendered inline inside the
@@ -1689,21 +1707,19 @@ class TestJobsAPI:
         pool.add_workers.assert_called_once_with("GPU", 2)
 
     def test_workers_remove_global_success(self, client):
-        """POST /api/workers/remove delegates to running job pool."""
+        """POST /api/workers/remove saves the lower CPU count and resizes the running job's pool to it."""
         with patch("media_preview_generator.web.routes.api_jobs._start_job_async"):
             create_resp = client.post("/api/jobs", headers=_api_headers(), json={})
         job_id = create_resp.get_json()["id"]
 
         from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
 
+        get_settings_manager().cpu_threads = 3
         jm = get_job_manager()
         jm.start_job(job_id)
         pool = MagicMock()
-        pool.remove_workers.return_value = {
-            "removed": 1,
-            "scheduled": 0,
-            "unavailable": 0,
-        }
+        pool.reconcile_cpu_workers.return_value = {"added": 0, "removed": 1, "deferred": 0, "retiring": 0}
         jm.set_active_worker_pool(job_id, pool)
 
         remove_resp = client.post(
@@ -1715,7 +1731,9 @@ class TestJobsAPI:
         data = remove_resp.get_json()
         assert data["removed"] == 1
         assert data["worker_type"] == "CPU"
-        pool.remove_workers.assert_called_once_with("CPU", 1)
+        pool.reconcile_cpu_workers.assert_called_once_with(2)
+        pool.remove_workers.assert_not_called()
+        assert get_settings_manager().cpu_threads == 2
 
 
 # ---------------------------------------------------------------------------

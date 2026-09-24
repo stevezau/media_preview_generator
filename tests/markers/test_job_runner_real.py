@@ -61,7 +61,7 @@ def engine(tmp_path, monkeypatch):
     monkeypatch.setattr(job_runner, "get_settings_manager", lambda: sm)
     monkeypatch.setattr(job_runner, "get_job_gate", lambda: gate)
     monkeypatch.setattr(job_runner, "load_config", lambda: config)
-    monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda s: [])
+    monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda s, **kw: [])
     yield SimpleNamespace(jm=jm, gate=gate, settings=settings)
     reset_dispatcher()
 
@@ -782,7 +782,9 @@ class TestCreditTextOnTheWorkers:
         # One GPU worker and no CPU worker: the CPU rerun can only be that same worker's.
         config = SimpleNamespace(cpu_threads=0, gpu_threads=1, scan_workers=4, ffmpeg_path="ffmpeg")
         monkeypatch.setattr(job_runner, "load_config", lambda: config)
-        monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda s: [("NVIDIA", "cuda:0", {"name": "Test GPU"})])
+        monkeypatch.setattr(
+            job_runner, "_build_selected_gpus", lambda s, **kw: [("NVIDIA", "cuda:0", {"name": "Test GPU"})]
+        )
         monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
 

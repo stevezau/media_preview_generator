@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from flask import Response, current_app, jsonify, request, session
 from loguru import logger
 
+from ...config import MAX_CPU_THREADS
 from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..auth import (
     api_token_required,
@@ -1229,10 +1230,40 @@ def resume_processing():
     return jsonify({"paused": False})
 
 
+def _change_saved_cpu_worker_count(worker_pool, delta: int) -> tuple[dict, int, int] | tuple[None, int, int]:
+    """Add ``delta`` to the saved ``cpu_threads`` and resize the live pool to it, as a Settings save does.
+
+    Saving it means the next Settings save (which always sends ``cpu_threads``) keeps this change. The read, the
+    save and the resize all run under the settings lock, so two concurrent requests can't both start from the same
+    count, and the pool is resized in the same order the counts were saved.
+
+    Args:
+        worker_pool: The shared WorkerPool.
+        delta: Workers to add (positive) or remove (negative). The count doesn't go below 0, and a decrease
+            from a count saved above ``MAX_CPU_THREADS`` (before the cap existed) lands on the maximum at most.
+
+    Returns:
+        ``(summary, previous, target)``: the pool's reconcile summary (``added``, ``removed``, ``deferred``,
+        ``retiring``), the saved count before and the count now saved. ``summary`` is None, and nothing is saved,
+        when adding would take the count above ``MAX_CPU_THREADS``.
+    """
+    from ..settings_manager import get_settings_manager
+
+    with get_settings_manager().locked() as settings:
+        previous = settings.cpu_threads
+        target = max(0, previous + delta)
+        if delta < 0:
+            target = min(target, MAX_CPU_THREADS)
+        elif target > MAX_CPU_THREADS:
+            return None, previous, target
+        settings.cpu_threads = target
+        return worker_pool.reconcile_cpu_workers(target), previous, target
+
+
 @api.route("/workers/add", methods=["POST"])
 @api_token_required
 def add_workers_global():
-    """Add workers to the shared pool (not scoped to any job)."""
+    """Add workers to the shared pool (not scoped to any job); a CPU change is saved as the CPU worker count."""
     data = request.get_json(silent=True) or {}
     parsed_type, parsed_count = _parse_worker_request(data)
     if parsed_type is None:
@@ -1244,10 +1275,21 @@ def add_workers_global():
     if worker_pool is None:
         return jsonify({"error": "Worker pool is not available"}), 409
 
-    try:
-        added = worker_pool.add_workers(worker_type, count)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    if worker_type == "CPU":
+        summary, previous, target = _change_saved_cpu_worker_count(worker_pool, count)
+        if summary is None:
+            return jsonify(
+                {
+                    "error": f"cpu_threads must be between 0 and {MAX_CPU_THREADS}; "
+                    f"adding {count} to {previous} would make {target}"
+                }
+            ), 400
+        added = count
+    else:
+        try:
+            added = worker_pool.add_workers(worker_type, count)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     return jsonify(
         {
@@ -1262,7 +1304,7 @@ def add_workers_global():
 @api.route("/workers/remove", methods=["POST"])
 @api_token_required
 def remove_workers_global():
-    """Remove workers from the shared pool (not scoped to any job)."""
+    """Remove workers from the shared pool (not scoped to any job); a CPU change is saved as the CPU worker count."""
     data = request.get_json(silent=True) or {}
     parsed_type, parsed_count = _parse_worker_request(data)
     if parsed_type is None:
@@ -1274,7 +1316,15 @@ def remove_workers_global():
     if worker_pool is None:
         return jsonify({"error": "Worker pool is not available"}), 409
 
-    result = worker_pool.remove_workers(worker_type, count)
+    if worker_type == "CPU":
+        summary, previous, target = _change_saved_cpu_worker_count(worker_pool, -count)
+        result = {
+            "removed": summary["removed"],
+            "scheduled": summary["deferred"],
+            "unavailable": max(0, count - previous),
+        }
+    else:
+        result = worker_pool.remove_workers(worker_type, count)
     return jsonify(
         {
             "success": True,

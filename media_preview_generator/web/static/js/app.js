@@ -487,7 +487,9 @@ function normalizeWorkerConfigCounts(config) {
     // gpu_threads is the total across all enabled GPUs (computed from gpu_config)
     return {
         gpu_threads: Number(config?.gpu_threads ?? 0),
-        cpu_threads: Number(config?.cpu_threads ?? 1)
+        cpu_threads: Number(config?.cpu_threads ?? 1),
+        // The server rejects a saved CPU count above this; unknown until the config loads.
+        cpu_threads_max: Number(config?.cpu_threads_max ?? Infinity)
     };
 }
 
@@ -3715,11 +3717,11 @@ function refreshWorkerScaleButtons() {
     const buttons = document.querySelectorAll('.worker-scale-btn');
     buttons.forEach((btn) => {
         const direction = parseInt(btn.getAttribute('data-direction'), 10);
+        const workerType = btn.getAttribute('data-worker-type');
         if (direction === 1) {
-            btn.disabled = false;
+            btn.disabled = getWorkerCountForType(workerType) >= getWorkerMaxForType(workerType);
             return;
         }
-        const workerType = btn.getAttribute('data-worker-type');
         btn.disabled = getWorkerCountForType(workerType) <= 0;
     });
 }
@@ -3732,6 +3734,11 @@ function getWorkerCountForType(workerType) {
     return Number.isNaN(n) ? 0 : n;
 }
 
+function getWorkerMaxForType(workerType) {
+    if (workerType !== 'CPU') return Infinity;
+    return cachedWorkerConfigCounts?.cpu_threads_max ?? Infinity;
+}
+
 function settingsKeyForWorkerType(workerType) {
     if (workerType === 'CPU') return 'cpu_threads';
     return null;
@@ -3739,8 +3746,11 @@ function settingsKeyForWorkerType(workerType) {
 
 async function scaleWorkersGlobal(workerType, direction) {
     const currentCount = getWorkerCountForType(workerType);
-    const newCount = Math.max(0, currentCount + direction);
-    if (newCount === currentCount) return;
+    const maxCount = getWorkerMaxForType(workerType);
+    let newCount = Math.max(0, currentCount + direction);
+    // A count saved above the maximum (before the cap existed) steps down to the maximum first.
+    if (direction < 0) newCount = Math.min(newCount, maxCount);
+    if (newCount === currentCount || (direction > 0 && newCount > maxCount)) return;
 
     const settingsKey = settingsKeyForWorkerType(workerType);
 
@@ -3753,31 +3763,22 @@ async function scaleWorkersGlobal(workerType, direction) {
         if (badgeEl) badgeEl.textContent = String(newCount);
         refreshWorkerScaleButtons();
 
-        if (saveResult.warning) {
-            showToast('Warning', saveResult.warning, 'warning');
+        // The settings save resizes the live pool itself; a follow-up
+        // /api/workers/add|remove call would change a second worker.
+        await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
+        const retiring = saveResult.cpu_workers_retiring || 0;
+        let busyNote = '';
+        if (retiring === 1) {
+            busyNote = '1 busy worker will stop after its current file.';
+        } else if (retiring > 1) {
+            busyNote = `${retiring} busy workers will stop after their current files.`;
         }
-
-        const endpoint = direction > 0 ? 'add' : 'remove';
-        try {
-            const result = await apiPost(`/api/workers/${endpoint}`, {
-                worker_type: workerType,
-                count: 1
-            });
-            await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
-            if (endpoint === 'add') {
-                showToast('Workers Updated', `Added ${result.added} ${workerType} worker(s)`, 'success');
-            } else {
-                const scheduled = result.scheduled_removal || 0;
-                if (scheduled > 0) {
-                    showToast('Workers Updated', `Removed ${result.removed} ${workerType}; ${scheduled} scheduled after current tasks`, 'warning');
-                } else {
-                    showToast('Workers Updated', `Removed ${result.removed} ${workerType} worker(s)`, 'info');
-                }
-            }
-        } catch (scaleErr) {
-            if (!saveResult.warning) {
-                showToast('Setting Saved', `${workerType} workers set to ${newCount}`, 'success');
-            }
+        if (saveResult.warning) {
+            showToast('Warning', busyNote ? `${saveResult.warning} ${busyNote}` : saveResult.warning, 'warning');
+        } else if (busyNote) {
+            showToast('Setting Saved', `${workerType} workers set to ${newCount}. ${busyNote}`, 'success');
+        } else {
+            showToast('Setting Saved', `${workerType} workers set to ${newCount}`, 'success');
         }
     } catch (error) {
         const badgeEl = workerType === 'CPU' ? document.getElementById('cpuWorkers') : null;

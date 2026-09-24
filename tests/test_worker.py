@@ -1294,6 +1294,210 @@ class TestReconcileGpuWorkers:
         assert len(pool.workers) == 1
         assert pool.workers[0]._pending_removal is True
 
+    DEVICE = "/dev/dri/renderD128"
+
+    def _busy_gpu_pool(self, workers: int) -> "WorkerPool":
+        pool = WorkerPool(
+            gpu_workers=workers, cpu_workers=0, selected_gpus=[("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": 1})]
+        )
+        for w in pool.workers:
+            w.is_busy = True
+        return pool
+
+    def _gpus(self, workers: int) -> list:
+        return [("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": workers})]
+
+    def test_reconcile_raise_after_pending_shrink_cancels_removals_instead_of_adding(self):
+        pool = self._busy_gpu_pool(3)
+        busy = list(pool.workers)
+        pool.reconcile_gpu_workers(self._gpus(1))
+
+        result = pool.reconcile_gpu_workers(self._gpus(3))
+
+        assert result == {"added": 0, "removed": 0, "deferred": 0}
+        assert pool.workers == busy
+        assert not any(w._pending_removal for w in pool.workers)
+
+    def test_reconcile_raise_past_pending_cancels_then_adds_the_rest(self):
+        pool = self._busy_gpu_pool(3)
+        busy = list(pool.workers)
+        pool.reconcile_gpu_workers(self._gpus(1))
+
+        result = pool.reconcile_gpu_workers(self._gpus(4))
+
+        assert result == {"added": 1, "removed": 0, "deferred": 0}
+        assert pool.workers[:3] == busy
+        assert len(pool.workers) == 4
+        assert not any(w._pending_removal for w in pool.workers)
+
+    def test_reconcile_same_count_again_keeps_the_same_pending_removals(self):
+        pool = self._busy_gpu_pool(3)
+        pool.reconcile_gpu_workers(self._gpus(1))
+        flagged = [w for w in pool.workers if w._pending_removal]
+
+        result = pool.reconcile_gpu_workers(self._gpus(1))
+
+        assert result == {"added": 0, "removed": 0, "deferred": 0}
+        assert [w for w in pool.workers if w._pending_removal] == flagged
+        assert len(flagged) == 2
+
+    def test_reconcile_lower_again_counts_pending_removals(self):
+        pool = self._busy_gpu_pool(3)
+        pool.reconcile_gpu_workers(self._gpus(2))
+
+        result = pool.reconcile_gpu_workers(self._gpus(1))
+
+        assert result == {"added": 0, "removed": 0, "deferred": 1}
+        assert sum(w._pending_removal for w in pool.workers) == 2
+        assert len(pool.workers) == 3
+
+    def test_reconcile_added_gpu_workers_wired_to_done_event(self):
+        """Workers the reconcile adds must wake the dispatch loop when they finish, like start-up workers."""
+        selected_gpus = [("NVIDIA", "/dev/dri/renderD128", {"name": "GPU0", "workers": 1})]
+        pool = WorkerPool(gpu_workers=1, cpu_workers=0, selected_gpus=selected_gpus)
+        pool._worker_done_event = threading.Event()
+        pool.workers[0]._done_event = pool._worker_done_event
+
+        new_gpus = [("NVIDIA", "/dev/dri/renderD128", {"name": "GPU0", "workers": 3})]
+        result = pool.reconcile_gpu_workers(new_gpus)
+
+        assert result["added"] == 2
+        gpu_workers = [w for w in pool.workers if w.worker_type == "GPU"]
+        assert len(gpu_workers) == 3
+        assert all(w._done_event is pool._worker_done_event for w in gpu_workers)
+
+
+class TestReconcileCpuWorkers:
+    """reconcile_cpu_workers brings the live CPU worker count to the saved setting."""
+
+    GPU = [("NVIDIA", "/dev/dri/renderD128", {"name": "GPU0", "workers": 1})]
+
+    @staticmethod
+    def _cpu(pool):
+        return [w for w in pool.workers if w.worker_type == "CPU"]
+
+    def test_reconcile_adds_cpu_workers_when_count_raised(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
+        pool._worker_done_event = threading.Event()
+
+        result = pool.reconcile_cpu_workers(3)
+
+        assert result == {"added": 2, "removed": 0, "deferred": 0, "retiring": 0}
+        cpu = self._cpu(pool)
+        assert len(cpu) == 3
+        # New workers must wake the dispatch loop when they finish, like the ones built at start-up.
+        assert all(w._done_event is pool._worker_done_event for w in cpu[1:])
+
+    def test_reconcile_removes_idle_cpu_workers_immediately(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=4, selected_gpus=[])
+
+        result = pool.reconcile_cpu_workers(1)
+
+        assert result == {"added": 0, "removed": 3, "deferred": 0, "retiring": 0}
+        assert len(self._cpu(pool)) == 1
+        assert pool._pending_removals["CPU"] == 0
+
+    def test_reconcile_defers_busy_cpu_workers_until_task_done(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
+        first, second = self._cpu(pool)
+        first.is_busy = True
+        second.is_busy = True
+
+        result = pool.reconcile_cpu_workers(1)
+
+        assert result == {"added": 0, "removed": 0, "deferred": 1, "retiring": 1}
+        assert self._cpu(pool) == [first, second]
+        assert pool._pending_removals["CPU"] == 1
+
+        second.is_busy = False
+        assert pool._retire_idle_worker_if_scheduled(second) is True
+        assert self._cpu(pool) == [first]
+        first.is_busy = False
+        assert pool._retire_idle_worker_if_scheduled(first) is False
+
+    def test_reconcile_removes_idle_before_deferring_busy(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=3, selected_gpus=[])
+        busy = self._cpu(pool)[1]
+        busy.is_busy = True
+
+        result = pool.reconcile_cpu_workers(1)
+
+        assert result == {"added": 0, "removed": 2, "deferred": 0, "retiring": 0}
+        assert self._cpu(pool) == [busy]
+        assert pool._pending_removals["CPU"] == 0
+
+    def test_reconcile_raise_cancels_pending_removal_before_adding(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
+        busy = self._cpu(pool)
+        for w in busy:
+            w.is_busy = True
+        pool.reconcile_cpu_workers(1)
+
+        result = pool.reconcile_cpu_workers(3)
+
+        # One cancelled removal restores the second worker; only one new worker is needed for three.
+        assert result == {"added": 1, "removed": 0, "deferred": 0, "retiring": 0}
+        assert pool._pending_removals["CPU"] == 0
+        cpu = self._cpu(pool)
+        assert len(cpu) == 3
+        assert cpu[:2] == busy
+
+    def test_reconcile_same_count_again_keeps_one_pending_removal(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
+        busy = self._cpu(pool)
+        for w in busy:
+            w.is_busy = True
+        pool.reconcile_cpu_workers(1)
+
+        result = pool.reconcile_cpu_workers(1)
+
+        assert result == {"added": 0, "removed": 0, "deferred": 0, "retiring": 1}
+        assert self._cpu(pool) == busy
+        assert pool._pending_removals["CPU"] == 1
+
+    def test_reconcile_lower_again_counts_pending_removals(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=3, selected_gpus=[])
+        busy = self._cpu(pool)
+        for w in busy:
+            w.is_busy = True
+        pool.reconcile_cpu_workers(2)
+
+        result = pool.reconcile_cpu_workers(1)
+
+        assert result == {"added": 0, "removed": 0, "deferred": 1, "retiring": 2}
+        assert self._cpu(pool) == busy
+        assert pool._pending_removals["CPU"] == 2
+
+    def test_reconcile_unchanged_count_is_noop(self):
+        pool = WorkerPool(gpu_workers=0, cpu_workers=3, selected_gpus=[])
+        before = self._cpu(pool)
+        before[0].is_busy = True
+
+        result = pool.reconcile_cpu_workers(3)
+
+        assert result == {"added": 0, "removed": 0, "deferred": 0, "retiring": 0}
+        assert self._cpu(pool) == before
+        assert pool._pending_removals["CPU"] == 0
+
+    def test_reconcile_to_zero_removes_all_cpu_workers(self):
+        pool = WorkerPool(gpu_workers=1, cpu_workers=2, selected_gpus=self.GPU)
+        gpu_before = [w for w in pool.workers if w.worker_type == "GPU"]
+
+        result = pool.reconcile_cpu_workers(0)
+
+        assert result == {"added": 0, "removed": 2, "deferred": 0, "retiring": 0}
+        assert self._cpu(pool) == []
+        assert [w for w in pool.workers if w.worker_type == "GPU"] == gpu_before
+
+    def test_reconcile_leaves_gpu_pending_removals_alone(self):
+        pool = WorkerPool(gpu_workers=2, cpu_workers=1, selected_gpus=self.GPU)
+        pool._pending_removals["GPU"] = 1
+
+        pool.reconcile_cpu_workers(2)
+
+        assert pool._pending_removals["GPU"] == 1
+        assert len([w for w in pool.workers if w.worker_type == "GPU"]) == 2
+
 
 class TestWorkerProgressCount:
     """Test that GPU→CPU fallback does not double-count completed_tasks (H2)."""
@@ -1545,7 +1749,7 @@ class TestBuildSelectedGpus:
         from media_preview_generator.web.routes import _helpers
 
         _helpers._gpu_cache["result"] = []
-        monkeypatch.setattr(_helpers, "_ensure_gpu_cache", lambda: None)
+        monkeypatch.setattr(_helpers, "_ensure_gpu_cache", lambda: _helpers._gpu_cache["result"])
         yield
         _helpers._gpu_cache["result"] = None
 

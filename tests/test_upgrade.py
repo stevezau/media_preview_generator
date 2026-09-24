@@ -275,6 +275,67 @@ class TestEnvVarMigrationExtended:
         assert "SORT_BY" not in all_keys
 
 
+@pytest.fixture
+def warnings_logged():
+    """Messages logged at WARNING or above while the test runs."""
+    from loguru import logger
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+    yield messages
+    logger.remove(handler_id)
+
+
+class TestSeededCpuThreadsClamped:
+    """Seeding cpu_threads keeps it within 0-MAX_CPU_THREADS; load_config refuses anything outside."""
+
+    @pytest.mark.parametrize(("raw", "saved"), [("40", 32), ("-3", 0)], ids=["above-max", "negative"])
+    def test_env_seed_outside_range_is_clamped_and_logged(
+        self, settings_manager, monkeypatch, warnings_logged, raw, saved
+    ):
+        from media_preview_generator.upgrade import _migrate_env_vars
+
+        monkeypatch.setenv("CPU_THREADS", raw)
+        _migrate_env_vars(settings_manager)
+
+        assert settings_manager.get("cpu_threads") == saved
+        assert warnings_logged == [
+            f"The CPU_THREADS environment variable asks for {raw} CPU workers, outside 0-32. Saved {saved} instead."
+        ]
+
+    def test_env_seed_at_the_maximum_is_kept(self, settings_manager, monkeypatch, warnings_logged):
+        from media_preview_generator.upgrade import _migrate_env_vars
+
+        monkeypatch.setenv("CPU_THREADS", "32")
+        _migrate_env_vars(settings_manager)
+
+        assert settings_manager.get("cpu_threads") == 32
+        assert warnings_logged == []
+
+    def test_v5_fold_above_max_is_clamped_and_logged(self, settings_manager, warnings_logged):
+        from media_preview_generator.upgrade import _migrate_to_v5
+
+        settings_manager.apply_changes({"cpu_threads": 1, "cpu_fallback_threads": 40})
+        notes = _migrate_to_v5(settings_manager)
+
+        assert settings_manager.get("cpu_threads") == 32
+        assert settings_manager.get("cpu_fallback_threads") is None
+        assert "v5: folded cpu_fallback_threads=40 into cpu_threads=32 (was 1)" in notes
+        assert warnings_logged == [
+            "The old cpu_fallback_threads setting asks for 40 CPU workers, outside 0-32. Saved 32 instead."
+        ]
+
+    def test_v5_fold_within_range_is_kept(self, settings_manager, warnings_logged):
+        from media_preview_generator.upgrade import _migrate_to_v5
+
+        settings_manager.apply_changes({"cpu_threads": 1, "cpu_fallback_threads": 8})
+        notes = _migrate_to_v5(settings_manager)
+
+        assert settings_manager.get("cpu_threads") == 8
+        assert "v5: folded cpu_fallback_threads=8 into cpu_threads=8 (was 1)" in notes
+        assert warnings_logged == []
+
+
 class TestBuildGpuConfigFromEnv:
     """Tests for _build_gpu_config_from_env helper."""
 

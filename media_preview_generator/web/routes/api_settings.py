@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from flask import jsonify, request
 from loguru import logger
 
-from ...config import validate_processing_thread_totals
+from ...config import MAX_CPU_THREADS, validate_processing_thread_totals
 from ...markers.settings import mask_global
 from ...utils import is_docker_environment
 from ..auth import api_token_required, setup_or_auth_required
@@ -61,14 +61,19 @@ def _reconcile_live_gpu_workers(settings) -> None:
     newly enabled GPUs are added without requiring a restart.
     """
     try:
+        from ._helpers import _ensure_gpu_cache
         from .api_jobs import _get_shared_worker_pool
         from .job_runner import _build_selected_gpus
 
         pool = _get_shared_worker_pool()
         if pool is None:
             return
-        new_selected = _build_selected_gpus(settings)
-        pool.reconcile_gpu_workers(new_selected)
+        # Detect GPUs (slow the first time) before taking the lock, and use that list under it: detection never
+        # runs while the lock is held. Then read gpu_config and resize under the lock, the same way the CPU count
+        # is handled, so a concurrent save can't be undone by this one's stale config.
+        detected_gpus = _ensure_gpu_cache()
+        with settings.locked():
+            pool.reconcile_gpu_workers(_build_selected_gpus(settings, detected=detected_gpus))
     except Exception:
         logger.warning(
             "Could not reconcile the live worker pool with the new GPU settings. "
@@ -77,6 +82,38 @@ def _reconcile_live_gpu_workers(settings) -> None:
             "See the traceback below for the underlying cause.",
             exc_info=True,
         )
+
+
+def _reconcile_live_cpu_workers(settings) -> int:
+    """Sync the live WorkerPool's CPU workers with the current cpu_threads.
+
+    After cpu_threads is persisted, resize the running pool so the new
+    count applies without a restart. Busy workers finish their current
+    task before they retire.
+
+    Returns:
+        How many busy CPU workers are still due to retire; 0 when there is no pool yet or the resize failed.
+    """
+    try:
+        from .api_jobs import _get_shared_worker_pool
+
+        pool = _get_shared_worker_pool()
+        if pool is None:
+            return 0
+        # Read the saved count and resize under the settings lock, which every save takes: no save can land between
+        # the read and the resize, so the last hook to run leaves the pool at the last saved count. Only the pool's
+        # own lock is taken inside it; nothing holding that lock reads settings.
+        with settings.locked():
+            return pool.reconcile_cpu_workers(settings.cpu_threads)["retiring"]
+    except Exception:
+        logger.warning(
+            "Could not resize the live worker pool to the new CPU worker count. "
+            "The setting was saved, but you may need to restart the app for it to take effect. "
+            "Currently-running jobs are unaffected. "
+            "See the traceback below for the underlying cause.",
+            exc_info=True,
+        )
+        return 0
 
 
 def _auto_pause_if_needed(settings) -> None:
@@ -515,6 +552,13 @@ def _validate_and_coerce_settings_updates(
             except (TypeError, ValueError):
                 return None, (jsonify({"error": f"{field} must be an integer"}), 400)
 
+    # load_config rejects a CPU count above MAX_CPU_THREADS, so saving one would stop every later job from starting.
+    if "cpu_threads" in updates and not 0 <= updates["cpu_threads"] <= MAX_CPU_THREADS:
+        return None, (
+            jsonify({"error": f"cpu_threads must be between 0 and {MAX_CPU_THREADS} (got {updates['cpu_threads']})"}),
+            400,
+        )
+
     # Clamp concurrency cap to a sane range. Mirrors the GET-side
     # clamp (line ~307) and the gate's internal clamp (JobGate._cap)
     # so all three agree. Reject out-of-range values rather than
@@ -645,16 +689,17 @@ def _reregister_plex_webhooks_after_secret_rotation(settings) -> None:
         )
 
 
-def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str]) -> str:
+def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str]) -> dict:
     """Run side-effects that fire after settings.update() persists the change.
 
     Hooks (in apply order):
 
-    1. **GPU worker reconciliation** — if ``gpu_config`` changed, scale the
-       live worker pool to match.
+    1. **Worker reconciliation** — if ``gpu_config`` or ``cpu_threads``
+       changed, scale the live worker pool to match. A ``cpu_threads`` save
+       reports how many busy CPU workers will stop after their current file.
     2. **Worker-count gate** — if total processing threads dropped to zero,
        auto-pause; if they rose above zero and we were paused, auto-resume.
-       Returns the warning string for the response.
+       Reports the warning for the response.
     3. **Library cache bust** — if any Plex connection field changed (URL,
        token, verify_ssl), invalidate the cached library list. Uses
        ``incoming_field_keys`` rather than ``updates`` so the hook still
@@ -669,11 +714,15 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
        BIF writer, Jellyfin trickplay registration, Emby sidecar naming, and
        BIF viewer all use the new value immediately.
 
-    Returns ``thread_warning`` (empty string when worker counts are healthy)
-    so the route can include it in the JSON response.
+    Returns:
+        Extra fields for the JSON response: ``warning`` when no workers are
+        configured, and ``cpu_workers_retiring`` when ``cpu_threads`` was saved.
     """
+    response_fields: dict = {}
     if "gpu_config" in updates:
         _reconcile_live_gpu_workers(settings)
+    if "cpu_threads" in updates:
+        response_fields["cpu_workers_retiring"] = _reconcile_live_cpu_workers(settings)
 
     ok, thread_warning = validate_processing_thread_totals(settings.get_all())
     if not ok:
@@ -734,7 +783,9 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
                 new_interval,
             )
 
-    return thread_warning
+    if thread_warning:
+        response_fields["warning"] = thread_warning
+    return response_fields
 
 
 @api.route("/settings", methods=["POST"])
@@ -762,15 +813,11 @@ def save_settings():
     if new_media_servers is not None:
         updates["media_servers"] = new_media_servers
 
-    thread_warning = ""
+    result = {"success": True}
     if updates:
         settings.update(updates)
         logger.info("Settings updated: {}", list(updates.keys()))
-        thread_warning = _apply_post_save_hooks(settings, updates, incoming_field_keys)
-
-    result = {"success": True}
-    if thread_warning:
-        result["warning"] = thread_warning
+        result.update(_apply_post_save_hooks(settings, updates, incoming_field_keys))
     return jsonify(result)
 
 

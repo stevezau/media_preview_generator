@@ -7,7 +7,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 
@@ -305,7 +305,7 @@ def env(monkeypatch):
     registry = MagicMock()
     monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
     gpus = [("nvidia", "/dev/nvidia0", {"workers": 1})]
-    monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings: gpus)
+    monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings, **kw: gpus)
     ctx = MagicMock()
     ctx.take_budget_rechecks.return_value = ([], None)
     ctx.take_missing.return_value = 0
@@ -392,6 +392,70 @@ class TestRun:
         env.dispatcher.submit_items.side_effect = lambda **kw: order.append("submit") or env.tracker
         self._run()
         assert order == [("pool", "j1", env.dispatcher.worker_pool), "submit"]
+
+    def test_the_shared_pool_is_resized_to_the_saved_cpu_count_before_items_go_in(self, env):
+        # The job's config was read before the files were listed; a CPU count saved in between, while no pool
+        # existed yet, only reaches the pool here. It runs after the pool is registered, so a save that lands
+        # later finds the pool itself.
+        env.sm.cpu_threads = 4
+        order = []
+        env.jm.set_active_worker_pool.side_effect = lambda job_id, pool: order.append("pool")
+        env.dispatcher.worker_pool.reconcile_cpu_workers.side_effect = lambda n: order.append(("cpu", n))
+        env.dispatcher.submit_items.side_effect = lambda **kw: order.append("submit") or env.tracker
+        self._run()
+        assert order == ["pool", ("cpu", 4), "submit"]
+
+    def test_the_saved_cpu_count_is_read_and_applied_under_the_settings_lock(self, env):
+        # A save landing between the read and the resize would otherwise be undone by this job's stale count, so
+        # the read itself must come after the lock is taken, not just the resize.
+        order = []
+        type(env.sm).cpu_threads = PropertyMock(side_effect=lambda: order.append("read") or 4)
+        env.sm.locked.return_value.__enter__.side_effect = lambda *a: order.append("lock")
+        env.sm.locked.return_value.__exit__.side_effect = lambda *a: order.append("unlock")
+        env.dispatcher.worker_pool.reconcile_cpu_workers.side_effect = lambda n: order.append(("cpu", n))
+        self._run()
+        assert order == ["lock", "read", ("cpu", 4), "unlock"]
+
+    def test_the_saved_gpu_config_is_read_and_applied_under_the_settings_lock(self, env, monkeypatch):
+        # The GPU selection passed to get_or_create_dispatcher is read before the lock; it's read again, and
+        # applied, under it so a save landing in between isn't undone. GPUs are detected once, before the lock,
+        # and that list is what both reads use: detection never runs under the lock.
+        env.sm.cpu_threads = 2
+        order = []
+        detected = [{"type": "nvidia", "device": "/dev/nvidia0"}]
+
+        def ensure_gpu_cache():
+            order.append("detect")
+            return detected
+
+        def build_selected_gpus(settings, detected=None):
+            order.append(("gpus read", detected))
+            return env.gpus
+
+        monkeypatch.setattr(job_runner, "_ensure_gpu_cache", ensure_gpu_cache)
+        monkeypatch.setattr(job_runner, "_build_selected_gpus", build_selected_gpus)
+        env.sm.locked.return_value.__enter__.side_effect = lambda *a: order.append("lock")
+        env.sm.locked.return_value.__exit__.side_effect = lambda *a: order.append("unlock")
+        env.dispatcher.worker_pool.reconcile_gpu_workers.side_effect = lambda gpus: order.append(("gpu", gpus))
+        env.dispatcher.worker_pool.reconcile_cpu_workers.side_effect = lambda n: order.append(("cpu", n))
+        self._run()
+        assert order == [
+            "detect",
+            ("gpus read", detected),
+            "lock",
+            ("gpus read", detected),
+            ("gpu", env.gpus),
+            ("cpu", 2),
+            "unlock",
+        ]
+
+    def test_an_empty_gpu_selection_leaves_gpu_workers_alone_and_still_resizes_cpu(self, env, monkeypatch):
+        # No enabled GPU at job start (or none detected) must not strip the pool's GPU workers here.
+        env.sm.cpu_threads = 3
+        monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings, **kw: [])
+        self._run()
+        env.dispatcher.worker_pool.reconcile_gpu_workers.assert_not_called()
+        env.dispatcher.worker_pool.reconcile_cpu_workers.assert_called_once_with(3)
 
     @pytest.mark.parametrize(("force", "expected"), [(True, True), (False, False), (None, False), ("", False)])
     def test_force_from_job_config_reaches_the_pipeline_context(self, env, force, expected):

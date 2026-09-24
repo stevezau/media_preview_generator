@@ -1173,6 +1173,61 @@ class TestLoadConfig:
         assert config.gpu_threads == 0
         assert config.cpu_threads == 0
 
+    @pytest.mark.parametrize("over", [0, 1], ids=["at-maximum", "one-above"])
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    @patch("os.path.exists", return_value=True)
+    @patch("os.path.isdir", return_value=True)
+    @patch("os.listdir")
+    @patch("os.access", return_value=True)
+    @patch("os.statvfs", create=True)
+    @patch("media_preview_generator.logging_config.setup_logging")
+    def test_load_config_cpu_threads_limit_is_max_cpu_threads(
+        self,
+        mock_logging,
+        mock_statvfs,
+        mock_access,
+        mock_listdir,
+        mock_isdir,
+        mock_exists,
+        mock_run,
+        mock_which,
+        over,
+    ):
+        """The saved-count limit the web routes enforce is the one load_config enforces, so a saved maximum loads."""
+        from media_preview_generator.config import MAX_CPU_THREADS, ConfigValidationError, clear_config_cache
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        mock_which.return_value = "/usr/bin/ffmpeg"
+        mock_run.return_value = MagicMock(returncode=0, stdout="ffmpeg version 7.0.0")
+
+        def mock_listdir_fn(path):
+            if "tmp" in path or path.startswith("/tmp"):
+                return []
+            if path.endswith("/localhost") or ("/localhost" in path and not path.endswith("Media")):
+                return list("0123456789abcdef")
+            if path.endswith("/Media"):
+                return ["localhost"]
+            return ["Cache", "Media", "Metadata", "Plug-ins", "Logs"]
+
+        mock_listdir.side_effect = mock_listdir_fn
+        mock_statvfs.return_value = MagicMock(f_frsize=4096, f_bavail=1024 * 1024 * 250)
+        get_settings_manager().apply_changes(
+            {
+                "plex_url": "http://localhost:32400",
+                "plex_token": "test_token",
+                "plex_config_folder": "/config/plex/Library/Application Support/Plex Media Server",
+                "cpu_threads": MAX_CPU_THREADS + over,
+            }
+        )
+        clear_config_cache()
+
+        if over:
+            with pytest.raises(ConfigValidationError):
+                load_config()
+        else:
+            assert load_config().cpu_threads == MAX_CPU_THREADS
+
     @patch("shutil.which")
     @patch("subprocess.run")
     @patch("os.path.exists")
