@@ -12,10 +12,12 @@ import numpy as np
 
 from media_preview_generator.markers.audio.fingerprint import ALGORITHM, compute_fingerprint, window_s
 from media_preview_generator.markers.probe import Chapter, MediaProbe, probe_media
+from media_preview_generator.markers.speed import playback_speed
 
 
 class FingerprintCache:
-    """``points(path)``: the app's own fingerprint of a file, computed once per file identity."""
+    """``points(path)``: the app's own fingerprint of a file, computed once per file identity (``retimed``: one made
+    at another speed, once per factor); ``speed(path)``: its playback speed, read once per file identity."""
 
     def __init__(self, root: Path, *, ffmpeg: str, ffprobe: str) -> None:
         """Create the cache.
@@ -35,19 +37,49 @@ class FingerprintCache:
         """The cache folder."""
         return self._root
 
-    def points(self, path: str) -> np.ndarray:
-        """The file's fingerprint (spec window and algorithm), from the cache when the file is unchanged."""
+    def points(self, path: str, retime: float | None = None) -> np.ndarray:
+        """The file's fingerprint (spec window and algorithm), from the cache when the file is unchanged.
+
+        Args:
+            path: Media file (only read).
+            retime: Its audio retimed by this factor (``fingerprint.fingerprint_command``), None for its own speed.
+
+        Returns:
+            The points.
+        """
         st = os.stat(path)
         duration_ms = probe_media(path, ffprobe=self._ffprobe).duration_ms
         if not duration_ms:
             raise ValueError(f"no duration for {os.path.basename(path)}")
         key = f"{path}|{st.st_size}|{st.st_mtime_ns}|{window_s(duration_ms):.3f}|{ALGORITHM}"
+        if retime is not None:
+            key += f"|retime {retime:.6f}"
         cached = self._root / (hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".npy")
         if cached.exists():
             return np.load(cached)
-        points = compute_fingerprint(path, duration_ms, ffmpeg=self._ffmpeg)
+        points = compute_fingerprint(path, duration_ms, ffmpeg=self._ffmpeg, retime=retime)
         np.save(cached, points)
         return points
+
+    def retimed(self, path: str, retime: float) -> np.ndarray:
+        """The file's fingerprint with its audio retimed by ``retime`` (:meth:`points`)."""
+        return self.points(path, retime)
+
+    def speed(self, path: str) -> float | None:
+        """The file's playback speed (``speed.playback_speed`` of its video frame rate), cached per file identity."""
+        return playback_speed(self.frame_rate(path))
+
+    def frame_rate(self, path: str) -> float | None:
+        """The file's probed video frame rate (``probe.MediaProbe.frame_rate``), cached per file identity."""
+        st = os.stat(path)
+        key = f"{path}|{st.st_size}|{st.st_mtime_ns}|frame rate"
+        cached = self._root / "rates" / (hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".json")
+        if cached.exists():
+            return json.loads(cached.read_text())["frame_rate"]
+        frame_rate = probe_media(path, ffprobe=self._ffprobe).frame_rate
+        cached.parent.mkdir(exist_ok=True)
+        cached.write_text(json.dumps({"frame_rate": frame_rate}))
+        return frame_rate
 
 
 class ProbeCache:

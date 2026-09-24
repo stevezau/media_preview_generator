@@ -7,6 +7,7 @@ unavailable rather than failing every episode.
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
 # One name for the window, defined beside the season-pair queries that read it (the store can't import this module).
 WINDOW = SEASON_PAIR_WINDOW
 ALGORITHM = 1
+# A retimed fingerprint's audio is resampled to this rate and then declared to run at this rate times the retime factor,
+# so it plays that much faster or slower, pitch with it: the exact inverse of a PAL speed-up (``markers.speed``). A
+# pitch-keeping stretch (atempo) matched none of Bones season 5's 85 cross-speed pairs; this matched all 85.
+RETIME_BASE_RATE = 48_000
+# Retime factors outside this range are no PAL speed-up (a bug, not a file): ffmpeg is never started with one.
+MIN_RETIME, MAX_RETIME = 0.5, 2.0
 MAX_WINDOW_S = 900.0
 WINDOW_FRACTION = 0.35
 FFMPEG_THREADS = 2
@@ -183,12 +190,39 @@ def chromaprint_status(configured: str | None) -> tuple[str | None, str]:
     return None, "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found"
 
 
-def fingerprint_command(ffmpeg: str, path: str, length_s: float) -> list[str]:
-    """The spec §5.3 command: raw algorithm-1 chromaprint of the first ``length_s`` seconds, stereo."""
+def fingerprint_window(retime: float | None) -> str:
+    """The ``fingerprints`` window a fingerprint is cached under: ``WINDOW`` for the file's own audio, and one per
+    retime factor for its audio retimed to another speed (a file has one own speed, so the factor names the group's)."""
+    return WINDOW if retime is None else f"{WINDOW}@{retime:.6f}"
+
+
+def fingerprint_command(ffmpeg: str, path: str, length_s: float, retime: float | None = None) -> list[str]:
+    """The spec §5.3 command: raw algorithm-1 chromaprint of the first ``length_s`` seconds, stereo.
+
+    Args:
+        ffmpeg: An ffmpeg with chromaprint.
+        path: Media file.
+        length_s: Seconds of the file fingerprinted from its start.
+        retime: The file's own seconds per second of its season group's speed (``speed.retime_factor``), None for its
+            own speed. The audio then plays at the group's speed, so a point ``i`` of the fingerprint is ``i * POINT_S
+            * retime`` seconds into the file.
+
+    Returns:
+        The command.
+
+    Raises:
+        FingerprintError: ``retime`` isn't a speed change between half and double (the two it is made for are 4.3 %).
+    """
+    if retime is not None and not (math.isfinite(retime) and MIN_RETIME < retime < MAX_RETIME):
+        raise FingerprintError(f"Not fingerprinting {os.path.basename(path)} with retime {retime}")
+    speed = (
+        [] if retime is None else ["-af", f"aresample={RETIME_BASE_RATE},asetrate={round(RETIME_BASE_RATE * retime)}"]
+    )
     return [
         ffmpeg, "-nostdin", "-v", "error", "-threads", str(FFMPEG_THREADS),
         "-ss", "0", "-t", f"{length_s:.3f}", "-i", path,
-        "-vn", "-sn", "-dn", "-ac", "2", "-f", "chromaprint", "-algorithm", str(ALGORITHM), "-fp_format", "raw", "-",
+        "-vn", "-sn", "-dn", "-ac", "2", *speed,
+        "-f", "chromaprint", "-algorithm", str(ALGORITHM), "-fp_format", "raw", "-",
     ]  # fmt: skip
 
 
@@ -199,6 +233,7 @@ def compute_fingerprint(
     ffmpeg: str,
     cancel_check: Callable[[], bool] | None = None,
     timeout_s: float = 300.0,
+    retime: float | None = None,
 ) -> np.ndarray:
     """Run ffmpeg and return the fingerprint points.
 
@@ -209,6 +244,7 @@ def compute_fingerprint(
         cancel_check: True once the job is cancelled; ffmpeg is killed.
         timeout_s: Hard limit (a hung network mount must not hold a worker): the call returns within it plus
             ``KILL_WAIT_S`` and one poll.
+        retime: Fingerprint the audio retimed to another speed (:func:`fingerprint_command`); None for its own.
 
     Returns:
         uint32 points (little-endian); empty for a file without an audio stream.
@@ -217,7 +253,7 @@ def compute_fingerprint(
         FingerprintError: ffmpeg failed, timed out or the job was cancelled.
     """
     name = os.path.basename(path)
-    command = fingerprint_command(ffmpeg, path, window_s(duration_ms))
+    command = fingerprint_command(ffmpeg, path, window_s(duration_ms), retime)
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.monotonic() + timeout_s
     while True:
@@ -267,25 +303,28 @@ def points_of(stored: StoredFingerprint) -> np.ndarray:
     return np.frombuffer(stored.points, dtype="<u4").copy()
 
 
-def cached_fingerprint(store: MarkerStore, rec: FileRecord) -> StoredFingerprint | None:
+def cached_fingerprint(store: MarkerStore, rec: FileRecord, retime: float | None = None) -> StoredFingerprint | None:
     """A file's cached fingerprint, when it was made the way this build makes it (algorithm and window length).
 
     Args:
         store: The markers store.
         rec: The file's record.
+        retime: The retime factor of the fingerprint wanted (:func:`fingerprint_command`), None for the file's own.
 
     Returns:
         The fingerprint, or None (never made, or made another way: it is computed again).
     """
     if not rec.duration_ms:
         return None
-    return store.get_fingerprint(rec.id, WINDOW, algorithm=ALGORITHM, length_s=window_s(rec.duration_ms))
+    return store.get_fingerprint(
+        rec.id, fingerprint_window(retime), algorithm=ALGORITHM, length_s=window_s(rec.duration_ms)
+    )
 
 
-def has_cached_fingerprint(store: MarkerStore, rec: FileRecord) -> bool:
+def has_cached_fingerprint(store: MarkerStore, rec: FileRecord, retime: float | None = None) -> bool:
     """Whether :func:`cached_fingerprint` finds one, without reading its points."""
     return bool(rec.duration_ms) and store.has_fingerprint(
-        rec.id, WINDOW, algorithm=ALGORITHM, length_s=window_s(rec.duration_ms)
+        rec.id, fingerprint_window(retime), algorithm=ALGORITHM, length_s=window_s(rec.duration_ms)
     )
 
 
@@ -297,6 +336,7 @@ def ensure_fingerprint(
     cancel_check: Callable[[], bool] | None = None,
     skip: Callable[[], bool] | None = None,
     on_failure: Callable[[], None] | None = None,
+    retime: float | None = None,
 ) -> np.ndarray | None:
     """A file's fingerprint from the cache, computing and storing it when missing.
 
@@ -311,6 +351,8 @@ def ensure_fingerprint(
             waited on the lock while another caller's ffmpeg failed see that failure here.
         on_failure: Called when ffmpeg fails (not when the job was cancelled, nor when earlier ffmpegs are stalled),
             before the lock is released, so a ``skip`` of a caller waiting on the lock sees what it records.
+        retime: The file's audio retimed to its season group's speed (:func:`fingerprint_command`), cached apart from
+            its own; None for its own.
 
     Returns:
         The points, or None when the file's row changed identity while ffmpeg ran (nothing stored).
@@ -324,7 +366,7 @@ def ensure_fingerprint(
     with _FILE_LOCKS.hold(rec.id):
         if not rec.duration_ms:
             raise FingerprintError(f"No known duration for {name}")
-        stored = cached_fingerprint(store, rec)
+        stored = cached_fingerprint(store, rec, retime)
         if stored is not None:
             return points_of(stored)
         if skip is not None and skip():
@@ -339,7 +381,7 @@ def ensure_fingerprint(
                 # takes it at once: only a check here sees it.
                 _raise_if_stalled(name)
                 points = compute_fingerprint(
-                    rec.canonical_path, rec.duration_ms, ffmpeg=ffmpeg, cancel_check=cancel_check
+                    rec.canonical_path, rec.duration_ms, ffmpeg=ffmpeg, cancel_check=cancel_check, retime=retime
                 )
             finally:
                 _PARALLEL.release()
@@ -353,7 +395,7 @@ def ensure_fingerprint(
             rec.id,
             size=rec.size,
             mtime_ns=rec.mtime_ns,
-            window=WINDOW,
+            window=fingerprint_window(retime),
             start_s=0.0,
             length_s=window_s(rec.duration_ms),
             algorithm=ALGORITHM,

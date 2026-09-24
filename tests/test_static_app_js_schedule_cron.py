@@ -180,6 +180,9 @@ function loadSchedulesContext(formValues) {
         document: docStub,
         window: { _scheduleQuietHoursOverlap: undefined, appConfirm: async () => true },
         bootstrap: { Modal: class { static getInstance() { return { hide: () => {} }; } show() {} } },
+        // app.js's dialog helpers, which schedule_modal.js loads after.
+        modalOpening: () => null,
+        hideModalSafely: () => {},
         showToast: function (title, msg, level) {
             ctx.__toasts.push({ title, msg, level });
         },

@@ -22,7 +22,7 @@ from typing import NamedTuple
 from loguru import logger
 
 from .decide import DecisionStatus, TypeDecision
-from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, Source
+from .models import SERVER_SOURCES, STALE_SERVER_MARKERS_DETAIL, Candidate, FileIdentity, Marker, MarkerType, Source
 from .outcomes import VERSIONS_WAITING, is_kept_own
 from .sources.server_markers import importer_database
 
@@ -205,6 +205,15 @@ _SCHEMA = (
         file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
         limit_ms INTEGER,
         decided_at TEXT NOT NULL)""",
+    # A file's video frame rate as ffprobe read it (NULL: probed, no rate: no video stream, or none it reports), with
+    # the identity it was read from: a row whose identity isn't the file's counts as unread. Season audio matches 25 fps
+    # and film-rate releases at one speed, and decide reads online times on the file's clock by it (``markers.speed``).
+    # A separate table, so a markers.db from before it only gains it.
+    """CREATE TABLE IF NOT EXISTS frame_rates (
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        frame_rate REAL)""",
     # A file another episode's season step couldn't probe, with the identity it had then: it isn't probed again (up to
     # a 60 s ffprobe on a checking thread) until that identity changes or the entry is old. Not tied to a file row: an
     # unreadable file never gets one.
@@ -644,9 +653,9 @@ class MarkerStore:
         """Insert or refresh a file; a size/mtime change invalidates derived data (locked markers survive).
 
         A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind, season pairs
-        and end-picture checks, detector runs and failures, the season intro-chapter limit, Check servers' re-read
-        counts and every server's ``publish_basis``, so the next run offers the markers to every server again
-        even when an in-place replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin
+        and end-picture checks, detector runs and failures, the season intro-chapter limit, the frame rate, Check
+        servers' re-read counts and every server's ``publish_basis``, so the next run offers the markers to every server
+        again even when an in-place replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin
         serves nothing for a file whose size changed until it is sent again, and its publisher sends it when the
         stored size differs. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to
         replace. ``duration_ms=None`` on a changed identity stores NULL, since the old duration can no longer be
@@ -688,6 +697,7 @@ class MarkerStore:
                         "detector_failures",
                         "intro_chapter_limits",
                         "server_marker_rereads",
+                        "frame_rates",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
                     for table in ("season_pairs", "season_end_pictures"):
@@ -763,6 +773,34 @@ class MarkerStore:
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
+    def files_decided_by_online_and_server_markers(self) -> list[str]:
+        """Canonical paths of the files with an unlocked intro or credits decided by an IntroDB or TheIntroDB answer
+        together with a server's own marker, and by no source that reads the file (chapters, season audio, credit
+        text), sorted; files missing from disk are left out. Settings v18 decides them again: on a 25 fps file the
+        pair can be online times from the film-rate release and a marker made for an earlier file of the item. On that
+        run the server's answer is read again and flagged when Plex says so, or, from a Plex server that shows our
+        markers now (so can't be read again), stops counting."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT f.canonical_path FROM markers m JOIN files f ON f.id = m.file_id "
+                "WHERE m.type IN (?, ?) AND m.locked=0 AND f.missing_since IS NULL "
+                "AND EXISTS (SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value = ?) "
+                "AND EXISTS (SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN (?, ?)) "
+                "AND NOT EXISTS (SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN (?, ?, ?)) "
+                "ORDER BY f.canonical_path",
+                (
+                    MarkerType.INTRO.value,
+                    MarkerType.CREDITS.value,
+                    Source.SERVER_MARKERS.value,
+                    Source.INTRODB.value,
+                    Source.THEINTRODB.value,
+                    Source.CHAPTERS.value,
+                    Source.SEASON_AUDIO.value,
+                    Source.CREDITS_TEXT.value,
+                ),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
+
     def files_with_old_empty_lookups(self, sources: Iterable[Source], before: datetime) -> list[str]:
         """Canonical paths of the files whose stored lookup of any of these online sources found nothing ("no entry")
         and was made before ``before``, sorted; files marked missing from disk are left out.
@@ -821,8 +859,9 @@ class MarkerStore:
         season_key: str,
         chapters: list[Candidate],
         chapter_version: int,
+        frame_rate: float | None,
     ) -> FileRecord | None:
-        """Record a file another file's season step probed, with its chapters, in one transaction.
+        """Record a file another file's season step probed, with its chapters and frame rate, in one transaction.
 
         A file the store never saw is added. A known file is refreshed only while its row still has the identity that
         was probed: the season step never changes another file's identity, which only that file's own run (holding its
@@ -834,6 +873,7 @@ class MarkerStore:
             season_key: The season folder, kept when the row already has one.
             chapters: Its chapter candidates.
             chapter_version: The chapter rules version that made them.
+            frame_rate: Its video frame rate (None: the probe found none).
 
         Returns:
             The record, or None when the row has another identity now.
@@ -858,6 +898,7 @@ class MarkerStore:
                     (duration_ms, season_key, now, file_id),
                 )
             self._write_evidence(conn, file_id, Source.CHAPTERS, chapters, "", "", chapter_version, (), now)
+            self._write_frame_rate(conn, file_id, (identity.size, identity.mtime_ns), frame_rate)
             new_row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
         return self._file(new_row)
 
@@ -992,7 +1033,7 @@ class MarkerStore:
                     c.start_ms,
                     c.end_ms,
                     c.confidence,
-                    detail,
+                    STALE_SERVER_MARKERS_DETAIL if c.stale else detail,
                     now,
                 ),
             )
@@ -1042,7 +1083,8 @@ class MarkerStore:
         A candidate's ``origin`` is rebuilt from the row's own ``label`` (e.g. a chapter title) when set,
         falling back to the replace/lookup key in ``origin`` -- the two differ for chapters, which share one
         lookup key ("") across many differently-titled candidates. An importer plugin's copy gets ``copied_from``
-        from the plugin names its row's detail carries, so rows stored before the database was read get it too.
+        from the plugin names its row's detail carries, so rows stored before the database was read get it too; a
+        server's marker made for an earlier file gets ``stale`` from its detail the same way.
         """
         return [
             Candidate(
@@ -1053,6 +1095,7 @@ class MarkerStore:
                 r["confidence"] if r["confidence"] is not None else 1.0,
                 r["label"] or r["origin"],
                 importer_database(r["detail"]) if r["source"] == Source.SERVER_MARKERS_IMPORTED.value else "",
+                r["detail"] == STALE_SERVER_MARKERS_DETAIL,
             )
             for r in self._evidence_query(file_id)
             if r["type"] is not None and r["start_ms"] is not None
@@ -1678,6 +1721,52 @@ class MarkerStore:
         with self._lock:
             r = self._conn.execute("SELECT limit_ms FROM intro_chapter_limits WHERE file_id=?", (file_id,)).fetchone()
         return (False, None) if r is None else (True, r["limit_ms"])
+
+    def get_frame_rate(self, file_id: int) -> tuple[bool, float | None]:
+        """A file's video frame rate as ffprobe read it from the file as its row is now.
+
+        Returns:
+            ``(stored, frame_rate)``: whether the file was probed for it with its current identity, and the rate (None:
+            it has none).
+        """
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT r.frame_rate FROM frame_rates r JOIN files f ON f.id = r.file_id "
+                "AND f.size = r.size AND f.mtime_ns = r.mtime_ns WHERE r.file_id=?",
+                (file_id,),
+            ).fetchone()
+        return (False, None) if r is None else (True, r["frame_rate"])
+
+    def set_frame_rate(self, file_id: int, frame_rate: float | None, *, identity: tuple[int, int]) -> bool:
+        """Store a file's video frame rate as ffprobe read it. A rate other than the stored one (a first one
+        included) drops the file's cached season pairs: they may have been matched at another speed.
+
+        Args:
+            file_id: The file.
+            frame_rate: The rate, None when it has none.
+            identity: ``(size, mtime_ns)`` of the file as it was probed.
+
+        Returns:
+            False (nothing stored) when the file's row has another identity now: it was replaced while it was probed.
+        """
+        with self._tx() as conn:
+            row = conn.execute("SELECT size, mtime_ns FROM files WHERE id=?", (file_id,)).fetchone()
+            if row is None or (row["size"], row["mtime_ns"]) != tuple(identity):
+                return False
+            self._write_frame_rate(conn, file_id, tuple(identity), frame_rate)
+        return True
+
+    @staticmethod
+    def _write_frame_rate(
+        conn: sqlite3.Connection, file_id: int, identity: tuple[int, int], frame_rate: float | None
+    ) -> None:
+        old = conn.execute("SELECT size, mtime_ns, frame_rate FROM frame_rates WHERE file_id=?", (file_id,)).fetchone()
+        if old is None or (old["size"], old["mtime_ns"], old["frame_rate"]) != (*identity, frame_rate):
+            conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
+        conn.execute(
+            "INSERT OR REPLACE INTO frame_rates (file_id, size, mtime_ns, frame_rate) VALUES (?,?,?,?)",
+            (file_id, *identity, frame_rate),
+        )
 
     def set_intro_chapter_limit(self, file_id: int, limit_ms: int | None) -> None:
         """Record the season intro-chapter limit a file's decisions were just made with."""

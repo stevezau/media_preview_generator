@@ -1729,6 +1729,7 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. A batch never waits more than **10 minutes** from its first file, though: a steady stream of imports would otherwise hold it until the stream stopped. Files that arrive once that limit is reached start the next batch.
 4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3 and initial delay of 30 s; the delay setting scales every wait, so 60 s gives 2 m → 4 m → 10 m, and more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
+6. A file that a newer file has already replaced when its job runs isn't retried: Sonarr or Radarr imported the same episode or movie again under a new name, and the new file is in the same folder. The Files panel shows it as **Gone from disk**, and the newer file gets its own preview. Any other missing file is retried as usual.
 
 ### Prerequisites
 
@@ -2107,11 +2108,22 @@ re-detect still try it.
 
 A channel logo at the very start, or music under the cold open, repeats in every episode just like the theme does, so
 season audio passes over such a stretch: one in the first 2 seconds must last at least 10 seconds, every one needs
-about 8 seconds where the episodes' audio matches closely, and one starting in the first 30 seconds must end on the
-same picture in the episodes it repeats in. That check decodes 3 seconds of video from the episode and two others once,
+about 8 seconds where the episodes' audio matches closely (except one starting after the first 2 seconds that lasts
+30 seconds or more, or one after the first 30 seconds that lasts 10 seconds or more and that at least 2 other episodes
+share: a theme under dialogue matches only in patches), and one starting in the first 30 seconds must end on the same
+picture in the episodes it repeats in. An online database's intro that starts in the first 2 seconds and lasts under 10
+seconds (a streaming service's logo) is ignored for the same reason, and so is a server plugin's copy of one. That
+check decodes 3 seconds of video from the episode and two others once,
 on a worker (its GPU when it has one), and saves the answer. A show whose title card after the cold open lasts only a
 few seconds gets no intro, as with Plex's own detection. After updating, one job decides every intro that came from
 season audio again (a locked one is left alone) and takes any that no longer holds off your servers.
+
+A season can mix releases that play at slightly different speeds: European broadcasts and some web releases play the
+whole episode a little faster than the film release. Season audio notices this, matches those episodes at the speed
+of the rest of the season, then gives their intro in their own time. Online databases' times come from whichever
+release their users timed, so on such a file they are read at the file's speed only when that is what makes them
+agree with the file's own evidence. The published times are always the file's own. After updating, one job decides
+the episodes in **Needs review** again.
 
 Saved fingerprints take up to about 28 KB per episode. When an Intro & Credits job completes (except Season, retry and
 verify jobs), a cleanup starts in the background, at most once an hour. It looks for up to 2,000 fingerprinted files on
@@ -2211,11 +2223,23 @@ first time you turn it on for a Plex server:
   markers go to keeps its own and shows one: the row says **"Keeping Plex's credits"** and the Inspector **"Kept
   Plex's own marker"**. **Check servers** still watches that marker: once Plex no longer has it, or the server is
   switched to **Use ours**, it runs the file, which then reads it and writes ours.
-- Plex detects in a library only when its server setting (Settings → Library → *Generate intro / credits video
-  markers*) **and** the library's own setting (Edit library → Advanced → *Enable intro / credits detection*) are on.
-  With **Use ours**, **Servers → Edit → Setup Health** lists the Intro & Credits libraries where both are on, each
-  with a **Turn off** that switches off only that library's own setting. With **Keep Plex's** it doesn't warn. See
-  [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits).
+- **Keep Plex's** only keeps Plex's markers of a type that can be right for the file. When every one of them is
+  impossible — it starts or ends after the file does, or has no length — Plex hasn't really processed the file: the
+  file is read for that type and ours are written. Where on the file Plex put a marker is never second-guessed.
+- Plex keeps an item's markers when its file is replaced (a Sonarr or Radarr upgrade, say), so they can be the old
+  file's. A type counts as **made for an earlier file** when Plex's database has no record of detecting it on the file
+  it has now and its markers are older than that file. Such a type doesn't stop the file being read, and Plex's marker
+  isn't used as a second opinion. When the file gives an answer, ours replaces Plex's marker (row message e.g.
+  "Replaced Plex's intro: it was detected for an earlier file"); when it gives none, **Keep Plex's** keeps Plex's,
+  which is still the closest there is. The job log marks those markers **(made for an earlier file)**. When Plex's
+  database can't tell this time (busy, or an older Plex marker agent), every Plex marker counts as before and the next
+  run asks again.
+- **Don't turn off a library's own *Intro markers* / *Credits markers* setting** (Edit library → Advanced). While
+  it is off, Plex hides every skip marker of that type in the library, ours included, so nobody sees a skip button
+  there. **Servers → Edit → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
+  Plex detecting on its own, set its server-wide *Generate intro video markers* / *Generate credits video markers*
+  (Settings → Library) to **Never** instead: Setup Health offers **Set server-wide to Never** for that. With **Keep
+  Plex's** it doesn't suggest it. See [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits).
 - **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
   type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
   server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.
@@ -3066,7 +3090,8 @@ good", and nothing about markers is checked or contacted. The rows are read from
 tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
 another machine says nothing about Plex Pass until that is fixed.
 
-Only Plex's detection row has buttons, one **Turn off** per library. Every other row says what to change and where.
+Only Plex's library-settings and detection rows have buttons (**Turn on**, **Set server-wide to Never**). Every
+other row says what to change and where.
 
 ### Plex
 
@@ -3075,7 +3100,8 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
   until the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
 - **Plex hasn't made its marker list yet** (critical) / **Plex's marker list is ready**. Plex only serves markers
   attached to a database row it made itself, and this app never creates that row. Turn on Plex's own intro detection
-  for one library, play a file, then check again. You can turn Plex's detection back off afterwards.
+  for one library, play a file, then check again. Afterwards you can set Plex's server-wide detection back to Never;
+  leave the library's own setting on.
 - **Plex's library database isn't on this machine** (critical) / **…is on this machine**. Markers are written into
   Plex's database, which is only safe from the machine the file is on. Run this app on the Plex machine, or run the
   [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent
@@ -3087,20 +3113,26 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
   on both sides), **and this app are different versions** (the Intro & Credits tab says which to update), **is
   beside a different Plex** (check the address: markers would have gone into the wrong database). While it is red,
   no marker reaches this server, and its badge reads **Fix on the agent** instead of **Change in Plex UI**.
+- **TV Shows — skip buttons are hidden** (critical, one row per library, named after it) / **Plex shows skip buttons
+  in your Intro & Credits libraries**. Each library Intro & Credits goes to has its own *Intro markers* and *Credits
+  markers* setting in Plex (Edit library → Advanced; only TV libraries have the intro one). While one is off, Plex
+  hides every marker of that type in the library, its own and ours, so nobody sees a skip button there. Until it is
+  back on, the app doesn't use any of Plex's own markers on that library's items as a second opinion, of either type.
+  The row names the settings that are off, and **Turn on** switches them back on for that library, after a
+  confirmation. **Fix critical** turns them all on after showing the list.
+  - Under the last such row, a note offers **Set server-wide to Never**: it sets Plex's server-wide *Generate intro
+    video markers* / *Generate credits video markers* (Settings → Library) to Never for the types that are off. That
+    stops Plex's own detection and keeps skip buttons working. It isn't offered when Plex already never detects them,
+    or when the server is set to "Keep Plex's".
+  - A setting that can't be read (an older Plex, or Plex didn't answer) shows no row.
 - **Plex's own detection can replace your markers** (recommended). When Plex analyses a file again it replaces the
   markers on it with its own, ours included. The next Intro & Credits run puts ours back, but the file shows Plex's
-  times until then. Plex detects in a library only when both of its settings are on: the server's *Generate intro
-  video markers* / *Generate credits video markers* (Settings → Library) and the library's own *Enable intro
-  detection* / *Enable credits detection* (Edit library → Advanced; only TV libraries have the intro one). The row
-  lists each library Intro & Credits goes to where both are on, and what Plex detects there, for example
-  **TV Shows · intro, credits** and **Movies · credits**. **Turn off** switches off that library's own setting for the
-  types listed, after a confirmation. Plex's server setting and your other libraries stay as they are.
-  - **Plex's own detection is off** / **…is off in your Intro & Credits libraries**: nothing to do.
+  times until then. **Set server-wide to Never** sets Plex's *Generate intro video markers* / *Generate credits video
+  markers* to Never for the types Plex detects in your Intro & Credits libraries, after a confirmation. It changes
+  every library on the server, so **Fix all** leaves it out.
+  - **Plex's own detection is off** / **…doesn't reach your Intro & Credits libraries**: nothing to do.
   - **Keeping Plex's own markers: its detection can stay on**: the server is set to "Keep Plex's" under "When Plex
     has its own markers", so Plex's detection is what you asked for.
-  - If a library's own setting can't be read (an older Plex, or Plex didn't answer), the row falls back to the server
-    setting alone, shows **unknown**, and has no buttons: turn the settings off in Plex yourself, or choose "Keep
-    Plex's".
 
 ### Jellyfin and Emby
 
@@ -3897,7 +3929,7 @@ An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of
 | `emby` | object | *(Emby servers only)* | Absent on Plex/Jellyfin entries. |
 | `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
-| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
 | `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Edit → Intro & Credits → Plex marker agent: a [Plex marker agent](https://mediapreviewgenerator.dev/reference/#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
 | `plex.agent.enabled` | bool | `false` | `true` needs `url` and `token` set (400 otherwise: "Set the Plex marker agent's address and shared key before turning it on"). The database-write confirmation (`plex.db_write_confirmed_at`) still applies. |
 | `plex.agent.url` | string | `""` | `http` or `https` address, e.g. `http://plex-host.lan:9494`. A trailing `/` is dropped. 400 for a query string, fragment, or a username/password in it. |
@@ -4812,7 +4844,8 @@ For full design and per-vendor details see [Multi-Media-Server](https://mediapre
 | POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Setup Health card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
 | GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Setup Health card on the Edit Server modal. See the [Setup Health guide](https://mediapreviewgenerator.dev/guides/previews-readiness/). |
 | POST | `/api/servers/<id>/install-plugin` | Jellyfin and Emby (400 for Plex). Jellyfin: adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. Emby: installs Media Preview Bridge for Emby from Emby's own plugin catalog and restarts Emby; when the catalog doesn't list it, answers `ok: false, manual: true` (install the DLL by hand). Returns `{ok, steps, error, manual}`. |
-| POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's per-library **Turn off** for Plex's own intro/credits detection. Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them off with `PUT /library/sections/{id}/prefs` for that library only, never Plex's server-wide prefs. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
+| POST | `/api/servers/<id>/plex-library-markers` | Plex only. Setup Health's **Turn on** for a library whose own *Intro markers* / *Credits markers* setting is off (Plex then hides every skip marker of that type there, ours included). Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them on with `PUT /library/sections/{id}/prefs` for that library only. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
+| POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's **Set server-wide to Never**. Body `{"types": ["intro", "credits"]}` (one or both); sends `PUT /:/prefs?GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never` for the types given, which stops Plex's own detection without hiding any marker. 400 for any other type, a non-Plex server, or a server with Intro & Credits off. Returns `{ok, types}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
 | GET | `/api/bif/servers/<id>/search?q=<query>` | Multi-server BIF Viewer search; returns `preview_kind` (`bif` or `trickplay`) per result so the viewer renders the right format |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + report sheet metadata |
@@ -5432,6 +5465,7 @@ Possible causes:
 
 - Thumbnails already exist (use the **Regenerate** option when starting a job to force)
 - File not found (check [path mappings](https://mediapreviewgenerator.dev/reference/#path-mappings))
+- Gone from disk: a newer file replaced it before its job ran (the newer file gets its own preview)
 - Invalid file format
 
 ### Why does a worker's ETA show "-"?

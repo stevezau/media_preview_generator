@@ -842,7 +842,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
     # Capability uses each server's stored settings (no preview override) for the Inspector.
     assert [(c["config"].id, c.get("settings")) for c in factory.calls] == [("plex", None), ("jf", None)]
     registry.get("plex").resolve_remote_path_to_item_id.assert_called_once_with(PATH, library_ids=["1"])
-    registry.get("plex").get_markers.assert_called_once_with("item-plex")
+    registry.get("plex").get_markers.assert_called_once_with("item-plex", unknown_if_hidden=False)
     registry.get("jf").get_media_segments.assert_called_once_with("item-jf")
 
 
@@ -1070,7 +1070,7 @@ def test_plex_up_to_date_when_current_equals_published_equals_decided(store, fac
     assert (row["publish_status"], row["publish_message"], row["plan"]) == ("written", "2 marker(s)", "up_to_date")
     # The file's publish state already knows the item: no lookup by path.
     registry.get("plex").resolve_remote_path_to_item_id.assert_not_called()
-    registry.get("plex").get_markers.assert_called_once_with("rk-1")
+    registry.get("plex").get_markers.assert_called_once_with("rk-1", unknown_if_hidden=False)
 
 
 def test_plex_will_replace_when_plex_shows_its_own_intro(store, factory):

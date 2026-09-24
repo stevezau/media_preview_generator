@@ -110,3 +110,16 @@ def test_case_file_finds_the_one_episode_of_the_show_folder():
     assert case_file(case, files) == files[1]
     assert case_file({**case, "episode": 9}, files) is None
     assert case_file(case, [*files, files[1].replace(" - y.mkv", " - y (1080p).mkv")]) is None  # two versions
+
+
+def test_the_probed_frame_rate_reaches_the_decision():
+    # A 25 fps file: IntroDB's film-rate intro (324-354 s) disagrees with season audio (310-338 s) as it is, and
+    # agrees on the file's clock, so only a decision that knows the frame rate decides it.
+    case = {**CASE, "dur": 2498.304, "intro": [310.0, 338.5]}
+    idb = {"intro": {"start_ms": 324_000, "end_ms": 354_000}, "recap": None, "outro": None}
+    extra = {case_key(case): [Candidate(MarkerType.INTRO, 310_000, 338_000, Source.SEASON_AUDIO, 1.0, "3/3")]}
+    rows = [{"case": case, "tidb": None, "idb": idb}]
+    unknown = run_online(rows, [], order=ORDER, level="medium", extra=extra)
+    probed = run_online(rows, [], order=ORDER, level="medium", extra=extra, frame_rates={case_key(case): 25.0})
+    assert unknown["intro"] == Counter(missed=1)  # "sources disagree"
+    assert probed["intro"] == Counter(useful=1)

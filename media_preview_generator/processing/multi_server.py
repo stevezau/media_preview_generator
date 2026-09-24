@@ -30,6 +30,7 @@ import hashlib
 import os
 import shutil
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -40,10 +41,14 @@ from loguru import logger
 
 from ..bif_reader import read_bif_metadata, unpack_bif_to_jpegs
 from ..config import resolve_frame_interval
+from ..markers.external_ids import ids_from_path, is_extra
+from ..markers.fs import gone_from_disk
+from ..markers.missing import disk_roots
 from ..output import BifBundle, EmbyBifAdapter, JellyfinTrickplayAdapter, PlexBundleAdapter
 from ..output.base import OutputAdapter
 from ..output.journal import clear_meta, outputs_fresh_for_source, write_meta
 from ..servers.base import LibraryNotYetIndexedError, MediaServer, ServerConfig, ServerType
+from ..servers.ownership import find_library_matches
 from .frame_cache import get_frame_cache
 from .generator import (
     CancellationError,
@@ -75,6 +80,7 @@ class MultiServerStatus(str, Enum):
     SKIPPED = "skipped"  # owners exist but every one was skipped (output already on disk)
     SKIPPED_NOT_INDEXED = "skipped_not_indexed"  # owners exist but every one was waiting on the server's index
     SKIPPED_FILE_NOT_FOUND = "skipped_file_not_found"  # source file missing on disk (retryable — usually mid-copy)
+    SKIPPED_SOURCE_GONE = "skipped_source_gone"  # replaced by a newer file in its folder (terminal, no retry)
     NO_OWNERS = "no_owners"  # no enabled library covers the path
     FAILED = "failed"  # generation or every publisher failed
     NO_FRAMES = "no_frames"  # FFmpeg produced 0 frames (unrecoverable)
@@ -144,6 +150,9 @@ _PUBLISHED_LIKE_STATUSES: frozenset[PublisherStatus] = frozenset(
 _VIDEO_EXTS: frozenset[str] = frozenset(
     {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".ts", ".m2ts", ".wmv", ".webm", ".mpg", ".mpeg"}
 )
+
+# Library kinds that hold movies: Plex's section METADATA_TYPE and Emby/Jellyfin's CollectionType.
+_MOVIE_LIBRARY_KINDS: frozenset[str] = frozenset({"movie", "movies"})
 
 
 def _adapter_for_server(server_config: ServerConfig) -> OutputAdapter | None:
@@ -949,6 +958,102 @@ def _probe_sibling_mounts(canonical_path: str, registry) -> tuple[str | None, li
     return None, tried
 
 
+def _entry_mtime(entry: os.DirEntry) -> float:
+    try:
+        return entry.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _name_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _in_movie_library(canonical_path: str, configs: list[ServerConfig]) -> bool:
+    """Whether every library holding ``canonical_path`` is a movie library (unknown kinds count as not)."""
+    kind_by_library = {(cfg.id, lib.id): (lib.kind or "").lower() for cfg in configs for lib in cfg.libraries}
+    kinds = {
+        kind_by_library.get((m.server_id, m.library_id), "") for m in find_library_matches(canonical_path, configs)
+    }
+    return bool(kinds) and kinds <= _MOVIE_LIBRARY_KINDS
+
+
+def _replacement_video(canonical_path: str, *, movie_library: bool) -> str | None:
+    """Name the video that took a missing file's place in its folder, or ``None`` when there's no clear one.
+
+    Outside a movie library a replacement is another video of the same SxxEyy (the newest, when there are several);
+    a name without one (anime absolute numbering, a daily show's date) can't be matched, since the video next to it
+    is usually another episode. In a movie library it's the one other feature video in the movie's folder; extras
+    don't count, and several candidates are too ambiguous to call. A file whose name matches the missing one after
+    Unicode normalisation and case folding is the same file under another spelling of its name, not a replacement.
+
+    Args:
+        canonical_path: The missing file's local path; its folder exists.
+        movie_library: The file is in a movie library.
+
+    Returns:
+        The replacement's file name, or ``None``.
+    """
+    folder, name = os.path.split(canonical_path)
+    missing_key = _name_key(name)
+    videos: list[os.DirEntry] = []
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if _name_key(entry.name) == missing_key:
+                    return None
+                if os.path.splitext(entry.name)[1].lower() in _VIDEO_EXTS and entry.is_file():
+                    videos.append(entry)
+    except OSError:
+        return None
+    if movie_library:
+        features = [entry for entry in videos if not is_extra(entry.path)]
+        return features[0].name if len(features) == 1 and not is_extra(canonical_path) else None
+    ids = ids_from_path(canonical_path)
+    if not ids.is_episode:
+        return None
+    same_episode = [
+        entry
+        for entry in videos
+        if (other := ids_from_path(entry.path)).is_episode
+        and (other.season, other.episode) == (ids.season, ids.episode)
+    ]
+    return max(same_episode, key=_entry_mtime).name if same_episode else None
+
+
+def _source_replaced_reason(canonical_path: str, registry: ServerRegistry) -> str | None:
+    """Say which newer file replaced a missing source file, or ``None`` when it may still turn up.
+
+    A webhook can name a file that's already been replaced: Sonarr or Radarr importing the same episode or movie again
+    under a new name deletes the old file, and no retry can find it. Only a replacement sitting in the file's own folder
+    counts, and only while the library's disk looks plainly mounted: ``gone_from_disk`` with the path mapping and
+    library folders as roots says "not gone" when one of them is missing, empty or unreadable (a stale bind mount shows
+    an empty underlay), and when the file sits directly in one. A missing folder is never taken as a deletion: a union
+    filesystem that lost a disk looks exactly the same.
+
+    Args:
+        canonical_path: The local path that isn't on disk.
+        registry: The server registry, for the libraries' folders and kinds.
+
+    Returns:
+        ``"Skipped: replaced by a newer file (<name>)"``, or ``None`` (keep retrying).
+    """
+    if os.path.normpath(canonical_path) != canonical_path:
+        return None
+    try:
+        configs = registry.configs()
+        roots = disk_roots(canonical_path, configs)
+    except Exception as exc:
+        logger.debug("Couldn't read the library folders for {}: {}", canonical_path, exc)
+        return None
+    if not roots or not gone_from_disk([canonical_path], roots={canonical_path: roots}, trust_roots=True):
+        return None
+    if not os.path.isdir(os.path.dirname(canonical_path)):
+        return None
+    replacement = _replacement_video(canonical_path, movie_library=_in_movie_library(canonical_path, configs))
+    return f"Skipped: replaced by a newer file ({replacement})" if replacement else None
+
+
 def _summarise_results(results: list[PublisherResult], status: MultiServerStatus) -> str:
     """Build a user-facing one-liner describing what happened across servers (D16).
 
@@ -1291,7 +1396,7 @@ def process_canonical_path(
             :attr:`MultiServerStatus.NEEDS_GENERATION` at the FFmpeg
             boundary instead of extracting frames. Terminal outcomes
             (``SKIPPED``, ``PUBLISHED`` pending-registration, ``NO_OWNERS``,
-            ``SKIPPED_FILE_NOT_FOUND``) return exactly as they do without
+            ``SKIPPED_FILE_NOT_FOUND``, ``SKIPPED_SOURCE_GONE``) return exactly as they do without
             this flag — they never reach the FFmpeg boundary. The full-scan
             orchestrator uses this so its high-concurrency scan phase can
             decide whether to spend a (capped) generation permit before any
@@ -1455,6 +1560,20 @@ def process_canonical_path(
                 ", ".join(f"{srv.name}/{adp.name}" for srv, adp, _ in publishers),
             )
         else:
+            replaced_reason = _source_replaced_reason(canonical_path, registry)
+            if replaced_reason is not None:
+                logger.info(
+                    "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); "
+                    "skipping without a retry. The newer file gets its own preview from its own webhook or the next "
+                    "scan.",
+                    canonical_path,
+                    replaced_reason.removeprefix("Skipped: "),
+                )
+                return MultiServerResult(
+                    canonical_path=canonical_path,
+                    status=MultiServerStatus.SKIPPED_SOURCE_GONE,
+                    message=replaced_reason,
+                )
             logger.warning(_missing_on_disk_message(canonical_path, sibling_candidates))
             # SKIPPED_FILE_NOT_FOUND (not FAILED) so the webhook-retry path
             # in job_runner picks it up and reschedules — webhooks fire at

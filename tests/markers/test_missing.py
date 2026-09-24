@@ -287,7 +287,7 @@ class TestSweep:
         rec = store.get_file(library.kept)
         store.mark_missing(rec)
         store.record_member(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns), duration_ms=1_500_000,
-                            season_key=rec.season_key, chapters=[], chapter_version=1)  # fmt: skip
+                            season_key=rec.season_key, chapters=[], chapter_version=1, frame_rate=None)  # fmt: skip
         assert store.get_file(library.kept).missing_since is None
 
     def test_a_sweep_out_of_time_checks_no_further_file(self, store, library, monkeypatch):

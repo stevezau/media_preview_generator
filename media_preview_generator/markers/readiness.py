@@ -15,8 +15,9 @@ Two things ``web/static/js/servers.js`` requires of these rows:
 A fact the capability check never reached is unknown, and an unknown fact emits no row: ``capability()`` stops at
 the first problem it finds, so a Plex whose database is on another machine says nothing about Plex Pass.
 
-The one exception is each Plex library's own detection switch: the Edit tab doesn't show it, so the detection row
-reads it itself (:func:`marker_facts`), only when Plex's server-wide detection is on and "Use ours" is chosen.
+The one exception is each Plex library's own "Intro markers" / "Credits markers" setting: the Edit tab doesn't show
+it, so :func:`marker_facts` reads it itself whenever Plex answered the capability check. While one is off, Plex hides
+every skip marker of that type in the library, ours included, so an off setting is a must-fix row.
 """
 
 from __future__ import annotations
@@ -123,30 +124,72 @@ AGENT_EXPLANATION = (
     "them as soon as the agent answers again.</p>"
 )
 
+# Plex's names for its settings: each library's own (Edit library → Advanced) and the server-wide ones (Settings →
+# Library).
+LIBRARY_SETTING_NAMES = {"intro": "Intro markers", "credits": "Credits markers"}
+SERVER_SETTING_NAMES = {"intro": "Generate intro video markers", "credits": "Generate credits video markers"}
+_DETECTING = {"intro": "intros", "credits": "credits"}
+
+# A library whose own "Intro markers" / "Credits markers" setting is off: Plex serves no marker of that type there.
+HIDDEN_LABEL = "{library} — skip buttons are hidden"
+HIDDEN_LABEL_OK = "Plex shows skip buttons in your Intro & Credits libraries"
+HIDDEN_REASON_BOTH = (
+    'Plex\'s "Intro markers" and "Credits markers" are off for this library, and Plex then hides every skip marker in '
+    "it, ours included."
+)
+HIDDEN_REASON_ONE = (
+    'Plex\'s "{setting}" is off for this library, and Plex then hides every {kind} marker in it, ours included.'
+)
+HIDDEN_TOOLTIP = (
+    "While a library's own Intro markers or Credits markers setting is off, Plex hides every skip marker of that type "
+    "in it, ours included."
+)
+HIDDEN_TURN_ON = "Turn on"
+HIDDEN_EXPLANATION = (
+    "<p><strong>What it checks:</strong> each Intro &amp; Credits library's own <em>Intro markers</em> and "
+    "<em>Credits markers</em> settings in Plex (Edit library → Advanced). Only TV libraries have the intro one.</p>"
+    "<p><strong>Why it matters:</strong> while one is off, Plex leaves every marker of that type out of what it serves "
+    "for the library — its own and ours — so no viewer sees Skip Intro or Skip Credits there, even though the markers "
+    "are in Plex's database.</p>"
+    "<p><strong>Turn on:</strong> switches that library's setting back on, only for the types listed.</p>"
+    "<p><strong>If you turned it off to stop Plex detecting:</strong> set Plex's server-wide <em>Generate intro video "
+    "markers</em> / <em>Generate credits video markers</em> (Plex settings → Library) to Never instead. That stops "
+    "Plex's own detection in every library and keeps skip buttons working.</p>"
+)
+# The note under the last hidden library: the server-wide switch that does what turning a library's setting off was for.
+NEVER_NOTE_BOTH = (
+    "Don't want Plex detecting intros itself? Set Plex's server-wide \"Generate intro video markers\" and "
+    '"Generate credits video markers" to Never instead. That stops Plex\'s detection and keeps skip buttons working.'
+)
+NEVER_NOTE_ONE = (
+    "Don't want Plex detecting {detecting} itself? Set Plex's server-wide \"{setting}\" to Never instead. That stops "
+    "Plex's detection and keeps skip buttons working."
+)
+NEVER_BUTTON = "Set server-wide to Never"
+NEVER_TOOLTIP = (
+    "Plex settings → Library → Generate intro / credits video markers → Never. Stops Plex's own detection in every "
+    "library; every library keeps its skip buttons."
+)
+
 DETECTION_LABEL = "Plex's own detection can replace your markers"
 DETECTION_LABEL_OK = "Plex's own detection is off"
-DETECTION_LABEL_OK_LIBRARIES = "Plex's own detection is off in your Intro & Credits libraries"
+DETECTION_LABEL_OK_LIBRARIES = "Plex's own detection doesn't reach your Intro & Credits libraries"
 DETECTION_LABEL_KEEP = "Keeping Plex's own markers: its detection can stay on"
-# The fallback when a library's own switch couldn't be read: the server-wide wording, which is all that is known.
-DETECTION_REASON = "Plex settings → Library → Generate intro and credits video markers."
-DETECTION_LIBRARIES_CAPTION = "Plex detects on its own in these libraries:"
-DETECTION_LIBRARIES_REASON = "Turn off = Edit library → Advanced → Enable intro / credits detection, that library only."
-DETECTION_TURN_OFF = "Turn off"
+DETECTION_REASON = "Plex settings → Library → Generate intro and credits video markers → Never."
 DETECTION_TOOLTIP = (
     "Plex finds markers itself in a library only when its server setting and that library's own setting are both "
     "on. When it does, it overwrites ours; the next Intro & Credits run puts them back."
 )
 DETECTION_EXPLANATION = (
-    "<p><strong>What it checks:</strong> where Plex's own intro and credits detection runs. Plex detects in a "
-    "library only when two settings are both on: the server's <em>Generate intro video markers</em> / "
-    "<em>Generate credits video markers</em> (Plex settings → Library) and that library's own <em>Enable intro "
-    "detection</em> / <em>Enable credits detection</em> (Edit library → Advanced). Only TV libraries have intro "
-    "detection. The row lists the libraries Intro &amp; Credits goes to where both are on.</p>"
+    "<p><strong>What it checks:</strong> whether Plex's own intro and credits detection reaches the libraries Intro "
+    "&amp; Credits goes to: Plex's server-wide <em>Generate intro video markers</em> / <em>Generate credits video "
+    "markers</em> (Plex settings → Library). Only TV libraries have intro detection.</p>"
     "<p><strong>Why it matters:</strong> when Plex analyses a file again it replaces every marker on it with its "
     "own, including ours. Nothing is lost for long — the next Intro &amp; Credits run notices and puts ours back — "
     "but the file shows Plex's times until it does.</p>"
-    "<p><strong>Turn off:</strong> switches off that library's own setting, only for the types listed. Plex's "
-    "server setting and your other libraries stay as they are.</p>"
+    "<p><strong>Set server-wide to Never:</strong> stops Plex's own detection in every library, and every library "
+    "keeps its skip buttons. Don't turn a library's own <em>Intro markers</em> / <em>Credits markers</em> setting "
+    "off instead: Plex then hides every skip marker in that library, ours included.</p>"
     "<p><strong>If you'd rather keep Plex's:</strong> choose \"Keep Plex's\" under \"When Plex has its own "
     "markers\" in the Intro &amp; Credits tab. Plex's detection is then welcome, and this row has nothing to warn "
     "about.</p>"
@@ -191,7 +234,7 @@ class MarkerFacts:
         details: That report's ``details`` — the facts the rows below are read from.
         keep_plex: Whether this Plex server is set to "Keep Plex's" (``on_plex_redetect``).
         libraries: ``(id, name)`` of each library in this server's Intro & Credits selection, in order.
-        library_detection: Each library's own detection switches, as
+        library_detection: Each library's own "Intro markers" / "Credits markers" settings, as
             :meth:`~media_preview_generator.servers.plex.PlexServer.get_library_marker_detection` returns them;
             None when they weren't read or couldn't be.
     """
@@ -283,38 +326,28 @@ class MarkerFacts:
             return ()
         return tuple(kind for kind in ("intro", "credits") if detection.get(kind) not in (None, "never"))
 
-    def detecting_libraries(self) -> list[tuple[str, str, tuple[str, ...]]] | None:
-        """The Intro & Credits libraries Plex detects in by itself, and which types.
+    def detected_types(self) -> tuple[str, ...] | None:
+        """The types Plex's own detection reaches in the Intro & Credits libraries.
 
-        A type counts only where the server-wide pref lets Plex detect it AND the library's own switch is on; intro
-        only in TV libraries, the one kind of library Plex has intro detection for.
+        A type counts where the server-wide pref lets Plex detect it and a selected library has it (intro only in TV
+        libraries), whatever that library's own setting says: an off one is a must-fix row
+        (:func:`library_marker_checks`), and Plex detects there again once it is turned back on.
 
         Returns:
-            ``(id, name, types)`` per library, in selection order; None when a switch that decides it couldn't be
-            read. A selected library Plex doesn't list as a movie or TV library has nothing to detect.
+            Those types, in :attr:`plex_detects` order; None when the libraries' kinds couldn't be read.
         """
         types = self.plex_detects
         if not types or not self.libraries:
-            return []
+            return ()
         if self.library_detection is None:
             return None
-        listed: list[tuple[str, str, tuple[str, ...]]] = []
-        for library_id, name in self.libraries:
-            entry = self.library_detection.get(library_id)
-            if entry is None:
-                continue
-            detected: list[str] = []
-            for kind in types:
-                if kind == "intro" and entry.get("type") != "show":
-                    continue
-                value = entry.get(kind)
-                if value is None:
-                    return None
-                if value:
-                    detected.append(kind)
-            if detected:
-                listed.append((library_id, name, tuple(detected)))
-        return listed
+        kinds = {
+            entry.get("type")
+            for library_id, _name in self.libraries
+            if (entry := self.library_detection.get(library_id)) is not None
+        }
+        reachable = {"intro": "show" in kinds, "credits": bool(kinds)}
+        return tuple(kind for kind in types if reachable[kind])
 
     @property
     def plugin_installed(self) -> bool | None:
@@ -349,8 +382,8 @@ def marker_facts(server: Any, config: ServerConfig | None) -> MarkerFacts:
 
     Nothing is contacted when the feature is off for this server: the switch is read from the stored settings
     first, so a user who never turned Intro & Credits on pays no probe for these rows. The one exception is
-    Plex's per-library detection switches, read fresh below (never a second probe otherwise) so the row
-    reflects a switch flipped after the Edit tab last asked.
+    Plex's per-library "Intro markers" / "Credits markers" settings, read fresh below (never a second probe
+    otherwise) so the rows reflect a setting flipped after the Edit tab last asked.
 
     Args:
         server: Live client for ``config``.
@@ -398,9 +431,11 @@ def marker_facts(server: Any, config: ServerConfig | None) -> MarkerFacts:
         keep_plex=settings.on_plex_redetect == "keep_plex",
         libraries=tuple((str(lib.id), str(lib.name or lib.id)) for lib in marker_libraries(config)),
     )
-    # The one fact the capability check doesn't carry, read here and only when it decides the detection row:
-    # read fresh, so the row changes as soon as a library's switch is turned off.
-    if facts.keep_plex or not facts.plex_detects or not facts.libraries:
+    # The one fact the capability check doesn't carry, read fresh so the rows change as soon as a library's setting
+    # is turned back on. Whatever Plex's detection does: an off setting hides "Keep Plex's" own markers just the same.
+    # Only once Plex answered the check (Plex Pass or its detection prefs): an unreachable Plex isn't asked again.
+    plex_answered = facts.plex_pass is not None or facts.plex_detection_on is not None
+    if not facts.libraries or not plex_answered:
         return facts
     try:
         library_detection = server.get_library_marker_detection([library_id for library_id, _ in facts.libraries])
@@ -423,10 +458,16 @@ def _row(
     reason: str | None = None,
     actions: dict[str, Any] | None = None,
     fix_action: str | None = None,
+    fix_label: str | None = None,
     fix_where: str | None = None,
+    bulk: bool = True,
     docs_anchor: str = DOCS_ANCHOR,
 ) -> dict[str, Any]:
-    """One check in the envelope ``MediaServer.previews_readiness`` documents."""
+    """One check in the envelope ``MediaServer.previews_readiness`` documents.
+
+    ``fix_label`` names the fix button when "Apply recommended" wouldn't say what it does. ``bulk=False`` keeps the
+    fix out of "Fix critical" / "Fix all": it is applied only from its own button, after its own confirmation.
+    """
     check: dict[str, Any] = {
         "id": check_id,
         "label": label,
@@ -443,8 +484,12 @@ def _row(
     }
     if fix_action is not None:
         check["fix_action"] = fix_action
+    if fix_label is not None:
+        check["fix_label"] = fix_label
     if fix_where is not None:
         check["fix_where"] = fix_where
+    if not bulk:
+        check["bulk"] = False
     return check
 
 
@@ -595,8 +640,9 @@ def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
                     "row it made itself; a row created by anything else is ignored until Plex restarts, and "
                     "Plex then makes its own anyway.</p>"
                     "<p><strong>How to get one:</strong> let Plex find one marker by itself — turn its own "
-                    "intro detection on for a library, play a file, and check again. You can turn Plex's "
-                    "detection back off afterwards.</p>"
+                    "intro detection on for a library, play a file, and check again. Afterwards you can set "
+                    "Plex's server-wide detection back to Never; leave the library's own setting on, or Plex "
+                    "hides every skip marker in it.</p>"
                 ),
                 current="present" if tag_row else "missing",
                 recommended="present",
@@ -637,6 +683,8 @@ def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
             )
         )
 
+    checks.extend(library_marker_checks(facts))
+
     detection_row = detection_check(facts)
     if detection_row is not None:
         checks.append(detection_row)
@@ -644,31 +692,137 @@ def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
     return _section(checks)
 
 
-def _turn_off_action(library_name: str, types: tuple[str, ...], library_id: str) -> dict[str, Any]:
-    """The per-library Turn off action: that library's own switches for ``types``, never the server's."""
+def _setting_names_html(names: dict[str, str], types: tuple[str, ...]) -> str:
+    return " and ".join(f"<em>{names[kind]}</em>" for kind in types)
+
+
+def _turn_on_action(library_name: str, library_id: str, types: tuple[str, ...]) -> dict[str, Any]:
+    """The per-library Turn on action: that library's own "Intro markers" / "Credits markers" for ``types``."""
     from ..servers.plex import LIBRARY_MARKER_DETECTION_PREFS
 
-    what = " and ".join(types)
+    settings = _setting_names_html(LIBRARY_SETTING_NAMES, types)
     return {
-        "action": "turn_off_plex_detection",
+        "action": "turn_on_plex_library_markers",
         "args": {"library_id": library_id, "prefs": [LIBRARY_MARKER_DETECTION_PREFS[kind] for kind in types]},
         "confirm": {
             "kind": "button",
             "phrase": "",
             # The confirm modal renders this as HTML, so the library's name is escaped.
             "body": (
-                f"Turns off Plex's own {what} detection in {html.escape(library_name)} only (Edit library → "
-                "Advanced). Plex's server setting and your other libraries stay as they are."
+                f"Turns Plex's {settings} back on in {html.escape(library_name)} only (Edit library → Advanced), so "
+                "Plex serves the skip markers there again, ours included."
             ),
         },
     }
 
 
+def _never_action(types: tuple[str, ...]) -> dict[str, Any]:
+    """Set Plex's server-wide detection of ``types`` to Never: its detection stops, and nothing is hidden."""
+    what = " and ".join(_DETECTING[kind] for kind in types)
+    settings = _setting_names_html(SERVER_SETTING_NAMES, types)
+    return {
+        "action": "set_plex_detection_never",
+        "args": {"types": list(types)},
+        "confirm": {
+            "kind": "button",
+            "phrase": "",
+            "body": (
+                f"Sets Plex's server-wide {settings} to Never (Plex settings → Library). Plex stops detecting {what} "
+                "itself in every library, and every library keeps its skip buttons, ours included."
+            ),
+        },
+    }
+
+
+def _hidden_reason(types: tuple[str, ...]) -> str:
+    if len(types) > 1:
+        return HIDDEN_REASON_BOTH
+    return HIDDEN_REASON_ONE.format(setting=LIBRARY_SETTING_NAMES[types[0]], kind=types[0])
+
+
+def _never_note(types: tuple[str, ...]) -> dict[str, Any]:
+    if len(types) > 1:
+        text = NEVER_NOTE_BOTH
+    else:
+        text = NEVER_NOTE_ONE.format(detecting=_DETECTING[types[0]], setting=SERVER_SETTING_NAMES[types[0]])
+    return {"text": text, "tooltip": NEVER_TOOLTIP, "button": NEVER_BUTTON, "action": _never_action(types)}
+
+
+def library_marker_checks(facts: MarkerFacts) -> list[dict[str, Any]]:
+    """One must-fix row per Intro & Credits library with its own "Intro markers" or "Credits markers" setting off.
+
+    Plex serves no marker of that type in such a library, its own or ours, so no skip button shows there: the fix is
+    to turn the setting back on, never off. The last row carries a note offering Plex's server-wide Never for the
+    types in scope — what a user turning a library's setting off wanted, without hiding anything — unless Plex
+    already never detects them or the server keeps Plex's own markers.
+
+    Args:
+        facts: This server's facts, from :func:`marker_facts`.
+
+    Returns:
+        The rows; one passing row when every selected library's settings are known and on; none when a setting
+        couldn't be read (an unknown fact emits no row).
+    """
+    if facts.library_detection is None:
+        return []
+    hidden: list[tuple[str, str, tuple[str, ...]]] = []
+    seen = False
+    all_known = True
+    for library_id, name in facts.libraries:
+        entry = facts.library_detection.get(library_id)
+        if entry is None:
+            continue  # not a movie or TV library: nothing to show
+        seen = True
+        kinds = ("intro", "credits") if entry.get("type") == "show" else ("credits",)
+        off = tuple(kind for kind in kinds if entry.get(kind) is False)
+        if off:
+            hidden.append((library_id, name, off))
+        elif any(entry.get(kind) is None for kind in kinds):
+            all_known = False
+    if not hidden:
+        if not seen or not all_known:
+            return []
+        return [
+            _row(
+                "markers_plex_library_markers",
+                HIDDEN_LABEL_OK,
+                severity=CRITICAL,
+                ok=True,
+                tooltip=HIDDEN_TOOLTIP,
+                explanation=HIDDEN_EXPLANATION,
+                current="on",
+                recommended="on",
+            )
+        ]
+    rows = [
+        _row(
+            f"markers_plex_library_markers_{library_id}",
+            HIDDEN_LABEL.format(library=name),
+            severity=CRITICAL,
+            ok=False,
+            tooltip=HIDDEN_TOOLTIP,
+            explanation=HIDDEN_EXPLANATION,
+            current="off",
+            recommended="on",
+            reason=_hidden_reason(off),
+            actions={"enable": _turn_on_action(name, library_id, off)},
+            fix_action="enable",
+            fix_label=HIDDEN_TURN_ON,
+        )
+        for library_id, name, off in hidden
+    ]
+    off_anywhere = {kind for _id, _name, off in hidden for kind in off}
+    never_types = () if facts.keep_plex else tuple(kind for kind in facts.plex_detects if kind in off_anywhere)
+    if never_types:
+        rows[-1]["note"] = _never_note(never_types)
+    return rows
+
+
 def detection_check(facts: MarkerFacts) -> dict[str, Any] | None:
     """The "Plex's own detection" row, or None when Plex's server-wide detection prefs couldn't be read.
 
-    Plex detects in a library only when its server-wide pref isn't ``never`` AND the library's own switch is on,
-    so the warning lists the Intro & Credits libraries where both hold, each with its own Turn off. Under "Keep
+    Under "Use ours" Plex's detection overwrites our markers wherever it reaches, and the fix is its server-wide
+    Never: turning a library's own setting off instead would hide every skip marker in that library. Under "Keep
     Plex's" Plex's detection is what the user asked for, so there is nothing to warn about.
 
     Args:
@@ -681,9 +835,7 @@ def detection_check(facts: MarkerFacts) -> dict[str, Any] | None:
     if detection_on is None:
         return None
 
-    def row(
-        label: str, *, ok: bool, current: Any = None, recommended: Any = None, reason: str | None = None
-    ) -> dict[str, Any]:
+    def row(label: str, *, ok: bool, current: Any = None, recommended: Any = None, **fix: Any) -> dict[str, Any]:
         return _row(
             "markers_plex_detection",
             label,
@@ -693,7 +845,7 @@ def detection_check(facts: MarkerFacts) -> dict[str, Any] | None:
             explanation=DETECTION_EXPLANATION,
             current=current,
             recommended=recommended,
-            reason=reason,
+            **fix,
         )
 
     if facts.keep_plex:
@@ -701,25 +853,22 @@ def detection_check(facts: MarkerFacts) -> dict[str, Any] | None:
         return row(DETECTION_LABEL_KEEP, ok=True)
     if not detection_on:
         return row(DETECTION_LABEL_OK, ok=True, current="Off", recommended="Off")
-    listed = facts.detecting_libraries()
-    if listed is None:
-        # A library's own switch couldn't be read: say what the server-wide prefs say, and no more.
-        return row(DETECTION_LABEL, ok=False, current=_UNKNOWN_STATE, recommended="Off", reason=DETECTION_REASON)
-    if not listed:
-        return row(DETECTION_LABEL_OK_LIBRARIES, ok=True, current="Off", recommended="Off")
-    check = row(DETECTION_LABEL, ok=False, current="On", recommended="Off", reason=DETECTION_LIBRARIES_REASON)
-    check["libraries_caption"] = DETECTION_LIBRARIES_CAPTION
-    check["libraries"] = [
-        {
-            "id": library_id,
-            "name": name,
-            "detail": ", ".join(types),
-            "button": DETECTION_TURN_OFF,
-            "action": _turn_off_action(name, types, library_id),
-        }
-        for library_id, name, types in listed
-    ]
-    return check
+    types = facts.detected_types()
+    if types == ():
+        return row(DETECTION_LABEL_OK_LIBRARIES, ok=True)
+    # Libraries whose kind couldn't be read: every type Plex detects server-wide may reach them.
+    return row(
+        DETECTION_LABEL,
+        ok=False,
+        current="On",
+        recommended="Never",
+        reason=DETECTION_REASON,
+        actions={"disable": _never_action(types or facts.plex_detects)},
+        fix_action="disable",
+        fix_label=NEVER_BUTTON,
+        # Never changes Plex's detection in every library, not only the ones Intro & Credits goes to.
+        bulk=False,
+    )
 
 
 def _install_action(vendor: str, *, update: bool) -> dict[str, Any]:

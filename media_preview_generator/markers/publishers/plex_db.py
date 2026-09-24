@@ -27,8 +27,9 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from loguru import logger
 
+from ..decide import FileLimits, unusable_server_marker
 from ..fs import filesystem_type, gone_from_disk, is_local_filesystem, is_network_filesystem
-from ..models import Marker, MarkerType
+from ..models import Candidate, Marker, MarkerType, Source
 from .base import (
     NEXT_RUN,
     Capability,
@@ -73,6 +74,9 @@ WAIT_SLICE_S = 1.0
 WAIT_CANCELLED = "Stopped waiting for Plex's database: the job was cancelled"
 # How long a write waits to learn whether another version's file is gone from disk before treating it as still there.
 GONE_CHECK_TIMEOUT_S = 5.0
+# How long the read before detection (``types_not_made_for_file``) waits for the database locks. Asked for every file
+# Plex keeps its own markers of, so a busy database means "can't tell" (asked again next run), never a writer's wait.
+STALE_READ_WAIT_S = 5.0
 # Check servers reads Plex items back one read-only connection each, like a single file's read-back, and leaves this
 # process's lock on the database free this long between them, so a write from another job waiting for it gets it.
 READ_BACK_PAUSE_S = 0.001
@@ -95,7 +99,7 @@ _REQUIRED_COLUMNS = {
         "created_at",
         "extra_data",
     },
-    "media_parts": {"id", "media_item_id", "file", "extra_data", "deleted_at"},
+    "media_parts": {"id", "media_item_id", "file", "extra_data", "deleted_at", "updated_at"},
     "media_items": {"id", "metadata_item_id", "deleted_at", "proxy_type"},
     "metadata_items": {"id"},
 }
@@ -633,6 +637,8 @@ class _Part(NamedTuple):
     file: str
     extra_data: str | None
     proxy_type: int | None
+    # When the part last changed, in seconds since the epoch: the file's mtime (Plex leaves ``created_at`` empty).
+    updated_at: int | None = None
 
 
 def _same_extra_data(a: str | None, b: str | None) -> bool:
@@ -663,8 +669,11 @@ def _version_files(parts: list[_Part]) -> tuple[str, ...]:
 
 
 def _same_files(a: list[_Part], b: list[_Part]) -> bool:
-    """The same parts, files and versions (extra_data aside)."""
-    return [p._replace(extra_data=None) for p in a] == [p._replace(extra_data=None) for p in b]
+    """The same parts, files and versions (extra_data and the time a part changed aside: an app older than this
+    code sends no time)."""
+    return [p._replace(extra_data=None, updated_at=None) for p in a] == [
+        p._replace(extra_data=None, updated_at=None) for p in b
+    ]
 
 
 class _TaggingRow(NamedTuple):
@@ -675,6 +684,7 @@ class _TaggingRow(NamedTuple):
     end_time_offset: int
     thumb_url: str | None
     extra_data: str | None
+    created_at: int | None = None  # when the row was tagged, in seconds since the epoch
 
 
 class _Plan(NamedTuple):
@@ -687,6 +697,8 @@ class _Plan(NamedTuple):
     ours: list[Marker]  # the desired markers the item shows as ours after the write (kept types left out)
     kept_types: frozenset[MarkerType]  # types whose rows are Plex's own and stay untouched
     replaced_own: frozenset[MarkerType]  # locked types whose Plex rows this write replaces under "Keep Plex's"
+    # Types "Keep Plex's" would have kept but whose Plex rows were made for an earlier file, so ours replace them
+    replaced_stale: frozenset[MarkerType] = frozenset()
 
     @property
     def is_noop(self) -> bool:
@@ -723,6 +735,9 @@ def _kept_types(
     own_prior: list[Marker],
     kept_before: frozenset[MarkerType],
     keep_plex: bool,
+    *,
+    limits: FileLimits | None = None,
+    stale: frozenset[MarkerType] = frozenset(),
 ) -> frozenset[MarkerType]:
     """The types whose rows on the item are Plex's own and must stay ("Keep Plex's", ``on_plex_redetect``).
 
@@ -732,6 +747,15 @@ def _kept_types(
     no record of (a first publish, a reset markers.db, a re-added server): those can't be told from Plex's. Rows that
     already show what we'd write are treated as ours. A kept type stays kept, whatever gets written for the item,
     until Plex has no rows of it left or the server is set to restore ours.
+
+    Never kept: a type whose every row besides ours can't be right for this file (``unusable_server_marker`` against
+    ``limits``, e.g. credits that start after the file ends). Plex hasn't really processed this file for it, so ours
+    is written. One of Plex's rows that can be right keeps the type, rows and all. Without ``limits`` (an older app
+    talking to this agent) nothing is checked.
+
+    Not kept either: a type ``stale`` names (its rows were made for an earlier file at this path,
+    ``_types_not_made_for_file``) when this write has an answer of ours for it. Without one, Plex's rows stay: close
+    is better than nothing.
 
     Locks are not read here: this answers only what the **setting** would keep. ``_plan`` takes the types the user
     locked back out of the answer, since a locked marker wins over "Keep Plex's" (spec §5.5 rule 1), and reports them
@@ -750,9 +774,97 @@ def _kept_types(
             continue
         would_show = _served_of(wanted, mtype)
         provably_ours = (would_show, _served_of(prior, mtype), _served_of(own_prior, mtype))
+        if limits is not None and _plex_rows_cant_be_right(mtype, current, provably_ours, limits):
+            continue
+        if mtype in stale and would_show:
+            continue
         if mtype in kept_before or (would_show and current not in provably_ours):
             kept.add(mtype)
     return frozenset(kept)
+
+
+def _plex_rows_cant_be_right(
+    mtype: MarkerType,
+    current: list[tuple[int, int]],
+    provably_ours: tuple[list[tuple[int, int]], ...],
+    limits: FileLimits,
+) -> bool:
+    """Whether the item has rows of a type besides ours, and every one of them can't be right for the file."""
+    ours = {times for served in provably_ours for times in served}
+    plex_rows = [times for times in current if times not in ours]
+    return bool(plex_rows) and all(
+        unusable_server_marker(Candidate(mtype, start, end, Source.SERVER_MARKERS), limits) for start, end in plex_rows
+    )
+
+
+# A row tagged within this long before its file last changed can't be told from one tagged for the file: the rule was
+# validated with a clear minute between the two.
+STALE_MARGIN_S = 60
+
+
+def _epoch(value: object) -> int | None:
+    """A Plex timestamp column (seconds since the epoch); None when empty, not a number, or not after 1970."""
+    try:
+        seconds = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _types_not_made_for_file(rows: list[_TaggingRow], parts: list[_Part]) -> frozenset[MarkerType]:
+    """The types whose marker rows were made for an earlier file at this path (stale).
+
+    Plex's markers belong to the metadata item, so they outlive a file replacement (production, 2026-09-24: Bones'
+    markers were detected 2025-06-17 against the old Blu-ray files, which Sonarr replaced with 25 fps files on
+    2026-09-23, leaving intros 9-17 s late and credits past the end). A type counts only when both hold — the rule
+    validated against Sonarr's imports, with no false positive among 5,493 re-detected files:
+
+    * no live part carries Plex's own detection record of the rows (its ``pv:intros`` / ``pv:credits`` holding
+      those times), which Plex writes with them when it analyses the file it has now;
+    * every row was tagged more than :data:`STALE_MARGIN_S` before every live part last changed
+      (``media_parts.updated_at``, the file's mtime).
+
+    Anything that can't be read counts as made for the file.
+    """
+    changed = [_epoch(p.updated_at) for p in parts]
+    if not changed or any(t is None for t in changed):
+        return frozenset()
+    file_changed = min(t for t in changed if t is not None)
+    stale = set()
+    for mtype, text in _TYPE_TEXT.items():
+        of_type = [r for r in rows if r.text == text]
+        tagged = [_epoch(r.created_at) for r in of_type]
+        if not of_type or any(t is None for t in tagged):
+            continue
+        if max(t for t in tagged if t is not None) + STALE_MARGIN_S >= file_changed:
+            continue
+        if _a_part_records(mtype, of_type, parts) is False:
+            stale.add(mtype)
+    return frozenset(stale)
+
+
+def _a_part_records(mtype: MarkerType, rows: list[_TaggingRow], parts: list[_Part]) -> bool | None:
+    """Whether a live part's ``pv:`` key holds these rows' times; None when a part's key can't be read.
+
+    Compared as stored (``time_offset``/``end_time_offset`` against ``startTimeOffset``/``endTimeOffset``), which Plex
+    writes alike, so a ``final`` flag that differs between the row and the entry doesn't hide the record.
+    """
+    times = {(r.time_offset, r.end_time_offset) for r in rows}
+    for part in parts:
+        try:
+            value = decode_extra_data(part.extra_data)[0].get(_PART_KEY[mtype])
+        except PublishError:
+            return None
+        if value is None:
+            continue
+        try:
+            entries = json.loads(value)["MediaPartMarkersArray"]["MediaPartMarker"]
+            recorded = {(int(e["startTimeOffset"]), int(e["endTimeOffset"])) for e in entries}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+        if times <= recorded:
+            return True
+    return False
 
 
 class ItemRead(NamedTuple):
@@ -760,6 +872,9 @@ class ItemRead(NamedTuple):
 
     exists: bool  # the database knows this rating key at all
     parts: list[_Part]  # its live files (deleted parts and items in Plex's trash left out)
+    # Types whose rows were made for an earlier file at this path (``_types_not_made_for_file``); None when not read
+    # (an agent older than this field).
+    stale_types: frozenset[MarkerType] | None = None
 
 
 class WriteRequest(NamedTuple):
@@ -774,6 +889,7 @@ class WriteRequest(NamedTuple):
     calling_part_ids: tuple[int, ...]  # the parts that are the calling file
     kept_types: frozenset[MarkerType]  # types the last write kept as Plex's own
     keep_plex: bool  # "Keep Plex's" is on for this server
+    limits: FileLimits | None = None  # the file's limits a kept Plex marker must fit (None: not checked)
 
 
 class WriteResult(NamedTuple):
@@ -783,6 +899,7 @@ class WriteResult(NamedTuple):
     ours: list[Marker]
     kept_types: frozenset[MarkerType]
     replaced_own: frozenset[MarkerType]
+    replaced_stale: frozenset[MarkerType] = frozenset()  # an agent older than this field says nothing
 
 
 class ShownAsk(NamedTuple):
@@ -837,7 +954,8 @@ class PlexDatabase(ABC):
 
     @abstractmethod
     def read_item(self, rating_key: int, *, deadline: float) -> ItemRead:
-        """Read one item's live parts (schema and tag row checked first).
+        """Read one item's live parts (schema and tag row checked first), and ``stale_types``: the types whose
+        marker rows were made for an earlier file at its path (``_types_not_made_for_file``).
 
         Raises:
             PublishError: The database couldn't be read, or isn't the tested schema.
@@ -968,12 +1086,23 @@ class LocalPlexDb(PlexDatabase):
     @staticmethod
     def _item_parts(conn: sqlite3.Connection, rating_key: int) -> list[_Part]:
         rows = conn.execute(
-            "SELECT mp.id, mp.media_item_id, mp.file, mp.extra_data, mi.proxy_type FROM media_parts mp "
+            "SELECT mp.id, mp.media_item_id, mp.file, mp.extra_data, mi.proxy_type, mp.updated_at FROM media_parts mp "
             "JOIN media_items mi ON mi.id = mp.media_item_id "
             "WHERE mi.metadata_item_id=? AND mp.deleted_at IS NULL AND mi.deleted_at IS NULL ORDER BY mp.id",
             (rating_key,),
         ).fetchall()
         return [_Part(*row) for row in rows]
+
+    @staticmethod
+    def _item_rows(conn: sqlite3.Connection, rating_key: int, tag_id: int) -> list[_TaggingRow]:
+        return [
+            _TaggingRow(*row)
+            for row in conn.execute(
+                "SELECT id, [index], text, time_offset, end_time_offset, thumb_url, extra_data, created_at "
+                "FROM taggings WHERE metadata_item_id=? AND tag_id=? ORDER BY [index], id",
+                (rating_key, tag_id),
+            )
+        ]
 
     @staticmethod
     def _item_exists(conn: sqlite3.Connection, rating_key: int) -> bool:
@@ -1094,7 +1223,8 @@ class LocalPlexDb(PlexDatabase):
             deadline: When to stop waiting for the database locks.
 
         Returns:
-            Whether the database knows the item, and its live parts.
+            Whether the database knows the item, its live parts, and which types' rows were made for an earlier
+            file at this path.
 
         Raises:
             PublishError: The database couldn't be read, or isn't the tested schema.
@@ -1102,9 +1232,10 @@ class LocalPlexDb(PlexDatabase):
         try:
             with self._database(read_only=True, deadline=deadline) as conn:
                 self._check_schema(conn)
-                self._marker_tag_id(conn)
+                tag_id = self._marker_tag_id(conn)
                 parts = self._item_parts(conn, rating_key)
-                return ItemRead(bool(parts) or self._item_exists(conn, rating_key), parts)
+                stale = _types_not_made_for_file(self._item_rows(conn, rating_key, tag_id), parts)
+                return ItemRead(bool(parts) or self._item_exists(conn, rating_key), parts, stale)
         except sqlite3.Error as exc:
             raise publish_error_from_sqlite(exc) from exc
 
@@ -1140,6 +1271,7 @@ class LocalPlexDb(PlexDatabase):
                         calling,
                         request.kept_types,
                         request.keep_plex,
+                        limits=request.limits,
                     )
             if same_files and _nothing_to_write(plan):
                 changed = False
@@ -1157,10 +1289,11 @@ class LocalPlexDb(PlexDatabase):
                         calling,
                         request.kept_types,
                         request.keep_plex,
+                        limits=request.limits,
                     )
         except sqlite3.Error as exc:
             raise publish_error_from_sqlite(exc) from exc
-        return WriteResult(changed, plan.ours, plan.kept_types, plan.replaced_own)
+        return WriteResult(changed, plan.ours, plan.kept_types, plan.replaced_own, plan.replaced_stale)
 
     def shown_many(
         self, items: list[ShownAsk], *, timeout_s: float, cancel_check: Callable[[], bool] | None = None
@@ -1238,19 +1371,21 @@ class LocalPlexDb(PlexDatabase):
         calling_part_ids: set[int],
         kept_before: frozenset[MarkerType],
         keep_plex: bool,
+        *,
+        limits: FileLimits | None = None,
     ) -> _Plan:
-        rows = [
-            _TaggingRow(*row)
-            for row in conn.execute(
-                "SELECT id, [index], text, time_offset, end_time_offset, thumb_url, extra_data FROM taggings "
-                "WHERE metadata_item_id=? AND tag_id=? ORDER BY [index], id",
-                (rating_key, tag_id),
-            )
-        ]
+        rows = self._item_rows(conn, rating_key, tag_id)
         # A marker the user adjusted or locked wins over "Keep Plex's" (spec §5.5 rule 1, §14 2026-09-20), so a locked
         # type is written even where the setting would have left Plex's own rows in place.
         locked = frozenset(m.type for m in wanted if m.locked)
-        would_keep = _kept_types(rows, wanted, prior, own_prior, kept_before, keep_plex)
+        stale = _types_not_made_for_file(rows, parts)
+        would_keep = _kept_types(rows, wanted, prior, own_prior, kept_before, keep_plex, limits=limits, stale=stale)
+        # What the setting would have kept were Plex's rows made for this file: those ours replace because they weren't.
+        replaced_stale = (
+            _kept_types(rows, wanted, prior, own_prior, kept_before, keep_plex, limits=limits) - would_keep - locked
+            if stale
+            else frozenset()
+        )
         kept_types = would_keep - locked
         # Plex's rows of a kept type, and the pv: key it rebuilds them from, are left exactly as they are.
         wanted = [m for m in wanted if m.type not in kept_types]
@@ -1311,6 +1446,7 @@ class LocalPlexDb(PlexDatabase):
             # Only the types whose rows this write really rewrites: a locked type the setting would have kept whose
             # rows already serve the wanted times takes nothing off Plex, so the row mustn't say it did.
             replaced_own=frozenset(t for t in would_keep & locked if _TYPE_TEXT[t] in replaced),
+            replaced_stale=frozenset(t for t in replaced_stale if _TYPE_TEXT[t] in replaced),
         )
 
     @staticmethod
@@ -1364,6 +1500,8 @@ class LocalPlexDb(PlexDatabase):
         calling_part_ids: set[int],
         kept_before: frozenset[MarkerType],
         keep_plex: bool,
+        *,
+        limits: FileLimits | None = None,
     ) -> tuple[bool, _Plan]:
         """Write one item in one transaction.
 
@@ -1391,6 +1529,7 @@ class LocalPlexDb(PlexDatabase):
                 calling_part_ids,
                 kept_before,
                 keep_plex,
+                limits=limits,
             )
             if _nothing_to_write(plan):
                 conn.execute("ROLLBACK")
@@ -1793,6 +1932,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         canonical_path: str,
         own_previous: list[Marker] | None = None,
         kept_types: frozenset[MarkerType] = frozenset(),
+        limits: FileLimits | None = None,
     ) -> list[Marker]:
         """Make this item show its desired marker set (see ``_desired``) in ``taggings`` and every part's ``extra_data``.
 
@@ -1800,8 +1940,9 @@ class PlexMarkerPublisher(MarkerPublisher):
 
         Types of ours that are no longer desired are removed only where they still serve exactly ``previous``; Plex's
         own rows of those types stay. A desired type replaces whatever rows the item has of that type, except a type
-        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``) — a type the user locked is
-        written even then, and reported in ``last_replaced_own_types`` (spec §5.5 rule 1). Rows and keys that already
+        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``; never one whose every row of
+        Plex's can't be right for the file's ``limits``) — a type the user locked is written even then, and reported in
+        ``last_replaced_own_types`` (spec §5.5 rule 1). Rows and keys that already
         serve the desired times stay, unless only their credits ``final`` flag is stale (see ``_refresh_final_types``).
 
         Returns:
@@ -1812,6 +1953,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         """
         self.last_write_changed = False
         self.last_replaced_own_types = frozenset()
+        self.last_replaced_stale_types = frozenset()
         self.last_item_files = None
         self.last_unchecked_versions = False
         keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
@@ -1858,9 +2000,18 @@ class PlexMarkerPublisher(MarkerPublisher):
                 calling_part_ids=calling,
                 kept_types=kept_before,
                 keep_plex=keep_plex,
+                limits=limits,
             ),
             deadline=deadline,
         )
+        if result.replaced_stale:
+            logger.info(
+                "Plex {}: item {} showed Plex's own {}, detected for an earlier file at its path; replaced with ours",
+                self._config.name,
+                rating_key,
+                " and ".join(t.value for t in MarkerType if t in result.replaced_stale),
+            )
+        self.last_replaced_stale_types = result.replaced_stale
         newly_kept = result.kept_types - kept_before
         if newly_kept:
             logger.info(
@@ -1885,6 +2036,36 @@ class PlexMarkerPublisher(MarkerPublisher):
         self.last_kept_types = result.kept_types
         self.last_replaced_own_types = result.replaced_own
         return result.ours
+
+    def types_not_made_for_file(self, item_id: str) -> frozenset[MarkerType] | None:
+        """The types whose markers on this item were made for an earlier file at its path.
+
+        See ``_types_not_made_for_file`` for the rule.
+
+        Read from Plex's database with the same lock proof and read-only connection as a write, locally or through the
+        Plex marker agent, waiting at most :data:`STALE_READ_WAIT_S` for its locks (and less once the job is cancelled,
+        ``base.cancellable_waits``).
+
+        Args:
+            item_id: Plex rating key.
+
+        Returns:
+            Those types; None when the database can't be read here or an agent older than this answer can't tell.
+        """
+        try:
+            rating_key = _rating_key(item_id)
+            deadline = time.monotonic() + STALE_READ_WAIT_S
+            if not self._local_checks(deadline=deadline).ready:
+                return None
+            stale = self._db.read_item(rating_key, deadline=deadline).stale_types
+            # Only an agent older than the answer reads the item without it.
+            self.stale_types_unanswerable = stale is None
+            return stale
+        except PublishError as exc:
+            logger.debug(
+                "Plex {}: couldn't tell whether item {}'s markers are stale: {}", self._config.name, item_id, exc
+            )
+            return None
 
     def shows(
         self,

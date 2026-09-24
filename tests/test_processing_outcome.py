@@ -28,6 +28,7 @@ class TestProcessingResultEnum:
             "skipped_bif_exists",
             "skipped_not_indexed",
             "skipped_file_not_found",
+            "skipped_source_gone",
             "skipped_excluded",
             "skipped_invalid_hash",
             "failed",
@@ -109,6 +110,59 @@ class TestWorkerOutcomeCounts:
         assert worker.outcome_counts["skipped_bif_exists"] == 0
         assert worker.completed == 1
         assert worker.failed == 0
+
+    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
+    def test_file_missing_at_generation_time_is_retryable_not_found(self, mock_process):
+        """A file that vanished between the checking stage and the worker is recorded like any other not-found, so
+        job_runner's retry scan (outcome ``skipped_file_not_found``) picks it up instead of counting a failure."""
+        from media_preview_generator.processing.generator import set_file_result_callback
+
+        message = "Source file not found: /data/Show - S01E01.mkv"
+        mock_process.return_value = _ms(
+            "skipped_file_not_found", canonical_path="/data/Show - S01E01.mkv", message=message
+        )
+        rows: list[tuple] = []
+        set_file_result_callback(lambda *args: rows.append(args))
+        try:
+            worker = Worker(0, "CPU")
+            worker.assign_task(_pi("k", title="T", media_type="episode"), MagicMock(), MagicMock())
+            worker.current_thread.join(timeout=2)
+        finally:
+            set_file_result_callback(None)
+
+        assert worker.outcome_counts["skipped_file_not_found"] == 1
+        assert worker.outcome_counts["failed"] == 0
+        assert worker.completed == 1
+        assert worker.failed == 0
+        assert [(outcome, reason) for _path, outcome, reason, _worker, _servers in rows] == [
+            ("skipped_file_not_found", message)
+        ]
+
+    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
+    def test_source_gone_result_counts_as_completed_with_its_message(self, mock_process):
+        """A file a newer file replaced after its webhook is a finished skip, not a failure, and its row says why."""
+        from media_preview_generator.processing.generator import set_file_result_callback
+
+        message = "Skipped: replaced by a newer file (Show - S06E02.mkv)"
+        mock_process.return_value = _ms(
+            "skipped_source_gone", canonical_path="/data/Show - S06E02-CAKES.mkv", message=message
+        )
+        rows: list[tuple] = []
+        set_file_result_callback(lambda *args: rows.append(args))
+        try:
+            worker = Worker(0, "CPU")
+            worker.assign_task(_pi("k", title="T", media_type="episode"), MagicMock(), MagicMock())
+            worker.current_thread.join(timeout=2)
+        finally:
+            set_file_result_callback(None)
+
+        assert worker.outcome_counts["skipped_source_gone"] == 1
+        assert worker.outcome_counts["failed"] == 0
+        assert worker.completed == 1
+        assert worker.failed == 0
+        assert [(outcome, reason) for _path, outcome, reason, _worker, _servers in rows] == [
+            ("skipped_source_gone", message)
+        ]
 
 
 class TestJobProgressOutcome:
@@ -220,6 +274,35 @@ class TestMisconfigurationDetection:
 
         with patch("media_preview_generator.jobs.orchestrator.logger") as mock_logger:
             fired = _maybe_log_path_mapping_misconfig(self._outcome(skipped_file_not_found=0), processed=0)
+
+        assert fired is False
+        mock_logger.warning.assert_not_called()
+
+
+class TestSourceGoneOutcomeMapping:
+    """The checking stage and the end-of-job summary name the replaced-file outcome as its own count."""
+
+    def test_multi_server_status_maps_to_its_own_processing_result(self):
+        from media_preview_generator.jobs.orchestrator import _outcome_for_multi_server_status
+        from media_preview_generator.processing.multi_server import MultiServerStatus
+
+        outcome = _outcome_for_multi_server_status(MultiServerStatus.SKIPPED_SOURCE_GONE)
+
+        assert outcome is ProcessingResult.SKIPPED_SOURCE_GONE
+        assert outcome.value == "skipped_source_gone"
+
+    def test_outcome_summary_counts_files_gone_from_disk(self):
+        from media_preview_generator.jobs.orchestrator import _format_outcome_summary
+
+        summary = _format_outcome_summary({"generated": 3, "skipped_source_gone": 2})
+
+        assert summary == "3 generated, 2 gone from disk"
+
+    def test_files_gone_from_disk_never_trip_the_path_mapping_warning(self):
+        from media_preview_generator.jobs.orchestrator import _maybe_log_path_mapping_misconfig
+
+        with patch("media_preview_generator.jobs.orchestrator.logger") as mock_logger:
+            fired = _maybe_log_path_mapping_misconfig({"generated": 0, "skipped_source_gone": 4}, processed=4)
 
         assert fired is False
         mock_logger.warning.assert_not_called()

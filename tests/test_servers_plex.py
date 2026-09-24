@@ -1837,6 +1837,152 @@ class TestPlexMarkerHelpers:
         conn.query.return_value = ET.fromstring("<MediaContainer/>")
         assert plex_server_under_test.get_markers("7") is None
 
+    @staticmethod
+    def _library_reads(conn, markers_xml: str, prefs_by_library: dict[str, object]) -> None:
+        """Serve one item's markers and each library's ``/prefs`` (an exception is raised) from ``conn.query``."""
+        import xml.etree.ElementTree as ET
+
+        def query(path, **_kwargs):
+            if path.startswith("/library/metadata/"):
+                return ET.fromstring(markers_xml)
+            library_id = path.removeprefix("/library/sections/").removesuffix("/prefs")
+            prefs = prefs_by_library[library_id]
+            if isinstance(prefs, Exception):
+                raise prefs
+            settings = "".join(f'<Setting id="{pref}" value="{value}"/>' for pref, value in prefs.items())
+            return ET.fromstring(f"<MediaContainer>{settings}</MediaContainer>")
+
+        conn.query.side_effect = query
+
+    ITEM_IN_TV = (
+        '<MediaContainer librarySectionID="2"><Video ratingKey="7" librarySectionID="2">'
+        '<Marker type="intro" startTimeOffset="990" endTimeOffset="29306"/></Video></MediaContainer>'
+    )
+
+    @pytest.mark.parametrize(
+        "prefs",
+        [
+            {"enableIntroMarkerGeneration": "0", "enableCreditsMarkerGeneration": "1"},
+            {"enableIntroMarkerGeneration": "1", "enableCreditsMarkerGeneration": "0"},
+            {"enableIntroMarkerGeneration": "false", "enableCreditsMarkerGeneration": "false"},
+        ],
+        ids=["intro-off", "credits-off", "both-off"],
+    )
+    def test_get_markers_is_unknown_while_the_items_library_hides_a_type(self, plex_server_under_test, prefs):
+        # Plex leaves out every marker of a type, ours included, while the library's own setting for it is off.
+        conn = plex_server_under_test._connect.return_value
+        self._library_reads(conn, self.ITEM_IN_TV, {"2": prefs})
+
+        assert plex_server_under_test.get_markers("7", unknown_if_hidden=True) is None
+        assert [c.args[0] for c in conn.query.call_args_list] == [
+            "/library/metadata/7?includeMarkers=1",
+            "/library/sections/2/prefs",
+        ]
+
+    @pytest.mark.parametrize(
+        "prefs",
+        [
+            {"enableIntroMarkerGeneration": "1", "enableCreditsMarkerGeneration": "1"},
+            {"enableCreditsMarkerGeneration": "true"},
+            {},
+        ],
+        ids=["both-on", "movie-library-without-intro", "older-plex-without-either"],
+    )
+    def test_get_markers_answers_while_the_library_shows_every_type(self, plex_server_under_test, prefs):
+        conn = plex_server_under_test._connect.return_value
+        self._library_reads(conn, self.ITEM_IN_TV, {"2": prefs})
+
+        assert plex_server_under_test.get_markers("7", unknown_if_hidden=True) == [
+            {"type": "intro", "start_ms": 990, "end_ms": 29306, "final": False}
+        ]
+
+    def test_get_markers_as_served_never_reads_the_library(self, plex_server_under_test):
+        # What clients see: a hidden type is simply not there.
+        conn = plex_server_under_test._connect.return_value
+        self._library_reads(conn, self.ITEM_IN_TV, {"2": {"enableIntroMarkerGeneration": "0"}})
+
+        assert plex_server_under_test.get_markers("7") == [
+            {"type": "intro", "start_ms": 990, "end_ms": 29306, "final": False}
+        ]
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/library/metadata/7?includeMarkers=1"]
+
+    @pytest.mark.parametrize(
+        ("markers_xml", "prefs"),
+        [
+            (ITEM_IN_TV, RuntimeError("500")),
+            ('<MediaContainer><Video ratingKey="7"/></MediaContainer>', {}),
+        ],
+        ids=["library-prefs-unreadable", "no-library-on-the-item"],
+    )
+    def test_get_markers_is_unknown_when_the_library_cant_be_read(self, plex_server_under_test, markers_xml, prefs):
+        conn = plex_server_under_test._connect.return_value
+        self._library_reads(conn, markers_xml, {"2": prefs})
+
+        assert plex_server_under_test.get_markers("7", unknown_if_hidden=True) is None
+
+    def test_each_librarys_settings_are_read_once_per_client(self, plex_server_under_test):
+        # One client serves one job's run: every item of a library shares one read of its settings.
+        conn = plex_server_under_test._connect.return_value
+        in_movies = self.ITEM_IN_TV.replace('librarySectionID="2"', 'librarySectionID="1"')
+        on = {"enableIntroMarkerGeneration": "1", "enableCreditsMarkerGeneration": "1"}
+        self._library_reads(conn, self.ITEM_IN_TV, {"1": on, "2": on})
+        plex_server_under_test.get_markers("7", unknown_if_hidden=True)
+        plex_server_under_test.get_markers("8", unknown_if_hidden=True)
+        self._library_reads(conn, in_movies, {"1": on, "2": on})
+        plex_server_under_test.get_markers("9", unknown_if_hidden=True)
+
+        library_reads = [c.args[0] for c in conn.query.call_args_list if c.args[0].startswith("/library/sections/")]
+        assert library_reads == ["/library/sections/2/prefs", "/library/sections/1/prefs"]
+
+    def test_a_failed_settings_read_is_asked_again_by_the_next_item(self, plex_server_under_test):
+        # Only an answer is kept: one failed read mustn't leave the library unknown for the rest of the job.
+        conn = plex_server_under_test._connect.return_value
+        self._library_reads(conn, self.ITEM_IN_TV, {"2": RuntimeError("500")})
+        assert plex_server_under_test.get_markers("7", unknown_if_hidden=True) is None
+
+        self._library_reads(conn, self.ITEM_IN_TV, {"2": {"enableIntroMarkerGeneration": "1"}})
+        assert plex_server_under_test.get_markers("8", unknown_if_hidden=True) == [
+            {"type": "intro", "start_ms": 990, "end_ms": 29306, "final": False}
+        ]
+        plex_server_under_test.get_markers("9", unknown_if_hidden=True)
+
+        library_reads = [c.args[0] for c in conn.query.call_args_list if c.args[0].startswith("/library/sections/")]
+        assert library_reads == ["/library/sections/2/prefs", "/library/sections/2/prefs"]
+
+    def test_concurrent_items_of_one_library_share_one_settings_read(self, plex_server_under_test):
+        import threading
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        workers = 6
+        started = threading.Barrier(workers)
+        library_reads: list[str] = []
+
+        def query(path, **_kwargs):
+            if path.startswith("/library/metadata/"):
+                started.wait(timeout=5)  # every worker is past its markers read before any library is read
+                return ET.fromstring(self.ITEM_IN_TV)
+            library_reads.append(path)
+            return ET.fromstring(
+                '<MediaContainer><Setting id="enableIntroMarkerGeneration" value="0"/></MediaContainer>'
+            )
+
+        conn.query.side_effect = query
+        answers: list = []
+        threads = [
+            threading.Thread(
+                target=lambda: answers.append(plex_server_under_test.get_markers("7", unknown_if_hidden=True))
+            )
+            for _ in range(workers)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert answers == [None] * workers
+        assert library_reads == ["/library/sections/2/prefs"]
+
     def test_get_part_durations_lists_every_part_of_every_version(self, plex_server_under_test):
         import xml.etree.ElementTree as ET
 
@@ -1984,19 +2130,19 @@ class TestPlexMarkerHelpers:
     @pytest.mark.parametrize(
         ("prefs", "expected_query"),
         [
-            (["enableIntroMarkerGeneration"], "enableIntroMarkerGeneration=0"),
-            (["enableCreditsMarkerGeneration"], "enableCreditsMarkerGeneration=0"),
+            (["enableIntroMarkerGeneration"], "enableIntroMarkerGeneration=1"),
+            (["enableCreditsMarkerGeneration"], "enableCreditsMarkerGeneration=1"),
             (
                 ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"],
-                "enableIntroMarkerGeneration=0&enableCreditsMarkerGeneration=0",
+                "enableIntroMarkerGeneration=1&enableCreditsMarkerGeneration=1",
             ),
         ],
     )
-    def test_turn_off_writes_only_that_librarys_prefs(self, plex_server_under_test, prefs, expected_query):
+    def test_turn_on_writes_only_that_librarys_prefs(self, plex_server_under_test, prefs, expected_query):
         conn = plex_server_under_test._connect.return_value
         conn.library.sections.return_value = [self._section("1", "movie"), self._section("2", "show")]
 
-        assert plex_server_under_test.turn_off_library_marker_detection("2", prefs) is None
+        assert plex_server_under_test.turn_on_library_marker_detection("2", prefs) is None
 
         conn.query.assert_called_once_with(f"/library/sections/2/prefs?{expected_query}", method=conn._session.put)
 
@@ -2008,28 +2154,59 @@ class TestPlexMarkerHelpers:
             ("5", ["enableCreditsMarkerGeneration"], "library 5 is not a movie or TV library"),
         ],
     )
-    def test_turn_off_refuses_a_library_that_cant_have_it(self, plex_server_under_test, library_id, prefs, error):
+    def test_turn_on_refuses_a_library_that_cant_have_it(self, plex_server_under_test, library_id, prefs, error):
         conn = plex_server_under_test._connect.return_value
         conn.library.sections.return_value = [self._section("1", "movie"), self._section("5", "photo")]
 
-        assert plex_server_under_test.turn_off_library_marker_detection(library_id, prefs) == error
+        assert plex_server_under_test.turn_on_library_marker_detection(library_id, prefs) == error
         conn.query.assert_not_called()
 
     @pytest.mark.parametrize("prefs", [[], ["GenerateIntroMarkerBehavior"], ["enableBIFGeneration"]])
-    def test_turn_off_never_writes_another_pref(self, plex_server_under_test, prefs):
+    def test_turn_on_never_writes_another_pref(self, plex_server_under_test, prefs):
         with pytest.raises(ValueError):
-            plex_server_under_test.turn_off_library_marker_detection("2", prefs)
+            plex_server_under_test.turn_on_library_marker_detection("2", prefs)
         plex_server_under_test._connect.return_value.query.assert_not_called()
 
-    def test_turn_off_reports_plexs_refusal(self, plex_server_under_test):
+    def test_turn_on_reports_plexs_refusal(self, plex_server_under_test):
         conn = plex_server_under_test._connect.return_value
         conn.library.sections.return_value = [self._section("2", "show")]
         conn.query.side_effect = RuntimeError("(400) bad_request")
 
         assert (
-            plex_server_under_test.turn_off_library_marker_detection("2", ["enableCreditsMarkerGeneration"])
+            plex_server_under_test.turn_on_library_marker_detection("2", ["enableCreditsMarkerGeneration"])
             == "(400) bad_request"
         )
+
+    def test_nothing_can_turn_a_librarys_markers_off_any_more(self, plex_server_under_test):
+        # Off hides every skip marker in the library, ours included (proven on production 2026-09-24).
+        assert not hasattr(plex_server_under_test, "turn_off_library_marker_detection")
+
+    @pytest.mark.parametrize(
+        ("types", "expected_query"),
+        [
+            (["intro", "credits"], "GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never"),
+            (["credits", "intro"], "GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never"),
+            (["intro"], "GenerateIntroMarkerBehavior=never"),
+            (["credits"], "GenerateCreditsMarkerBehavior=never"),
+        ],
+        ids=["both", "both-any-order", "intro", "credits"],
+    )
+    def test_server_wide_never_puts_exactly_the_types_asked_for(self, plex_server_under_test, types, expected_query):
+        conn = plex_server_under_test._connect.return_value
+
+        assert plex_server_under_test.set_marker_detection_never(types) is None
+
+        conn.query.assert_called_once_with(f"/:/prefs?{expected_query}", method=conn._session.put)
+
+    @pytest.mark.parametrize("types", [[], ["recap"], ["intro", "enableIntroMarkerGeneration"]])
+    def test_server_wide_never_writes_nothing_else(self, plex_server_under_test, types):
+        with pytest.raises(ValueError):
+            plex_server_under_test.set_marker_detection_never(types)
+        plex_server_under_test._connect.return_value.query.assert_not_called()
+
+    def test_server_wide_never_reports_plexs_refusal(self, plex_server_under_test):
+        plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("(401) unauthorized")
+        assert plex_server_under_test.set_marker_detection_never(["intro"]) == "(401) unauthorized"
 
 
 class _MarkerReadinessHarness:
@@ -2320,9 +2497,9 @@ class TestPlexMarkersReadiness(_MarkerReadinessHarness):
         assert detection["label"] == "Plex's own detection can replace your markers"
         assert detection["severity"] == "recommended"
         assert detection["ok"] is False
-        assert (detection["current"], detection["recommended"]) == ("On", "Off")
+        assert (detection["current"], detection["recommended"]) == ("On", "Never")
         # Credits is ``never`` server-wide, so only the intro is Plex's to detect in TV Shows.
-        assert [(lib["name"], lib["detail"]) for lib in detection["libraries"]] == [("TV Shows", "intro")]
+        assert detection["actions"]["disable"]["args"] == {"types": ["intro"]}
 
     @pytest.mark.parametrize(
         ("detection", "expected"),
@@ -2436,9 +2613,14 @@ class TestPlexMarkersReadiness(_MarkerReadinessHarness):
         assert ids.index("markers") < ids.index("library_settings")
 
 
-class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
-    """The "Plex's own detection" row: Plex detects in a library only when its server-wide pref isn't ``never``
-    AND the library's own ``enable…MarkerGeneration`` switch is on, and only "Use ours" makes that a problem."""
+class TestPlexLibraryMarkerSettings(_MarkerReadinessHarness):
+    """Each Intro & Credits library's own "Intro markers" / "Credits markers" setting (Edit library → Advanced).
+
+    While one is off, Plex serves no marker of that type in the library, its own or ours, so no skip button shows
+    (proven on production 2026-09-24). A setting that is off is a must-fix row with a "Turn on"; nothing offers to
+    turn one off. The note under the rows offers Plex's server-wide Never instead, which stops Plex's detection and
+    hides nothing.
+    """
 
     INTRO = "enableIntroMarkerGeneration"
     CREDITS = "enableCreditsMarkerGeneration"
@@ -2447,126 +2629,149 @@ class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
         "2": {"type": "show", "intro": True, "credits": True},
         "3": {"type": "show", "intro": True, "credits": True},
     }
+    BOTH_REASON = (
+        'Plex\'s "Intro markers" and "Credits markers" are off for this library, and Plex then hides every skip '
+        "marker in it, ours included."
+    )
+    BOTH_NOTE = (
+        "Don't want Plex detecting intros itself? Set Plex's server-wide \"Generate intro video markers\" and "
+        '"Generate credits video markers" to Never instead. That stops Plex\'s detection and keeps skip buttons '
+        "working."
+    )
 
-    def _row(self, server, detection: dict, *, library_detection: object = None, library_calls=None) -> dict:
+    def _payload(
+        self,
+        server,
+        library_detection: object,
+        *,
+        detection: dict | None = None,
+        library_calls: list | None = None,
+    ) -> dict:
+        detection = detection or {"intro": "scheduled", "credits": "asap"}
         capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
-        payload = self._readiness(server, capability, library_detection=library_detection, library_calls=library_calls)
-        return self._marker_checks(payload)["markers_plex_detection"]
+        return self._readiness(server, capability, library_detection=library_detection, library_calls=library_calls)
 
-    def test_server_never_is_all_good_whatever_the_libraries_say(self):
-        calls: list = []
-        row = self._row(
-            self._server_with_libraries(),
-            {"intro": "never", "credits": "never"},
-            library_detection=self.ALL_ON,
-            library_calls=calls,
-        )
+    def _hidden(self, payload: dict) -> list[dict]:
+        return [c for c in self._marker_checks(payload).values() if c["id"].startswith("markers_plex_library_markers")]
 
-        assert (row["ok"], row["severity"]) == (True, "recommended")
-        assert row["label"] == "Plex's own detection is off"
-        assert (row["current"], row["recommended"]) == ("Off", "Off")
-        assert "libraries" not in row
-        assert calls == [], "a server that never detects needs no library read"
+    def test_a_library_with_its_settings_off_is_a_must_fix_row_with_turn_on(self):
+        tv_off = {**self.ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}
 
-    def test_server_scheduled_and_library_on_is_listed_with_its_turn_off(self):
-        calls: list = []
-        row = self._row(
-            self._server_with_libraries(library_ids=["2"]),
-            {"intro": "scheduled", "credits": "scheduled"},
-            library_detection=self.ALL_ON,
-            library_calls=calls,
-        )
+        payload = self._payload(self._server_with_libraries(library_ids=["2"]), tv_off)
 
-        assert (row["ok"], row["severity"]) == (False, "recommended")
-        assert row["label"] == "Plex's own detection can replace your markers"
-        assert (row["current"], row["recommended"]) == ("On", "Off")
-        assert row["reason"] == (
-            "Turn off = Edit library → Advanced → Enable intro / credits detection, that library only."
-        )
-        assert row["libraries_caption"] == "Plex detects on its own in these libraries:"
-        assert row["actions"] == {}, "the only fixes are the per-library ones"
-        [library] = row["libraries"]
-        assert (library["id"], library["name"], library["detail"], library["button"]) == (
-            "2",
-            "TV Shows",
-            "intro, credits",
-            "Turn off",
-        )
-        action = library["action"]
-        assert action["action"] == "turn_off_plex_detection"
+        [row] = self._hidden(payload)
+        assert row["id"] == "markers_plex_library_markers_2"
+        assert row["label"] == "TV Shows — skip buttons are hidden"
+        assert (row["severity"], row["ok"]) == ("critical", False)
+        assert row["reason"] == self.BOTH_REASON
+        assert (row["current"], row["recommended"]) == ("off", "on")
+        assert (row["fix_action"], row["fix_label"]) == ("enable", "Turn on")
+        assert list(row["actions"]) == ["enable"], "Turn on is the only fix: nothing turns a library's markers off"
+        assert "bulk" not in row, "Turn on is in Fix critical / Fix all"
+        action = row["actions"]["enable"]
+        assert action["action"] == "turn_on_plex_library_markers"
         assert action["args"] == {"library_id": "2", "prefs": [self.INTRO, self.CREDITS]}
         assert action["confirm"]["kind"] == "button"
-        assert "TV Shows only" in action["confirm"]["body"]
-        # Only the selected library's switches are read.
-        assert calls == [["2"]]
+        assert "TV Shows" in action["confirm"]["body"]
+        assert "turn_off" not in json.dumps(payload), "no Turn off action anywhere in Setup Health"
+        assert "markers_plex_library_markers_2" in self._failing_critical(payload)
+        assert payload["overall_ok"] is False
 
-    def test_server_asap_and_library_off_is_not_listed(self):
-        row = self._row(
-            self._server_with_libraries(library_ids=["2"]),
-            {"intro": "asap", "credits": "asap"},
-            library_detection={"2": {"type": "show", "intro": False, "credits": False}},
+    def test_the_note_offers_server_wide_never_for_the_types_that_are_off(self):
+        tv_off = {**self.ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}
+
+        [row] = self._hidden(self._payload(self._server_with_libraries(library_ids=["2"]), tv_off))
+
+        note = row["note"]
+        assert note["text"] == self.BOTH_NOTE
+        assert note["button"] == "Set server-wide to Never"
+        assert note["action"]["action"] == "set_plex_detection_never"
+        assert note["action"]["args"] == {"types": ["intro", "credits"]}
+        assert note["action"]["confirm"]["kind"] == "button"
+
+    @pytest.mark.parametrize(
+        ("library_id", "entry", "reason", "prefs"),
+        [
+            (
+                "1",
+                {"type": "movie", "intro": None, "credits": False},
+                'Plex\'s "Credits markers" is off for this library, and Plex then hides every credits marker in it, '
+                "ours included.",
+                [CREDITS],
+            ),
+            (
+                "2",
+                {"type": "show", "intro": False, "credits": True},
+                'Plex\'s "Intro markers" is off for this library, and Plex then hides every intro marker in it, '
+                "ours included.",
+                [INTRO],
+            ),
+        ],
+        ids=["movies-credits-off", "tv-intro-off"],
+    )
+    def test_only_the_types_actually_off_are_named(self, library_id, entry, reason, prefs):
+        payload = self._payload(
+            self._server_with_libraries(library_ids=[library_id]), {**self.ALL_ON, library_id: entry}
         )
 
-        assert row["ok"] is True
-        assert row["label"] == "Plex's own detection is off in your Intro & Credits libraries"
-        assert (row["current"], row["recommended"]) == ("Off", "Off")
-        assert "libraries" not in row
+        [row] = self._hidden(payload)
+        assert row["reason"] == reason
+        assert row["actions"]["enable"]["args"] == {"library_id": library_id, "prefs": prefs}
 
-    def test_a_tv_library_lists_intro_and_credits_and_a_movie_library_credits_only(self):
-        detection = {**self.ALL_ON, "3": {"type": "show", "intro": False, "credits": False}}
-        row = self._row(
-            self._server_with_libraries(),
-            {"intro": "scheduled", "credits": "asap"},
-            library_detection=detection,
+    def test_the_note_names_only_the_types_in_scope(self):
+        movies_off = {**self.ALL_ON, "1": {"type": "movie", "intro": None, "credits": False}}
+
+        [row] = self._hidden(self._payload(self._server_with_libraries(library_ids=["1"]), movies_off))
+
+        assert row["note"]["text"] == (
+            "Don't want Plex detecting credits itself? Set Plex's server-wide \"Generate credits video markers\" to "
+            "Never instead. That stops Plex's detection and keeps skip buttons working."
         )
+        assert row["note"]["action"]["args"] == {"types": ["credits"]}
 
-        listed = [(lib["name"], lib["detail"], lib["action"]["args"]["prefs"]) for lib in row["libraries"]]
-        assert listed == [
-            ("Movies", "credits", [self.CREDITS]),
-            ("TV Shows", "intro, credits", [self.INTRO, self.CREDITS]),
+    def test_one_note_under_the_last_hidden_library(self):
+        both_off = {
+            **self.ALL_ON,
+            "1": {"type": "movie", "intro": None, "credits": False},
+            "2": {"type": "show", "intro": False, "credits": True},
+        }
+
+        rows = self._hidden(self._payload(self._server_with_libraries(library_ids=["1", "2"]), both_off))
+
+        assert [row["label"] for row in rows] == [
+            "Movies — skip buttons are hidden",
+            "TV Shows — skip buttons are hidden",
         ]
+        assert "note" not in rows[0]
+        assert rows[1]["note"]["action"]["args"] == {"types": ["intro", "credits"]}
 
-    def test_only_the_types_plex_detects_server_wide_are_listed(self):
-        row = self._row(
-            self._server_with_libraries(),
-            {"intro": "never", "credits": "scheduled"},
-            library_detection=self.ALL_ON,
-        )
+    @pytest.mark.parametrize(
+        ("redetect", "detection"),
+        [
+            ("restore", {"intro": "never", "credits": "never"}),
+            ("keep_plex", {"intro": "scheduled", "credits": "asap"}),
+            ("restore", {"intro": None, "credits": None}),
+        ],
+        ids=["plex-already-never-detects", "keep-plexs-wants-its-detection", "server-prefs-unreadable"],
+    )
+    def test_no_note_when_server_wide_never_isnt_wanted_or_changes_nothing(self, redetect, detection):
+        tv_off = {**self.ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}
+        server = self._server_with_libraries(redetect=redetect, library_ids=["2"])
 
-        assert [(lib["name"], lib["detail"]) for lib in row["libraries"]] == [
-            ("Movies", "credits"),
-            ("TV Shows", "credits"),
-            ("Kids TV", "credits"),
-        ]
+        [row] = self._hidden(self._payload(server, tv_off, detection=detection))
 
-    def test_a_library_outside_the_markers_selection_is_not_listed(self):
-        calls: list = []
-        detection = {**self.ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}
-        row = self._row(
-            self._server_with_libraries(library_ids=["2"]),
-            {"intro": "scheduled", "credits": "scheduled"},
-            library_detection=detection,
-            library_calls=calls,
-        )
+        assert row["label"] == "TV Shows — skip buttons are hidden"
+        assert "note" not in row
 
-        assert row["ok"] is True
-        assert "libraries" not in row
-        assert calls == [["2"]]
+    def test_every_library_showing_its_markers_is_one_passing_row(self):
+        payload = self._payload(self._server_with_libraries(), self.ALL_ON)
 
-    def test_keep_plex_never_warns_and_reads_no_library(self):
-        calls: list = []
-        row = self._row(
-            self._server_with_libraries(redetect="keep_plex"),
-            {"intro": "scheduled", "credits": "scheduled"},
-            library_detection=self.ALL_ON,
-            library_calls=calls,
-        )
-
-        assert (row["ok"], row["severity"]) == (True, "recommended")
-        assert row["label"] == "Keeping Plex's own markers: its detection can stay on"
-        assert (row["current"], row["recommended"], row["reason"]) == (None, None, None)
-        assert "libraries" not in row
-        assert calls == []
+        [row] = self._hidden(payload)
+        assert row["id"] == "markers_plex_library_markers"
+        assert row["label"] == "Plex shows skip buttons in your Intro & Credits libraries"
+        assert (row["severity"], row["ok"]) == ("critical", True)
+        assert (row["current"], row["recommended"]) == ("on", "on")
+        assert row["actions"] == {}
 
     @pytest.mark.parametrize(
         "library_detection",
@@ -2578,7 +2783,66 @@ class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
         ],
         ids=["read-raised", "no-section-list", "library-unreadable", "older-plex-without-credits-pref"],
     )
-    def test_an_unreadable_library_switch_falls_back_to_the_server_row(self, library_detection):
+    def test_a_setting_that_couldnt_be_read_emits_no_row(self, library_detection):
+        payload = self._payload(self._server_with_libraries(library_ids=["2"]), library_detection)
+        assert self._hidden(payload) == []
+
+    @pytest.mark.parametrize(
+        ("redetect", "detection"),
+        [("keep_plex", {"intro": "scheduled", "credits": "asap"}), ("restore", {"intro": "never", "credits": "never"})],
+        ids=["keep-plexs", "detection-never"],
+    )
+    def test_the_selected_libraries_are_read_whatever_plexs_detection_does(self, redetect, detection):
+        # Hiding doesn't depend on Plex's detection: "Keep Plex's" loses Plex's own skip buttons the same way.
+        calls: list = []
+        tv_off = {**self.ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}
+
+        payload = self._payload(
+            self._server_with_libraries(redetect=redetect), tv_off, detection=detection, library_calls=calls
+        )
+
+        assert calls == [["1", "2", "3"]]
+        assert [row["label"] for row in self._hidden(payload)] == ["TV Shows — skip buttons are hidden"]
+
+    def test_the_confirm_body_escapes_the_library_name(self):
+        """``_openConfirmModal`` renders the body as HTML."""
+        library = Library(id="2", name="<b>TV</b>", remote_paths=(), kind="episode")
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, libraries=[library])
+
+        [row] = self._hidden(self._payload(server, {"2": {"type": "show", "intro": False, "credits": True}}))
+
+        body = row["actions"]["enable"]["confirm"]["body"]
+        assert "&lt;b&gt;TV&lt;/b&gt;" in body and "<b>" not in body
+        assert row["label"] == "<b>TV</b> — skip buttons are hidden", "the page escapes the label itself"
+
+
+class TestPlexDetectionRow(_MarkerReadinessHarness):
+    """The "Plex's own detection" row: Plex's detection overwrites ours under "Use ours", and the fix is its server-wide
+    Never — never a library's own setting, which would hide every marker there."""
+
+    ALL_ON = TestPlexLibraryMarkerSettings.ALL_ON
+
+    def _row(self, server, detection: dict, *, library_detection: object = None) -> dict:
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
+        payload = self._readiness(server, capability, library_detection=library_detection)
+        return self._marker_checks(payload)["markers_plex_detection"]
+
+    def test_server_never_is_all_good_whatever_the_libraries_say(self):
+        row = self._row(
+            self._server_with_libraries(), {"intro": "never", "credits": "never"}, library_detection=self.ALL_ON
+        )
+
+        assert (row["ok"], row["severity"]) == (True, "recommended")
+        assert row["label"] == "Plex's own detection is off"
+        assert (row["current"], row["recommended"]) == ("Off", "Off")
+        assert row["actions"] == {}
+
+    @pytest.mark.parametrize(
+        "library_detection",
+        [ALL_ON, {**ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}],
+        ids=["library-on", "library-off-and-about-to-be-turned-on"],
+    )
+    def test_server_on_recommends_server_wide_never(self, library_detection):
         row = self._row(
             self._server_with_libraries(library_ids=["2"]),
             {"intro": "scheduled", "credits": "scheduled"},
@@ -2587,10 +2851,57 @@ class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
 
         assert (row["ok"], row["severity"]) == (False, "recommended")
         assert row["label"] == "Plex's own detection can replace your markers"
-        assert (row["current"], row["recommended"]) == ("unknown", "Off")
-        assert row["reason"] == "Plex settings → Library → Generate intro and credits video markers."
-        assert row["actions"] == {}
-        assert "libraries" not in row
+        assert (row["current"], row["recommended"]) == ("On", "Never")
+        assert row["reason"] == "Plex settings → Library → Generate intro and credits video markers → Never."
+        assert (row["fix_action"], row["fix_label"]) == ("disable", "Set server-wide to Never")
+        # Never reaches every library: only this row's own button (and its confirm) sets it, never "Fix all".
+        assert row["bulk"] is False
+        action = row["actions"]["disable"]
+        assert action["action"] == "set_plex_detection_never"
+        assert action["args"] == {"types": ["intro", "credits"]}
+        assert list(row["actions"]) == ["disable"]
+        assert "libraries" not in row, "no per-library buttons any more"
+
+    def test_only_the_types_plex_detects_server_wide_and_in_these_libraries_are_set(self):
+        row = self._row(
+            self._server_with_libraries(library_ids=["1", "2"]),
+            {"intro": "never", "credits": "scheduled"},
+            library_detection=self.ALL_ON,
+        )
+        assert row["actions"]["disable"]["args"] == {"types": ["credits"]}
+
+    def test_intro_detection_doesnt_reach_a_movie_library(self):
+        row = self._row(
+            self._server_with_libraries(library_ids=["1"]),
+            {"intro": "scheduled", "credits": "never"},
+            library_detection=self.ALL_ON,
+        )
+
+        assert (row["ok"], row["severity"]) == (True, "recommended")
+        assert row["label"] == "Plex's own detection doesn't reach your Intro & Credits libraries"
+        assert (row["current"], row["recommended"], row["actions"]) == (None, None, {})
+
+    @pytest.mark.parametrize("library_detection", [RuntimeError("down"), None], ids=["read-raised", "no-section-list"])
+    def test_libraries_that_couldnt_be_read_still_get_the_server_wide_fix(self, library_detection):
+        row = self._row(
+            self._server_with_libraries(library_ids=["2"]),
+            {"intro": "scheduled", "credits": "scheduled"},
+            library_detection=library_detection,
+        )
+
+        assert (row["ok"], row["current"], row["recommended"]) == (False, "On", "Never")
+        assert row["actions"]["disable"]["args"] == {"types": ["intro", "credits"]}
+
+    def test_keep_plex_never_warns(self):
+        row = self._row(
+            self._server_with_libraries(redetect="keep_plex"),
+            {"intro": "scheduled", "credits": "scheduled"},
+            library_detection=self.ALL_ON,
+        )
+
+        assert (row["ok"], row["severity"]) == (True, "recommended")
+        assert row["label"] == "Keeping Plex's own markers: its detection can stay on"
+        assert (row["current"], row["recommended"], row["reason"], row["actions"]) == (None, None, None, {})
 
     def test_intro_and_credits_off_on_the_server_has_no_detection_row(self):
         calls: list = []
@@ -2613,17 +2924,6 @@ class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
             ]
         ]
         assert {row["id"] for row in rows} == {"markers_plex_detection"}
-
-    def test_the_confirm_body_escapes_the_library_name(self):
-        """``_openConfirmModal`` renders the body as HTML."""
-        library = Library(id="2", name="<b>TV</b>", remote_paths=(), kind="episode")
-        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, libraries=[library])
-
-        row = self._row(server, {"intro": "asap", "credits": "never"}, library_detection=self.ALL_ON)
-
-        body = row["libraries"][0]["action"]["confirm"]["body"]
-        assert "&lt;b&gt;TV&lt;/b&gt;" in body and "<b>" not in body
-        assert row["libraries"][0]["name"] == "<b>TV</b>", "the page escapes the name itself (textContent)"
 
 
 class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):

@@ -272,6 +272,7 @@ function showEditScheduleModal(scheduleId) {
 }
 
 async function saveSchedule() {
+    const opening = modalOpening(document.getElementById('newScheduleModal'));
     const editId = document.getElementById('scheduleEditId').value;
     const name = document.getElementById('scheduleName').value.trim();
     if (!name) {
@@ -405,7 +406,7 @@ async function saveSchedule() {
             showToast('Schedule Created', `Schedule "${name}" created successfully`, 'success');
         }
 
-        bootstrap.Modal.getInstance(document.getElementById('newScheduleModal')).hide();
+        hideModalSafely(document.getElementById('newScheduleModal'), opening);
         loadSchedules();
     } catch (error) {
         const action = editId ? 'update' : 'create';

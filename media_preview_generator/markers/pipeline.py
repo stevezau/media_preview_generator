@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,16 +34,19 @@ from ..servers.ownership import OwnershipMatch
 from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
-from .audio.season import season_audio_spec, season_intro_chapter_limits
+from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
 from .credits.detector import credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
     DecisionContext,
     DecisionStatus,
+    FileLimits,
     TypeDecision,
     credits_limits_ms,
     decide,
+    file_clock_may_matter,
+    unusable_server_marker,
 )
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, is_season_folder, merge_ids
 from .job_log import (
@@ -66,7 +69,16 @@ from .job_log import (
 from .locks import FILE_RUN_LOCKS
 from .locks import KeyedLocks as _KeyedLocks
 from .missing import mark_if_missing
-from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
+from .models import (
+    SERVER_SOURCES,
+    STALE_SERVER_MARKERS_DETAIL,
+    Candidate,
+    FileIdentity,
+    Marker,
+    MarkerType,
+    MediaIds,
+    Source,
+)
 from .outcomes import (
     EXTRAS_NOT_CHECKED,
     NOT_IN_LIBRARY,
@@ -87,6 +99,7 @@ from .outcomes import (
     kept_note,
     kept_own_reason,
     replaced_own_note,
+    replaced_stale_note,
     review_message,
     with_kept_note,
     with_sentence,
@@ -104,8 +117,10 @@ from .publishers.base import (
     PublishError,
     Shown,
     cancellable_waits,
+    wait_cancelled,
 )
 from .publishers.factory import publisher_for, supported_types_for
+from .publishers.plex_db import STALE_READ_WAIT_S, WAIT_SLICE_S
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
 from .source_counts import DecidedByTally, decided_groups
 from .sources import introdb, skipdb, theintrodb
@@ -156,7 +171,15 @@ _ITEM_WIDE_MARKERS = frozenset({ServerType.PLEX, ServerType.EMBY})
 # Servers where a plugin can import a crowd skip database into the server's own markers; Plex detects its own.
 _IMPORTER_PLUGIN_SERVERS = frozenset({ServerType.JELLYFIN, ServerType.EMBY})
 PLUGINS_UNKNOWN_DETAIL = "Couldn't read this server's plugins, so its markers aren't used"
-UNUSABLE_SERVER_MARKERS_DETAIL = "Couldn't read this server's markers, or they may describe another cut"
+# A Plex answer stored while Plex couldn't tell which of its markers were made for an earlier file (an agent older
+# than that answer, a busy database): counted as before, and asked again like an unusable answer until Plex can tell.
+STALENESS_UNKNOWN_DETAIL = "Plex couldn't tell yet whether these markers were made for this file; asked again"
+UNUSABLE_SERVER_MARKERS_DETAIL = (
+    "Couldn't read this server's markers, they may describe another cut, or its library hides a type in Plex"
+)
+# What an older reader stored from a Plex server that shows our markers now: it can't be read again (Plex can't tell
+# ours from its own), so it isn't checked for markers made for an earlier file either, and counts for nothing.
+OURS_SHOWN_DETAIL = "This server shows our markers now; what an older version read from it isn't used"
 _CANCELLED = "cancelled by user"
 # A ready Plex whose Plex Pass didn't answer (usually restarting): files within this long share the answer instead of
 # each running the whole check (lock probe, Plex's HTTP connect with its retries, schema and library scans).
@@ -361,6 +384,10 @@ class PipelineContext:
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Server ids whose Plex can never tell on this job which of its markers were made for an earlier file (an agent
+    # older than that answer, ``MarkerPublisher.stale_types_unanswerable``): not asked again for the job's other files.
+    # A set's add and membership test are atomic under the GIL, so the check threads share it without a lock.
+    _stale_unanswerable: set[str] = field(default_factory=set, repr=False)
     # Per file of a forced run: the sources it already refreshed, so the worker stage doesn't ask those sources twice
     # and still refreshes the sources after the detector that handed the item to a worker. Dropped once the file has
     # its outcome, so a library-wide forced job doesn't keep an entry for every file it ran.
@@ -639,8 +666,12 @@ class _FileChangedError(Exception):
 class _ItemServers:
     """The owning servers of one file, asked for item ids, external ids and markers at most once each."""
 
-    def __init__(self, item: ProcessableItem, owning: list[_Owning]) -> None:
+    def __init__(
+        self, item: ProcessableItem, owning: list[_Owning], cancel_check: Callable[[], bool] | None = None
+    ) -> None:
         self._path = item.canonical_path
+        # The job's cancel, for the database reads made on the file's behalf before detection.
+        self.cancel_check = cancel_check
         self._hints = item.item_id_by_server or {}
         self.owning = owning
         self._item_ids: dict[str, str | None] = {}
@@ -648,6 +679,7 @@ class _ItemServers:
         self._server_ids: MediaIds | None = None
         self._markers: dict[str, list[Candidate] | None] = {}
         self._parts: dict[str, dict[str, list[int | None] | None]] = {}
+        self._stale: dict[str, frozenset[MarkerType] | None] = {}
 
     def item_id(self, owner: _Owning) -> str | None:
         """The server's item id for this file (hint first), or None when the server doesn't have it (yet).
@@ -704,6 +736,16 @@ class _ItemServers:
                 logger.debug("Reading markers on {} failed for {}: {}", owner.config.name, self._path, exc)
                 self._markers[sid] = None
         return self._markers[sid]
+
+    def stale_types(
+        self, owner: _Owning, read: Callable[[], frozenset[MarkerType] | None]
+    ) -> frozenset[MarkerType] | None:
+        """The types whose own markers the server shows for this file were made for an earlier file at its path, read
+        at most once per run (``read``); None when the server can't tell."""
+        sid = owner.config.id
+        if sid not in self._stale:
+            self._stale[sid] = read()
+        return self._stale[sid]
 
     def part_count(self, owner: _Owning, item_id: str) -> int | None:
         """How many parts the server's item has across its versions (Plex), as the markers read asked for them; None
@@ -1009,6 +1051,20 @@ _RIDERS = {
 _LOCAL_DETECTOR_SOURCES = frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS, Source.CREDITS_TEXT})
 
 
+def _frame_rate(
+    ctx: PipelineContext, rec: FileRecord, evidence: Iterable[Candidate], order: tuple[str, ...]
+) -> float | None:
+    """The frame rate decisions read online times on the file's clock by (``decide`` rule 12): the stored one, read
+    first for a file stored before frame rates were (``season.frame_rate_of``) only when, among the evidence of the
+    sources in ``order`` (the ones turned on), an answer that may be timed on another release has a candidate of its
+    type from another source to agree with (``decide.file_clock_may_matter``). A server marker made for an earlier file
+    (``Candidate.stale``) isn't one: decide drops it before reading any clock. Season audio reads the rate it needs
+    itself."""
+    if file_clock_may_matter((c for c in evidence if c.source.value in order and not c.stale), rec.duration_ms or 0):
+        return frame_rate_of(ctx, rec, probe=probe_media)
+    return ctx.store.get_frame_rate(rec.id)[1]
+
+
 def _decision_order(settings: GlobalMarkersSettings) -> tuple[str, ...]:
     """Enabled sources in the user's order; importer-plugin copies ride on the server-markers switch and the
     previous-season hint on the season-audio switch, each ranked right after its switch."""
@@ -1018,6 +1074,11 @@ def _decision_order(settings: GlobalMarkersSettings) -> tuple[str, ...]:
         if source_id in _RIDERS:
             order.append(_RIDERS[source_id])
     return tuple(order)
+
+
+def _file_limits(rec: FileRecord) -> FileLimits:
+    """The limits a server's own marker must fit for this file (``decide.unusable_server_marker``)."""
+    return FileLimits(rec.duration_ms or 0)
 
 
 def _decide(
@@ -1041,6 +1102,7 @@ def _decide(
     # would silently republish over that edit with no way back (the detected answer a lock replaced isn't stored). To
     # let detection decide a type again the user unlocks it.
     locked = ctx.store.get_locked(rec.id)
+    frame_rate = _frame_rate(ctx, rec, evidence, order)
 
     # The window of the file's kind, chosen the way the detector chooses it (an episode has a season key); the credit
     # text detector bounds its reads with the same two numbers (``credits.detector._earliest_start_s``).
@@ -1061,6 +1123,7 @@ def _decide(
             intro_chapter_limit,
             movie_credits_max_from_end_ms=movie_cap_ms,
             credits_window_ms=credits_window_ms,
+            frame_rate=frame_rate,
         )
         return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
 
@@ -1501,9 +1564,12 @@ def _read_server_markers(
         servers: The file's owning servers and their item ids.
         refresh: A forced run: read every server we never published to.
         first_read_only: Every wanted type is already decided, so only a server never asked for this file (or asked by
-            an older reader) is read -- its own markers can still shorten decided credits (spec §5.5 rule 7). An empty
-            or unusable answer isn't asked again on such a run, unless the job checks servers
-            (``ctx.recheck_empty_server_markers``): then it is on its backoff (``MarkerStore.server_recheck_due``).
+            an older reader), and not showing our markers, is read -- its own markers can still shorten decided credits
+            (spec §5.5 rule 7). An empty or unusable answer isn't asked again on such a run, unless the job checks
+            servers (``ctx.recheck_empty_server_markers``): then it is on its backoff
+            (``MarkerStore.server_recheck_due``). A Plex answer stored while Plex couldn't tell whether its markers
+            were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
+            is never read; an older reader's answer from a Plex one stops counting (``_drop_older_reader_answer``).
 
     Returns:
         The ids of the servers whose answer was stored.
@@ -1513,8 +1579,15 @@ def _read_server_markers(
         cfg = owner.config
         published = ctx.store.get_publish_state(rec.id, cfg.id)
         if published and published.markers:
-            continue  # what's there now is (partly) ours: never a second opinion
-        if not refresh and not _server_markers_due(ctx, rec, cfg.id, first_read_only=first_read_only):
+            # What's there now is (partly) ours: never a second opinion.
+            if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id):
+                read.add(cfg.id)
+            continue
+        if (
+            not refresh
+            and not _server_markers_due(ctx, rec, cfg.id, first_read_only=first_read_only)
+            and not _staleness_known_now(ctx, rec, servers, owner)
+        ):
             continue
         item_id = servers.item_id(owner)
         if not item_id:
@@ -1524,8 +1597,11 @@ def _read_server_markers(
             continue
         found = servers.markers(owner, item_id, rec.duration_ms)
         if found is None:
-            if not _server_rows(ctx, rec, cfg.id):
+            rows = _server_rows(ctx, rec, cfg.id)
+            if not rows or ctx.store.evidence_version(rec.id, rows[0].source, cfg.id) != READER_VERSION:
                 # Remembered, so a run with everything decided doesn't ask again; a run still missing evidence does.
+                # An older reader's answer goes too: it would be due again on every run, and this reader can't vouch
+                # for it (a Plex library that hides a type used to read as "none there").
                 ctx.store.replace_evidence(
                     rec.id,
                     Source.SERVER_MARKERS,
@@ -1533,6 +1609,7 @@ def _read_server_markers(
                     origin=cfg.id,
                     detail=UNUSABLE_SERVER_MARKERS_DETAIL,
                     version=READER_VERSION,
+                    also_replaces=SERVER_SOURCES - {Source.SERVER_MARKERS},
                 )
                 read.add(cfg.id)
             elif ctx.recheck_empty_server_markers:
@@ -1543,6 +1620,14 @@ def _read_server_markers(
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             continue  # another version of this item was published while the read was out: it may show ours
         source, found, detail = _counted_as(ctx, owner, found)
+        if found and cfg.type is ServerType.PLEX:
+            stale = _plex_types_not_made_for_file(ctx, servers, owner, item_id)
+            if stale is None:
+                # Counted as before, and kept due so the next run asks Plex again (``_server_markers_due``).
+                detail = STALENESS_UNKNOWN_DETAIL
+            else:
+                # Stored flagged, so decide counts them for nothing (``Candidate.stale``) and the Inspector says why.
+                found = [replace(c, stale=True) if c.type in stale else c for c in found]
         ctx.store.replace_evidence(
             rec.id,
             source,
@@ -1556,8 +1641,50 @@ def _read_server_markers(
     return read
 
 
+def _drop_older_reader_answer(ctx: PipelineContext, rec: FileRecord, server_id: str) -> bool:
+    """Stop counting a Plex answer an older reader stored, once the server shows our markers.
+
+    Such an answer can't be read again to be checked for markers made for an earlier file (``READER_VERSION`` 5), so,
+    as when the reader can't read the server (``_read_server_markers``), it goes: kept, a stale Plex marker would
+    still confirm online times timed on another release.
+
+    Returns:
+        Whether the stored answer was replaced.
+    """
+    rows = _server_rows(ctx, rec, server_id)
+    if not rows or ctx.store.evidence_version(rec.id, rows[0].source, server_id) == READER_VERSION:
+        return False
+    ctx.store.replace_evidence(
+        rec.id,
+        Source.SERVER_MARKERS,
+        [],
+        origin=server_id,
+        detail=OURS_SHOWN_DETAIL,
+        version=READER_VERSION,
+        also_replaces=SERVER_SOURCES - {Source.SERVER_MARKERS},
+    )
+    return True
+
+
+def _staleness_known_now(ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, owner: _Owning) -> bool:
+    """Whether Plex, which couldn't tell last time whether its stored markers were made for this file, can tell now.
+
+    Then the answer is read again and stored flagged even on a run that needs no more evidence, so decide stops
+    counting markers Plex now says were made for an earlier file.
+    """
+    if not any(r.detail == STALENESS_UNKNOWN_DETAIL for r in _server_rows(ctx, rec, owner.config.id)):
+        return False
+    item_id = servers.item_id(owner)
+    return bool(item_id) and _plex_types_not_made_for_file(ctx, servers, owner, item_id) is not None
+
+
 def _server_rows(ctx: PipelineContext, rec: FileRecord, server_id: str) -> list[EvidenceRow]:
     return [r for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES and r.origin == server_id]
+
+
+_ASKED_AGAIN_DETAILS = frozenset(
+    {UNUSABLE_SERVER_MARKERS_DETAIL, STALE_SERVER_MARKERS_DETAIL, STALENESS_UNKNOWN_DETAIL}
+)
 
 
 def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str, *, first_read_only: bool) -> bool:
@@ -1569,8 +1696,10 @@ def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str, *
             return False
         # Check servers: an empty answer is asked again on its backoff (RECHECK_AFTER), then no more.
         return ctx.store.server_recheck_due(rec.id, server_id, now=ctx.now(), after=RECHECK_AFTER)
-    if any(r.detail == UNUSABLE_SERVER_MARKERS_DETAIL for r in rows):
-        return True  # unreadable or another cut last time: asked again on every run that still needs evidence
+    if any(r.detail in _ASKED_AGAIN_DETAILS for r in rows):
+        # Unreadable, another cut, a Plex library hiding a type, markers made for an earlier file, or Plex couldn't tell
+        # whether they were, last time: asked again on every run that still needs evidence.
+        return True
     fetched = max(datetime.fromisoformat(r.fetched_at) for r in rows)
     if not all(r.type is None for r in rows) or ctx.now() - fetched <= EMPTY_SERVER_MARKERS_RETRY:
         return False
@@ -1580,8 +1709,60 @@ def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str, *
     return True
 
 
+def _plex_types_not_made_for_file(
+    ctx: PipelineContext, servers: _ItemServers, owner: _Owning, item_id: str
+) -> frozenset[MarkerType] | None:
+    """The types whose markers Plex shows for this file were made for an earlier file at its path.
+
+    Plex keeps an item's markers when its file is replaced, and only its database can tell (the HTTP API has no
+    timestamps), so the publisher reads it (``types_not_made_for_file``), locally or through the Plex marker agent,
+    briefly and stopping when the job is cancelled. Asked once per run for the file.
+
+    Returns:
+        Those types. Empty when this job may not use the server's database at all (Intro & Credits off, or the
+        database write not confirmed): nothing will ever tell, so every marker counts as before. None when Plex
+        couldn't tell this time (an agent older than the answer, a busy or unreachable database): counted as before,
+        and asked again on the next run -- an agent too old to tell isn't asked again for this job's other files
+        (``ctx._stale_unanswerable``).
+    """
+    cfg = owner.config
+
+    def read() -> frozenset[MarkerType] | None:
+        if cfg.id in ctx._stale_unanswerable:
+            return None
+        try:
+            # Built to wait briefly: its capability check waits for the database locks too, and a busy database means
+            # "can't tell" (asked again next run), never a writer's wait for every file.
+            publisher = publisher_for(
+                owner.server,
+                cfg,
+                settings_provider=lambda: _live_markers_settings(ctx, cfg),
+                ui_details=False,
+                db_timeout_s=STALE_READ_WAIT_S,
+            )
+            if publisher is None:
+                return frozenset()
+            with cancellable_waits(servers.cancel_check):
+                report = _cached_capability(ctx, cfg, publisher, wait_s=STALE_READ_WAIT_S)
+                if report is None:
+                    return None
+                if report.state in _SETTINGS_ANSWERS:
+                    return frozenset()
+                if not report.ready:
+                    return None
+                stale = publisher.types_not_made_for_file(item_id)
+            if stale is None and publisher.stale_types_unanswerable is True:
+                ctx._stale_unanswerable.add(cfg.id)
+            return stale
+        except Exception as exc:
+            logger.debug("Couldn't ask {} which markers are stale: {}", cfg.name, type(exc).__name__)
+            return None
+
+    return servers.stale_types(owner, read)
+
+
 def _own_types_now(
-    ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, owner: _Owning
+    ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, owner: _Owning, *, stale_counts: bool = False
 ) -> frozenset[MarkerType]:
     """The types a server shows markers of its own detection of for this file, read from the server on this run.
 
@@ -1592,6 +1773,11 @@ def _own_types_now(
     importer plugin's copy counts as its database (``_counted_as``), and Jellyfin's and Emby's readers leave ours out.
     Plex can't tell ours from its own, so a type this app has on the item or left there from this file is never the
     server's own, and after a failed write, when what is ours there may be unknown, no type is.
+
+    Nor, for Plex, a type whose every marker can't be right for the file, or (unless ``stale_counts``) one whose
+    markers were made for an earlier file at its path: the file is read for it. ``stale_counts`` is for a type left
+    undecided once the file was read: then Plex's stale marker is still the closest there is, and "Keep Plex's" keeps
+    it.
     """
     cfg = owner.config
     item_id = servers.item_id(owner)
@@ -1609,6 +1795,15 @@ def _own_types_now(
     if source is not Source.SERVER_MARKERS:
         return frozenset()
     own = frozenset(c.type for c in found) - ours
+    if cfg.type is ServerType.PLEX:
+        # A type whose every marker can't be right for this file means Plex hasn't really processed it for that type:
+        # the file is read for it, and Plex's publisher doesn't keep those markers either (``_kept_types``). Emby's
+        # plugin keeps its own rows whatever they say, so reading the file for Emby would find an answer never shown.
+        limits = _file_limits(rec)
+        usable = {c.type for c in found if not unusable_server_marker(c, limits)}
+        own &= usable
+        if own and not stale_counts:
+            own -= _plex_types_not_made_for_file(ctx, servers, owner, item_id) or frozenset()
     if own and cfg.type is ServerType.PLEX and servers.part_count(owner, item_id) != 1:
         # Plex shows one marker set per item and writes a type only once every version decided it alike, so a version
         # left undecided keeps the others waiting. An item with several versions (or parts we can't count) is read as
@@ -1633,9 +1828,11 @@ def _kept_by_every_destination(
     servers: _ItemServers,
     owners: list[_Owning],
     types: frozenset[MarkerType],
+    *,
+    stale_counts: bool = False,
 ) -> frozenset[MarkerType]:
     """The types no answer of ours would be shown for: no local detector reads the file for them, and one left
-    undecided isn't in review.
+    undecided isn't in review (``stale_counts``: see ``_own_types_now``).
 
     A type qualifies when every server the file's markers go to keeps its own markers ("Keep Plex's", "Keep Emby's")
     and shows its own of that type now; a locked type never does (a lock wins, spec §5.5 rule 1). Worked out on every
@@ -1659,7 +1856,7 @@ def _kept_by_every_destination(
         logger.warning("Couldn't read the saved server settings for {}: {}", rec.canonical_path, type(exc).__name__)
         return frozenset()
     for owner in owners:
-        candidates &= _own_types_now(ctx, rec, servers, owner)
+        candidates &= _own_types_now(ctx, rec, servers, owner, stale_counts=stale_counts)
         if not candidates:
             break
     return candidates
@@ -1710,12 +1907,30 @@ def cached_capability(ctx: PipelineContext, cfg: ServerConfig, publisher: Marker
     back on must reach the job's next file, not one 5 minutes later. Nor is one that gave up on a busy database
     (``details["db_busy"]``). A ready Plex whose Plex Pass didn't answer is reused for ``PLEX_PASS_UNKNOWN_TTL_S`` only.
     """
+    report = _cached_capability(ctx, cfg, publisher, wait_s=None)
+    assert report is not None  # waiting without a bound always gets the check
+    return report
+
+
+def _cached_capability(
+    ctx: PipelineContext, cfg: ServerConfig, publisher: MarkerPublisher, *, wait_s: float | None
+) -> CapabilityReport | None:
+    """:func:`cached_capability`, waiting at most ``wait_s`` for another thread's check of the server to finish.
+
+    That check may wait minutes for a busy Plex database, so a caller that must answer briefly (the read of which Plex
+    markers were made for an earlier file) waits in slices that stop once the job is cancelled
+    (``base.cancellable_waits``), and gets None when the wait runs out. ``wait_s`` None waits for it.
+    """
     cached = ctx._capabilities.get(cfg.id)
     if _still_fresh(ctx, cached):
         return cached[1]
     with ctx._capability_guard:
         lock = ctx._capability_locks.setdefault(cfg.id, threading.Lock())
-    with lock:
+    if wait_s is None:
+        lock.acquire()
+    elif not _acquire_briefly(lock, wait_s):
+        return None
+    try:
         cached = ctx._capabilities.get(cfg.id)
         if _still_fresh(ctx, cached):
             return cached[1]
@@ -1726,6 +1941,20 @@ def cached_capability(ctx: PipelineContext, cfg: ServerConfig, publisher: Marker
         elif report.state not in _SETTINGS_ANSWERS:
             ctx._capabilities[cfg.id] = (time.monotonic(), report)
         return report
+    finally:
+        lock.release()
+
+
+def _acquire_briefly(lock: threading.Lock, wait_s: float) -> bool:
+    """Take ``lock`` within ``wait_s``, giving up early once this thread's job is cancelled (``wait_cancelled``)."""
+    deadline = time.monotonic() + wait_s
+    while not wait_cancelled():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        if lock.acquire(timeout=min(WAIT_SLICE_S, left)):
+            return True
+    return False
 
 
 def identity_changed(rec: FileRecord) -> bool:
@@ -2005,6 +2234,7 @@ def _publish_to(
                     duration_ms=rec.duration_ms,
                     canonical_path=path,
                     kept_types=item_row.kept_types if item_row is not None else frozenset(),
+                    limits=_file_limits(rec),
                 ),
                 key=lambda m: (m.start_ms, m.type.value),
             )
@@ -2050,7 +2280,10 @@ def _publish_to(
             return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
         note = with_kept_note(kept_note(kept, wanted, vendor, not_decided=kept_own), _shown_differently(ours))
-        override = replaced_own_note(replaced_own, vendor)
+        # Ours replaced markers the server keeps: the user's lock, or the server's markers were made for an earlier file.
+        override = with_sentence(
+            replaced_own_note(replaced_own, vendor), replaced_stale_note(publisher.last_replaced_stale_types, vendor)
+        )
 
         def _says_override(row: dict) -> dict:
             # The user's lock took the server's own markers off it although the server keeps its own: the row names
@@ -2331,7 +2564,7 @@ def _attempt(
     if cancelled():
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
 
-    servers = _ItemServers(item, owning)
+    servers = _ItemServers(item, owning, cancel_check)
     known_kind = ctx.store.get_server_kind(existing.id) if unchanged else None
     path_ids = ids_from_path(path)
     ids, lookups_allowed, confirmed_kind = _resolve_kind(path_ids, servers, known_kind)
@@ -2346,6 +2579,7 @@ def _attempt(
     if not unchanged or probe is not None:
         ctx.note_answer_changed()
     if probe is not None:
+        ctx.store.set_frame_rate(rec.id, probe.frame_rate, identity=(rec.size, rec.mtime_ns))
         # The episode-only chapter names read the kind from the PATH, not the resolved kind: the path is
         # part of the file's identity, so stored candidates can never disagree with it, while a resolved
         # kind can change under a cache that only re-reads on CHAPTER_RULES_VERSION. Measured cost of the
@@ -2494,10 +2728,14 @@ def _attempt(
     # A type that ends undecided while every server keeps its own and shows one is nothing for the user to review: the
     # servers' own markers stay whatever it would decide. That holds whether the file was skipped for it or an answer
     # stored earlier left it in review. A decided type stays decided (the publisher's own kept note names it).
+    # Plex's marker made for an earlier file counts as the server's own here, though not before detection: the file was
+    # read for its type, and with nothing of ours decided for it, Plex's marker is still the closest there is.
     undecided = frozenset(t for t in types if decisions[t].status is not DecisionStatus.DECIDED)
-    if undecided and kept_everywhere is None:
-        kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, undecided)
-    kept_own = undecided & (kept_everywhere or frozenset())
+    kept_own = (
+        undecided & _kept_by_every_destination(ctx, rec, servers, owners, undecided, stale_counts=True)
+        if undecided
+        else frozenset()
+    )
     if kept_own:
         reason = kept_own_reason(owner.config.type.value.capitalize() for owner in owners)
         decisions = {
@@ -2549,8 +2787,9 @@ def _attempt(
 
 # Plain words for a server's stored markers answer that says they weren't used.
 _UNUSED_SERVER_MARKERS = {
-    UNUSABLE_SERVER_MARKERS_DETAIL: "couldn't be used (unreadable, or another cut)",
+    UNUSABLE_SERVER_MARKERS_DETAIL: "couldn't be used (unreadable, another cut, or its library hides a type in Plex)",
     PLUGINS_UNKNOWN_DETAIL: "not used (couldn't read its plugins)",
+    OURS_SHOWN_DETAIL: "not used (read by an older version; it shows our markers now)",
 }
 
 

@@ -51,6 +51,11 @@ DEFAULT_MODEL_PATH = "/app/models/ch_PP-OCRv4_det_infer.onnx"
 CPU_KEY = "cpu"
 THREADS = 2
 SELFTEST_FRAMES = 20
+# The detector reads a tail with no answer at 320x180 again at this many times the size (``detector.RETRY_SCALE``;
+# this module can't import the detector), so the self-test also compares the boxes on these many frames of that size.
+# Untimed: the speed verdict stays the 320x180 one, the size nearly every request is.
+SELFTEST_LARGE_SCALE = 2
+SELFTEST_LARGE_FRAMES = 8
 # Timed GPU/CPU pairs, each timed back to back; the median of the pairs' own GPU/CPU ratios decides (see self_test).
 # Seven, not five: on storage's P5000 (10 cold starts x 12 rounds, 2026-09-19) the median ratio of 5 rounds spread
 # 0.047 around its typical 0.67, of 7 rounds 0.038 -- the TITAN RTX's 4.94 vs 6.18 ms is only 0.1 inside the margin.
@@ -99,6 +104,10 @@ class HelperError(Exception):
 
 class TextDetUnavailableError(Exception):
     """Text detection can't answer this time (the CPU helper failed)."""
+
+
+class TextDetShuttingDownError(TextDetUnavailableError):
+    """The pool is closed: the app is stopping, so nothing read now may be stored as an answer."""
 
 
 def model_path() -> str:
@@ -179,23 +188,27 @@ class SelfTest:
         cpu_ms: The CPU's median milliseconds per frame.
         ratio: The median of each round's own GPU/CPU time ratio: what decides.
         same_boxes: Every frame's boxes matched, corner for corner, in every round.
+        same_boxes_large: Every larger frame's boxes matched too (``SELFTEST_LARGE_SCALE``), or none were compared.
     """
 
     gpu_ms: float
     cpu_ms: float
     ratio: float
     same_boxes: bool
+    same_boxes_large: bool = True
 
     @property
     def use_gpu(self) -> bool:
-        """The GPU is used only when it finds exactly the CPU's boxes, in the same places, at least
+        """The GPU is used only when it finds exactly the CPU's boxes, in the same places and at both sizes, at least
         ``GPU_SPEEDUP_MARGIN`` faster."""
-        return self.same_boxes and self.ratio <= 1.0 - GPU_SPEEDUP_MARGIN
+        return self.same_boxes and self.same_boxes_large and self.ratio <= 1.0 - GPU_SPEEDUP_MARGIN
 
     def cpu_reason(self) -> str:
         """Why this result keeps the CPU (for the helper's ready line and the log)."""
         if not self.same_boxes:
             return "the GPU was finding different boxes than the CPU"
+        if not self.same_boxes_large:
+            return "the GPU was finding different boxes than the CPU at 640x360"
         return (
             f"the GPU wasn't at least {GPU_SPEEDUP_MARGIN:.0%} faster than the CPU "
             f"(median {self.gpu_ms} vs {self.cpu_ms} ms per frame; GPU/CPU {self.ratio} per round)"
@@ -210,6 +223,7 @@ def self_test(
     clock: Callable[[], float] | None = None,
     warmup: int = 3,
     rounds: int = SELFTEST_ROUNDS,
+    large_frames: np.ndarray | None = None,
 ) -> SelfTest:
     """Time both detectors on the same frames after a warm-up and compare the boxes they find.
 
@@ -232,10 +246,12 @@ def self_test(
         warmup: Frames each detector runs before timing (session start-up and shader compilation: the first WebGPU
             call measured 61-101 ms per frame against 11-14 ms after it).
         rounds: How many GPU/CPU pairs to time.
+        large_frames: (n, H, W) uint8 luma at the detector's larger reading's size, each side's boxes compared once
+            after the timed rounds (not timed); None compares none.
 
     Returns:
         Each side's median milliseconds per frame, the median per-round ratio, and whether every frame's
-        boxes matched, corner for corner, in every round.
+        boxes matched, corner for corner, in every round and on the larger frames.
     """
     now = clock or _perf_counter
     for detector in (gpu, cpu):
@@ -256,7 +272,10 @@ def self_test(
         cpu_times.append(cpu_ms)
         same_boxes = same_boxes and list(gpu_boxes) == list(cpu_boxes)
     ratios = [g / c if c > 0 else math.inf for g, c in zip(gpu_times, cpu_times, strict=True)]
-    return SelfTest(round(median(gpu_times), 2), round(median(cpu_times), 2), round(median(ratios), 4), same_boxes)
+    same_large = large_frames is None or list(gpu.detect(large_frames)) == list(cpu.detect(large_frames))
+    return SelfTest(
+        round(median(gpu_times), 2), round(median(cpu_times), 2), round(median(ratios), 4), same_boxes, same_large
+    )
 
 
 @dataclass(frozen=True)
@@ -569,7 +588,8 @@ class TextDetectorPool:
             One plane's boxes per plane, each ``(left, top, right, bottom)`` in the plane's own pixels.
 
         Raises:
-            TextDetUnavailableError: The CPU helper failed (the next call starts a new one), or the pool is closed.
+            TextDetUnavailableError: The CPU helper failed (the next call starts a new one).
+            TextDetShuttingDownError: The pool is closed.
         """
         key = device_key(gpu, gpu_device_path)
         self._raise_if_closed()
@@ -625,7 +645,7 @@ class TextDetectorPool:
         with self._guard:
             closed = self._closed
         if closed:
-            raise TextDetUnavailableError("Text detection is shutting down")
+            raise TextDetShuttingDownError("Text detection is shutting down")
 
     def _gpu_allowed(self, key: str, gpu: str | None) -> bool:
         with self._guard:
@@ -836,7 +856,12 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
         gpu = textdet.TextDetector(textdet.webgpu_session(args.model, found[index], args.threads), backend="webgpu")
         if not args.selftest:
             return gpu, {"backend": "webgpu", "selftest": None, "reason": ""}
-        result = self_test(gpu, cpu(), textdet.synthetic_frames(SELFTEST_FRAMES))
+        result = self_test(
+            gpu,
+            cpu(),
+            textdet.synthetic_frames(SELFTEST_FRAMES),
+            large_frames=textdet.synthetic_frames(SELFTEST_LARGE_FRAMES, scale=SELFTEST_LARGE_SCALE),
+        )
     except textdet.ModelError:
         raise
     except textdet.WebGpuSessionError as exc:

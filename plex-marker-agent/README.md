@@ -137,6 +137,16 @@ version and protocols off every answer, so a mismatch is caught on the first cal
 A new protocol number is only ever *added* to the agent, never swapped, so an agent can serve an older app while you
 update them one at a time. Update the agent first: a newer agent still speaks the older app's protocol.
 
+An optional field added to a request doesn't change the protocol: an older agent ignores it and behaves as before.
+**Needs the next agent release:** the file's limits a write now carries (`limits`, the file's duration). With them
+"Keep Plex's" drops a Plex marker that can't be right for the file, such as credits that start after it ends, and
+writes ours. Agent 1.0.0 ignores them and keeps such markers until it is updated.
+
+**Needs the next agent release too:** the item read now answers `stale_types` (the types whose markers Plex made for
+an earlier file at the path, from `taggings.created_at`, `media_parts.updated_at` and the parts' `pv:` records) and
+each part's `updated_at`. Agent 1.0.0 leaves both out, which the app reads as "can't tell": every Plex marker counts
+as before, and its "Keep Plex's" keeps stale markers even where the app has an answer of its own.
+
 `AGENT_VERSION` in `plex_marker_agent.py` is the one place that version is decided. The image tag in
 `docker-compose.yml` and in the `docker run` above are copies of it that a human has to read, so a test
 (`TestTheImageStaysInStepWithTheApp`) fails when either drifts from it, and the release workflow refuses a

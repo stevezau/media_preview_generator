@@ -200,7 +200,7 @@ def _decode(
 ) -> Frames:
     command, hw_active = frames.decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=False, fps=FPS, gpu=gpu,
-        gpu_device_path=gpu_device_path,
+        gpu_device_path=gpu_device_path, vendor_scaler=True,
     )  # fmt: skip
     planes: list[np.ndarray] = []
 

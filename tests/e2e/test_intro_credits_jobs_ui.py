@@ -14,6 +14,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 
 from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status
+from .conftest import expect_modal_shown, watch_modal_shown
 
 _SERVERS = [
     {"id": "plex-1", "name": "Home Plex", "type": "plex", "enabled": True, "status": "connected", "url": "http://p"},
@@ -206,9 +207,12 @@ def _capture_posts(page: Page, pattern: str, response: dict, status: int = 201) 
 
 
 def _open_start_modal(page: Page) -> None:
+    # A test may close the dialog it just opened: the open waits until it has finished opening (``watch_modal_shown``).
+    watch_modal_shown(page, "newJobModal")
     page.locator('button:has-text("Start New Job")').first.click()
     expect(page.locator("#newJobForm")).to_be_visible(timeout=3000)
     expect(page.locator('.job-library-checkbox[data-server-id="plex-1"][value="2"]')).to_be_attached(timeout=3000)
+    expect_modal_shown(page, "newJobModal")
 
 
 def _start_button(page: Page):
@@ -479,11 +483,19 @@ class TestStartJobModalIntroCredits:
         expect(page.locator("#jobProcessingModeGroup")).to_be_visible()
         expect(page.locator("#jobPriority")).to_have_value("2")
 
-    def test_reopening_after_a_preview_job_keeps_the_chosen_priority(self, dashboard) -> None:
+    @pytest.mark.parametrize("fade_s", [None, 1.5], ids=["normal-fade", "slow-fade"])
+    def test_reopening_after_a_preview_job_keeps_the_chosen_priority(self, dashboard, fade_s) -> None:
+        # The slow fade, clicked without Playwright's wait for the dialog to stop moving, makes certain what a busy
+        # machine does now and then: the close click lands while the dialog is still opening, which Bootstrap
+        # ignores, unless the open waits for it to finish (``_open_start_modal``).
         page = dashboard()
+        if fade_s:
+            page.add_style_tag(
+                content=f"#newJobModal.fade, #newJobModal .modal-dialog {{ transition-duration: {fade_s}s !important; }}"
+            )
         _open_start_modal(page)
         page.locator("#jobPriority").select_option("1")
-        page.locator("#newJobModal .btn-close").click()
+        page.locator("#newJobModal .btn-close").click(force=bool(fade_s))
         expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
 
         _open_start_modal(page)
@@ -569,6 +581,25 @@ class TestQueueRows:
         detail = page.locator(f"#job-detail-{preview['id']}")
         expect(detail).to_contain_text("Generated × 11")
         expect(page.locator(f"#job-row-{preview['id']}")).not_to_contain_text("↳")
+
+    def test_preview_job_counts_files_gone_from_disk_in_grey_with_why(self, dashboard) -> None:
+        preview = _preview_job()
+        preview["progress"]["outcome"] = {"generated": 11, "skipped_source_gone": 2}
+        page = dashboard([preview])
+        row = page.locator(f"#job-row-{preview['id']}")
+        expect(row).to_be_visible(timeout=5000)
+        status = row.locator("[data-bs-toggle='tooltip']").filter(has_text="Completed").first
+        status_tip = status.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert status_tip.split("\n") == ["Generated: 11", "Gone from disk: 2"]
+
+        page.locator(f"#job-files-toggle-{preview['id']}").click()
+        detail = page.locator(f"#job-detail-{preview['id']}")
+        gone = detail.locator(".badge", has_text="Gone from disk")
+        expect(gone).to_have_text("Gone from disk × 2")
+        expect(gone).to_have_class(re.compile(r"\bbg-secondary\b"))
+        assert gone.get_attribute("title") == (
+            "Replaced by a newer file before this job reached it; the newer file gets its own preview."
+        )
 
     def test_follow_up_whose_preview_job_is_not_listed_renders_in_place(self, dashboard) -> None:
         other = _job("aaaaaaaa-0000-4000-8000-000000000009", library_name="Other show")
@@ -959,7 +990,7 @@ class TestFilesPanel:
             "failed",
             "skipped_file_not_found",
         ]
-        page.evaluate("() => bootstrap.Modal.getInstance(document.getElementById('logsModal')).hide()")
+        page.evaluate("() => hideModalSafely(document.getElementById('logsModal'))")
         expect(page.locator("#logsModal")).to_be_hidden(timeout=3000)
 
         page.locator(f'#job-row-{preview["id"]} button[aria-label="View logs"]').click()
@@ -976,6 +1007,7 @@ class TestFilesPanel:
             "no_media_parts",
             "skipped_excluded",
             "skipped_file_not_found",
+            "skipped_source_gone",
             "skipped_invalid_hash",
             "unresolved_plex",
         ]
@@ -1093,6 +1125,29 @@ class TestFilesPanel:
         assert row.locator("small.text-truncate").get_attribute("title") == name
         assert row.locator("td").nth(3).locator("small").get_attribute("title") == reason
         assert row.locator("[onmouseover]").count() == 0
+
+    def test_a_file_gone_from_disk_reads_gone_with_its_reason(self, dashboard) -> None:
+        preview = _preview_job()
+        page = dashboard([preview])
+        reason = "Skipped: replaced by a newer file (Slow Horses - S06E02.mkv)"
+        files = [
+            {
+                "file": "/data/tv/Slow Horses/Season 06/Slow Horses - S06E02-CAKES.mkv",
+                "outcome": "skipped_source_gone",
+                "reason": reason,
+                "worker": "Checking",
+                "servers": [],
+            }
+        ]
+
+        self._open_files(page, preview, files)
+
+        row = page.locator("#fileResultsBody tr").first
+        outcome = row.locator("td").nth(1).locator(".badge")
+        expect(outcome).to_have_text("Gone from disk")
+        expect(outcome).to_have_class(re.compile(r"\bbg-secondary\b"))
+        expect(row.locator("td").nth(3)).to_have_text(reason)
+        expect(row.locator('a[title="Open in Preview Inspector"]')).to_have_count(0)
 
     def test_preview_file_pills_are_unchanged(self, dashboard) -> None:
         preview = _preview_job()

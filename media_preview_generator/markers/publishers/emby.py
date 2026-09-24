@@ -37,6 +37,7 @@ from .base import (
 if TYPE_CHECKING:
     from ...servers.base import ServerConfig
     from ...servers.emby import EmbyServer
+    from ..decide import FileLimits
     from ..settings import ServerMarkersSettings
 
 TICKS_PER_MS = 10_000
@@ -340,6 +341,7 @@ class EmbyMarkerPublisher(MarkerPublisher):
         canonical_path: str,
         own_previous: list[Marker] | None = None,
         kept_types: frozenset[MarkerType] = frozenset(),
+        limits: FileLimits | None = None,
     ) -> list[Marker]:
         """Replace the plugin's markers for the item and confirm Emby's chapters show them.
 
@@ -354,6 +356,7 @@ class EmbyMarkerPublisher(MarkerPublisher):
         plugin holds exactly it for this very file, and Emby's chapters already show what a POST would leave there.
 
         ``own_previous`` is ignored: every Emby version is an item with its own chapters.
+        ``limits`` is ignored: the plugin decides which of Emby's own rows stay ("Keep Emby's").
 
         Returns:
             The markers that are ours on the item now: ``project(markers)`` without kept types, or ``[]``.

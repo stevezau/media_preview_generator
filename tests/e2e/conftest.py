@@ -34,7 +34,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
-from playwright.sync_api import BrowserContext, Page
+from playwright.sync_api import BrowserContext, Page, expect
 
 # ---------------------------------------------------------------------------
 # Subprocess plumbing
@@ -346,6 +346,25 @@ def accept_app_confirm(page: Page, timeout: int = 3000) -> None:
     btn = page.locator("#appConfirmModalOkBtn")
     btn.wait_for(state="visible", timeout=timeout)
     btn.click()
+
+
+def watch_modal_shown(page: Page, modal_id: str) -> None:
+    """Start listening for a Bootstrap modal's ``shown.bs.modal`` before the click that opens it.
+
+    Bootstrap ignores a close (its ✕, a ``data-bs-dismiss`` button, ``hide()``) while a dialog is still fading in, and
+    Playwright's "visible" is true from the fade's first frame, so a test that closes a dialog it just opened pairs
+    this with :func:`expect_modal_shown`.
+    """
+    page.evaluate(
+        "(id) => { const el = document.getElementById(id); delete el.dataset.e2eShown;"
+        " el.addEventListener('shown.bs.modal', () => { el.dataset.e2eShown = '1'; }, { once: true }); }",
+        modal_id,
+    )
+
+
+def expect_modal_shown(page: Page, modal_id: str, timeout: int = 5000) -> None:
+    """Wait until the modal :func:`watch_modal_shown` armed has finished opening."""
+    expect(page.locator(f'#{modal_id}[data-e2e-shown="1"]')).to_be_attached(timeout=timeout)
 
 
 # ---------------------------------------------------------------------------

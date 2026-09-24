@@ -859,12 +859,15 @@ def _files_to_decide_again(store: MarkerStore) -> set[str]:
         *store.files_in_review(),
         *store.files_waiting_for_other_versions(),
         *store.files_with_season_audio_intro(),
+        *store.files_decided_by_online_and_server_markers(),
     }
 
 
 def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] = ()) -> list[ProcessableItem]:
-    """The files in Needs review now, those whose last publish waits for their item's other versions, and those whose
-    unlocked intro was decided with a season audio answer (settings v17: season audio's guards changed its answers).
+    """The files in Needs review now, those whose last publish waits for their item's other versions, those whose
+    unlocked intro was decided with a season audio answer (settings v17: season audio's guards changed its answers), and
+    those whose unlocked intro or credits rests on an online answer and a server's own marker alone (settings v18:
+    online times on the file's clock).
 
     Given the servers' configs, those files that are missing from disk are marked first (``missing``), so a series
     deleted since isn't listed; any the check had no time for are marked when their run finds them missing.

@@ -20,6 +20,7 @@ from typing import Any
 import requests
 from loguru import logger
 
+from ..decide import FileLimits
 from ..models import Marker, MarkerType
 from .base import Capability, CapabilityReport, DatabaseBusyError, ItemNotFoundError, PublishError, Shown
 from .plex_db import (
@@ -124,6 +125,13 @@ def _as_opt_int(value: Any) -> int | None:
     return None if value is None else _as_int(value)
 
 
+def _lenient_int(value: Any) -> int | None:
+    try:
+        return _as_int(value)
+    except ValueError:
+        return None
+
+
 def _as_opt_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -140,6 +148,7 @@ def part_to_json(part: _Part) -> dict:
         "file": part.file,
         "extra_data": part.extra_data,
         "proxy_type": part.proxy_type,
+        "updated_at": part.updated_at,
     }
 
 
@@ -158,6 +167,9 @@ def part_from_json(raw: Any) -> _Part:
             str(raw["file"]),
             _as_opt_str(raw.get("extra_data")),
             _as_opt_int(raw.get("proxy_type")),
+            # Absent from an app or agent older than the staleness check, or not a whole number: unknown, which the
+            # check treats as fresh.
+            _lenient_int(raw.get("updated_at")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"not a media part: {exc}") from exc
@@ -173,6 +185,21 @@ def _types_from_json(raw: Any) -> frozenset[MarkerType]:
     if not isinstance(raw, list):
         raise ValueError("marker types must be a list")
     return frozenset(MarkerType(str(t)) for t in raw)
+
+
+def _limits_to_json(limits: FileLimits | None) -> dict | None:
+    if limits is None:
+        return None
+    return {"duration_ms": limits.duration_ms}
+
+
+def _limits_from_json(raw: Any) -> FileLimits | None:
+    """Read a file's limits; None (an app older than this agent sent none) leaves Plex's markers unchecked."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("limits must be an object")
+    return FileLimits(_as_int(raw.get("duration_ms")))
 
 
 def _markers_from_json(raw: Any) -> list[Marker]:
@@ -193,6 +220,7 @@ def write_request_to_json(request: WriteRequest) -> dict:
         "calling_part_ids": list(request.calling_part_ids),
         "kept_types": _types_to_json(request.kept_types),
         "keep_plex": request.keep_plex,
+        "limits": _limits_to_json(request.limits),
     }
 
 
@@ -215,6 +243,7 @@ def write_request_from_json(raw: Any) -> WriteRequest:
             calling_part_ids=tuple(_as_int(i) for i in raw.get("calling_part_ids") or ()),
             kept_types=_types_from_json(raw.get("kept_types")),
             keep_plex=bool(raw.get("keep_plex")),
+            limits=_limits_from_json(raw.get("limits")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"not a write request: {exc}") from exc
@@ -227,6 +256,7 @@ def write_result_to_json(result: WriteResult) -> dict:
         "ours": [marker_to_json(m) for m in result.ours],
         "kept_types": _types_to_json(result.kept_types),
         "replaced_own": _types_to_json(result.replaced_own),
+        "replaced_stale": _types_to_json(result.replaced_stale),
     }
 
 
@@ -244,14 +274,16 @@ def write_result_from_json(raw: Any) -> WriteResult:
             _markers_from_json(raw["ours"]),
             _types_from_json(raw.get("kept_types")),
             _types_from_json(raw.get("replaced_own")),
+            _types_from_json(raw.get("replaced_stale")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"not a write result: {exc}") from exc
 
 
 def item_read_to_json(item: ItemRead) -> dict:
-    """Serialise one item's parts."""
-    return {"exists": item.exists, "parts": [part_to_json(p) for p in item.parts]}
+    """Serialise one item's parts, and which types' markers were made for an earlier file (None: not read)."""
+    stale = None if item.stale_types is None else _types_to_json(item.stale_types)
+    return {"exists": item.exists, "parts": [part_to_json(p) for p in item.parts], "stale_types": stale}
 
 
 def item_read_from_json(raw: Any) -> ItemRead:
@@ -262,7 +294,9 @@ def item_read_from_json(raw: Any) -> ItemRead:
     """
     if not isinstance(raw, dict) or not isinstance(raw.get("parts"), list):
         raise ValueError("not an item")
-    return ItemRead(bool(raw.get("exists")), [part_from_json(p) for p in raw["parts"]])
+    # An agent older than this field doesn't say: unknown, so the pipeline and "Keep Plex's" behave as before it.
+    stale = None if raw.get("stale_types") is None else _types_from_json(raw["stale_types"])
+    return ItemRead(bool(raw.get("exists")), [part_from_json(p) for p in raw["parts"]], stale)
 
 
 def shown_ask_to_json(ask: ShownAsk) -> dict:
@@ -594,7 +628,8 @@ class RemotePlexDb(PlexDatabase):
             deadline: When to stop waiting.
 
         Returns:
-            Whether the database knows the item, and its live parts.
+            Whether the database knows the item, its live parts, and ``stale_types`` (None from an agent older than
+            that field).
 
         Raises:
             PublishError: The agent refused, or couldn't be used.

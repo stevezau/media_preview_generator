@@ -194,7 +194,10 @@ def text_candidates(start_s: float | None, end_s: float | None = None) -> list[C
 
 
 def epilogue_like(
-    key_rows: Sequence[rule_j.Row], start_s: float | None, overlays: Sequence[rule_j.Box] | None = None
+    key_rows: Sequence[rule_j.Row],
+    start_s: float | None,
+    overlays: Sequence[rule_j.Box] | None = None,
+    run_rows: Sequence[rule_j.Row] | None = None,
 ) -> bool:
     """Whether a frame check must look at an answer for epilogue cards (spec §5.4: they aren't credits; rule J can't
     tell them from a roll they touch, ``test_rule_j.TestEpilogueCards``).
@@ -217,13 +220,17 @@ def epilogue_like(
             ``key_rows``, which is right only for a file whose rows are the tail's alone. On the branch that reads the
             120 s before the tail they are not, and gathering again would call a roll that began before the tail its
             own overlay -- the one thing the detector refuses to do.
+        run_rows: The rows rule J found the runs on (``CreditsTextResult.run_rows``), in place of ``key_rows``: an
+            answer from the 640x360 reading found its run without the text the 320x180 reading had boxed, which
+            ``key_rows`` still holds. None (or empty) finds them on ``key_rows``.
 
     Returns:
         Whether the answer is shaped like epilogue cards.
     """
+    runs = list(run_rows) if run_rows else list(key_rows)
     found = rule_j.overlay_boxes(key_rows) if overlays is None else tuple(overlays)
-    rows = rule_j.without_overlays(key_rows, found)
-    coarse = rule_j.coarse_start(key_rows, without=rows)
+    rows = rule_j.without_overlays(runs, found)
+    coarse = rule_j.coarse_start(runs, without=rows)
     if coarse is None or start_s is None:
         return False
     run = list(rule_j._run_rows(rows, coarse))
@@ -393,7 +400,10 @@ def merge_rows(parts: Iterable[TextRows]) -> TextRows:
 
 
 def sheet_reasons(
-    detail: dict, key_rows: Sequence[rule_j.Row], overlays: Sequence[rule_j.Box] | None = None
+    detail: dict,
+    key_rows: Sequence[rule_j.Row],
+    overlays: Sequence[rule_j.Box] | None = None,
+    run_rows: Sequence[rule_j.Row] | None = None,
 ) -> list[str]:
     """Why a file's credits text answer gets a frame-check sheet (Q5, I7); empty: it doesn't.
 
@@ -404,6 +414,7 @@ def sheet_reasons(
         detail: One file's row (``text``, ``text_end``, ``truth``).
         key_rows: The file's keyframe rows.
         overlays: The overlays the run was read without (:func:`epilogue_like`).
+        run_rows: The rows the run was found on (:func:`epilogue_like`).
 
     Returns:
         The reasons, in reporting order.
@@ -418,7 +429,7 @@ def sheet_reasons(
         reasons.append("early 10-30 s")
     if start > truth + 30:
         reasons.append("late >30 s")
-    if epilogue_like(key_rows, start, overlays):
+    if epilogue_like(key_rows, start, overlays, run_rows):
         reasons.append("epilogue-like")
     if detail["text_end"] is not None:
         reasons.append("end kept")
@@ -554,11 +565,12 @@ class CreditsTextCache:
             is_episode: The file is a TV episode (a 450 s tail, T-R4).
 
         Returns:
-            ``{"start_s", "end_s", "key", "fine", "end", "overlays"}`` (from the cache when this identity, detector
-            version and source, ffmpeg build, decode path and GPU, text detection backend and kind were read before).
-            ``overlays`` is what rule J read the run without, which :func:`epilogue_like` has to be handed rather
-            than gather again. An answer whose text detection backend changed while the file was read is returned but
-            not kept.
+            ``{"start_s", "end_s", "key", "fine", "end", "overlays", "scale", "runs"}`` (from the cache when this
+            identity, detector version and source, ffmpeg build, decode path and GPU, text detection backend and kind
+            were read before). ``scale`` is 2 for an answer from the 640x360 reading of a tail the 320x180 one found
+            nothing in, and ``runs`` then the keyframe rows rule J found its run on (empty at 1). ``overlays`` and
+            ``runs`` are what :func:`epilogue_like` has to be handed rather than gather again. An answer whose text
+            detection backend changed while the file was read is returned but not kept.
         """
         if self._build is None:
             self._build = ffmpeg_build(self._ffmpeg)
@@ -587,7 +599,8 @@ class CreditsTextCache:
             self.gpu_fallbacks.add(_name(path))
         data = {"start_s": found.start_s, "end_s": found.end_s, "key": rows_to_json(found.key_rows),
                 "fine": rows_to_json(found.fine_rows), "end": rows_to_json(found.end_rows),
-                "overlays": [list(box) for box in found.overlays]}  # fmt: skip
+                "overlays": [list(box) for box in found.overlays], "scale": found.scale,
+                "runs": rows_to_json(found.run_rows)}  # fmt: skip
         if self._backend() == backend:
             cached.write_text(json.dumps(data))
         return data
@@ -809,7 +822,10 @@ def run_credits_text(
                     # every credits module, so an entry from before rows held positions can never be served here.
                     stored = results[f["file"]]
                     reasons = sheet_reasons(
-                        f, rows_from_json(stored["key"]), [tuple(box) for box in stored["overlays"]]
+                        f,
+                        rows_from_json(stored["key"]),
+                        [tuple(box) for box in stored["overlays"]],
+                        rows_from_json(stored["runs"]),
                     )
                     if not reasons:
                         continue
@@ -1101,9 +1117,11 @@ def sweep_credits_text(
     """Rule J's own constants, swept over the gate's sets with the **whole rule** live on every cell.
 
     Each cell sets the constants on :mod:`rule_j` and runs the app's own ``find_credits`` over every file of the
-    chosen sets through the decode cache, so a cell costs rule J's own microseconds per file plus a stored-rows read.
-    The answer cache is deliberately not used: its key carries the detector's *source* digest, which a swept
-    attribute doesn't move, so it would serve the shipped cell's answers to every cell.
+    chosen sets through the decode cache, so a cell costs rule J's own microseconds per file plus a stored-rows read
+    -- unless the swept value leaves a file with no answer at 320x180 that no earlier run left without one: its tail is
+    then decoded at 640x360 (``detector.RETRY_SCALE``) once, and stored like any decode. The answer cache is
+    deliberately not used: its key carries the detector's *source* digest, which a swept attribute doesn't move, so it
+    would serve the shipped cell's answers to every cell.
 
     Several ``--sweep`` arguments are a cross product, which is the shape the band's two numbers were tabled in.
 

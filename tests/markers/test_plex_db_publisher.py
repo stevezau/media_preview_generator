@@ -13,11 +13,13 @@ import sys
 import threading
 import time
 import urllib.parse
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from media_preview_generator.markers.decide import FileLimits
 from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import (
@@ -1809,6 +1811,112 @@ class TestKeepPlexs:
         )
         assert (ours, pub.last_kept_types, pub.last_write_changed) == ([], kept, False)
 
+    # Bones S07E01 on production: Plex's credits start and end after the 2498304 ms file does, so they can never fire.
+    # Ours, from the credit text, start at 2464 s.
+    BONES_DUR = 2_498_304
+    BONES_LIMITS = FileLimits(BONES_DUR)
+    OUR_BONES_CREDITS = Marker(T.CREDITS, 2_464_000, BONES_DUR, ("credits_text",))
+    # Stored 2 s before where Plex serves them (Plex serves credits 2578083–2615648 ms).
+    BONES_PLEX_CREDITS = (7, 563, 0, "credits", 2_576_083, 2_615_648, CREDITS_FINAL_ROW_EXTRA)
+    SANE_PLEX_CREDITS = (7, 563, 0, "credits", 2_466_000, BONES_DUR, CREDITS_FINAL_ROW_EXTRA)
+
+    @staticmethod
+    def _tagging(row: tuple) -> plex_db._TaggingRow:
+        _item, _tag, index, text, start, end, extra = row
+        return plex_db._TaggingRow(1, index, text, start, end, None, extra)
+
+    @pytest.mark.parametrize("kept_before", [frozenset(), frozenset({T.CREDITS})], ids=["first-write", "kept-before"])
+    def test_plexs_marker_that_cant_be_right_is_not_kept(self, kept_before):
+        rows = [self._tagging(self.BONES_PLEX_CREDITS)]
+        wanted = [self.OUR_BONES_CREDITS]
+
+        kept = plex_db._kept_types(rows, wanted, [], [], kept_before, True, limits=self.BONES_LIMITS)
+
+        assert kept == frozenset()
+
+    def test_plexs_marker_that_can_be_right_is_still_kept(self):
+        rows = [self._tagging(self.SANE_PLEX_CREDITS)]
+
+        kept = plex_db._kept_types(rows, [self.OUR_BONES_CREDITS], [], [], frozenset(), True, limits=self.BONES_LIMITS)
+
+        assert kept == frozenset({T.CREDITS})
+
+    def test_plexs_movie_credits_twenty_minutes_before_the_end_are_kept(self):
+        # Only an impossible marker is refused: our 900 s movie cap is a rule for our own answers.
+        movie_dur = 7_200_000
+        row = self._tagging((7, 563, 0, "credits", movie_dur - 1_202_000, movie_dur, CREDITS_FINAL_ROW_EXTRA))
+        ours = Marker(T.CREDITS, movie_dur - 600_000, movie_dur, ("credits_text",))
+
+        kept = plex_db._kept_types([row], [ours], [], [], frozenset(), True, limits=FileLimits(movie_dur))
+
+        assert kept == frozenset({T.CREDITS})
+
+    def test_one_sane_row_keeps_the_type_beside_an_impossible_one(self):
+        rows = [self._tagging(self.SANE_PLEX_CREDITS), self._tagging(self.BONES_PLEX_CREDITS)]
+
+        kept = plex_db._kept_types(rows, [self.OUR_BONES_CREDITS], [], [], frozenset(), True, limits=self.BONES_LIMITS)
+
+        assert kept == frozenset({T.CREDITS})
+
+    def test_without_the_files_limits_plexs_marker_is_kept_as_before(self):
+        # An app older than its agent sends no limits: nothing to check against.
+        rows = [self._tagging(self.BONES_PLEX_CREDITS)]
+        assert plex_db._kept_types(rows, [self.OUR_BONES_CREDITS], [], [], frozenset(), True) == {T.CREDITS}
+
+    @pytest.mark.parametrize(
+        ("plex_row", "ours", "kept", "served"),
+        [
+            (BONES_PLEX_CREDITS, [OUR_BONES_CREDITS], frozenset(), [(T.CREDITS, 2_464_000, BONES_DUR)]),
+            (SANE_PLEX_CREDITS, [], frozenset({T.CREDITS}), [(T.CREDITS, 2_468_000, BONES_DUR)]),
+            (
+                (SANE_PLEX_CREDITS, BONES_PLEX_CREDITS),
+                [],
+                frozenset({T.CREDITS}),
+                [(T.CREDITS, 2_468_000, BONES_DUR), (T.CREDITS, 2_578_083, 2_615_648)],
+            ),
+        ],
+        ids=["impossible-plex-credits-get-ours", "sane-plex-credits-are-kept", "one-sane-row-keeps-both"],
+    )
+    def test_the_write_shows_ours_only_where_plexs_cant_be_right(self, tmp_path, plex_row, ours, kept, served):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        rows = plex_row if isinstance(plex_row[0], tuple) else (plex_row,)
+        _insert_taggings(db, *((row[0], row[1], index, *row[3:]) for index, row in enumerate(rows)))
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+
+        written = pub.write(
+            "7",
+            [self.OUR_BONES_CREDITS],
+            previous=[],
+            duration_ms=self.BONES_DUR,
+            canonical_path="/data/tv/S01E01.mkv",
+            limits=self.BONES_LIMITS,
+        )
+
+        assert (written, pub.last_kept_types) == (ours, kept)
+        assert _served(db) == served
+
+    def test_a_locked_type_replaces_an_impossible_plex_row_without_calling_it_plexs_own(self, tmp_path):
+        # The lock wins anyway; an impossible row was never what "Keep Plex's" would keep, so nothing was replaced of
+        # Plex's own and the row doesn't say so.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        _insert_taggings(db, self.BONES_PLEX_CREDITS)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        locked = Marker(T.CREDITS, 2_464_000, self.BONES_DUR, ("user",), locked=True)
+
+        written = pub.write(
+            "7",
+            [locked],
+            previous=[],
+            duration_ms=self.BONES_DUR,
+            canonical_path="/data/tv/S01E01.mkv",
+            limits=self.BONES_LIMITS,
+        )
+
+        assert (written, pub.last_kept_types, pub.last_replaced_own_types) == ([locked], frozenset(), frozenset())
+        assert _served(db) == [(T.CREDITS, 2_464_000, self.BONES_DUR)]
+
     def test_read_back_reports_a_kept_type_plex_no_longer_shows(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
@@ -1820,6 +1928,253 @@ class TestKeepPlexs:
         assert pub.shows("7", [CREDITS_FINAL], kept_types=frozenset({T.INTRO})) is Shown.OURS
         assert pub.shows("7", [], kept_types=frozenset({T.INTRO})) is Shown.OURS
         assert pub.shows("7", [INTRO, CREDITS_FINAL]) is Shown.REPLACED
+
+
+class TestNotMadeForThisFile:
+    """Plex's markers belong to the metadata item, so they outlive a file replacement (proven on production 2026-09-24:
+    Bones' markers were detected 2025-06-17 against the old Blu-ray files, which Sonarr replaced 2026-09-23). A type's
+    rows are stale when BOTH hold: no live part carries Plex's own detection record of them (``pv:intros`` /
+    ``pv:credits`` holding those times), and every row was created before every live part was last updated (the
+    file's mtime)."""
+
+    BONES_DUR = 2_498_304
+    MARKERS_AT = int(datetime(2025, 6, 17, 6, 46, 56, tzinfo=UTC).timestamp())
+    PART_UPDATED = int(datetime(2026, 9, 23, 22, 49, 42, tzinfo=UTC).timestamp())
+    BONES_INTRO = (7, 563, 0, "intro", 322_622, 354_901, INTRO_ROW_EXTRA)  # can be right: stale only
+    BONES_CREDITS = (7, 563, 1, "credits", 2_578_083, 2_615_648, CREDITS_FINAL_ROW_EXTRA)  # past the end too
+    OUR_INTRO = Marker(T.INTRO, 60_000, 95_000, ("season_audio",))
+    INTRO_RECORD = (
+        '{"MediaPartMarkersArray":{"attributeName":"intros","version":5,'
+        '"MediaPartMarker":[{"startTimeOffset":322622,"endTimeOffset":354901}]}}'
+    )
+    OTHER_INTRO_RECORD = INTRO_RECORD.replace("322622", "300000")
+
+    def _item(self, tmp_path, *rows, created_at=MARKERS_AT, updated_at=PART_UPDATED, record=None, parts=None):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, **({"parts": parts} if parts else {}))
+        ids = _insert_taggings(db, *rows)
+        for row_id in ids:
+            _exec(db, "UPDATE taggings SET created_at=? WHERE id=?", created_at, row_id)
+        _exec(db, "UPDATE media_parts SET updated_at=?", updated_at)
+        if record is not None:
+            _set_part_extra(db, 1, encode_extra_data({"pv:intros": record}))
+        return folder, db
+
+    def _read(self, db) -> frozenset:
+        return plex_db.LocalPlexDb(lambda: str(db)).read_item(7, deadline=time.monotonic() + 5).stale_types
+
+    @pytest.mark.parametrize(
+        ("changes", "stale"),
+        [
+            ({}, frozenset({T.INTRO})),  # Bones S07E01: no record, markers 2025-06-17, file 2026-09-23
+            ({"record": INTRO_RECORD}, frozenset()),  # Plex's own record of them: made for this file
+            ({"record": OTHER_INTRO_RECORD}, frozenset({T.INTRO})),  # a record of other times isn't theirs
+            ({"created_at": PART_UPDATED + 3600}, frozenset()),  # tagged after the file changed: fresh
+            ({"created_at": PART_UPDATED - 30}, frozenset()),  # within a minute of it: can't tell, fresh
+            ({"updated_at": None}, frozenset()),  # the file's time unknown: fresh
+            ({"created_at": None}, frozenset()),  # the rows' time unknown: fresh
+            ({"record": '{"MediaPartMarkersArray":'}, frozenset()),  # a record this code can't read: fresh
+        ],
+        ids=[
+            "bones-stale",
+            "own-record",
+            "record-of-other-times",
+            "tagged-after-the-file",
+            "within-a-minute",
+            "no-file-time",
+            "no-row-time",
+            "unreadable-record",
+        ],
+    )
+    def test_which_types_were_made_for_an_earlier_file(self, tmp_path, changes, stale):
+        _folder, db = self._item(tmp_path, self.BONES_INTRO, **changes)
+        assert self._read(db) == stale
+
+    def test_final_credits_with_plexs_record_are_fresh(self, tmp_path):
+        # The record is compared as stored (time_offset/end_time_offset against startTimeOffset/endTimeOffset), so a
+        # row flagged final and an entry that isn't still match.
+        record = (
+            '{"MediaPartMarkersArray":{"attributeName":"credits","version":4,'
+            '"MediaPartMarker":[{"startTimeOffset":2400000,"endTimeOffset":2498304}]}}'
+        )
+        row = (7, 563, 0, "credits", 2_400_000, 2_498_304, CREDITS_FINAL_ROW_EXTRA)
+        _folder, db = self._item(tmp_path, row)
+        _set_part_extra(db, 1, encode_extra_data({"pv:credits": record}))
+        assert self._read(db) == frozenset()
+
+    @pytest.mark.parametrize("updated_at", [0, -1], ids=["zero", "negative"])
+    def test_a_file_time_of_zero_or_less_is_unknown(self, tmp_path, updated_at):
+        _folder, db = self._item(tmp_path, self.BONES_INTRO, updated_at=updated_at, created_at=-100)
+        assert self._read(db) == frozenset()
+
+    def test_a_version_updated_before_the_markers_keeps_them_fresh(self, tmp_path):
+        # Older than every live file, not just one: a version added later doesn't make the others' markers stale.
+        parts = (("/data/tv/S01E01.mkv", None), ("/data/tv/S01E01.720p.mkv", None))
+        _folder, db = self._item(tmp_path, self.BONES_INTRO, parts=parts)
+        _exec(db, "UPDATE media_parts SET updated_at=? WHERE id=2", self.MARKERS_AT - 86_400)
+        assert self._read(db) == frozenset()
+
+    def test_each_type_is_judged_on_its_own(self, tmp_path):
+        _folder, db = self._item(tmp_path, self.BONES_INTRO, self.BONES_CREDITS, record=self.INTRO_RECORD)
+        assert self._read(db) == frozenset({T.CREDITS})
+
+    def test_the_publisher_answers_for_the_pipeline(self, tmp_path):
+        folder, _db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        assert pub.types_not_made_for_file("7") == frozenset({T.INTRO})
+        assert pub.types_not_made_for_file("not-a-rating-key") is None
+
+    @pytest.mark.parametrize(
+        ("stale", "unanswerable"),
+        [(frozenset({T.INTRO}), False), (None, True)],
+        ids=["read-answers", "agent-older-than-the-answer"],
+    )
+    def test_the_publisher_says_when_its_setup_can_never_tell(self, tmp_path, monkeypatch, stale, unanswerable):
+        # An agent older than ``stale_types`` reads the item without it: the pipeline stops asking it for the job.
+        folder, _db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        monkeypatch.setattr(pub._db, "read_item", lambda key, *, deadline: plex_db.ItemRead(True, [], stale))
+        assert pub.types_not_made_for_file("7") == stale
+        assert pub.stale_types_unanswerable is unanswerable
+
+    def test_a_busy_database_isnt_a_setup_that_can_never_tell(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(plex_db, "STALE_READ_WAIT_S", 0.3)
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        lock = plex_db._db_lock(str(db))
+        lock.acquire()
+        try:
+            assert pub.types_not_made_for_file("7") is None
+        finally:
+            lock.release()
+        assert pub.stale_types_unanswerable is False
+
+    def test_the_publishers_read_gives_up_quickly_on_a_busy_database(self, tmp_path, monkeypatch):
+        # Asked before detection, for every Plex-kept file: a busy database means "can't tell", never a 120 s wait.
+        monkeypatch.setattr(plex_db, "STALE_READ_WAIT_S", 0.5)
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        lock = plex_db._db_lock(str(db))
+        lock.acquire()  # another task of ours holds the database
+        start = time.monotonic()
+        try:
+            answer = pub.types_not_made_for_file("7")
+        finally:
+            lock.release()
+        assert answer is None
+        assert time.monotonic() - start < 0.5 + plex_db.WAIT_SLICE_S + 0.5
+
+    def test_the_publishers_read_stops_when_the_job_is_cancelled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(plex_db, "STALE_READ_WAIT_S", 30.0)
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        cancelled, answers = threading.Event(), []
+
+        def ask():
+            with cancellable_waits(cancelled.is_set):
+                answers.append(pub.types_not_made_for_file("7"))
+
+        lock = plex_db._db_lock(str(db))
+        lock.acquire()
+        try:
+            reader = threading.Thread(target=ask)
+            reader.start()
+            time.sleep(0.3)
+            start = time.monotonic()
+            cancelled.set()
+            reader.join(10)
+            assert time.monotonic() - start < plex_db.WAIT_SLICE_S + 1.0
+        finally:
+            lock.release()
+        assert answers == [None]
+
+    def test_the_publisher_cant_tell_without_its_database(self, tmp_path):
+        folder, _db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex", fs="nfs4")
+        assert pub.types_not_made_for_file("7") is None
+
+    @pytest.mark.parametrize(
+        ("wanted", "kept_before", "kept"),
+        [
+            ([OUR_INTRO], frozenset(), frozenset()),  # stale and ours decided: ours replaces Plex's
+            # Production's commonest case: kept by an earlier write, stale now, and ours decided: ours replaces it.
+            ([OUR_INTRO], frozenset({T.INTRO}), frozenset()),
+            ([], frozenset({T.INTRO}), frozenset({T.INTRO})),  # stale and nothing of ours: Plex's, close is better
+        ],
+        ids=["ours-decided", "kept-before-and-ours-decided", "no-answer-of-ours"],
+    )
+    def test_kept_types_give_up_a_stale_type_only_for_an_answer_of_ours(self, wanted, kept_before, kept):
+        row = plex_db._TaggingRow(1, 0, "intro", 322_622, 354_901, None, INTRO_ROW_EXTRA, self.MARKERS_AT)
+
+        answer = plex_db._kept_types(
+            [row], wanted, [], [], kept_before, True, limits=FileLimits(self.BONES_DUR), stale=frozenset({T.INTRO})
+        )
+
+        assert answer == kept
+
+    def test_kept_types_keep_a_fresh_type(self):
+        row = plex_db._TaggingRow(1, 0, "intro", 322_622, 354_901, None, INTRO_ROW_EXTRA, self.MARKERS_AT)
+        kept = plex_db._kept_types(
+            [row], [self.OUR_INTRO], [], [], frozenset(), True, limits=FileLimits(self.BONES_DUR)
+        )
+        assert kept == frozenset({T.INTRO})
+
+    def _write(self, tmp_path, folder, markers, **kwargs):
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        written = pub.write(
+            "7",
+            markers,
+            previous=[],
+            duration_ms=self.BONES_DUR,
+            canonical_path="/data/tv/S01E01.mkv",
+            limits=FileLimits(self.BONES_DUR),
+            **kwargs,
+        )
+        return pub, written
+
+    @pytest.mark.parametrize("kept_before", [frozenset(), frozenset({T.INTRO})], ids=["first-write", "kept-before"])
+    def test_stale_plex_intro_gives_way_to_ours_and_says_so(self, tmp_path, kept_before):
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        pub, written = self._write(tmp_path, folder, [self.OUR_INTRO], kept_types=kept_before)
+        assert (written, pub.last_kept_types) == ([self.OUR_INTRO], frozenset())
+        assert pub.last_replaced_stale_types == frozenset({T.INTRO})
+        assert _served(db) == [(T.INTRO, 60_000, 95_000)]
+
+    def test_nothing_stale_replaced_says_nothing(self, tmp_path):
+        folder, _db = self._item(tmp_path, self.BONES_INTRO, record=self.INTRO_RECORD)
+        pub, _written = self._write(tmp_path, folder, [self.OUR_INTRO])
+        assert pub.last_replaced_stale_types == frozenset()
+
+    def test_stale_plex_intro_stays_without_an_answer_of_ours(self, tmp_path):
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        pub, written = self._write(tmp_path, folder, [], kept_types=frozenset({T.INTRO}))
+        assert (written, pub.last_kept_types) == ([], frozenset({T.INTRO}))
+        assert _served(db) == [(T.INTRO, 322_622, 354_901)]
+
+    def test_fresh_plex_intro_with_its_record_is_kept(self, tmp_path):
+        folder, db = self._item(tmp_path, self.BONES_INTRO, record=self.INTRO_RECORD)
+        pub, written = self._write(tmp_path, folder, [self.OUR_INTRO])
+        assert (written, pub.last_kept_types) == ([], frozenset({T.INTRO}))
+        assert _served(db) == [(T.INTRO, 322_622, 354_901)]
+
+    def test_stale_and_impossible_credits_are_never_kept(self, tmp_path):
+        folder, db = self._item(tmp_path, self.BONES_CREDITS)
+        ours = Marker(T.CREDITS, 2_464_000, self.BONES_DUR, ("credits_text",))
+        pub, written = self._write(tmp_path, folder, [ours], kept_types=frozenset({T.CREDITS}))
+        assert (written, pub.last_kept_types) == ([ours], frozenset())
+
+    def test_a_write_from_an_app_that_sends_no_file_times_still_writes(self, tmp_path):
+        # An older app's request carries parts without ``updated_at``: that is not "Plex changed the item's files".
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        request_parts = [
+            p._replace(updated_at=None)
+            for p in plex_db.LocalPlexDb(lambda: str(db)).read_item(7, deadline=time.monotonic() + 5).parts
+        ]
+        result = plex_db.LocalPlexDb(lambda: str(db)).write_item(
+            plex_db.WriteRequest(7, request_parts, [self.OUR_INTRO], [], self.BONES_DUR, [], (1,), frozenset(), True),
+            deadline=time.monotonic() + 5,
+        )
+        assert result.ours == [self.OUR_INTRO]
 
 
 class TestOptimizedVersions:

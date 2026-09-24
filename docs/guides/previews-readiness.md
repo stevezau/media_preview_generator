@@ -342,7 +342,8 @@ good", and nothing about markers is checked or contacted. The rows are read from
 tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
 another machine says nothing about Plex Pass until that is fixed.
 
-Only Plex's detection row has buttons, one **Turn off** per library. Every other row says what to change and where.
+Only Plex's library-settings and detection rows have buttons (**Turn on**, **Set server-wide to Never**). Every
+other row says what to change and where.
 
 ### Plex
 
@@ -351,7 +352,8 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
   until the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
 - **Plex hasn't made its marker list yet** (critical) / **Plex's marker list is ready**. Plex only serves markers
   attached to a database row it made itself, and this app never creates that row. Turn on Plex's own intro detection
-  for one library, play a file, then check again. You can turn Plex's detection back off afterwards.
+  for one library, play a file, then check again. Afterwards you can set Plex's server-wide detection back to Never;
+  leave the library's own setting on.
 - **Plex's library database isn't on this machine** (critical) / **…is on this machine**. Markers are written into
   Plex's database, which is only safe from the machine the file is on. Run this app on the Plex machine, or run the
   [Plex marker agent](../guides.md#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent
@@ -363,20 +365,26 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
   on both sides), **and this app are different versions** (the Intro & Credits tab says which to update), **is
   beside a different Plex** (check the address: markers would have gone into the wrong database). While it is red,
   no marker reaches this server, and its badge reads **Fix on the agent** instead of **Change in Plex UI**.
+- **TV Shows — skip buttons are hidden** (critical, one row per library, named after it) / **Plex shows skip buttons
+  in your Intro & Credits libraries**. Each library Intro & Credits goes to has its own *Intro markers* and *Credits
+  markers* setting in Plex (Edit library → Advanced; only TV libraries have the intro one). While one is off, Plex
+  hides every marker of that type in the library, its own and ours, so nobody sees a skip button there. Until it is
+  back on, the app doesn't use any of Plex's own markers on that library's items as a second opinion, of either type.
+  The row names the settings that are off, and **Turn on** switches them back on for that library, after a
+  confirmation. **Fix critical** turns them all on after showing the list.
+  - Under the last such row, a note offers **Set server-wide to Never**: it sets Plex's server-wide *Generate intro
+    video markers* / *Generate credits video markers* (Settings → Library) to Never for the types that are off. That
+    stops Plex's own detection and keeps skip buttons working. It isn't offered when Plex already never detects them,
+    or when the server is set to "Keep Plex's".
+  - A setting that can't be read (an older Plex, or Plex didn't answer) shows no row.
 - **Plex's own detection can replace your markers** (recommended). When Plex analyses a file again it replaces the
   markers on it with its own, ours included. The next Intro & Credits run puts ours back, but the file shows Plex's
-  times until then. Plex detects in a library only when both of its settings are on: the server's *Generate intro
-  video markers* / *Generate credits video markers* (Settings → Library) and the library's own *Enable intro
-  detection* / *Enable credits detection* (Edit library → Advanced; only TV libraries have the intro one). The row
-  lists each library Intro & Credits goes to where both are on, and what Plex detects there, for example
-  **TV Shows · intro, credits** and **Movies · credits**. **Turn off** switches off that library's own setting for the
-  types listed, after a confirmation. Plex's server setting and your other libraries stay as they are.
-  - **Plex's own detection is off** / **…is off in your Intro & Credits libraries**: nothing to do.
+  times until then. **Set server-wide to Never** sets Plex's *Generate intro video markers* / *Generate credits video
+  markers* to Never for the types Plex detects in your Intro & Credits libraries, after a confirmation. It changes
+  every library on the server, so **Fix all** leaves it out.
+  - **Plex's own detection is off** / **…doesn't reach your Intro & Credits libraries**: nothing to do.
   - **Keeping Plex's own markers: its detection can stay on**: the server is set to "Keep Plex's" under "When Plex
     has its own markers", so Plex's detection is what you asked for.
-  - If a library's own setting can't be read (an older Plex, or Plex didn't answer), the row falls back to the server
-    setting alone, shows **unknown**, and has no buttons: turn the settings off in Plex yourself, or choose "Keep
-    Plex's".
 
 ### Jellyfin and Emby
 

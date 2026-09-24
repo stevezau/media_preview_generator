@@ -22,6 +22,7 @@ from loguru import logger
 from ...config import resolve_frame_interval
 from ...markers.settings import mask_server
 from ...servers import (
+    ServerConfig,
     ServerRegistry,
     ServerType,
     UnsupportedServerTypeError,
@@ -1488,15 +1489,38 @@ def set_vendor_extraction(server_id: str):
     return jsonify(payload)
 
 
-@api.route("/servers/<server_id>/plex-marker-detection", methods=["POST"])
+def _plex_marker_target(server_id: str) -> tuple[ServerConfig | None, Any]:
+    """The Plex server a Setup Health marker-setting fix may write, or the response refusing it.
+
+    Returns:
+        ``(config, None)`` for a Plex server that exists and is enabled, else ``(None, response)``.
+    """
+    raw_servers = _get_media_servers()
+    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
+    if target is None:
+        return None, (jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404)
+    if _is_disabled(target):
+        return None, _disabled_response(target)
+    try:
+        cfg = server_config_from_dict(target)
+    except Exception as exc:
+        return None, (jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400)
+    if cfg.type is not ServerType.PLEX:
+        return None, (jsonify({"ok": False, "error": "Plex's marker settings are Plex settings"}), 400)
+    return cfg, None
+
+
+@api.route("/servers/<server_id>/plex-library-markers", methods=["POST"])
 @setup_or_auth_required
-def turn_off_plex_marker_detection(server_id: str):
-    """Turn Plex's own intro and/or credits detection off for one library (Setup Health's "Turn off").
+def turn_on_plex_library_markers(server_id: str):
+    """Turn one library's own "Intro markers" and/or "Credits markers" setting back on (Setup Health's "Turn on").
+
+    While one is off, Plex serves no marker of that type in the library — its own or ours — so no skip button shows.
 
     Body: ``{"library_id": str, "prefs": [str, ...]}``, ``prefs`` being one or both of
     ``enableIntroMarkerGeneration`` / ``enableCreditsMarkerGeneration``. Only a library in this server's Intro &
-    Credits selection is accepted, and only that library's own switches are written: Plex's server-wide
-    detection prefs are never touched. Returns ``{"ok": bool, "error": str}`` like the other readiness actions.
+    Credits selection is accepted, and only that library's own settings are written. Returns ``{"ok": bool,
+    "error": str}`` like the other readiness actions.
     """
     from ...markers.ownership import marker_libraries
     from ...servers.plex import LIBRARY_MARKER_DETECTION_PREFS
@@ -1510,39 +1534,65 @@ def turn_off_plex_marker_detection(server_id: str):
     if not isinstance(prefs, list) or not prefs or not all(isinstance(p, str) and p in allowed for p in prefs):
         return jsonify({"ok": False, "error": f"prefs must be a non-empty list drawn from {allowed}"}), 400
 
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-        selected = {str(lib.id) for lib in marker_libraries(cfg)}
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
-
-    if cfg.type is not ServerType.PLEX:
-        return jsonify({"ok": False, "error": "Plex's own marker detection is a Plex setting"}), 400
-    if library_id not in selected:
+    cfg, refused = _plex_marker_target(server_id)
+    if refused is not None:
+        return refused
+    if library_id not in {str(lib.id) for lib in marker_libraries(cfg)}:
         return jsonify(
             {"ok": False, "error": f"library {library_id!r} isn't one Intro & Credits goes to on this server"}
         ), 400
 
     live = _instantiate_for_probe(cfg)
-    if live is None or not hasattr(live, "turn_off_library_marker_detection"):
+    if live is None or not hasattr(live, "turn_on_library_marker_detection"):
         return jsonify({"ok": False, "error": "could not instantiate server client"}), 400
-
     try:
-        error = live.turn_off_library_marker_detection(library_id, prefs)
+        error = live.turn_on_library_marker_detection(library_id, prefs)
     except Exception as exc:
-        logger.warning("Turning off Plex's own marker detection on {!r} raised: {}", cfg.name or cfg.id, exc)
+        logger.warning("Turning on Plex library marker settings on {!r} raised: {}", cfg.name or cfg.id, exc)
         return jsonify({"ok": False, "error": str(exc)}), 200
     if error:
         return jsonify({"ok": False, "error": error}), 200
     return jsonify({"ok": True, "library_id": library_id, "prefs": list(dict.fromkeys(prefs))})
+
+
+@api.route("/servers/<server_id>/plex-marker-detection", methods=["POST"])
+@setup_or_auth_required
+def set_plex_marker_detection_never(server_id: str):
+    """Set Plex's server-wide intro and/or credits detection to Never (Setup Health's "Set server-wide to Never").
+
+    Stops Plex's own detection in every library while every library keeps serving its skip markers — what turning a
+    library's own setting off can't do, since that hides them.
+
+    Body: ``{"types": ["intro", "credits"]}`` (one or both). Only for a Plex server with Intro & Credits on. Sends
+    ``PUT /:/prefs?GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never`` for the types given.
+    Returns ``{"ok": bool, "error": str}`` like the other readiness actions.
+    """
+    from ...markers.ownership import marker_libraries
+    from ...servers.plex import SERVER_MARKER_DETECTION_PREFS
+
+    body = request.get_json(silent=True) or {}
+    types = body.get("types")
+    allowed = list(SERVER_MARKER_DETECTION_PREFS)
+    if not isinstance(types, list) or not types or not all(isinstance(t, str) and t in allowed for t in types):
+        return jsonify({"ok": False, "error": f"types must be a non-empty list drawn from {allowed}"}), 400
+
+    cfg, refused = _plex_marker_target(server_id)
+    if refused is not None:
+        return refused
+    if not marker_libraries(cfg):
+        return jsonify({"ok": False, "error": "Intro & Credits is off for this server"}), 400
+
+    live = _instantiate_for_probe(cfg)
+    if live is None or not hasattr(live, "set_marker_detection_never"):
+        return jsonify({"ok": False, "error": "could not instantiate server client"}), 400
+    try:
+        error = live.set_marker_detection_never(types)
+    except Exception as exc:
+        logger.warning("Setting Plex's own marker detection to Never on {!r} raised: {}", cfg.name or cfg.id, exc)
+        return jsonify({"ok": False, "error": str(exc)}), 200
+    if error:
+        return jsonify({"ok": False, "error": error}), 200
+    return jsonify({"ok": True, "types": list(dict.fromkeys(types))})
 
 
 @api.route("/servers/<server_id>/scheduled-trickplay", methods=["POST"])

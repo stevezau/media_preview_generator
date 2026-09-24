@@ -24,7 +24,7 @@ import math
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -36,8 +36,9 @@ from ..decide import DecisionStatus, intro_chapter_length_ms, intro_chapter_limi
 from ..external_ids import ids_from_path, is_extra
 from ..models import Candidate, FileIdentity, MarkerType, Source
 from ..outcomes import is_kept_own
-from ..probe import ProbeError, ProbeStalledError, probe_media
+from ..probe import MediaProbe, ProbeError, ProbeStalledError, probe_media
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
+from ..speed import FILM_FPS, PAL_FPS, match_speed, playback_speed, retime_factor
 from ..store import EndPictureKey
 from . import POINT_S, end_picture
 from .fingerprint import (
@@ -55,6 +56,7 @@ from .matcher import (
     MAX_GAP_S,
     MAX_INTRO_S,
     TOP_SHIFTS,
+    Hit,
     IntroCandidate,
     IntroSegment,
     Run,
@@ -68,10 +70,15 @@ if TYPE_CHECKING:
     from ..pipeline import DetectorAnswer, LocalDetectorSpec, PipelineContext
     from ..store import FileRecord
 
-# The season step's own version (matcher v3 plus the silence guard, the provable pair skip, the group rule and the
-# guards against idents and music beds): stored with its answers and with cached pairs, so a change to any of them is
-# matched again.
-SEASON_AUDIO_VERSION = 5
+# The season step's own version (matcher v3 plus the silence guard, the provable pair skip, the group rule, the guards
+# against idents and music beds with where a stretch needs no dense core, and matching a season of 25 fps and film-rate
+# releases at one speed): stored with its answers and with cached pairs, so a change to any of them is matched again.
+SEASON_AUDIO_VERSION = 7
+# A pair's runs are cached under a version naming the speed each side was matched at (its own, or retimed to film or
+# to 25 fps), so runs matched from one pair of fingerprints never stand in for another pair's. A file's cached pairs
+# also go when its stored frame rate changes (``MarkerStore.set_frame_rate``).
+_PAIR_VERSION_STEP = 1_000
+_RETIMED_TO = {FILM_FPS: 1, PAL_FPS: 2}
 # Guards on the repeated stretches season audio takes for the intro (§5.3, owner 2026-09-24): a network ident at the
 # very start of the file, or a music bed under the cold open, repeats in every episode as well as the theme does
 # ("Accused: Guilty or Innocent": 13 of 15 intros were the A&E logo, the logo plus the cold-open music, or the music).
@@ -83,6 +90,14 @@ FILE_START_S = 2.0
 MIN_FILE_START_LENGTH_S = 10.0
 MIN_DENSE_CORE_S = 8.0
 DENSE_CORE_GAP_PTS = 4
+# A theme sung or played under dialogue has no dense core either, so two kinds of stretch are let off it (owner
+# 2026-09-24): one starting at 2-30 s that is at least 30 s long (an ident or a music bed that long wasn't seen; its end
+# picture is still checked), and one starting after 30 s, past the cold open, that is at least 10 s long and found by
+# at least 2 other episodes. The limits were set after seeing what they leave out: an 8.8 s music bed after 30 s
+# (Accused S04E06) and a recap only one other episode shares (The Fall, season 3).
+CORE_FREE_EARLY_MIN_S = 30.0
+CORE_FREE_LATER_MIN_S = 10.0
+CORE_FREE_LATER_MIN_SUPPORT = 2
 MAX_PREVIOUS_SEASON_FILES = 4
 MAX_GROUP_EPISODES = 40
 # A season member ffprobe couldn't read, or ffmpeg couldn't fingerprint, is left out of other episodes' season steps for
@@ -399,6 +414,22 @@ def dense_core_s(target: str, candidate: IntroCandidate, points: Mapping[str, np
     return float(np.median(list(longest.values()))) if longest else 0.0
 
 
+def needs_dense_core(segment: IntroSegment) -> bool:
+    """Whether a stretch must have a dense core to be taken (``CORE_FREE_EARLY_MIN_S`` above).
+
+    Args:
+        segment: A cluster's segment, with its support.
+
+    Returns:
+        False for a stretch starting at 2-30 s that is at least 30 s long, and for one starting after 30 s that is at
+        least 10 s long and found by at least 2 other episodes; True otherwise.
+    """
+    length_s = segment.end_s - segment.start_s
+    if end_picture.is_early(segment.start_s):
+        return segment.start_s < FILE_START_S or length_s < CORE_FREE_EARLY_MIN_S
+    return length_s < CORE_FREE_LATER_MIN_S or segment.support < CORE_FREE_LATER_MIN_SUPPORT
+
+
 def _passes_guards(
     target: str,
     candidate: IntroCandidate,
@@ -410,7 +441,7 @@ def _passes_guards(
     segment = candidate.segment
     if segment.start_s < FILE_START_S and segment.end_s - segment.start_s < MIN_FILE_START_LENGTH_S:
         return False
-    if dense_core_s(target, candidate, points) < MIN_DENSE_CORE_S:
+    if needs_dense_core(segment) and dense_core_s(target, candidate, points) < MIN_DENSE_CORE_S:
         return False
     return not end_picture.is_early(segment.start_s) or end_picture_passes(candidate)
 
@@ -427,7 +458,7 @@ def guarded_pick(
 
     The clusters are walked in the matcher's ranking order (:func:`matcher.intro_candidates`): the walk ends, with no
     intro, at the first cluster without the quorum; a quorum cluster that fails a guard (too short at the file's start,
-    no dense core, or an early one whose end picture differs) is passed over.
+    no dense core where one is needed, or an early one whose end picture differs) is passed over.
 
     Args:
         target: The episode (one of ``files``).
@@ -474,6 +505,82 @@ def season_intro(
     return segment
 
 
+@dataclass(frozen=True)
+class SeasonClock:
+    """The speed a season group is matched at, and the retime factor of each file that plays at another speed.
+
+    A 25 fps release of a film-rate show plays 4.3 % fast, pitch raised with it, and its opening fingerprints like
+    nothing a film-rate release of the same show plays (Bones season 5: 0 of 85 such pairs matched, against 85 of 85
+    with the 25 fps audio slowed to film speed). A group whose files play at two speeds is matched at the speed most of
+    them play at (``speed.match_speed``); each file at the other speed is matched on its audio retimed to it, and what
+    it matches is read back at its own speed (``factors``: its own seconds per second of the group's).
+
+    Attributes:
+        speed: The group's speed, None when nothing is retimed.
+        factors: Per retimed file, its :func:`speed.retime_factor`.
+    """
+
+    speed: float | None = None
+    factors: Mapping[str, float] = field(default_factory=dict)
+
+    def pair_version(self, first: str, second: str) -> int:
+        """The version a pair's runs are cached under: :data:`SEASON_AUDIO_VERSION` for two files at their own speed,
+        and another for each combination of the two sides' speeds (own, retimed to film, retimed to 25 fps)."""
+
+        def side(path: str) -> int:
+            return _RETIMED_TO[self.speed] if path in self.factors else 0
+
+        return SEASON_AUDIO_VERSION + _PAIR_VERSION_STEP * (3 * side(first) + side(second))
+
+
+def season_clock(speeds: Mapping[str, float | None]) -> SeasonClock:
+    """The clock a season group is matched with.
+
+    Args:
+        speeds: Each file's :func:`speed.playback_speed` (None: unknown, matched as it plays).
+
+    Returns:
+        The group's speed and the files to retime; no speed and nothing to retime for a group at one speed.
+    """
+    group_speed = match_speed(speeds.values())
+    factors = {path: factor for path, own in speeds.items() if (factor := retime_factor(own, group_speed)) is not None}
+    return SeasonClock(group_speed, factors)
+
+
+def in_own_time(segment: IntroSegment, factor: float | None) -> IntroSegment:
+    """A segment matched at the group's speed in the file's own seconds (its retime factor; None: not retimed)."""
+    if factor is None:
+        return segment
+    return IntroSegment(segment.start_s * factor, segment.end_s * factor, segment.support)
+
+
+def in_own_times(candidate: IntroCandidate, target: str, factors: Mapping[str, float]) -> IntroCandidate:
+    """A cluster matched at the group's speed in each file's own seconds, for the end-picture check.
+
+    The target's stretch and hits are scaled by its factor. A partner's start is set so that its offset (its start
+    minus the hit's) is exact at the stretch's end, where the pictures are compared: across the 3 s compared, a 4.3 %
+    speed difference drifts 0.13 s, inside the check's half-second grid.
+
+    Args:
+        candidate: One of the target's clusters, at the group's speed.
+        target: The episode.
+        factors: :attr:`SeasonClock.factors`.
+
+    Returns:
+        The cluster in own seconds; the same cluster when neither the target nor a partner was retimed.
+    """
+    if target not in factors and not any(hit.partner in factors for hit in candidate.members):
+        return candidate
+    own = factors.get(target, 1.0)
+    end_s = candidate.segment.end_s
+    hits = []
+    for hit in candidate.members:
+        partner_end_s = (end_s + hit.partner_start_s - hit.start_s) * factors.get(hit.partner, 1.0)
+        offset_s = partner_end_s - end_s * own
+        hits.append(Hit(hit.start_s * own, hit.end_s * own, hit.partner, hit.start_s * own + offset_s))
+    return IntroCandidate(in_own_time(candidate.segment, own), tuple(hits))
+
+
 def _disk_identity(path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(path)
@@ -516,15 +623,16 @@ def _record_fingerprint_failure(ctx: PipelineContext, rec: FileRecord) -> None:
     ctx.store.record_member_fingerprint_failure(_identity_of(rec), now, forget_before=now - UNREADABLE_MEMBER_RETRY)
 
 
-def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
+def _member_record(ctx: PipelineContext, path: str, *, with_frame_rate: bool = True) -> FileRecord | None:
     """A season member's record, read like its own run would read it.
 
-    The store's record when it matches the disk and holds a duration and current chapters; otherwise the file is probed
-    and its duration and chapters are stored (its own run then reads nothing again). None for a file that changed since
-    its record was made, or while it was probed (its own run reads it again), or can't be probed. A file that couldn't be
-    probed isn't probed again for a day while its identity stays the same, except by a forced re-detect. The season
-    step holds only its own file's path lock, so the store refuses to change another file's identity
-    (``record_member``).
+    The store's record when it matches the disk and holds a duration, current chapters and (``with_frame_rate``, for
+    season audio) a frame rate; otherwise the file is probed and its duration, chapters and frame rate are stored (its
+    own run then reads nothing again). None for a file that changed since its record was made, or while it was probed
+    (its own run reads it again), or can't be probed. A file that couldn't be probed isn't probed again for a day while
+    its identity stays the same, except by a forced re-detect; one stored before frame rates were read, with current
+    chapters, stays in meanwhile at an unknown speed. The season step holds only its own file's path lock, so the store
+    refuses to change another file's identity (``record_member``).
 
     Raises:
         ProbeStalledError: Earlier ffprobes are still stuck on their files, so this one wasn't read (and nothing is
@@ -534,16 +642,18 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
     rec = ctx.store.get_file(path)
     if identity is None or (rec is not None and identity != (rec.size, rec.mtime_ns)):
         return None
-    if (
-        rec is not None
+    read = (
+        rec
+        if rec is not None
         and rec.duration_ms
         and ctx.store.evidence_version(rec.id, Source.CHAPTERS) == CHAPTER_RULES_VERSION
-    ):
-        return rec
+        else None
+    )
+    if read is not None and (not with_frame_rate or ctx.store.get_frame_rate(read.id)[0]):
+        return read
     probed_as = FileIdentity(path, *identity)
-    failed_at = None if ctx.force else ctx.store.member_probe_failed_at(probed_as)
-    if failed_at is not None and ctx.now() - failed_at < UNREADABLE_MEMBER_RETRY:
-        return None
+    if _probe_failed_lately(ctx, probed_as):
+        return read
     try:
         probe = probe_media(path, ffprobe=ctx.ffprobe)
     except ProbeStalledError:
@@ -556,7 +666,7 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
     if probe is None or not probe.duration_ms:
         now = ctx.now()
         ctx.store.record_member_probe_failure(probed_as, now, forget_before=now - UNREADABLE_MEMBER_RETRY)
-        return None
+        return read
     return ctx.store.record_member(
         probed_as,
         duration_ms=probe.duration_ms,
@@ -565,14 +675,21 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
         # a season group can hold a file whose name carries no SxxEyy, and it must not be read as one.
         chapters=chapter_candidates(probe, is_episode=ids_from_path(path).is_episode),
         chapter_version=CHAPTER_RULES_VERSION,
+        frame_rate=probe.frame_rate,
     )
 
 
+def _probe_failed_lately(ctx: PipelineContext, identity: FileIdentity) -> bool:
+    """Whether ffprobe failed on a member with this identity less than a day ago (a forced re-detect tries anyway)."""
+    failed_at = None if ctx.force else ctx.store.member_probe_failed_at(identity)
+    return failed_at is not None and ctx.now() - failed_at < UNREADABLE_MEMBER_RETRY
+
+
 def _member_record_if_readable(ctx: PipelineContext, path: str) -> FileRecord | None:
-    """:func:`_member_record`, with a member ffprobe can't be started for now counting as unread (its own run reads
-    it)."""
+    """:func:`_member_record` for the chapter step (no frame rate needed), with a member ffprobe can't be started for
+    now counting as unread (its own run reads it)."""
     try:
-        return _member_record(ctx, path)
+        return _member_record(ctx, path, with_frame_rate=False)
     except ProbeStalledError as exc:
         logger.debug("The season step leaves out {} for now: {}", os.path.basename(path), exc)
         return None
@@ -634,7 +751,24 @@ def _signature_item(ctx: PipelineContext, path: str) -> list:
     rec = ctx.store.get_file(path) if identity is not None else None
     current = rec is not None and (rec.size, rec.mtime_ns) == identity
     size, mtime_ns = identity or (None, None)
-    return [path, size, mtime_ns, bool(current and has_cached_fingerprint(ctx.store, rec))]
+    return [path, size, mtime_ns, *(_fingerprints_item(ctx, rec) if current else [False, None, None])]
+
+
+def _fingerprints_item(ctx: PipelineContext, rec: FileRecord, rates: Mapping[str, float | None] | None = None) -> list:
+    """What a file's part of a signature says about its fingerprints: whether it has its own, its frame rate (the one
+    it was matched at, given ``rates``; else the stored one), and whether it has the one retimed to its other speed
+    (None at an unknown or other rate), so a retimed fingerprint made after an answer left the file out makes that
+    answer due."""
+    if rates is not None and rec.canonical_path in rates:
+        rate = rates[rec.canonical_path]
+    else:
+        rate = ctx.store.get_frame_rate(rec.id)[1]
+    own = playback_speed(rate)
+    retimed = None
+    if own is not None:
+        other = FILM_FPS if own == PAL_FPS else PAL_FPS
+        retimed = has_cached_fingerprint(ctx.store, rec, retime_factor(own, other))
+    return [has_cached_fingerprint(ctx.store, rec), rate, retimed]
 
 
 def _signature(
@@ -642,18 +776,22 @@ def _signature(
     paths: tuple[str, ...],
     matched: Mapping[str, FileRecord] | None = None,
     on_disk: dict[str, list] | None = None,
+    rates: Mapping[str, float | None] | None = None,
 ) -> str:
-    """What an answer is based on: each file's identity and whether it has a fingerprint.
+    """What an answer is based on: each file's identity, whether it has its fingerprint, its frame rate (a rate read
+    later can make the file one to retime) and whether it has its retimed fingerprint (:func:`_fingerprints_item`).
 
-    ``matched`` files (a detector run's) enter with the identity they were matched with, so a sibling replaced while the
-    season was matched makes the answer due again; every other file enters as it is on disk now (read once per path
-    into ``on_disk`` when a caller builds several signatures).
+    ``matched`` files (a detector run's) enter with the identity they were matched with, and with the frame rate they
+    were matched at (``rates``, :class:`_Matching`), so a sibling replaced, or whose rate was read, while the season was
+    matched makes the answer due again; every other file enters as it is on disk now (read once per path into
+    ``on_disk`` when a caller builds several signatures).
     """
     on_disk = {} if on_disk is None else on_disk
     items = []
     for path in paths:
         if matched and path in matched:
-            items.append([path, matched[path].size, matched[path].mtime_ns, True])
+            rec = matched[path]
+            items.append([path, rec.size, rec.mtime_ns, *_fingerprints_item(ctx, rec, rates)])
             continue
         if path not in on_disk:
             on_disk[path] = _signature_item(ctx, path)
@@ -726,13 +864,16 @@ def season_audio_due(rec: FileRecord, ctx: PipelineContext) -> bool:
 def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
     """Whether this episode's season audio has to run on a worker.
 
-    It does while an episode of the folder (this one included) still needs ffmpeg or ffprobe, while a pair this
-    episode hasn't been matched with yet is too slow for a checking thread (:func:`slow_to_match`: long constant
-    stretches in both openings that don't provably rule out an intro), or while the season step would meet a cluster
-    starting in the first 30 s whose end picture isn't checked yet (decoding is a worker's job). That last question is
-    the season step itself, run here with the end-picture check reading only markers.db: the pairs it matches are cached
-    for the detector, whichever thread it then runs on. Otherwise matching is cheap enough to run inline. A sibling
-    ffmpeg failed on lately doesn't count: the step leaves it out.
+    It does while an episode of the folder (this one included) still needs ffmpeg or ffprobe (a sibling's frame rate
+    included; this episode's own is read here, inline like its own probe, when it was stored before frame rates were
+    read), while a file that plays at another speed than the group has no retimed fingerprint yet
+    (:class:`SeasonClock`), while a pair this episode hasn't been matched with yet is too slow for a checking thread
+    (:func:`slow_to_match`: long constant stretches in both openings that don't provably rule out an intro), or while
+    the season step would meet a cluster starting in the first 30 s whose end picture isn't checked yet (decoding is a
+    worker's job). That last question is the season step itself, run here with the end-picture check reading only
+    markers.db: the pairs it matches are cached for the detector, whichever thread it then runs on. Otherwise matching
+    is cheap enough to run inline. A sibling ffmpeg or ffprobe failed on lately doesn't count: the step leaves it out,
+    or keeps it at an unknown speed.
 
     Args:
         rec: The episode.
@@ -755,56 +896,185 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
             if path != rec.canonical_path and _fingerprint_failed_lately(ctx, stored):
                 continue
             return True
+        if path != rec.canonical_path and _frame_rate_unread(ctx, stored):
+            return True
         fingerprinted[path] = (stored, cached)
     if rec.canonical_path not in fingerprinted:
         return False
-    if len(group.episodes) == 1:
-        pairs = []
-        for path in view.previous_season():
-            member = _current_record(ctx, path)
-            cached = _cached_points(ctx, member)
-            if member is not None and cached is not None:
-                pairs.append((fingerprinted[rec.canonical_path], (member, cached)))
-    else:
-        own = fingerprinted[rec.canonical_path]
-        pairs = [
-            (fingerprinted[path], own) if path < rec.canonical_path else (own, fingerprinted[path])
-            for path in fingerprinted
-            if path != rec.canonical_path
-        ]
-    if any(
-        ctx.store.get_season_pair(first.id, second.id, SEASON_AUDIO_VERSION) is None and slow_to_match(a, b)
-        for (first, a), (second, b) in pairs
-    ):
+    # Read here, inline as the file's own probe is, so the speed matched at is the one the detector will match at. A
+    # rate left unread (ffprobes stuck on earlier files) is read on a worker, not guessed at here.
+    frame_rate_of(ctx, rec)
+    if _frame_rate_unread(ctx, rec):
         return True
-    return _end_picture_unchecked(ctx, rec, view, fingerprinted)
-
-
-def _end_picture_unchecked(
-    ctx: PipelineContext, rec: FileRecord, view: _SeasonView, fingerprinted: dict[str, tuple[FileRecord, np.ndarray]]
-) -> bool:
-    """Whether the detector, matching the files it would match now, would decode an end picture."""
     records = {path: member for path, (member, _) in fingerprinted.items()}
     points = {path: cached for path, (_, cached) in fingerprinted.items()}
-    if not len(points[rec.canonical_path]):
-        return False
-    audible = sorted(path for path, cached in points.items() if len(cached))
-    if len(audible) > 1:
-        files = audible
-    elif len(view.group().episodes) == 1:
-        previous = _previous_season_points(ctx, rec.canonical_path, records, view.previous_season())
-        if not previous:
-            return False
-        files, points = [rec.canonical_path, *sorted(previous)], {**points, **previous}
-    else:
-        return False
     try:
-        _intro(ctx, rec.canonical_path, files, records, points, _EndPictures(ctx, rec, records, decode=False))
+        matching = _matching(
+            ctx,
+            rec,
+            records,
+            points,
+            group_size=len(group.episodes),
+            previous_files=view.previous_season(),
+            retimed=functools.partial(_cached_retimed, ctx, rec),
+        )
+    except _RetimedUnmadeError:
+        return True
+    if matching is None:
+        return False
+    target = rec.canonical_path
+    pairs = [(path, target) if path < target and not matching.previous else (target, path) for path in matching.files]
+    if any(
+        ctx.store.get_season_pair(records[first].id, records[second].id, matching.clock.pair_version(first, second))
+        is None
+        and slow_to_match(matching.points[first], matching.points[second])
+        for first, second in pairs
+        if first != second
+    ):
+        return True
+    try:
+        _intro(ctx, target, matching, records, _EndPictures(ctx, rec, records, decode=False))
     except _EndPictureUncheckedError:
         return True
     except end_picture.CheckUnavailableError:
         return False  # this episode's own file couldn't be read lately: the detector gives up without decoding
     return False
+
+
+def frame_rate_of(
+    ctx: PipelineContext, rec: FileRecord, *, probe: Callable[..., MediaProbe] | None = None
+) -> float | None:
+    """A file's video frame rate: the stored one, or, for a file stored before frame rates were read, one read now.
+
+    A read that fails is remembered with the file's identity (the season members' probe failures) and not tried again
+    for a day, except by a forced re-detect; ffprobes stuck on earlier files leave it unread, blaming nothing. A rate
+    stored for the first time is noted as a changed answer: the season's other episodes may now match this file at
+    another speed.
+
+    Args:
+        ctx: The job's context.
+        rec: The file (its identity matches the disk: callers checked).
+        probe: The ffprobe reader (the caller's module's ``probe_media``); :func:`probe_media` by default.
+
+    Returns:
+        The rate, or None when the file has none or it couldn't be read.
+    """
+    stored, rate = ctx.store.get_frame_rate(rec.id)
+    if stored:
+        return rate
+    identity = _identity_of(rec)
+    if _probe_failed_lately(ctx, identity):
+        return None
+    try:
+        probed = (probe if probe is not None else probe_media)(rec.canonical_path, ffprobe=ctx.ffprobe)
+    except ProbeStalledError as exc:
+        logger.debug("Frame rate of {} unread for now: {}", os.path.basename(rec.canonical_path), exc)
+        return None
+    except ProbeError as exc:
+        logger.debug("Frame rate of {} unknown: {}", os.path.basename(rec.canonical_path), exc)
+        now = ctx.now()
+        ctx.store.record_member_probe_failure(identity, now, forget_before=now - UNREADABLE_MEMBER_RETRY)
+        return None
+    if ctx.store.set_frame_rate(rec.id, probed.frame_rate, identity=(rec.size, rec.mtime_ns)):
+        ctx.note_answer_changed()
+    return probed.frame_rate
+
+
+def _frame_rate_unread(ctx: PipelineContext, member: FileRecord) -> bool:
+    """Whether a sibling's frame rate still has to be read (``_member_record`` probes it), unless ffprobe failed on it
+    lately."""
+    return not ctx.store.get_frame_rate(member.id)[0] and not _probe_failed_lately(ctx, _identity_of(member))
+
+
+class _RetimedUnmadeError(Exception):
+    """A file of the group needs a retimed fingerprint that isn't made yet (``needs_worker``: ffmpeg is a worker's
+    job)."""
+
+
+def _cached_retimed(ctx: PipelineContext, rec: FileRecord, member: FileRecord, factor: float) -> np.ndarray | None:
+    """A group file's cached retimed fingerprint for ``needs_worker``: None for a sibling ffmpeg failed on lately (the
+    step leaves it out).
+
+    Raises:
+        _RetimedUnmadeError: It isn't made yet.
+    """
+    stored = cached_fingerprint(ctx.store, member, factor)
+    if stored is not None:
+        return points_of(stored)
+    if member.id != rec.id and _fingerprint_failed_lately(ctx, member):
+        return None
+    raise _RetimedUnmadeError(os.path.basename(member.canonical_path))
+
+
+@dataclass(frozen=True)
+class _Matching:
+    """What one episode's season step matches: its files in matching order, their points at the group's speed, the
+    clock, the source an answer is stored as, the previous season's files it was matched with (a lone episode), and
+    the frame rate each audible file was matched at (the answer's signature names these, not rates read later)."""
+
+    files: list[str]
+    points: dict[str, np.ndarray]
+    clock: SeasonClock
+    source: Source
+    previous: tuple[str, ...] = ()
+    rates: dict[str, float | None] = field(default_factory=dict)
+
+
+def _matching(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    records: dict[str, FileRecord],
+    points: Mapping[str, np.ndarray],
+    *,
+    group_size: int,
+    previous_files: Sequence[str] | None,
+    retimed: Callable[[FileRecord, float], np.ndarray | None],
+) -> _Matching | None:
+    """The files this episode is matched with, at one speed: its group's audible files, or, alone in its folder, the
+    previous season's cached ones (their records are added to ``records``).
+
+    Every file that plays at another speed than most of them (:func:`season_clock`) is matched on its retimed
+    fingerprint (``retimed``: None leaves a sibling out, which only a file other than this episode may be).
+
+    Args:
+        ctx: The job's context.
+        rec: The episode.
+        records: Record per path of the group's fingerprinted files.
+        points: Their own-speed fingerprints.
+        group_size: How many episodes the group has.
+        previous_files: The previous season's files (None: listed here).
+        retimed: A file's fingerprint retimed by a factor.
+
+    Returns:
+        The matching, or None when there is nothing to match (this episode is silent, or has no audible partner).
+    """
+    target = rec.canonical_path
+    if not len(points[target]):
+        return None
+    audible = {path: found for path, found in points.items() if len(found)}
+    previous: dict[str, np.ndarray] = {}
+    source = Source.SEASON_AUDIO
+    if len(audible) < 2:
+        if group_size != 1:
+            return None
+        previous = _previous_season_points(ctx, target, records, previous_files)
+        if not previous:
+            return None
+        audible, source = {target: points[target], **previous}, Source.SEASON_AUDIO_PREVIOUS
+    rates = {path: ctx.store.get_frame_rate(records[path].id)[1] for path in audible}
+    clock = season_clock({path: playback_speed(rate) for path, rate in rates.items()})
+    matched = dict(audible)
+    for path, factor in clock.factors.items():
+        found = retimed(records[path], factor)
+        if found is None or not len(found):
+            del matched[path]
+        else:
+            matched[path] = found
+    if target not in matched or len(matched) < 2:
+        return None
+    # A lone episode goes first, then the previous season's files by path: the order few_siblings.py measured.
+    files = [target, *sorted(path for path in previous if path in matched)] if previous else sorted(matched)
+    return _Matching(files, matched, clock, source, tuple(previous), rates)
 
 
 class _EndPictureUncheckedError(Exception):
@@ -923,28 +1193,39 @@ class _EndPictures:
 def _intro(
     ctx: PipelineContext,
     target: str,
-    files: list[str],
+    matching: _Matching,
     records: dict[str, FileRecord],
-    points: dict[str, np.ndarray],
     end_pictures: _EndPictures,
 ) -> IntroSegment | None:
+    """:func:`season_intro` on the matching's points, pairs cached in markers.db; the answer, and each end picture
+    checked, in the files' own seconds."""
+    points, clock = matching.points, matching.clock
+
     def runs_between(first: str, second: str) -> list[Run]:
         a, b = records[first], records[second]
-        cached = ctx.store.get_season_pair(a.id, b.id, SEASON_AUDIO_VERSION)
+        version = clock.pair_version(first, second)
+        cached = ctx.store.get_season_pair(a.id, b.id, version)
         if cached is not None:
             return [Run(*run) for run in cached]
         runs = season_pair_runs(points[first], points[second])
         ctx.store.set_season_pair(
             a.id,
             b.id,
-            SEASON_AUDIO_VERSION,
+            version,
             [tuple(run) for run in runs],
             identity_a=(a.size, a.mtime_ns),
             identity_b=(b.size, b.mtime_ns),
         )
         return runs
 
-    return season_intro(target, files, points, runs_between, end_picture_passes=end_pictures)
+    segment = season_intro(
+        target,
+        matching.files,
+        points,
+        runs_between,
+        end_picture_passes=lambda candidate: end_pictures(in_own_times(candidate, target, clock.factors)),
+    )
+    return None if segment is None else in_own_time(segment, clock.factors.get(target))
 
 
 def _previous_season_points(
@@ -1126,26 +1407,58 @@ def detect_season_audio(
     if ffmpeg is None:
         raise DetectorUnavailableError("no ffmpeg with chromaprint")
     group = season_group(rec.canonical_path)
+
+    def fingerprint_of(member: FileRecord, retime: float | None = None) -> np.ndarray | None:
+        """A group file's fingerprint (retimed by ``retime``), computed when missing; None leaves a sibling out."""
+        own_file = member.id == rec.id
+        try:
+            # A failure is recorded while the file's lock is held, so siblings' steps waiting on it skip it (for a day).
+            found = ensure_fingerprint(
+                ctx.store,
+                member,
+                ffmpeg=ffmpeg,
+                cancel_check=cancel_check,
+                skip=None if own_file else functools.partial(_fingerprint_failed_lately, ctx, member),
+                on_failure=functools.partial(_record_fingerprint_failure, ctx, member),
+                retime=retime,
+            )
+        except FingerprintSkippedError:
+            logger.debug(
+                "Season audio leaves out {}: it couldn't be fingerprinted lately",
+                os.path.basename(member.canonical_path),
+            )
+            return None
+        except FingerprintStalledError as exc:
+            # The mount's fault, not this file's: nothing recorded. Every later sibling would meet the same stalled
+            # mount: no answer this run rather than one matched against whichever siblings were fingerprinted already.
+            raise DetectorUnavailableError(str(exc)) from exc
+        except FingerprintError as exc:
+            if not own_file:
+                logger.info("Season audio leaves out {} this time: {}", os.path.basename(member.canonical_path), exc)
+                return None
+            if not (cancel_check and cancel_check()):
+                # Siblings' runs don't ask for this file again until its season changes (season_audio_followups).
+                attempted = _signature(ctx, _signature_paths(rec.canonical_path, group))
+                ctx.store.set_detector_failure(rec.id, Source.SEASON_AUDIO, attempted)
+            raise DetectorUnavailableError(str(exc)) from exc
+        if found is None and own_file:
+            raise DetectorUnavailableError("the file changed while it was fingerprinted")
+        return found
+
+    left_out: set[str] = set()
+
+    def retimed(member: FileRecord, factor: float) -> np.ndarray | None:
+        if cancel_check and cancel_check():
+            raise DetectorUnavailableError("cancelled")
+        phase("Fingerprinting audio…")  # the worker row's existing words: a retimed file is fingerprinted once more
+        found = fingerprint_of(member, factor)
+        if found is None:
+            left_out.add(member.canonical_path)
+        return found
+
     phase("Fingerprinting audio…")
-    try:
-        # A failure is recorded while the file's lock is held, so siblings' steps waiting on it skip it (for a day).
-        own = ensure_fingerprint(
-            ctx.store,
-            rec,
-            ffmpeg=ffmpeg,
-            cancel_check=cancel_check,
-            on_failure=functools.partial(_record_fingerprint_failure, ctx, rec),
-        )
-    except FingerprintStalledError as exc:
-        raise DetectorUnavailableError(str(exc)) from exc  # the mount's fault, not this file's: nothing recorded
-    except FingerprintError as exc:
-        if not (cancel_check and cancel_check()):
-            # Siblings' runs don't ask for this file again until its season changes (season_audio_followups).
-            attempted = _signature(ctx, _signature_paths(rec.canonical_path, group))
-            ctx.store.set_detector_failure(rec.id, Source.SEASON_AUDIO, attempted)
-        raise DetectorUnavailableError(str(exc)) from exc
-    if own is None:
-        raise DetectorUnavailableError("the file changed while it was fingerprinted")
+    own = fingerprint_of(rec)
+    frame_rate_of(ctx, rec)
     records: dict[str, FileRecord] = {rec.canonical_path: rec}
     points: dict[str, np.ndarray] = {rec.canonical_path: own}
     others = [p for p in group.episodes if p != rec.canonical_path]
@@ -1163,31 +1476,18 @@ def detect_season_audio(
         cached = _cached_points(ctx, member)
         if cached is None:
             phase(f"Fingerprinting season audio {n}/{len(others)}…")
-            try:
-                cached = ensure_fingerprint(
-                    ctx.store,
-                    member,
-                    ffmpeg=ffmpeg,
-                    cancel_check=cancel_check,
-                    skip=functools.partial(_fingerprint_failed_lately, ctx, member),
-                    on_failure=functools.partial(_record_fingerprint_failure, ctx, member),
-                )
-            except FingerprintSkippedError:
-                logger.debug("Season audio leaves out {}: it couldn't be fingerprinted lately", os.path.basename(path))
-                continue
-            except FingerprintStalledError as exc:
-                # Every later sibling would meet the same stalled mount: no answer this run rather than one matched
-                # against whichever siblings happened to be fingerprinted already.
-                raise DetectorUnavailableError(str(exc)) from exc
-            except FingerprintError as exc:
-                logger.info("Season audio leaves out {} this time: {}", os.path.basename(path), exc)
-                continue
+            cached = fingerprint_of(member)
         if cached is not None:
             records[path], points[path] = member, cached
 
+    matching = _matching(
+        ctx, rec, records, points, group_size=len(group.episodes), previous_files=None, retimed=retimed
+    )
+    if cancel_check and cancel_check():
+        # A sibling's fingerprint cancelled part way is left out like a failed one: no answer without it.
+        raise DetectorUnavailableError("cancelled")
     phase("Matching season audio…")
     candidates: list[Candidate] = []
-    previous_used: set[str] = set()
     end_pictures = _EndPictures(
         ctx,
         rec,
@@ -1198,26 +1498,19 @@ def detect_season_audio(
         cancel_check=cancel_check,
         phase=phase,
     )
-    audible = sorted(p for p, pts in points.items() if len(pts))
     try:
-        if len(own) and len(audible) > 1:
-            segment = _intro(ctx, rec.canonical_path, audible, records, points, end_pictures)
-            if segment is not None:
-                candidates.append(_candidate(segment, len(audible) - 1, Source.SEASON_AUDIO))
-        elif len(own) and len(group.episodes) == 1:
-            previous = _previous_season_points(ctx, rec.canonical_path, records)
-            previous_used = set(previous)
-            if previous:
-                # The order few_siblings.py measured: this episode first, then the previous season's files by path.
-                files = [rec.canonical_path, *sorted(previous)]
-                segment = _intro(ctx, rec.canonical_path, files, records, {**points, **previous}, end_pictures)
-                if segment is not None:
-                    candidates.append(_candidate(segment, len(previous), Source.SEASON_AUDIO_PREVIOUS))
+        segment = None if matching is None else _intro(ctx, rec.canonical_path, matching, records, end_pictures)
     except end_picture.CheckUnavailableError as exc:
         raise DetectorUnavailableError(str(exc)) from exc
+    if segment is not None:
+        candidates.append(_candidate(segment, len(matching.files) - 1, matching.source))
 
-    matched = {path: records[path] for path in points.keys() | previous_used}
-    signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched)
+    # Every file read for the match (the previous season's included, which _matching adds to records) but one left out
+    # for want of its retimed fingerprint: that one enters the signature as it is, so its fingerprint made later makes
+    # this answer due.
+    matched = {path: member for path, member in records.items() if path not in left_out}
+    rates = matching.rates if matching is not None else None
+    signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched, rates=rates)
     _request_redecide(ctx, rec, records, signature, matched=matched)
     if left_out_changed:
         # The sibling's own run in this job reads it again, and its request for this file would be dropped as one of

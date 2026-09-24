@@ -45,6 +45,7 @@ def _online(
         for key, path in found.items()
     }
     plex_by_case = {key: baseline[path] for key, path in found.items()}
+    rates = {key: fingerprints.frame_rate(path) for key, path in found.items()}
     subsets = {
         "all": results,
         "truth_not_plex": [r for r in results if r["case"]["truth_src"] != PLEX_TRUTH_SOURCE],
@@ -55,9 +56,9 @@ def _online(
     for subset, rows in subsets.items():
         block: dict = {"cases": len(rows), "plex": _counts(plex_online(rows, plex_by_case)), "settings": {}}
         for label, order, level in SETTINGS:
-            only = online_verdicts(rows, dump, order=order, level=level)
-            on = online_verdicts(rows, dump, order=order, level=level, extra=extra)
-            off = online_verdicts(rows, dump, order=order, level=level, extra=extra, g3=False)
+            only = online_verdicts(rows, dump, order=order, level=level, frame_rates=rates)
+            on = online_verdicts(rows, dump, order=order, level=level, extra=extra, frame_rates=rates)
+            off = online_verdicts(rows, dump, order=order, level=level, extra=extra, g3=False, frame_rates=rates)
             block["settings"][label] = {
                 "online_only": _counts(tally(only)),
                 "with_plex_and_audio_g3_on": _counts(tally(on)),
@@ -168,8 +169,8 @@ def full_report(
     baseline = load_baseline(baseline_path)
     episodes = load_v3_results()
     segments = season_segments(episodes, points=fingerprints.points, full_folder=full_folder, end_pictures=end_pictures)
-    on = compare_with_plex(episodes, segments, baseline)
-    off = compare_with_plex(episodes, segments, baseline, g3=False)
+    on = compare_with_plex(episodes, segments, baseline, frame_rate=fingerprints.frame_rate)
+    off = compare_with_plex(episodes, segments, baseline, g3=False, frame_rate=fingerprints.frame_rate)
     differences = g3_differences(on, off)
     online_summary, online_details = _online(evidence, baseline, fingerprints, end_pictures)
     credits_summary, credits_details = _credits(evidence, baseline, ProbeCache(fingerprints.root, ffprobe=ffprobe))

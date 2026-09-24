@@ -44,6 +44,12 @@ RENDER = "/dev/dri/renderD128"
 
 
 class TestCommand:
+    # Every path scales the same way: the decoded frame, whole, through one software scaler taking the nearest pixel
+    # (flags=neighbor). A GPU scaler of its own (scale_cuda, scale_vaapi) or swscale's default bicubic blurs text only a
+    # few pixels tall differently on each vendor, and credits found on NVIDIA were lost on Intel and the CPU.
+    CUDA = ["-hwaccel", "cuda", "-hwaccel_device", "1", "-hwaccel_output_format", "cuda"]
+    VAAPI = ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi", "-extra_hw_frames", "8"]
+
     def test_nvidia_keyframes_of_the_tail(self):
         cmd, hw = frames.decode_command(
             FF,
@@ -54,14 +60,17 @@ class TestCommand:
             fps=None,
             gpu="NVIDIA",
             gpu_device_path="cuda:1",
+            download_format="nv12",
         )
         assert hw is True
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2",
-                       "-hwaccel", "cuda", "-hwaccel_device", "1", "-hwaccel_output_format", "cuda",
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *self.CUDA,
                        "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", "scale_cuda=320:180:format=nv12,hwdownload,format=nv12,showinfo", "-f", "rawvideo", "-"]  # fmt: skip
+                       "-vf", "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12,showinfo",
+                       "-f", "rawvideo", "-"]  # fmt: skip
 
-    def test_vaapi_refine_window_at_1_fps(self):
+    def test_vaapi_refine_window_at_1_fps_of_a_10_bit_stream(self):
+        # fps=1 picks the frames while they are still GPU surfaces: only those are downloaded, in the stream's own
+        # format (P010 for 10-bit), and the scaler converts to the 8-bit luma text detection reads.
         cmd, hw = frames.decode_command(
             FF,
             MOVIE,
@@ -70,69 +79,129 @@ class TestCommand:
             keyframes_only=False,
             fps=1,
             gpu="INTEL",
-            gpu_device_path="/dev/dri/renderD128",
+            gpu_device_path=RENDER,
+            download_format="p010le",
         )
         assert hw is True
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2",
-                       "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi",
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *self.VAAPI,
                        "-ss", "5680.500", "-t", "21.000", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", "fps=1,scale_vaapi=w=320:h=180:format=nv12,hwdownload,format=nv12,showinfo", "-f", "rawvideo", "-"]  # fmt: skip
+                       "-vf", "fps=1,hwdownload,format=p010le,scale=320:180:flags=neighbor,format=nv12,showinfo",
+                       "-f", "rawvideo", "-"]  # fmt: skip
 
     @pytest.mark.parametrize(
-        ("gpu", "device", "hw_args", "hw"),
+        ("gpu", "device", "download_format", "hw_args", "hw"),
         [
-            (None, None, [], False),
-            ("INTEL", None, [], False),
-            ("APPLE", "videotoolbox", ["-hwaccel", "videotoolbox"], True),
-            ("WINDOWS_GPU", "d3d11va", ["-hwaccel", "d3d11va"], True),
-            # Only NVIDIA, INTEL and AMD have a GPU scale filter here: other VAAPI nodes decode on the GPU and download
-            # each frame (no -hwaccel_output_format), or the software scale would fail on GPU surfaces.
-            ("ARM", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
-            ("VIDEOCORE", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
-            ("UNKNOWN", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
+            (None, None, "nv12", [], False),
+            (None, None, None, [], False),
+            ("INTEL", None, "nv12", [], False),
+            ("APPLE", "videotoolbox", "nv12", ["-hwaccel", "videotoolbox"], True),
+            ("WINDOWS_GPU", "d3d11va", "nv12", ["-hwaccel", "d3d11va"], True),
+            # Only CUDA and the VAAPI GPUs keep their surfaces for the graph to download: other VAAPI nodes decode on
+            # the GPU and ffmpeg downloads each frame itself (no -hwaccel_output_format).
+            ("ARM", RENDER, "nv12", ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
+            ("VIDEOCORE", RENDER, "nv12", ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
+            ("UNKNOWN", RENDER, "nv12", ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
+            # A stream whose surfaces' format isn't known (4:2:2, 4:4:4, 12-bit, a failed probe): hwdownload would
+            # need it named, so ffmpeg downloads each frame itself, as on any other GPU.
+            ("NVIDIA", "cuda:0", None, ["-hwaccel", "cuda", "-hwaccel_device", "0"], True),
+            ("INTEL", RENDER, None, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
+            ("AMD", RENDER, None, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], True),
         ],
-    )
-    def test_software_scaling_cells(self, gpu, device, hw_args, hw):
-        cmd, active = frames.decode_command(
-            FF, MOVIE, start_s=0.0, length_s=None, keyframes_only=True, fps=None, gpu=gpu, gpu_device_path=device
-        )
+        ids=["cpu", "cpu-unknown-format", "intel-without-device", "apple", "windows", "arm", "videocore", "unknown",
+             "cuda-unknown-format", "intel-unknown-format", "amd-unknown-format"],
+    )  # fmt: skip
+    def test_software_scaling_cells(self, gpu, device, download_format, hw_args, hw):
+        cmd, active = frames.decode_command(FF, MOVIE, start_s=0.0, length_s=None, keyframes_only=True, fps=None,
+                                            gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
         assert active is hw
         assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
                        "-skip_frame", "nokey", "-ss", "0.000", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", "scale=320:180,format=nv12,showinfo", "-f", "rawvideo", "-"]  # fmt: skip
+                       "-vf", "scale=320:180:flags=neighbor,format=nv12,showinfo", "-f", "rawvideo", "-"]  # fmt: skip
 
     @pytest.mark.parametrize(
-        ("gpu", "device", "hw_args", "scale"),
+        ("gpu", "device", "download_format", "hw_args"),
         [
-            ("AMD", "/dev/dri/renderD129", ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD129", "-hwaccel_output_format", "vaapi"], "scale_vaapi=w=320:h=180:format=nv12,hwdownload,format=nv12"),
-            ("NVIDIA", None, ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"], "scale_cuda=320:180:format=nv12,hwdownload,format=nv12"),
+            ("AMD", "/dev/dri/renderD129", "nv12", ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD129", "-hwaccel_output_format", "vaapi"]),
+            ("INTEL", RENDER, "p010le", ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi"]),
+            ("NVIDIA", None, "p010le", ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]),
+            ("NVIDIA", "cuda:0", "nv12", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"]),
         ],
+        ids=["amd", "intel-10-bit", "cuda-without-index-10-bit", "cuda"],
     )  # fmt: skip
-    def test_gpu_scaling_cells(self, gpu, device, hw_args, scale):
-        cmd, active = frames.decode_command(
-            FF, MOVIE, start_s=12.25, length_s=None, keyframes_only=True, fps=None, gpu=gpu, gpu_device_path=device
-        )
+    def test_gpu_download_cells(self, gpu, device, download_format, hw_args):
+        # Spare surfaces for the frames the graph holds while it downloads them, on VAAPI: a 4K VAAPI decode failed
+        # without them. CUDA never needed them (its scale_cuda chain held more frames than hwdownload alone does), and
+        # each is a full-size NVDEC surface.
+        cmd, active = frames.decode_command(FF, MOVIE, start_s=12.25, length_s=None, keyframes_only=True, fps=None,
+                                            gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
+        spare = [] if gpu == "NVIDIA" else ["-extra_hw_frames", "8"]
         assert active is True
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args, *spare,
                        "-skip_frame", "nokey", "-ss", "12.250", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", f"{scale},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
+                       "-vf", f"hwdownload,format={download_format},scale=320:180:flags=neighbor,format=nv12,showinfo",
+                       "-f", "rawvideo", "-"]  # fmt: skip
+
+    @pytest.mark.parametrize(
+        ("gpu", "device", "fps", "video_filter"),
+        [
+            ("NVIDIA", "cuda:0", None, "hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12"),
+            ("INTEL", RENDER, None, "hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12"),
+            (None, None, None, "scale=640:360:flags=neighbor,format=nv12"),
+            ("NVIDIA", "cuda:0", 1, "fps=1,hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12"),
+            (None, None, 1, "fps=1,scale=640:360:flags=neighbor,format=nv12"),
+        ],
+        ids=["nvidia", "vaapi", "cpu", "nvidia-refine", "cpu-refine"],
+    )
+    def test_a_scale_of_2_decodes_every_frame_at_640x360(self, gpu, device, fps, video_filter):
+        # The larger read of a tail whose 320x180 frames gave no answer: the same command with only the frame's size
+        # doubled, on every path.
+        window = {"start_s": 5100.0, "length_s": None, "keyframes_only": fps is None, "fps": fps, "gpu": gpu,
+                  "gpu_device_path": device, "download_format": "nv12"}  # fmt: skip
+        cmd, _ = frames.decode_command(FF, MOVIE, **window, scale=2)
+        plain, _ = frames.decode_command(FF, MOVIE, **window)
+        vf = cmd.index("-vf") + 1
+        assert cmd[vf] == f"{video_filter},showinfo"
+        assert cmd[:vf] + cmd[vf + 1 :] == plain[:vf] + plain[vf + 1 :]
 
     def test_no_thinning_is_the_spec_command_exactly(self):
         # What every file that is neither intra-only nor VP9 gets (the detector passes keep_every=None and
         # drop_non_key=False): the command the 80 and the 205 were measured with, byte for byte.
         cmd, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
-                                       gpu="NVIDIA", gpu_device_path="cuda:1", keep_every=None, drop_non_key=False)  # fmt: skip
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2",
-                       "-hwaccel", "cuda", "-hwaccel_device", "1", "-hwaccel_output_format", "cuda",
+                                       gpu="NVIDIA", gpu_device_path="cuda:1", keep_every=None, drop_non_key=False,
+                                       download_format="nv12")  # fmt: skip
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *self.CUDA,
                        "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", "scale_cuda=320:180:format=nv12,hwdownload,format=nv12,showinfo", "-f", "rawvideo", "-"]  # fmt: skip
+                       "-vf", "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12,showinfo",
+                       "-f", "rawvideo", "-"]  # fmt: skip
+
+    @pytest.mark.parametrize(
+        ("gpu", "device", "hw_args", "video_filter"),
+        [
+            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], "fps=2,scale_cuda=320:180:format=nv12,hwdownload,format=nv12"),
+            ("INTEL", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi"], "fps=2,scale_vaapi=w=320:h=180:format=nv12,hwdownload,format=nv12"),
+            ("ARM", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], "fps=2,scale=320:180,format=nv12"),
+            (None, None, [], "fps=2,scale=320:180,format=nv12"),
+        ],
+        ids=["cuda", "vaapi", "other-gpu", "cpu"],
+    )  # fmt: skip
+    def test_the_end_picture_check_keeps_each_vendors_own_scaler(self, gpu, device, hw_args, video_filter):
+        # Season audio's end-picture check (markers.audio.end_picture) was measured on these commands, byte for byte;
+        # it moves to the neighbor scaler only with its own measurement. The download format changes nothing there.
+        cmd, _ = frames.decode_command(FF, MOVIE, start_s=33.5, length_s=3.5, keyframes_only=False, fps=2, gpu=gpu,
+                                       gpu_device_path=device, download_format="nv12", vendor_scaler=True)  # fmt: skip
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
+                       "-ss", "33.500", "-t", "3.500", "-copyts", "-i", MOVIE, *TAIL,
+                       "-vf", f"{video_filter},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
+
+    GPU_DOWNLOAD = "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12"
+    CPU_SCALE = "scale=320:180:flags=neighbor,format=nv12"
 
     @pytest.mark.parametrize(
         ("gpu", "device", "hw_args", "scale"),
         [
-            (None, None, [], "scale=320:180,format=nv12"),
-            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], "scale_cuda=320:180:format=nv12,hwdownload,format=nv12"),
-            ("INTEL", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi"], "scale_vaapi=w=320:h=180:format=nv12,hwdownload,format=nv12"),
+            (None, None, [], CPU_SCALE),
+            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], GPU_DOWNLOAD),
+            ("INTEL", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi", "-extra_hw_frames", "8"], GPU_DOWNLOAD),
         ],
     )  # fmt: skip
     def test_an_intra_only_keyframe_pass_drops_packets_before_the_decoder(self, gpu, device, hw_args, scale):
@@ -140,7 +209,7 @@ class TestCommand:
         # stream the stride was measured on (ffmpeg may decode another). The comma is escaped for ffmpeg's bitstream
         # filter list, not for a shell: argv never goes through one.
         cmd, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
-                                       gpu=gpu, gpu_device_path=device, keep_every=48)  # fmt: skip
+                                       gpu=gpu, gpu_device_path=device, keep_every=48, download_format="nv12")  # fmt: skip
         assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
                        "-bsf:V:0", "noise=drop=mod(n\\,48)", "-skip_frame", "nokey", "-ss", "5100.000", "-copyts",
                        "-i", MOVIE, *TAIL, "-vf", f"{scale},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
@@ -160,8 +229,8 @@ class TestCommand:
     @pytest.mark.parametrize(
         ("gpu", "device", "hw_args", "scale"),
         [
-            (None, None, [], "scale=320:180,format=nv12"),
-            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], "scale_cuda=320:180:format=nv12,hwdownload,format=nv12"),
+            (None, None, [], CPU_SCALE),
+            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], GPU_DOWNLOAD),
         ],
         ids=["cpu", "cuda"],
     )  # fmt: skip
@@ -177,7 +246,7 @@ class TestCommand:
             else {"start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1}
         )
         cmd, _ = frames.decode_command(FF, MOVIE, **window, gpu=gpu, gpu_device_path=device, keep_every=keep_every,
-                                       drop_non_key=drop_non_key)  # fmt: skip
+                                       drop_non_key=drop_non_key, download_format="nv12")  # fmt: skip
         bsf = self.PACKET_DROPS[(keep_every, drop_non_key)]
         seek = ["-skip_frame", "nokey", "-ss", "5100.000"] if keyframe_pass else ["-ss", "5680.000", "-t", "21.000"]
         video_filter = f"{scale},showinfo" if keyframe_pass else f"fps=1,{scale},showinfo"
@@ -230,13 +299,16 @@ def _fake_ffmpeg(
     linger_s: float = 0.0,
     ignore_sigterm: bool = False,
     progress_file: str = "",
+    width: int = 320,
+    height: int = 180,
 ) -> list[str]:
     """A child that writes NV12 frames (Y plane filled with each value) to stdout and showinfo lines to stderr.
 
     ``pts`` entries past the frames become showinfo lines with no whole frame behind them (ffmpeg dying mid-write);
     ``child_pid_file`` spawns a grandchild in the same process group, so the group kill can be asserted;
     ``ignore_sigterm`` stands in for an ffmpeg that won't take a polite signal; ``progress_file`` records how many
-    frames have been written, so how far the decoder ran ahead of text detection can be read.
+    frames have been written, so how far the decoder ran ahead of text detection can be read; ``width`` and ``height``
+    are the frames' size.
     """
     script = textwrap.dedent(f"""
         import os, signal, subprocess, sys, time
@@ -261,7 +333,7 @@ def _fake_ffmpeg(
         for i, value in enumerate({frame_values!r}):
             if i < len(pts):
                 line(i)
-            out.write(bytes([value]) * (320 * 180) + bytes([128]) * (320 * 90))
+            out.write(bytes([value]) * ({width} * {height}) + bytes([128]) * ({width} * {height} // 2))
             out.flush()
             progress(i + 1)
             time.sleep({sleep_s})
@@ -363,6 +435,27 @@ class TestRunDecode:
         assert [c.shape for c in calls] == [(2, 180, 320), (2, 180, 320), (1, 180, 320)]
         assert calls[0].dtype == np.uint8 and int(calls[0][1, 5, 5]) == 250  # the Y plane, not the chroma
         assert _reapers() == before  # a decode that ended cleanly closes its own pipe, no reaper
+
+    def test_a_frame_at_scale_2_is_read_whole_and_its_boxes_come_back_in_320x180_pixels(self):
+        # Rule J's pixel numbers (the band's 32 px, the overlay boxes) are the 320x180 frame's, so a box found on the
+        # 640x360 frame is halved: inclusive pixel indices 0..639 become 0..319, and a frame-wide box stays frame-wide.
+        calls: list[np.ndarray] = []
+
+        def detect(planes: np.ndarray) -> list[tuple[tuple[int, int, int, int], ...]]:
+            calls.append(planes.copy())
+            return [((0, 0, 639, 359), (321, 181, 323, 183))] * len(planes)
+
+        rows = frames.run_decode(
+            _fake_ffmpeg([10, 250], ["1", "2"], width=640, height=360),
+            hw_active=False,
+            pts_offset_s=0.0,
+            detect_boxes=detect,
+            scale=2,
+        )
+        halved = ((0, 0, 319, 179), (160, 90, 161, 91))
+        assert rows == [(1.0, 2, 10.0, halved), (2.0, 2, 250.0, halved)]
+        assert [c.shape for c in calls] == [(2, 360, 640)]
+        assert int(calls[0][1, 359, 639]) == 250  # the whole Y plane of the larger frame, not the chroma after it
 
     def test_a_frame_with_no_one_or_several_boxes_keeps_its_own_boxes_and_their_count(self):
         # The count rule J reads and the positions the next rules read come from one detection call and must agree,
@@ -835,10 +928,12 @@ class TestDecodeRows:
             cancel_check=cancel,
             timeout_s=42.0,
             start_time_s=0.0,
+            download_format="p010le",
         )
         expected_command, _ = frames.decode_command(
-            FF, MOVIE, start_s=5680.5, length_s=21.0, keyframes_only=False, fps=1, gpu=gpu, gpu_device_path=device
-        )
+            FF, MOVIE, start_s=5680.5, length_s=21.0, keyframes_only=False, fps=1, gpu=gpu, gpu_device_path=device,
+            download_format="p010le",
+        )  # fmt: skip
         assert rows == [(1.0, 0, 10.0, ())]
         assert seen == {
             "command": expected_command,
@@ -848,7 +943,31 @@ class TestDecodeRows:
             "timeout_s": 42.0,
             "pts_offset_s": 0.0,
             "name": "Movie.mkv",
+            "scale": 1,
+            "chunk_frames": frames.CHUNK_FRAMES,
         }
+
+    @pytest.mark.parametrize(("gpu", "device"), [("NVIDIA", "cuda:0"), (None, None)], ids=["gpu", "cpu"])
+    def test_the_scale_reaches_both_the_command_and_the_frame_reader(self, monkeypatch, gpu, device):
+        # Half of it alone breaks the decode: a 640x360 command read as 320x180 frames, or the other way round.
+        seen: dict = {}
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(frames, "run_decode", fake_run)
+        frames.decode_rows(MOVIE, ffmpeg=FF, start_s=5100.0, length_s=None, keyframes_only=True, fps=None, gpu=gpu,
+                           gpu_device_path=device, detect_boxes=lambda planes: [], start_time_s=0.0, scale=2,
+                           download_format="nv12")  # fmt: skip
+        expected_command, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True,
+                                                    fps=None, gpu=gpu, gpu_device_path=device, scale=2,
+                                                    download_format="nv12")  # fmt: skip
+        assert (seen["command"], seen["scale"]) == (expected_command, 2)
+        # A quarter of the frames per text detection request: the same pixels, so the helper's per-request timeout
+        # (sized for 64 frames at 320x180) holds at 640x360 too, and the queue holds the same bytes.
+        assert seen["chunk_frames"] == frames.CHUNK_FRAMES // 4 == 16
 
     @pytest.mark.parametrize(
         ("start_time_ms", "expected"),
@@ -1009,6 +1128,7 @@ class TestKeyframeThinning:
 
         class Probed(list):
             codec: str | None = "h264"
+            pix_fmt: str | None = None
             packets: list[VideoPacket] = []
             error: Exception | None = None
 
@@ -1018,7 +1138,7 @@ class TestKeyframeThinning:
             calls.append({"path": path, **kwargs})
             if calls.error:
                 raise calls.error
-            return VideoPackets(calls.codec, tuple(calls.packets))
+            return VideoPackets(calls.codec, tuple(calls.packets), calls.pix_fmt)
 
         monkeypatch.setattr(frames, "video_packets", video_packets)
         return calls
@@ -1073,6 +1193,21 @@ class TestKeyframeThinning:
         assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(keep_every, drop_non_key)
         assert len(probed) == 1
 
+    @pytest.mark.parametrize(
+        ("pix_fmt", "download_format"),
+        [("yuv420p", "nv12"), ("nv12", "nv12"), ("yuv420p10le", "p010le"), ("p010le", "p010le"),
+         # MJPEG's full-range 4:2:0: VAAPI's JPEG surfaces aren't reliably NV12, so ffmpeg downloads them itself.
+         ("yuvj420p", None), ("yuv422p10le", None), ("yuv444p", None), ("yuv420p12le", None), ("gray", None),
+         (None, None)],
+    )  # fmt: skip
+    def test_the_stream_names_the_format_its_gpu_surfaces_are_downloaded_in(self, probed, pix_fmt, download_format):
+        # CUDA and VAAPI decode 8-bit 4:2:0 into NV12 surfaces and 10-bit 4:2:0 into P010; hwdownload has to be told
+        # which. Anything else is left to ffmpeg to download (``frames.decode_command``). Read from the same ffprobe
+        # as the packets: no second process per file.
+        probed.pix_fmt, probed.packets = pix_fmt, self.NORMAL_GOP
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(None, False, download_format)
+        assert len(probed) == 1
+
     def test_a_short_vp9_stream_still_drops_its_non_key_packets(self, probed):
         # Too few packets to call it intra-only says nothing about its decoder.
         probed.codec, probed.packets = "vp9", self.NORMAL_GOP[:10]
@@ -1100,7 +1235,7 @@ class TestKeyframeThinning:
         # The start time probe on the same file already succeeded: failing here too would only lose an answer the file
         # could get the ordinary way.
         probed.error = ProbeError("ffprobe exited 1 for /media/Movie (2020)/Movie.mkv: invalid data")
-        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(None, False)
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(None, False, None)  # ffmpeg downloads frames
         assert "Couldn't read the video packets of Movie.mkv, so it is read the ordinary way" in loguru_caplog.text
 
     def test_a_probe_that_times_out_is_a_decode_timeout(self, probed):

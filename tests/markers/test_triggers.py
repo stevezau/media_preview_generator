@@ -878,6 +878,25 @@ class TestInReviewRedecide:
             "/media/tv/A/S04/e1.mkv",
         ]
 
+    def test_settings_v18_adds_the_files_resting_on_an_online_answer_and_a_servers_marker_alone(self, jm, store):
+        # On a 25 fps file such a pair can be online times from the film-rate release and a marker made for an earlier
+        # file of the item: decided again, online times are read on the file's clock, and the marker is flagged (or,
+        # from a Plex server showing ours, an older version's answer stops counting: test_pipeline_kept_own).
+        from media_preview_generator.markers import job_runner
+
+        self._intro(store, "/media/tv/Bones/S07/e1.mkv", ("introdb", "server_markers"))
+        self._intro(store, "/media/tv/Bones/S07/e2.mkv", ("introdb", "season_audio", "server_markers"))
+        self._intro(store, "/media/tv/Bones/S07/e3.mkv", ("theintrodb", "server_markers"), locked=True)
+        assert triggers.submit_decide_again() == self._ic_jobs(jm)[0].id
+        assert [i.canonical_path for i in job_runner._items_to_decide_again(store)] == [
+            "/media/tv/Bones/S07/e1.mkv",
+            "/media/tv/Bones/S07/e2.mkv",  # its intro rests on season audio (v17)
+        ]
+
+    def test_a_locked_online_and_server_marker_intro_alone_queues_nothing(self, jm, store):
+        self._intro(store, "/media/tv/Bones/S07/e1.mkv", ("introdb", "server_markers"), locked=True)
+        assert triggers.submit_decide_again() is None
+
     def test_season_audio_intros_alone_are_enough(self, jm, store):
         self._intro(store, "/media/tv/A/S03/e1.mkv", ("season_audio",))
         assert triggers.submit_decide_again() == self._ic_jobs(jm)[0].id

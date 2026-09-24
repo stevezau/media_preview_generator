@@ -285,8 +285,14 @@ class TestDecodeFrames:
         )  # fmt: skip
         command = call["command"]
         assert command[command.index("-ss") + 1] == "33.476" and command[command.index("-t") + 1] == "3.500"
-        assert "-skip_frame" not in command and "fps=2," in command[command.index("-vf") + 1]
-        assert command[command.index("-hwaccel") + 1] == "cuda" and "-copyts" in command
+        assert "-skip_frame" not in command and "-copyts" in command
+        # Each vendor's own scaler, as season audio was measured on (not the credit text's one neighbor scaler).
+        assert (
+            command[command.index("-vf") + 1] == "fps=2,scale_cuda=320:180:format=nv12,hwdownload,format=nv12,showinfo"
+        )
+        assert command[command.index("-hwaccel") + 1 : command.index("-t")] == [
+            "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda", "-ss", "33.476",
+        ]  # fmt: skip
 
     def test_a_failed_gpu_decode_is_run_again_on_the_cpu(self):
         calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
@@ -295,6 +301,8 @@ class TestDecodeFrames:
                                    container_start_s=0.0)  # fmt: skip
         assert [call["hw_active"] for call in calls] == [True, False]
         assert "-hwaccel" not in calls[1]["command"] and len(got) == 1
+        cpu = calls[1]["command"]
+        assert cpu[cpu.index("-vf") + 1] == "fps=2,scale=320:180,format=nv12,showinfo"
 
     def test_a_frame_without_a_timestamp_fails_the_decode(self):
         _calls, run_decode = self._run_decode(_planes(3), [33.5, 34.0])  # one frame's timestamp was dropped

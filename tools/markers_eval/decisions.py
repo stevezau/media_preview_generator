@@ -140,6 +140,7 @@ def compare_with_plex(
     baseline: dict[str, list[PlexMarker]],
     *,
     g3: bool = True,
+    frame_rate: Callable[[str], float | None] | None = None,
 ) -> DecisionRows:
     """Judge Plex's intro, season audio alone, and ``decide()`` on both at High and Medium, per episode with a truth.
 
@@ -148,6 +149,8 @@ def compare_with_plex(
         segments: ``season_segments``.
         baseline: Plex's markers by file path.
         g3: Ruling G3 on (shipped) or off.
+        frame_rate: A file's probed video frame rate (``cache.FingerprintCache.frame_rate``), which the app's decisions
+            read online times on the file's clock by (``decide`` rule 12); None decides without it.
 
     Returns:
         The rows.
@@ -167,8 +170,10 @@ def compare_with_plex(
         candidates = server_candidates(markers, MarkerType.INTRO)
         if seg:
             candidates.append(audio_candidate(seg))
+        rate = frame_rate(e.file) if frame_rate else None
         for level in ("high", "medium"):
-            ctx = DecisionContext(round(e.duration_s * 1000), False, level, frozenset({MarkerType.INTRO}), ORDER)
+            ctx = DecisionContext(round(e.duration_s * 1000), False, level, frozenset({MarkerType.INTRO}), ORDER,
+                                  frame_rate=rate)  # fmt: skip
             with g3_rule(g3):
                 d = decide(candidates, ctx, {})[MarkerType.INTRO]
             decided = (d.marker.start_ms / 1000, d.marker.end_ms / 1000) if d.status is DecisionStatus.DECIDED else None

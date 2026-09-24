@@ -21,6 +21,7 @@ from .base import Capability, CapabilityReport, ItemNotFoundError, MarkerPublish
 if TYPE_CHECKING:
     from ...servers.base import ServerConfig
     from ...servers.jellyfin import JellyfinServer
+    from ..decide import FileLimits
     from ..settings import ServerMarkersSettings
 
 TICKS_PER_MS = 10_000
@@ -152,6 +153,7 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         canonical_path: str,
         own_previous: list[Marker] | None = None,
         kept_types: frozenset[MarkerType] = frozenset(),
+        limits: FileLimits | None = None,
     ) -> list[Marker]:
         """Replace the plugin's markers for the item and confirm Jellyfin serves them.
 
@@ -164,7 +166,8 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         until the next write for the item, so after a failure callers pass ``previous=None`` and write again.
 
         ``own_previous`` is ignored: Jellyfin item ids are per version, so no other file's markers share the item.
-        ``kept_types`` is ignored: Jellyfin serves every provider's segments side by side, so nothing is kept instead.
+        ``kept_types`` and ``limits`` are ignored: Jellyfin serves every provider's segments side by side, so nothing
+        is kept instead.
 
         Returns:
             The markers that are ours on this item now: ``project(markers)``, or ``[]`` after a delete or when there

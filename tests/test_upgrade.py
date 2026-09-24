@@ -2817,7 +2817,7 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 17
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 18
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[16]]
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
@@ -2849,11 +2849,38 @@ class TestMigrateToV17:
 
         settings_manager.apply_changes(updates={"_schema_version": start})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 17
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 18
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
 
-        # The completed job clears the request; a later start at v17 doesn't ask again.
+        # The completed job clears the request; a later start at the current version doesn't ask again.
+        settings_manager.delete(DECIDE_AGAIN_KEY)
+        _migrate_schema(settings_manager)
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
+
+
+class TestMigrateToV18:
+    """Season audio matches 25 fps and film-rate releases of one season at one speed, and IntroDB/TheIntroDB times are
+    read on a 25 fps or film-rate file's own clock (owner, 2026-09-24: Bones seasons 5-8 sat in Needs review): the next
+    start decides the files in Needs review and those whose intro rests on season audio again."""
+
+    def test_it_asks_for_the_decide_again_job_and_changes_nothing_else(self, settings_manager):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v18
+
+        block = {"detect": {"intro": True, "credits": True, "recap": False}}
+        settings_manager.apply_changes(updates={"markers": dict(block)})
+        assert _migrate_to_v18(settings_manager) == []
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get("markers") == block
+
+    def test_a_start_after_v17_s_job_completed_asks_again_once(self, settings_manager):
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, DECIDE_AGAIN_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 17})
+        _migrate_schema(settings_manager)
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 18
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
         settings_manager.delete(DECIDE_AGAIN_KEY)
         _migrate_schema(settings_manager)
         assert settings_manager.get(DECIDE_AGAIN_KEY) is None

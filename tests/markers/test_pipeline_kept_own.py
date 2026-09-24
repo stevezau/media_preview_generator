@@ -9,16 +9,21 @@ instead of Needs review; anything else reads and decides it exactly as before.
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock
+import threading
+import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from media_preview_generator.markers import pipeline
-from media_preview_generator.markers.decide import DecisionStatus
+from media_preview_generator.markers.decide import DecisionStatus, FileLimits
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome, ServerStatus, kept_own_reason
 from media_preview_generator.markers.pipeline import LocalDetectorSpec
+from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, wait_cancelled
+from media_preview_generator.markers.publishers.plex_db import STALE_READ_WAIT_S
 from media_preview_generator.markers.sources.online import LookupResult
+from media_preview_generator.markers.sources.server_markers import READER_VERSION
 from media_preview_generator.servers.base import ServerType
 from tests.markers import test_pipeline
 from tests.markers.fakes import ready_publisher, server_config
@@ -226,6 +231,334 @@ class TestNotRead:
         detectors.credits.assert_not_called()
         assert [r["message"] for r in out.publisher_rows] == ["Keeping Plex's credits", "Keeping Emby's credits"]
         assert _decision(store, movie, T.CREDITS).reason == "kept Plex's and Emby's own markers"
+
+
+class TestAServersMarkerThatCantBeRight:
+    """ "Keep Plex's" uses Plex's marker when Plex has processed the file, except when that marker can't be right for it
+    (``decide.unusable_server_marker``): then Plex counts as not having processed the file, so the file is read for the
+    type, and the write carries the file's limits so the publisher doesn't keep Plex's rows either."""
+
+    # Plex's credits start and end after the file does (Bones S07E01 on production).
+    PAST_THE_END = {"type": "credits", "start_ms": DUR + 79_779, "end_ms": DUR + 117_344, "final": False}
+
+    def test_plexs_credits_past_the_end_dont_stop_the_credits_read(self, store, movie):
+        reg = _plex(movie, rows=(self.PAST_THE_END,))
+        detectors = _Detectors()
+        plex = ready_publisher()
+
+        _job(store, reg, movie, detectors, {"plex-1": plex})
+
+        assert detectors.credits.call_count == 1
+        credits = _decision(store, movie, T.CREDITS)
+        assert credits.status is DecisionStatus.DECIDED
+        call = plex.write.call_args
+        assert [m.type for m in call.args[1]] == [T.CREDITS]
+        assert call.kwargs["limits"] == FileLimits(DUR)
+
+    def test_emby_keeps_its_own_whatever_it_says_so_the_file_still_isnt_read(self, store, movie):
+        # Emby's plugin leaves Emby's own rows alone under "Keep Emby's", so an answer of ours would never be shown.
+        reg = _registry(movie, ServerType.EMBY)
+        reg.configs_by_id["emby-1"] = _emby_config(movie, "keep_emby")
+        reg.get("emby-1").get_chapter_markers.return_value = [{"marker_type": "CreditsStart", "start_ms": DUR + 5_000}]
+        detectors = _Detectors()
+
+        _job(store, reg, movie, detectors, {"emby-1": ready_publisher("emby_bridge")})
+
+        detectors.credits.assert_not_called()
+
+    def test_one_plex_credits_that_can_be_right_is_enough_to_stop_the_read(self, store, movie):
+        detectors = _Detectors()
+        _job(
+            store, _plex(movie, rows=(PLEX_CREDITS, self.PAST_THE_END)), movie, detectors, {"plex-1": ready_publisher()}
+        )
+        detectors.credits.assert_not_called()
+
+    def test_plexs_credits_that_can_be_right_still_stop_the_read(self, store, movie):
+        _job(store, _plex(movie), movie, (detectors := _Detectors()), {"plex-1": ready_publisher()})
+        detectors.credits.assert_not_called()
+
+    def test_every_write_carries_the_files_limits(self, store, media):
+        # An episode: the TV credits window, and a season key.
+        plex = ready_publisher()
+        _job(store, _plex(media, setting="restore"), media, _Detectors(), {"plex-1": plex})
+        assert plex.write.call_args.kwargs["limits"] == FileLimits(DUR)
+
+
+class TestPlexsMarkerMadeForAnEarlierFile:
+    """Plex's markers belong to the item, so a replaced file keeps the old file's markers (Bones, production). A type
+    Plex's database says is stale (``types_not_made_for_file``) doesn't stop our detection, its marker confirms
+    nothing, and "Keep Plex's" still keeps it when we find nothing."""
+
+    def _run_with(self, store, movie, stale, *, setting="keep_plex", rows=(PLEX_CREDITS,)):
+        reg = _plex(movie, setting, rows=rows)
+        detectors = _Detectors()
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = stale
+        out = _job(store, reg, movie, detectors, {"plex-1": plex})
+        return out, detectors, plex
+
+    def test_a_stale_visible_marker_runs_detection_and_ours_is_written(self, store, movie):
+        out, detectors, plex = self._run_with(store, movie, frozenset({T.CREDITS}))
+
+        assert detectors.credits.call_count == 1
+        plex.types_not_made_for_file.assert_called_with("item-plex-1")
+        assert _decision(store, movie, T.CREDITS).status is DecisionStatus.DECIDED
+        assert [m.type for m in plex.write.call_args.args[1]] == [T.CREDITS]
+
+    @pytest.mark.parametrize("stale", [frozenset(), None], ids=["fresh", "old-agent-cant-tell"])
+    def test_a_fresh_marker_or_an_unknown_answer_keeps_todays_behaviour(self, store, movie, stale):
+        out, detectors, plex = self._run_with(store, movie, stale)
+
+        detectors.credits.assert_not_called()
+        assert (_decision(store, movie, T.CREDITS).status, out.publisher_rows[0]["message"]) == (
+            DecisionStatus.DISABLED,
+            "Keeping Plex's credits",
+        )
+
+    def test_nothing_found_beside_a_stale_marker_still_keeps_plexs(self, store, movie):
+        # Close is better than nothing: detection ran and found nothing, so Plex's marker stays and isn't in review.
+        reg = _plex(movie)
+        detectors = _Detectors()
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = frozenset({T.CREDITS})
+
+        out = _job(store, reg, movie, detectors, {"plex-1": plex})
+
+        assert detectors.credits.call_count == 1
+        assert (_decision(store, movie, T.CREDITS).status, out.publisher_rows[0]["message"]) == (
+            DecisionStatus.DISABLED,
+            "Keeping Plex's credits",
+        )
+
+    def test_a_stale_marker_is_stored_as_evidence_that_confirms_nothing(self, store, movie):
+        # Plex only lends evidence here: its stale credits are stored flagged, so decide skips them.
+        self._run_with(store, movie, frozenset({T.CREDITS}), setting="restore")
+
+        rec = store.get_file(movie)
+        [plex_credits] = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        assert (plex_credits.type, plex_credits.stale) == (T.CREDITS, True)
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert row.detail == pipeline.STALE_SERVER_MARKERS_DETAIL
+
+    @pytest.mark.parametrize(("stale", "read_again"), [(frozenset({T.CREDITS}), True), (frozenset(), False)])
+    def test_a_stale_answer_is_read_again_while_the_file_still_needs_evidence(self, store, movie, stale, read_again):
+        # Plex may analyse the new file any day: a stale answer is asked again like an unusable one, a fresh one isn't.
+        reg = _plex(movie, "restore")
+        detectors = _Detectors()
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = stale
+        _job(store, reg, movie, detectors, {"plex-1": plex})
+        reads = reg.get("plex-1").get_markers.call_count
+
+        _job(store, reg, movie, detectors, {"plex-1": plex})
+
+        assert reg.get("plex-1").get_markers.call_count == reads + (1 if read_again else 0)
+
+    def test_an_unknown_answer_is_asked_again_and_flags_the_markers_once_plex_can_tell(self, store, movie):
+        # First run: Plex can't tell (an old agent, a busy database), so today's behaviour, and the answer stays due.
+        # Next run: Plex says the credits are stale, so the stored answer is read again and flagged, and the file is
+        # read for credits.
+        reg = _plex(movie)
+        detectors = _Detectors()
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = None
+        _job(store, reg, movie, detectors, {"plex-1": plex})
+        rec = store.get_file(movie)
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert row.detail == pipeline.STALENESS_UNKNOWN_DETAIL
+        detectors.credits.assert_not_called()
+
+        plex.types_not_made_for_file.return_value = frozenset({T.CREDITS})
+        _job(store, reg, movie, detectors, {"plex-1": plex})
+
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert row.detail == pipeline.STALE_SERVER_MARKERS_DETAIL
+        assert detectors.credits.call_count == 1
+
+    def test_a_server_that_cant_use_its_database_isnt_asked_again(self, store, movie):
+        # A Plex whose Intro & Credits is off lends evidence over HTTP only: its database is never read, so nothing
+        # will ever tell and its answer isn't kept due.
+        reg = _registry(movie, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["plex-1"].markers["enabled"] = False
+        reg.get("plex-1").get_markers.return_value = [PLEX_CREDITS]
+        reg.get("plex-1").get_part_durations.return_value = [DUR]
+        plex = ready_publisher()
+        plex.capability.return_value = CapabilityReport(Capability.DISABLED, "off")
+
+        _job(store, reg, movie, _Detectors(), {"plex-1": plex, "jellyfin-1": ready_publisher("jellyfin_bridge")})
+
+        rec = store.get_file(movie)
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert row.detail == ""
+        plex.types_not_made_for_file.assert_not_called()
+
+    def test_the_jobs_cancel_reaches_plexs_read(self, store, movie):
+        reg = _plex(movie)
+        cancelled, seen = [False], []
+        plex = ready_publisher()
+
+        def stale(item_id):
+            cancelled[0] = True
+            seen.append(wait_cancelled())
+            return frozenset()
+
+        plex.types_not_made_for_file.side_effect = stale
+        ctx = _ctx(store, reg, settings_raw=_settings(), clients=_clients(), detectors=_Detectors().specs)
+        _run(ctx, movie, {"plex-1": plex}, cancel_check=lambda: cancelled[0])
+
+        assert seen == [True]
+
+    def test_the_row_says_when_ours_replaced_plexs_stale_marker(self, store, movie):
+        reg = _plex(movie)
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = frozenset({T.CREDITS})
+
+        def replaces_stale(item_id, markers, **kwargs):
+            plex.last_replaced_stale_types = frozenset({T.CREDITS})
+            return plex.succeed(item_id, markers, **kwargs)
+
+        plex.write.side_effect = replaces_stale
+        out = _job(store, reg, movie, _Detectors(), {"plex-1": plex})
+
+        assert out.publisher_rows[0]["message"] == (
+            "1 marker(s). Replaced Plex's credits: they were detected for an earlier file"
+        )
+
+    def test_the_read_builds_its_publisher_to_wait_briefly_for_plexs_database(self, store, movie):
+        # A busy database means "can't tell" (asked again next run), never a writer's minutes-long wait.
+        reg = _plex(movie)
+        built = []
+
+        def build(server, cfg, **kwargs):
+            publisher = ready_publisher()
+            publisher.types_not_made_for_file.return_value = frozenset()
+            built.append((publisher, kwargs))
+            return publisher
+
+        ctx = _ctx(store, reg, settings_raw=_settings(), clients=_clients(), detectors=_Detectors().specs)
+        with (
+            patch.object(pipeline, "probe_media", return_value=test_pipeline._probe()),
+            patch.object(pipeline, "publisher_for", side_effect=build),
+        ):
+            pipeline.check_item(test_pipeline._item(movie), ctx=ctx)
+
+        [stale_read] = [kw for p, kw in built if p.types_not_made_for_file.called]
+        assert stale_read["db_timeout_s"] == STALE_READ_WAIT_S
+
+    def test_the_jobs_cancel_reaches_the_reads_capability_check(self, store, movie):
+        reg = _plex(movie)
+        cancelled, seen = [False], []
+        plex = ready_publisher()
+        ready = plex.capability.return_value
+
+        def capability():
+            cancelled[0] = True
+            seen.append(wait_cancelled())
+            return ready
+
+        plex.capability.side_effect = capability
+        plex.types_not_made_for_file.return_value = frozenset()
+        ctx = _ctx(store, reg, settings_raw=_settings(), clients=_clients(), detectors=_Detectors().specs)
+        _run(ctx, movie, {"plex-1": plex}, cancel_check=lambda: cancelled[0])
+
+        assert seen[:1] == [True]
+
+    @pytest.mark.parametrize("cancel", [False, True], ids=["busy", "busy-then-cancelled"])
+    def test_a_capability_check_held_by_another_thread_is_waited_for_briefly(self, store, movie, monkeypatch, cancel):
+        # Another file's publish holds the server's capability check (it may wait minutes for a busy database) until
+        # 3 s in: the read gives up within STALE_READ_WAIT_S, or within a wait slice of the job's cancel, and Plex
+        # "couldn't tell". Waiting it out would have got the check at 3 s.
+        monkeypatch.setattr(pipeline, "STALE_READ_WAIT_S", 30.0 if cancel else 0.3)
+        reg = _plex(movie)
+        plex = ready_publisher()
+        ctx = _ctx(store, reg, settings_raw=_settings(), clients=_clients(), detectors=_Detectors().specs)
+        held = ctx._capability_locks.setdefault("plex-1", threading.Lock())
+        held.acquire()
+        cancelled = [False]
+        flip = threading.Timer(0.3, lambda: cancelled.__setitem__(0, cancel))
+        releaser = threading.Timer(3.0, held.release)
+        brief = []
+        check = pipeline._cached_capability
+
+        def timed(*args, **kwargs):
+            started = time.monotonic()
+            report = check(*args, **kwargs)
+            if kwargs.get("wait_s") is not None:
+                brief.append((report, time.monotonic() - started))
+            return report
+
+        monkeypatch.setattr(pipeline, "_cached_capability", timed)
+        flip.start()
+        releaser.start()
+        try:
+            _run(ctx, movie, {"plex-1": plex}, cancel_check=lambda: cancelled[0])
+        finally:
+            flip.join()
+            releaser.join()
+
+        [(report, took)] = brief
+        assert report is None and took < 2.5
+        plex.types_not_made_for_file.assert_not_called()
+
+    @pytest.mark.parametrize(("unanswerable", "asked"), [(True, 1), (False, 2)], ids=["old-agent", "busy-database"])
+    def test_an_agent_too_old_to_tell_is_asked_once_per_job(self, store, movie, tmp_path, unanswerable, asked):
+        # An agent older than the answer (the item read works, without ``stale_types``) will never tell on this job, so
+        # the job's other files don't ask it again; a busy database may answer for the next file.
+        other = tmp_path / "media" / "movies" / "Ronin (1998) {tmdb-8195}" / "Ronin (1998).mkv"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"x" * 100)
+        reg = _plex(movie)
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = None
+        plex.stale_types_unanswerable = unanswerable
+        ctx = _ctx(store, reg, settings_raw=_settings(), clients=_clients(), detectors=_Detectors().specs)
+
+        _run(ctx, movie, {"plex-1": plex})
+        _run(ctx, str(other), {"plex-1": plex})
+
+        assert plex.types_not_made_for_file.call_count == asked
+
+    def test_an_older_readers_answer_from_a_plex_showing_ours_confirms_nothing(self, store, media):
+        # A file published before staleness existed (reader version 4): Plex shows our intro now, so its stored answer
+        # can't be read again and flagged. Kept, Plex's stale intro would go on confirming IntroDB's raw times.
+        reg = _plex(media, "restore", rows=(PLEX_INTRO,))
+        detectors = _Detectors()
+        detectors.intro.return_value = []
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = frozenset()
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+        rec = store.get_file(media)
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+        assert store.get_publish_state(rec.id, "plex-1").markers
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        plex.types_not_made_for_file.return_value = frozenset({T.INTRO})
+        reads = reg.get("plex-1").get_markers.call_count
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"] == []
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert (row.detail, store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1")) == (
+            pipeline.OURS_SHOWN_DETAIL,
+            READER_VERSION,
+        )
+        after = _decision(store, media, T.INTRO)
+        assert "server_markers" not in after.reason, (after.status, after.reason)
+        assert reg.get("plex-1").get_markers.call_count == reads  # ours are there: never read back
+
+    def test_emby_is_never_asked(self, store, movie):
+        reg = _registry(movie, ServerType.EMBY)
+        reg.configs_by_id["emby-1"] = _emby_config(movie, "keep_emby")
+        reg.get("emby-1").get_chapter_markers.return_value = [EMBY_CREDITS]
+        emby = ready_publisher("emby_bridge")
+
+        _job(store, reg, movie, _Detectors(), {"emby-1": emby})
+
+        emby.types_not_made_for_file.assert_not_called()
 
 
 class TestReadAsBefore:
@@ -476,18 +809,27 @@ class TestStoredAnswerInReview:
             "Keeping Plex's credits",
         )
 
+    EARLY_PLEX_CREDITS = {"type": "credits", "start_ms": 600_000, "end_ms": 650_000, "final": False}
+    PAST_THE_END = {"type": "credits", "start_ms": DUR + 80_000, "end_ms": DUR + 117_000, "final": False}
+
     @pytest.mark.parametrize(
-        ("setting", "status", "row"),
+        ("setting", "plex_credits", "status", "row"),
         [
-            ("keep_plex", DecisionStatus.DISABLED, "Keeping Plex's credits"),
-            ("restore", DecisionStatus.NO_EVIDENCE, "No markers found"),
+            # Credits that start too early for our own answers are still Plex's: only an impossible marker isn't.
+            ("keep_plex", EARLY_PLEX_CREDITS, DecisionStatus.DISABLED, "Keeping Plex's credits"),
+            # Credits after the end of the file can't be right: Plex counts as not having processed the file, so
+            # nothing found is nothing found, as under Use ours.
+            ("keep_plex", PAST_THE_END, DecisionStatus.NO_EVIDENCE, "No markers found"),
+            ("restore", EARLY_PLEX_CREDITS, DecisionStatus.NO_EVIDENCE, "No markers found"),
         ],
+        ids=["keep-plexs-early", "keep-plexs-cant-be-right", "use-ours"],
     )
-    def test_nothing_found_beside_plexs_own_marker_is_kept_too(self, store, movie, setting, status, row):
-        # The credit text found nothing, and Plex's own credits start too early to pass the sanity checks: the type
-        # ends with nothing found (Use ours shows it), not in review, and Plex's marker stays whatever we decide.
+    def test_nothing_found_beside_plexs_own_marker_is_kept_only_when_it_can_be_right(
+        self, store, movie, setting, plex_credits, status, row
+    ):
+        # The credit text found nothing: the type ends kept (not in review) only while Plex's marker can be right.
         _stored_text_answer(store, movie, ())
-        reg = _plex(movie, setting, rows=({"type": "credits", "start_ms": 600_000, "end_ms": 650_000, "final": False},))
+        reg = _plex(movie, setting, rows=(plex_credits,))
         detectors = _Detectors()
 
         out = _job(store, reg, movie, detectors, {"plex-1": ready_publisher()})

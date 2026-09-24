@@ -180,6 +180,18 @@ class TestFileLines:
         ctx.local_detectors[0].detect.assert_not_called()
         assert out.outcome_key == FileOutcome.PUBLISHED.value
 
+    def test_plexs_marker_made_for_an_earlier_file_says_so(self, store, media, job_log):
+        # Plex's credits were detected against the file this one replaced: the file is read, and the evidence line
+        # says why Plex's credits confirmed nothing.
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = frozenset({T.CREDITS})
+        ctx = _job(store, media, _plex(media, keeps_own_credits=True))
+        _run(ctx, media, {"plex-1": plex}, probe=_probe(INTRO_CHAPTERS))
+
+        [entry] = job_log
+        assert entry.endswith("Plex's own credits from 21:30 (made for an earlier file)")
+        ctx.local_detectors[0].detect.assert_called_once()
+
     def test_a_decided_type_the_server_keeps_its_own_of_says_ours_wasnt_written(self, store, media, job_log):
         plex = ready_publisher()
 

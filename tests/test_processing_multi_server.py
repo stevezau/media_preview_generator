@@ -438,6 +438,307 @@ class TestSourceMissing:
         assert "folder" in result.message.lower()
 
 
+def _video(path: Path, *, mtime: float | None = None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"video")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def _emby_registry(
+    library_root: Path,
+    *,
+    kind: str | None = None,
+    path_mappings: list[dict] | None = None,
+    remote_root: str | None = None,
+):
+    cfg = _server_config(
+        server_id="emby-1",
+        server_type=ServerType.EMBY,
+        libraries=[Library(id="1", name="Library", remote_paths=(remote_root or str(library_root),), enabled=True)],
+    )
+    cfg["libraries"][0]["kind"] = kind
+    if path_mappings:
+        cfg["path_mappings"] = path_mappings
+    return ServerRegistry.from_settings([cfg])
+
+
+class TestSourceGoneFromDisk:
+    """A webhook naming a file that a newer file has since replaced ends without a retry.
+
+    Production, 2026-09-24: Sonarr re-imported Slow Horses S06E02 without the ``-CAKES`` group suffix a second after the
+    first import and deleted the old file; Plex's webhook for the ``-CAKES`` path arrived 40 s later and the job
+    retried for 16 minutes before failing on "check your path mappings". The replacement got its own preview from its
+    own webhook.
+
+    Only positive evidence ends the retry: another video of the same episode in the same folder (or, in a movie
+    library, the one other feature in the movie's folder). Everything else keeps today's retryable
+    ``SKIPPED_FILE_NOT_FOUND``: a missing or empty mount (a stale bind mount shows an empty underlay), a missing series,
+    season or movie folder (a union filesystem that lost a disk looks exactly like a deletion), a folder with no
+    replacement (possibly mid-copy), and anything the names can't settle.
+    """
+
+    @staticmethod
+    def _run(canonical_path: Path | str, registry, config, *, check_only: bool = False):
+        with patch("media_preview_generator.processing.multi_server.generate_images") as mock_ffmpeg:
+            result = process_canonical_path(
+                canonical_path=str(canonical_path),
+                registry=registry,
+                config=config,
+                check_only=check_only,
+            )
+        mock_ffmpeg.assert_not_called()
+        return result
+
+    @staticmethod
+    def _assert_retries(result, canonical_path: Path | str) -> None:
+        assert result.status is MultiServerStatus.SKIPPED_FILE_NOT_FOUND
+        assert result.message == f"Source file not found: {canonical_path}"
+        assert result.publishers == []
+
+    @staticmethod
+    def _tv_root(tmp_path: Path) -> Path:
+        root = tmp_path / "tv"
+        _video(root / "Other Show (2019)" / "Season 01" / "Other Show (2019) - S01E01 - Pilot.mkv")
+        return root
+
+    @staticmethod
+    def _movies_root(tmp_path: Path) -> Path:
+        root = tmp_path / "movies"
+        _video(root / "Kept Movie (2001)" / "Kept Movie (2001).mkv")
+        return root
+
+    @pytest.mark.parametrize("check_only", [False, True], ids=["processing", "checking-stage"])
+    @pytest.mark.parametrize("kind", [None, "tvshows", "episode"], ids=["unknown-kind", "emby-tv", "plex-tv"])
+    def test_episode_replaced_by_same_episode_file_is_source_gone(
+        self, mock_config_for_processing, tmp_path, check_only, kind
+    ):
+        root = self._tv_root(tmp_path)
+        season = root / "Slow Horses (2022)" / "Season 06"
+        _video(season / "Slow Horses (2022) - S06E01 - Last Stop.mkv")
+        _video(season / "Slow Horses (2022) - S06E02 - Old Scores.mkv")
+        stale = season / "Slow Horses (2022) - S06E02 - Old Scores-CAKES.mkv"
+
+        result = self._run(stale, _emby_registry(root, kind=kind), mock_config_for_processing, check_only=check_only)
+
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.status.value == "skipped_source_gone"
+        assert result.message == "Skipped: replaced by a newer file (Slow Horses (2022) - S06E02 - Old Scores.mkv)"
+        assert result.canonical_path == str(stale)
+        assert result.publishers == []
+
+    def test_newest_of_several_same_episode_files_is_named(self, mock_config_for_processing, tmp_path):
+        root = self._tv_root(tmp_path)
+        season = root / "Show (2020)" / "Season 01"
+        _video(season / "Show (2020) - S01E05 - A.mkv", mtime=1_000_000)
+        _video(season / "Show (2020) - S01E05 - B.mkv", mtime=3_000_000)
+        _video(season / "Show (2020) - S01E05 - C.mkv", mtime=2_000_000)
+        stale = season / "Show (2020) - S01E05 - Old.mkv"
+
+        result = self._run(stale, _emby_registry(root), mock_config_for_processing)
+
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == "Skipped: replaced by a newer file (Show (2020) - S01E05 - B.mkv)"
+
+    @pytest.mark.parametrize("kind", ["movies", "movie"], ids=["emby-movies", "plex-movie"])
+    def test_movie_replaced_by_the_one_other_video_in_its_folder_is_source_gone(
+        self, mock_config_for_processing, tmp_path, kind
+    ):
+        root = self._movies_root(tmp_path)
+        folder = root / "Film (2021)"
+        _video(folder / "Film (2021) - 2160p.mkv")
+        _video(folder / "Film (2021)-trailer.mkv")
+        (folder / "Film (2021) - 2160p.srt").write_text("subs")
+        stale = folder / "Film (2021) - 1080p-GRP.mkv"
+
+        result = self._run(stale, _emby_registry(root, kind=kind), mock_config_for_processing)
+
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == "Skipped: replaced by a newer file (Film (2021) - 2160p.mkv)"
+
+    @pytest.mark.parametrize("kind", [None, "tvshows", "mixed"], ids=["unknown-kind", "tv", "mixed"])
+    def test_one_other_video_outside_a_movie_library_still_retries(self, mock_config_for_processing, tmp_path, kind):
+        """The one-other-video rule only holds in a movie library; elsewhere it could be the next episode."""
+        root = self._movies_root(tmp_path)
+        folder = root / "Film (2021)"
+        _video(folder / "Film (2021) - 2160p.mkv")
+        stale = folder / "Film (2021) - 1080p-GRP.mkv"
+
+        self._assert_retries(self._run(stale, _emby_registry(root, kind=kind), mock_config_for_processing), stale)
+
+    def test_movie_folder_with_two_other_videos_still_retries(self, mock_config_for_processing, tmp_path):
+        root = self._movies_root(tmp_path)
+        folder = root / "Film (2021)"
+        _video(folder / "Film (2021) - 2160p.mkv")
+        _video(folder / "Film (2021) - 720p.mkv")
+        stale = folder / "Film (2021) - 1080p.mkv"
+
+        self._assert_retries(self._run(stale, _emby_registry(root, kind="movies"), mock_config_for_processing), stale)
+
+    def test_movie_folder_with_only_an_extra_left_still_retries(self, mock_config_for_processing, tmp_path):
+        """A trailer isn't a replacement for the feature: the feature may still be copying in."""
+        root = self._movies_root(tmp_path)
+        folder = root / "Film (2021)"
+        _video(folder / "Film (2021)-trailer.mkv")
+        missing = folder / "Film (2021).mkv"
+
+        self._assert_retries(
+            self._run(missing, _emby_registry(root, kind="movies"), mock_config_for_processing), missing
+        )
+
+    def test_anime_absolute_episode_next_to_another_still_retries(self, mock_config_for_processing, tmp_path):
+        """No SxxEyy in a TV library: ``- 001`` isn't a replacement for ``- 002``."""
+        root = self._tv_root(tmp_path)
+        folder = root / "Anime Show (2019)"
+        _video(folder / "Anime Show - 001.mkv")
+        missing = folder / "Anime Show - 002.mkv"
+
+        self._assert_retries(
+            self._run(missing, _emby_registry(root, kind="tvshows"), mock_config_for_processing), missing
+        )
+
+    def test_dated_daily_episode_next_to_the_previous_day_still_retries(self, mock_config_for_processing, tmp_path):
+        root = self._tv_root(tmp_path)
+        folder = root / "Daily Show"
+        _video(folder / "Daily Show - 2026-09-23.mkv")
+        missing = folder / "Daily Show - 2026-09-24.mkv"
+
+        self._assert_retries(self._run(missing, _emby_registry(root), mock_config_for_processing), missing)
+
+    @pytest.mark.parametrize(
+        ("on_disk", "in_webhook"),
+        [
+            ("Amélie (2001).mkv", "Amélie (2001).mkv"),
+            ("amélie (2001).mkv", "Amélie (2001).mkv"),
+        ],
+        ids=["nfd-on-disk-nfc-in-webhook", "case-only"],
+    )
+    def test_same_name_spelled_differently_still_retries(
+        self, mock_config_for_processing, tmp_path, on_disk, in_webhook
+    ):
+        """The file that's there is the webhook's own file under another spelling of its name, not a replacement."""
+        root = self._movies_root(tmp_path)
+        folder = root / "Amelie (2001)"
+        _video(folder / on_disk)
+        missing = folder / in_webhook
+
+        self._assert_retries(
+            self._run(missing, _emby_registry(root, kind="movies"), mock_config_for_processing), missing
+        )
+
+    def test_path_with_dot_dot_still_retries(self, mock_config_for_processing, tmp_path):
+        root = self._tv_root(tmp_path)
+        season = root / "Slow Horses (2022)" / "Season 06"
+        _video(season / "Slow Horses (2022) - S06E02 - Old Scores.mkv")
+        stale = f"{season}/../Season 06/Slow Horses (2022) - S06E02 - Old Scores-CAKES.mkv"
+
+        self._assert_retries(self._run(stale, _emby_registry(root), mock_config_for_processing), stale)
+
+    def test_series_folder_missing_still_retries(self, mock_config_for_processing, tmp_path):
+        """A union filesystem that lost the disk holding one series looks exactly like that series being deleted."""
+        root = self._tv_root(tmp_path)
+        missing = root / "Super Duper Bunny League (2022)" / "Season 01" / "Super Duper Bunny League - S01E03.mkv"
+
+        self._assert_retries(self._run(missing, _emby_registry(root), mock_config_for_processing), missing)
+
+    def test_movie_folder_missing_still_retries(self, mock_config_for_processing, tmp_path):
+        root = self._movies_root(tmp_path)
+        missing = root / "Gone Movie (2020)" / "Gone Movie (2020) - 1080p.mkv"
+
+        self._assert_retries(
+            self._run(missing, _emby_registry(root, kind="movies"), mock_config_for_processing), missing
+        )
+
+    def test_season_folder_missing_under_a_present_series_still_retries(self, mock_config_for_processing, tmp_path):
+        root = self._tv_root(tmp_path)
+        _video(root / "Slow Horses (2022)" / "Season 05" / "Slow Horses (2022) - S05E01.mkv")
+        missing = root / "Slow Horses (2022)" / "Season 06" / "Slow Horses (2022) - S06E01.mkv"
+
+        self._assert_retries(self._run(missing, _emby_registry(root), mock_config_for_processing), missing)
+
+    def test_folder_present_without_a_same_episode_file_still_retries(self, mock_config_for_processing, tmp_path):
+        """No replacement in a folder that's still there: the file may be mid-copy, so the retry stays."""
+        root = self._tv_root(tmp_path)
+        season = root / "Slow Horses (2022)" / "Season 06"
+        _video(season / "Slow Horses (2022) - S06E01 - Last Stop.mkv")
+        _video(season / "Slow Horses (2022) - S06E03.mkv")
+        missing = season / "Slow Horses (2022) - S06E02 - Old Scores.mkv"
+
+        self._assert_retries(self._run(missing, _emby_registry(root), mock_config_for_processing), missing)
+
+    def test_file_directly_in_the_library_folder_still_retries(self, mock_config_for_processing, tmp_path):
+        root = tmp_path / "movies"
+        _video(root / "Film (2021) - 2160p.mkv")
+        missing = root / "Film (2021) - 1080p.mkv"
+
+        self._assert_retries(
+            self._run(missing, _emby_registry(root, kind="movies"), mock_config_for_processing), missing
+        )
+
+    def test_empty_mapped_mount_still_retries(self, mock_config_for_processing, tmp_path):
+        """A stale bind mount shows an empty underlay: nothing looks there, so nothing may look gone."""
+        mount = tmp_path / "data"
+        mount.mkdir()
+        registry = _emby_registry(
+            mount / "tv",
+            remote_root="/media/tv",
+            path_mappings=[{"remote_prefix": "/media", "local_prefix": str(mount)}],
+        )
+        missing = (
+            mount / "tv" / "Super Duper Bunny League (2022)" / "Season 01" / "Super Duper Bunny League - S01E03.mkv"
+        )
+
+        self._assert_retries(self._run(missing, registry, mock_config_for_processing), missing)
+
+    def test_empty_library_folder_on_a_mapped_mount_still_retries(self, mock_config_for_processing, tmp_path):
+        mount = tmp_path / "data"
+        _video(mount / "movies" / "Kept Movie (2001)" / "Kept Movie (2001).mkv")
+        (mount / "tv").mkdir()
+        registry = _emby_registry(
+            mount / "tv",
+            remote_root="/media/tv",
+            path_mappings=[{"remote_prefix": "/media", "local_prefix": str(mount)}],
+        )
+        missing = (
+            mount / "tv" / "Super Duper Bunny League (2022)" / "Season 01" / "Super Duper Bunny League - S01E03.mkv"
+        )
+
+        self._assert_retries(self._run(missing, registry, mock_config_for_processing), missing)
+
+    def test_missing_mount_root_still_retries(self, mock_config_for_processing, tmp_path):
+        root = tmp_path / "not-mounted"
+        missing = root / "Super Duper Bunny League (2022)" / "Season 01" / "Super Duper Bunny League - S01E03.mkv"
+
+        self._assert_retries(self._run(missing, _emby_registry(root), mock_config_for_processing), missing)
+
+    def _replaced_episode(self, tmp_path: Path) -> tuple[Path, Path]:
+        root = self._tv_root(tmp_path)
+        season = root / "Slow Horses (2022)" / "Season 06"
+        _video(season / "Slow Horses (2022) - S06E02 - Old Scores.mkv")
+        return root, season / "Slow Horses (2022) - S06E02 - Old Scores-CAKES.mkv"
+
+    def test_no_library_folders_found_still_retries(self, mock_config_for_processing, tmp_path):
+        root, stale = self._replaced_episode(tmp_path)
+        registry = _emby_registry(root)
+
+        with patch("media_preview_generator.processing.multi_server.disk_roots", return_value=()) as mock_roots:
+            result = self._run(stale, registry, mock_config_for_processing)
+
+        self._assert_retries(result, stale)
+        assert mock_roots.call_args.args == (str(stale), registry.configs())
+
+    def test_library_folders_unreadable_still_retries(self, mock_config_for_processing, tmp_path):
+        root, stale = self._replaced_episode(tmp_path)
+
+        with patch(
+            "media_preview_generator.processing.multi_server.disk_roots", side_effect=RuntimeError("bad config")
+        ):
+            result = self._run(stale, _emby_registry(root), mock_config_for_processing)
+
+        self._assert_retries(result, stale)
+
+
 class TestSinglePublisher:
     def test_emby_publisher_runs_one_ffmpeg_pass(self, mock_config_for_processing, tmp_path):
         media_dir = tmp_path / "data" / "movies" / "Test (2024)"

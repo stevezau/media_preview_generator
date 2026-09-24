@@ -706,6 +706,87 @@ class TestPlexTab:
         body = _save_and_get_put(authed_page, captured)
         assert body["markers"] == stored
 
+    def test_a_save_answered_while_the_dialog_opens_still_closes_it(self, authed_page: Page, app_url: str) -> None:
+        # Bootstrap ignores hide() while a dialog is still opening, so a save answered then left the dialog open over
+        # a finished save. A 2 s opening makes that window certain; force=True clicks without waiting it out.
+        server = _plex_server()
+        captured = _mock_server_page(
+            authed_page,
+            server,
+            _status(server, "ready", "Written into this Plex server's database", _plex_ready_details()),
+        )
+        authed_page.goto(f"{app_url}/servers")
+        authed_page.add_style_tag(content="#editServerModal .modal-dialog { transition-duration: 2s !important; }")
+        edit_btn = authed_page.locator(".edit-server-btn[data-id='plex-1']")
+        edit_btn.wait_for(state="visible", timeout=10000)
+        edit_btn.click()
+        expect(authed_page.locator("#editServerModal")).to_be_visible(timeout=5000)
+        assert authed_page.evaluate(
+            "() => bootstrap.Modal.getInstance(document.getElementById('editServerModal'))._isTransitioning"
+        ), "the click must land while the dialog is still opening"
+
+        authed_page.locator("#editServerSave").click(force=True)
+        expect(authed_page.locator("#editServerModal")).to_be_hidden(timeout=6000)
+        assert len(captured["puts"]) == 1
+
+    def test_a_dialog_hidden_in_the_same_tick_it_was_shown_ends_up_hidden(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        server = _plex_server()
+        _mock_server_page(authed_page, server, None)
+        authed_page.goto(f"{app_url}/servers")
+        authed_page.locator(".edit-server-btn[data-id='plex-1']").wait_for(state="visible", timeout=10000)
+
+        authed_page.evaluate(
+            "() => { const el = document.getElementById('editServerModal');"
+            " bootstrap.Modal.getOrCreateInstance(el).show(); hideModalSafely(el); }"
+        )
+
+        expect(authed_page.locator("#editServerModal")).to_be_hidden(timeout=5000)
+
+    def test_a_save_answered_after_the_dialog_was_closed_and_reopened_leaves_it_open(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # The user saved, closed the dialog before the answer and opened it again: the late answer is for the dialog
+        # they closed, so it mustn't close the one they're now working in.
+        server = _plex_server()
+        _mock_server_page(
+            authed_page,
+            server,
+            _status(server, "ready", "Written into this Plex server's database", _plex_ready_details()),
+        )
+        held: list[Route] = []
+
+        def hold_puts(route: Route) -> None:
+            if route.request.method == "PUT":
+                held.append(route)
+            else:
+                route.fallback()
+
+        authed_page.route(f"**/api/servers/{server['id']}", hold_puts)
+        authed_page.goto(f"{app_url}/servers")
+        edit_btn = authed_page.locator(".edit-server-btn[data-id='plex-1']")
+        edit_btn.wait_for(state="visible", timeout=10000)
+        edit_btn.click()
+        modal = authed_page.locator("#editServerModal")
+        expect(modal).to_be_visible(timeout=5000)
+        authed_page.locator("#editServerSave").click()
+        authed_page.wait_for_function("() => document.querySelector('#editServerSave').disabled")
+        assert len(held) == 1
+
+        modal.locator(".modal-footer [data-bs-dismiss='modal']").click()
+        expect(modal).to_be_hidden(timeout=5000)
+        edit_btn.click()
+        expect(modal).to_be_visible(timeout=5000)
+        authed_page.wait_for_function(
+            "() => !bootstrap.Modal.getInstance(document.getElementById('editServerModal'))._isTransitioning"
+        )
+        held[0].fulfill(status=200, content_type="application/json", body=json.dumps(server))
+        authed_page.wait_for_function("() => !document.querySelector('#editServerSave').disabled")
+        authed_page.wait_for_timeout(800)
+
+        expect(modal).to_be_visible()
+
 
 @pytest.mark.e2e
 class TestJellyfinTab:
@@ -1299,7 +1380,7 @@ class TestSetupHealthMarkerRows:
     def test_failing_rows_split_across_must_fix_and_recommended(self, authed_page: Page, app_url: str) -> None:
         from media_preview_generator.markers.readiness import MarkerFacts, plex_section
 
-        # The library's own switch couldn't be read: the server-wide row, with nothing to click.
+        # The libraries' own settings couldn't be read: the server-wide row, with its server-wide fix.
         facts = MarkerFacts(
             enabled=True,
             state="needs_pass",
@@ -1330,7 +1411,7 @@ class TestSetupHealthMarkerRows:
         recommended = authed_page.locator("#editReadinessBody details[data-tier='recommended']")
         recommended.locator("summary").click()
         expect(recommended).to_contain_text("Plex's own detection can replace your markers")
-        expect(recommended).to_contain_text("Change in Plex UI")
+        expect(recommended.get_by_role("button", name="Set server-wide to Never")).to_be_visible()
         # Every recommended row carries the shipped Dismiss link.
         expect(recommended.get_by_text("Dismiss")).to_be_visible()
 
@@ -1392,49 +1473,56 @@ class TestSetupHealthMarkerRows:
             libraries=(("2", "TV Shows"), ("1", "Movies")),
             library_detection=library_detection,
         )
-        return {"vendor": "plex", "overall_ok": True, "sections": [plex_section(facts)]}
+        section = plex_section(facts)
+        overall_ok = not any(c["ok"] is False and c["severity"] == "critical" for c in section["checks"])
+        return {"vendor": "plex", "overall_ok": overall_ok, "sections": [section]}
 
-    def test_detection_lists_each_library_with_its_own_turn_off(self, authed_page: Page, app_url: str) -> None:
-        both_on = {
-            "2": {"type": "show", "intro": True, "credits": True},
-            "1": {"type": "movie", "intro": None, "credits": True},
-        }
-        tv_off = {**both_on, "2": {"type": "show", "intro": False, "credits": False}}
-        before, after = self._detection_envelope(both_on), self._detection_envelope(tv_off)
+    BOTH_ON = {
+        "2": {"type": "show", "intro": True, "credits": True},
+        "1": {"type": "movie", "intro": None, "credits": True},
+    }
+    TV_OFF = {**BOTH_ON, "2": {"type": "show", "intro": False, "credits": False}}
+    HIDDEN_REASON = (
+        'Plex\'s "Intro markers" and "Credits markers" are off for this library, and Plex then hides every skip '
+        "marker in it, ours included."
+    )
+    NEVER_NOTE = (
+        "Don't want Plex detecting intros itself? Set Plex's server-wide \"Generate intro video markers\" and "
+        '"Generate credits video markers" to Never instead. That stops Plex\'s detection and keeps skip buttons '
+        "working."
+    )
+
+    def test_a_library_hiding_skip_markers_is_must_fix_with_turn_on(self, authed_page: Page, app_url: str) -> None:
+        before, after = self._detection_envelope(self.TV_OFF), self._detection_envelope(self.BOTH_ON)
         self._open_health(authed_page, app_url, _plex_server(), before)
-        turned_off: list = []
+        turned_on: list = []
 
-        # Registered after the page's own stub: once the Turn off POST has been answered, Plex reads TV Shows off.
+        # Registered after the page's own stub: once the Turn on POST has been answered, Plex reads TV Shows on.
         authed_page.route(
-            "**/api/servers/*/previews-readiness", lambda route: _fulfill(route, after if turned_off else before)
+            "**/api/servers/*/previews-readiness", lambda route: _fulfill(route, after if turned_on else before)
         )
 
-        def turn_off(route: Route) -> None:
-            turned_off.append(route.request.post_data_json)
-            _fulfill(route, {"ok": True, "library_id": "2", "prefs": turned_off[-1]["prefs"]})
+        def turn_on(route: Route) -> None:
+            turned_on.append(route.request.post_data_json)
+            _fulfill(route, {"ok": True, "library_id": "2", "prefs": turned_on[-1]["prefs"]})
 
-        authed_page.route("**/api/servers/plex-1/plex-marker-detection", turn_off)
+        authed_page.route("**/api/servers/plex-1/plex-library-markers", turn_on)
 
-        recommended = authed_page.locator("#editReadinessBody details[data-tier='recommended']")
-        expect(recommended).to_contain_text("Plex's own detection can replace your markers", timeout=5000)
-        expect(recommended).to_contain_text("Plex detects on its own in these libraries:")
-        tv = recommended.locator(".readiness-library[data-library-id='2']")
-        movies = recommended.locator(".readiness-library[data-library-id='1']")
-        expect(tv).to_contain_text("TV Shows")
-        expect(tv).to_contain_text("intro, credits")
-        expect(movies).to_contain_text("Movies")
-        expect(movies).to_have_text(re.compile(r"Movies\s*credits\s*Turn off"))
-        expect(recommended).to_contain_text(
-            "Turn off = Edit library → Advanced → Enable intro / credits detection, that library only."
-        )
-        # A fixable row: the Recommended badge, not "Change in Plex UI", and it can still be dismissed.
-        expect(recommended).not_to_contain_text("Change in Plex UI")
-        expect(recommended.get_by_text("Dismiss")).to_be_visible()
+        must_fix = authed_page.locator("#editReadinessBody details[data-tier='critical']")
+        expect(must_fix).to_contain_text("TV Shows — skip buttons are hidden", timeout=5000)
+        expect(must_fix).to_contain_text(self.HIDDEN_REASON)
+        expect(must_fix.locator(".readiness-current")).to_contain_text("off")
+        expect(must_fix.locator(".readiness-recommended")).to_contain_text("on")
+        expect(must_fix).not_to_contain_text("Movies — skip buttons are hidden")
+        expect(authed_page.locator("#editReadinessBody")).not_to_contain_text("Turn off")
+        note = must_fix.locator(".readiness-note")
+        expect(note).to_contain_text(self.NEVER_NOTE)
+        expect(note.get_by_role("button", name="Set server-wide to Never")).to_be_visible()
 
-        tv.get_by_role("button", name="Turn off").click()
+        must_fix.get_by_role("button", name="Turn on").click()
         expect(authed_page.locator("#readinessConfirmBody")).to_contain_text("TV Shows only", timeout=5000)
         with authed_page.expect_response(
-            lambda r: r.url.endswith("/api/servers/plex-1/plex-marker-detection") and r.request.method == "POST"
+            lambda r: r.url.endswith("/api/servers/plex-1/plex-library-markers") and r.request.method == "POST"
         ) as answered:
             authed_page.locator("#readinessConfirmSubmit").click()
 
@@ -1442,23 +1530,88 @@ class TestSetupHealthMarkerRows:
             "library_id": "2",
             "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"],
         }
-        # The row refreshes: TV Shows is gone, Movies still offers its own Turn off.
         expect(authed_page.locator(".toast", has_text="Applied")).to_be_visible(timeout=10000)
-        expect(authed_page.locator("#editReadinessBody .readiness-library[data-library-id='2']")).to_have_count(0)
-        expect(authed_page.locator("#editReadinessBody .readiness-library[data-library-id='1']")).to_be_visible()
-        assert len(turned_off) == 1
+        expect(authed_page.locator("#editReadinessBody details[data-tier='critical']")).to_have_count(0)
+        assert len(turned_on) == 1
+
+    def test_set_server_wide_to_never_sends_only_the_types_in_scope(self, authed_page: Page, app_url: str) -> None:
+        movies_off = {**self.BOTH_ON, "1": {"type": "movie", "intro": None, "credits": False}}
+        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(movies_off))
+        sent: list = []
+
+        def never(route: Route) -> None:
+            sent.append(route.request.post_data_json)
+            _fulfill(route, {"ok": True, "types": sent[-1]["types"]})
+
+        authed_page.route("**/api/servers/plex-1/plex-marker-detection", never)
+
+        must_fix = authed_page.locator("#editReadinessBody details[data-tier='critical']")
+        expect(must_fix).to_contain_text("Movies — skip buttons are hidden", timeout=5000)
+        expect(must_fix).to_contain_text(
+            'Plex\'s "Credits markers" is off for this library, and Plex then hides every credits marker in it, '
+            "ours included."
+        )
+        must_fix.locator(".readiness-note").get_by_role("button", name="Set server-wide to Never").click()
+        expect(authed_page.locator("#readinessConfirmBody")).to_contain_text(
+            "Generate credits video markers", timeout=5000
+        )
+        with authed_page.expect_response(
+            lambda r: r.url.endswith("/api/servers/plex-1/plex-marker-detection") and r.request.method == "POST"
+        ) as answered:
+            authed_page.locator("#readinessConfirmSubmit").click()
+
+        assert answered.value.request.post_data_json == {"types": ["credits"]}
+        expect(authed_page.locator(".toast", has_text="Applied")).to_be_visible(timeout=10000)
+
+    @pytest.mark.parametrize("button", ["#editReadinessFixCriticalBtn", "#editReadinessFixAllBtn"])
+    def test_bulk_fixes_preview_turn_on_and_never_include_server_wide_never(
+        self, authed_page: Page, app_url: str, button: str
+    ) -> None:
+        # Never reaches every library, so it is only ever set from its own button, with its own confirmation.
+        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(self.TV_OFF))
+        expect(authed_page.locator("#editReadinessBody")).to_contain_text(
+            "Plex's own detection can replace your markers", timeout=5000
+        )
+
+        authed_page.locator(button).click()
+
+        plan = authed_page.locator("#readinessFixPlanList")
+        expect(plan).to_contain_text("TV Shows — skip buttons are hidden", timeout=5000)
+        expect(plan).to_contain_text(re.compile(r"off\s*→\s*on"))
+        expect(plan).not_to_contain_text("Plex's own detection")
+        expect(plan.locator("li")).to_have_count(1)
+
+    def test_no_fix_all_when_server_wide_never_is_the_only_fix(self, authed_page: Page, app_url: str) -> None:
+        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(self.BOTH_ON))
+
+        expect(authed_page.locator("#editReadinessBody")).to_contain_text(
+            "Plex's own detection can replace your markers", timeout=5000
+        )
+        expect(authed_page.locator("#editReadinessFixControls")).to_be_hidden()
+
+    def test_plexs_detection_row_offers_server_wide_never_not_turn_off(self, authed_page: Page, app_url: str) -> None:
+        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(self.BOTH_ON))
+
+        recommended = authed_page.locator("#editReadinessBody details[data-tier='recommended']")
+        expect(recommended).to_contain_text("Plex's own detection can replace your markers", timeout=5000)
+        expect(recommended).to_contain_text(
+            "Plex settings → Library → Generate intro and credits video markers → Never."
+        )
+        expect(recommended.locator(".readiness-recommended")).to_contain_text("Never")
+        expect(recommended.get_by_role("button", name="Set server-wide to Never")).to_be_visible()
+        expect(recommended.locator(".readiness-library")).to_have_count(0)
+        expect(authed_page.locator("#editReadinessBody")).not_to_contain_text("Turn off")
+        # Every library shows its markers: the passing row sits in All good.
+        all_good = authed_page.locator("#editReadinessBody details[data-tier='ok']")
+        expect(all_good).to_contain_text("Plex shows skip buttons in your Intro & Credits libraries")
 
     def test_keep_plex_shows_an_all_good_row_and_no_turn_off(self, authed_page: Page, app_url: str) -> None:
-        both_on = {
-            "2": {"type": "show", "intro": True, "credits": True},
-            "1": {"type": "movie", "intro": None, "credits": True},
-        }
-        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(both_on, keep_plex=True))
+        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(self.BOTH_ON, keep_plex=True))
 
         all_good = authed_page.locator("#editReadinessBody details[data-tier='ok']")
         expect(all_good).to_contain_text("Keeping Plex's own markers: its detection can stay on", timeout=5000)
         expect(authed_page.locator("#editReadinessBody details[data-tier='recommended']")).to_have_count(0)
-        expect(authed_page.locator("#editReadinessBody .readiness-library")).to_have_count(0)
+        expect(authed_page.locator("#editReadinessBody")).not_to_contain_text("Turn off")
         expect(authed_page.locator("#editReadinessBody")).not_to_contain_text("Plex's own detection can replace")
 
     def test_the_feature_off_row_lands_in_all_good(self, authed_page: Page, app_url: str) -> None:
