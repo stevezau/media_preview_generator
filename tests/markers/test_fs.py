@@ -247,5 +247,62 @@ class TestGoneFromDisk:
         monkeypatch.setattr(os, "stat", stat)
         assert gone_from_disk(disks) is False
 
+    @pytest.mark.parametrize(("trust", "gone"), [(False, True), (True, False)], ids=["folder-rule", "trusted-roots"])
+    def test_a_dangling_symlink_is_gone_only_to_the_folder_rule(self, disks, tmp_path, trust, gone):
+        # A library of symlinks into a remote mount (rclone, zurg) that dropped: the links stay, dangling. Marking a
+        # file missing (trusted roots) takes the link for the file; a Plex version or a cached fingerprint behind it
+        # can't be read, so the folder rule counts it gone.
+        os.symlink(tmp_path / "rclone" / "ep.mkv", disks[0])
+        roots = {disks[0]: (self._root(disks[0]),)}
+        assert gone_from_disk([disks[0]], roots=roots, trust_roots=trust) is gone
+
     def test_no_paths_is_not_gone(self):
         assert gone_from_disk([]) is False
+
+
+class TestGoneFromDiskTrustingTheRoot:
+    """Forgetting deleted files (``trust_roots``): a mounted, non-empty root stands in for a missing season folder."""
+
+    @pytest.fixture
+    def library(self, tmp_path):
+        root = tmp_path / "tv"
+        (root / "Other Show" / "Season 01").mkdir(parents=True)
+        path = str(root / "Show" / "Season 01" / "ep.mkv")  # the whole series is deleted
+        return root, path
+
+    @pytest.mark.parametrize(("trust", "gone"), [(True, True), (False, False)], ids=["trusted", "folder-rule"])
+    def test_a_series_deleted_whole_is_gone_only_when_the_root_is_trusted(self, library, trust, gone):
+        root, path = library
+        assert gone_from_disk([path], roots={path: (str(root),)}, trust_roots=trust) is gone
+
+    def test_an_empty_root_is_never_trusted(self, library):
+        root, path = library
+        shutil.rmtree(root)
+        root.mkdir()  # an unmounted share's mount point
+        assert gone_from_disk([path], roots={path: (str(root),)}, trust_roots=True) is False
+
+    def test_an_empty_mount_inside_the_root_is_not_gone(self, library):
+        root, path = library
+        (root / "Show").mkdir()  # the series was its own mount, now unmounted
+        assert gone_from_disk([path], roots={path: (str(root),)}, trust_roots=True) is False
+
+    def test_without_roots_the_folder_still_decides(self, library):
+        _root, path = library
+        assert gone_from_disk([path], trust_roots=True) is False
+
+    def test_a_symlinked_series_folder_whose_target_dropped_is_not_gone(self, library, tmp_path):
+        root, path = library
+        os.symlink(tmp_path / "rclone" / "Show", root / "Show")  # the target mount dropped: the link dangles
+        assert gone_from_disk([path], roots={path: (str(root),)}, trust_roots=True) is False
+
+    def test_a_folder_that_cant_be_read_is_not_gone(self, library, monkeypatch):
+        root, path = library
+        real_lstat, show = os.lstat, str(root / "Show")
+
+        def lstat(p, *args, **kwargs):  # the series folder sits on a share whose handle went stale
+            if os.fspath(p) == show:
+                raise OSError(errno.ESTALE, "Stale file handle")
+            return real_lstat(p, *args, **kwargs)
+
+        monkeypatch.setattr(os, "lstat", lstat)
+        assert gone_from_disk([path], roots={path: (str(root),)}, trust_roots=True) is False

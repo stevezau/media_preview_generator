@@ -22,10 +22,12 @@ from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import (
     Capability,
+    DatabaseBusyError,
     ItemNotFoundError,
     MarkerPublisher,
     PublishError,
     Shown,
+    cancellable_waits,
 )
 from media_preview_generator.markers.publishers.plex_db import (
     LocalPlexDb,
@@ -2004,6 +2006,8 @@ class TestSqliteErrors:
         err = plex_db.publish_error_from_sqlite(exc)
         assert isinstance(err, PublishError) and err.state is state and message in str(err)
         assert labels.get(message, "") in str(err)
+        # Busy and locked (and the transient WAL race) are waits that ran out: a job tries the file again soon.
+        assert isinstance(err, DatabaseBusyError) is (state is Capability.UNREACHABLE)
 
 
 class TestSchemaGuards:
@@ -2157,9 +2161,14 @@ class TestLockTimeouts:
         db, pub, writer, release = self._paused_writer(tmp_path, monkeypatch)
         try:
             start = time.monotonic()
-            with pytest.raises(PublishError) as ei:
+            with pytest.raises(DatabaseBusyError) as ei:
                 _write_one(pub, [INTRO])
             assert ei.value.state is Capability.UNREACHABLE
+            # The task holding the lock isn't waiting for Plex: it is ours that is still busy.
+            assert (
+                str(ei.value)
+                == "Another Intro & Credits task is still using this Plex database; trying again on the next run"
+            )
             assert time.monotonic() - start < 0.5 + 1.0
             start = time.monotonic()
             assert pub.capability().state is Capability.UNREACHABLE
@@ -2224,6 +2233,118 @@ class TestLockTimeouts:
         assert ei.value.state is Capability.UNREACHABLE
         assert time.monotonic() - start < 2.0 + 0.8
 
+    @staticmethod
+    def _four_items(folder):
+        """Four episodes, each its own Plex item (7-10), as the four files production saw fail."""
+        db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", None),))
+        conn = sqlite3.connect(db)
+        for n in (2, 3, 4):
+            conn.execute("INSERT INTO metadata_items (id, metadata_type, title) VALUES (?, 4, 'Ep')", (6 + n,))
+            conn.execute("INSERT INTO media_items (id, metadata_item_id) VALUES (?, ?)", (n, 6 + n))
+            conn.execute(
+                "INSERT INTO media_parts (id, media_item_id, file) VALUES (?, ?, ?)", (n, n, f"/data/tv/S01E0{n}.mkv")
+            )
+        conn.commit()
+        conn.close()
+        return db, [(str(6 + n), f"/data/tv/S01E0{n}.mkv") for n in (1, 2, 3, 4)]
+
+    def _write_all_while_plex_holds_its_write_lock(self, tmp_path, hold_s):
+        """Four files published at once while another program holds Plex's write lock for ``hold_s``."""
+        folder = tmp_path / "Plex Media Server"
+        db, items = self._four_items(folder)
+        publishers = [_publisher(tmp_path, folder) for _ in items]
+        results: dict[str, object] = {}
+
+        def publish(pub, item_id, path):
+            try:
+                results[item_id] = _write_one(pub, [INTRO], item_id=item_id, path=path)
+            except PublishError as exc:
+                results[item_id] = exc
+
+        locker = sqlite3.connect(db, isolation_level=None, check_same_thread=False)
+        locker.execute("BEGIN IMMEDIATE")  # e.g. a Kometa-style tool writing to Plex's database
+        threads = [
+            threading.Thread(target=publish, args=(pub, *item)) for pub, item in zip(publishers, items, strict=True)
+        ]
+        for thread in threads:
+            thread.start()
+        time.sleep(hold_s)
+        locker.execute("ROLLBACK")
+        locker.close()
+        for thread in threads:
+            thread.join(30)
+        return db, results
+
+    # Production: another program held Plex's write lock for 30.8 s against a 30 s wait; four files failed. Scaled
+    # down 1:60 so the test takes seconds: the job wait keeps its ratio to the old one.
+    SCALE = 60
+    OLD_WAIT_S = 30.0
+    HELD_S = 30.8
+
+    def test_a_job_waits_120_s_for_plex_s_database(self):
+        assert plex_db.BUSY_TIMEOUT_S == 120.0 > self.HELD_S
+
+    @pytest.mark.parametrize("wait", ["old", "new"])
+    def test_files_waiting_on_a_write_lock_held_past_the_old_wait_are_written_with_the_new_one(
+        self, tmp_path, monkeypatch, wait
+    ):
+        timeout = (self.OLD_WAIT_S if wait == "old" else plex_db.BUSY_TIMEOUT_S) / self.SCALE
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", timeout)
+        # Held about twice as long as the scaled production hold, so the old wait fails by a clear margin.
+        db, results = self._write_all_while_plex_holds_its_write_lock(tmp_path, 2 * self.HELD_S / self.SCALE)
+        if wait == "new":
+            assert all(not isinstance(result, Exception) for result in results.values()), results
+            assert _rows(db, "SELECT metadata_item_id FROM taggings ORDER BY metadata_item_id") == [
+                (7,),
+                (8,),
+                (9,),
+                (10,),
+            ]
+        else:
+            assert len(results) == 4 and all(isinstance(r, DatabaseBusyError) for r in results.values()), results
+            assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+
+    def test_every_file_queued_behind_a_write_blocked_by_plex_names_plex_as_the_cause(self, tmp_path, monkeypatch):
+        # The holder waits in BEGIN IMMEDIATE; the three behind it wait for this process's lock. None of them may
+        # blame "another Intro & Credits task": that task is only waiting for Plex too.
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
+        db, results = self._write_all_while_plex_holds_its_write_lock(tmp_path, 2.5)
+        assert len(results) == 4
+        for result in results.values():
+            assert isinstance(result, DatabaseBusyError) and result.state is Capability.UNREACHABLE, results
+            assert str(result).startswith("Plex's database was busy (held by another program) for "), results
+            assert str(result).endswith(" s; trying again on the next run")
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+
+    def test_a_busy_stretch_is_counted_from_its_start_across_writes(self, tmp_path, monkeypatch):
+        # The second write starts waiting right after the first gave up: Plex has been busy since the first began.
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        locker = sqlite3.connect(db, isolation_level=None, check_same_thread=False)
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            messages = []
+            for _ in range(2):
+                with pytest.raises(DatabaseBusyError) as ei:
+                    _write_one(pub, [INTRO])
+                messages.append(str(ei.value))
+        finally:
+            locker.execute("ROLLBACK")
+        assert messages == [
+            "Plex's database was busy (held by another program) for 1 s; trying again on the next run",
+            "Plex's database was busy (held by another program) for 2 s; trying again on the next run",
+        ]
+        _write_one(pub, [INTRO])  # Plex let go: the stretch is over
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(DatabaseBusyError, match=r"for 1 s;"):
+                _write_one(pub, [], previous=[INTRO])
+        finally:
+            locker.execute("ROLLBACK")
+            locker.close()
+
     def test_version_check_runs_with_no_plex_connection_or_lock_held(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, parts=(("/data/tv/A.mkv", None), ("/data/tv/B.mkv", None)))
@@ -2255,6 +2376,94 @@ class TestLockTimeouts:
         monkeypatch.setattr(LocalPlexDb, "_unwritable_paths", staticmethod(lambda path: (os.remove(path), [path])[1]))
         report = _publisher(tmp_path, folder).capability()
         assert report.state is Capability.MISCONFIGURED and "can't write" in report.message
+
+
+class TestBusyThroughTheRealLockProbe:
+    """The write's own lock probe takes this process's database lock too: a file that gives up there is still busy."""
+
+    @pytest.fixture(autouse=True)
+    def plex_holds_the_database(self, monkeypatch):
+        """Overrides the module fixture: the real probe runs; only the fcntl answer (Plex holds it) is stubbed."""
+        monkeypatch.setattr(plex_db, "_shm_dms_locked_elsewhere", lambda _db: True)
+
+    def test_files_that_give_up_in_the_lock_probe_are_retried_as_busy(self, tmp_path, monkeypatch):
+        # Reviewer's repro: the first write waits in BEGIN IMMEDIATE holding this process's lock; the three that
+        # arrive later give up in the lock probe (file_checks), whose report used to lose the busy type. The first
+        # waits longer than the others, so they all give up in the probe, whatever the threads' timing.
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
+        folder = tmp_path / "Plex Media Server"
+        db, items = TestLockTimeouts._four_items(folder)
+        publishers = [_publisher(tmp_path, folder) for _ in items]
+        publishers[0]._db_timeout_s = 3.0
+        probed = []
+        real_file_checks = LocalPlexDb.file_checks
+
+        def file_checks(database, *, deadline):
+            report = real_file_checks(database, deadline=deadline)
+            probed.append(report.state)
+            return report
+
+        monkeypatch.setattr(LocalPlexDb, "file_checks", file_checks)
+        results: dict[str, object] = {}
+
+        def publish(pub, item_id, path):
+            try:
+                results[item_id] = _write_one(pub, [INTRO], item_id=item_id, path=path)
+            except PublishError as exc:
+                results[item_id] = exc
+
+        locker = sqlite3.connect(db, isolation_level=None, check_same_thread=False)
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            first = threading.Thread(target=publish, args=(publishers[0], *items[0]))
+            first.start()
+            time.sleep(0.3)  # the first write now waits in BEGIN IMMEDIATE, holding this process's lock
+            rest = [
+                threading.Thread(target=publish, args=(pub, *item))
+                for pub, item in zip(publishers[1:], items[1:], strict=True)
+            ]
+            for thread in rest:
+                thread.start()
+            for thread in [first, *rest]:
+                thread.join(10)
+        finally:
+            locker.execute("ROLLBACK")
+            locker.close()
+        assert len(results) == 4
+        assert all(isinstance(result, DatabaseBusyError) for result in results.values()), results
+        assert all(str(r).startswith("Plex's database was busy (held by another program)") for r in results.values())
+        assert sorted(state.value for state in probed) == ["ready", "unreachable", "unreachable", "unreachable"]
+
+    def test_a_cancelled_job_stops_waiting_for_this_process_s_lock_within_a_slice(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 30.0)
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, journal_mode="wal")
+        pub = _publisher(tmp_path, folder)
+        cancelled, outcome = threading.Event(), []
+
+        def publish():
+            with cancellable_waits(cancelled.is_set):
+                try:
+                    _write_one(pub, [INTRO])
+                except PublishError as exc:
+                    outcome.append(exc)
+
+        lock = plex_db._db_lock(str(db))
+        lock.acquire()  # another task of ours holds the database
+        try:
+            writer = threading.Thread(target=publish)
+            writer.start()
+            time.sleep(0.3)
+            start = time.monotonic()
+            cancelled.set()
+            writer.join(10)
+            assert time.monotonic() - start < plex_db.WAIT_SLICE_S + 1.0
+        finally:
+            lock.release()
+        [error] = outcome
+        # Not busy: a cancelled job queues no retry for it.
+        assert type(error) is PublishError and str(error) == plex_db.WAIT_CANCELLED
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
 
 
 class TestLockSerialisation:

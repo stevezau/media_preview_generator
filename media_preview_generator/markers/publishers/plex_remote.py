@@ -21,7 +21,7 @@ import requests
 from loguru import logger
 
 from ..models import Marker, MarkerType
-from .base import Capability, CapabilityReport, ItemNotFoundError, PublishError, Shown
+from .base import Capability, CapabilityReport, DatabaseBusyError, ItemNotFoundError, PublishError, Shown
 from .plex_db import (
     ItemRead,
     LocalPlexDb,
@@ -350,10 +350,15 @@ def report_from_json(raw: Any) -> CapabilityReport:
         raise ValueError(f"not a capability report: {exc}") from exc
 
 
+# Refusal kinds an answer names, per exception type; anything else is a plain ``PublishError``. An app older than a kind
+# reads it as "publish": the same message and state, only not retried as busy.
+_ERROR_KINDS: dict[type[PublishError], str] = {ItemNotFoundError: "item_not_found", DatabaseBusyError: "busy"}
+
+
 def error_to_json(exc: PublishError) -> dict:
     """Serialise a refusal so the app can raise the very same exception."""
     return {
-        "kind": "item_not_found" if isinstance(exc, ItemNotFoundError) else "publish",
+        "kind": next((name for cls, name in _ERROR_KINDS.items() if isinstance(exc, cls)), "publish"),
         "message": str(exc),
         "state": exc.state.value if exc.state else None,
     }
@@ -378,7 +383,7 @@ def error_from_json(raw: Any) -> PublishError:
             state = Capability(str(with_state))
         except ValueError:
             state = None
-    kind = ItemNotFoundError if raw.get("kind") == "item_not_found" else PublishError
+    kind = next((cls for cls, name in _ERROR_KINDS.items() if raw.get("kind") == name), PublishError)
     return kind(message, state=state)
 
 

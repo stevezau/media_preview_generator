@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 
 from loguru import logger
@@ -45,9 +45,11 @@ from .audio.season import season_audio_answer_outdated
 from .decide import DecisionStatus
 from .external_ids import is_season_folder
 from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL
+from .missing import MISSING_LINE, mark_missing_files
 from .models import Source
 from .outcomes import (
     NOT_IN_LIBRARY,
+    PLEX_DB_BUSY,
     PLEX_PASS_UNKNOWN,
     READ_BACK_FAILED,
     RETRY_REASON_CODES,
@@ -133,11 +135,16 @@ def retry_reason(row: object) -> str | None:
 
     Returns:
         The reason code of a waiting row the job retries (the server hasn't indexed the file yet, Plex didn't answer
-        its Plex Pass check, or another version of its Plex item hasn't been checked yet); None for any other row.
+        its Plex Pass check, or another version of its Plex item hasn't been checked yet), or ``PLEX_DB_BUSY`` for a
+        failed row whose write gave up waiting for Plex's database; None for any other row.
     """
-    if not isinstance(row, dict) or row.get("status") != ServerStatus.WAITING.value:
+    if not isinstance(row, dict):
         return None
     code = row.get("reason_code")
+    if row.get("status") == ServerStatus.FAILED.value:
+        return code if code == PLEX_DB_BUSY else None
+    if row.get("status") != ServerStatus.WAITING.value:
+        return None
     return code if code in RETRY_REASON_CODES else None
 
 
@@ -162,6 +169,7 @@ _RETRY_WORDS = {
     NOT_IN_LIBRARY: "not in a server's library",
     PLEX_PASS_UNKNOWN: "not checked on Plex",
     VERSIONS_UNCHECKED: "with another version not checked",
+    PLEX_DB_BUSY: "not written to Plex's busy database",
 }
 
 
@@ -268,8 +276,11 @@ def _end_chain(jm, cfg: dict, waiting: dict[str, set[str]]) -> None:
     )
 
 
-def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> list[str]:
-    """Create the delayed retry job for files that weren't on disk yet or that a server could take later.
+def _queue_retry(
+    job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str], promised: set[str] = frozenset()
+) -> list[str]:
+    """Create the delayed retry job for files that weren't on disk yet, that a server could take later, or whose write
+    gave up waiting for Plex's busy database (a few minutes later it is usually free).
 
     Up to ``webhook_retry_count`` retries, one job for every reason; a verify job's retries go on counting from the
     retries its chain used before it, and never queue another verify. The retry gets each file as its sender gave it
@@ -284,12 +295,16 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
         cfg: Its config.
         waiting: Local paths per reason (``NOT_ON_DISK`` or a row's retry reason code).
         sender_paths: The path each local path was given as (``build_items``); a missing entry is retried as is.
+        promised: Local paths whose row said this job tries again (``PipelineContext.busy_promised``, at most
+            ``MAX_RETRY_FILES``): taken first when more files wait than a retry job takes.
 
     Returns:
         The paths the retry job lists (as sent); empty when none was queued.
     """
     jm = get_job_manager()
-    paths = _sent_paths({path for files in waiting.values() for path in files}, sender_paths)
+    waiting_paths = {path for files in waiting.values() for path in files}
+    first = _sent_paths(waiting_paths & set(promised), sender_paths)
+    paths = [*first, *(path for path in _sent_paths(waiting_paths, sender_paths) if path not in set(first))]
     reason = _retry_reason(waiting)
     # Check servers leaves the items of a file it doesn't retry to be read back again; any other job's file is only
     # tried again by a job that lists it (a retry chain started by Check servers included: its items are gone).
@@ -838,8 +853,14 @@ def _stored_file_items(paths: set[str]) -> list[ProcessableItem]:
     ]
 
 
-def _items_to_decide_again(store: MarkerStore) -> list[ProcessableItem]:
-    """The files in Needs review now and those whose last publish waits for their item's other versions."""
+def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] = ()) -> list[ProcessableItem]:
+    """The files in Needs review now and those whose last publish waits for their item's other versions.
+
+    Given the servers' configs, those files that are missing from disk are marked first (``missing``), so a series
+    deleted since isn't listed; any the check had no time for are marked when their run finds them missing.
+    """
+    if configs:
+        mark_missing_files(store, [*store.files_in_review(), *store.files_waiting_for_other_versions()], configs)
     return _stored_file_items({*store.files_in_review(), *store.files_waiting_for_other_versions()})
 
 
@@ -1162,19 +1183,49 @@ def _skip_finished_before_restart(
     return remaining, dict(carried), carried_to_verify, carried_outcomes
 
 
-def _start_fingerprint_sweep(cfg: dict, store: MarkerStore) -> None:
-    """After a job completed and gave back its slot: start clearing the cached fingerprints of a batch of files gone
-    from disk, so markers.db doesn't grow with every renamed or deleted episode (``start_fingerprint_sweep``: its own
-    thread, at most one an hour).
+def _start_fingerprint_sweep(cfg: dict, store: MarkerStore, configs: Sequence[ServerConfig]) -> None:
+    """After a job completed and gave back its slot: start marking a batch of files missing from disk (and clearing
+    the marks of those back) and clearing the cached fingerprints of files gone, so markers.db doesn't grow with every
+    renamed or deleted episode (``start_fingerprint_sweep``: its own thread, at most one an hour).
 
     Season, retry and verify jobs don't: they follow a job that did. Never raises.
     """
     if cfg.get("source") == SEASON_SOURCE or cfg.get("retry_attempt") or cfg.get("verify"):
         return
     try:
-        start_fingerprint_sweep(store)
+        start_fingerprint_sweep(store, configs=configs)
     except Exception as exc:
         logger.warning("Couldn't start clearing old audio fingerprints: {}", exc)
+
+
+def _retry_follows(cfg: dict) -> bool:
+    """Whether this job queues a retry for a file that still needs one (``_queue_retry``: retries are on and this job
+    isn't its chain's last attempt)."""
+    count, _delay = retry_policy(get_settings_manager())
+    return count >= int(cfg.get("retry_attempt") or cfg.get("chain_attempt") or 0) + 1
+
+
+def _retries_missing_files(cfg: dict) -> bool:
+    """Whether the job tries a file it finds missing from disk again later (``_queue_retry``'s ``NOT_ON_DISK``).
+
+    Webhook paths (and their retries) can arrive before the file is visible here (an import still copying over NFS);
+    the preview job retries those too. A file the user picked, or a library listing, that isn't on disk won't appear by
+    waiting; a verify job's file was there already, and a Season job's files were on disk when the season step saw
+    them.
+    """
+    return _sends_files(cfg) and not cfg.get("verify")
+
+
+def _sends_files(cfg: dict) -> bool:
+    """Whether the job lists files a sender just reported (not a listing, nor a source that picks files itself)."""
+    return bool(cfg.get("file_paths")) and cfg.get("source") not in _NO_RETRY_SOURCES
+
+
+def _log_missing(ctx: PipelineContext) -> None:
+    """Log how many files this job marked missing from disk (``PipelineContext.take_missing``)."""
+    missing = ctx.take_missing()
+    if missing:
+        logger.info(MISSING_LINE, missing)
 
 
 def _log_summary(jm, job_id: str, outcome: dict[str, int], ctx: PipelineContext) -> None:
@@ -1338,8 +1389,10 @@ def run_intro_credits_job(job_id: str) -> None:
     slot = {"held": False, "priority": job.priority}
     cfg = dict(job.config or {})
     dispatcher = None
-    # Set once the job completes: the fingerprint cache sweep starts after the slot is given back.
+    # Set once the job completes: the fingerprint cache sweep starts after the slot is given back, with the servers'
+    # configs for the deleted-file sweep that runs first.
     sweep_store = None
+    sweep_configs: list[ServerConfig] = []
     # While the config holds the Check servers listing (a revived job's from the start): only a revive needs it, so the
     # teardown takes it off the ended job (the config ships in every job payload).
     listing_on_job = LISTING_CONFIG_KEY in cfg
@@ -1453,6 +1506,9 @@ def run_intro_credits_job(job_id: str) -> None:
                     decide_again=bool(cfg.get(DECIDE_AGAIN)),
                     online_recheck=bool(cfg.get(ONLINE_RECHECK)),
                 )
+                ctx.busy_writes_retried = _retry_follows(cfg)
+                ctx.retry_file_cap = MAX_RETRY_FILES
+                sweep_configs = list(registry.configs())
                 listing = None
                 if cfg.get("reconcile"):
                     from .reconcile import check_servers_listing
@@ -1485,7 +1541,7 @@ def run_intro_credits_job(job_id: str) -> None:
                             listing_on_job = True
                     items, warnings, sender_paths = listing.items, listing.warnings, {}
                 elif cfg.get(DECIDE_AGAIN):
-                    items, warnings, sender_paths = _items_to_decide_again(ctx.store), [], {}
+                    items, warnings, sender_paths = _items_to_decide_again(ctx.store, sweep_configs), [], {}
                 elif cfg.get(ONLINE_RECHECK):
                     items, warnings, sender_paths = _items_for_online_recheck(ctx, cancel_check), [], {}
                 else:
@@ -1516,12 +1572,8 @@ def run_intro_credits_job(job_id: str) -> None:
                         requests_passed_on = True
                     sweep_store = ctx.store
                     return
-                # Webhook paths (and their retries) can arrive before the file is visible here (an import still
-                # copying over NFS); the preview job retries those too. A file the user picked, or a library
-                # listing, that isn't on disk won't appear by waiting; a verify job's file was there already, and a
-                # Season job's files were on disk when the season step saw them.
-                sent_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _NO_RETRY_SOURCES
-                retries_missing_files = sent_files and not cfg.get("verify")
+                sent_files = _sends_files(cfg)
+                retries_missing_files = _retries_missing_files(cfg)
                 # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
                 # servers rescanned it long since. A verify chain checks once.
                 checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
@@ -1559,10 +1611,11 @@ def run_intro_credits_job(job_id: str) -> None:
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that can take the file later, even when another server was written. Check servers
-                    # retries only the files whose old item a server confirmed gone (below).
-                    codes = (
-                        set() if listing is not None else {code for row in servers or [] if (code := retry_reason(row))}
-                    )
+                    # retries only a write Plex's busy database refused (its next run is a day away for a failed item)
+                    # and the files whose old item a server confirmed gone (below).
+                    codes = {code for row in servers or [] if (code := retry_reason(row))}
+                    if listing is not None:
+                        codes &= {PLEX_DB_BUSY}
                     for code in codes:
                         waiting.setdefault(code, set()).add(file_path)
                     if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
@@ -1629,6 +1682,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     ),
                 )
                 result = tracker.get_result()
+                _log_missing(ctx)
                 outcome = dict(result["outcome"])  # includes the carried counts
                 jm.set_job_outcome(job_id, outcome)
                 # Worker threads store their snapshots in any order; the last one stored may not be the newest.
@@ -1648,7 +1702,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
                 # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
                 # file still waiting keeps its item and is listed again by a later run.
-                retried = _queue_retry(job, cfg, waiting, sender_paths) if waiting else []
+                retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)], ctx)
                 _settle_decide_again(jm, job_id, cfg)
@@ -1708,7 +1762,7 @@ def run_intro_credits_job(job_id: str) -> None:
         unregister_job_thread()
         # After the slot is back, and outside the job's log: a skipped cleanup's warning isn't about this job.
         if sweep_store is not None:
-            _start_fingerprint_sweep(cfg, sweep_store)
+            _start_fingerprint_sweep(cfg, sweep_store, sweep_configs)
         try:
             loguru_logger.complete()
             loguru_logger.remove(handler_id)

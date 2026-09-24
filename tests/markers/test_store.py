@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -758,6 +759,18 @@ _V1_DECISIONS = """CREATE TABLE decisions (
     PRIMARY KEY (file_id, type))"""
 
 
+# `files` before schema 3 added `missing_since`.
+_PRE_V3_FILES = """CREATE TABLE files (
+    id INTEGER PRIMARY KEY,
+    canonical_path TEXT NOT NULL UNIQUE,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    duration_ms INTEGER,
+    season_key TEXT,
+    is_movie INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL)"""
+
+
 def _schema_1_database(path, version="1"):
     """A markers.db as schema 1 left it: no `markers.locked_at`, no `decisions.decided_by`."""
     raw = sqlite3.connect(path)
@@ -766,7 +779,7 @@ def _schema_1_database(path, version="1"):
             "CREATE TABLE IF NOT EXISTS decisions "
         ):
             continue
-        raw.execute(stmt)
+        raw.execute(_PRE_V3_FILES if stmt.startswith("CREATE TABLE IF NOT EXISTS files ") else stmt)
     raw.execute(_V1_MARKERS)
     raw.execute(_V1_DECISIONS)
     raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (version,))
@@ -810,7 +823,8 @@ def test_a_schema_1_database_gains_the_lock_and_proposal_columns_and_keeps_its_r
 
     s = MarkerStore(path)
     try:
-        assert s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()["value"] == "2"
+        version = s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()["value"]
+        assert version == str(store_mod.SCHEMA_VERSION)
         assert s.get_locked(1) == {T.INTRO: Marker(T.INTRO, 1000, 30000, ("user",), locked=True)}
         assert s.locked_at(1) == {}  # a lock from before the column has no date, and that must not read as "today"
         decision = s.get_decisions(1)[T.CREDITS]
@@ -831,6 +845,61 @@ def test_a_schema_1_database_gains_the_lock_and_proposal_columns_and_keeps_its_r
         assert s.get_decisions(1)[T.PREVIEW].decided_by == ("skipdb",)
     finally:
         s.close()
+
+
+def test_a_schema_2_database_gains_the_missing_mark_and_keeps_its_rows(tmp_path):
+    """`files.missing_since` must reach an existing install: without `_MIGRATIONS[2]` every read of a file raises."""
+    path = str(tmp_path / "markers.db")
+    raw = sqlite3.connect(path)
+    for stmt in store_mod._SCHEMA:
+        raw.execute(_PRE_V3_FILES if stmt.startswith("CREATE TABLE IF NOT EXISTS files ") else stmt)
+    raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '2')")
+    raw.execute(
+        "INSERT INTO files (id, canonical_path, size, mtime_ns, duration_ms, season_key, is_movie, updated_at) "
+        "VALUES (1, '/m/Show/S01E01.mkv', 100, 1, 600000, '/m/Show', 0, '2026-09-01T00:00:00+00:00')"
+    )
+    raw.execute(
+        "INSERT INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
+        "settings_fingerprint, decided_at) VALUES (1, 'credits', 'needs_review', 'sources disagree', 500000, 600000, "
+        "'fp', '2026-09-01T00:00:00+00:00')"
+    )
+    raw.commit()
+    raw.close()
+
+    s = MarkerStore(path)
+    try:
+        assert s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()["value"] == "3"
+        # The database as it was before, for a downgrade: copied once, next to it.
+        backup = sqlite3.connect(path + store_mod.BACKUP_SUFFIX)
+        try:
+            assert backup.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+            assert backup.execute("SELECT canonical_path FROM files").fetchall() == [("/m/Show/S01E01.mkv",)]
+            assert "missing_since" not in {r[1] for r in backup.execute("PRAGMA table_info(files)")}
+        finally:
+            backup.close()
+        rec = s.get_file("/m/Show/S01E01.mkv")
+        assert (rec.id, rec.size, rec.missing_since) == (1, 100, None)
+        assert s.files_in_review() == ["/m/Show/S01E01.mkv"]
+        assert s.mark_missing(rec) is True
+        assert s.files_in_review() == [] and s.get_file(rec.canonical_path).missing_since is not None
+    finally:
+        s.close()
+
+
+def test_the_pre_v3_copy_is_made_once_and_never_for_a_new_or_current_database(tmp_path):
+    fresh = str(tmp_path / "fresh" / "markers.db")
+    MarkerStore(fresh).close()
+    MarkerStore(fresh).close()  # schema 3 already
+    assert not os.path.exists(fresh + store_mod.BACKUP_SUFFIX)
+
+    path = str(tmp_path / "old" / "markers.db")
+    os.makedirs(os.path.dirname(path))
+    _schema_1_database(path)
+    MarkerStore(path).close()
+    first = os.path.getmtime(path + store_mod.BACKUP_SUFFIX)
+    MarkerStore(path).close()
+    assert os.path.getmtime(path + store_mod.BACKUP_SUFFIX) == first
+    assert not os.path.exists(path + store_mod.BACKUP_SUFFIX + ".partial")
 
 
 def _losing_the_open_race(path, winner):

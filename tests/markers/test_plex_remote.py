@@ -15,6 +15,7 @@ from media_preview_generator.markers.publishers import plex_remote
 from media_preview_generator.markers.publishers.base import (
     Capability,
     CapabilityReport,
+    DatabaseBusyError,
     ItemNotFoundError,
     PublishError,
     Shown,
@@ -150,9 +151,16 @@ class TestCodec:
                 Capability.UNSUPPORTED_SCHEMA,
             ),
             (PublishError("no state"), PublishError, None),
+            # The agent's write gave up on Plex's busy database: the app's job retries it minutes later.
+            (
+                DatabaseBusyError("Plex's database was busy (held by another program) for 121 s; trying again on the next run",
+                                  state=Capability.UNREACHABLE),
+                DatabaseBusyError,
+                Capability.UNREACHABLE,
+            ),
         ],
-        ids=["publish-with-state", "item-not-found", "schema", "stateless"],
-    )
+        ids=["publish-with-state", "item-not-found", "schema", "stateless", "plex-db-busy"],
+    )  # fmt: skip
     def test_a_refusal_comes_back_as_the_very_same_exception(self, error, kind, state):
         rebuilt = plex_remote.error_from_json(plex_remote.error_to_json(error))
         assert type(rebuilt) is kind

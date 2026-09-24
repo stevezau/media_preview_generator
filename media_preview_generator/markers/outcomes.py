@@ -96,6 +96,9 @@ PLEX_PASS_UNKNOWN = "plex_pass_unknown"
 # Versions that were checked and disagree carry no code: trying again changes nothing until one of them changes.
 VERSIONS_UNCHECKED = "versions_unchecked"
 RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, VERSIONS_UNCHECKED})
+# ``reason_code`` of a failed row the job retries: the write gave up waiting for Plex's database (another program, or
+# another task of this app, held it past the wait). The row stays failed, and so does the file once the retries run out.
+PLEX_DB_BUSY = "plex_db_busy"
 
 
 # Start of a waiting row's message: Plex shows a type only once every version of the item is decided and agrees on
