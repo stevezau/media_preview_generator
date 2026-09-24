@@ -21,6 +21,11 @@ Cache validity rules:
 - Entry is valid only when the source file's ``mtime`` matches the
   recorded mtime. A file that's been re-encoded / replaced returns a
   miss and the cache entry is evicted.
+- Entry is valid only when the lookup's ``extraction_key`` (the settings
+  that shape the frames: interval, JPEG quality, tone map) equals the
+  one stored at ``put`` time. Frames made at a 10 s interval can't fill
+  a 5 s BIF, so a settings change is a miss and the entry is evicted.
+  Entries stored without a key never match a lookup that supplies one.
 - Entries expire after ``ttl_seconds`` regardless of mtime — protects
   against cache file corruption or partial writes from a previous run
   by bounding the trust window.
@@ -60,6 +65,7 @@ class CacheEntry:
     frame_count: int
     source_mtime: float
     cached_at: float
+    extraction_key: tuple | None = None
 
 
 class FrameCache:
@@ -131,22 +137,41 @@ class FrameCache:
             return lock
 
     # ---------------------------------------------------------- accessors
-    def get(self, canonical_path: str) -> CacheEntry | None:
+    def get(self, canonical_path: str, *, extraction_key: tuple | None = None) -> CacheEntry | None:
         """Return a valid cache entry for ``canonical_path`` or ``None``.
 
         An entry is valid iff:
         - it exists in the in-memory map,
+        - it was stored with the same ``extraction_key``,
         - its frame directory still exists on disk,
         - the source file's mtime is unchanged since the entry was cached,
         - the entry is younger than ``ttl_seconds``.
 
         On any failure the entry is evicted (memory + disk) so a
         subsequent put can repopulate cleanly.
+
+        Args:
+            canonical_path: Source media file the frames were extracted from.
+            extraction_key: The settings the caller needs the frames made
+                with (see :meth:`put`).
+
+        Returns:
+            The matching entry, or ``None`` on a miss.
         """
         key = self._key(canonical_path)
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
+                return None
+
+            if entry.extraction_key != extraction_key:
+                logger.info(
+                    "Frame cache miss: extraction settings changed for {} ({} → {}); will re-extract",
+                    canonical_path,
+                    entry.extraction_key,
+                    extraction_key,
+                )
+                self._evict(key)
                 return None
 
             now = time.time()
@@ -196,6 +221,7 @@ class FrameCache:
         frame_dir: Path,
         frame_count: int,
         source_mtime: float | None = None,
+        extraction_key: tuple | None = None,
     ) -> CacheEntry:
         """Record a freshly-generated frame directory in the cache.
 
@@ -203,6 +229,17 @@ class FrameCache:
         don't move or copy anything — the caller is expected to have
         used :meth:`frame_dir_for` to write directly into the cache
         slot. We just record the metadata.
+
+        Args:
+            canonical_path: Source media file the frames were extracted from.
+            frame_dir: Directory holding the JPG frames.
+            frame_count: Number of frames in ``frame_dir``.
+            source_mtime: Source mtime at extraction; read from disk when omitted.
+            extraction_key: The settings the frames were made with. A later
+                :meth:`get` only hits when it asks for the same key.
+
+        Returns:
+            The stored entry.
         """
         if source_mtime is None:
             try:
@@ -216,6 +253,7 @@ class FrameCache:
             frame_count=int(frame_count),
             source_mtime=float(source_mtime),
             cached_at=time.time(),
+            extraction_key=extraction_key,
         )
         key = self._key(canonical_path)
         with self._lock:
