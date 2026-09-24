@@ -217,6 +217,24 @@ class TestSaveSettingsReconcilesCpuWorkers:
             assert get_settings_manager().cpu_threads == 4
         assert get_dispatcher() is None
 
+    def test_gpu_raise_after_pending_shrink_keeps_busy_workers(self, app):
+        # The GPU twin of the CPU row above: lower 3 -> 1 while busy, then back to 3, and 3 must stay.
+        pool = _live_pool(app, cpu=0, gpu=3)
+        busy = _gpu_workers(pool)
+        for w in busy:
+            w.is_busy = True
+
+        with _fake_detected_gpu():
+            _save(app, {"gpu_config": _gpu_config(1)})
+            assert sum(w._pending_removal for w in busy) == 2
+            resp = _save(app, {"gpu_config": _gpu_config(3)})
+
+        assert resp.status_code == 200
+        for w in busy:
+            w.is_busy = False
+        pool._apply_deferred_removals()
+        assert _gpu_workers(pool) == busy
+
     def test_gpu_workers_untouched_by_cpu_threads_save(self, app):
         pool = _live_pool(app, cpu=1, gpu=2)
         gpus_before = _gpu_workers(pool)
