@@ -224,9 +224,7 @@ def _get_vulkan_info() -> dict:
         return result
 
     try:
-        _ensure_gpu_cache()
-        with _gpu_cache_lock:
-            gpus = list(_gpu_cache["result"] or [])
+        gpus = list(_ensure_gpu_cache())
     except Exception as exc:
         logger.warning(
             "Dolby Vision warning: could not list detected GPUs while building the diagnostic message "

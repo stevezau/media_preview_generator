@@ -33,8 +33,6 @@ from . import api
 from ._helpers import (
     MEDIA_ROOT,
     _ensure_gpu_cache,
-    _gpu_cache,
-    _gpu_cache_lock,
     _param_to_bool,
     _safe_resolve_within,
     limiter,
@@ -1662,9 +1660,7 @@ def _build_idle_workers_from_config():
         logger.debug("Could not read worker counts from settings", exc_info=True)
         return []
 
-    _ensure_gpu_cache()
-    with _gpu_cache_lock:
-        gpu_infos = _gpu_cache["result"] or []
+    gpu_infos = _ensure_gpu_cache()
 
     # Mirror the dispatcher's _build_worker_statuses() idle-branch contract
     # so the synthesised idle list (used before any pool exists) has the

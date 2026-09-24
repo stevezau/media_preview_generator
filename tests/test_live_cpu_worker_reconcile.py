@@ -773,3 +773,93 @@ class TestGpuDetection:
         assert len(calls) == 1
         assert len(results) == 2
         assert results[0] == results[1] == [{"type": "nvidia", "device": GPU_DEVICE, "name": "Fake GPU"}]
+
+
+class TestGpuListSurvivesARescan:
+    """A "Re-scan GPUs" clearing the cache right after a route's warm-up must not blank that route's GPU list.
+
+    Each route warms the cache with ``_ensure_gpu_cache()`` and must use the list it returns: reading the cache
+    again afterwards finds it empty while the re-scan runs.
+    """
+
+    DETECTED = {"type": "NVIDIA", "device": GPU_DEVICE, "name": "Fake GPU"}
+
+    @pytest.fixture(autouse=True)
+    def _detect_one_gpu(self, monkeypatch):
+        from media_preview_generator.web.routes import _helpers
+
+        monkeypatch.setattr(
+            "media_preview_generator.gpu.detect.detect_all_gpus",
+            lambda *args, **kwargs: [("NVIDIA", GPU_DEVICE, {"name": "Fake GPU"})],
+        )
+        _helpers.clear_gpu_cache()
+        yield
+        _helpers.clear_gpu_cache()
+
+    @staticmethod
+    def _rescan_lands_after_the_warm_up(route_module: str):
+        """Clear the GPU cache as soon as the route's warm-up returns, as a re-scan landing then would."""
+        from media_preview_generator.web.routes import _helpers
+
+        def warm_up_then_rescan_clears() -> list[dict]:
+            gpus = _helpers._ensure_gpu_cache()
+            _helpers.clear_gpu_cache()
+            return gpus
+
+        return patch(f"media_preview_generator.web.routes.{route_module}._ensure_gpu_cache", warm_up_then_rescan_clears)
+
+    def test_rescan_response_lists_the_gpus_it_detected(self, app):
+        with self._rescan_lands_after_the_warm_up("api_system"):
+            resp = app.test_client().post("/api/system/rescan-gpus", headers={"X-Auth-Token": TOKEN})
+
+        assert resp.status_code == 200
+        assert resp.get_json()["gpus"] == [self.DETECTED]
+
+    def test_system_status_lists_the_detected_gpus(self, app):
+        with self._rescan_lands_after_the_warm_up("api_system"):
+            resp = app.test_client().get("/api/system/status", headers={"X-Auth-Token": TOKEN})
+
+        assert resp.status_code == 200
+        assert resp.get_json()["gpus"] == [self.DETECTED]
+
+    def test_idle_worker_list_keeps_the_saved_gpu_rows(self, app):
+        # No pool exists yet, so the Workers panel is built from the saved counts and the detected GPUs.
+        with app.app_context():
+            get_settings_manager().update({"cpu_threads": 1, "gpu_config": _gpu_config(2)})
+
+        with self._rescan_lands_after_the_warm_up("api_jobs"):
+            resp = app.test_client().get("/api/jobs/workers", headers={"X-Auth-Token": TOKEN})
+
+        assert resp.status_code == 200
+        assert [w["worker_type"] for w in resp.get_json()["workers"]] == ["GPU", "GPU", "CPU"]
+
+    def test_vulkan_warning_names_the_detected_gpu(self, app):
+        from media_preview_generator.gpu import _reset_vulkan_device_cache
+
+        no_graphics_capability = {
+            "nvidia_capabilities": "compute,video,utility",
+            "nvidia_capabilities_has_graphics": False,
+            "nvidia_icd_json_path": None,
+            "libnvidia_glvkspirv_found": False,
+            "libegl_nvidia_found": False,
+        }
+        _reset_vulkan_device_cache()
+        try:
+            with (
+                self._rescan_lands_after_the_warm_up("api_vulkan"),
+                patch(
+                    "media_preview_generator.gpu.vulkan_probe._probe_vulkan_device",
+                    return_value="llvmpipe (LLVM 18.1.3, 256 bits) (software) (0x0)",
+                ),
+                patch("media_preview_generator.web.routes.api_vulkan.glob.glob", return_value=[]),
+                patch(
+                    "media_preview_generator.web.routes.api_vulkan._diagnose_vulkan_environment",
+                    return_value=no_graphics_capability,
+                ),
+            ):
+                resp = app.test_client().get("/api/system/vulkan")
+        finally:
+            _reset_vulkan_device_cache()
+
+        assert resp.status_code == 200
+        assert "<strong>Your GPU:</strong> Fake GPU" in resp.get_json()["warning"]
