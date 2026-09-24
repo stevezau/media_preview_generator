@@ -30,9 +30,10 @@ which every Jellyfin install of the plugin polls. A Pages deploy replaces the wh
 
 - The manifest is built from the `plugin-v*` GitHub releases on every deploy, docs or plugin
   release (`scripts/build_jellyfin_manifest.py`: version, MD5 and zip URL from each release's
-  assets, plugin metadata from `jellyfin-plugin/manifest.template.json`), and shipped at the same
-  path. The deploy must FAIL (deploy nothing) on a download error, a digest mismatch or zero
-  versions. Nothing reads the live copy back, so a cancelled or failed deploy loses no version:
+  assets, plugin metadata from `jellyfin-plugin/manifest.template.json` as it was at the newest
+  listed release's tag, so text edited on `dev` ships only with the next plugin release), and
+  shipped at the same path. The deploy must FAIL (deploy nothing) on a download error, a digest
+  mismatch, a template it can't read at that tag, or zero versions. Nothing reads the live copy back, so a cancelled or failed deploy loses no version:
   the next deploy lists the releases itself. (Until 2026-09-24 docs deploys re-shipped the live
   manifest and only the plugin release added versions, so GitHub cancelling that pending deploy
   dropped a version for good.)

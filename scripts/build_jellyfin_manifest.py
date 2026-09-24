@@ -8,15 +8,20 @@ lists the releases itself. Nothing reads the live copy back.
 
 Each non-draft plugin-v10.11.X.Y release gives one entry per uploaded zip: media-preview-bridge_10.11.X.Y.zip
 (targetAbi 10.11.0.0) and, from the dual-ABI releases on, media-preview-bridge_12.0.X.Y.zip (targetAbi 12.0.0.0).
-Plugin metadata (name, guid, description...) comes from jellyfin-plugin/manifest.template.json.
+Plugin metadata (name, guid, description...) comes from jellyfin-plugin/manifest.template.json as it was at the
+newest listed release's tag, read through the GitHub contents API (docs.yml's checkout is shallow and has no tags).
+So the manifest derives entirely from releases: text edited on dev reaches users only with the next plugin release,
+and never describes a feature no installable build has.
 
 Fails closed, exiting non-zero without writing anything, on an API or download error, a zip whose bytes don't
-match GitHub's sha256 digest (or that has none), a malformed template, or zero versions. A zip that isn't fully uploaded yet is left
+match GitHub's sha256 digest (or that has none), a template unreadable or malformed at that tag, or zero
+versions. A zip that isn't fully uploaded yet is left
 out with a warning; the plugin release's own deploy runs after both uploads and lists it.
 
 Usage:
     GH_TOKEN=... python scripts/build_jellyfin_manifest.py --repo OWNER/NAME \\
         --template jellyfin-plugin/manifest.template.json --out site/jellyfin-plugin/manifest.json
+    --template is the file's path in the repository; it is read at the release tag, never from disk.
     Use --out - to print the manifest instead (dry run).
 """
 
@@ -32,6 +37,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -39,6 +45,7 @@ from pathlib import Path
 API_ROOT = "https://api.github.com"
 PLUGIN_TAG = re.compile(r"plugin-v(10\.11\.(\d+\.\d+))")
 REPO_NAME = re.compile(r"[\w.-]+/[\w.-]+")
+REPO_PATH = re.compile(r"[\w.-]+(/[\w.-]+)*")
 NEXT_LINK = re.compile(r'<([^>]+)>;\s*rel="next"')
 MD5_HEX = re.compile(r"[0-9A-F]{32}")
 # Asset-name ABI prefix -> the manifest's targetAbi. Jellyfin only offers a version whose targetAbi is <= the
@@ -62,11 +69,11 @@ def _version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
-def _check_template(template: object) -> dict:
+def _check_template(template: object, tag: str) -> dict:
     if not (isinstance(template, list) and len(template) == 1 and isinstance(template[0], dict)):
-        raise ManifestError("template must be a JSON list holding exactly one plugin")
+        raise ManifestError(f"template at {tag} must be a JSON list holding exactly one plugin")
     if template[0].get("versions") != []:
-        raise ManifestError('template\'s plugin must have "versions": [] (versions come from the releases)')
+        raise ManifestError(f'template at {tag}: the plugin must have "versions": [] (versions come from the releases)')
     return template[0]
 
 
@@ -144,28 +151,36 @@ def _check_versions(versions: list[dict]) -> None:
         seen.add(entry["version"])
 
 
-def build_manifest(template: list[dict], releases: list[dict], fetch_bytes: Callable[[str], bytes]) -> list[dict]:
-    """Build the manifest from the template and the repository's releases.
+def build_manifest(
+    releases: list[dict], fetch_bytes: Callable[[str], bytes], template_at: Callable[[str], object]
+) -> list[dict]:
+    """Build the manifest from the repository's releases.
 
     Args:
-        template: The parsed manifest.template.json: one plugin with ``"versions": []``.
         releases: Every release of the repository, as the GitHub releases API lists them.
         fetch_bytes: Downloads a URL and returns its bytes; errors propagate.
+        template_at: Returns the parsed manifest.template.json as it was at a tag; errors propagate.
 
     Returns:
-        The manifest: the template's plugin with ``versions`` filled in, newest version first.
+        The manifest: the newest listed release's template plugin with ``versions`` filled in, newest first.
 
     Raises:
-        ManifestError: A malformed template, a zip that fails its digest check, or zero versions.
+        ManifestError: A zip that fails its digest check, zero versions, or a malformed template at the tag.
     """
-    plugin = copy.deepcopy(_check_template(template))
     versions = []
+    listed_tags = []
     for release in releases:
         if release.get("draft") or not PLUGIN_TAG.fullmatch(release.get("tag_name") or ""):
             continue
-        versions.extend(_release_entries(release, fetch_bytes))
+        entries = _release_entries(release, fetch_bytes)
+        if entries:
+            listed_tags.append(release["tag_name"])
+        versions.extend(entries)
     versions.sort(key=lambda entry: _version_key(entry["version"]), reverse=True)
     _check_versions(versions)
+    # The newest release users can install, not one still uploading: its text must match a build they can get.
+    newest_tag = max(listed_tags, key=lambda tag: _version_key(PLUGIN_TAG.fullmatch(tag).group(1)))
+    plugin = copy.deepcopy(_check_template(template_at(newest_tag), newest_tag))
     plugin["versions"] = versions
     return [plugin]
 
@@ -196,6 +211,13 @@ def list_releases(repo: str, get: Callable[[str], tuple[bytes, str | None]]) -> 
         match = NEXT_LINK.search(link or "")
         url = match.group(1) if match else None
     return releases
+
+
+def template_url(repo: str, path: str, tag: str) -> str:
+    """The contents-API URL of ``path`` in ``repo`` as it was at ``tag``."""
+    if not REPO_PATH.fullmatch(path) or ".." in path:
+        raise ManifestError(f"--template must be a path inside the repository (got {path!r})")
+    return f"{API_ROOT}/repos/{repo}/contents/{path}?ref={urllib.parse.quote(tag, safe='')}"
 
 
 def render(manifest: list[dict]) -> str:
@@ -239,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point: build the manifest and write it to --out, or fail without writing anything."""
     parser = argparse.ArgumentParser(description="Build the Jellyfin plugin manifest from plugin-v* releases.")
     parser.add_argument("--repo", required=True, help="owner/name of the GitHub repository")
-    parser.add_argument("--template", required=True, type=Path, help="path to manifest.template.json")
+    parser.add_argument(
+        "--template", required=True, help="repository path of manifest.template.json, read at the newest release tag"
+    )
     parser.add_argument("--out", required=True, help="where to write the manifest; - for stdout")
     args = parser.parse_args(argv)
 
@@ -247,12 +271,16 @@ def main(argv: list[str] | None = None) -> int:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         api_headers["Authorization"] = f"Bearer {token}"
+    raw_headers = {**api_headers, "Accept": "application/vnd.github.raw+json"}
     try:
-        template = json.loads(args.template.read_text(encoding="utf-8"))
         releases = list_releases(args.repo, lambda url: http_get(url, api_headers))
-        # The zips are public. No token here: the download redirects to another host, and urllib would
-        # forward the Authorization header there.
-        manifest = build_manifest(template, releases, lambda url: http_get(url, {})[0])
+        manifest = build_manifest(
+            releases,
+            # The zips are public. No token here: the download redirects to another host, and urllib would
+            # forward the Authorization header there.
+            lambda url: http_get(url, {})[0],
+            lambda tag: json.loads(http_get(template_url(args.repo, args.template, tag), raw_headers)[0]),
+        )
     except (ManifestError, OSError, ValueError, http.client.HTTPException) as exc:
         print(f"::error::Jellyfin manifest not built, refusing to deploy: {exc}", file=sys.stderr)
         return 1

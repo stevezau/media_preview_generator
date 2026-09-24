@@ -121,9 +121,12 @@ class TestDeployOrder:
         job = _load("docs.yml")["jobs"]["deploy"]
         assert job["concurrency"] == {"group": "pages", "cancel-in-progress": False}
 
-    def test_push_trigger_watches_the_jekyll_sources_only(self) -> None:
+    def test_push_trigger_watches_the_jekyll_sources_and_the_manifest_builder(self) -> None:
         paths = _triggers(_load("docs.yml"))["push"]["paths"]
         assert "docs/**" in paths
+        # A builder change deploys straight away, so a broken builder shows up on its own push. The template
+        # needn't trigger: the builder reads it at the newest release tag, not from dev.
+        assert "scripts/build_jellyfin_manifest.py" in paths
         assert [p for p in paths if "mkdocs" in p or "docs_theme" in p or p.startswith("llms")] == []
 
 

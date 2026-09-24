@@ -15,6 +15,9 @@ on:
     paths:
       - "docs/**"
       - ".github/workflows/docs.yml"
+      # A builder change deploys at once, so it's exercised on its own push. The template needn't
+      # trigger: the builder reads it at the newest plugin-v* tag, so dev edits wait for a release.
+      - "scripts/build_jellyfin_manifest.py"
   workflow_dispatch:
   workflow_call:
     inputs:
