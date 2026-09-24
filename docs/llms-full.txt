@@ -2181,8 +2181,8 @@ first time you turn it on for a Plex server:
 - **Map Plex's config folder into both containers from the identical host path.** On unRAID specifically, don't mix
   `/mnt/user` and `/mnt/cache` between the two containers — even though both paths can reach the same files, Plex and
   this app must open the database through the exact same path for the app's same-host proof to succeed.
-- **Viewers need Plex Pass** (or Plex Home) to see skip buttons at all — Plex hides markers entirely without it, even
-  ones already in its database.
+- **Needs Plex Pass on the server, and for viewers** (or their Plex Home) — Plex hides markers entirely without it,
+  even ones already in its database.
 - If Plex's own detection re-analyzes an item, it can replace our markers with its own. The next Intro & Credits job
   that checks the file notices (see [Checking the servers still show them](https://mediapreviewgenerator.dev/guides/#checking-the-servers-still-show-them)):
   with **"When Plex has its own markers" → "Use ours"** (the default) it writes ours again; with
