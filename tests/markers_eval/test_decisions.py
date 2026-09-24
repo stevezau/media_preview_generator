@@ -5,6 +5,7 @@ import pytest
 
 from media_preview_generator.markers import decide as decide_module
 from media_preview_generator.markers.models import SERVER_SOURCES, Source
+from tests.markers_eval.test_intros import ALIKE
 from tools.markers_eval.data import EvalEpisode
 from tools.markers_eval.decisions import DecisionRows, compare_with_plex, g3_differences, g3_rule, season_segments
 from tools.markers_eval.plex import PlexMarker
@@ -124,11 +125,11 @@ def test_season_segments_eval_lists_and_full_folder(tmp_path):
         asked.append(f)
         return fps[f]
 
-    lists = season_segments(eps, points=points, full_folder=False)
+    lists = season_segments(eps, points=points, full_folder=False, end_pictures=ALIKE)
     assert sorted(asked) == eval_files
     assert [lists[f][2:] for f in eval_files] == [(1, 1), (1, 1)]  # support / others within the eval's own list
     asked.clear()
-    full = season_segments(eps, points=points, full_folder=True)
+    full = season_segments(eps, points=points, full_folder=True, end_pictures=ALIKE)
     assert sorted(asked) == sorted(fps)
     assert [full[f][2:] for f in eval_files] == [(3, 3), (3, 3)]
     assert set(full) == set(eval_files)

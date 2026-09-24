@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 from loguru import logger
 
@@ -169,6 +170,19 @@ _SCHEMA = (
         runs_json TEXT NOT NULL,
         PRIMARY KEY (file_a, file_b))""",
     "CREATE INDEX IF NOT EXISTS idx_season_pairs_b ON season_pairs(file_b)",
+    # Season audio's end-picture check (``audio.end_picture``): the share of matching frames at the end of file_a's
+    # candidate intro (start_ms-end_ms on its side) and the same stretch of file_b, offset_ms later there. NULL: no
+    # frames could be compared. A separate table, so a markers.db from before it only gains it.
+    """CREATE TABLE IF NOT EXISTS season_end_pictures (
+        file_a INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        file_b INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        start_ms INTEGER NOT NULL,
+        end_ms INTEGER NOT NULL,
+        offset_ms INTEGER NOT NULL,
+        check_version INTEGER NOT NULL,
+        share REAL,
+        PRIMARY KEY (file_a, file_b, start_ms, end_ms, offset_ms))""",
+    "CREATE INDEX IF NOT EXISTS idx_season_end_pictures_b ON season_end_pictures(file_b)",
     # What a local detector's last answer for a file was based on (season audio: the season's fingerprinted files), so
     # it runs again only when that changes.
     """CREATE TABLE IF NOT EXISTS detector_runs (
@@ -396,6 +410,24 @@ class FingerprintCheck:
     mtime_ns: int
 
 
+class EndPictureKey(NamedTuple):
+    """What one end-picture share was measured on: ``file_a``'s candidate intro (``start_ms``-``end_ms`` on its side)
+    against the same stretch of ``file_b``, ``offset_ms`` later there."""
+
+    file_a: int
+    file_b: int
+    start_ms: int
+    end_ms: int
+    offset_ms: int
+
+
+@dataclass(frozen=True)
+class CachedShare:
+    """A cached end-picture share (None: no frames could be compared)."""
+
+    share: float | None
+
+
 @dataclass(frozen=True)
 class StoredFingerprint:
     """A cached chromaprint fingerprint (raw little-endian uint32 points; empty for a file without audio)."""
@@ -602,9 +634,9 @@ class MarkerStore:
     ) -> FileRecord:
         """Insert or refresh a file; a size/mtime change invalidates derived data (locked markers survive).
 
-        A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind, season pairs,
-        detector runs and failures, the season intro-chapter limit, Check servers' re-read counts and every server's
-        ``publish_basis``, so the next run offers the markers to every server again
+        A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind, season pairs
+        and end-picture checks, detector runs and failures, the season intro-chapter limit, Check servers' re-read
+        counts and every server's ``publish_basis``, so the next run offers the markers to every server again
         even when an in-place replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin
         serves nothing for a file whose size changed until it is sent again, and its publisher sends it when the
         stored size differs. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to
@@ -649,7 +681,8 @@ class MarkerStore:
                         "server_marker_rereads",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
-                    conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
+                    for table in ("season_pairs", "season_end_pictures"):
+                        conn.execute(f"DELETE FROM {table} WHERE file_a=? OR file_b=?", (file_id, file_id))
                     conn.execute("DELETE FROM markers WHERE file_id=? AND locked=0", (file_id,))
                     conn.execute(
                         "UPDATE files SET size=?, mtime_ns=?, duration_ms=?, season_key=?, is_movie=?, updated_at=?, "
@@ -706,6 +739,18 @@ class MarkerStore:
                 "WHERE p.status='waiting' AND substr(p.message, 1, ?) = ? AND f.missing_since IS NULL "
                 "ORDER BY f.canonical_path",
                 (len(VERSIONS_WAITING), VERSIONS_WAITING),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
+
+    def files_with_season_audio_intro(self) -> list[str]:
+        """Canonical paths of the files whose intro marker was decided with a season audio answer (or the
+        previous-season hint) and isn't locked, sorted; files missing from disk are left out."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.canonical_path FROM markers m JOIN files f ON f.id = m.file_id "
+                "WHERE m.type=? AND m.locked=0 AND f.missing_since IS NULL AND EXISTS "
+                "(SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN (?, ?)) ORDER BY f.canonical_path",
+                (MarkerType.INTRO.value, Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
@@ -1367,10 +1412,10 @@ class MarkerStore:
     def finish_fingerprint_checks(self, checked_up_to: int, gone: Iterable[FingerprintCheck]) -> int:
         """Record a sweep's checks in one transaction: drop the cache of the files found gone, and move the cursor.
 
-        A gone file's fingerprints, the matcher runs cached with them and its unreadable-member entries go. Its
-        ``files`` row stays, with the decisions, locked markers and publish records tied to it. A file whose row has
-        another identity than when it was listed is left alone: a new file came to that path, and its own run may
-        already have fingerprinted it.
+        A gone file's fingerprints, the matcher runs cached with them, its end-picture checks and its unreadable-member
+        entries go. Its ``files`` row stays, with the decisions, locked markers and publish records tied to it. A file
+        whose row has another identity than when it was listed is left alone: a new file came to that path, and its own
+        run may already have fingerprinted it.
 
         Args:
             checked_up_to: The id of the last file checked (``fingerprint_checks`` order); the next sweep starts after it.
@@ -1394,7 +1439,8 @@ class MarkerStore:
                     continue
                 dropped += 1
                 conn.execute("DELETE FROM fingerprints WHERE file_id=?", (check.file_id,))
-                conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (check.file_id, check.file_id))
+                for table in ("season_pairs", "season_end_pictures"):
+                    conn.execute(f"DELETE FROM {table} WHERE file_a=? OR file_b=?", (check.file_id, check.file_id))
                 for table in ("member_probe_failures", "member_fingerprint_failures"):
                     conn.execute(f"DELETE FROM {table} WHERE canonical_path=?", (check.canonical_path,))
         return dropped
@@ -1533,6 +1579,52 @@ class MarkerStore:
             conn.execute(
                 "INSERT OR REPLACE INTO season_pairs (file_a, file_b, matcher_version, runs_json) VALUES (?,?,?,?)",
                 (file_a, file_b, matcher_version, json.dumps([list(run) for run in runs])),
+            )
+        return True
+
+    def get_end_picture(self, key: EndPictureKey, check_version: int) -> CachedShare | None:
+        """A cached end-picture share between two files (season audio's check); None when not checked yet."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT share FROM season_end_pictures WHERE file_a=? AND file_b=? AND start_ms=? AND end_ms=? "
+                "AND offset_ms=? AND check_version=?",
+                (*key, check_version),
+            ).fetchone()
+        return None if r is None else CachedShare(r["share"])
+
+    def set_end_picture(
+        self,
+        key: EndPictureKey,
+        check_version: int,
+        share: float | None,
+        *,
+        identity_a: tuple[int, int],
+        identity_b: tuple[int, int],
+    ) -> bool:
+        """Cache an end-picture share between two files.
+
+        Args:
+            key: The files and the stretch compared.
+            check_version: The version the share is valid for.
+            share: The share of matching frames, None when no frames could be compared.
+            identity_a: ``(size, mtime_ns)`` of the first file as it was decoded.
+            identity_b: The same for the second file.
+
+        Returns:
+            False (nothing stored) when either file's row has another identity now: one of them was replaced while it
+            was decoded.
+        """
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT id, size, mtime_ns FROM files WHERE id IN (?, ?)", (key.file_a, key.file_b)
+            ).fetchall()
+            decoded = {key.file_a: tuple(identity_a), key.file_b: tuple(identity_b)}
+            if len(rows) != 2 or any((r["size"], r["mtime_ns"]) != decoded[r["id"]] for r in rows):
+                return False
+            conn.execute(
+                "INSERT OR REPLACE INTO season_end_pictures (file_a, file_b, start_ms, end_ms, offset_ms, "
+                "check_version, share) VALUES (?,?,?,?,?,?,?)",
+                (*key, check_version, share),
             )
         return True
 

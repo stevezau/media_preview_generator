@@ -7,8 +7,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from media_preview_generator.markers.audio import fingerprint
-from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
-from media_preview_generator.markers.store import SEASON_PAIR_WINDOW, MarkerStore, StoredFingerprint
+from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
+from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
+from media_preview_generator.markers.store import (
+    SEASON_PAIR_WINDOW,
+    CachedShare,
+    EndPictureKey,
+    MarkerStore,
+    StoredFingerprint,
+)
 
 
 @pytest.fixture
@@ -128,6 +135,100 @@ class TestSeasonPairs:
         a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
         _fp(store, a), _fp(store, b, window="credits")
         assert _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)]) is False
+
+
+def _share(store, a, b, share, *, start_ms=0, end_ms=30_000, offset_ms=500, version=1, identity_b=None):
+    key = EndPictureKey(a.id, b.id, start_ms, end_ms, offset_ms)
+    return store.set_end_picture(
+        key, version, share, identity_a=(a.size, a.mtime_ns), identity_b=identity_b or (b.size, b.mtime_ns)
+    )
+
+
+class TestEndPictures:
+    """Season audio's end-picture shares, cached per file pair and stretch."""
+
+    def test_round_trip_per_pair_stretch_offset_and_version(self, store):
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        assert _share(store, a, b, 0.8333333333333334) is True
+        key = EndPictureKey(a.id, b.id, 0, 30_000, 500)
+        assert store.get_end_picture(key, 1) == CachedShare(0.8333333333333334)
+        assert store.get_end_picture(key, 2) is None  # another way of comparing is measured again
+        for other in (key._replace(file_a=b.id, file_b=a.id), key._replace(end_ms=30_001), key._replace(offset_ms=0)):
+            assert store.get_end_picture(other, 1) is None
+
+    def test_no_frames_to_compare_is_a_stored_answer(self, store):
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _share(store, a, b, None)
+        assert store.get_end_picture(EndPictureKey(a.id, b.id, 0, 30_000, 500), 1) == CachedShare(None)
+
+    def test_refused_when_a_file_was_replaced_while_it_was_decoded(self, store):
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        assert _share(store, a, b, 1.0, identity_b=(b.size, b.mtime_ns + 1)) is False
+        assert store.get_end_picture(EndPictureKey(a.id, b.id, 0, 30_000, 500), 1) is None
+
+    @pytest.mark.parametrize("changed", ["a", "b"])
+    def test_a_changed_identity_clears_the_pairs_of_that_file_only(self, store, changed):
+        a, b, c = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv"), _file(store, "/m/c.mkv")
+        _share(store, a, b, 1.0), _share(store, b, c, 0.5), _share(store, a, c, 0.0)
+        _file(store, f"/m/{changed}.mkv", size=999, mtime=9)
+        cached = {
+            (x, y): store.get_end_picture(EndPictureKey(ids[0].id, ids[1].id, 0, 30_000, 500), 1)
+            for (x, y), ids in {("a", "b"): (a, b), ("b", "c"): (b, c), ("a", "c"): (a, c)}.items()
+        }
+        assert {pair for pair, share in cached.items() if share is not None} == {
+            pair for pair in cached if changed not in pair
+        }
+
+    def test_the_fingerprint_sweep_drops_a_gone_files_pairs(self, store):
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _fp(store, a), _fp(store, b)
+        _share(store, a, b, 1.0), _share(store, b, a, 1.0)
+        (check_a, _check_b) = store.fingerprint_checks(10)
+        store.finish_fingerprint_checks(check_a.file_id, [check_a])
+        assert store.get_end_picture(EndPictureKey(a.id, b.id, 0, 30_000, 500), 1) is None
+        assert store.get_end_picture(EndPictureKey(b.id, a.id, 0, 30_000, 500), 1) is None
+
+    def test_a_replaced_fingerprint_keeps_the_shares(self, store):
+        # A share compares pictures at given times; a fingerprint made another way changes neither.
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _fp(store, a), _fp(store, b)
+        _share(store, a, b, 1.0)
+        _fp(store, a, length_s=456.0)
+        assert store.get_end_picture(EndPictureKey(a.id, b.id, 0, 30_000, 500), 1) == CachedShare(1.0)
+
+
+class TestFilesWithSeasonAudioIntro:
+    """The files the decide-again job lists after settings v17: an unlocked intro decided with season audio."""
+
+    @pytest.mark.parametrize(
+        ("decided_by", "locked", "listed"),
+        [
+            (("season_audio",), False, True),
+            (("introdb", "season_audio"), False, True),
+            (("season_audio_previous", "theintrodb"), False, True),
+            (("chapters",), False, False),
+            (("season_audio",), True, False),
+        ],
+        ids=["alone", "with-an-online-source", "previous-season-hint", "other-sources", "locked"],
+    )
+    def test_listed_only_for_an_unlocked_intro_resting_on_season_audio(self, store, decided_by, locked, listed):
+        rec = _file(store, "/m/S01E01.mkv")
+        marker = Marker(MarkerType.INTRO, 10_000, 40_000, decided_by)
+        if locked:
+            store.lock_marker(rec.id, marker)
+        else:
+            decision = TypeDecision(MarkerType.INTRO, DecisionStatus.DECIDED, marker, None, "x")
+            store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="f")
+        assert store.files_with_season_audio_intro() == (["/m/S01E01.mkv"] if listed else [])
+
+    def test_credits_decided_with_it_and_files_missing_from_disk_are_not_listed(self, store):
+        credits_rec, gone = _file(store, "/m/S01E01.mkv"), _file(store, "/m/S01E02.mkv")
+        for rec, mtype in ((credits_rec, MarkerType.CREDITS), (gone, MarkerType.INTRO)):
+            marker = Marker(mtype, 10_000, 40_000, ("season_audio",))
+            decision = TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "x")
+            store.save_decisions(rec.id, {mtype: decision}, settings_fingerprint="f")
+        store.mark_missing(gone)
+        assert store.files_with_season_audio_intro() == []
 
 
 class TestRecordMember:

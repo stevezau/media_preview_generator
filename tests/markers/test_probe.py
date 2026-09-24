@@ -456,3 +456,48 @@ class TestVideoPackets:
                 video_packets("/m/a.mkv", ffprobe="ffprobe", packets=24)
             monkeypatch.setitem(probe._stuck, probe.FFPROBE_REAPER, 0)
         run.assert_not_called()
+
+
+class TestStreamStarts:
+    """The container's and the first audio stream's start times (season audio's end-picture check)."""
+
+    def test_reads_only_the_headers_of_the_first_audio_stream(self):
+        proc = _ok({"streams": [{"start_time": "0.976000"}], "format": {"start_time": "0.000000"}})
+        with patch(RUN, return_value=proc) as run:
+            starts = probe.stream_starts("/m/a.mkv", ffprobe="ffprobe", timeout_s=30.0)
+        assert run.call_args.args[0] == [
+            "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "format=start_time:stream=start_time",
+            "-of", "json", "/m/a.mkv",
+        ]  # fmt: skip
+        assert proc.communicate.call_args.kwargs == {"timeout": 30.0}
+        assert starts == probe.StreamStarts(0.0, 0.976)
+
+    @pytest.mark.parametrize(
+        ("payload", "offset"),
+        [
+            # An HBO Max release: the audio starts 0.976 s into the file, so a fingerprint's point 0 plays there.
+            ({"streams": [{"start_time": "0.976000"}], "format": {"start_time": "0.000000"}}, 0.976),
+            # The audio's start relative to the container's, not its raw timestamp.
+            ({"streams": [{"start_time": "2.000000"}], "format": {"start_time": "0.023000"}}, 1.977),
+            ({"streams": [{"start_time": "30001.5"}], "format": {"start_time": "30000.0"}}, 1.5),
+            # Audio that starts with (or before) the container: point 0 is the file's start.
+            ({"streams": [{"start_time": "-0.021000"}], "format": {"start_time": "0.000000"}}, 0.0),
+            ({"streams": [], "format": {"start_time": "0.000000"}}, 0.0),  # no audio stream
+            ({"streams": [{"start_time": "N/A"}], "format": {}}, 0.0),
+        ],
+        ids=["hmax-late-audio", "late-audio-in-a-late-container", "recording-base", "early-audio", "no-audio", "n/a"],
+    )
+    def test_the_audio_offset_is_where_the_first_audio_sample_plays(self, payload, offset):
+        with patch(RUN, return_value=_ok(payload)):
+            assert probe.stream_starts("/m/a.mkv", ffprobe="ffprobe").audio_offset_s == pytest.approx(offset)
+
+    @pytest.mark.parametrize("stdout", ["not json", "[]"])
+    def test_unreadable_output_is_a_probe_error(self, stdout):
+        with patch(RUN, return_value=_proc(stdout=stdout)), pytest.raises(ProbeError):
+            probe.stream_starts("/m/a.mkv", ffprobe="ffprobe")
+
+    def test_a_timeout_is_a_probe_timeout(self):
+        proc = _proc()
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("ffprobe", 30), ("", "")]
+        with patch(RUN, return_value=proc), pytest.raises(ProbeTimeoutError):
+            probe.stream_starts("/m/a.mkv", ffprobe="ffprobe", timeout_s=30.0)

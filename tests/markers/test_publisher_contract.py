@@ -2006,3 +2006,65 @@ class TestEmbyVersions:
         assert item.shown("2160p")[-1] == ("CreditsStart", CREDITS_AT - 19_000)
         assert item.shown("1080p") == EMBY_BOTH
         assert [post[0] for post in item.posts()] == ["a", "b", "b"]
+
+
+# --- Settings v17: season audio's guards change its answers; the decide-again job takes a lost intro off Plex ---
+
+LOGO_INTRO = Candidate(T.INTRO, 0, 9_400, Source.SEASON_AUDIO, confidence=1.0, origin="4/4")  # the A&E ident
+TITLE_HINT = Candidate(T.INTRO, 70_000, 82_000, Source.SEASON_AUDIO_PREVIOUS, confidence=1.0, origin="4/4")
+PLEX_OWN_CREDITS = ("credits", 1_282_000, 1_300_000)  # served from Plex's own row at 1_280_000-1_302_000
+
+
+def _season_audio(version: int, *candidates: Candidate) -> pipeline.LocalDetectorSpec:
+    """Season audio as the pipeline registers it, at ``version``, answering ``candidates``."""
+    return pipeline.LocalDetectorSpec(
+        Source.SEASON_AUDIO,
+        frozenset({T.INTRO}),
+        MagicMock(return_value=list(candidates)),
+        stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}),
+        version=version,
+    )
+
+
+class TestSeasonAudioAnswerLost:
+    """A file whose intro was decided with a season audio answer (ours on Plex) is decided again with version 5; when
+    the intro no longer holds, our intro rows and its ``pv:intros`` key come off Plex. Plex's own markers and a user's
+    locked intro are never touched."""
+
+    @pytest.mark.parametrize(
+        ("now", "status"),
+        [((), DecisionStatus.NO_EVIDENCE), ((TITLE_HINT,), DecisionStatus.NEEDS_REVIEW)],
+        ids=["no-intro-now", "needs-review-now"],
+    )
+    def test_the_intro_comes_off_plex_and_plexs_own_credits_stay(self, plex_item, now, status):
+        item = plex_item(versions=("1080p",))
+        path, name = item.paths["1080p"], os.path.basename(item.paths["1080p"])
+        _plex_native_credits(item, 1_280_000, 1_302_000)
+        assert _outcomes(item.run("1080p", detectors=(_season_audio(4, LOGO_INTRO),))) == ["published"]
+        assert item.served() == [("intro", 0, 9_400), PLEX_OWN_CREDITS]
+        assert item.part_types() == {name: ["pv:intros"]} and item.recorded() == [("intro", 0, 9_400)]
+        assert item.store.files_with_season_audio_intro() == [path]
+
+        out = item.run("1080p", detectors=(_season_audio(5, *now),))
+
+        rec = item.store.get_file(path)
+        assert item.store.get_decisions(rec.id)[T.INTRO].status is status
+        assert out.publisher_rows[0]["status"] == "markers_written"  # the removal is a write
+        assert item.served() == [PLEX_OWN_CREDITS]
+        assert item.part_types() == {name: []} and item.recorded() == []
+        assert item.store.files_with_season_audio_intro() == []
+        assert _outcomes(item.run("1080p", detectors=(_season_audio(5, *now),)))[0] != "published"
+        assert item.served() == [PLEX_OWN_CREDITS] and item.commits == 2
+
+    def test_a_locked_intro_stays_on_plex_whatever_season_audio_answers_now(self, plex_item):
+        item = plex_item(versions=("1080p",))
+        path, name = item.paths["1080p"], os.path.basename(item.paths["1080p"])
+        item.run("1080p", detectors=(_season_audio(4, LOGO_INTRO),))
+        rec = item.store.get_file(path)
+        item.store.lock_marker(rec.id, Marker(T.INTRO, 0, 9_400, (Source.USER.value,), locked=True))
+        assert item.store.files_with_season_audio_intro() == []  # the decide-again job doesn't list it
+
+        item.run("1080p", detectors=(_season_audio(5),))
+
+        assert item.served() == [("intro", 0, 9_400)] and item.part_types() == {name: ["pv:intros"]}
+        assert item.store.get_markers(rec.id)[T.INTRO].locked is True

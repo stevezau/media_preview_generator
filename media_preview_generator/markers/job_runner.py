@@ -853,15 +853,24 @@ def _stored_file_items(paths: set[str]) -> list[ProcessableItem]:
     ]
 
 
+def _files_to_decide_again(store: MarkerStore) -> set[str]:
+    return {
+        *store.files_in_review(),
+        *store.files_waiting_for_other_versions(),
+        *store.files_with_season_audio_intro(),
+    }
+
+
 def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] = ()) -> list[ProcessableItem]:
-    """The files in Needs review now and those whose last publish waits for their item's other versions.
+    """The files in Needs review now, those whose last publish waits for their item's other versions, and those whose
+    unlocked intro was decided with a season audio answer (settings v17: season audio's guards changed its answers).
 
     Given the servers' configs, those files that are missing from disk are marked first (``missing``), so a series
     deleted since isn't listed; any the check had no time for are marked when their run finds them missing.
     """
     if configs:
-        mark_missing_files(store, [*store.files_in_review(), *store.files_waiting_for_other_versions()], configs)
-    return _stored_file_items({*store.files_in_review(), *store.files_waiting_for_other_versions()})
+        mark_missing_files(store, sorted(_files_to_decide_again(store)), configs)
+    return _stored_file_items(_files_to_decide_again(store))
 
 
 def _items_for_online_recheck(ctx: PipelineContext, cancel_check: Callable[[], bool]) -> list[ProcessableItem]:

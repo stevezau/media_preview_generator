@@ -111,13 +111,14 @@ def test_file_hits_order_is_the_pair_loop_order():
         return [m.Run(1.0, 20.0, 2.0, 21.0)] if (x, y) != ("b", "c") else []
 
     hits = m.file_hits("b", ["a", "b", "c", "d"], runs_between)
-    assert hits == [(2.0, 21.0, "a"), (1.0, 20.0, "d")]
+    # Each hit carries where the run starts in its partner: side a for an earlier partner, side b for a later one.
+    assert hits == [m.Hit(2.0, 21.0, "a", 1.0), m.Hit(1.0, 20.0, "d", 2.0)]
     assert calls == [("a", "b"), ("b", "c"), ("b", "d")]
 
 
 def test_runs_over_120_s_are_dropped_from_hits():
     hits = m.file_hits("a", ["a", "b"], lambda x, y: [m.Run(0.0, 121.0, 0.0, 121.0), m.Run(0.0, 30.0, 5.0, 35.0)])
-    assert hits == [(0.0, 30.0, "b")]
+    assert hits == [m.Hit(0.0, 30.0, "b", 5.0)]
 
 
 def _random_points(rng: np.random.Generator, n: int) -> np.ndarray:
@@ -156,6 +157,51 @@ def _hard_season(seed: int, episodes: int, length: int = 1800) -> dict[str, np.n
             body[at : at + size] = block_values[int(rng.integers(0, len(block_values)))]
         out[_key(e)] = body
     return out
+
+
+@pytest.mark.parametrize("seed", range(16))
+def test_the_first_ranked_candidate_is_intro_for_s_answer(seed):
+    # The season step walks intro_candidates in order; its first entry must be what intro_for (the reference gate's
+    # answer) picks before the quorum, with the same median segment and support.
+    fps = _hard_season(seed, episodes=2 + seed % 5)
+    files = sorted(fps)
+    cache = {}
+
+    def runs_between(x, y):
+        if (x, y) not in cache:
+            cache[(x, y)] = m.pair_runs(fps[x], fps[y])
+        return cache[(x, y)]
+
+    for f in files:
+        hits = m.file_hits(f, files, runs_between)
+        ranked = m.intro_candidates(hits)
+        assert len(ranked) == len(hits)
+        answer = m.intro_for(hits, len(files) - 1)
+        if not ranked:
+            assert answer is None
+            continue
+        first = ranked[0].segment
+        expected = first if m.meets_quorum(first.support, len(files) - 1) else None
+        assert answer == expected
+
+
+def test_candidates_rank_by_preferred_length_then_support_then_length_ties_in_hit_order():
+    hits = [
+        m.Hit(10.0, 22.0, "b", 10.0),  # 12 s, one supporter
+        m.Hit(100.0, 116.0, "b", 100.0),  # 16 s: preferred length beats more support
+        m.Hit(10.5, 22.5, "c", 10.5),  # clusters with the first: 12 s, two supporters
+        m.Hit(300.0, 316.0, "c", 290.0),  # 16 s too, equal key to the second: after it in hit order
+    ]
+    ranked = m.intro_candidates(hits)
+    assert [(c.segment.start_s, c.segment.support) for c in ranked] == [(100.0, 1), (300.0, 1), (10.25, 2), (10.25, 2)]
+    # A cluster keeps its member hits, with where each starts in its partner.
+    assert ranked[1].members == (m.Hit(300.0, 316.0, "c", 290.0),)
+    assert set(ranked[2].members) == {hits[0], hits[2]}
+
+
+@pytest.mark.parametrize(("support", "others", "met"), [(1, 1, True), (1, 2, True), (1, 3, False), (2, 4, True)])
+def test_quorum_is_half_of_the_other_episodes_and_at_least_one(support, others, met):
+    assert m.meets_quorum(support, others) is met
 
 
 @pytest.mark.parametrize("seed", range(16))

@@ -9,12 +9,13 @@ import shutil
 import sys
 from pathlib import Path
 
+from media_preview_generator.markers.audio import end_picture
 from media_preview_generator.markers.audio.fingerprint import chromaprint_ffmpeg
 from media_preview_generator.markers.probe import ffprobe_path_for
 
 from .cache import FingerprintCache
 from .data import evidence_dir, load_v3_results
-from .intros import SPEC_V3, reproduce
+from .intros import SPEC_SEASON_STEP, SPEC_V3, DecodedEndPictures, reproduce, season_truth
 from .plex import export_sql
 from .report import DEFAULT_BASELINE, full_report
 
@@ -27,10 +28,19 @@ def _cache(args: argparse.Namespace) -> FingerprintCache:
     return FingerprintCache(root, ffmpeg=ffmpeg, ffprobe=ffprobe_path_for(ffmpeg))
 
 
+def _end_pictures(args: argparse.Namespace) -> DecodedEndPictures:
+    """The season step's end-picture check on the real files, decoded like a worker would (``--decode``)."""
+    ffmpeg = chromaprint_ffmpeg(args.ffmpeg) or "ffmpeg"
+    gpu = "NVIDIA" if args.decode == "gpu" else None
+    reader = end_picture.Reader(ffmpeg=ffmpeg, gpu=gpu, gpu_device_path=args.gpu_device if gpu else None)
+    return DecodedEndPictures(reader)
+
+
 def cmd_reproduce(args: argparse.Namespace) -> int:
     report = reproduce(
         load_v3_results(),
         points=_cache(args).points,
+        end_pictures=_end_pictures(args),
         with_reference=not args.no_reference,
         full_folder=args.full_folder,
     )
@@ -40,20 +50,45 @@ def cmd_reproduce(args: argparse.Namespace) -> int:
         "episodes": report.episodes,
         "tally": report.tally.as_dict(),
         "matcher_tally": report.matcher_tally.as_dict(),
-        "spec": dict(zip(("useful", "wrong", "missed"), SPEC_V3, strict=True)),
+        "spec": dict(zip(("useful", "wrong", "missed"), SPEC_SEASON_STEP, strict=True)),
+        "matcher_spec": dict(zip(("useful", "wrong", "missed"), SPEC_V3, strict=True)),
         # Without the reference that check never ran: 0 would read as "the port matches it".
         "port_vs_reference": "not checked" if args.no_reference else len(report.port_vs_reference),
         "drift": len(report.drift),
         "skipped_pairs": len(report.skipped_pairs),
         "silence_dropped": len(report.silence_dropped),
+        "guards_changed": len(report.guards_changed),
         "passed": report.passed,
     }
     print(json.dumps(summary, indent=2))
     if args.json:
         details = {"port_vs_reference": report.port_vs_reference, "drift": report.drift,
-                   "skipped_pairs": report.skipped_pairs, "silence_dropped": report.silence_dropped}  # fmt: skip
+                   "skipped_pairs": report.skipped_pairs, "silence_dropped": report.silence_dropped,
+                   "guards_changed": report.guards_changed}  # fmt: skip
         Path(args.json).write_text(json.dumps({**summary, "details": details}, indent=1, default=str))
     return 0 if report.passed else 1
+
+
+def cmd_season_truth(args: argparse.Namespace) -> int:
+    raw = json.loads(Path(args.truth).read_text())
+    truth = {path: (float(value[0]), float(value[1])) if value else None for path, value in raw.items()}
+    report = season_truth(truth, points=_cache(args).points, end_pictures=_end_pictures(args))
+    summary = {"files": len(truth), "tally": report.tally.as_dict(), "none_ok": report.none_ok}
+    passed = True
+    if args.expect:
+        useful, wrong = (int(n) for n in args.expect.split(","))
+        summary["expect"] = {"useful": useful, "wrong": wrong}
+        passed = report.tally.at_least(useful, wrong)
+    summary["passed"] = passed
+    print(json.dumps(summary, indent=2))
+    if args.json:
+        Path(args.json).write_text(json.dumps({**summary, "details": report.details}, indent=1, default=str))
+    return 0 if passed else 1
+
+
+def _decode_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--decode", choices=("gpu", "cpu"), default="gpu", help="the end-picture check's decode")
+    parser.add_argument("--gpu-device", default="cuda:0")
 
 
 def cmd_plex_sql(args: argparse.Namespace) -> int:
@@ -70,7 +105,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     baseline = Path(args.plex_baseline) if args.plex_baseline else evidence_dir() / DEFAULT_BASELINE
     summary, details, passed = full_report(
         fingerprints, ffprobe=ffprobe_path_for(chromaprint_ffmpeg(args.ffmpeg)), baseline_path=baseline,
-        full_folder=args.full_folder,
+        full_folder=args.full_folder, end_pictures=_end_pictures(args),
     )  # fmt: skip
     print(json.dumps(summary, indent=2))
     if args.json:
@@ -134,7 +169,16 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument(
         "--full-folder", action="store_true", help="match each whole season folder (the app) instead of the eval lists"
     )
+    _decode_arguments(rep)
     rep.set_defaults(func=cmd_reproduce)
+    truth = sub.add_parser("season-truth", help="the app's season step on an intro truth file (e.g. the Accused set)")
+    truth.add_argument("--truth", required=True, help='JSON {"<file>": [start_s, end_s] or null} (local-only)')
+    truth.add_argument("--expect", help="useful,wrong: exit 1 below that many useful or above that many wrong")
+    truth.add_argument("--ffmpeg")
+    truth.add_argument("--cache")
+    truth.add_argument("--json", help="write details (local-only: holds file paths)")
+    _decode_arguments(truth)
+    truth.set_defaults(func=cmd_season_truth)
     sql = sub.add_parser("plex-sql", help="read-only SQL exporting prod Plex's markers for the eval files")
     sql.set_defaults(func=cmd_plex_sql)
     full = sub.add_parser("report", help="decisions vs Plex's own markers, online cases, credits chapter rules")
@@ -145,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     full.add_argument(
         "--full-folder", action="store_true", help="match each whole season folder (the app) instead of the eval lists"
     )
+    _decode_arguments(full)
     full.set_defaults(func=cmd_report)
     text = sub.add_parser("credits-text", help="credit text (rule J) on the 80- and 205-file credits sets vs Plex")
     text.add_argument("--decode", choices=("gpu", "cpu"), default="gpu")

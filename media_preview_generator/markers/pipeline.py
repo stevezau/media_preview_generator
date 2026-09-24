@@ -321,8 +321,9 @@ class PipelineContext:
         season_recheck: A Season job: a file whose decisions didn't change logs no lines of its own; the job ends with
             one line per season instead (``summary_lines``).
         recheck_label: How those per-season lines name the job (a TheIntroDB recheck logs them too).
-        decide_again: The one-off job after settings v16 that decides the files in Needs review (and those waiting for
-            their item's other versions) again: like a Season job, a file whose decisions didn't change logs no lines
+        decide_again: The one-off job after settings v16 and v17 that decides the files in Needs review (and those
+            waiting for their item's other versions, and those whose intro rests on season audio) again: like a Season
+            job, a file whose decisions didn't change logs no lines
             of its own, and the job ends with one line for them (``summary_lines``). It runs files as any job does.
         online_recheck: The weekly job that asks the online databases again about files they had no entry for
             (``online_recheck_files``): only a file an online database now has an entry for, or whose decisions
@@ -823,7 +824,7 @@ def build_context(
         recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
         season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
         recheck_label: Which of the two (``PipelineContext.recheck_label``).
-        decide_again: The decide-again job after settings v16 (``PipelineContext.decide_again``).
+        decide_again: The decide-again job after settings v16 and v17 (``PipelineContext.decide_again``).
         online_recheck: The weekly online re-check (``PipelineContext.online_recheck``).
 
     Returns:
