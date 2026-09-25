@@ -11,20 +11,23 @@ re-cut in later episodes). A partner with certainly no frames to compare (no vid
 none passes; a file ffprobe or ffmpeg couldn't read is never a pass (``ReadFailedError``).
 
 Decoded with the worker's GPU through the credit text decode (``credits.frames``: its hwaccel arguments, its one
-nearest-pixel software scaler, time limit, cancel and stall handling), 320×180 luma averaged down 5×5. That scaler
-gives the same frames on every vendor (measured byte for byte on NVIDIA and the CPU here, on Intel for credit text;
-AMD untested), so partners decoded by different workers' GPUs can't change the answer.
+nearest-pixel software scaler, time limit, cancel, pause and stall handling, and the worker's ``ffmpeg_threads``),
+320×180 luma averaged down 5×5. That scaler gives the same frames on every vendor (measured byte for byte on NVIDIA
+and the CPU for this check, on Intel for credit text; AMD untested), so partners decoded by different workers' GPUs can't change the answer. A stretch the
+GPU can't decode is decoded again on the CPU on the spot, shown on the worker's row as previews' CPU fallback is.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Sequence
 
 import numpy as np
 from loguru import logger
 
 from ..credits import frames
+from ..freeze import Freeze
 from ..probe import ProbeError, ProbeStalledError, StreamStarts, ffprobe_path_for, stream_starts
 from .matcher import Hit
 
@@ -62,6 +65,10 @@ _PAD_S = 1.0 / FPS
 _NEAREST_S = 0.5 / FPS + 0.05
 _BLOCK_W = frames.FRAME_W // FRAME_W
 _BLOCK_H = frames.FRAME_H // FRAME_H
+# The GPUs (type, device) whose CPU fallback in this check has been warned about: one warning per GPU for the process,
+# since the check decodes a few seconds of many files and a format the GPU can't decode would warn for each one.
+_WARNED_DEVICES: set[tuple[str, str | None]] = set()
+_WARNED_LOCK = threading.Lock()
 
 Frames = list[tuple[float, np.ndarray]]
 
@@ -190,8 +197,15 @@ def decode_frames(
     container_start_s: float,
     cancel_check: Callable[[], bool] | None = None,
     download_format: str | None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
 ) -> Frames:
     """Decode a stretch at 2 fps, on the GPU when the worker has one and on the CPU when that fails.
+
+    A CPU fallback calls ``fallback_callback`` every time (the worker's row shows it, as it does previews' fallback)
+    and logs a warning once per GPU for the process (later ones at DEBUG). Only the stretch is decoded again, not the
+    whole file: the season step before it would otherwise run again.
 
     Args:
         path: The media file (read only).
@@ -204,6 +218,10 @@ def decode_frames(
         cancel_check: True once the job is cancelled.
         download_format: The format the stream's decoded GPU surfaces are downloaded in (``frames.DOWNLOAD_FORMATS``
             of its pixel format), or None: ffmpeg downloads each frame itself.
+        pause_check: True while everything is paused (``frames.run_decode``).
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` for the GPU decode (``frames.decode_command``); the
+            CPU fallback runs with ffmpeg's own thread count, as previews' does.
+        fallback_callback: Told why, when the GPU decode fell back to the CPU.
 
     Returns:
         (seconds from the start of the file, 64×36 grey frame) per decoded frame.
@@ -216,12 +234,38 @@ def decode_frames(
     name = os.path.basename(path)
     try:
         return _decode(path, start_s, length_s, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check,
-                       download_format)  # fmt: skip
+                       download_format, pause_check, ffmpeg_threads)  # fmt: skip
     except frames.GpuDecodeError as exc:
         if gpu is None:
             raise
+        _note_cpu_fallback(gpu, gpu_device_path, name, exc, fallback_callback)
+    return _decode(path, start_s, length_s, ffmpeg, None, None, container_start_s, cancel_check, download_format,
+                   pause_check, None)  # fmt: skip
+
+
+def _note_cpu_fallback(
+    gpu: str,
+    gpu_device_path: str | None,
+    name: str,
+    exc: Exception,
+    fallback_callback: Callable[[str], None] | None,
+) -> None:
+    """Show a GPU decode's fallback to the CPU: on the worker's row every time, as a warning once per GPU."""
+    reason = f"The end-picture check couldn't decode {name} on the GPU ({exc}); decoded it on the CPU"
+    device = (gpu, gpu_device_path)
+    with _WARNED_LOCK:
+        first = device not in _WARNED_DEVICES
+        _WARNED_DEVICES.add(device)
+    if first:
+        logger.warning(
+            "The intro end-picture check couldn't decode {} on {} {} and decoded it on the CPU instead: {}. Later CPU "
+            "fallbacks of this check on this GPU are logged at DEBUG.",
+            name, gpu, gpu_device_path or "", exc,
+        )  # fmt: skip
+    else:
         logger.debug("The end-picture check decodes {} on the CPU: {}", name, exc)
-    return _decode(path, start_s, length_s, ffmpeg, None, None, container_start_s, cancel_check, download_format)
+    if fallback_callback is not None:
+        fallback_callback(reason)
 
 
 def _decode(
@@ -234,10 +278,12 @@ def _decode(
     container_start_s: float,
     cancel_check: Callable[[], bool] | None,
     download_format: str | None,
+    pause_check: Callable[[], bool] | Freeze | None,
+    ffmpeg_threads: int | None,
 ) -> Frames:
     command, hw_active = frames.decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=False, fps=FPS, gpu=gpu,
-        gpu_device_path=gpu_device_path, download_format=download_format,
+        gpu_device_path=gpu_device_path, download_format=download_format, ffmpeg_threads=ffmpeg_threads,
     )  # fmt: skip
     planes: list[np.ndarray] = []
 
@@ -246,7 +292,8 @@ def _decode(
         return [()] * len(chunk)
 
     rows = frames.run_decode(command, hw_active=hw_active, detect_boxes=keep, pts_offset_s=container_start_s,
-                             cancel_check=cancel_check, timeout_s=DECODE_TIMEOUT_S, name=os.path.basename(path))  # fmt: skip
+                             cancel_check=cancel_check, pause_check=pause_check, timeout_s=DECODE_TIMEOUT_S,
+                             name=os.path.basename(path))  # fmt: skip
     decoded = np.concatenate(planes) if planes else np.zeros((0, FRAME_H, FRAME_W), dtype=np.float32)
     if len(rows) != len(decoded):
         raise frames.FrameDecodeError(f"ffmpeg gave {len(decoded) - len(rows)} frames of {path} no timestamp")
@@ -275,6 +322,9 @@ class Reader:
         gpu: str | None = None,
         gpu_device_path: str | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        pause_check: Callable[[], bool] | Freeze | None = None,
+        ffmpeg_threads: int | None = None,
+        fallback_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Set up the reader.
 
@@ -283,9 +333,14 @@ class Reader:
             gpu: The worker's GPU type, None on the CPU.
             gpu_device_path: The worker's device.
             cancel_check: True once the job is cancelled.
+            pause_check: True while everything is paused (:func:`decode_frames`).
+            ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (:func:`decode_frames`).
+            fallback_callback: Told why when a GPU decode fell back to the CPU (:func:`decode_frames`).
         """
         self._ffmpeg, self._gpu, self._gpu_device_path = ffmpeg, gpu, gpu_device_path
         self._cancel_check = cancel_check
+        self._worker = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
+                        "fallback_callback": fallback_callback}  # fmt: skip
         self._starts: dict[str, StreamStarts] = {}
         self._frames: dict[tuple[str, float, float], Frames] = {}
         self._failed: dict[str, ReadFailedError] = {}
@@ -350,6 +405,7 @@ class Reader:
                     container_start_s=starts.container_s,
                     cancel_check=self._cancel_check,
                     download_format=frames.DOWNLOAD_FORMATS.get(starts.pix_fmt or ""),
+                    **self._worker,
                 )
             except frames.DecodeCancelledError as exc:
                 raise CheckUnavailableError("cancelled") from exc

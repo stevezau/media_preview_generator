@@ -106,6 +106,42 @@ def is_live_retry_chain(config: dict | None) -> bool:
     return bool(cfg.get("is_retry_chain")) and cfg.get("last_outcome") in _CHAIN_LIVE_OUTCOMES
 
 
+# Config key: the last time a job was seen waiting for a gate slot. Both runners write it as they start waiting and
+# refresh it while they wait (``JobManager.note_slot_wait``), so a restart ages a job queued behind a long scan by the
+# downtime only (``JobManager.requeue_interrupted_jobs``).
+SLOT_WAIT_SINCE = "slot_wait_since"
+# How often a waiting job's ``SLOT_WAIT_SINCE`` is refreshed: a write to jobs.db per job per minute at most, and far
+# inside the revival window's 5-minute minimum.
+SLOT_WAIT_HEARTBEAT_S = 60.0
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _parse_utc(raw: object) -> datetime | None:
+    """An ISO-8601 time from a job's config as UTC, or None when it is missing or can't be read."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+def _due_time(config: dict | None) -> datetime | None:
+    """The moment a job that hasn't started could first run: its due time (``retry_not_before`` of an Intro & Credits
+    job queued to wait, ``scheduled_at`` of a preview retry).
+
+    Returns:
+        That time (UTC), or None when the job has none that can be read.
+    """
+    cfg = config or {}
+    times = [when for key in ("retry_not_before", "scheduled_at") if (when := _parse_utc(cfg.get(key)))]
+    return max(times, default=None)
+
+
 def _synthesize_retry_chain_log_lines(job: "Job") -> list[str]:
     """Render a retry-chain Job's state as readable log-style lines.
 
@@ -1238,8 +1274,9 @@ class JobManager:
 
         Args:
             max_age_minutes: Only revive jobs whose last activity
-                (``started_at``, falling back to ``created_at``) is
-                within this many minutes of the current time.  Older
+                (``started_at``, falling back to ``created_at``, or to
+                the due time of a job queued to wait when that is later)
+                is within this many minutes of the current time.  Older
                 jobs are considered stale and left as-is.
                 Range: 5 – 1440 (1 day).
 
@@ -1264,6 +1301,14 @@ class JobManager:
                 ref_time = datetime.fromisoformat(ref_str.replace("Z", "+00:00"))
                 if ref_time.tzinfo is None:
                     ref_time = ref_time.replace(tzinfo=UTC)
+                if not job.started_at:
+                    # A job that never started is only as old as the moment it could first run: its due time (a
+                    # TheIntroDB recheck waits for the next UTC day) or its preview job's end (a follow-up waits for
+                    # that first).
+                    ref_time = max(ref_time, _due_time(job.config) or ref_time, self._followed_job_end(job) or ref_time)
+                # A job waiting for a gate slot is as old as the last time it was seen waiting (the runners refresh it
+                # while they wait), so a job queued behind a long scan is aged by the downtime only.
+                ref_time = max(ref_time, _parse_utc((job.config or {}).get(SLOT_WAIT_SINCE)) or ref_time)
                 if ref_time < cutoff:
                     logger.debug("Skipping revive of job {} — too old (ref={})", job.id[:8], ref_str)
                     not_revived.append(job)
@@ -1273,23 +1318,8 @@ class JobManager:
                 not_revived.append(job)
                 continue
 
-            # Revive the job in place — same ID, same created_at
-            with self._lock:
-                job.status = JobStatus.PENDING
-                job.error = None
-                job.completed_at = None
-                # An Intro & Credits job's own pause is the user's (or its schedule's stop time's) intent and
-                # outlives the restart like the global pause does; its runner re-applies it. The preview runner
-                # can't hold a revived job paused, so a preview job's pause is dropped as before.
-                job.paused = job.paused and job.kind == JOB_KIND_INTRO_CREDITS
-                job.progress = JobProgress()
-
-            self.add_log(
-                job.id,
-                "INFO - Job revived after server restart; processing will resume.",
-            )
+            self._revive_interrupted(job)
             revived.append(job)
-            logger.info("Revived interrupted job {} ({})", job.id[:8], job.library_name)
 
         if revived:
             with self._lock:
@@ -1299,6 +1329,80 @@ class JobManager:
         # Revived jobs leave the list; the ones left behind stay for fail_unrevived_interrupted_jobs.
         self._interrupted_jobs = not_revived
         return revived
+
+    def _followed_job_end(self, job: Job) -> datetime | None:
+        """When the preview job a follow-up waits for (``follows_job_id``) finished, or None when it hasn't or is gone."""
+        followed_id = (job.config or {}).get("follows_job_id")
+        followed = self._jobs.get(followed_id) if isinstance(followed_id, str) else None
+        return _parse_utc(followed.completed_at) if followed is not None else None
+
+    def _revive_interrupted(self, job: Job) -> None:
+        """Restore one interrupted job to PENDING in place (same ID, same ``created_at``); the caller persists it."""
+        with self._lock:
+            job.status = JobStatus.PENDING
+            job.error = None
+            job.completed_at = None
+            # An Intro & Credits job's own pause is the user's (or its schedule's stop time's) intent and
+            # outlives the restart like the global pause does; its runner re-applies it. The preview runner
+            # can't hold a revived job paused, so a preview job's pause is dropped as before.
+            job.paused = job.paused and job.kind == JOB_KIND_INTRO_CREDITS
+            job.progress = JobProgress()
+
+        self.add_log(
+            job.id,
+            "INFO - Job revived after server restart; processing will resume.",
+        )
+        logger.info("Revived interrupted job {} ({})", job.id[:8], job.library_name)
+
+    def note_slot_wait(self, job_id: str) -> None:
+        """Record that a job is waiting for a gate slot now (``SLOT_WAIT_SINCE``), at most once a
+        ``SLOT_WAIT_HEARTBEAT_S``. Both runners call it as they start waiting and on every wait tick.
+
+        Args:
+            job_id: The waiting job.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return
+        now = _now()
+        last = _parse_utc((job.config or {}).get(SLOT_WAIT_SINCE))
+        if last is not None and 0 <= (now - last).total_seconds() < SLOT_WAIT_HEARTBEAT_S:
+            return
+        self.merge_job_config(job_id, {SLOT_WAIT_SINCE: now.isoformat()})
+
+    def unrevived_interrupted_jobs(self) -> list[Job]:
+        """The interrupted jobs no restart revived yet (:meth:`requeue_interrupted_jobs` leaves them behind)."""
+        return list(self._interrupted_jobs)
+
+    def requeue_interrupted_followers(self, kept_job_ids: set[str]) -> list[Job]:
+        """Revive the interrupted jobs left behind by :meth:`requeue_interrupted_jobs` that follow a job the restart
+        kept (``follows_job_id``: an Intro & Credits follow-up waiting for its preview job), whatever their age.
+
+        A follow-up only waits for its preview job, so it is as old as that job: queued when the preview job was first
+        started, it can be older than the preview job's ``started_at`` (a long wait for a slot) or than a pause that
+        holds the preview job across the restart. Failed as too old, its files would get previews and no markers.
+
+        Args:
+            kept_job_ids: The jobs the restart revived or holds PENDING.
+
+        Returns:
+            The revived followers, ready to be started.
+        """
+        followers = [
+            job
+            for job in self._interrupted_jobs
+            if job.status in (JobStatus.PENDING, JobStatus.FAILED)
+            and (job.config or {}).get("follows_job_id") in kept_job_ids
+        ]
+        if not followers:
+            return []
+        for job in followers:
+            self._revive_interrupted(job)
+        with self._lock:
+            for job in followers:
+                self._persist_job(job)
+        self._interrupted_jobs = [job for job in self._interrupted_jobs if job not in followers]
+        return followers
 
     def fail_unrevived_interrupted_jobs(self, kind: str) -> list[Job]:
         """Mark interrupted jobs of ``kind`` that no restart revived as failed.
@@ -2361,7 +2465,7 @@ class JobManager:
             outcome: Outcome key string: a ProcessingResult value (e.g. "generated", "failed") or a job kind's
                 outcome key (e.g. "markers_published").
             reason: Human-readable detail (skip/failure reason).
-            worker: Worker display name (e.g. "GPU Worker 1 (NVIDIA TITAN RTX)").
+            worker: Worker display name (e.g. "GPU Worker 1 (NVIDIA RTX 4090)").
             servers: Per-publisher attribution list (D9). Each entry is the
                 flat dict shape Worker._capture_publishers builds. The Jobs
                 UI uses this to show per-server pills on each file row

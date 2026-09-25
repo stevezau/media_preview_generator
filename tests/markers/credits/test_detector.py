@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import math
 import os
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from media_preview_generator.markers.credits import detector, frames, rule_j
+from media_preview_generator.markers.credits import decode_check, detector, frames, rule_j
 from media_preview_generator.markers.credits.textdet_helper import (
     TextDetShuttingDownError,
     TextDetUnavailableError,
 )
+from media_preview_generator.markers.freeze import Freeze
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
 from media_preview_generator.markers.pipeline import DetectorAnswer, DetectorUnavailableError
 from media_preview_generator.markers.probe import MediaProbe, ProbeStalledError, ProbeTimeoutError
@@ -61,8 +64,10 @@ class Decodes:
         self.answers = list(answers)
         self.calls: list[dict] = []
         self.given: list = []
+        self.worker: list[dict] = []  # each decode's pause check and threads, kept apart from its window
 
     def __call__(self, path, **kwargs):
+        self.worker.append({key: kwargs.pop(key, None) for key in ("pause_check", "ffmpeg_threads")})
         self.calls.append({"path": path, **kwargs})
         if self.answers or kwargs.get("scale") != 2:
             answer = self.answers.pop(0)
@@ -127,6 +132,27 @@ class TestFindCredits:
         assert phases == ["Reading the credits…"]
         assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
         assert probes.thinning_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
+
+    @pytest.mark.parametrize(("gpu", "device", "threads"), [("NVIDIA", "cuda:0", 3), (None, None, None)],
+                             ids=["gpu", "cpu"])  # fmt: skip
+    def test_the_pause_and_the_workers_threads_reach_every_decode_of_both_readings(
+        self, monkeypatch, probes, gpu, device, threads
+    ):
+        # One freeze for the file's every decode, so the time it holds adds up across them (the look-back's limit).
+        paused = threading.Event()
+        decodes = Decodes(ROLL, FINE)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                              detect_boxes=count, gpu=gpu, gpu_device_path=device, pause_check=paused.is_set,
+                              ffmpeg_threads=threads)  # fmt: skip
+        assert len(decodes.worker) >= 2  # the tail and its refine window at least
+        freezes = {id(call["pause_check"]) for call in decodes.worker}
+        assert len(freezes) == 1
+        freeze = decodes.worker[0]["pause_check"]
+        assert isinstance(freeze, Freeze) and not freeze()
+        paused.set()
+        assert freeze()
+        assert {call["ffmpeg_threads"] for call in decodes.worker} == {threads}
 
     @pytest.mark.parametrize(("gpu", "device"), [("NVIDIA", "cuda:0"), (None, None)], ids=["gpu", "cpu"])
     def test_a_roll_too_small_to_box_at_320x180_is_found_at_640x360(self, monkeypatch, probes, gpu, device):
@@ -226,6 +252,18 @@ class TestFindCredits:
         assert 'Stored "nothing found" for the credits of Movie (2020).mkv: reading its tail at 640x360 failed' in (
             loguru_caplog.text
         )
+
+    def test_a_cancel_during_the_larger_read_propagates_and_is_never_nothing_found(self, monkeypatch, probes):
+        # A job cancelled while its 640x360 request waited for a CPU helper: the file wasn't read, so neither the
+        # 320x180 "nothing found" nor anything else may be kept for it.
+        from media_preview_generator.markers.credits.textdet_helper import TextDetCancelledError
+
+        decodes = Decodes(STORY, TextDetCancelledError("cancelled"))
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        with pytest.raises(TextDetCancelledError):
+            detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                  detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert [call["scale"] for call in decodes.calls] == [1, 2]
 
     # A verdict card on black at 5600-5617 s (boxed at both sizes), story, then from 5700 s a roll over footage whose
     # names box only at 640x360: three small boxes a frame, to the end of the file. At 320x180 the card is the last run,
@@ -1302,12 +1340,17 @@ class FileDecodes:
         self.roll_from, self.duration_s, self.keyframe_s = roll_from, duration_s, keyframe_s
         self.no_keyframes, self.timeouts, self.gpu_fails = no_keyframes, timeouts, gpu_fails
         self.calls: list[dict] = []
+        self.worker: list[dict] = []  # each decode's pause check and threads, kept apart from its window
+        self.on_decode = None  # called with each keyframe window's start and its pause check
 
     def row(self, t: float) -> tuple:
         return (t, 3, 10.0) if t >= self.roll_from else (t, 0, 120.0)
 
     def __call__(self, path, *, start_s, length_s, keyframes_only, **kwargs):
+        self.worker.append({key: kwargs.pop(key, None) for key in ("pause_check", "ffmpeg_threads")})
         self.calls.append({"start_s": start_s, "length_s": length_s, "keyframes_only": keyframes_only, **kwargs})
+        if keyframes_only and self.on_decode is not None:
+            self.on_decode(start_s, self.worker[-1]["pause_check"])
         name = os.path.basename(path)
         if keyframes_only and start_s in self.timeouts:
             raise frames.DecodeTimeoutError(f"decoding {name} timed out")
@@ -1473,6 +1516,30 @@ class TestStepsBeforeTheTail:
             self._find(monkeypatch, decodes)
         assert decodes.windows() == [(2190.0, None), (2070.0, 120.0)]
 
+    def test_time_paused_during_a_step_doesnt_use_up_the_look_backs_time(self, monkeypatch, probes):
+        # Everything is paused for longer than the whole look-back's limit while the first step decodes (its ffmpeg is
+        # frozen, frames.run_decode): the second step still gets the time the pause didn't use.
+        monkeypatch.setattr(detector, "LOOK_BACK_TIMEOUT_S", 1.0)
+        paused = threading.Event()
+        decodes = FileDecodes(1990.0)
+
+        def pause_during_the_first_step(start_s, freeze):
+            if start_s == 2070.0:
+                paused.set()
+                threading.Timer(1.5, paused.clear).start()
+                freeze.hold()  # what run_decode does while the step's ffmpeg is frozen
+
+        decodes.on_decode = pause_during_the_first_step
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        started = time.monotonic()
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=decodes.duration_s * 1000, is_episode=True,
+                                       ffmpeg="/ff", detect_boxes=count, gpu=None, gpu_device_path=None,
+                                       earliest_start_s=0.75 * decodes.duration_s, pause_check=paused.is_set)  # fmt: skip
+        assert time.monotonic() - started >= 1.4
+        assert (result.start_s, result.end_s) == (1990.0, None)
+        assert decodes.windows() == [(2190.0, None), (2070.0, 120.0), (1950.0, 120.0), (1970.0, 21.0)]
+        assert 0 < decodes.calls[2]["timeout_s"] <= 1.0
+
     def test_a_later_step_that_runs_out_of_time_is_a_timeout(self, monkeypatch, probes):
         decodes = FileDecodes(1990.0, timeouts=(1950.0,))
         with pytest.raises(frames.DecodeTimeoutError):
@@ -1526,9 +1593,13 @@ class TestStepsBeforeTheTail:
 class FakePool:
     def __init__(self):
         self.calls = []
+        self.gpu_workers = []
+        self.hooks = []
 
-    def detect_boxes(self, planes, *, gpu, gpu_device_path):
+    def detect_boxes(self, planes, *, gpu, gpu_device_path, gpu_worker=None, on_cpu=None, cancel_check=None):
         self.calls.append((gpu, gpu_device_path))
+        self.gpu_workers.append(gpu_worker)
+        self.hooks.append((on_cpu, cancel_check))
         return [()] * len(planes)
 
 
@@ -1581,8 +1652,8 @@ class TestDetect:
         assert (call["path"], call["duration_ms"], call["is_episode"], call["ffmpeg"], call["gpu"], call["gpu_device_path"]) == (
             MOVIE.canonical_path, 6_000_000, False, "/usr/lib/jellyfin-ffmpeg/ffmpeg", "NVIDIA", "cuda:0")  # fmt: skip
         assert call["cancel_check"] is cancel
-        # The app runs the process's GPU decode check (a diagnostic; find_credits alone doesn't run it).
-        assert call["check_gpu_decode"] is True
+        # The GPU decode check is no worker's work: it runs in the background when a job builds the pool.
+        assert "check_gpu_decode" not in call
         # Call it rather than checking it is set: a phase callback wired to something else would leave the worker row
         # showing the pipeline's last text for the whole decode. Equality, not identity — ``phase.append`` is a fresh
         # bound method on every access.
@@ -1656,6 +1727,16 @@ class TestDetect:
         assert detector.detect_credits_text(rec, ctx=ctx) == DetectorAnswer((), "steps back to the earliest kept start")
         assert seen[0]["is_episode"] is episode
 
+    def test_the_pause_and_the_workers_threads_are_handed_on(self, monkeypatch, pool, ctx):
+        seen = self._find(monkeypatch, None)
+
+        def paused():
+            return False
+
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", pause_check=paused,
+                                     ffmpeg_threads=3, fallback_callback=lambda _reason: None)  # fmt: skip
+        assert seen[0]["pause_check"] is paused and seen[0]["ffmpeg_threads"] == 3
+
     def test_a_gpu_decode_failure_is_a_codec_error_for_the_workers_cpu_rerun(self, monkeypatch, pool, ctx):
         self._find(monkeypatch, frames.GpuDecodeError("the GPU decoded no frames from Movie (2020).mkv"))
         with pytest.raises(CodecNotSupportedError, match="no frames"):
@@ -1674,7 +1755,7 @@ class TestDetect:
                 raise error
             return ((0.0, "the CPU's pixels" if matches or gpu is None else "other pixels"),)
 
-        monkeypatch.setattr(detector.decode_check, "_checks", detector.decode_check.DecodeChecks(decode=decode_clip))
+        monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=decode_clip))
         return checked
 
     @staticmethod
@@ -1689,24 +1770,18 @@ class TestDetect:
         monkeypatch.setattr(detector.frames, "run_decode", run_decode)
         return commands
 
-    @pytest.mark.parametrize("matches", [True, False], ids=["gpu-matches-the-reference", "gpu-differs"])
     @pytest.mark.parametrize("pix_fmt_surfaces", [DOWNLOAD, None], ids=["4:2:0-surfaces", "ffmpeg-downloads"])
-    def test_the_files_decodes_run_on_the_workers_gpu_whatever_the_check_finds(
-        self, monkeypatch, pool, ctx, probes, matches, pix_fmt_surfaces, loguru_caplog
+    def test_the_files_decodes_run_on_the_workers_gpu_with_its_threads_and_no_decode_check(
+        self, monkeypatch, pool, ctx, probes, pix_fmt_surfaces
     ):
-        # The owner's worker model: a GPU worker decodes on its GPU, every codec included (MPEG-2 and MPEG-4 Part 2,
-        # which a GPU may decode a level or two off, as much as H.264). The check only says what it found.
+        # The worker model: a GPU worker decodes on its GPU, every codec included, with its GPU's ffmpeg_threads. The
+        # decode check is a diagnostic run in the background when a job builds the pool (decode_check.start_checks),
+        # never on a worker.
         probes.thinning = frames.KeyframeThinning(None, False, pix_fmt_surfaces)
-        check_decodes = self._checks(monkeypatch, matches=matches)
+        check_decodes = self._checks(monkeypatch, matches=False)
         commands = self._commands(monkeypatch)
-        cancel = lambda: False  # noqa: E731
-        detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", cancel_check=cancel)
-        # The check ran on the worker's own device, through the job's ffmpeg and its cancel.
-        assert {(c["gpu"], c["device"]) for c in check_decodes} == {(None, None), ("NVIDIA", "cuda:0")}
-        assert {c["ffmpeg"] for c in check_decodes} == {"/usr/lib/jellyfin-ffmpeg/ffmpeg"}
-        assert all(c["cancel_check"] is cancel for c in check_decodes)
-        warned = [m for m in loguru_caplog.messages if "doesn't match the reference decode" in m]
-        assert len(warned) == (0 if matches else 1)
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", ffmpeg_threads=3)
+        assert check_decodes == []
         hwaccel = ["-hwaccel", "cuda", "-hwaccel_device", "0"]
         if pix_fmt_surfaces:
             hwaccel += ["-hwaccel_output_format", "cuda"]
@@ -1716,25 +1791,83 @@ class TestDetect:
         # The tail's keyframe pass, on the GPU either way.
         (call,) = commands
         assert call["command"] == [
-            "/usr/lib/jellyfin-ffmpeg/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2",
-            *hwaccel, "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE.canonical_path, "-an", "-sn",
-            "-dn", "-fps_mode", "passthrough", "-vf", video_filter, "-f", "rawvideo", "-",
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info",
+            "-threads", "3", "-filter_threads", "3", *hwaccel, "-skip_frame", "nokey", "-ss", "5100.000", "-copyts",
+            "-i", MOVIE.canonical_path, "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", video_filter,
+            "-f", "rawvideo", "-",
         ]  # fmt: skip
         assert call["hw_active"] is True
         # Text detection is not the decode's: it stays on the worker's GPU (its own self-test decides it).
         assert pool.calls == [("NVIDIA", "cuda:0")]
 
-    def test_every_file_on_a_device_shares_the_processs_one_check(self, monkeypatch, pool, ctx, probes):
-        probes.thinning = frames.KeyframeThinning(None, False, "p010le")
-        check_decodes = self._checks(monkeypatch)
+    @pytest.mark.parametrize(
+        ("gpu", "gpu_worker", "asks_as_gpu_worker"),
+        [
+            ("NVIDIA", True, True),
+            (None, True, True),  # a GPU worker's CPU rerun after its GPU decode failed
+            (None, False, False),  # a CPU worker
+            ("NVIDIA", False, True),  # a caller that didn't say: a GPU is a GPU worker's
+        ],
+        ids=["gpu-worker", "gpu-workers-cpu-rerun", "cpu-worker", "gpu-unsaid"],
+    )
+    def test_text_detection_is_asked_as_the_workers_own_kind(self, monkeypatch, pool, ctx, gpu, gpu_worker,
+                                                             asks_as_gpu_worker):  # fmt: skip
+        seen = self._find(monkeypatch, None)
+        device = "cuda:0" if gpu else None
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu=gpu, gpu_device_path=device, gpu_worker=gpu_worker)
+        seen[0]["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
+        assert pool.calls == [(gpu, device)]
+        assert pool.gpu_workers == [asks_as_gpu_worker]
+
+    def test_text_detection_reports_a_cpu_fallback_to_the_worker_row_and_stops_waiting_on_a_cancel(
+        self, monkeypatch, pool, ctx
+    ):
+        # The pool calls on_cpu when a GPU worker's request is read on the CPU, and cancel_check ends a wait for a CPU
+        # helper: both are the worker's own callbacks.
+        seen = self._find(monkeypatch, None)
+        shown = lambda reason: None  # noqa: E731 — identity is asserted
+        cancel = lambda: False  # noqa: E731 — identity is asserted
+        detector.detect_credits_text(
+            MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", cancel_check=cancel, fallback_callback=shown
+        )
+        seen[0]["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
+        assert pool.hooks == [(shown, cancel)]
+
+    def test_a_cancel_while_waiting_for_a_cpu_helper_is_no_answer_this_time(self, monkeypatch, ctx):
+        from media_preview_generator.markers.credits.textdet_helper import TextDetCancelledError
+
+        class CancelledPool:
+            def detect_boxes(self, planes, **kwargs):
+                raise TextDetCancelledError("cancelled")
+
+        monkeypatch.setattr(detector, "get_textdet_pool", lambda: CancelledPool())
+        seen = self._find(monkeypatch, None)
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu=None, gpu_device_path=None)
+        with pytest.raises(TextDetCancelledError):
+            seen[0]["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
+
+    @pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
+    def test_a_cancel_while_text_detection_waits_is_no_answer_and_stores_nothing(
+        self, monkeypatch, pool, ctx, probes, scale
+    ):
+        from media_preview_generator.markers.credits.textdet_helper import TextDetCancelledError
+
+        answers = (TextDetCancelledError("cancelled"),) if scale == 1 else (STORY, TextDetCancelledError("cancelled"))
+        monkeypatch.setattr(detector.frames, "decode_rows", Decodes(*answers))
+        rec = ctx.store.upsert_file(FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns),
+                                    duration_ms=MOVIE.duration_ms, season_key=None, is_movie=True)  # fmt: skip
+        with pytest.raises(DetectorUnavailableError, match="^cancelled$"):
+            detector.detect_credits_text(rec, ctx=ctx, gpu=None, gpu_device_path=None)
+        assert ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) is None
+        assert ctx.store.credits_text_timed_out_at(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)) is None
+        assert ctx.store.evidence_version(rec.id, Source.CREDITS_TEXT) is None
+
+    def test_a_cpu_workers_decode_has_ffmpegs_own_thread_count(self, monkeypatch, pool, ctx, probes):
         commands = self._commands(monkeypatch)
-        cancel = lambda: False  # noqa: E731
-        for _ in range(2):
-            detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", cancel_check=cancel)
-        # Both clips at both sizes, on the GPU and the CPU, once: not again for the second file.
-        assert len(check_decodes) == 8
-        assert all(c["cancel_check"] is cancel for c in check_decodes)
-        assert [call["hw_active"] for call in commands] == [True, True]
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu=None, gpu_device_path=None, ffmpeg_threads=None)
+        (call,) = commands
+        assert "-threads" not in call["command"] and "-filter_threads" not in call["command"]
+        assert call["hw_active"] is False
 
     def test_the_harness_decodes_on_the_gpu_it_is_given_without_a_check(self, monkeypatch, probes):
         # find_credits alone (tools/markers_eval) measures the decode path it is handed.
@@ -1746,19 +1879,6 @@ class TestDetect:
                               detect_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
         assert check_decodes == []
         assert {(call["gpu"], call["gpu_device_path"]) for call in decodes.calls} == {("NVIDIA", "cuda:0")}
-
-    def test_a_job_cancelled_during_the_decode_check_is_no_answer_and_decodes_nothing(
-        self, monkeypatch, pool, ctx, probes
-    ):
-        probes.thinning = frames.KeyframeThinning(None, False, DOWNLOAD)
-        self._checks(monkeypatch, error=frames.DecodeCancelledError("cancelled while decoding h264-8bit.mkv"))
-        commands = self._commands(monkeypatch)
-        with pytest.raises(DetectorUnavailableError, match="cancelled"):
-            detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
-        assert commands == []
-        assert (
-            ctx.store.credits_text_timed_out_at(FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)) is None
-        )
 
     @pytest.mark.parametrize(
         ("error", "message", "failed_here"),

@@ -427,6 +427,45 @@ class TestWorker:
         assert worker.fallback_active is True
         assert "Codec not supported by GPU" in (worker.fallback_reason or "")
 
+    @pytest.mark.parametrize(
+        ("kind", "advice", "not_advised"),
+        [
+            ("codec", ["your GPU may not support the codec"], None),
+            ("stall", ["disk or network share"], "codec"),
+            ("io_error", ["disk or network share", "working folder"], "codec"),
+            ("stopped_part_way", ["GPU driver"], "codec"),
+            ("hwaccel", ["GPU driver"], "codec"),
+        ],
+    )
+    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
+    def test_worker_gpu_fallback_warning_advises_by_the_real_cause(self, mock_process, kind, advice, not_advised):
+        from loguru import logger as loguru_logger
+
+        worker = Worker(0, "GPU", "NVIDIA", "cuda", 0, "RTX 2060 SUPER")
+        config = MagicMock()
+        config.cpu_threads = 2
+        calls = []
+
+        def mock_process_fn(*args, **kwargs):
+            calls.append(kwargs.get("gpu"))
+            if len(calls) == 1:
+                raise CodecNotSupportedError("GPU processing failed (reason) for f.mkv", kind=kind)
+            return _ms("generated")
+
+        mock_process.side_effect = mock_process_fn
+        lines: list[str] = []
+        sink = loguru_logger.add(lambda m: lines.append(m.record["message"]), level="WARNING")
+        try:
+            worker.assign_task(_pi("k", title="Film", media_type="movie"), config, MagicMock())
+            worker.current_thread.join(timeout=2)
+        finally:
+            loguru_logger.remove(sink)
+        assert calls == ["NVIDIA", None]
+        (warning,) = [line for line in lines if "retrying on CPU" in line]
+        assert all(fragment in warning for fragment in advice), warning
+        if not_advised:
+            assert not_advised not in warning
+
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
     def test_worker_gpu_cpu_fallback_records_failure_when_cpu_retry_fails(self, mock_process):
         """If the in-place CPU retry also fails, the worker counts the task as failed."""
@@ -1306,6 +1345,20 @@ class TestReconcileGpuWorkers:
 
     def _gpus(self, workers: int) -> list:
         return [("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": workers})]
+
+    def test_a_gpus_saved_ffmpeg_threads_reach_its_live_workers_and_new_ones(self):
+        # Each GPU worker runs markers' ffmpeg with its own GPU's ffmpeg_threads: a value saved later applies to the
+        # workers already running on that GPU and to the ones a raised count adds, not only after a restart.
+        pool = WorkerPool(gpu_workers=1, cpu_workers=0,
+                          selected_gpus=[("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": 1, "ffmpeg_threads": 2})])  # fmt: skip
+        assert [w.ffmpeg_threads for w in pool.workers] == [2]
+        pool.reconcile_gpu_workers([("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": 3, "ffmpeg_threads": 5})])
+        assert [w.ffmpeg_threads for w in pool.workers] == [5, 5, 5]
+        pool.reconcile_gpu_workers([("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": 3, "ffmpeg_threads": 1})])
+        assert [w.ffmpeg_threads for w in pool.workers] == [1, 1, 1]
+        # An entry without the key (not one the settings build) leaves the workers' value as it was.
+        pool.reconcile_gpu_workers([("NVIDIA", self.DEVICE, {"name": "GPU0", "workers": 3})])
+        assert [w.ffmpeg_threads for w in pool.workers] == [1, 1, 1]
 
     def test_reconcile_raise_after_pending_shrink_cancels_removals_instead_of_adding(self):
         pool = self._busy_gpu_pool(3)

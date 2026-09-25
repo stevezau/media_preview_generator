@@ -14,6 +14,10 @@ from types import SimpleNamespace
 JOB_KIND_PREVIEWS = "previews"
 JOB_KIND_INTRO_CREDITS = "intro_credits"
 JOB_KINDS: tuple[str, ...] = (JOB_KIND_PREVIEWS, JOB_KIND_INTRO_CREDITS)
+# A webhook preview job's config key (or start override) asking for the Intro & Credits job that follows it. The batch
+# sets it when it opens, so a job revived after a restart during the debounce still asks; the preview runner queues the
+# follow-up once and takes the key off (``markers.triggers.submit_pending_follow_up``).
+INTRO_CREDITS_FOLLOW_UP = "intro_credits_follow_up"
 
 
 def parse_job_kind(value: object) -> str:

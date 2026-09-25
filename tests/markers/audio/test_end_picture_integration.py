@@ -24,7 +24,9 @@ from media_preview_generator.markers.credits import frames
 from media_preview_generator.markers.probe import ffprobe_path_for, stream_starts
 from tests.markers.credits.test_frames_integration import vaapi_node
 
-pytestmark = pytest.mark.integration
+# The module's clips are encoded on the CPU (libx264 and libx265 at 1280x720) in fixture setup, which pytest-timeout
+# counts: 25-40 s under a full xdist run, past the suite's 30 s.
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(180)]
 W, H, FPS, RATE = 320, 180, 10, 44100
 SECONDS = 45
 PREFIX_S = 5

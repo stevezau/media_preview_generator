@@ -430,12 +430,16 @@ def _start_scheduled_intro_credits_job(
                     )
                     return
             libraries = [{"server_id": server_id, "library_id": str(lid)} for lid in library_ids] if server_id else []
+            # A schedule for one server's libraries publishes to that server only, as its scheduled preview job does
+            # (``config["server_id"]`` in execute_scheduled_job): another server holding the same files isn't touched.
+            pin = {"server_id": server_id} if server_id else {}
             create_intro_credits_job(
                 library_name=f"Intro & Credits: {library_name or 'all libraries'}",
                 priority=parse_priority(priority) if priority is not None else PRIORITY_LOW,
                 source="schedule",
                 libraries=libraries,
                 parent_schedule_id=schedule_id,
+                **pin,
             )
             manager._update_last_run(schedule_id)
         except Exception:

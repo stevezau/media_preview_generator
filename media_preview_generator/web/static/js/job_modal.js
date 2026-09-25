@@ -1649,7 +1649,7 @@ function _renderFileServerNotes(servers, showMessages) {
 }
 
 // Compact two-character worker badge for the Files table — "G0" / "C3".
-// The full "GPU Worker 1 (NVIDIA TITAN RTX)" string was eating ~10% of
+// The full "GPU Worker 1 (NVIDIA RTX 4090)" string was eating ~10% of
 // the table's width and crowded the filename column on Sonarr/Radarr
 // release-group basenames. Hover-tooltip preserves the full label so the
 // info isn't lost; click target stays the table row.

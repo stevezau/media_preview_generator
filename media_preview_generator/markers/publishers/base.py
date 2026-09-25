@@ -136,7 +136,7 @@ def agreed_across_versions(
     within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless there is another version and what this
     app already left on the item (``prior``) agrees with every version too: then that stays, so versions whose times
     differ slightly don't rewrite each other's markers on every run. With no other version there is nothing to agree
-    with, so the item shows exactly what was decided (production: one-version Game of Thrones items kept intros ending
+    with, so the item shows exactly what was decided (observed: one-version items kept intros ending
     at 113.0 s after the decision moved to 110.5-112.4 s). **A locked type is the exception** -- the user's own times win however close
     they are to what the item shows, because the whole difference an editor nudge makes is smaller than
     ``VERSION_AGREEMENT_MS``, so keeping ``prior`` would silently discard the edit. That exception stops once

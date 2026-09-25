@@ -33,9 +33,8 @@ CLAIM = re.compile(
     r"|(?<![\w×])~?\d+(?:\.\d+)?(?:\s*[–-]\s*\d+(?:\.\d+)?)?\s*[×x](?![\w×])"
     r"|\b\d+\s*fps\b"
 )
-# Multipliers that aren't about speed, and log lines the docs quote word for word (the credit-text
-# self-test's reason, markers/credits/textdet_helper.py), as they appear in the sources.
-NOT_SPEED = ("2x capture", "4× safety buffer", "10% faster than the CPU (median")
+# Multipliers that aren't about speed, as they appear in the sources.
+NOT_SPEED = ("2x capture", "4× safety buffer")
 # docs/faq.md at 5f0960c7: unbenchmarked figures that shipped while the old pattern passed.
 OLD_FAQ_SPEEDS = """
 - **SDR / HDR10 / HDR10+ / HLG / Dolby Vision Profile 7/8** — 15–60× across all GPU vendors.

@@ -436,6 +436,15 @@ class TestDetectHwaccelRuntimeError:
         stderr_lines = ["[AVHWFramesContext @ 0xabc] Some unexpected error occurred"]
         assert _detect_hwaccel_runtime_error(stderr_lines) is True
 
+    def test_no_match_on_avhwframescontext_debug_chatter(self):
+        """A working VAAPI run at -loglevel debug names AVHWFramesContext on every surface it creates."""
+        stderr_lines = [
+            "[AVHWFramesContext @ 0x55d0c8a1b2c0] Created surface 0x4000000.",
+            "[AVHWFramesContext @ 0x55d0c8a1b2c0] Direct mapping possible.",
+            "[in @ 0x55d0c8a1c100] Error reading input: Input/output error",
+        ]
+        assert _detect_hwaccel_runtime_error(stderr_lines) is False
+
     def test_detect_cuda_error(self):
         """Test detection of CUDA decode errors."""
         stderr_lines = ["CUDA error: out of memory"]
@@ -475,6 +484,34 @@ class TestDetectHwaccelRuntimeError:
         """Test that patterns are matched case-insensitively."""
         stderr_lines = ["FAILED TO SYNC SURFACE 0: 23"]
         assert _detect_hwaccel_runtime_error(stderr_lines) is True
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "[tonemap @ 0x55a5] Failed to enqueue kernel: -5.",
+            "[hwmap @ 0x55a5] Failed to create CL image from surface 0x3 plane 0: -34.",
+            "[AVHWDeviceContext @ 0x55a5] OpenCL error -5 while mapping frame",
+            "FAILED TO ENQUEUE KERNEL: -5",
+        ],
+        ids=["enqueue-kernel", "cl-image", "opencl-error", "upper-case"],
+    )
+    def test_detect_opencl_filter_errors(self, line):
+        """Intel and AMD tone-map Dolby Vision in OpenCL: its kernel and image errors are GPU errors (often exit 251)."""
+        assert _detect_hwaccel_runtime_error([line]) is True
+
+    def test_no_match_on_opencl_debug_chatter(self):
+        """At -loglevel debug a working OpenCL run names OpenCL on many lines; none of them is an error."""
+        stderr_lines = [
+            "[OpenCL @ 0x5617a0] 1 OpenCL platforms found.",
+            '[OpenCL @ 0x5617a0] 1 OpenCL devices found on platform "Intel(R) OpenCL Graphics".',
+            "[OpenCL @ 0x5617a0] 0.0: Intel(R) OpenCL Graphics / Intel(R) Arc(TM) A380 Graphics",
+            "[OpenCL @ 0x5617a0] The cl_intel_va_api_media_sharing extension is required for QSV to OpenCL mapping.",
+            "[OpenCL @ 0x5617a0] Maximum supported image size 16384x16384.",
+            "Filter 'Parsed_tonemap_opencl_2' formats:",
+            "  out[0] 'default': opencl",
+            "[tonemap_opencl @ 0x7f3a10] Filter input: opencl, 3840x2160 (0).",
+        ]
+        assert _detect_hwaccel_runtime_error(stderr_lines) is False
 
 
 class TestGenerateImages:
@@ -2858,6 +2895,7 @@ class TestDiagnoseFFmpegExitCode:
         ("returncode", "expected"),
         [
             (0, "success"),
+            (129, "signal:SIGHUP"),
             (130, "signal:SIGINT"),
             (137, "signal:SIGKILL"),
             (143, "signal:SIGTERM"),

@@ -17,6 +17,9 @@ from typing import Any
 
 from loguru import logger
 
+# Present (True) only while processing is paused because a settings save left no workers.
+_AUTO_PAUSED_KEY = "processing_auto_paused"
+
 
 def _distribute_gpu_threads_into_dict(settings: dict[str, Any], value: int) -> None:
     """Distribute a total GPU worker count across enabled GPUs in ``gpu_config``.
@@ -461,7 +464,18 @@ class SettingsManager:
 
     @processing_paused.setter
     def processing_paused(self, value: bool) -> None:
-        self.set("processing_paused", bool(value))
+        # Any pause or resume set here (Pause all, quiet hours, a resume) takes the pause over from the
+        # zero-workers auto-pause, so a later settings save leaves it alone.
+        self.apply_changes(updates={"processing_paused": bool(value)}, deletes=[_AUTO_PAUSED_KEY])
+
+    @property
+    def processing_auto_paused(self) -> bool:
+        """True while the pause is the one a settings save made because no workers were configured."""
+        return bool(self.get(_AUTO_PAUSED_KEY, False))
+
+    def pause_for_no_workers(self) -> None:
+        """Pause processing because no workers are configured; the save that adds workers back resumes it."""
+        self.apply_changes(updates={"processing_paused": True, _AUTO_PAUSED_KEY: True})
 
     @property
     def dismissed_notifications(self) -> list[str]:

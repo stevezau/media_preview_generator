@@ -315,6 +315,52 @@ class TestConcurrency:
         assert checks.check_device(*INTEL, ffmpeg="ffmpeg") is True
 
 
+class TestInTheBackground:
+    """Each GPU's check runs once, in the background, when a job builds the worker pool: never on a worker, and
+    nothing waits for it."""
+
+    def test_each_gpu_is_checked_once_on_its_own_thread_and_nothing_waits_for_it(self, monkeypatch, loguru_caplog):
+        release = threading.Event()
+        decode = FakeDecode()
+
+        def slow(*args, **kwargs):
+            release.wait(5)  # a GPU busy with previews
+            return decode(*args, **kwargs)
+
+        monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=slow))
+        started = time.monotonic()
+        threads = decode_check.start_checks([NVIDIA, INTEL, (None, None)], ffmpeg="/ff")
+        assert time.monotonic() - started < 0.5  # returns at once
+        assert len(threads) == 2 and all(t.daemon and t.is_alive() for t in threads)
+        # A second pool build while they run starts nothing more.
+        assert decode_check.start_checks([NVIDIA, INTEL], ffmpeg="/ff") == []
+        release.set()
+        for t in threads:
+            t.join(10)
+        assert sorted(decode.gpu_calls("cuda:0")) == sorted(decode.gpu_calls(INTEL[1])) == sorted(EVERY_DECODE)
+        assert {c["ffmpeg"] for c in decode.calls} == {"/ff"}
+        assert all(c["cancel_check"] is None for c in decode.calls)  # no job's cancel: no job waits for it
+        assert len([m for m in infos(loguru_caplog) if m.startswith("Credits decoding on")]) == 2
+        # And once it has answered, never again for the process.
+        assert decode_check.start_checks([NVIDIA, INTEL], ffmpeg="/ff") == []
+
+    @pytest.mark.parametrize(("gpu", "device"), [(None, None), ("INTEL", None), ("AMD", "")])
+    def test_a_device_whose_decodes_never_reach_a_gpu_starts_no_check(self, monkeypatch, gpu, device):
+        decode = FakeDecode()
+        monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=decode))
+        assert decode_check.start_checks([(gpu, device)], ffmpeg="ffmpeg") == []
+        assert decode.calls == []
+
+    def test_a_check_that_fails_is_only_logged(self, monkeypatch, loguru_caplog):
+        decode = FakeDecode(fail={("cuda:0", H264, 1): RuntimeError("driver gone")})
+        monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=decode))
+        (thread,) = decode_check.start_checks([NVIDIA], ffmpeg="ffmpeg")
+        thread.join(10)
+        assert warnings(loguru_caplog) == [
+            MISMATCH.format(device="cuda:0", where="h264-8bit.mkv at 320x180", reason="the GPU couldn't decode it: driver gone")
+        ]  # fmt: skip
+
+
 class TestTheProcessWideChecks:
     def test_the_module_function_answers_from_the_processs_one_set_of_checks(self, monkeypatch):
         decode = FakeDecode()
@@ -374,7 +420,7 @@ class TestProductionDecode:
                                  cancel_check=cancel, timeout_s=12.5)  # fmt: skip
         (call,) = commands
         assert call["command"] == [
-            "/usr/bin/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hwaccel,
+            "/usr/bin/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", *hwaccel,
             "-ss", "0.000", "-copyts", "-i", ref.path, "-an", "-sn", "-dn", "-fps_mode", "passthrough",
             "-vf", video_filter, "-f", "rawvideo", "-",
         ]  # fmt: skip

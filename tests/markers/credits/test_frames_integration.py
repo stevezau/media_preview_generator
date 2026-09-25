@@ -9,7 +9,9 @@ import pytest
 
 from media_preview_generator.markers.credits import frames
 
-pytestmark = pytest.mark.integration
+# The module's clips are encoded on the CPU in module fixtures, which pytest-timeout counts against the first test that
+# uses each one: up to about 35 s under a full xdist run, past the suite's 30 s.
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(180)]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 VAAPI_DRIVERS = {"i915": "INTEL", "xe": "INTEL", "amdgpu": "AMD", "radeon": "AMD"}
 

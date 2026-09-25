@@ -7,19 +7,33 @@ the web layer and the CLI processing pipeline.
 
 import threading
 from contextlib import ExitStack
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
-from ...job_kinds import JOB_KIND_INTRO_CREDITS
+from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
 from ..job_gate import format_wait_message
-from ..jobs import PRIORITY_NORMAL, WorkerStatus, get_job_manager, incoming_job_priority, parse_priority
+from ..jobs import (
+    PRIORITY_NORMAL,
+    WorkerStatus,
+    get_job_manager,
+    incoming_job_priority,
+    parse_priority,
+)
+
+# The source of a scheduled "Recently added" scan's job: its lookback and libraries are read only from such a job.
+RECENTLY_ADDED_JOB_SOURCE = "scheduled_recently_added"
 
 # Tracks job IDs that already have a run_job thread in flight so that
 # resume / auto-resume calls during the long library scan don't spawn
 # duplicate threads for the same job.
 _inflight_jobs: set = set()
 _inflight_lock = threading.Lock()
+
+# The only Config attributes a job override may set directly; the other overrides are the named keys the
+# override loop in run_job translates itself. Anything else that names a Config attribute (ffmpeg_path,
+# plex_token, ...) is ignored, since the saved job config is replayed on every start path.
+_CONFIG_ATTRIBUTE_OVERRIDES = frozenset({"regenerate_thumbnails", "sort_by"})
 
 
 def _classify_job_completion(
@@ -360,8 +374,12 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     """Start job execution in a background thread.
 
     If a thread is already in-flight for *job_id* (e.g. still scanning
-    libraries after a revive), the call is silently skipped to avoid
+    libraries after a revive), no second thread is started, to avoid
     duplicate work.
+
+    Either way, a webhook preview job that asked for its Intro & Credits
+    follow-up (``INTRO_CREDITS_FOLLOW_UP`` in its saved config) gets it
+    queued once its thread is running (``_queue_intro_credits_follow_up``).
 
     Intro & Credits jobs are handed to their own runner, so every start path (manual resume, pending drain,
     restart requeue, reprocess) runs them with the marker pipeline.
@@ -377,11 +395,18 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
         start_intro_credits_job_async(job_id, config_overrides)
         return
+    if config_overrides and INTRO_CREDITS_FOLLOW_UP in config_overrides:
+        # Only the saved config asks for the follow-up (a revival passes a copy of it): the job's own writes below
+        # must never put back a request already taken.
+        config_overrides = {k: v for k, v in config_overrides.items() if k != INTRO_CREDITS_FOLLOW_UP}
     with _inflight_lock:
-        if job_id in _inflight_jobs:
-            logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
-            return
-        _inflight_jobs.add(job_id)
+        duplicate = job_id in _inflight_jobs
+        if not duplicate:
+            _inflight_jobs.add(job_id)
+    if duplicate:
+        logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
+        _queue_intro_credits_follow_up(job_id, config_overrides)
+        return
 
     def run_job():
         log_handler_id = None
@@ -430,12 +455,14 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
             if get_settings_manager().processing_paused:
                 merged = {**(job.config or {}), **(config_overrides or {})}
+                updates = dict(config_overrides or {})
                 wp = merged.get("webhook_paths")
                 if wp and not merged.get("webhook_basenames"):
-                    merged["webhook_basenames"] = [os.path.basename(p) for p in wp][:20]
+                    updates["webhook_basenames"] = [os.path.basename(p) for p in wp][:20]
                     if not merged.get("path_count"):
-                        merged["path_count"] = len(wp)
-                job_manager.update_job_config(job_id, merged)
+                        updates["path_count"] = len(wp)
+                # Only these keys: a read-then-replace could put back a key taken off meanwhile (the follow-up request).
+                job_manager.merge_job_config(job_id, updates)
                 logger.info("Job {} not started — global processing paused; job remains pending", job_id)
                 return
 
@@ -468,8 +495,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
             job = job_manager.get_job(job_id)
             if job and config_overrides:
-                merged = {**(job.config or {}), **(config_overrides or {})}
-                job_manager.update_job_config(job_id, merged)
+                # Only the override keys: a read-then-replace could put back a key taken off meanwhile (the
+                # Intro & Credits follow-up request, taken by the thread that started this one).
+                job_manager.merge_job_config(job_id, config_overrides)
 
             # Ensure webhook_basenames is populated for UI file display.
             # Some code paths (resume from pause, requeue after restart)
@@ -480,10 +508,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                 cfg = job.config or {}
                 wp = cfg.get("webhook_paths")
                 if wp and not cfg.get("webhook_basenames"):
-                    cfg["webhook_basenames"] = [os.path.basename(p) for p in wp][:20]
+                    derived = {"webhook_basenames": [os.path.basename(p) for p in wp][:20]}
                     if not cfg.get("path_count"):
-                        cfg["path_count"] = len(wp)
-                    job_manager.update_job_config(job_id, cfg)
+                        derived["path_count"] = len(wp)
+                    job_manager.merge_job_config(job_id, derived)
 
             # Job stays PENDING until _on_dispatch_start fires (the
             # moment the shared dispatcher actually pulls the first
@@ -631,8 +659,22 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     elif key == "server_id":
                         # Pin downstream dispatchers to publish for this server only.
                         config.server_id_filter = str(value) if value else None
-                    elif hasattr(config, key):
+                    elif key in ("lookback_hours", "library_ids") and config_overrides.get("source") == (
+                        RECENTLY_ADDED_JOB_SOURCE
+                    ):
+                        # A scheduled "Recently added" scan (_start_recently_added_job_async).
+                        if key == "lookback_hours":
+                            config.recently_added_since = _recently_added_since(job, value)
+                        else:
+                            config.recently_added_library_ids = [str(v) for v in value or []] or None
+                    elif key in _CONFIG_ATTRIBUTE_OVERRIDES:
                         setattr(config, key, value)
+                    elif hasattr(config, key):
+                        # Every start path replays the saved job config here (revival, resume, Reprocess,
+                        # schedules), so only the allow-listed attributes may reach Config.
+                        logger.warning(
+                            "Job {}: ignored config override {!r}, which a job can't set", job_id[:8], str(key)
+                        )
 
             config.working_tmp_folder = create_working_directory(config.tmp_folder)
             logger.debug("Created working temp folder: {}", config.working_tmp_folder)
@@ -702,7 +744,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             run_job_config = job_manager.get_job(job_id)
             if run_job_config and run_job_config.config.get("is_retry"):
                 import time as _time
-                from datetime import datetime, timedelta
 
                 delay_sec = max(1, int(run_job_config.config.get("retry_delay", 30)))
                 retry_eta = (datetime.now(UTC) + timedelta(seconds=delay_sec)).isoformat()
@@ -800,8 +841,11 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             total_items=0,
                             current_item=format_wait_message(active, cap, effective_cap),
                         )
+                        # A restart ages a job waiting here by the downtime only (JobManager.requeue_interrupted_jobs).
+                        job_manager.note_slot_wait(job_id)
 
                     _slot_priority = job.priority
+                    job_manager.note_slot_wait(job_id)
                     admitted = get_job_gate().acquire(
                         priority=_slot_priority,
                         cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
@@ -819,6 +863,15 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         job_manager.cancel_job(job_id)
                         return
                     _slot_held = True
+                    if isinstance(getattr(config, "recently_added_since", None), datetime):
+                        # Read the window again now: a schedule tick while this scan waited for its slot widens the
+                        # waiting scan's saved lookback instead of queueing another (_widen_recently_added_window).
+                        saved = job_manager.get_job(job_id)
+                        since = (
+                            _recently_added_since(saved, (saved.config or {}).get("lookback_hours")) if saved else None
+                        )
+                        if since is not None:
+                            config.recently_added_since = since
                     # Flip to RUNNING the moment the slot is acquired —
                     # library enumeration / webhook resolution IS
                     # active work (real API calls that can take a while) and
@@ -1202,7 +1255,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         ``published``/``skipped_output_exists``).
                         """
                         import os as _os
-                        from datetime import datetime, timedelta
 
                         from media_preview_generator.processing.retry_queue import scaled_backoff_delay
 
@@ -1623,20 +1675,30 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
                         if spawned_retry_id:
                             error_parts.append(f"{len(retry_paths)} path(s) sent for retry")
-                            summary = dict(job_config)
-                            summary["resolution_summary"] = {
-                                "total": total_paths,
-                                "resolved": resolved_count,
-                                "unresolved": len(unresolved_paths),
-                                "not_found_on_disk": len(not_found_on_disk),
-                                "retry_job_ids": [spawned_retry_id],
-                            }
-                            job_manager.update_job_config(job_id, summary)
+                            # Only this key: replacing the config from the snapshot read above could put back a key
+                            # taken off since (the Intro & Credits follow-up request).
+                            job_manager.merge_job_config(
+                                job_id,
+                                {
+                                    "resolution_summary": {
+                                        "total": total_paths,
+                                        "resolved": resolved_count,
+                                        "unresolved": len(unresolved_paths),
+                                        "not_found_on_disk": len(not_found_on_disk),
+                                        "retry_job_ids": [spawned_retry_id],
+                                    }
+                                },
+                            )
                         elif unresolved_paths:
                             if is_retry:
                                 error_parts.append(f"Could not find on any server after {effective_max} attempt(s)")
                             else:
                                 error_parts.append(f"{len(unresolved_paths)} item(s) not found on any server")
+
+                        # A server a scan couldn't list is worth saying whatever else the job reports.
+                        enumeration_warning = (result or {}).get("warning")
+                        if error_parts and enumeration_warning:
+                            error_parts.append(enumeration_warning)
 
                         if error_parts:
                             if total_paths > 0 and resolved_count < total_paths:
@@ -1673,6 +1735,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                     retry_attempt=retry_attempt,
                                     effective_max=effective_max,
                                 )
+                                if enumeration_warning:
+                                    msg = _join_error_clauses([msg, enumeration_warning])
                                 job_manager.add_log(job_id, f"INFO - {msg}")
                                 job_manager.complete_job(job_id, warning=msg)
                             elif is_retry:
@@ -1698,7 +1762,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 # plain green "completed", misleading
                                 # the user into thinking nothing went
                                 # wrong despite zero items processed.
-                                enumeration_warning = (result or {}).get("warning")
                                 if enumeration_warning:
                                     job_manager.add_log(job_id, f"WARNING - {enumeration_warning}")
                                     job_manager.complete_job(job_id, warning=enumeration_warning)
@@ -1781,6 +1844,51 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
     thread = threading.Thread(target=run_job, daemon=True)
     thread.start()
+    _queue_intro_credits_follow_up(job_id, config_overrides)
+
+
+def _queue_intro_credits_follow_up(job_id: str, config_overrides: dict | None) -> None:
+    """Queue the Intro & Credits job a webhook preview job asked for (``markers.triggers.submit_pending_follow_up``).
+
+    Called on every start of a preview job, after its thread has started: the follow-up waits for the preview job, and
+    a job that never asked queues nothing. Never raises: a markers problem must not cost the job its previews.
+
+    Args:
+        job_id: The preview job being started.
+        config_overrides: The start's overrides (the fired batch's paths, pin and item ids).
+    """
+    try:
+        from ...markers.triggers import submit_pending_follow_up
+
+        submit_pending_follow_up(job_id, config_overrides)
+    except Exception:
+        logger.exception("Could not queue the Intro & Credits job that follows webhook job {}", job_id)
+
+
+def _recently_added_since(job, lookback_hours) -> datetime | None:
+    """When a scheduled "Recently added" scan's window starts: the schedule's lookback before the job was created.
+
+    The scan lists from there to when it runs (``run_processing``, after the job gate), so a run that waited for a slot,
+    or was revived after a restart, still lists everything added in the hour(s) before the schedule fired.
+
+    Args:
+        job: The Recently Added job.
+        lookback_hours: The schedule's window, in hours.
+
+    Returns:
+        The window's start (UTC), or None when ``lookback_hours`` isn't a number.
+    """
+    try:
+        hours = float(lookback_hours)
+    except (TypeError, ValueError):
+        return None
+    try:
+        created = datetime.fromisoformat(str(job.created_at).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+    except (AttributeError, TypeError, ValueError):
+        created = datetime.now(UTC)
+    return created - timedelta(hours=hours)
 
 
 def _start_recently_added_job_async(
@@ -1792,38 +1900,44 @@ def _start_recently_added_job_async(
     library_name: str,
     priority: int | None = None,
 ) -> str:
-    """Spawn a gated daemon thread for a scheduled "Recently Added" scan.
+    """Create the Job for a scheduled "Recently Added" scan and start it through the preview runner.
 
-    Mirrors :func:`_start_job_async`'s gate-aware lifecycle but calls
-    :func:`_run_recently_added_multi_server` instead of ``run_processing``.
-    The scan becomes a first-class Job: visible in the Jobs UI,
-    cancellable, and counted against ``max_concurrent_jobs``.
+    The scan is a preview job like any other (:func:`_start_job_async`): it waits for a JobGate slot, shows in the
+    Jobs UI, can be paused and cancelled, writes a Files-panel row per file, retries the files a server hasn't indexed
+    yet, and is revived after a restart. ``run_processing`` runs it as a Recently Added scan
+    (:func:`~media_preview_generator.jobs.orchestrator._run_recently_added_multi_server`) because its config carries
+    ``lookback_hours``; the Intro & Credits follow-ups for its files are queued from there.
 
-    Before this helper existed, scheduled recently-added scans ran INLINE
-    on the APScheduler worker thread (see ``web/scheduler.py:398`` pre-fix)
-    — they did real publish work without acquiring the JobGate, so they
-    could push concurrent activity above the user's cap, and they didn't
-    appear as Job rows in the UI (only ``schedules.json``'s ``last_run``
-    recorded them). This helper closes both gaps: the scan goes through
-    the same gate every other dispatch obeys, AND it surfaces as a Job
-    row the operator can monitor / pause / cancel.
+    Before, it ran inline on the APScheduler thread (no gate, no Job row), then on a thread of its own with no file
+    rows or retries; a restart revived it through the preview runner, which refused it as a webhook job without paths,
+    so it ended green having done nothing.
 
-    Returns the new Job's UUID.
+    A tick while the schedule's last scan hasn't started yet queues nothing: that scan lists up to when it starts, so it
+    already covers this tick's window (widened to it when this tick looks further back).
+
+    Returns the new Job's UUID, or the waiting one's.
     """
-    from ...config import load_config
-    from ...jobs.orchestrator import _run_recently_added_multi_server
-    from ..settings_manager import get_settings_manager
-
     job_manager = get_job_manager()
+    waiting = _waiting_recently_added_job(job_manager, schedule_id)
+    if waiting is not None:
+        _widen_recently_added_window(job_manager, waiting, lookback_hours)
+        logger.info(
+            "Schedule {}: its Recently Added scan {} hasn't started yet and covers this tick; not queueing another",
+            schedule_id,
+            waiting.id[:8],
+        )
+        return waiting.id
     # An explicit High/Low pin on the schedule wins; an unset one falls back
     # to the global "Incoming job priority" setting (issue #285) so Recently
     # Added sweeps overtake full scans by default, same as webhooks. Either
-    # way the value reaches the gate, which admits at job.priority below.
+    # way the value reaches the gate, which admits at job.priority.
     job = job_manager.create_job(
         library_name=library_name,
         config={
-            "source": "scheduled_recently_added",
+            "source": RECENTLY_ADDED_JOB_SOURCE,
             "parent_schedule_id": schedule_id,
+            # The publish pin as well as the servers scanned: a scan pinned to one Plex server must not fan out to
+            # every server owning the file (issue #259).
             "server_id": server_id,
             "library_ids": library_ids,
             "lookback_hours": lookback_hours,
@@ -1831,205 +1945,28 @@ def _start_recently_added_job_async(
         server_id=server_id,
         priority=parse_priority(priority) if priority is not None else incoming_job_priority(),
     )
-    job_id = job.id
+    _start_job_async(job.id, dict(job.config))
+    return job.id
 
-    with _inflight_lock:
-        if job_id in _inflight_jobs:
-            logger.info(
-                "Skipping duplicate _start_recently_added_job_async for {} — already in flight",
-                job_id,
-            )
-            return job_id
-        _inflight_jobs.add(job_id)
 
-    def run_job():
-        log_handler_id = None
-        _slot_held = False
-        # Priority captured at admission — see the note in _start_job_async.
-        _slot_priority = PRIORITY_NORMAL
-        try:
-            from loguru import logger as loguru_logger
+def _waiting_recently_added_job(job_manager, schedule_id: str):
+    """The schedule's Recently Added scan that is queued and hasn't started (a revived one that had started isn't)."""
+    for job in job_manager.get_pending_jobs():
+        cfg = job.config or {}
+        if (
+            not job.started_at
+            and cfg.get("source") == RECENTLY_ADDED_JOB_SOURCE
+            and cfg.get("parent_schedule_id") == schedule_id
+        ):
+            return job
+    return None
 
-            from ...jobs.worker import is_job_thread_for, register_job_thread, unregister_job_thread
 
-            register_job_thread(job_id)
-
-            def log_sink(message):
-                record = message.record
-                log_text = f"{record['level'].name} - {record['message']}"
-                job_manager.add_log(job_id, log_text)
-
-            def job_thread_filter(record: dict) -> bool:
-                return is_job_thread_for(record["thread"].id, job_id)
-
-            log_handler_id = loguru_logger.add(
-                log_sink,
-                level=get_settings_manager().get("log_level", "INFO").upper(),
-                format="{message}",
-                filter=job_thread_filter,
-                enqueue=True,
-            )
-
-            # Same gate pattern as _start_job_async — the recently-added
-            # scan acquires before any enumeration / API calls so a cap
-            # of N really means "at most N concurrent dispatches/scans".
-            from ..job_gate import get_job_gate
-
-            def _on_wait(active: int, cap: int, effective_cap: int) -> None:
-                job_manager.update_progress(
-                    job_id,
-                    percent=0,
-                    processed_items=0,
-                    total_items=0,
-                    current_item=format_wait_message(active, cap, effective_cap),
-                )
-
-            _slot_priority = job.priority
-            admitted = get_job_gate().acquire(
-                priority=_slot_priority,
-                cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
-                on_wait=_on_wait,
-            )
-            if not admitted:
-                job_manager.add_log(
-                    job_id,
-                    "WARNING - Job cancelled while waiting for active slot",
-                )
-                job_manager.cancel_job(job_id)
-                return
-            _slot_held = True
-
-            job_manager.start_job(job_id)
-            job_manager.add_log(job_id, "INFO - Scheduled recently-added scan started")
-            job_manager.update_progress(
-                job_id,
-                percent=0,
-                processed_items=0,
-                total_items=0,
-                current_item="Starting — loading configuration...",
-            )
-
-            config = load_config()
-            # Pin the publish step to the scheduled server, not just the
-            # enumeration. _run_recently_added_multi_server filters which
-            # server it *scans*, but the per-item publish target is resolved
-            # from config.server_id_filter (resolve_per_item_pin). Without
-            # this, a recently-added scan pinned to one Plex server fans out
-            # and publishes to every server owning the file (issue #259).
-            if server_id:
-                config.server_id_filter = server_id
-            settings = get_settings_manager()
-            selected_gpus = _build_selected_gpus(settings)
-
-            def progress_callback(current, total, message, percent_override=None):
-                if percent_override is not None:
-                    percent = percent_override
-                else:
-                    percent = (current / total * 100) if total > 0 else 0
-                job_manager.update_progress(
-                    job_id,
-                    percent=percent,
-                    processed_items=current,
-                    total_items=total,
-                    current_item=message,
-                )
-
-            def worker_callback(workers_list):
-                active_keys = set()
-                for worker_data in workers_list:
-                    key = f"{worker_data['worker_type']}_{worker_data['worker_id']}"
-                    active_keys.add(key)
-                    remaining_time = worker_data.get("remaining_time")
-                    worker_eta = ""
-                    if isinstance(remaining_time, int | float) and remaining_time > 0:
-                        worker_eta = _format_eta(float(remaining_time))
-                    status = WorkerStatus(
-                        worker_id=worker_data["worker_id"],
-                        worker_type=worker_data["worker_type"],
-                        worker_name=worker_data["worker_name"],
-                        status=worker_data["status"],
-                        current_title=worker_data.get("current_title", ""),
-                        library_name=worker_data.get("library_name", ""),
-                        progress_percent=worker_data.get("progress_percent", 0),
-                        speed=worker_data.get("speed", "0.0x"),
-                        eta=worker_eta,
-                        ffmpeg_started=bool(worker_data.get("ffmpeg_started", False)),
-                        current_phase=worker_data.get("current_phase", "") or "",
-                    )
-                    job_manager.update_worker_status(key, status)
-                job_manager.prune_worker_statuses(active_keys)
-                job_manager.emit_worker_statuses()
-
-            # Bind the per-job failure_scope around the scan + completion.
-            # Mirrors _start_job_async's ExitStack pattern at line 516-517 so
-            # ``record_failure`` calls deep in the enumeration / publisher
-            # path attribute to THIS job, not a sibling that happened to be
-            # running on the same thread pool. Without this scope, the
-            # enumeration phase (before the per-item failure_scope inside
-            # _dispatch_processable_items) emits the "Internal bookkeeping
-            # bug: failure ... reported outside an active job" warning on
-            # auth/connectivity errors.
-            from ...processing.generator import failure_scope
-
-            with failure_scope(job_id):
-                scan_warnings: list[str] = []
-                counts = _run_recently_added_multi_server(
-                    config,
-                    selected_gpus=selected_gpus,
-                    server_id_filter=server_id,
-                    library_ids=library_ids,
-                    lookback_hours=lookback_hours,
-                    progress_callback=progress_callback,
-                    cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
-                    pause_check=lambda: (
-                        job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused
-                    ),
-                    job_id=job_id,
-                    worker_callback=worker_callback,
-                    warnings_out=scan_warnings,
-                )
-
-                if counts:
-                    job_manager.set_job_outcome(job_id, counts)
-                if scan_warnings:
-                    warning_msg = " | ".join(scan_warnings)
-                    job_manager.add_log(job_id, f"WARNING - {warning_msg}")
-                    job_manager.complete_job(job_id, warning=warning_msg)
-                else:
-                    job_manager.complete_job(job_id)
-
-        except Exception as exc:
-            logger.exception("Scheduled recently-added scan {} failed", job_id)
-            try:
-                job_manager.complete_job(job_id, error=f"{type(exc).__name__}: {exc}")
-            except Exception:
-                pass
-        finally:
-            if _slot_held:
-                try:
-                    from ..job_gate import get_job_gate
-
-                    get_job_gate().release(_slot_priority)
-                except Exception as gate_err:
-                    logger.debug("Could not release job gate for {}: {}", job_id, gate_err)
-                _slot_held = False
-            try:
-                from ...jobs.worker import unregister_job_thread
-
-                unregister_job_thread()
-            except Exception:
-                pass
-            with _inflight_lock:
-                _inflight_jobs.discard(job_id)
-            if log_handler_id is not None:
-                try:
-                    from loguru import logger as loguru_logger
-
-                    loguru_logger.complete()
-                    loguru_logger.remove(log_handler_id)
-                except (ValueError, TypeError):
-                    logger.debug("Could not remove job log handler", exc_info=True)
-
-    thread = threading.Thread(target=run_job, daemon=True, name=f"run_job_recently_added_{job_id}")
-    thread.start()
-    return job_id
+def _widen_recently_added_window(job_manager, job, lookback_hours: float) -> None:
+    """Make a waiting scan's window start no later than ``lookback_hours`` before now (``_recently_added_since``)."""
+    since = _recently_added_since(job, (job.config or {}).get("lookback_hours"))
+    wanted = datetime.now(UTC) - timedelta(hours=float(lookback_hours))
+    if since is None or wanted >= since:
+        return
+    created = since + timedelta(hours=float(job.config["lookback_hours"]))
+    job_manager.merge_job_config(job.id, {"lookback_hours": (created - wanted).total_seconds() / 3600})

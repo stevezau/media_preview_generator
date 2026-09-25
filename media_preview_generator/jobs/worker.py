@@ -18,11 +18,13 @@ from loguru import logger
 from ..config import Config
 from ..job_kinds import ItemOutcome, normalize_outcome, outcome_value
 from ..processing.generator import (
+    FALLBACK_CODEC,
     CancellationError,
     CodecNotSupportedError,
     ProcessingResult,
     _notify_file_result,
     failure_scope,
+    gpu_fallback_advice,
 )
 from ..utils import format_display_title, redact_secrets, redacted_traceback
 
@@ -488,6 +490,9 @@ class Worker:
                     bundle_metadata_by_server=item.bundle_metadata_by_server or None,
                     gpu=gpu,
                     gpu_device_path=gpu_device,
+                    # This GPU's own thread cap; Config.ffmpeg_threads is the max across GPUs.
+                    # The CPU fallback (gpu=None) runs uncapped, like a CPU worker.
+                    ffmpeg_threads_override=self.ffmpeg_threads if gpu else None,
                     progress_callback=progress_callback,
                     cancel_check=self.cancel_check,
                     pause_check=self.pause_check,
@@ -630,13 +635,11 @@ class Worker:
                         self.fallback_active = True
                         self.fallback_reason = reason
                         ctx_logger.warning(
-                            "{} couldn't process {} on the GPU and is retrying on CPU. Reason: {}. "
-                            "No action needed — the file will still get a preview, it'll just be slower. "
-                            "If this happens for many files, your GPU may not support the codec; consider "
-                            "raising CPU worker count under Settings → CPU.",
+                            "{} couldn't process {} on the GPU and is retrying on CPU. Reason: {}. {}",
                             self.display_name,
                             display_name,
                             reason,
+                            gpu_fallback_advice(getattr(e, "kind", FALLBACK_CODEC)),
                         )
                         try:
                             ms_result = _run_once(None, None)
@@ -713,6 +716,12 @@ class Worker:
             def _phase_cb(text: str) -> None:
                 self.current_phase = text or ""
 
+            def _fallback_cb(reason: str) -> None:
+                # A step that fell back to the CPU inside the kind's own run (the end-picture decode) shows on the row
+                # as a whole-item CPU rerun does.
+                self.fallback_active = True
+                self.fallback_reason = redact_secrets(reason) or "GPU processing failed"
+
             def _run(gpu, gpu_device):
                 return self.process_fn(
                     item,
@@ -722,6 +731,12 @@ class Worker:
                     phase_callback=_phase_cb,
                     cancel_check=self.cancel_check,
                     pause_check=self.pause_check,
+                    # The GPU's own gpu_config value, for the kind's GPU work on this GPU (its decodes); CPU work, the
+                    # CPU rerun's and chromaprint's included, runs at FFmpeg's own count, as previews' CPU work does.
+                    ffmpeg_threads=self.ffmpeg_threads if gpu is not None else None,
+                    fallback_callback=_fallback_cb,
+                    # True on a GPU worker's CPU rerun too: CPU work it does is its own, not a CPU worker's.
+                    gpu_worker=self.worker_type == "GPU",
                 )
 
             # Exception text reaches the file's row (served by the jobs API) and the log, and can carry a server URL
@@ -1169,10 +1184,15 @@ class WorkerPool:
                     cancelled += len(kept)
                     deficit = desired - current_count - len(kept)
 
-                    # Temporarily add to selected_gpus so _create_worker can
-                    # reference it; the list is replaced at the end of this block.
-                    if not any(d == device for _, d, _ in self.selected_gpus):
+                    # Put the device's new entry in selected_gpus, in its place, so
+                    # _create_worker builds from it (its ffmpeg_threads included);
+                    # the list is replaced at the end of this block.
+                    at = next((i for i, (_, d, _) in enumerate(self.selected_gpus) if d == device), None)
+                    self.selected_gpus = list(self.selected_gpus)
+                    if at is None:
                         self.selected_gpus.append(gpu_tuple)
+                    else:
+                        self.selected_gpus[at] = gpu_tuple
 
                     gpu_idx = next(
                         (i for i, (_, d, _) in enumerate(self.selected_gpus) if d == device),
@@ -1182,6 +1202,14 @@ class WorkerPool:
                         self._next_gpu_assignment_index = gpu_idx
                         self.workers.append(self._create_worker("GPU"))
                         added += 1
+
+                # A saved thread change reaches the workers already on the GPU from their next file (previews and markers
+                # alike), as a count change does; new workers got it from selected_gpus above. An entry without the key
+                # (the settings always give one) leaves their value as it was.
+                if "ffmpeg_threads" in info:
+                    for w in self.workers:
+                        if w.worker_type == "GPU" and w.gpu_device == device:
+                            w.ffmpeg_threads = info["ffmpeg_threads"]
 
             self.selected_gpus = list(new_selected_gpus)
             self._next_gpu_assignment_index = 0
@@ -1594,6 +1622,7 @@ class WorkerPool:
         last_overall_progress_log = time.time()
         run_successful = 0
         run_failed = 0
+        failed_paths: list[str] = []
         cancellation_requested = False
         per_worker_totals = {}
 
@@ -1616,6 +1645,8 @@ class WorkerPool:
             """Check completions, update counters, and retire deferred workers."""
             nonlocal completed_tasks
             for worker in workers:
+                # Read before check_completion frees the worker: once it's idle another assignment can replace it.
+                canonical_path = worker.media_file
                 if not worker.check_completion():
                     continue
                 title = worker.media_title or "(unknown)"
@@ -1623,6 +1654,8 @@ class WorkerPool:
                 completed_delta = max(0, worker.completed - prev_completed)
                 failed_delta = max(0, worker.failed - prev_failed)
                 _record_worker_delta(worker)
+                if failed_delta and canonical_path:
+                    failed_paths.append(canonical_path)
                 completed_tasks += 1
                 if on_task_complete:
                     on_task_complete(completed_tasks, total_items)
@@ -1798,6 +1831,7 @@ class WorkerPool:
         return {
             "completed": total_completed,
             "failed": total_failed,
+            "failed_paths": failed_paths,
             "total": total_items,
             "cancelled": cancellation_requested,
             "outcome": outcome,

@@ -116,12 +116,15 @@ class _Audio:
         self.rates = rates or {}
         self.share = share
         self.compared: list[tuple] = []
+        self.worker: list[dict] = []  # each ffmpeg run's pause check and threads
 
     def _share(self, reader, target, partner, start_s, end_s, offset_s):
         self.compared.append((target, partner, start_s, end_s, offset_s))
         return self.share(target, partner, start_s, end_s, offset_s)
 
-    def compute(self, path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
+    def compute(self, path, duration_ms, *, ffmpeg, cancel_check=None, retime=None, pause_check=None,
+                ffmpeg_threads=None):  # fmt: skip
+        self.worker.append({"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads})
         if retime is not None:
             self.retimes.append((path, retime))
             if path in self.fail_retimed:
@@ -569,17 +572,36 @@ class TestEndPictureCheck:
         e1, _e2, _e3 = show(1, 3)
         ctx = _season_ctx(store, e1)
         cancel = MagicMock(return_value=False)
-        with _Audio(points=early_points), patch.object(season.end_picture, "Reader") as reader:
+        paused = MagicMock(return_value=False)
+        flag = MagicMock()
+        with _Audio(points=early_points) as audio, patch.object(season.end_picture, "Reader") as reader:
             reader.return_value.share.return_value = 1.0
             rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
             pipeline._run_detector(
                 ctx, rec, _spec(), gpu="NVIDIA", gpu_device_path="cuda:0", phase=lambda _t: None,
-                cancel_check=cancel, pause_check=None,
+                cancel_check=cancel, pause_check=paused, ffmpeg_threads=3, fallback_callback=flag,
             )  # fmt: skip
         assert reader.call_args.kwargs == {
             "ffmpeg": ctx.config.ffmpeg_path, "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "cancel_check": cancel,
+            "pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag,
         }  # fmt: skip
         assert reader.return_value.share.call_count == 2
+        # Every fingerprint the step made ran with the global pause, at FFmpeg's own thread count: chromaprint is CPU
+        # work even on a GPU worker (the GPU's ffmpeg_threads went to the end-picture decode above), as previews' CPU
+        # work is never capped by a GPU's value.
+        assert len(audio.worker) == 3
+        assert audio.worker == [{"pause_check": paused, "ffmpeg_threads": None}] * 3
+
+    def test_a_cpu_workers_fingerprints_have_no_thread_cap(self, store, show):
+        e1, _e2, _e3 = show(1, 3)
+        ctx = _season_ctx(store, e1)
+        with _Audio() as audio:
+            rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+            pipeline._run_detector(
+                ctx, rec, _spec(), gpu=None, gpu_device_path=None, phase=lambda _t: None, cancel_check=None,
+                pause_check=None, ffmpeg_threads=None,
+            )  # fmt: skip
+        assert [run["ffmpeg_threads"] for run in audio.worker] == [None] * 3
 
     def test_intros_after_the_first_30_s_are_never_decoded(self, store, show):
         e1, _e2, _e3 = show(1, 3)
@@ -1536,7 +1558,7 @@ class TestFailures:
                         all_waiting.set()
             return real_ensure(store_, rec_, **kwargs)
 
-        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None, **_worker):
             audio.computed.append(path)
             if path == broken:
                 all_waiting.wait(10)  # every sibling's step is at the broken file before ffmpeg fails on it
@@ -1575,7 +1597,7 @@ class TestFailures:
         rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
         cancelled = threading.Event()
 
-        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None, **_worker):
             if path == e2:
                 cancelled.set()  # the user cancels while ffmpeg reads E2
                 raise fingerprint.FingerprintError("Fingerprinting cancelled")
@@ -1593,7 +1615,7 @@ class TestFailures:
         e1, e2, e3 = show(1, 3)
         rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
 
-        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None):
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None, retime=None, **_worker):
             audio.computed.append(path)
             if path == e2:
                 raise fingerprint.FingerprintStalledError("2 earlier fingerprint ffmpegs are still stuck")
@@ -1658,6 +1680,33 @@ class TestFailures:
         assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
         assert store.member_fingerprint_failed_at(FileIdentity(e1, *_identity(e1))) is None
 
+    @pytest.mark.parametrize("own", [True, False], ids=["own-file", "sibling"])
+    def test_a_file_another_frozen_job_holds_is_nobodys_failure(self, store, show, own):
+        # A job frozen by its schedule's stop time holds a file's fingerprint: this episode's step waits no longer than
+        # a fingerprint takes. Its own file held gives no answer this time; a sibling held is left out, and the season
+        # step goes on. Nothing is recorded against either file.
+        e1, e2, e3 = show(1, 3)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        held = e1 if own else e2
+        busy = fingerprint.FingerprintBusyError("Not fingerprinting it: another job has held it")
+        real_ensure = fingerprint.ensure_fingerprint
+
+        def ensure(store_, member, **kwargs):
+            if member.canonical_path == held:
+                raise busy
+            return real_ensure(store_, member, **kwargs)
+
+        with _Audio() as audio, patch.object(season, "ensure_fingerprint", side_effect=ensure):
+            if own:
+                with pytest.raises(pipeline.DetectorUnavailableError, match="another job"):
+                    season.detect_season_audio(rec, ctx=_season_ctx(store, e1))
+            else:
+                season.detect_season_audio(rec, ctx=_season_ctx(store, e1))
+        assert held not in audio.computed
+        assert audio.computed == ([] if own else [e1, e3])  # the step went on past the held sibling
+        assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
+        assert store.member_fingerprint_failed_at(FileIdentity(held, *_identity(held))) is None
+
     def test_a_file_whose_own_fingerprint_failed_lately_still_needs_a_worker(self, store, show):
         e1, e2 = show(1, 2)
         with _Audio(fail={e1}):
@@ -1687,6 +1736,39 @@ class TestFailures:
             _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
         rec = store.get_file(e1)
         assert audio.computed == [] and store.evidence_version(rec.id, Source.SEASON_AUDIO) is None
+
+    def test_a_pause_holds_the_step_before_the_next_sibling_until_the_resume(self, store, show):
+        e1, _e2, _e3 = show(1, 3)
+        ctx = _season_ctx(store, e1)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        paused = threading.Event()
+        seen_paused: list[bool] = []
+        with _Audio() as audio:
+            real = audio.compute
+
+            def compute(path, *args, **kwargs):
+                seen_paused.append(paused.is_set())
+                if path == e1:  # everything is paused while this episode's own fingerprint runs
+                    paused.set()
+                    threading.Timer(0.4, paused.clear).start()
+                return real(path, *args, **kwargs)
+
+            with patch.object(fingerprint, "compute_fingerprint", side_effect=compute):
+                started = time.monotonic()
+                season.detect_season_audio(rec, ctx=ctx, pause_check=paused.is_set)
+        assert audio.computed[0] == e1 and len(audio.computed) == 3
+        assert seen_paused == [False, False, False]  # no sibling was started while paused
+        assert time.monotonic() - started >= 0.35
+
+    def test_a_cancel_while_paused_between_siblings_stops_the_step(self, store, show):
+        e1, _e2, _e3 = show(1, 3)
+        ctx = _season_ctx(store, e1)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        cancelled = threading.Event()
+        with _Audio() as audio, pytest.raises(pipeline.DetectorUnavailableError, match="cancelled"):
+            threading.Timer(0.2, cancelled.set).start()
+            season.detect_season_audio(rec, ctx=ctx, pause_check=lambda: True, cancel_check=cancelled.is_set)
+        assert audio.computed == [e1]
 
     def test_cancelling_stops_before_the_next_sibling(self, store, show):
         e1, _, _ = show(1, 3)

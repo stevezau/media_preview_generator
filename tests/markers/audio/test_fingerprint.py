@@ -1,14 +1,19 @@
-"""Chromaprint fingerprints: window, command, ffmpeg choice, caching, identity gate, cancel, ≤ 2 in parallel."""
+"""Chromaprint fingerprints: window, command, ffmpeg choice, caching, identity gate, cancel, pause, no app-wide cap."""
 
 from __future__ import annotations
 
 import errno
 import os
+import pathlib
 import shutil
+import signal
 import subprocess
+import sys
+import textwrap
 import threading
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -68,12 +73,19 @@ def test_window_is_35_percent_capped_at_900_s(duration_ms, expected):
     assert fpmod.window_s(duration_ms) == pytest.approx(expected)
 
 
-def test_command_is_the_spec_command_with_thread_cap():
+def test_command_is_the_spec_command_with_ffmpegs_own_thread_count_on_a_cpu_worker():
+    # A CPU worker's ffmpeg is never capped, as previews' CPU decode isn't.
     assert fpmod.fingerprint_command("/usr/lib/jellyfin-ffmpeg/ffmpeg", "/m/a.mkv", 462.5152) == [
-        "/usr/lib/jellyfin-ffmpeg/ffmpeg", "-nostdin", "-v", "error", "-threads", "2",
+        "/usr/lib/jellyfin-ffmpeg/ffmpeg", "-nostdin", "-v", "error",
         "-ss", "0", "-t", "462.515", "-i", "/m/a.mkv",
         "-vn", "-sn", "-dn", "-ac", "2", "-f", "chromaprint", "-algorithm", "1", "-fp_format", "raw", "-",
     ]  # fmt: skip
+
+
+def test_a_fingerprint_runs_at_ffmpegs_own_thread_count():
+    # Chromaprint is CPU work even on a GPU worker: no GPU's ffmpeg_threads caps it, as none caps previews' CPU work.
+    command = fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", 462.5152)
+    assert "-threads" not in command and "-filter_threads" not in command
 
 
 @pytest.mark.parametrize(
@@ -84,7 +96,7 @@ def test_command_is_the_spec_command_with_thread_cap():
 def test_a_retimed_command_plays_the_audio_at_the_groups_speed(retime, rate):
     # Resampled to 48 kHz first, so the declared rate is the same speed change whatever rate the file has.
     assert fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", 462.5152, retime=retime) == [
-        "ffmpeg", "-nostdin", "-v", "error", "-threads", "2",
+        "ffmpeg", "-nostdin", "-v", "error",
         "-ss", "0", "-t", "462.515", "-i", "/m/a.mkv",
         "-vn", "-sn", "-dn", "-ac", "2", "-af", f"aresample=48000,asetrate={rate}",
         "-f", "chromaprint", "-algorithm", "1", "-fp_format", "raw", "-",
@@ -240,6 +252,63 @@ def test_compute_returns_the_raw_points():
     assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", fpmod.window_s(1_321_472))
 
 
+def test_compute_runs_in_a_session_of_its_own():
+    # Its own session, so a pause stops (and a cancel kills) ffmpeg's whole group and never the app's.
+    with patch.object(fpmod.subprocess, "Popen", return_value=_proc(stdout=b"")) as popen:
+        fpmod.compute_fingerprint("/m/a.mkv", 1_321_472, ffmpeg="ffmpeg")
+    assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", fpmod.window_s(1_321_472))
+    assert popen.call_args.kwargs["start_new_session"] is True
+
+
+def test_a_failing_pause_or_cancel_check_still_stops_ffmpeg():
+    # Both are asked while ffmpeg runs; whatever they raise must not leave it running with its pipes held.
+    proc = _proc(hang=True)
+
+    def broken():
+        raise RuntimeError("settings unreadable")
+
+    with patch.object(fpmod.subprocess, "Popen", return_value=proc), pytest.raises(RuntimeError, match="unreadable"):
+        fpmod.compute_fingerprint("/m/a.mkv", 60_000, ffmpeg="ffmpeg", cancel_check=broken)
+    proc.kill.assert_called_once()
+
+
+def test_a_cancel_during_a_pause_before_the_start_starts_no_ffmpeg():
+    cancelled = threading.Event()
+    paused = threading.Event()
+    paused.set()
+
+    def pause_check():
+        cancelled.set()  # cancelled while everything is paused
+        return paused.is_set()
+
+    with patch.object(fpmod.subprocess, "Popen") as popen, pytest.raises(fpmod.FingerprintError, match="cancelled"):
+        fpmod.compute_fingerprint("/m/a.mkv", 60_000, ffmpeg="ffmpeg", pause_check=pause_check,
+                                  cancel_check=cancelled.is_set)  # fmt: skip
+    popen.assert_not_called()
+
+
+def test_a_mount_that_stalled_during_a_pause_before_the_start_starts_no_ffmpeg(monkeypatch):
+    paused, stalled = [True], [0]
+
+    def pause_check():
+        return paused[0]
+
+    def sleep(_seconds):
+        stalled[0] = fpmod.STALLED_LIMIT  # other files' reads got stuck on the mount while everything was paused
+        paused[0] = False
+
+    from media_preview_generator.markers import freeze
+
+    monkeypatch.setattr(freeze, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep))
+    with (
+        patch.object(fpmod, "stalled_ffmpegs", lambda: stalled[0]),
+        patch.object(fpmod.subprocess, "Popen") as popen,
+        pytest.raises(fpmod.FingerprintStalledError),
+    ):
+        fpmod.compute_fingerprint("/m/a.mkv", 60_000, ffmpeg="ffmpeg", pause_check=pause_check)
+    popen.assert_not_called()
+
+
 def test_compute_runs_the_retimed_command():
     with patch.object(fpmod.subprocess, "Popen", return_value=_proc(stdout=b"")) as popen:
         fpmod.compute_fingerprint("/m/a.mkv", 1_321_472, ffmpeg="ffmpeg", retime=0.95)
@@ -314,6 +383,126 @@ def test_an_ffmpeg_whose_output_outlives_the_kill_never_holds_the_worker(tmp_pat
     assert fpmod.stalled_ffmpegs() == 0  # counted down once collected
 
 
+def _fake_ffmpeg(tmp_path, *, steps: int = 20, step_s: float = 0.05) -> pathlib.Path:
+    """An ffmpeg stand-in that counts its steps into ``progress``, then writes two fingerprint points."""
+    pid_file, progress = tmp_path / "ffmpeg.pid", tmp_path / "progress"
+    script = tmp_path / "ffmpeg"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(f"""
+        import os, sys, time
+        open({str(pid_file)!r}, "w").write(str(os.getpid()))
+        for n in range({steps}):
+            open({str(progress)!r} + ".tmp", "w").write(str(n + 1))
+            os.replace({str(progress)!r} + ".tmp", {str(progress)!r})
+            time.sleep({step_s})
+        sys.stdout.buffer.write(bytes([1, 0, 0, 0, 2, 0, 0, 0]))
+    """)
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _state(pid: int) -> str:
+    return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split(" ", 1)[0]
+
+
+def _progress(path: pathlib.Path) -> int:
+    try:
+        return int(path.read_text() or 0)
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def _wait_for(condition, *, within_s: float = 5.0) -> bool:
+    deadline = time.monotonic() + within_s
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return condition()
+
+
+class TestPause:
+    """Pause all, quiet hours and a schedule's stop time stop a running fingerprint where it is, as previews' FFmpeg."""
+
+    @pytest.fixture
+    def group_signals(self, monkeypatch):
+        from media_preview_generator.markers import freeze
+
+        monkeypatch.setattr(fpmod, "_POLL_S", 0.05)
+        sent: list[tuple[int, int]] = []
+        real = os.killpg
+
+        def killpg(pgid, sig):
+            sent.append((pgid, sig))
+            real(pgid, sig)
+
+        monkeypatch.setattr(freeze.os, "killpg", killpg)
+        return sent
+
+    @staticmethod
+    def _in_background(**kwargs):
+        out: dict = {}
+
+        def run():
+            try:
+                out["points"] = fpmod.compute_fingerprint("/m/a.mkv", 60_000, **kwargs).tolist()
+            except BaseException as exc:  # noqa: BLE001 - collected for the assertions
+                out["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread, out
+
+    def test_a_pause_stops_the_group_and_the_resume_goes_on_with_the_deadline_moved_out(self, tmp_path, group_signals):
+        ffmpeg = _fake_ffmpeg(tmp_path)  # about 1 s of work
+        progress = tmp_path / "progress"
+        paused = threading.Event()
+        thread, out = self._in_background(ffmpeg=str(ffmpeg), pause_check=paused.is_set, timeout_s=2.5)
+        try:
+            assert _wait_for(lambda: _progress(progress) >= 3)
+            paused.set()
+            pid = int((tmp_path / "ffmpeg.pid").read_text())
+            assert _wait_for(lambda: _state(pid) == "T")
+            frozen_at = _progress(progress)
+            time.sleep(3.0)  # past the 2.5 s limit
+            assert _state(pid) == "T" and _progress(progress) == frozen_at
+            assert thread.is_alive()
+        finally:
+            paused.clear()
+            thread.join(10)
+        assert out == {"points": [1, 2]}
+        assert group_signals == [(pid, signal.SIGSTOP), (pid, signal.SIGCONT)]
+
+    def test_a_cancel_while_paused_kills_the_frozen_ffmpeg(self, tmp_path, group_signals):
+        ffmpeg = _fake_ffmpeg(tmp_path, steps=200)
+        paused, cancelled = threading.Event(), threading.Event()
+        thread, out = self._in_background(ffmpeg=str(ffmpeg), pause_check=paused.is_set,
+                                          cancel_check=cancelled.is_set)  # fmt: skip
+        assert _wait_for(lambda: _progress(tmp_path / "progress") >= 2)
+        paused.set()
+        pid = int((tmp_path / "ffmpeg.pid").read_text())
+        assert _wait_for(lambda: _state(pid) == "T")
+        started = time.monotonic()
+        cancelled.set()
+        thread.join(10)
+        assert isinstance(out.get("error"), fpmod.FingerprintError) and "cancelled" in str(out["error"])
+        assert time.monotonic() - started < 3
+        assert not pathlib.Path(f"/proc/{pid}").exists() or _state(pid) == "Z"
+        assert group_signals[:2] == [(pid, signal.SIGSTOP), (pid, signal.SIGCONT)]
+
+    def test_no_ffmpeg_starts_while_paused(self, tmp_path, group_signals):
+        ffmpeg = _fake_ffmpeg(tmp_path, steps=1)
+        paused = threading.Event()
+        paused.set()
+        thread, out = self._in_background(ffmpeg=str(ffmpeg), pause_check=paused.is_set, timeout_s=1.0)
+        time.sleep(1.5)  # past the time limit: it counts from the start of ffmpeg
+        assert not (tmp_path / "ffmpeg.pid").exists() and thread.is_alive()
+        paused.clear()
+        thread.join(10)
+        assert out == {"points": [1, 2]}
+        assert group_signals == []
+
+
 def _record(store, tmp_path, name="S01E01.mkv"):
     path = tmp_path / name
     path.write_bytes(b"x" * 10)
@@ -336,7 +525,14 @@ def test_ensure_computes_once_then_reads_the_cache(store, tmp_path):
         first = fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
         second = fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
     assert first.tolist() == second.tolist() == [5, 6]
-    compute.assert_called_once_with(rec.canonical_path, 300_000, ffmpeg="ffmpeg", cancel_check=None, retime=None)
+    compute.assert_called_once_with(
+        rec.canonical_path,
+        300_000,
+        ffmpeg="ffmpeg",
+        cancel_check=None,
+        pause_check=None,
+        retime=None,
+    )
     stored = store.get_fingerprint(rec.id, "intro")
     assert (stored.start_s, stored.length_s, stored.algorithm) == (0.0, 105.0, 1)
 
@@ -347,7 +543,14 @@ def test_a_retimed_fingerprint_is_computed_and_cached_beside_the_files_own(store
     with patch.object(fpmod, "compute_fingerprint", return_value=np.array([7, 8], dtype="<u4")) as compute:
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", retime=retime).tolist() == [7, 8]
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", retime=retime).tolist() == [7, 8]
-    compute.assert_called_once_with(rec.canonical_path, 300_000, ffmpeg="ffmpeg", cancel_check=None, retime=retime)
+    compute.assert_called_once_with(
+        rec.canonical_path,
+        300_000,
+        ffmpeg="ffmpeg",
+        cancel_check=None,
+        pause_check=None,
+        retime=retime,
+    )
     stored = store.get_fingerprint(rec.id, "intro@0.959041")
     assert (stored.start_s, stored.length_s, stored.algorithm, stored.points) == (
         0.0,
@@ -379,7 +582,12 @@ def test_skip_is_asked_after_the_lock_and_a_cache_miss(store, tmp_path):
         fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: False)
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: True).tolist() == [5]  # cached
     compute.assert_called_once_with(
-        rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None, retime=None
+        rec.canonical_path,
+        rec.duration_ms,
+        ffmpeg="ffmpeg",
+        cancel_check=None,
+        pause_check=None,
+        retime=None,
     )
 
 
@@ -398,28 +606,42 @@ def test_a_failure_is_reported_while_the_files_lock_is_still_held(store, tmp_pat
     assert held_at_failure == ([True] if recorded else [])
 
 
-def test_at_most_two_fingerprints_run_at_once(store, tmp_path):
-    recs = [_record(store, tmp_path, f"S01E0{i}.mkv") for i in range(1, 6)]
-    running, peak, guard = [0], [0], threading.Lock()
+def test_eight_workers_fingerprint_at_once_with_no_app_wide_limit(store, tmp_path):
+    # The worker pool is the cap, as it is for previews: a worker never holds its slot waiting for an app-wide
+    # fingerprint limit. All eight must be inside ffmpeg together for the barrier to open; one held back would break it.
+    recs = [_record(store, tmp_path, f"S01E0{i}.mkv") for i in range(1, 9)]
+    together = threading.Barrier(len(recs), timeout=5)
+    results: list[object] = []
 
-    def slow(*_a, **_kw):
-        with guard:
-            running[0] += 1
-            peak[0] = max(peak[0], running[0])
-        time.sleep(0.05)
-        with guard:
-            running[0] -= 1
+    def compute(*_a, **_kw):
+        together.wait()
         return np.array([1], dtype="<u4")
 
-    with patch.object(fpmod, "compute_fingerprint", side_effect=slow):
-        threads = [
-            threading.Thread(target=fpmod.ensure_fingerprint, args=(store, r), kwargs={"ffmpeg": "f"}) for r in recs
-        ]
+    def work(rec):
+        try:
+            results.append(fpmod.ensure_fingerprint(store, rec, ffmpeg="f").tolist())
+        except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+            results.append(exc)
+
+    with patch.object(fpmod, "compute_fingerprint", side_effect=compute):
+        threads = [threading.Thread(target=work, args=(r,)) for r in recs]
         for t in threads:
             t.start()
         for t in threads:
             t.join(10)
-    assert peak[0] == 2
+    assert results == [[1]] * len(recs)
+    assert not hasattr(fpmod, "_PARALLEL") and not hasattr(fpmod, "MAX_PARALLEL")
+
+
+def test_the_pause_reaches_the_ffmpeg_run(store, tmp_path):
+    rec = _record(store, tmp_path)
+
+    def paused():
+        return False
+
+    with patch.object(fpmod, "compute_fingerprint", return_value=np.array([5], dtype="<u4")) as compute:
+        fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", pause_check=paused)
+    assert compute.call_args.kwargs["pause_check"] is paused
 
 
 class _StuckProc:
@@ -439,9 +661,74 @@ class _StuckProc:
         return b"", b""
 
 
+class TestAFileAnotherRunHolds:
+    """Another job's run of the same file holds its fingerprint lock; one frozen by its schedule's stop time holds it
+    until the schedule's next start. A waiter never waits longer than a running fingerprint takes, and a cancel ends
+    its wait at once."""
+
+    @pytest.fixture
+    def held(self, store, tmp_path, monkeypatch):
+        monkeypatch.setattr(fpmod, "LOCK_WAIT_S", 0.3)
+        rec = _record(store, tmp_path)
+        holding, release = threading.Event(), threading.Event()
+
+        def hold():
+            with fpmod._FILE_LOCKS.hold(rec.id):
+                holding.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        assert holding.wait(5)
+        yield rec, release
+        release.set()
+        holder.join(5)
+
+    @pytest.mark.parametrize("sibling", [True, False], ids=["sibling", "own-file"])
+    def test_a_waiter_gives_up_after_the_longest_a_running_fingerprint_takes(self, store, held, sibling):
+        rec, _release = held
+        failures: list[int] = []
+        started = time.monotonic()
+        with (
+            patch.object(fpmod, "compute_fingerprint") as compute,
+            pytest.raises(fpmod.FingerprintBusyError, match="another job"),
+        ):
+            fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=(lambda: False) if sibling else None,
+                                     on_failure=lambda: failures.append(1))  # fmt: skip
+        assert 0.3 <= time.monotonic() - started < 2
+        compute.assert_not_called()
+        assert failures == []  # not the file's fault: nothing is recorded against it
+
+    def test_a_cancel_ends_the_wait_at_once(self, store, held, monkeypatch):
+        monkeypatch.setattr(fpmod, "LOCK_WAIT_S", 30.0)
+        rec, _release = held
+        cancelled = threading.Event()
+        threading.Timer(0.2, cancelled.set).start()
+        started = time.monotonic()
+        with (
+            patch.object(fpmod, "compute_fingerprint") as compute,
+            pytest.raises(fpmod.FingerprintError, match="cancelled"),
+        ):
+            fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", cancel_check=cancelled.is_set)
+        assert time.monotonic() - started < 1.5
+        compute.assert_not_called()
+
+    def test_time_the_waiter_itself_is_paused_doesnt_count(self, store, held):
+        # Pause all freezes both runs: the waiter waits it out and takes the file once it is free.
+        rec, release = held
+        paused = threading.Event()
+        paused.set()
+        threading.Timer(0.8, release.set).start()
+        threading.Timer(1.0, paused.clear).start()
+        with patch.object(fpmod, "compute_fingerprint", return_value=np.array([4], dtype="<u4")) as compute:
+            assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: False,
+                                            pause_check=paused.is_set).tolist() == [4]  # fmt: skip
+        compute.assert_called_once()
+
+
 class TestStalledFfmpegs:
-    """A killed ffmpeg that still holds its output gives back its slot and the file's lock, but counts as stalled until
-    it is collected: at ``MAX_PARALLEL`` stalled, no new ffmpeg starts on what is most likely the same stalled mount."""
+    """A killed ffmpeg that still holds its output gives back the file's lock, but counts as stalled until it is
+    collected: at ``STALLED_LIMIT`` stalled, no new ffmpeg starts on what is most likely the same stalled mount."""
 
     @pytest.fixture
     def stuck(self, monkeypatch):
@@ -490,59 +777,16 @@ class TestStalledFfmpegs:
             assert fpmod.ensure_fingerprint(store, third, ffmpeg="ffmpeg").tolist() == [7, 8]
         assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", third.canonical_path, 105.0)
 
-    @staticmethod
-    def _hand_off_two_stuck_ffmpegs(stuck):
-        """Two ffmpegs of other files, stopped and handed to the reaper while still stuck."""
-        for name in ("S02E01.mkv", "S02E02.mkv"):
+    def test_other_files_stalled_ffmpegs_refuse_a_caller_at_once(self, store, tmp_path, stuck):
+        rec = _record(store, tmp_path, "S01E01.mkv")
+        for name in ("S02E01.mkv", "S02E02.mkv"):  # other files' ffmpegs, killed and handed on while still stuck
             stuck.append(_StuckProc())
             fpmod._stop(stuck[-1], name)
-        assert fpmod.stalled_ffmpegs() == 2
-
-    @staticmethod
-    def _run(store, rec, errors):
-        def run():
-            try:
-                fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
-            except BaseException as exc:  # noqa: BLE001 - collected for the assertions
-                errors.append(exc)
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        return thread
-
-    def test_with_every_slot_busy_a_stalled_mount_is_reported_without_waiting_for_one(self, store, tmp_path, stuck):
-        rec = _record(store, tmp_path, "S01E01.mkv")
-        self._hand_off_two_stuck_ffmpegs(stuck)
-        for _ in range(fpmod.MAX_PARALLEL):
-            fpmod._PARALLEL.acquire()  # both slots held by other files' ffmpegs that are still running
-        errors: list[BaseException] = []
-        try:
-            thread = self._run(store, rec, errors)
-            thread.join(1)
-            assert not thread.is_alive()  # not parked behind the running ffmpegs
-        finally:
-            for _ in range(fpmod.MAX_PARALLEL):
-                fpmod._PARALLEL.release()
-        thread.join(5)
-        assert [type(e) for e in errors] == [fpmod.FingerprintStalledError]
+        started = time.monotonic()
+        with pytest.raises(fpmod.FingerprintStalledError):
+            fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
+        assert time.monotonic() - started < 0.5
         assert len(stuck) == 2  # no ffmpeg started
-
-    def test_a_caller_given_a_slot_after_the_mount_stalled_starts_no_ffmpeg(self, store, tmp_path, stuck):
-        rec = _record(store, tmp_path, "S01E01.mkv")
-        for _ in range(fpmod.MAX_PARALLEL):
-            fpmod._PARALLEL.acquire()  # both slots held by running ffmpegs
-        errors: list[BaseException] = []
-        try:
-            thread = self._run(store, rec, errors)  # nothing stalled yet: it waits for a slot
-            time.sleep(0.2)
-            self._hand_off_two_stuck_ffmpegs(stuck)  # meanwhile other ffmpegs stall on the mount
-        finally:
-            fpmod._PARALLEL.release()  # a running one finishes normally and frees its slot
-        thread.join(3)
-        fpmod._PARALLEL.release()
-        assert not thread.is_alive()
-        assert [type(e) for e in errors] == [fpmod.FingerprintStalledError]
-        assert len(stuck) == 2  # the freed slot started nothing on the stalled mount
 
 
 @pytest.mark.parametrize("made", [{"algorithm": 2}, {"length_s": 60.0}], ids=["other-algorithm", "other-window"])
@@ -561,7 +805,12 @@ def test_a_fingerprint_made_another_way_is_computed_again(store, tmp_path, made)
     with patch.object(fpmod, "compute_fingerprint", return_value=np.array([5, 6], dtype="<u4")) as compute:
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg").tolist() == [5, 6]
     compute.assert_called_once_with(
-        rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None, retime=None
+        rec.canonical_path,
+        rec.duration_ms,
+        ffmpeg="ffmpeg",
+        cancel_check=None,
+        pause_check=None,
+        retime=None,
     )
     stored = store.get_fingerprint(rec.id, "intro")
     assert (stored.algorithm, stored.length_s) == (fpmod.ALGORITHM, fpmod.window_s(rec.duration_ms))

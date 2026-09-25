@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from flask import jsonify, request
+from flask import Response, jsonify, request
 from loguru import logger
 
 from ..servers import (
@@ -343,6 +343,23 @@ def _resolve_to_canonical_paths(
     return [], f"unsupported webhook kind: {kind}"
 
 
+def _webhooks_disabled_response(kind: str) -> tuple[Response, int] | None:
+    """Honour the "Enable webhook processing" master switch, which covers every incoming webhook.
+
+    Checked before the registry is built so a disabled install makes no vendor API call.
+
+    Args:
+        kind: The classified payload kind, for the log line.
+
+    Returns:
+        A 202 "ignored" response when webhooks are disabled, else ``None``.
+    """
+    if get_settings_manager().get("webhook_enabled", True):
+        return None
+    logger.info("Webhook router: {} payload from {} ignored (webhooks disabled)", kind, request.remote_addr)
+    return jsonify({"status": "ignored", "kind": kind, "reason": "webhooks disabled"}), 202
+
+
 @webhooks_bp.route("/incoming", methods=["POST"])
 @_authenticate_webhook
 def webhook_incoming():
@@ -394,6 +411,10 @@ def webhook_incoming():
             400,
         )
 
+    disabled = _webhooks_disabled_response(kind)
+    if disabled is not None:
+        return disabled
+
     registry = _build_registry_from_settings()
     resolved, error = _resolve_to_canonical_paths(
         kind=kind,
@@ -441,6 +462,10 @@ def webhook_per_server(server_id: str):
     kind, payload, parse_error = _classify_payload(request)
     if payload is None:
         return jsonify({"status": "ignored", "reason": parse_error or "unrecognised"}), 400
+
+    disabled = _webhooks_disabled_response(kind)
+    if disabled is not None:
+        return disabled
 
     registry = _build_registry_from_settings()
     server_cfg = registry.get_config(server_id)

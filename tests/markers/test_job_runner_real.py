@@ -866,7 +866,9 @@ class TestCreditTextOnTheWorkers:
     def test_the_worker_reads_the_text_on_its_gpu(self, engine, setup):
         job = self._run(engine, setup)
         assert setup.decodes == [("NVIDIA", "cuda:0")]
-        assert setup.pool.detect_boxes.call_args.kwargs == {"gpu": "NVIDIA", "gpu_device_path": "cuda:0"}
+        kwargs = setup.pool.detect_boxes.call_args.kwargs
+        assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["gpu_worker"]) == ("NVIDIA", "cuda:0", True)
+        assert callable(kwargs["on_cpu"]) and callable(kwargs["cancel_check"])
         assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         assert self._worker().fallback_active is False
         assert self._released(engine)
@@ -878,7 +880,9 @@ class TestCreditTextOnTheWorkers:
         setup.effects["gpu"] = frames.GpuDecodeError("the GPU decoded no frames from S01E01.mkv")
         job = self._run(engine, setup)
         assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
-        assert setup.pool.detect_boxes.call_args.kwargs == {"gpu": None, "gpu_device_path": None}
+        # Still a GPU worker's request with no GPU: its CPU text detection gets a helper of its own, not a CPU worker's.
+        kwargs = setup.pool.detect_boxes.call_args.kwargs
+        assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["gpu_worker"]) == (None, None, True)
         worker = self._worker()
         assert worker.fallback_active is True and "GPU decoded no frames" in worker.fallback_reason
         rec = setup.store.get_file(setup.path)
@@ -887,6 +891,23 @@ class TestCreditTextOnTheWorkers:
         assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         [row] = engine.jm.get_file_results(job.id)
         assert row["worker"] == "GPU Worker 1 (Test GPU)"
+        assert self._released(engine)
+
+    def test_text_detection_read_on_the_cpu_on_a_gpu_worker_shows_on_the_worker_row(self, engine, setup):
+        # The GPU helper failed this request: the pool reads it on the CPU and says so through the worker's callback.
+        def on_the_cpu(planes, **kwargs):
+            kwargs["on_cpu"]("Credit text detection on the CPU: its GPU helper failed (the helper exited (-9))")
+            return [()] * len(planes)
+
+        setup.pool.detect_boxes.side_effect = on_the_cpu
+        job = self._run(engine, setup)
+        assert setup.decodes == [("NVIDIA", "cuda:0")]  # the decode itself stayed on the GPU
+        worker = self._worker()
+        assert worker.fallback_active is True
+        assert (
+            worker.fallback_reason == "Credit text detection on the CPU: its GPU helper failed (the helper exited (-9))"
+        )
+        assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         assert self._released(engine)
 
     def test_a_cancel_during_the_decode_frees_the_worker_and_the_slot_without_a_cpu_rerun(self, engine, setup):

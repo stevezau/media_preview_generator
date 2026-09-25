@@ -76,10 +76,15 @@ def _reset_singletons():
     # at the end, but releasing doesn't guarantee the thread has
     # fully unwound the outer finally block yet.
     def _leftover_threads() -> list:
+        # Not a Timer: the JobManager's hourly retention timer is also named "Thread-N", never ends on its own, and
+        # is stopped by closing the manager below.
         return [
             t
             for t in _threading.enumerate()
-            if t.ident not in threads_before and t.name.startswith(("run_job", "Thread-")) and t.is_alive()
+            if t.ident not in threads_before
+            and t.name.startswith(("run_job", "Thread-"))
+            and not isinstance(t, _threading.Timer)
+            and t.is_alive()
         ]
 
     # First, poke the gate to wake any stuck acquirers (belt-and-
@@ -125,6 +130,8 @@ def _reset_singletons():
 
     reset_settings_manager()
     with jobs_mod._job_lock:
+        if jobs_mod._job_manager is not None:
+            jobs_mod._job_manager.close()
         jobs_mod._job_manager = None
     with sched_mod._schedule_lock:
         if sched_mod._schedule_manager is not None:
@@ -197,17 +204,25 @@ class _BlockingRunProcessing:
     Each job gets its own Event and records its entry + release. The gate
     tests need this because ``run_processing``'s real implementation does
     real work — we only care that the *gate* admission happened.
+
+    ``release_all`` is sticky: releasing the running jobs frees their
+    slots, so the gate admits a waiting job right after, and that job
+    must not block for the full 30 s wait (the teardown's drain would run
+    past the test timeout).
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._events: dict[str, threading.Event] = {}
         self._entered: list[str] = []
+        self._released_all = False
 
     def _event_for(self, job_id: str) -> threading.Event:
         with self._lock:
             if job_id not in self._events:
                 self._events[job_id] = threading.Event()
+                if self._released_all:
+                    self._events[job_id].set()
             return self._events[job_id]
 
     def entered(self) -> list[str]:
@@ -219,6 +234,7 @@ class _BlockingRunProcessing:
 
     def release_all(self) -> None:
         with self._lock:
+            self._released_all = True
             for ev in self._events.values():
                 ev.set()
 

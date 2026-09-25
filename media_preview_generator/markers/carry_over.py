@@ -2,9 +2,9 @@
 stays for the new file while nothing answers for it there.
 
 Plex keeps an item's markers across a file replacement; deciding the new file from its own evidence alone did worse.
-Tomb Raider King S01E12's replacement, identical in length and showing the same opening, has no chapters, and its
-season audio passed nothing: its 0-92 s intro (the old file's Intro chapter) was removed. RuPaul's Drag Race UK
-S08E04's, 408 ms shorter, lost its intro the same way.
+One episode's replacement, identical in length and showing the same opening, has no chapters, and its
+season audio passed nothing: its 0-92 s intro (the old file's Intro chapter) was removed. Another episode's,
+408 ms shorter, lost its intro the same way.
 
 The rule is narrow on purpose:
 

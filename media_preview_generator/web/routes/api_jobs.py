@@ -11,7 +11,7 @@ from flask import Response, current_app, jsonify, request, session
 from loguru import logger
 
 from ...config import MAX_CPU_THREADS
-from ...job_kinds import JOB_KIND_INTRO_CREDITS
+from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
 from ..auth import (
     api_token_required,
     get_auth_method,
@@ -24,6 +24,7 @@ from ..jobs import (
     PAUSED_BY_SCHEDULE,
     PRIORITY_NORMAL,
     RETRY_STATE_CONFIG_KEYS,
+    SLOT_WAIT_SINCE,
     JobStatus,
     get_job_manager,
     is_user_visible_job,
@@ -695,24 +696,11 @@ def create_job():
     # library_name carry the human label (e.g. "3 Libraries").
     display_library_id = library_ids[0] if len(library_ids) == 1 else None
 
-    job_manager = get_job_manager()
-    job = job_manager.create_job(
-        library_id=display_library_id,
-        library_name=data.get("library_name", ""),
-        config=data.get("config", {}),
-        priority=priority,
-        server_id=server_id,
-        server_name=server_name,
-        server_type=server_type,
-    )
-
     # Allow-list of config keys the API accepts as job overrides. Anything
-    # NOT in this list (notably credentials like ``plex_token`` /
-    # ``plex_url`` / ``plex_config_folder``) is silently dropped — an
-    # attacker who crafts a request with credential fields would otherwise
-    # have those fields overwrite the live Config inside the worker
-    # because ``job_runner.py``'s override loop falls through to
-    # ``setattr(config, key, value)`` for any matching attribute.
+    # else (notably credentials like ``plex_token`` / ``plex_url`` /
+    # ``plex_config_folder``, or ``ffmpeg_path``) is dropped before the job
+    # is saved: revival, resume and Reprocess replay the saved config as
+    # overrides, so a key saved here would reach the worker's Config later.
     _ALLOWED_OVERRIDES = {
         "force_generate",
         "regenerate_thumbnails",
@@ -722,6 +710,9 @@ def create_job():
     }
     raw_config = data.get("config") or {}
     config_overrides = {k: v for k, v in raw_config.items() if k in _ALLOWED_OVERRIDES}
+    dropped = sorted(str(k) for k in raw_config if k not in _ALLOWED_OVERRIDES)
+    if dropped:
+        logger.warning("New job: ignored config key(s) a job can't set: {!r}", dropped)
     if library_ids:
         config_overrides["selected_library_ids"] = library_ids
     elif library_names:
@@ -731,6 +722,17 @@ def create_job():
     if server_id:
         # Pin the dispatcher to this server only — handled in job_runner.
         config_overrides["server_id"] = server_id
+
+    job_manager = get_job_manager()
+    job = job_manager.create_job(
+        library_id=display_library_id,
+        library_name=data.get("library_name", ""),
+        config=dict(config_overrides),
+        priority=priority,
+        server_id=server_id,
+        server_name=server_name,
+        server_type=server_type,
+    )
 
     _start_job_async(job.id, config_overrides)
 
@@ -1683,8 +1685,8 @@ def _build_idle_workers_from_config():
     # Use the shared label helper so the panel reads identically whether
     # this synthesised idle list is on screen or the live dispatcher's
     # rows are. Without this the row labels visibly flipped between
-    # "GPU Worker 1 (NVIDIA TITAN RTX)" (mid-job) and
-    # "NVIDIA TITAN RTX #1" (idle, after the job ended).
+    # "GPU Worker 1 (NVIDIA RTX 4090)" (mid-job) and
+    # "NVIDIA RTX 4090 #1" (idle, after the job ended).
     from ...jobs.worker_naming import (
         cpu_worker_label,
         friendly_device_label,
@@ -1815,6 +1817,11 @@ def reprocess_job(job_id):
     new_config.pop(FILES_SEALED, None)
     # The new job was never paused by its schedule's stop time, so that schedule's start doesn't resume it.
     new_config.pop(PAUSED_BY_SCHEDULE, None)
+    # A Re-run is the previews again: a follow-up request the old job never got to take (it never started) would
+    # queue a second Intro & Credits job for files the first one already has or had.
+    new_config.pop(INTRO_CREDITS_FOLLOW_UP, None)
+    # The new job hasn't waited for a slot yet: a restart must age it from its own wait, not the old job's.
+    new_config.pop(SLOT_WAIT_SINCE, None)
     new_job = job_manager.create_job(
         library_id=job.library_id,
         library_name=library_name,

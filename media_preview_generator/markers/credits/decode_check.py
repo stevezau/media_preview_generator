@@ -3,11 +3,12 @@
 
 A credits answer depends on the decoder alone: every path downloads the whole decoded frame and shrinks it with the
 same software scaler (``frames._scale_filter``). NVIDIA and Intel VAAPI decode H.264 and HEVC bit-exactly against the
-CPU (no pixel differed on 8 real files), but no other hardware was measured. So on a device's first credits decode, two
-packaged reference clips go through the credits decode's own command (``frames.decode_rows``) on that device and on the
-CPU, at both sizes credits are read at, and every frame's Y plane is compared. The result is only logged: a match as an
-info line, a difference, decode error or timeout as one warning. The work never moves: a GPU worker decodes credits on
-its GPU, every codec included (the owner's worker model: users choose GPU or CPU workers, often to take the work off
+CPU (no pixel differed on 8 real files), but no other hardware was measured. So each GPU gets a check: two packaged
+reference clips go through the credits decode's own command (``frames.decode_rows``) on that device and on the CPU, at
+both sizes credits are read at, and every frame's Y plane is compared. It runs in the background when an Intro &
+Credits job builds the worker pool (:func:`start_checks`), never on a worker, and nothing waits for it. The result is
+only logged: a match as an info line, a difference, decode error or timeout as one warning. The work never moves: a GPU
+worker decodes credits on its GPU, every codec included (users choose GPU or CPU workers, often to take the work off
 the CPU). A GPU that can't decode a file at all is another matter: its ``frames.GpuDecodeError`` still sends that file
 to the worker's CPU rerun. Text detection has its own per-device self-test (``textdet_helper``).
 """
@@ -19,7 +20,7 @@ import hashlib
 import os
 import threading
 import time
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -35,11 +36,11 @@ from .textdet_helper import device_key
 CLIPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_clips")
 # 1 and ``detector.RETRY_SCALE``: 320x180, and the 640x360 a tail without an answer is read again at.
 SCALES = (1, 2)
-# The whole check on one device, CPU side included. On storage's P5000 it takes 2.9 s: 2.4 s for the four GPU decodes,
-# most of it CUDA starting up once per decode, and 0.5 s for the CPU's, which every later device reuses. The limit
-# leaves room for a GPU busy with preview work.
+# The whole check on one device, CPU side included. On one NVIDIA GPU it took 2.9 s: 2.4 s for the four GPU
+# decodes, most of it CUDA starting up once per decode, and 0.5 s for the CPU's, which every later device reuses. The
+# limit leaves room for a GPU busy with preview work.
 CHECK_TIMEOUT_S = 60.0
-# How often a worker waiting for another worker's check asks whether its own job was cancelled.
+# How often a check waiting for another GPU's check to finish the shared CPU decode asks whether to stop.
 WAIT_POLL_S = 0.1
 
 Frames = tuple[tuple[float, str], ...]
@@ -132,7 +133,7 @@ def decode_clip(
 
 
 class DecodeChecks:
-    """Each GPU device's check, run once per process on the first credits decode for it."""
+    """Each GPU device's check, run once per process in the background (:meth:`start`)."""
 
     def __init__(
         self,
@@ -142,7 +143,7 @@ class DecodeChecks:
         timeout_s: float = CHECK_TIMEOUT_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """Create the checks (none run until a device's first credits decode).
+        """Create the checks (none run until one is started).
 
         Args:
             decode: Decodes one clip at one scale on one device (tests pass a fake).
@@ -156,6 +157,45 @@ class DecodeChecks:
         self._guard = threading.Lock()
         self._device_locks = KeyedLocks()
         self._cpu_locks = KeyedLocks()
+        self._running: set[tuple[str, str]] = set()  # (ffmpeg, device key) checks started and not finished
+
+    def start(self, gpu: str | None, gpu_device_path: str | None, *, ffmpeg: str) -> threading.Thread | None:
+        """Start a device's check on a daemon thread, unless it has answered or is running. Never waits for it.
+
+        Args:
+            gpu: The GPU type, None for the CPU (no check).
+            gpu_device_path: The GPU's device.
+            ffmpeg: The ffmpeg binary jobs decode with.
+
+        Returns:
+            The thread, or None when no check was started.
+        """
+        if gpu is None or not hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=False).active:
+            return None
+        key = (ffmpeg, device_key(gpu, gpu_device_path))
+        with self._guard:
+            if key in self._verdicts or key in self._running:
+                return None
+            self._running.add(key)
+        thread = threading.Thread(target=self._check_in_background, args=(key, gpu, gpu_device_path, ffmpeg),
+                                  name="credits-decode-check", daemon=True)  # fmt: skip
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            with self._guard:
+                self._running.discard(key)
+            logger.warning("Couldn't start the credits decoding check on {}: {}", key[1], exc)
+            return None
+        return thread
+
+    def _check_in_background(self, key: tuple[str, str], gpu: str, gpu_device_path: str | None, ffmpeg: str) -> None:
+        try:
+            self.check_device(gpu, gpu_device_path, ffmpeg=ffmpeg)
+        except Exception as exc:  # a diagnostic: nothing it meets may reach anything else
+            logger.warning("Couldn't check credits decoding on {}: {}", key[1], exc)
+        finally:
+            with self._guard:
+                self._running.discard(key)
 
     def check_device(
         self,
@@ -165,17 +205,17 @@ class DecodeChecks:
         ffmpeg: str,
         cancel_check: Callable[[], bool] | None = None,
     ) -> bool | None:
-        """Check a worker's GPU once per process, and log what it found. Never changes where anything decodes.
+        """Check a GPU once per process, and log what it found. Never changes where anything decodes.
 
-        The first caller for a device runs its check; one arriving meanwhile doesn't wait for a diagnostic and goes on
-        decoding. A cancelled check is not kept, so the next caller runs it again. A worker whose decodes never reach a
-        GPU (a CPU worker, a GPU without a usable device) runs none.
+        The first caller for a device runs its check; one arriving meanwhile doesn't wait for a diagnostic. A cancelled
+        check is not kept, so the next caller runs it again. A device whose decodes never reach a GPU (the CPU, a GPU
+        without a usable device) gets none.
 
         Args:
-            gpu: The worker's GPU type, None on a CPU worker.
-            gpu_device_path: The worker's device.
-            ffmpeg: The ffmpeg binary the job decodes with.
-            cancel_check: True once the job is cancelled.
+            gpu: The GPU type, None for the CPU.
+            gpu_device_path: The GPU's device.
+            ffmpeg: The ffmpeg binary jobs decode with.
+            cancel_check: True once the check should stop; None (the background check) never stops it.
 
         Returns:
             True when the device's frames matched the CPU's, False when they didn't or it couldn't decode the clips in
@@ -207,7 +247,8 @@ class DecodeChecks:
     def _hold(
         locks: KeyedLocks, key: Hashable, cancel_check: Callable[[], bool] | None, waiting: str
     ) -> Iterator[None]:
-        """Hold ``key``'s lock, waiting for whoever holds it for as long as this job isn't cancelled."""
+        """Hold ``key``'s lock (the CPU decode another GPU's check is making), waiting for as long as
+        ``cancel_check`` doesn't say stop (None: as long as it takes)."""
         while True:
             with locks.try_hold(key, WAIT_POLL_S) as held:
                 if held:
@@ -334,3 +375,22 @@ def check_device(
 ) -> bool | None:
     """The process's :meth:`DecodeChecks.check_device`."""
     return _checks.check_device(gpu, gpu_device_path, ffmpeg=ffmpeg, cancel_check=cancel_check)
+
+
+def start_checks(gpus: Iterable[tuple[str | None, str | None]], *, ffmpeg: str) -> list[threading.Thread]:
+    """Start the process's check of each GPU in the background (:meth:`DecodeChecks.start`), when a job builds the
+    worker pool. Never waits for one: no worker and no job does.
+
+    Args:
+        gpus: ``(gpu type, device)`` per GPU the pool has workers for.
+        ffmpeg: The ffmpeg binary jobs decode with.
+
+    Returns:
+        The threads started (none for a GPU checked or being checked already).
+    """
+    started = []
+    for gpu, gpu_device_path in gpus:
+        thread = _checks.start(gpu, gpu_device_path, ffmpeg=ffmpeg)
+        if thread is not None:
+            started.append(thread)
+    return started

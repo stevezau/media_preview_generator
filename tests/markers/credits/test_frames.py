@@ -63,7 +63,7 @@ class TestCommand:
             download_format="nv12",
         )
         assert hw is True
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *self.CUDA,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *self.CUDA,
                        "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12,showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
@@ -83,7 +83,7 @@ class TestCommand:
             download_format="p010le",
         )
         assert hw is True
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *self.VAAPI,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *self.VAAPI,
                        "-ss", "5680.500", "-t", "21.000", "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", "fps=1,hwdownload,format=p010le,scale=320:180:flags=neighbor,format=nv12,showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
@@ -114,7 +114,7 @@ class TestCommand:
         cmd, active = frames.decode_command(FF, MOVIE, start_s=0.0, length_s=None, keyframes_only=True, fps=None,
                                             gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
         assert active is hw
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args,
                        "-skip_frame", "nokey", "-ss", "0.000", "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", "scale=320:180:flags=neighbor,format=nv12,showinfo", "-f", "rawvideo", "-"]  # fmt: skip
 
@@ -136,7 +136,7 @@ class TestCommand:
                                             gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
         spare = [] if gpu == "NVIDIA" else ["-extra_hw_frames", "8"]
         assert active is True
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args, *spare,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args, *spare,
                        "-skip_frame", "nokey", "-ss", "12.250", "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", f"hwdownload,format={download_format},scale=320:180:flags=neighbor,format=nv12,showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
@@ -163,13 +163,36 @@ class TestCommand:
         assert cmd[vf] == f"{video_filter},showinfo"
         assert cmd[:vf] + cmd[vf + 1 :] == plain[:vf] + plain[vf + 1 :]
 
+    @pytest.mark.parametrize(
+        ("gpu", "device", "ffmpeg_threads", "threads"),
+        [
+            ("NVIDIA", "cuda:1", 3, ["-threads", "3", "-filter_threads", "3"]),
+            ("INTEL", RENDER, 3, ["-threads", "3", "-filter_threads", "3"]),
+            ("NVIDIA", "cuda:1", None, []),
+            ("NVIDIA", "cuda:1", 0, []),
+            (None, None, None, []),
+            (None, None, 3, []),
+        ],
+        ids=["gpu-worker-3", "vaapi-worker-3", "gpu-worker-no-value", "gpu-worker-0", "cpu-worker",
+             "cpu-decode-on-a-gpu-worker"],
+    )  # fmt: skip
+    def test_a_gpu_workers_own_ffmpeg_threads_cap_its_decode_as_previews_do(self, gpu, device, ffmpeg_threads, threads):
+        # Previews cap a GPU worker's FFmpeg at its GPU's ffmpeg_threads (-threads and -filter_threads) and leave every
+        # CPU decode, a GPU worker's CPU rerun included, at FFmpeg's own count. 0 or no value is no cap there too.
+        cmd, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
+                                       gpu=gpu, gpu_device_path=device, download_format="nv12",
+                                       ffmpeg_threads=ffmpeg_threads)  # fmt: skip
+        assert cmd[:5] == [FF, "-nostdin", "-hide_banner", "-loglevel", "info"]
+        assert cmd[5 : 5 + len(threads)] == threads
+        assert cmd.count("-threads") == cmd.count("-filter_threads") == (1 if threads else 0)
+
     def test_no_thinning_is_the_spec_command_exactly(self):
         # What every file that is neither intra-only nor VP9 gets (the detector passes keep_every=None and
         # drop_non_key=False): the command the 80 and the 205 were measured with, byte for byte.
         cmd, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
                                        gpu="NVIDIA", gpu_device_path="cuda:1", keep_every=None, drop_non_key=False,
                                        download_format="nv12")  # fmt: skip
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *self.CUDA,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *self.CUDA,
                        "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12,showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
@@ -191,7 +214,7 @@ class TestCommand:
         # filter list, not for a shell: argv never goes through one.
         cmd, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
                                        gpu=gpu, gpu_device_path=device, keep_every=48, download_format="nv12")  # fmt: skip
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args,
                        "-bsf:V:0", "noise=drop=mod(n\\,48)", "-skip_frame", "nokey", "-ss", "5100.000", "-copyts",
                        "-i", MOVIE, *TAIL, "-vf", f"{scale},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
         assert cmd[cmd.index("-bsf:V:0") + 1] == r"noise=drop=mod(n\,48)"
@@ -231,7 +254,7 @@ class TestCommand:
         bsf = self.PACKET_DROPS[(keep_every, drop_non_key)]
         seek = ["-skip_frame", "nokey", "-ss", "5100.000"] if keyframe_pass else ["-ss", "5680.000", "-t", "21.000"]
         video_filter = f"{scale},showinfo" if keyframe_pass else f"fps=1,{scale},showinfo"
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args,
                        *(["-bsf:V:0", bsf] if bsf else []), *seek, "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", video_filter, "-f", "rawvideo", "-"]  # fmt: skip
         assert cmd.count("-bsf:V:0") == (1 if bsf else 0)
@@ -875,6 +898,131 @@ class TestRunDecode:
         _assert_gone(pid_file)
 
 
+def _state(pid: int) -> str:
+    return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split(" ", 1)[0]
+
+
+def _progress(path: pathlib.Path) -> int:
+    try:
+        return int(path.read_text() or 0)
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+@pytest.fixture
+def group_signals(monkeypatch):
+    """The signals sent to a process group by the pause, still sent."""
+    from media_preview_generator.markers import freeze
+
+    sent: list[tuple[int, int]] = []
+    real = os.killpg
+
+    def killpg(pgid, sig):
+        if sig in (signal.SIGSTOP, signal.SIGCONT):
+            sent.append((pgid, sig))
+        real(pgid, sig)
+
+    monkeypatch.setattr(freeze.os, "killpg", killpg)
+    return sent
+
+
+class TestRunDecodePause:
+    """Pause all, quiet hours and a schedule's stop time freeze the running decode where it is, as previews' FFmpeg."""
+
+    def _decode_in_background(self, command, **kwargs) -> tuple[threading.Thread, dict]:
+        out: dict = {}
+
+        def run():
+            try:
+                out["rows"] = frames.run_decode(command, hw_active=False, pts_offset_s=0.0, **kwargs)
+            except BaseException as exc:
+                out["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread, out
+
+    def test_a_pause_stops_ffmpegs_group_and_the_resume_goes_on_with_the_deadline_moved_out(
+        self, tmp_path, group_signals
+    ):
+        pid_file, progress = tmp_path / "ffmpeg.pid", tmp_path / "progress"
+        paused = threading.Event()
+        chunks: list[int] = []
+
+        def detect(planes):
+            chunks.append(len(planes))
+            if len(chunks) == 1:
+                paused.set()  # everything is paused as the first chunk is read
+            return [()] * len(planes)
+
+        # 20 frames over about 1 s of work; the pause lasts longer than the whole time limit.
+        thread, out = self._decode_in_background(
+            _fake_ffmpeg([10] * 20, ["1"] * 20, sleep_s=0.05, pid_file=str(pid_file), progress_file=str(progress)),
+            detect_boxes=detect, pause_check=paused.is_set, chunk_frames=2, timeout_s=2.5,
+        )  # fmt: skip
+        try:
+            assert _wait_for(paused.is_set, within_s=5)
+            pid = int(pid_file.read_text())
+            assert _wait_for(lambda: _state(pid) == "T", within_s=5)
+            frozen_at = _progress(progress)
+            time.sleep(3.0)  # past the 2.5 s limit
+            assert _state(pid) == "T" and _progress(progress) == frozen_at
+            assert thread.is_alive()
+        finally:
+            paused.clear()
+            thread.join(10)
+        assert "error" not in out, out.get("error")
+        assert len(out["rows"]) == 20  # every frame, nothing lost to the pause or to the time limit
+        assert group_signals == [(pid, signal.SIGSTOP), (pid, signal.SIGCONT)]
+
+    def test_a_cancel_while_paused_kills_the_frozen_group(self, tmp_path, group_signals):
+        pid_file = tmp_path / "ffmpeg.pid"
+        paused, cancelled = threading.Event(), threading.Event()
+
+        def detect(planes):
+            paused.set()
+            return [()] * len(planes)
+
+        thread, out = self._decode_in_background(
+            _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.1, pid_file=str(pid_file)),
+            detect_boxes=detect, pause_check=paused.is_set, cancel_check=cancelled.is_set, chunk_frames=2,
+        )  # fmt: skip
+        assert _wait_for(paused.is_set, within_s=5)
+        pid = int(pid_file.read_text())
+        assert _wait_for(lambda: _state(pid) == "T", within_s=5)
+        started = time.monotonic()
+        cancelled.set()
+        thread.join(10)
+        assert isinstance(out.get("error"), DecodeCancelledError)
+        assert time.monotonic() - started < 3
+        _assert_gone(pid_file, within_s=5)
+        assert group_signals[:2] == [(pid, signal.SIGSTOP), (pid, signal.SIGCONT)]
+
+    def test_no_ffmpeg_starts_while_paused(self, tmp_path):
+        pid_file = tmp_path / "ffmpeg.pid"
+        paused = threading.Event()
+        paused.set()
+        thread, out = self._decode_in_background(
+            _fake_ffmpeg([10, 250], ["1", "2"], pid_file=str(pid_file)),
+            detect_boxes=lambda planes: [()] * len(planes), pause_check=paused.is_set, timeout_s=1.0,
+        )  # fmt: skip
+        time.sleep(1.5)  # past the time limit: it starts counting once the decode starts
+        assert not pid_file.exists() and thread.is_alive()
+        paused.clear()
+        thread.join(10)
+        assert "error" not in out, out.get("error")
+        assert [row[2] for row in out["rows"]] == [10.0, 250.0]
+
+    def test_a_cancel_before_the_start_while_paused_starts_nothing(self, tmp_path):
+        pid_file = tmp_path / "ffmpeg.pid"
+        with pytest.raises(DecodeCancelledError):
+            frames.run_decode(
+                _fake_ffmpeg([10], ["1"], pid_file=str(pid_file)), hw_active=False, pts_offset_s=0.0,
+                detect_boxes=lambda planes: [()] * len(planes), pause_check=lambda: True, cancel_check=lambda: True,
+            )  # fmt: skip
+        assert not pid_file.exists()
+
+
 class TestDecodeRows:
     @pytest.mark.parametrize(
         ("gpu", "device", "hw"),
@@ -896,6 +1044,9 @@ class TestDecodeRows:
         def cancel():
             return False
 
+        def paused():
+            return False
+
         rows = frames.decode_rows(
             MOVIE,
             ffmpeg=FF,
@@ -907,20 +1058,24 @@ class TestDecodeRows:
             gpu_device_path=device,
             detect_boxes=count,
             cancel_check=cancel,
+            pause_check=paused,
             timeout_s=42.0,
             start_time_s=0.0,
             download_format="p010le",
+            ffmpeg_threads=3,
         )
         expected_command, _ = frames.decode_command(
             FF, MOVIE, start_s=5680.5, length_s=21.0, keyframes_only=False, fps=1, gpu=gpu, gpu_device_path=device,
-            download_format="p010le",
+            download_format="p010le", ffmpeg_threads=3,
         )  # fmt: skip
+        assert ("-threads" in seen["command"]) is hw  # the worker's threads reached the command it runs
         assert rows == [(1.0, 0, 10.0, ())]
         assert seen == {
             "command": expected_command,
             "hw_active": hw,
             "detect_boxes": count,
             "cancel_check": cancel,
+            "pause_check": paused,
             "timeout_s": 42.0,
             "pts_offset_s": 0.0,
             "name": "Movie.mkv",

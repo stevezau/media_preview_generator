@@ -22,7 +22,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from .carry_over import CARRIED_OVER
-from .decide import DecisionStatus, TypeDecision, shortened_by
+from .decide import KEPT_BEFORE_RULE_CHANGE, DecisionStatus, TypeDecision, kept_before_rule_change, shortened_by
 from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, STALE_SERVER_MARKERS_DETAIL, MarkerType, Source
 from .outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FileOutcome, ServerStatus, is_kept_own
@@ -216,6 +216,8 @@ def type_phrase(decision: TypeDecision) -> str:
             why = f"from {names[0]}" if names else decision.reason
         if not marker.locked and shortened_by(decision.reason) is not None:
             why += ", start moved to the server's own marker"
+        if kept_before_rule_change(decision.reason):
+            why += f", {KEPT_BEFORE_RULE_CHANGE}"
         return f"{mtype} {_span(marker.start_ms, marker.end_ms)} ({why})"
     if decision.status is DecisionStatus.NEEDS_REVIEW:
         reason = decision.reason

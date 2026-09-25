@@ -16,7 +16,15 @@ _ID_RE = re.compile(r"[\{\[](tmdb|tvdb|imdb)(?:id)?[-=]((?:tt)?\d+)[\}\]]", re.I
 # Season/episode width widened to 4 digits for daily/absolute numbering conventions
 # (e.g. "S2005E01", "S2024E13"); still anchored so a bare digit run never spills over.
 _SXXEYY_RE = re.compile(r"(?<![a-z0-9])s(\d{1,4})e(\d{1,4})(?![0-9])", re.IGNORECASE)
-_SEASON_DIR_RE = re.compile(r"^(?:season|series|staffel|saison)\s*\d{1,4}$|^specials$", re.IGNORECASE)
+# Non-English season-folder words: Spanish/Portuguese "Temporada", Italian "Stagione", Dutch "Seizoen",
+# Polish "Sezon", Swedish "Säsong", Danish "Sæson" (accent optional -- some filesystems/muxers drop it),
+# Finnish "Kausi". A bare "S01"-style folder (no word at all) is also a season folder.
+_SEASON_DIR_RE = re.compile(
+    r"^(?:season|series|staffel|saison|temporada|stagione|seizoen|sezon|s[äa]song|s(?:æ|ae)son|kausi)\s*\d{1,4}$"
+    r"|^s\d{1,4}$"
+    r"|^specials$",
+    re.IGNORECASE,
+)
 # Daily/talk-show dated episodes ("Show - 2024-01-15.mkv"): no SxxEyy to parse, and the
 # filename shape itself (not a movie convention) rules out guessing "movie" from a nearby id.
 _DATE_EPISODE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
@@ -71,7 +79,10 @@ def _is_extra(stem: str, folders: list[str]) -> bool:
 
 
 def is_season_folder(name: str) -> bool:
-    """Whether a folder name is a season folder: ``Season 01``, ``Series 2``, ``Staffel 3``, ``Saison 4`` or ``Specials``.
+    """Whether a folder name is a season folder.
+
+    Matches ``Season 01``, ``Series 2``, ``Staffel 3``, ``Saison 4``, ``Temporada 5``, ``Stagione 6``,
+    ``Seizoen 7``, ``Sezon 8``, ``Säsong 9``, ``Sæson 10``, ``Kausi 11``, a bare ``S01``, or ``Specials``.
 
     Args:
         name: One folder name.

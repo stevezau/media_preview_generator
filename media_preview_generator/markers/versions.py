@@ -2,8 +2,8 @@
 
 Every detector and reader stores its version with each answer (``evidence_versions``), and a file's run asks again an
 answer from another version (``pipeline._detector_pending``, ``_stale_evidence``, ``_server_markers_due``). A file no job
-runs keeps its older answer, though: after an update, credit text version 4 had reached 164 of 345 files with an answer
-in production, and the files resting on version 3 kept its early answers. On every start the app compares the stored
+runs keeps its older answer, though: after an update, credit text version 4 had reached most files with an answer, and
+the files resting on version 3 kept its early answers. On every start the app compares the stored
 versions with today's and queues the files whose decisions could move with them into LOW-priority Intro & Credits
 jobs, at most ``BATCH_FILES`` a job with ``BATCH_GAP`` between jobs (``triggers.submit_version_reruns``).
 

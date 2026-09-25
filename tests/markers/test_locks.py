@@ -135,3 +135,47 @@ def test_try_hold_releases_the_lock_for_a_caller_already_waiting(raising):
     assert got_it.wait(5), "try_hold left the lock held, so the waiting caller is stuck for good"
     t.join(5)
     assert locks._locks == {}
+
+
+class _StopWaiting(Exception):
+    pass
+
+
+def test_a_wait_ends_when_while_waiting_raises_and_leaves_the_key_as_it_was():
+    # A job frozen by its schedule's stop time can hold a key for hours: a waiter must be able to stop (its own cancel,
+    # or a holder held longer than any running one takes) without holding or leaking anything.
+    locks = KeyedLocks()
+    holding, release = threading.Event(), threading.Event()
+
+    def holder():
+        with locks.hold("a"):
+            holding.set()
+            release.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert holding.wait(5)
+    asked = []
+
+    def while_waiting():
+        asked.append(time.monotonic())
+        if len(asked) == 3:
+            raise _StopWaiting
+
+    with pytest.raises(_StopWaiting):
+        with locks.hold("a", while_waiting=while_waiting, poll_s=0.05):
+            pytest.fail("held a lock another caller holds")
+    assert len(asked) == 3
+    assert locks._locks["a"][1] == 1  # only the holder counts
+    release.set()
+    t.join(5)
+    assert "a" not in locks._locks
+    with locks.hold("a", while_waiting=while_waiting):
+        pass  # a free key is taken at once, without asking
+
+
+def test_while_waiting_is_never_asked_for_a_free_key():
+    locks = KeyedLocks()
+    with locks.hold("a", while_waiting=lambda: pytest.fail("asked while the key was free")):
+        assert locks._locks["a"][1] == 1
+    assert "a" not in locks._locks

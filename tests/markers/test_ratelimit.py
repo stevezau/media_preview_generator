@@ -602,6 +602,64 @@ class TestWaiting:
         assert seen == [("theintrodb", "2026-09-13", 2, 500, 10)]
 
 
+class TestCappedWaits:
+    """A worker must not sleep on pacing: its thread caps every slot wait (``capped_waits``); the checking stage keeps
+    the caller's ``max_wait_s``."""
+
+    @staticmethod
+    def _blocked_for(seconds):
+        c = FakeClock()
+        lim = _limiter(c)
+        lim.acquire(priority=2)
+        lim.record(429, {"Retry-After": str(seconds)})
+        return c, lim
+
+    def test_a_capped_thread_is_refused_at_once_a_slot_the_caller_would_wait_for(self):
+        c, lim = self._blocked_for(5)
+        with ratelimit.capped_waits(1.0):
+            assert lim.acquire(priority=2, max_wait_s=60) is Acquire.BLOCKED
+        assert c.slept == []
+        assert lim.usage()["used"] == 1  # the refused slot isn't counted
+
+    def test_after_the_block_the_callers_wait_applies_again(self):
+        c, lim = self._blocked_for(5)
+        with ratelimit.capped_waits(1.0):
+            pass
+        assert lim.acquire(priority=2, max_wait_s=60) is Acquire.ALLOWED
+        assert sum(c.slept) == pytest.approx(5, abs=0.5)
+
+    def test_a_slot_within_the_cap_is_still_waited_for(self):
+        c = FakeClock()
+        lim = _limiter(c)
+        lim.acquire(priority=2)
+        with ratelimit.capped_waits(1.0):
+            assert lim.acquire(priority=2, max_wait_s=60) is Acquire.ALLOWED  # the 0.34 s spacing
+        assert sum(c.slept) == pytest.approx(0.34, abs=0.01)
+
+    def test_the_cap_never_lengthens_a_shorter_callers_wait(self):
+        _c, lim = self._blocked_for(5)
+        with ratelimit.capped_waits(10.0):
+            assert lim.acquire(priority=2, max_wait_s=1) is Acquire.BLOCKED
+
+    def test_none_leaves_waits_uncapped(self):
+        _c, lim = self._blocked_for(5)
+        with ratelimit.capped_waits(None):
+            assert ratelimit.wait_cap() is None
+            assert lim.acquire(priority=2, max_wait_s=60) is Acquire.ALLOWED
+
+    def test_the_cap_is_per_thread_and_restored_after_nesting(self):
+        seen = {}
+        with ratelimit.capped_waits(1.0):
+            with ratelimit.capped_waits(None):
+                seen["inner"] = ratelimit.wait_cap()
+            seen["outer"] = ratelimit.wait_cap()
+            other = threading.Thread(target=lambda: seen.update(other=ratelimit.wait_cap()))
+            other.start()
+            other.join(5)
+        assert seen == {"inner": None, "outer": 1.0, "other": None}
+        assert ratelimit.wait_cap() is None
+
+
 class TestRefund:
     def test_refund_gives_back_the_last_allowed_reservation(self):
         c = FakeClock()

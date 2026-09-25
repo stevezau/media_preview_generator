@@ -1687,3 +1687,82 @@ class TestDisabledServerWebhooks:
         assert body.get("status") == "ignored", body
         assert body.get("reason") == "server is disabled", body
         assert proc.call_count == 0, f"Per-server URL must not bypass the disable switch for {vendor}"
+
+
+class TestMasterSwitchGatesRouter:
+    """ "Enable webhook processing" is the master switch for every incoming webhook.
+
+    The UI and docs call it that, and the Sonarr/Radarr/Plex/Custom receivers
+    honour it; the router (Plex Direct, Emby, Jellyfin, the per-server URL)
+    has to as well, before it spends a vendor API call resolving the item.
+    """
+
+    _EMBY = {
+        "id": "emby-1",
+        "type": "emby",
+        "name": "Emby",
+        "enabled": True,
+        "url": "http://emby:8096",
+        "auth": {},
+        "libraries": [{"id": "1", "name": "TV", "remote_paths": ["/data/tv"], "enabled": True}],
+    }
+    _JELLYFIN = {
+        "id": "jelly-1",
+        "type": "jellyfin",
+        "name": "Jellyfin",
+        "enabled": True,
+        "url": "http://jellyfin:8096",
+        "auth": {"method": "api_key", "api_key": "k"},
+        "libraries": [{"id": "1", "name": "TV", "remote_paths": ["/data/tv"], "enabled": True}],
+    }
+
+    @pytest.mark.parametrize(
+        "url, payload",
+        [
+            ("/api/webhooks/incoming", {"path": "/data/tv/Show/S01E01.mkv"}),
+            (
+                "/api/webhooks/incoming",
+                {"NotificationType": "ItemAdded", "ItemId": "jf-42", "ItemType": "Episode", "ServerId": "jelly-1"},
+            ),
+            ("/api/webhooks/server/emby-1", {"path": "/data/tv/Show/S01E01.mkv"}),
+        ],
+        ids=["incoming-path", "incoming-jellyfin", "per-server"],
+    )
+    def test_no_job_when_webhooks_disabled(self, client, auth_headers, monkeypatch, url, payload):
+        _seed_servers([self._EMBY, self._JELLYFIN])
+        get_settings_manager().set("webhook_enabled", False)
+        from media_preview_generator.servers.jellyfin import JellyfinServer
+
+        resolve_calls = []
+        monkeypatch.setattr(
+            JellyfinServer,
+            "resolve_item_to_remote_paths",
+            lambda self, item_id: resolve_calls.append(item_id) or [(item_id, "/data/tv/Show/S01E01.mkv")],
+        )
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job", return_value="job-must-not-exist"
+        ) as proc:
+            response = client.post(url, headers=auth_headers, json=payload)
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        body = response.get_json()
+        assert body["status"] == "ignored"
+        assert body["reason"] == "webhooks disabled"
+        assert proc.call_count == 0
+        assert resolve_calls == []
+
+    def test_job_created_when_webhooks_enabled(self, client, auth_headers):
+        _seed_servers([self._EMBY])
+        get_settings_manager().set("webhook_enabled", True)
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job", return_value="job-fake-12345678"
+        ) as proc:
+            response = client.post(
+                "/api/webhooks/server/emby-1", headers=auth_headers, json={"path": "/data/tv/Show/S01E01.mkv"}
+            )
+
+        assert response.status_code == 202
+        assert proc.call_args.kwargs["canonical_path"] == "/data/tv/Show/S01E01.mkv"
+        assert proc.call_args.kwargs["server_id_filter"] == "emby-1"

@@ -271,6 +271,7 @@ def test_a_write_cut_short_leaves_no_entry_behind(tmp_path, monkeypatch, media):
 def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch)
     detect_boxes = object()
+    paused = object()
     DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").decode_rows(
         str(media),
         **_kwargs(
@@ -285,13 +286,15 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
             drop_non_key=True,
             scale=2,
             download_format="p010le",
+            pause_check=paused,
+            ffmpeg_threads=3,
         ),  # fmt: skip
     )
     (kwargs,) = decoder.decodes
     assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
                       "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "detect_boxes": detect_boxes, "cancel_check": None,
                       "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48, "drop_non_key": True,
-                      "scale": 2, "download_format": "p010le"}  # fmt: skip
+                      "scale": 2, "download_format": "p010le", "pause_check": paused, "ffmpeg_threads": 3}  # fmt: skip
 
 
 def test_the_cache_takes_exactly_the_arguments_the_real_decode_takes():

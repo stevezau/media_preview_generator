@@ -69,7 +69,7 @@ class VendorProcessor(Protocol):
         self,
         server_config: ServerConfig,
         *,
-        lookback_hours: int,
+        lookback_hours: float,
         library_ids: list[str] | None = None,
     ) -> Iterator[ProcessableItem]:
         """Yield items added within the lookback window.

@@ -452,8 +452,25 @@ class TestIsExtra:
         ("Staffel 2", True),
         ("Saison 4", True),
         ("Specials", True),
+        # Non-English season-folder words
+        ("Temporada 5", True),
+        ("temporada5", True),
+        ("Stagione 6", True),
+        ("Seizoen 7", True),
+        ("Sezon 8", True),
+        ("Säsong 9", True),
+        ("Sasong 9", True),  # accent dropped
+        ("Sæson 10", True),
+        ("Saeson 10", True),  # accent dropped (ae fallback, not the digraph itself)
+        ("Kausi 11", True),
+        # Plain "S01"-style folders
+        ("S01", True),
+        ("s1", True),
+        ("S2024", True),
         ("Rick and Morty (2013) {tvdb-275274}", False),
         ("Season 01 Extras", False),
+        ("S01 Extras", False),
+        ("S01E01", False),  # an episode file's own folder, not a season folder
         ("", False),
     ],
 )

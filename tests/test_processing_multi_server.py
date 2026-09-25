@@ -788,6 +788,42 @@ class TestSinglePublisher:
         sidecar = media_dir / "Test (2024)-320-10.bif"
         assert sidecar.exists()
 
+    def test_worker_thread_cap_reaches_generate_images(self, mock_config_for_processing, tmp_path):
+        """A GPU worker's own ``ffmpeg_threads`` must reach the FFmpeg call, not just this function."""
+        media_dir = tmp_path / "data" / "movies" / "Test (2024)"
+        media_file = _seed_canonical_file(media_dir)
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="emby-1",
+                    server_type=ServerType.EMBY,
+                    libraries=[
+                        Library(id="1", name="Movies", remote_paths=(str(tmp_path / "data" / "movies"),), enabled=True)
+                    ],
+                    output={"adapter": "emby_sidecar", "width": 320, "frame_interval": 10},
+                )
+            ],
+        )
+
+        def fake_generate_images(video_file, output_folder, *args, **kwargs):
+            _populate_frames(output_folder, count=5)
+            return (True, 5, "h264", 1.0, 30.0, None)
+
+        with patch(
+            "media_preview_generator.processing.multi_server.generate_images",
+            side_effect=fake_generate_images,
+        ) as gen:
+            process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+                gpu="NVIDIA",
+                gpu_device_path="cuda:0",
+                ffmpeg_threads_override=3,
+            )
+
+        assert gen.call_args.kwargs["ffmpeg_threads_override"] == 3
+
 
 class TestMultiPublisherFanOut:
     def test_one_pass_feeds_emby_and_jellyfin(self, mock_config_for_processing, tmp_path):
@@ -2078,3 +2114,52 @@ class TestItemIdResolverMemoisation:
             f"each new resolver instance must have its own cache; "
             f"got {backend.call_count} (cache leaked across dispatches)"
         )
+
+
+class TestGpuHandOffAnnouncementNamesItsCause:
+    """The INFO line announcing a CPU retry says why the GPU run was handed off: a codec, a run that stopped part-way,
+    an I/O error (the video's disk or share, or the working folder: the line names both), a stall, or the GPU's decoder
+    or filters. Only a codec is "a normal fallback for codecs your GPU doesn't support"."""
+
+    @pytest.mark.parametrize(
+        ("kind", "said", "not_said"),
+        [
+            ("codec", ["could not handle the codec"], None),
+            ("stopped_part_way", ["stopped part-way"], "codec"),
+            ("io_error", ["I/O error", "disk or network share", "working folder"], "codec"),
+            ("stall", ["stopped making progress"], "codec"),
+            ("hwaccel", ["decoder or filters"], "codec"),
+        ],
+    )
+    def test_the_announcement_words_the_real_cause(self, mock_config_for_processing, tmp_path, kind, said, not_said):
+        from media_preview_generator.processing.generator import CodecNotSupportedError
+
+        media_file = _seed_canonical_file(tmp_path / "movies" / "Film (2024)")
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="jellyfin-1",
+                    server_type=ServerType.JELLYFIN,
+                    libraries=[Library(id="2", name="Movies", remote_paths=(str(tmp_path / "movies"),), enabled=True)],
+                ),
+            ],
+        )
+        lines: list[str] = []
+        sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+        try:
+            with (
+                patch(
+                    "media_preview_generator.processing.multi_server.generate_images",
+                    side_effect=CodecNotSupportedError("GPU processing failed", kind=kind),
+                ),
+                pytest.raises(CodecNotSupportedError),
+            ):
+                process_canonical_path(
+                    canonical_path=str(media_file), registry=registry, config=mock_config_for_processing, gpu="NVIDIA"
+                )
+        finally:
+            logger.remove(sink)
+        (announced,) = [line for line in lines if "retrying on CPU" in line]
+        assert all(fragment in announced for fragment in said) and str(media_file) in announced, announced
+        if not_said:
+            assert not_said not in announced

@@ -383,6 +383,7 @@ class TestWebhookFollowUp:
             file_paths=paths,
             follows_job_id="prev-1",
             item_id_hints={paths[0]: {"jf-1": "x"}},
+            server_id=None,
         )
 
     @pytest.mark.parametrize(

@@ -51,10 +51,12 @@ from ..servers.base import LibraryNotYetIndexedError, MediaServer, ServerConfig,
 from ..servers.ownership import find_library_matches
 from .frame_cache import get_frame_cache
 from .generator import (
+    FALLBACK_CODEC,
     CancellationError,
     CodecNotSupportedError,
     _cleanup_temp_directory,
     generate_images,
+    gpu_fallback_announcement,
 )
 
 if TYPE_CHECKING:
@@ -409,6 +411,14 @@ def cleanup_orphaned_outputs(
 
     live_basenames = {p.stem for p in live_videos}
     for adapter in adapters:
+        try:
+            for temp in adapter.sweep_stale_write_temps(media_dir):
+                removed.append(temp)
+                logger.info("Cleanup: removed {}, left by an interrupted preview write", temp)
+        except OSError as exc:
+            logger.warning(
+                "Cleanup: sweeping {} for interrupted writes failed (adapter {}): {}", media_dir, adapter.name, exc
+            )
         try:
             for orphan in adapter.list_orphans_in_folder(media_dir, live_basenames):
                 if orphan in removed:
@@ -1109,8 +1119,8 @@ def _server_needs_item_registration(server: MediaServer) -> bool:
        retry — the chain runs all 5 attempts and exhausts because the
        id will NEVER resolve.
 
-    Live regression (chain ``retry-3d1cfc6394a78c5a`` against
-    Deadliest Catch S22E01, 2026-05-10 05:27 → 06:51): EmbyTest was
+    Live regression (chain ``retry-3d1cfc6394a78c5a`` against one
+    episode, 2026-05-10 05:27 → 06:51): the lab's Emby server was
     permanently ``PUBLISHED_PENDING_REGISTRATION`` because ``Emby`` is
     in the resolver's no-lookup list. The path-based
     ``/Library/Media/Updated`` partial scan fired correctly on every
@@ -1674,8 +1684,8 @@ def process_canonical_path(
                 # for every publisher (registration never fires), and
                 # the retry chain would mark itself "complete" while
                 # Jellyfin still has no trickplay row for the file.
-                # Reproduced live 2026-05-09 against Bering Sea Gold
-                # S17E10 — every retry attempt #1 short-circuited here
+                # Reproduced live 2026-05-09 against one episode —
+                # every retry attempt #1 short-circuited here
                 # without ever firing the plugin-bridge or
                 # /Items/{id}/Refresh registration calls.
                 needs_registration = item_id is None and _server_needs_item_registration(server)
@@ -1936,13 +1946,10 @@ def process_canonical_path(
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                 )
-            except CodecNotSupportedError:
-                # Re-raised so callers can fall back to CPU; not a publisher failure.
-                logger.info(
-                    "Hardware acceleration could not handle the codec for {} — retrying on CPU automatically. "
-                    "No action needed; this is a normal fallback for codecs your GPU doesn't support.",
-                    canonical_path,
-                )
+            except CodecNotSupportedError as exc:
+                # Re-raised so callers can fall back to CPU; not a publisher failure. Worded by the real cause: a stall
+                # or an I/O error is the disk's, not a codec the GPU doesn't support.
+                logger.info("{}", gpu_fallback_announcement(getattr(exc, "kind", FALLBACK_CODEC), canonical_path))
                 raise
             except CancellationError:
                 # Cancellation (job cancelled / container restart mid-FFmpeg) is

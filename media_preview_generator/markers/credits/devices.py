@@ -9,15 +9,15 @@ import threading
 from collections.abc import Mapping, Sequence
 
 _PCI_RE = re.compile(r"^(?:([0-9a-fA-F]{1,8}):)?([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-7])$")
-# The metadata key onnxruntime-ep-webgpu 0.3.0 puts a device's PCI address under (measured on storage, 2026-09-16).
+# The metadata key onnxruntime-ep-webgpu 0.3.0 puts a device's PCI address under (measured on a lab machine, 2026-09-16).
 PCI_METADATA_KEYS: tuple[str, ...] = ("pci_bus_id",)
 SYSFS_DRM = "/sys/class/drm"
 
 # Which physical GPU a Vulkan process runs on is decided by Mesa's device-select implicit layer
 # (mesa-vulkan-drivers, in the app image), which the Vulkan loader applies to every ICD including NVIDIA's
-# proprietary one. Measured on storage 2026-09-16, see
+# proprietary one. Measured on a lab machine 2026-09-16, see
 # docs/design/intro-credits/evidence/credits/bench/t5-gpu-pinning.txt:
-# DRI_PRIME's PCI tag plus MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE moved Dawn between the P5000 and llvmpipe
+# DRI_PRIME's PCI tag plus MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE moved Dawn between a discrete GPU and llvmpipe
 # (12.2 vs 156.1 ms per frame); without the force flag, or with the layer off (NODEVICE_SELECT=1), nothing moved.
 DRI_PRIME_ENV = "DRI_PRIME"
 FORCE_DEFAULT_DEVICE_ENV = "MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE"

@@ -6,10 +6,12 @@ import os
 import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from loguru import logger
 
-from ..job_kinds import JOB_KIND_INTRO_CREDITS
+from ..job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
+from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
@@ -27,6 +29,8 @@ from .job_runner import (
     ONLINE_RECHECK_SOURCE,
     VERSION_RERUN,
     VERSION_RERUN_SOURCE,
+    sent_by_a_sender,
+    server_pin,
     start_intro_credits_job_async,
 )
 from .ownership import marker_matches
@@ -38,6 +42,9 @@ from .versions import BATCH_FILES, files_to_read_again
 # Serialises Inspector re-detect's "is this file already queued?" with the job creation, so a double-click queues one
 # job. Webhook follow-ups use job_runner.FOLLOW_UP_LOCK, which their runner also takes to read the files.
 _redetect_lock = threading.Lock()
+# Serialises taking a preview job's request for its follow-up (``submit_pending_follow_up``), so two starts of one
+# preview job queue it once.
+_pending_follow_up_lock = threading.Lock()
 _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
 DECIDE_AGAIN_JOB_NAME = "Intro & Credits: Needs review and waiting files, decided again"
@@ -83,22 +90,24 @@ def _local_candidates(path: str, configs: list[ServerConfig]) -> set[str]:
     return set(webhook_path_candidates(path, configs))
 
 
-def marker_owned_paths(paths: list[str]) -> list[str]:
+def marker_owned_paths(paths: list[str], server_id: str | None = None) -> list[str]:
     """Paths held by a library that Intro & Credits goes to on an enabled server.
 
     Runs on webhook threads, so it reads settings only: no disk or network access.
 
     Args:
         paths: File paths as the webhook sender reported them.
+        server_id: Only this server counts (the job would be pinned to it); None = any server.
 
     Returns:
         The owned paths, in input order.
     """
     configs = _server_configs()
+    owners = [cfg for cfg in configs if cfg.id == server_id] if server_id else configs
     return [
         path
         for path in paths
-        if any(marker_matches(candidate, configs) for candidate in _local_candidates(path, configs))
+        if any(marker_matches(candidate, owners) for candidate in _local_candidates(path, configs))
     ]
 
 
@@ -124,6 +133,7 @@ def create_intro_credits_job(
     decide_again: bool = False,
     online_recheck: bool = False,
     version_rerun: bool = False,
+    server_id: str | None = None,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -155,6 +165,9 @@ def create_intro_credits_job(
             (``job_runner._items_for_online_recheck``) instead of libraries or paths.
         version_rerun: Take the next batch of files to re-check after an update when the job runs
             (``job_runner._items_to_read_again``) instead of libraries or paths.
+        server_id: Publish to this server only (``job_runner.server_pin``): the pin of the preview job it follows, as
+            ``jobs.worker.resolve_per_item_pin`` resolved it, or of the job whose retry or check it is. None = every
+            server with Intro & Credits on.
 
     Returns:
         The created job.
@@ -178,6 +191,8 @@ def create_intro_credits_job(
         config[ONLINE_RECHECK] = True
     if version_rerun:
         config[VERSION_RERUN] = True
+    if server_id:
+        config["server_id"] = server_id
     if chain_attempt:
         config["chain_attempt"] = int(chain_attempt)
     if verify_chain:
@@ -203,15 +218,22 @@ def create_intro_credits_job(
     return job
 
 
-def _queued_in_waiting_follow_ups(jm, configs: list[ServerConfig] | None = None) -> set[str]:
+def _queued_in_waiting_follow_ups(
+    jm, configs: list[ServerConfig] | None = None, server_id: str | None = None, source: str | None = None
+) -> set[str]:
     """Local paths (every candidate) of the files webhook follow-ups that have never started list.
 
     A follow-up that has never started reads its files when it runs, so a file already listed there is covered. A
-    revived one (PENDING again, started_at kept) may already have published the file's old version.
+    revived one (PENDING again, started_at kept) may already have published the file's old version. So is one that
+    publishes to fewer servers than the request: a follow-up pinned to one server covers only a request with the same
+    pin; an unpinned one covers any request. And a Recently Added scan's follow-up doesn't cover a sender's files: it
+    gives them no retry when missing from disk and no later verify (``job_runner.sent_by_a_sender``).
 
     Args:
         jm: The job manager.
         configs: Server configs; read from settings only when a waiting follow-up needs them.
+        server_id: The request's pin (``job_runner.server_pin``); None = every server with Intro & Credits on.
+        source: The request's source; None (a Season request) = any waiting follow-up covers it.
 
     Returns:
         The covered local paths.
@@ -222,6 +244,10 @@ def _queued_in_waiting_follow_ups(jm, configs: list[ServerConfig] | None = None)
         if job.kind != JOB_KIND_INTRO_CREDITS or job.started_at is not None:
             continue
         if not cfg.get("follows_job_id") or cfg.get("force"):
+            continue
+        if server_pin(cfg) not in (None, server_id):
+            continue
+        if source is not None and sent_by_a_sender(source) and not sent_by_a_sender(cfg.get("source")):
             continue
         if configs is None:
             configs = _server_configs()
@@ -285,20 +311,23 @@ def submit_webhook_follow_up(
     paths: list[str],
     source: str,
     item_id_hints: dict[str, dict[str, str]] | None = None,
+    server_id: str | None = None,
 ) -> str | None:
     """Queue the Intro & Credits job that follows a webhook preview job (spec §6.4 item 9).
 
-    Only files a server with Intro & Credits on holds are queued, and not files a waiting follow-up already lists.
-    Vendor webhooks arrive one episode at a time: an episode whose season folder a waiting follow-up already covers
-    joins it while that job stays within 500 files. A new job runs at NORMAL, or at the preview job's priority when that
-    is lower; its runner waits for the preview job to finish. A joined episode doesn't wait for its own preview job
-    (markers don't need previews): the job it joined waits only for the preview job it was created for.
+    Only files a server with Intro & Credits on holds are queued (the pinned server, for a pinned job), and not files a
+    waiting follow-up that publishes at least as widely already lists. Vendor webhooks arrive one episode at a time: an
+    episode whose season folder a waiting follow-up with the same pin already covers joins it while that job stays
+    within 500 files. A new job runs at NORMAL, or at the preview job's priority when that is lower; its runner waits
+    for the preview job to finish. A joined episode doesn't wait for its own preview job (markers don't need previews):
+    the job it joined waits only for the preview job it was created for.
 
     Args:
         preview_job_id: The preview job just started for the batch.
         paths: The batch's file paths.
         source: Webhook source (``sonarr``, ``plex``…).
         item_id_hints: ``{path: {server_id: item_id}}`` from vendor webhooks.
+        server_id: Publish to this server only: the preview job's pin for these files (``submit_follow_ups``).
 
     Returns:
         The new job's id; the joined job's id when the episodes all joined waiting follow-ups; None when nothing needed
@@ -306,14 +335,18 @@ def submit_webhook_follow_up(
     """
     if not paths or not markers_enabled_anywhere():
         return None
-    owned = marker_owned_paths(list(paths))
+    owned = marker_owned_paths(list(paths), server_id)
     if not owned:
-        logger.debug("No server with Intro & Credits on holds the files of webhook job {}", preview_job_id)
+        logger.debug(
+            "No server with Intro & Credits on{} holds the files of webhook job {}",
+            f" that the job is pinned to ({server_id})" if server_id else "",
+            preview_job_id,
+        )
         return None
     configs = _server_configs()
     jm = get_job_manager()
     with FOLLOW_UP_LOCK:
-        queued = _queued_in_waiting_follow_ups(jm, configs)
+        queued = _queued_in_waiting_follow_ups(jm, configs, server_id, source)
         fresh = [p for p in owned if not (_local_candidates(p, configs) & queued)]
         if not fresh:
             logger.info("Intro & Credits for webhook job {}: its files are already queued", preview_job_id)
@@ -321,6 +354,11 @@ def submit_webhook_follow_up(
         rest = list(fresh)
         joined_id: str | None = None
         for waiting, folders in _joinable_follow_ups(jm, configs):
+            # Only a job that publishes where this one would, and whose files get the same retries and verify.
+            if server_pin(waiting.config) != server_id:
+                continue
+            if sent_by_a_sender(waiting.config.get("source")) != sent_by_a_sender(source):
+                continue
             mine = [p for p in rest if _season_folders([p], configs) & folders]
             if not mine or len(waiting.config.get("file_paths") or []) + len(mine) > MAX_RETRY_FILES:
                 continue
@@ -352,8 +390,107 @@ def submit_webhook_follow_up(
             file_paths=rest,
             follows_job_id=preview_job_id,
             item_id_hints=hints or None,
+            server_id=server_id,
         )
     return job.id
+
+
+class _ServerLookup:
+    """The part of a ``ServerRegistry`` that ``resolve_per_item_pin`` reads, over the saved server configs."""
+
+    def __init__(self, configs: list[ServerConfig]) -> None:
+        self._by_id = {cfg.id: cfg for cfg in configs}
+
+    def get_config(self, server_id: str) -> ServerConfig | None:
+        return self._by_id.get(server_id)
+
+
+def submit_follow_ups(*, preview_job_id: str, items: list[ProcessableItem], source: str, pin: str | None) -> list[str]:
+    """Queue the Intro & Credits follow-ups of a preview job's files, each published where the file's previews are.
+
+    Each file's server comes from the rule the preview workers use (``jobs.worker.resolve_per_item_pin``): the job's pin
+    wins; else a non-Plex server the item came from (an Emby or Jellyfin webhook, or a Recently Added listing) gets it
+    alone; else every server with Intro & Credits on does. One ``submit_webhook_follow_up`` per server.
+
+    Args:
+        preview_job_id: The preview job the follow-ups wait for.
+        items: Its files, with the server each came from (``ProcessableItem.server_id``) and their item id hints.
+        source: What triggered the preview job (``sonarr``, ``emby``, ``recently_added``…).
+        pin: The preview job's own pin (its config's ``server_id``); None when it has none.
+
+    Returns:
+        The ids of the jobs queued or joined, one per server group that needed one.
+    """
+    if not items or not markers_enabled_anywhere():
+        return []
+    from ..jobs.worker import resolve_per_item_pin
+
+    lookup = _ServerLookup(_server_configs())
+    job_config = SimpleNamespace(server_id_filter=pin or None)
+    groups: dict[str | None, list[ProcessableItem]] = {}
+    for item in items:
+        groups.setdefault(resolve_per_item_pin(job_config, item, lookup), []).append(item)
+    queued = []
+    for server_id, group in groups.items():
+        hints = {item.canonical_path: dict(item.item_id_by_server) for item in group if item.item_id_by_server}
+        job_id = submit_webhook_follow_up(
+            preview_job_id=preview_job_id,
+            paths=[item.canonical_path for item in group],
+            source=source,
+            server_id=server_id,
+            item_id_hints=hints or None,
+        )
+        if job_id:
+            queued.append(job_id)
+    return queued
+
+
+def submit_pending_follow_up(preview_job_id: str, overrides: dict | None = None) -> list[str]:
+    """Queue the Intro & Credits follow-up a webhook preview job asks for, and take the request off the job.
+
+    The webhook sets ``INTRO_CREDITS_FOLLOW_UP`` in the preview job's saved config when its batch opens (a vendor
+    webhook, when it creates the job), so a job revived after a restart asks too; the preview runner calls this each
+    time it starts the job. The request is taken off even when queueing fails, so it's queued at most once; it stays
+    when the batch took more files meanwhile (a start during the debounce), so the batch's fire queues those.
+
+    Args:
+        preview_job_id: The preview job being started.
+        overrides: The start's config overrides (the fired batch's paths, pin and item ids); the saved config fills in
+            the rest. Only the saved config's request counts: a stale copy of the config asks nothing.
+
+    Returns:
+        The ids of the jobs queued or joined (``submit_follow_ups``); empty when the job asked for none.
+    """
+    jm = get_job_manager()
+    with _pending_follow_up_lock:
+        job = jm.get_job(preview_job_id)
+        saved = dict(job.config or {}) if job is not None else {}
+        if not saved.get(INTRO_CREDITS_FOLLOW_UP):
+            return []
+        request = {**saved, **(overrides or {})}
+        paths = [path for path in (str(p).strip() for p in request.get("webhook_paths") or []) if path]
+        try:
+            hints = request.get("webhook_item_id_hints") or {}
+            # As the preview orchestrator builds a webhook path's item: the first server with an item id sent it.
+            items = [
+                ProcessableItem(
+                    canonical_path=path,
+                    server_id=next(iter(hints.get(path) or {}), ""),
+                    item_id_by_server=dict(hints.get(path) or {}),
+                )
+                for path in paths
+            ]
+            return submit_follow_ups(
+                preview_job_id=preview_job_id,
+                items=items,
+                source=str(request.get("source") or "webhook"),
+                pin=server_pin(request),
+            )
+        finally:
+            live = jm.get_job(preview_job_id)
+            added = set((live.config or {}).get("webhook_paths") or []) - set(paths) if live is not None else set()
+            if not added:
+                jm.merge_job_config(preview_job_id, {}, remove=(INTRO_CREDITS_FOLLOW_UP,))
 
 
 def submit_redetect(path: str) -> str:
@@ -388,6 +525,46 @@ def submit_redetect(path: str) -> str:
             source=_REDETECT_SOURCE,
             file_paths=[path],
             force=True,
+        )
+    return job.id
+
+
+def submit_publish_retry(path: str) -> str:
+    """Queue the job that delivers an Inspector save to the servers its publish didn't write.
+
+    The save's own publish is bounded to answer the page quickly: a server whose row came back waiting or failed (the
+    file busy in a running job, the deadline, a busy Plex database, a server down or not indexed yet) gets it from
+    this job instead. It is a single-file HIGH job, not forced: it publishes the saved markers and asks no source
+    again; its retry chain takes a server that hasn't indexed the file yet, as any job's does. A job for the file
+    that hasn't started yet (an earlier one of these, or a queued re-detect) reads the saved markers when it runs, so
+    that job is returned instead. A running one isn't: it decided from the markers as they were before the save.
+
+    Args:
+        path: The file's local path, already validated by the caller.
+
+    Returns:
+        The id of the new or the reused job.
+    """
+    jm = get_job_manager()
+    with _redetect_lock:
+        for job in jm.get_pending_jobs():
+            cfg = job.config or {}
+            if (
+                job.kind == JOB_KIND_INTRO_CREDITS
+                and job.started_at is None
+                and cfg.get("source") == _REDETECT_SOURCE
+                and list(cfg.get("file_paths") or []) == [path]
+                # A retry counting down to its due time could be an hour away.
+                and not cfg.get("retry_not_before")
+                and not is_live_retry_chain(cfg)
+            ):
+                logger.info("Intro & Credits for {} is already queued as job {}", os.path.basename(path), job.id[:8])
+                return job.id
+        job = create_intro_credits_job(
+            library_name=f"Intro & Credits: {os.path.basename(path)}",
+            priority=PRIORITY_HIGH,
+            source=_REDETECT_SOURCE,
+            file_paths=[path],
         )
     return job.id
 

@@ -19,7 +19,6 @@ import statistics
 import subprocess
 import tempfile
 import threading
-import time
 from collections.abc import Callable
 from typing import BinaryIO, NamedTuple
 
@@ -27,6 +26,7 @@ import numpy as np
 from loguru import logger
 
 from ...processing.hwaccel import hwaccel_decode_args
+from ..freeze import Freeze
 from ..probe import (
     ProbeError,
     ProbeStalledError,
@@ -42,7 +42,6 @@ FRAME_W = 320
 FRAME_H = 180
 MOVIE_TAIL_S = 900.0
 EPISODE_TAIL_S = 450.0
-FFMPEG_THREADS = 2
 CHUNK_FRAMES = 64
 DECODE_TIMEOUT_S = 600.0
 PROBE_TIMEOUT_S = 30.0
@@ -72,10 +71,9 @@ _SURFACE_VENDORS = ("NVIDIA", "INTEL", "AMD")
 # 4:2:0 into NV12, 10-bit 4:2:0 into P010. Any other (4:2:2, 4:4:4, 12-bit, and MJPEG's full-range yuvj420p, whose
 # VAAPI JPEG surfaces aren't reliably NV12) is left to ffmpeg to download: a wrong guess fails the GPU decode.
 DOWNLOAD_FORMATS = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}
-# Spare VAAPI decoder surfaces for the frames the filter graph holds while it downloads them: a 4K VAAPI decode failed
-# without them (measured on the plex host's Intel GPU, 2026-09-24). Not on CUDA, where this same full-frame hwdownload
-# ran without them on every measured set (credit text's and the end-picture check's, on storage's P5000), and each spare
-# is a full-size NVDEC surface.
+# Spare VAAPI decoder surfaces for the frames the filter graph holds while it downloads them: a 4K VAAPI decode on an
+# Intel GPU failed without them. Not on CUDA, where this same full-frame hwdownload ran without them on every measured
+# set (credit text's and the end-picture check's), and each spare is a full-size NVDEC surface.
 EXTRA_HW_FRAMES = 8
 _POLL_S = 0.1
 _KILL_WAIT_S = 5.0
@@ -175,6 +173,7 @@ def decode_command(
     drop_non_key: bool = False,
     scale: int = 1,
     download_format: str | None = None,
+    ffmpeg_threads: int | None = None,
 ) -> tuple[list[str], bool]:
     """The spec §5.4 ffmpeg command for one decode.
 
@@ -197,6 +196,9 @@ def decode_command(
         download_format: The format of the stream's decoded GPU surfaces (``KeyframeThinning.download_format``). On
             CUDA and VAAPI (``_SURFACE_VENDORS``) the frames then stay surfaces until the filter graph downloads them,
             after ``fps`` has picked the ones kept; None, or any other GPU, lets ffmpeg download each frame itself.
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (its GPU's entry in ``gpu_config``): ffmpeg's threads
+            and filter threads, the flags previews put on a GPU worker's FFmpeg. None or 0, and any decode on the CPU
+            (a CPU worker, or a GPU worker's CPU rerun), leave ffmpeg its own thread count, as previews do.
 
     Returns:
         The argv, and whether decode runs on the GPU.
@@ -207,7 +209,10 @@ def decode_command(
     video_filter = _scale_filter(download_format if surfaces else None, scale)
     if fps:
         video_filter = f"fps={fps},{video_filter}"
-    command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", str(FFMPEG_THREADS), *decode.args]
+    command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info"]
+    if gpu is not None and ffmpeg_threads is not None and ffmpeg_threads > 0:
+        command += ["-threads", str(ffmpeg_threads), "-filter_threads", str(ffmpeg_threads)]
+    command += decode.args
     if surfaces and gpu != "NVIDIA":
         command += ["-extra_hw_frames", str(EXTRA_HW_FRAMES)]
     drops = (["not(key)"] if drop_non_key else []) + ([f"mod(n\\,{keep_every})"] if keep_every else [])
@@ -424,6 +429,7 @@ def run_decode(
     chunk_frames: int = CHUNK_FRAMES,
     name: str = "",
     scale: int = 1,
+    pause_check: Callable[[], bool] | Freeze | None = None,
 ) -> list[Row]:
     """Run one decode and read its text boxes chunk by chunk.
 
@@ -437,11 +443,15 @@ def run_decode(
             default would quietly hand back a recording's raw timestamps, tens of thousands of seconds out.
         cancel_check: True once the job is cancelled; checked between chunks and while ffmpeg exits.
         timeout_s: Time limit for the decode, checked between chunks: the worker is released within ``timeout_s`` plus
-            one text detection call plus 7 s (the bounded kill and reader waits). A stalled network mount must not hold
-            a worker.
+            one text detection call plus 7 s (the bounded kill and reader waits), not counting time paused. A stalled
+            network mount must not hold a worker.
         chunk_frames: Frames per text detection request.
         name: The file's name for messages.
         scale: The frames are this many times 320×180 (the command's own ``scale``).
+        pause_check: True while everything is paused (:class:`freeze.Freeze`): no ffmpeg starts, a running one's
+            process group is stopped where it is until the resume, no text detection runs meanwhile, and the time
+            limit moves out by the time paused. A cancel still ends the decode. A :class:`freeze.Freeze` keeps adding
+            up its time paused across decodes.
 
     Returns:
         ``(pts, box count, luma, boxes)`` per frame, in decode order, the boxes in the 320×180 frame's pixels at every
@@ -465,7 +475,11 @@ def run_decode(
     # a quarter of the frames per chunk, so the queue and each chunk's copies on the way to the helper (the planes,
     # their bytes, the request) hold the same bytes as at 320x180, about 22 MB per worker at the peak.
     frames: queue.Queue = queue.Queue(maxsize=chunk_frames * 2)
-    deadline = time.monotonic() + timeout_s
+    freeze = Freeze.of(pause_check)
+    freeze.hold(cancel_check=cancel_check, name=name)
+    if cancel_check and cancel_check():
+        raise DecodeCancelledError(f"cancelled before decoding {name}")
+    deadline = freeze.clock() + timeout_s
 
     def flush() -> None:
         planes = np.frombuffer(b"".join(pending), dtype=np.uint8).reshape(
@@ -500,9 +514,10 @@ def run_decode(
         reader.start()
         try:
             while True:
+                freeze.hold(proc, cancel_check=cancel_check, name=name)
                 if cancel_check and cancel_check():
                     raise DecodeCancelledError(f"cancelled while decoding {name}")
-                if time.monotonic() > deadline:
+                if freeze.clock() > deadline:
                     raise DecodeTimeoutError(f"decoding {name} timed out after {timeout_s:g} s")
                 try:
                     item = frames.get(timeout=_POLL_S)
@@ -518,9 +533,10 @@ def run_decode(
             if pending:
                 flush()
             while proc.poll() is None:  # ffmpeg can outlive its output; a cancel here must not wait for the deadline
+                freeze.hold(proc, cancel_check=cancel_check, name=name)
                 if cancel_check and cancel_check():
                     raise DecodeCancelledError(f"cancelled while decoding {name}")
-                if time.monotonic() > deadline:
+                if freeze.clock() > deadline:
                     raise DecodeTimeoutError(f"decoding {name} timed out after {timeout_s:g} s")
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POLL_S)
@@ -568,6 +584,8 @@ def decode_rows(
     drop_non_key: bool = False,
     scale: int = 1,
     download_format: str | None = None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
+    ffmpeg_threads: int | None = None,
 ) -> list[Row]:
     """:func:`decode_command` then :func:`run_decode` (other arguments as there; ``scale`` goes to both).
 
@@ -595,7 +613,7 @@ def decode_rows(
     command, hw_active = decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
         gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key, scale=scale,
-        download_format=download_format,
+        download_format=download_format, ffmpeg_threads=ffmpeg_threads,
     )  # fmt: skip
     offset_s = (
         container_start_s(path, ffmpeg, timeout_s=min(PROBE_TIMEOUT_S, timeout_s))
@@ -605,5 +623,5 @@ def decode_rows(
     # A quarter of the frames per text detection request at 640x360: the same pixels, so the helper's per-request
     # timeout (``textdet_helper.REQUEST_TIMEOUT_S``, sized for 64 frames at 320x180) and the frame queue's bytes hold.
     return run_decode(command, hw_active=hw_active, detect_boxes=detect_boxes, cancel_check=cancel_check,
-                      timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale,
+                      pause_check=pause_check, timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale,
                       chunk_frames=max(1, CHUNK_FRAMES // (scale * scale)))  # fmt: skip

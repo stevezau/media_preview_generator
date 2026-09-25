@@ -24,6 +24,9 @@ from .speed import online_time_scale
 # release's intro beside season audio; spec §5.5 rules 2, 3, 6 and 14).
 DECIDE_RULES = "decide_rules"
 DECIDE_RULES_VERSION = 1
+# A decided type whose published marker today's rules would put in Needs review or leave without one keeps it, until new
+# or changed evidence contradicts it (``keep_published``); the reason starts with this.
+KEPT_BEFORE_RULE_CHANGE = "kept: published before a rule change"
 INTRO_END_TOLERANCE_MS = 5_000
 CREDITS_START_TOLERANCE_MS = 10_000
 EOF_CLAMP_MS = 2_000
@@ -32,7 +35,7 @@ MAX_INTRO_MS = 300_000
 MOVIE_CREDITS_MAX_FROM_END_MS = 900_000
 INTRO_RECAP_MAX_OVERLAP_MS = 5_000
 PREVIEW_CREDITS_MAX_OVERLAP_MS = 10_000
-# Finding F1 (phase-1 scale run): streaming releases can label story "Intro" (Reservation Dogs S01E05: 126 s against
+# Finding F1 (phase-1 scale run): streaming releases can label story "Intro" (one episode: 126 s against
 # the season's 3-11 s). With at least this many other episodes of the season carrying an intro chapter, one lasting
 # more than max(2 x their median, median + 30 s) needs an agreeing source.
 SEASON_INTRO_CHAPTERS_MIN_OTHERS = 2
@@ -63,8 +66,8 @@ _IMPORTED_GROUP = {"introdb": _INTRODB_GROUP, "skipdb": Source.SKIPDB.value, "an
 # this file's own frames (owner, Q1, 2026-09-16), and season audio's intros (owner, 2026-09-24, overriding R2: alone 91
 # useful / 13 wrong / 14 missed on 118 episodes, against Plex's own 23 right / 15 wrong; "if it doesn't exist online
 # then use the GPU/CPU check"). IntroDB takes no duration and TheIntroDB answers the closest cut it has. SkipDB's
-# duration match proves the cut, not the segment's edges (2026-09-25 audit: Westworld S04E01/E07/E08 alone covered 20 s
-# of a 97 s title sequence, Outlander S08 ended 5-11 s late on 4 of 4 online cases), so it too waits for a check against
+# duration match proves the cut, not the segment's edges (2026-09-25 audit: three episodes of one show alone covered 20 s
+# of a 97 s title sequence, a season of another show ended 5-11 s late on 4 of 4 online cases), so it too waits for a check against
 # the file. Markers already on servers never decide alone (rule 7). The previous season's audio stays a hint: alone it
 # was 48 useful / 10 wrong / 24 missed (precision 83 %), and the owner ruled on 2026-09-13 that it needs a second source.
 _AGREEMENT_ONLY = SERVER_SOURCES | {
@@ -111,30 +114,30 @@ _WHY_NOT_ALONE = {
 }
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
 # IntroDB and TheIntroDB take no duration: their times come from whichever release their users timed, so on a file at
-# the other speed of a PAL speed-up they run 4.3 % off (Bones S07E01, 25 fps: IntroDB 324-354 s from a 23.976 release,
+# the other speed of a PAL speed-up they run 4.3 % off (one episode, 25 fps: IntroDB 324-354 s from a 23.976 release,
 # the file's own theme 310-338 s). An importer plugin's copy of them is the same times. SkipDB matches the file's
 # duration, so its times are this file's.
 _TIMED_ON_ANY_RELEASE = frozenset({Source.INTRODB, Source.THEINTRODB})
 _TIMED_ON_ANY_RELEASE_COPY = "introdb"
 # An IntroDB or TheIntroDB intro (or an importer plugin's copy of one) starting in the first 2 s and shorter than 10 s
-# is a logo at the start of the file, not the show's intro (The Fixers: IntroDB gives Netflix's "N", 0-7 s, for all
+# is a logo at the start of the file, not the show's intro (one show: IntroDB gives Netflix's "N", 0-7 s, for all
 # 10 episodes, where season audio finds the theme at 263.0-284.8 s on E01). Season audio passes over the same
 # stretches of its own (``audio.season``'s ``FILE_START_S`` and ``MIN_FILE_START_LENGTH_S``, which a test keeps equal
 # to these); none of 43 verified online intros is one.
 ONLINE_LOGO_BEFORE_MS = 2_000
 MIN_ONLINE_INTRO_AT_START_MS = 10_000
 # Credits or a preview of IntroDB, TheIntroDB or an importer plugin's copy of them run to the end of the release their
-# users timed, which can run a few seconds past this file's end (Game of Thrones: IntroDB 2.8-4.8 s past on 20 episodes;
-# S03E08/E09 and S05E06 start within 1 s of credit text). Up to this far past the end such an answer is clamped like any other; further,
-# the release's clock is off by as much (The Big Bang Theory S12E15: 9.8 s past, starting 8 s after the file's credits;
-# Daredevil S03E12 on the online set: 8 s past, 10 s early).
+# users timed, which can run a few seconds past this file's end (one show: IntroDB 2.8-4.8 s past on 20 episodes;
+# two of those episodes start within 1 s of credit text). Up to this far past the end such an answer is clamped like any other; further,
+# the release's clock is off by as much (one show's S12E15: 9.8 s past, starting 8 s after the file's credits;
+# another show's S03E12 on the online set: 8 s past, 10 s early).
 ONLINE_END_PAST_FILE_MS = 5_000
 # An IntroDB or TheIntroDB intro with season audio's length (within the 5 s end tolerance) that starts more than this
-# far from it is the same intro on another release's clock (Westworld S03E03-E08: 50-80 s earlier, a release without
+# far from it is the same intro on another release's clock (one show's S03E03-E08: 50-80 s earlier, a release without
 # the episode's recap), not a contradiction (rule 14). A shift of a few seconds is two answers disagreeing about one
-# segment's edges (Daredevil S03, Invasion S03: season audio wrong), so it still disagrees.
+# segment's edges (two other shows: season audio wrong), so it still disagrees.
 OTHER_RELEASE_MIN_SHIFT_MS = 15_000
-# Both must be at least this long: a short card matches a stretch of another length by chance (The Big Door Prize S02E03,
+# Both must be at least this long: a short card matches a stretch of another length by chance (one episode,
 # a 16 s title card beside a 15 s season audio answer elsewhere).
 OTHER_RELEASE_MIN_LENGTH_MS = 30_000
 SHORTENED_NOTE = "shortened to the server's own marker"
@@ -695,8 +698,9 @@ def _decide_from_chapters(
 def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: DecisionContext) -> TypeDecision | None:
     """Credits decided by the agreeing clusters that contradict a credits chapter, when each holds credit text and a
     source of another group that isn't a server's marker (rule 3): the file's own frames and an independent answer
-    outvote the chapter (Somebody Somewhere S03E02-E07: HMAX "Credits" chapters 40-70 s late, credit text and SkipDB
-    within 2 s of the frame-checked start). The start is credit text's; the rest is composed as rule 4 composes.
+    outvote the chapter (one season's run of episodes: a streaming release's "Credits" chapters 40-70 s late, credit
+    text and SkipDB within 2 s of the frame-checked start). The start is credit text's; the rest is composed as rule 4
+    composes.
 
     Returns:
         The decision, or None when a cluster lacks such a pair, the clusters disagree with each other, or the composed
@@ -752,7 +756,7 @@ def _may_decide_alone(candidate: Candidate) -> bool:
 
     Season audio was only ever measured on intros (its credits were rejected at 54 % precision), so only an intro of it
     decides. SkipDB never does (``_AGREEMENT_ONLY``): its lone credits started early on the lab scale run, some by
-    minutes (Battlestar Galactica S04E05: 6.7 min of story), and its lone intros missed their edges in the 2026-09-25
+    minutes (one episode: 6.7 min of story), and its lone intros missed their edges in the 2026-09-25
     audit.
     """
     if candidate.source in _AGREEMENT_ONLY:
@@ -1050,6 +1054,59 @@ def shortened_by(reason: str) -> tuple[str, ...] | None:
     if found is None:
         return None
     return tuple(found.group(1).split(", ")) if found.group(1) else ()
+
+
+def kept_before_rule_change(reason: str) -> bool:
+    """Whether a decision's reason says its marker was kept through a rule change (:func:`keep_published`)."""
+    return (reason or "").startswith(KEPT_BEFORE_RULE_CHANGE)
+
+
+def keep_published(
+    decision: TypeDecision,
+    published: Marker,
+    *,
+    candidates: Iterable[Candidate],
+    changed: Iterable[Candidate],
+    duration_ms: int,
+) -> TypeDecision:
+    """Today's decision for a type, or the marker published before the rules changed, kept in its place.
+
+    A re-decide that only a rule change causes never takes a published marker off the servers (owner ruling
+    2026-09-25): where today's rules leave the type in Needs review or without a marker, the marker stays while a source
+    it was decided by still gives an answer that agrees with it, and no new or changed answer disagrees with it. An
+    answer that disagreed before and is only stored again (a forced run, a parser's new version reading the same
+    answer) is no news. An answer agrees as two sources do (rule 4): its end within 5 s for an intro or recap, its start
+    within 10 s for credits or a preview. Today's rules deciding the type, whatever the answer, replace it; a marker
+    carried over from a replaced file rests on no source and isn't kept.
+
+    Args:
+        decision: Today's decision for the type.
+        published: The marker decided and published before.
+        candidates: The type's answers now, from the sources turned on (a server's marker made for an earlier file
+            left out).
+        changed: Those of them that are new or changed since the file's run began.
+        duration_ms: The file's length.
+
+    Returns:
+        ``decision``, or the kept marker decided with the reason :data:`KEPT_BEFORE_RULE_CHANGE` and today's.
+    """
+    if decision.status not in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE):
+        return decision
+    checked = _checked_value(published.type, published)
+
+    def agrees(candidate: Candidate) -> bool:
+        return abs(_agree_value(candidate, duration_ms) - checked) <= _tolerance_ms(published.type)
+
+    supported = any(c.source.value in published.decided_by and agrees(c) for c in candidates)
+    if not supported or not all(agrees(c) for c in changed):
+        return decision
+    return TypeDecision(
+        published.type,
+        DecisionStatus.DECIDED,
+        published,
+        None,
+        f"{KEPT_BEFORE_RULE_CHANGE}; today's rules: {decision.reason}",
+    )
 
 
 def _overlap_ms(a: Marker, b: Marker) -> int:

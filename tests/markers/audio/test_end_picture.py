@@ -160,9 +160,11 @@ class _Decoder:
         self.download_formats: dict[str, str | None] = {}
 
     def __call__(self, path, start_s, length_s, *, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check,
-                 download_format):  # fmt: skip
+                 download_format, pause_check=None, ffmpeg_threads=None, fallback_callback=None):  # fmt: skip
         self.calls.append((path, round(start_s, 3), round(length_s, 3), gpu, gpu_device_path, container_start_s))
         self.download_formats[path] = download_format
+        self.worker = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
+                       "fallback_callback": fallback_callback}  # fmt: skip
         times = np.arange(np.ceil(start_s * 2) / 2, start_s + length_s, 0.5)
         return [(float(t), _textured(self.seed_of(path, float(t)))) for t in times]
 
@@ -215,6 +217,21 @@ class TestReader:
         with patched:
             reader.share("a", "b", 0.0, 30.0, 0.0)
         assert decoder.download_formats == {"a": "nv12", "b": download_format}
+
+    def test_the_workers_pause_threads_and_fallback_flag_reach_every_decode(self):
+        decoder = _Decoder()
+
+        def paused():
+            return False
+
+        def flag(_reason):
+            return None
+
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None), decoder, pause_check=paused,
+                                       ffmpeg_threads=3, fallback_callback=flag)  # fmt: skip
+        with patched:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert decoder.worker == {"pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag}
 
     def test_each_file_is_probed_once_and_each_window_decoded_once(self):
         decoder = _Decoder()
@@ -317,9 +334,10 @@ class TestDecodeFrames:
     def _run_decode(self, planes, pts, fail_on_gpu=False):
         calls = []
 
-        def run_decode(command, *, hw_active, detect_boxes, pts_offset_s, cancel_check, timeout_s, name):
+        def run_decode(command, *, hw_active, detect_boxes, pts_offset_s, cancel_check, timeout_s, name,
+                       pause_check=None):  # fmt: skip
             calls.append({"command": command, "hw_active": hw_active, "pts_offset_s": pts_offset_s,
-                          "timeout_s": timeout_s, "cancel_check": cancel_check})  # fmt: skip
+                          "timeout_s": timeout_s, "cancel_check": cancel_check, "pause_check": pause_check})  # fmt: skip
             if fail_on_gpu and hw_active:
                 raise frames.GpuDecodeError("the GPU decoded no frames")
             boxes = detect_boxes(planes)
@@ -373,7 +391,7 @@ class TestDecodeFrames:
             ep.decode_frames("/m/a.mkv", 33.476, 3.5, ffmpeg="ffmpeg", gpu=gpu, gpu_device_path=device,
                              container_start_s=0.0, download_format=download_format)  # fmt: skip
         assert calls[0]["command"] == [
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args, "-ss", "33.476",
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args, "-ss", "33.476",
             "-t", "3.500", "-copyts", "-i", "/m/a.mkv", "-an", "-sn", "-dn", "-fps_mode", "passthrough",
             "-vf", f"{video_filter},showinfo", "-f", "rawvideo", "-",
         ]  # fmt: skip
@@ -388,6 +406,49 @@ class TestDecodeFrames:
         assert "-hwaccel" not in calls[1]["command"] and len(got) == 1
         cpu = calls[1]["command"]
         assert cpu[cpu.index("-vf") + 1] == f"fps=2,{self.NEIGHBOR},showinfo"
+
+    def test_a_gpu_workers_threads_cap_its_gpu_decode_and_the_pause_reaches_both_decodes(self):
+        # The CPU rerun is uncapped, as previews' CPU fallback on a GPU worker is.
+        calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
+
+        def paused():
+            return False
+
+        with patch.object(frames, "run_decode", side_effect=run_decode):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path="cuda:0",
+                             container_start_s=0.0, download_format="nv12", pause_check=paused,
+                             ffmpeg_threads=3)  # fmt: skip
+        gpu, cpu = (call["command"] for call in calls)
+        assert gpu[5:9] == ["-threads", "3", "-filter_threads", "3"]
+        assert "-threads" not in cpu and "-filter_threads" not in cpu
+        assert [call["pause_check"] for call in calls] == [paused, paused]
+
+    def test_a_cpu_fallback_flags_the_worker_every_time_and_warns_once_per_device(self, monkeypatch, loguru_caplog):
+        # Previews and the credits decode show a CPU fallback on the worker's row; the end-picture check does too. One
+        # warning per GPU for the process: this check decodes a few seconds of many files, so a GPU that can't decode a
+        # format would otherwise warn for every episode.
+        monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
+        flagged: list[str] = []
+        for device in ("cuda:0", "cuda:0", "cuda:1"):
+            _calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
+            with patch.object(frames, "run_decode", side_effect=run_decode):
+                ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path=device,
+                                 container_start_s=0.0, download_format="nv12",
+                                 fallback_callback=flagged.append)  # fmt: skip
+        assert len(flagged) == 3 and all("the GPU decoded no frames" in reason for reason in flagged)
+        warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 2
+        assert "cuda:0" in warnings[0] and "cuda:1" in warnings[1]
+        assert all("a.mkv" in w and "on the CPU" in w for w in warnings)
+
+    def test_a_cpu_worker_has_no_fallback_to_flag(self, monkeypatch):
+        monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
+        flagged: list[str] = []
+        _calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
+        with patch.object(frames, "run_decode", side_effect=run_decode):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=None, gpu_device_path=None,
+                             container_start_s=0.0, download_format="nv12", fallback_callback=flagged.append)  # fmt: skip
+        assert flagged == []
 
     def test_a_frame_without_a_timestamp_fails_the_decode(self):
         _calls, run_decode = self._run_decode(_planes(3), [33.5, 34.0])  # one frame's timestamp was dropped

@@ -101,11 +101,11 @@ STORY_BEFORE_RUN_S = 30.0
 # ... and fewer than this share of those keyframes carry any text. The harness's 245 files reach 0.54 (a stand-up
 # special); the lab's Synth Audio test pattern with its running timecode, 1.00. The cost: a channel logo or ticker
 # boxed on this share of the story loses a real roll's answer too. On 51 broadcast recordings with channel logos (final
-# review) that was one answer (Live Rescue S02E01 on the GPU decode, 0.895), against five wrong ones this share and
+# review) that was one answer (one episode on the GPU decode, 0.895), against five wrong ones this share and
 # the 30 s above took away over both decode paths.
 TEXT_ALL_THROUGH_SHARE = 0.8
 # When the run is under STORY_BEFORE_RUN_S into the tail and only dark rows (luma under 30) come before it there, the
-# roll may have begun before the tail (the lab's Heeramandi episodes: 462 s rolls against a 450 s tail), so the
+# roll may have begun before the tail (one show's episodes: 462 s rolls against a 450 s tail), so the
 # keyframes of this much before the tail are read too, and the run is judged on both when it continues into them
 # (:func:`opens_on_the_run`, :func:`joined_before`). While the run then still starts under STORY_BEFORE_RUN_S after the
 # first row read (:func:`too_little_story`), the detector puts another step of this length in front
@@ -722,7 +722,7 @@ def start_on_dense_text(
 
     The larger frame boxes small print the smaller frame never does -- a news feed's date line, logo and caption, a
     channel's fine print, a lower third's words -- and on lit story that makes credit frames of three to five boxes, on
-    and off with the shots, which the 24 s join puts in front of the roll (I Survived a Serial Killer S01E14: court
+    and off with the shots, which the 24 s join puts in front of the roll (one true-crime episode: court
     footage from 68 s before the roll). :func:`overlay_boxes` can't take them: they are on screen only in the stretch
     the run itself opens on, not across the story before it, so they are never gathered. So the start moves to the
     run's first dense frame -- a dark credit frame, or a lit one with ``dense_boxes`` boxes -- and from there steps
@@ -1019,7 +1019,7 @@ def end_keyframe_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RUL
     keyframe is scene text glued onto the roll.
 
     The start's anchor, mirrored (spec §13 item 13). The 24 s join lets a lit text frame in the scene after the roll
-    join the run, and the end then lands in that scene: Rick and Morty S01E04's roll ends on a card at 1183.0 s, and
+    join the run, and the end then lands in that scene: one episode's roll ends on a card at 1183.0 s, and
     swscale's frame of the scene at 1198.4 s reads 3 boxes, so the CPU decode's skip ran 11.5 s into the scene. The last
     credit keyframe is taken for glued on -- and the end steps back one credit keyframe, never more -- only when it's
     all of: a lit frame (a dark card is the roll's own), further from the credit keyframe before it than 1.5 x the

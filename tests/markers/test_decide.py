@@ -4021,3 +4021,64 @@ class TestAnotherReleasesIntroBesideSeasonAudio:
         cands = [intro(S.INTRODB, 243_000, 341_000), self._audio(293_253, 390_838, S.SEASON_AUDIO_PREVIOUS)]
         d = self._decide(cands, self.WW_S03E03)
         assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, self.DISAGREE)
+
+
+class TestKeepPublishedThroughARuleChange:
+    """``keep_published``: a marker published before a rule change stays where today's rules would leave its type in
+    Needs review or without a marker, while an answer it rests on still agrees and nothing newer disagrees."""
+
+    INTRO = Marker(T.INTRO, 60_000, 90_000, ("skipdb",))
+    CREDITS = Marker(T.CREDITS, 1_250_000, DUR, ("skipdb",))
+    REVIEW = TypeDecision(T.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "SkipDB alone: needs a check")
+
+    def _keep(self, decision, published, candidates, changed=()):
+        return decide_module.keep_published(
+            decision, published, candidates=candidates, changed=changed, duration_ms=DUR
+        )
+
+    @pytest.mark.parametrize(
+        "status", [DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE], ids=["needs-review", "no-evidence"]
+    )
+    def test_kept_where_todays_rules_leave_the_type_undecided(self, status):
+        decision = TypeDecision(T.INTRO, status, None, None, "why today")
+        kept = self._keep(decision, self.INTRO, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)])
+        assert (kept.status, kept.marker, kept.proposed) == (DecisionStatus.DECIDED, self.INTRO, None)
+        assert kept.reason == "kept: published before a rule change; today's rules: why today"
+        assert decide_module.kept_before_rule_change(kept.reason)
+
+    @pytest.mark.parametrize("status", [DecisionStatus.DECIDED, DecisionStatus.DISABLED], ids=["decided", "off"])
+    def test_todays_decided_or_disabled_type_wins(self, status):
+        other = Marker(T.INTRO, 10_000, 40_000, ("chapters",)) if status is DecisionStatus.DECIDED else None
+        decision = TypeDecision(T.INTRO, status, other, None, "today")
+        assert self._keep(decision, self.INTRO, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)]) is decision
+
+    @pytest.mark.parametrize(
+        ("end_ms", "kept"), [(95_000, True), (95_001, False), (85_000, True), (84_999, False)], ids=str
+    )
+    def test_an_intros_answer_agrees_within_5_s_of_its_end(self, end_ms, kept):
+        out = self._keep(self.REVIEW, self.INTRO, [Candidate(T.INTRO, 60_000, end_ms, S.SKIPDB)])
+        assert (out.status is DecisionStatus.DECIDED) is kept
+
+    @pytest.mark.parametrize(("start_ms", "kept"), [(1_260_000, True), (1_260_001, False)], ids=str)
+    def test_a_credits_answer_agrees_within_10_s_of_its_start(self, start_ms, kept):
+        review = TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, None, "why")
+        out = self._keep(review, self.CREDITS, [Candidate(T.CREDITS, start_ms, None, S.SKIPDB)])
+        assert (out.status is DecisionStatus.DECIDED) is kept
+
+    def test_an_agreeing_answer_from_a_source_it_wasnt_decided_by_doesnt_hold_it(self):
+        out = self._keep(self.REVIEW, self.INTRO, [Candidate(T.INTRO, 60_000, 90_000, S.THEINTRODB)])
+        assert out is self.REVIEW
+
+    def test_nothing_left_of_its_source_doesnt_hold_it(self):
+        assert self._keep(self.REVIEW, self.INTRO, []) is self.REVIEW
+
+    def test_a_new_or_changed_disagreeing_answer_replaces_it_and_an_agreeing_one_doesnt(self):
+        own = Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)
+        agreeing = Candidate(T.INTRO, 61_000, 92_000, S.THEINTRODB)
+        disagreeing = Candidate(T.INTRO, 200_000, 230_000, S.THEINTRODB)
+        assert self._keep(self.REVIEW, self.INTRO, [own, agreeing], [agreeing]).status is DecisionStatus.DECIDED
+        assert self._keep(self.REVIEW, self.INTRO, [own, disagreeing], [disagreeing]) is self.REVIEW
+
+    def test_a_marker_carried_over_from_a_replaced_file_rests_on_no_source_and_isnt_kept(self):
+        carried = Marker(T.INTRO, 60_000, 90_000, ("carried_over",))
+        assert self._keep(self.REVIEW, carried, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)]) is self.REVIEW

@@ -63,6 +63,43 @@ def test_classify_matrix(title, expected):
     assert classify_chapter_title(title) is expected
 
 
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        # German
+        ("Vorspann", T.INTRO),
+        ("VORSPANN", T.INTRO),
+        ("Abspann", T.CREDITS),
+        # French -- accent optional, some muxers drop it
+        ("Générique", T.INTRO),
+        ("Generique", T.INTRO),
+        ("Générique de fin", T.CREDITS),
+        ("Generique de fin", T.CREDITS),
+        # Spanish -- "Intro"/"Credits" already match via the English patterns
+        ("Cabecera", T.INTRO),
+        ("Créditos", T.CREDITS),
+        ("Creditos", T.CREDITS),
+        # Italian
+        ("Sigla", T.INTRO),
+        ("Titoli di coda", T.CREDITS),
+        # Portuguese
+        ("Abertura", T.INTRO),
+        ("Créditos finais", T.CREDITS),
+        ("Creditos finais", T.CREDITS),
+        # Dutch
+        ("Aftiteling", T.CREDITS),
+        # Whole-title matches only -- a longer title containing the word is not a hit.
+        ("Générique du film", None),
+        ("La Sigla", None),
+        ("Cabeceras", None),
+        ("Vorspannmusik", None),
+        ("Aftiteling Muziek", None),
+    ],
+)
+def test_classify_non_english_names(title, expected):
+    assert classify_chapter_title(title) is expected
+
+
 def test_candidates_use_chapter_bounds_and_skip_unnamed():
     probe = MediaProbe(
         duration_ms=1_680_709,

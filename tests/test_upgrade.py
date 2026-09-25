@@ -2817,7 +2817,7 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 18
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[16]]
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
@@ -2849,7 +2849,7 @@ class TestMigrateToV17:
 
         settings_manager.apply_changes(updates={"_schema_version": start})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 18
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
 
@@ -2878,9 +2878,181 @@ class TestMigrateToV18:
 
         settings_manager.apply_changes(updates={"_schema_version": 17})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 18
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
         settings_manager.delete(DECIDE_AGAIN_KEY)
         _migrate_schema(settings_manager)
         assert settings_manager.get(DECIDE_AGAIN_KEY) is None
+
+
+_GPU_NO_WORKERS = [{"device": "cuda:0", "name": "GPU", "enabled": True, "workers": 0, "ffmpeg_threads": 2}]
+_GPU_DISABLED = [{"device": "cuda:0", "name": "GPU", "enabled": False, "workers": 2, "ffmpeg_threads": 2}]
+_GPU_ONE_WORKER = [{"device": "cuda:0", "name": "GPU", "enabled": True, "workers": 1, "ffmpeg_threads": 2}]
+
+
+class TestMigrateToV19:
+    """An install the zero-workers auto-pause paused before ``processing_auto_paused`` existed has no flag, so the save
+    that adds workers back left it paused for good: v19 marks a pause with no workers configured as that auto-pause."""
+
+    NOTE = "v19: marked the pause as the no-workers auto-pause, so the save that adds workers back resumes processing"
+
+    @pytest.mark.parametrize("gpu_config", [_GPU_NO_WORKERS, _GPU_DISABLED], ids=["gpu-with-0-workers", "gpu-disabled"])
+    def test_a_pause_with_no_workers_becomes_the_auto_pause(self, settings_manager, gpu_config):
+        from media_preview_generator.upgrade import _migrate_to_v19
+
+        settings_manager.apply_changes(updates={"processing_paused": True, "cpu_threads": 0, "gpu_config": gpu_config})
+
+        assert _migrate_to_v19(settings_manager) == [self.NOTE]
+        assert settings_manager.processing_paused is True
+        assert settings_manager.processing_auto_paused is True
+
+    @pytest.mark.parametrize(
+        ("cpu_threads", "gpu_config"),
+        [(2, _GPU_DISABLED), (0, _GPU_ONE_WORKER), (0, [])],
+        # No gpu_config falls back to one GPU worker (``thread_totals_from_ui_settings``), so the app never
+        # auto-paused such an install: its pause is the user's.
+        ids=["cpu-workers", "gpu-workers-only", "no-gpu-config"],
+    )
+    def test_a_pause_with_workers_is_the_users_and_is_left_alone(self, settings_manager, cpu_threads, gpu_config):
+        from media_preview_generator.upgrade import _migrate_to_v19
+        from media_preview_generator.web.settings_manager import _AUTO_PAUSED_KEY
+
+        settings_manager.apply_changes(
+            updates={"processing_paused": True, "cpu_threads": cpu_threads, "gpu_config": gpu_config}
+        )
+
+        assert _migrate_to_v19(settings_manager) == []
+        assert settings_manager.processing_paused is True
+        assert settings_manager.get(_AUTO_PAUSED_KEY) is None
+
+    @pytest.mark.parametrize("paused", [False, _MISSING], ids=["resumed", "never-paused"])
+    def test_not_paused_is_left_alone(self, settings_manager, paused):
+        from media_preview_generator.upgrade import _migrate_to_v19
+        from media_preview_generator.web.settings_manager import _AUTO_PAUSED_KEY
+
+        updates = {"cpu_threads": 0, "gpu_config": _GPU_NO_WORKERS}
+        if paused is not _MISSING:
+            updates["processing_paused"] = paused
+        settings_manager.apply_changes(updates=updates)
+
+        assert _migrate_to_v19(settings_manager) == []
+        assert settings_manager.processing_paused is False
+        assert settings_manager.get(_AUTO_PAUSED_KEY) is None
+
+    def test_an_already_marked_pause_is_left_alone(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v19
+
+        settings_manager.apply_changes(updates={"cpu_threads": 0, "gpu_config": _GPU_NO_WORKERS})
+        settings_manager.pause_for_no_workers()
+        before = settings_manager.get_all()
+
+        assert _migrate_to_v19(settings_manager) == []
+        assert settings_manager.get_all() == before
+
+    @pytest.mark.parametrize(
+        ("updates", "reason"),
+        [
+            ({"processing_paused": False, "cpu_threads": 0, "gpu_config": _GPU_NO_WORKERS}, "not paused"),
+            ({"processing_paused": True, "cpu_threads": 2, "gpu_config": _GPU_DISABLED}, "workers configured"),
+            ({"processing_paused": True, "cpu_threads": 0, "gpu_config": _GPU_ONE_WORKER}, "GPU workers configured"),
+        ],
+        ids=["not-paused", "cpu-workers", "gpu-workers"],
+    )
+    def test_a_stale_flag_a_restored_backup_carries_is_removed(self, settings_manager, updates, reason):
+        # The flag is exactly "paused and no workers": one restored from an older settings.json.bak next to a pause
+        # that isn't (or no pause at all) would resume the user's own pause on the next save.
+        from media_preview_generator.upgrade import _migrate_to_v19
+        from media_preview_generator.web.settings_manager import _AUTO_PAUSED_KEY
+
+        settings_manager.apply_changes(updates={**updates, _AUTO_PAUSED_KEY: True})
+
+        notes = _migrate_to_v19(settings_manager)
+
+        assert settings_manager.get(_AUTO_PAUSED_KEY) is None, reason
+        assert settings_manager.processing_paused is updates["processing_paused"]
+        assert notes == ["v19: removed a no-workers auto-pause flag the settings no longer match"]
+
+    def test_a_second_run_changes_nothing(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v19
+
+        settings_manager.apply_changes(updates={"processing_paused": True, "cpu_threads": 0, "gpu_config": []})
+        settings_manager.apply_changes(updates={"gpu_config": _GPU_NO_WORKERS})
+        assert _migrate_to_v19(settings_manager) == [self.NOTE]
+        after_first = settings_manager.get_all()
+
+        assert _migrate_to_v19(settings_manager) == []
+        assert settings_manager.get_all() == after_first
+
+    def test_the_schema_step_runs_once(self, settings_manager):
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, _migrate_schema
+        from media_preview_generator.web.settings_manager import _AUTO_PAUSED_KEY
+
+        settings_manager.apply_changes(
+            updates={
+                "_schema_version": 18,
+                "processing_paused": True,
+                "cpu_threads": 0,
+                "gpu_config": _GPU_NO_WORKERS,
+            }
+        )
+        _migrate_schema(settings_manager)
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
+        assert settings_manager.processing_auto_paused is True
+
+        # Pause all takes the pause over (and drops the flag); a later start doesn't mark it again (the version gate).
+        settings_manager.processing_paused = True
+        _migrate_schema(settings_manager)
+        assert settings_manager.get(_AUTO_PAUSED_KEY) is None
+
+
+class TestUpgradedAutoPauseResumes:
+    """The v19 flag is what the settings save's real ``_auto_resume_if_needed`` path reads."""
+
+    TOKEN = "test-token-12345678"
+    DRAIN = "media_preview_generator.web.routes.job_runner.resume_running_and_drain_pending"
+
+    @pytest.fixture(autouse=True)
+    def _reset_singletons(self):
+        import media_preview_generator.web.jobs as jobs_mod
+        from media_preview_generator.jobs.dispatcher import reset_dispatcher
+        from media_preview_generator.web.settings_manager import reset_settings_manager
+
+        def reset():
+            reset_dispatcher()
+            reset_settings_manager()
+            with jobs_mod._job_lock:
+                jobs_mod._job_manager = None
+
+        reset()
+        yield
+        reset()
+
+    def test_the_save_that_adds_workers_back_resumes_an_upgraded_install(self, tmp_path, monkeypatch):
+        from media_preview_generator.web.app import create_app
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("WEB_AUTH_TOKEN", self.TOKEN)
+        (tmp_path / "settings.json").write_text(
+            json.dumps(
+                {
+                    "_schema_version": 18,
+                    "_env_migrated": True,
+                    "processing_paused": True,
+                    "cpu_threads": 0,
+                    "gpu_config": _GPU_NO_WORKERS,
+                }
+            )
+        )
+        app = create_app(config_dir=str(tmp_path))
+
+        with patch(self.DRAIN) as drain:
+            response = app.test_client().post(
+                "/api/settings", json={"cpu_threads": 2}, headers={"X-Auth-Token": self.TOKEN}
+            )
+
+        assert response.status_code == 200, response.get_data(as_text=True)
+        with app.app_context():
+            assert get_settings_manager().processing_paused is False
+        drain.assert_called_once_with()

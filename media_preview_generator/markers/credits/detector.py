@@ -22,9 +22,10 @@ import numpy as np
 from loguru import logger
 
 from ..decide import credits_limits_ms, earliest_credits_start_ms
+from ..freeze import Freeze
 from ..models import Candidate, FileIdentity, MarkerType, Source
-from . import decode_check, frames, rule_j
-from .textdet_helper import TextDetShuttingDownError, TextDetUnavailableError, get_textdet_pool
+from . import frames, rule_j
+from .textdet_helper import TextDetCancelledError, TextDetShuttingDownError, TextDetUnavailableError, get_textdet_pool
 
 if TYPE_CHECKING:
     from ..pipeline import DetectorAnswer, LocalDetectorSpec, PipelineContext
@@ -65,7 +66,8 @@ LOOK_BACK_BASIS = "steps back to the earliest kept start"
 # The first step before the tail keeps the one decode's time limit it always had, counted from its start, and every
 # later step gets what is left of it, so a reading's worst case stays what it was (a file with no answer at 320x180
 # has two readings, :func:`find_credits`). Every later step that would start past
-# it, or runs past it, is a timeout like any decode's (T-R7): the file is asked again the next day.
+# it, or runs past it, is a timeout like any decode's (T-R7): the file is asked again the next day. Time paused
+# (:class:`..freeze.Freeze`) doesn't count, as it doesn't for one decode's own limit.
 LOOK_BACK_TIMEOUT_S = frames.DECODE_TIMEOUT_S
 # A tail whose 320x180 frames give no answer is read once more at this many times the size, 640x360. Small credit
 # cards can box nothing at 320x180 (Accused (2020): "PRODUCER / DIRECTOR", "COLORIST" at 4-11 boxes a frame at 640x360,
@@ -145,7 +147,8 @@ def find_credits(
     cancel_check: Callable[[], bool] | None = None,
     phase: Callable[[str], None] | None = None,
     earliest_start_s: float | None = None,
-    check_gpu_decode: bool = False,
+    pause_check: Callable[[], bool] | None = None,
+    ffmpeg_threads: int | None = None,
 ) -> CreditsTextResult:
     """Decode the tail, find the roll, refine its start and, when a scene follows it, its end.
 
@@ -216,8 +219,10 @@ def find_credits(
         earliest_start_s: The earliest credits start the decision keeps for this file
             (``decide.earliest_credits_start_ms``): the steps after the first stop 30 s before it, the story a start
             there needs. None reads the first step only.
-        check_gpu_decode: Run the process's decode check on ``gpu`` first (``decode_check.check_device``: once per
-            device, logged only). The decodes run on ``gpu`` either way; False, for the harness, runs no check.
+        pause_check: True while everything is paused (Pause all, quiet hours, the job's schedule's stop time): the
+            running decode's ffmpeg stops where it is and no decode starts until the resume (``frames.run_decode``),
+            and the time limits leave the pause out, the look-back's shared one included.
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (``frames.decode_command``); None on a CPU worker.
 
     Returns:
         The start, the end, and the rows they came from, with the scale they were read at.
@@ -230,18 +235,19 @@ def find_credits(
             limit.
         frames.FrameDecodeError: ffprobe couldn't read the start time, either probe wasn't started (earlier ffprobes
             being stuck), or ffmpeg couldn't decode the frames.
-        frames.DecodeCancelledError: The job was cancelled before or during a decode, or during the GPU decode check.
+        frames.DecodeCancelledError: The job was cancelled before or during a decode.
+        TextDetCancelledError: The job was cancelled while text detection waited for a helper (either reading).
         TextDetUnavailableError: Text detection couldn't answer.
     """
     show = phase or (lambda _text: None)
     show(READING_PHASE)
     start_time_s = frames.container_start_s(path, ffmpeg, cancel_check=cancel_check)
     thinning = frames.keyframe_thinning(path, ffmpeg, cancel_check=cancel_check)
-    if check_gpu_decode:
-        decode_check.check_device(gpu, gpu_device_path, ffmpeg=ffmpeg, cancel_check=cancel_check)
+    # One freeze for every decode of the file, so the time it holds adds up for the look-back's shared limit.
     decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "detect_boxes": detect_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s,
-              "download_format": thinning.download_format}  # fmt: skip
+              "download_format": thinning.download_format, "pause_check": Freeze.of(pause_check),
+              "ffmpeg_threads": ffmpeg_threads}  # fmt: skip
     tail_start = frames.tail_start_s(
         duration_ms, tail_s=frames.tail_length_s(is_episode=is_episode) if tail_s is None else tail_s
     )
@@ -316,6 +322,7 @@ def _read_credits(
     """
     decode = {**decode, "scale": scale}
     cancel_check = decode["cancel_check"]
+    freeze: Freeze = decode["pause_check"]
     seen_boxes = {row[0]: rule_j.boxes_of(row) for row in seen}
     # After a 320x180 answer's end, a keyframe holding text only the larger frame boxes is read whole: a roll that
     # reading half boxed (as blocks, a frame short of a 15 s run) is that text too (I Survived a Serial Killer S01E04:
@@ -383,7 +390,7 @@ def _read_credits(
     # overlay_boxes takes its story by time while that check reads decode order (the reordering measured on the 80 is
     # 10-21 s, and this branch's story is under 30 s all told).
     if coarse is not None and tail_start > 0 and rule_j.opens_on_the_run(new_text(key_rows), coarse):
-        deadline = time.monotonic() + LOOK_BACK_TIMEOUT_S
+        deadline = freeze.clock() + LOOK_BACK_TIMEOUT_S
         # The first step reads what it always has, even where the whole of it lies before the earliest start the
         # decision keeps (a movie on Automatic): narrowed to that bound, or to 30 s before it, it turns stored answers
         # into none -- ones the decision refuses anyway, but answers that were found (spec §14 2026-09-23).
@@ -401,7 +408,8 @@ def _read_credits(
             read_from, before_start = before_start, _next_step_start(before_start, earliest_start_s)
             if before_start is None:
                 break
-            before_rows = _step_rows(keyframes, before_start, read_from, deadline, cancel_check, os.path.basename(path))
+            before_rows = _step_rows(keyframes, before_start, read_from, deadline, cancel_check, os.path.basename(path),
+                                     clock=freeze.clock)  # fmt: skip
             # The run crossed the tail's edge at the first step, so a later step is kept whatever it holds: more of the
             # roll moves the start back, and story is what the start needs before it.
             joined = rule_j.rows_before(before_rows, key_rows)
@@ -527,8 +535,11 @@ def _step_rows(
     deadline: float,
     cancel_check: Callable[[], bool] | None,
     name: str,
+    *,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[rule_j.Row]:
-    """One later step's keyframes, decoded within what is left of the look-back's time.
+    """One later step's keyframes, decoded within what is left of the look-back's time (``deadline`` on ``clock``,
+    which leaves time paused out).
 
     Raises:
         frames.DecodeCancelledError: The job was cancelled. Asked first, so a cancel that lands once the time has also
@@ -539,7 +550,7 @@ def _step_rows(
     """
     if cancel_check and cancel_check():
         raise frames.DecodeCancelledError(f"cancelled before decoding {name}")
-    remaining_s = deadline - time.monotonic()
+    remaining_s = deadline - clock()
     if remaining_s <= 0:
         raise frames.DecodeTimeoutError(
             f"reading before the tail of the credits of {name} ran past {LOOK_BACK_TIMEOUT_S:g} s before {end_s:.0f} s"
@@ -619,14 +630,17 @@ def detect_credits_text(
     phase_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
+    gpu_worker: bool = False,
 ) -> DetectorAnswer:
     """The local detector: a credits candidate from the file's on-screen credit roll.
 
-    A paused job doesn't block the worker here (T-R9): one file's decode is bounded, and the job pauses between files.
+    A job paused on its own doesn't block the worker here (T-R9): one file's decode is bounded, and the job pauses
+    between files. Everything paused (``pause_check``) freezes the running decode where it is, as previews' FFmpeg.
 
-    The file is decoded on the worker's GPU, whatever its codec; the first decode per device per process runs the
-    decode check (``decode_check``), which only logs. Text detection runs on the worker's GPU as its own self-test
-    decides.
+    The file is decoded on the worker's GPU, whatever its codec, with the worker's own ``ffmpeg_threads``. Text
+    detection runs on the worker's GPU as its own self-test decides.
 
     Args:
         rec: The file (its identity matches the disk: the pipeline just checked).
@@ -635,7 +649,13 @@ def detect_credits_text(
         gpu_device_path: The worker's device.
         phase_callback: Worker row step text.
         cancel_check: True once the job is cancelled.
-        pause_check: Unused.
+        pause_check: True while everything is paused (:func:`find_credits`); None never pauses.
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads``; None on a CPU worker and for the CPU rerun.
+        fallback_callback: Shows on the worker's row that text detection was read on the CPU although the worker has
+            a GPU (``TextDetectorPool.detect_boxes``'s ``on_cpu``). A failed GPU decode reruns the whole file on the CPU
+            through the worker instead, which shows that on its row itself.
+        gpu_worker: Whether a GPU worker runs the file. On its CPU rerun (``gpu`` None) text detection gets a CPU
+            helper of its own instead of one of the CPU workers' (``TextDetectorPool.detect_boxes``).
 
     Returns:
         One candidate (its end None when the roll runs to the end of the file, Q3), or none when the tail holds no
@@ -663,17 +683,25 @@ def detect_credits_text(
             is_episode=rec.season_key is not None,
             tail_s=_tail_s(rec, ctx),
             ffmpeg=getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg",
-            detect_boxes=lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=gpu_device_path),
+            detect_boxes=lambda planes: pool.detect_boxes(
+                planes,
+                gpu=gpu,
+                gpu_device_path=gpu_device_path,
+                gpu_worker=gpu_worker or gpu is not None,
+                on_cpu=fallback_callback,
+                cancel_check=cancel_check,
+            ),
             gpu=gpu,
             gpu_device_path=gpu_device_path,
             cancel_check=cancel_check,
             phase=phase_callback,
             earliest_start_s=_earliest_start_s(rec, ctx),
-            check_gpu_decode=True,
+            pause_check=pause_check,
+            ffmpeg_threads=ffmpeg_threads,
         )
     except frames.GpuDecodeError as exc:
         raise CodecNotSupportedError(str(exc)) from exc
-    except frames.DecodeCancelledError as exc:
+    except (frames.DecodeCancelledError, TextDetCancelledError) as exc:
         raise DetectorUnavailableError("cancelled") from exc
     except frames.DecodeTimeoutError as exc:
         now = ctx.now()

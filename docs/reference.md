@@ -320,7 +320,8 @@ covers is in Needs review or not found. It also takes files whose one-version Pl
 2 s of an older decision, and, after an update that changes the decision rules, every file not yet decided under
 them with an unlocked type that has a stored answer (decided, Needs review, not found, or kept as the server's own;
 not a type whose detection is off): each run that decides a file records the rules version it used (`decide_rules` in
-`version_reruns`). The next batch is queued 30 minutes after one completes; after a cancelled or failed batch
+`version_reruns`). A marker such a run's new rules alone would move to Needs review (or leave out) stays while
+a server has it and no new or changed answer disagrees, its reason starting "kept: published before a rule change". The next batch is queued 30 minutes after one completes; after a cancelled or failed batch
 the next start queues one. A job keeps its batch in its config (`version_rerun_files`, removed when it ends) so a job
 revived after a restart runs the same files, and each file is recorded in markers.db (`version_reruns`) with the
 versions it was read for as it finishes, whatever its outcome: a file is read again once per version, and one a batch
@@ -390,18 +391,20 @@ column) holds:
 | Key | Type | Notes |
 |---|---|---|
 | `kind` | `"intro_credits"` | Always this value for a markers job. |
-| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), `inspector_season` (Season view **Publish**), `season` (a Season follow-up job), `reconcile` (Check servers), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
+| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect, or the job an editor save queues), `inspector_season` (Season view **Publish**), `season` (a Season follow-up job), `reconcile` (Check servers), `recently_added` (the follow-up of a scheduled Recently Added scan), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
 | `libraries` | `[{"server_id", "library_id"}]` | Libraries to enumerate. Empty with no `file_paths` = every library Intro & Credits goes to. |
 | `file_paths` | array of strings | Explicit files/folders instead of libraries (webhook follow-ups, Inspector re-detect, retries). |
 | `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). Episodes that later joined the job (see below) don't wait for their own preview jobs. |
 | `files_sealed` | bool | Present once a webhook follow-up or Season job has read its `file_paths`: no more files join it after that. |
 | `force` | bool | Re-detect files already decided, asking every source again. |
 | `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
+| `server_id` | string | Present only on a job pinned to one server: it publishes there only. A follow-up gets its preview job's pin as the preview workers resolve it per file (the webhook's or schedule's own pin; else an Emby or Jellyfin webhook, or a file a Recently Added scan listed from Emby or Jellyfin, pins it to that server). Its retries, verify job and TheIntroDB recheck keep it; Season jobs don't. |
 | `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
 | `verify_chain` | bool | Present only on a retry queued by a verify job or by another retry in its chain: it queues no verify job. |
 | `chain_attempt` | int | Present only on a verify job queued by a retry: the retries already used, so the verify job's own retry goes on counting. |
 | `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
-| `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
+| `retry_not_before` | ISO-8601 timestamp | Present only on a job queued to wait (a retry, verify job, TheIntroDB recheck or version batch): the due time. It survives a restart without waiting again in full, and the restart revival ages the job from it (`requeue_max_age_minutes`), not from when it was queued. |
+| `slot_wait_since` | ISO-8601 timestamp | The last time the job was seen waiting for a slot (preview jobs carry it too), refreshed at most once a minute while it waits. A restart ages a job from the latest of this and when it started or was created; a job that never started also from its due time (`retry_not_before`, or a preview retry's `scheduled_at`) and, for a follow-up, its preview job's end. A job queued behind a long scan is therefore aged by the downtime only. A Re-run drops it. |
 | `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
 | `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, files with a locked marker a server never received, and decided files to ask servers again about) instead of libraries or paths. |
 | `paused_by_schedule` | bool | Set when a schedule's stop time paused the job: that schedule's next start (or **Run now**) resumes it. Any resume, and a pause by hand, clears it (a job cancelled while so paused keeps it); a Re-run drops it. |
@@ -659,7 +662,8 @@ length cap and the position windows that catch a wrong source are not applied.
       "notes": [],
       "replaced_own": []
     }
-  ]
+  ],
+  "queued_job_id": null
 }
 ```
 
@@ -674,6 +678,10 @@ The publish is bounded: each call to a server waits at most 8 s, and a server th
 it began is not contacted: its row is `failed` with "Couldn't publish to this server in time; the next Intro & Credits
 run publishes it". These are per-call limits and a start gate, not a cap on the whole request. A job already running on
 the same file gives a `waiting` row, "Intro & Credits is running for this file; the next run publishes your marker".
+When any row is `waiting` or `failed`, the save queues that next run: one HIGH-priority, not forced, single-file Intro &
+Credits job (`source: "inspector"`) that publishes the saved markers and retries a server that hasn't indexed the file
+yet. The response's `queued_job_id` is its id (`null` when every server took the save); a job for the file that hasn't
+started yet (an earlier save's, or a queued re-detect) is reused.
 
 **Errors:** `400` for a body it can't save from (a duplicate type, a marker outside the file or ending before it
 starts, a non-integer time), a path outside every server library, or a type no enabled owner can show. `404` for an
@@ -1040,6 +1048,10 @@ Update settings. Send only the fields to change.
 }
 ```
 
+A save that leaves no GPU or CPU workers pauses processing, and the save that adds workers back resumes it. Any other
+pause (Pause all, quiet hours) stays in place when settings are saved. An install that was paused with no workers
+before this rule counts as paused by it (settings schema 19), so adding workers back resumes it too.
+
 `markers` (the Intro & Credits block) may be partial: posted keys merge over the stored block — `detect` key by key,
 `sources` by `id` (a list naming every source sets their order; a shorter one updates those sources where they are;
 naming a source twice is a `400`). `api_key: "****"` keeps the stored TheIntroDB key and `""` clears it. `GET
@@ -1150,6 +1162,9 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
 
 **Request:** `{"library_id": "1", "library_name": "Movies"}`
 
+An optional `config` object may set `force_generate`, `regenerate_thumbnails`, `sort_by`, `selected_libraries` and
+`selected_library_ids`. Other keys are dropped with a WARNING and aren't saved with the job.
+
 **Response:** `{"id": "job-123", "status": "pending", "message": "Job created successfully"}`
 
 #### GET /api/jobs/{id}
@@ -1234,8 +1249,8 @@ explicit `null` clears it.
 `config.job_type` accepts:
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
-- `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), queuing each through the webhook job pipeline. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
-- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Find markers job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running. A start tick (or `POST /api/schedules/{id}/run`) first resumes every Intro & Credits job of the schedule that its stop time paused, whichever of the two it is (the schedule may have been switched since), and then queues nothing that tick; the check above applies only when it resumed nothing. A job paused by hand (`POST /api/jobs/{id}/pause`) is never resumed by a tick, and a stop tick doesn't take over a pause made by hand; the job's config carries `paused_by_schedule: true` from a stop-time pause until the next resume, pause by hand, or the job's end. Deleting a schedule leaves its paused jobs paused and logs a WARNING naming each; so does a `PUT` that switches `config.job_type` to a kind its start ticks don't resume (`intro_credits` ↔ `full_library`, or either to `recently_added`), for each job its stop time paused. While a Check servers job runs, its config also carries `check_servers_listing` (the files it listed), so a run revived after a restart checks those same files; the key is dropped when the job ends.
+- `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), counted back from when the job was created (a job that waited for a slot, or was revived after a restart, still covers that window; a tick while the schedule's last scan hasn't started queues nothing, widening that scan's window when this tick looks further back), as one preview job with a Files-panel row per file, the usual retry for files a server hasn't indexed yet, and revival after a restart. Its files also get an Intro & Credits follow-up (`source: "recently_added"`) when a server with Intro & Credits on holds them. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
+- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. A schedule with a `server_id` publishes to that server only (the job's `server_id`), as a scheduled preview job does. Skipped while an earlier Find markers job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running. A start tick (or `POST /api/schedules/{id}/run`) first resumes every Intro & Credits job of the schedule that its stop time paused, whichever of the two it is (the schedule may have been switched since), and then queues nothing that tick; the check above applies only when it resumed nothing. A job paused by hand (`POST /api/jobs/{id}/pause`) is never resumed by a tick, and a stop tick doesn't take over a pause made by hand; the job's config carries `paused_by_schedule: true` from a stop-time pause until the next resume, pause by hand, or the job's end. Deleting a schedule leaves its paused jobs paused and logs a WARNING naming each; so does a `PUT` that switches `config.job_type` to a kind its start ticks don't resume (`intro_credits` ↔ `full_library`, or either to `recently_added`), for each job its stop time paused. While a Check servers job runs, its config also carries `check_servers_listing` (the files it listed), so a run revived after a restart checks those same files; the key is dropped when the job ends.
 
 ### System Endpoints
 

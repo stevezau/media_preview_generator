@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from dotenv import load_dotenv
@@ -189,6 +190,11 @@ class Config:
     # row carries — without it the chain row falls back to a bare title
     # and the user can't tell at a glance which trigger spawned the chain.
     webhook_source: str | None = None
+    # A scheduled "Recently added" scan (``_start_recently_added_job_async``): when its window starts (the schedule's
+    # lookback before the job was created, so a run that waited for a slot or a restart still lists it), and the
+    # libraries to list (None = every library of the scanned servers). None = not a Recently Added job.
+    recently_added_since: datetime | None = None
+    recently_added_library_ids: list[str] | None = None
     # Exclude paths: list of {"value": str, "type": "path"|"regex"}; path = prefix match, regex = full match
     exclude_paths: list[dict[str, str]] | None = None
     # When a job is pinned to one configured media-server (via the Schedules

@@ -457,8 +457,12 @@ class TestRequeueInterruptedOnStartup:
 
         jm = mock_get_job_manager.return_value
         jm.requeue_interrupted_jobs.assert_not_called()
-        # Nothing is revived, so Intro & Credits jobs left PENDING are settled instead of blocking their schedule.
-        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        # Nothing is revived, so jobs left PENDING are settled: Intro & Credits ones would block their schedule,
+        # preview ones would be started by the next resume.
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         mock_start_job.assert_not_called()
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -470,13 +474,17 @@ class TestRequeueInterruptedOnStartup:
             "auto_requeue_on_restart": "true",
             "requeue_max_age_minutes": "45",
         }.get(key, default)
+        mock_get_settings_manager.return_value.processing_paused = False
         requeued_job = type("RequeuedJob", (), {"id": "job-123", "config": {"foo": "bar"}})()
         mock_get_job_manager.return_value.requeue_interrupted_jobs.return_value = [requeued_job]
 
         _requeue_interrupted_on_startup("/tmp/config")
 
         mock_get_job_manager.return_value.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=45)
-        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        assert [c.args for c in mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         mock_start_job.assert_called_once_with("job-123", {"foo": "bar"})
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -500,6 +508,9 @@ class TestRequeueInterruptedOnStartup:
 
         assert sm.processing_paused is True, "an explicit pause must survive the restart"
         mock_start_job.assert_called_once_with("job-456", {})
+        # Older preview jobs are held by the pause too: left PENDING for Resume, not settled.
+        jm = mock_get_job_manager.return_value
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [("intro_credits",)]
 
     @pytest.mark.parametrize("auto_requeue", [True, False])
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -527,7 +538,10 @@ class TestRequeueInterruptedOnStartup:
         finally:
             logger.remove(sink)
 
-        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         if auto_requeue:
             mock_start_job.assert_called_once_with("job-123", {"a": 1})
         else:
@@ -549,13 +563,17 @@ class TestRequeueInterruptedOnStartup:
             "auto_requeue_on_restart": True,
             "requeue_max_age_minutes": 30,
         }.get(key, default)
+        mock_get_settings_manager.return_value.processing_paused = False
         jm = mock_get_job_manager.return_value
         jm.requeue_interrupted_jobs.return_value = []
 
         _requeue_interrupted_on_startup("/tmp/config")
 
         jm.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=30)
-        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         mock_start_job.assert_not_called()
 
     @patch("media_preview_generator.markers.job_runner.pass_on_requests_of_unrevived_jobs")

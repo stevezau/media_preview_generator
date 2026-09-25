@@ -163,7 +163,7 @@ class _MediaServerProcessor:
         self,
         server_config: ServerConfig,
         *,
-        lookback_hours: int,
+        lookback_hours: float,
         library_ids: list[str] | None = None,
     ) -> Iterator[ProcessableItem]:
         """Vendor-specific recently-added query — subclasses must override.

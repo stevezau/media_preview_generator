@@ -18,7 +18,7 @@ from ..jobs.dispatcher import get_or_create_dispatcher
 from ..jobs.orchestrator import _build_multi_server_registry
 from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
 from ..processing.generator import clear_failures, failure_scope, set_file_result_callback
-from ..processing.retry_queue import BACKOFF_SCHEDULE, retry_policy
+from ..processing.retry_queue import retry_policy, scaled_backoff_delay
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..utils import redact_secrets, redacted_traceback
@@ -44,12 +44,14 @@ from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
 from .audio.season import season_audio_answer_outdated
 from .carry_over import is_carried_over
+from .credits import decode_check
 from .decide import DecisionStatus
 from .external_ids import is_season_folder
 from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL
 from .missing import MISSING_LINE, mark_missing_files
 from .models import Source
 from .outcomes import (
+    FILE_BUSY,
     NOT_IN_LIBRARY,
     PLEX_DB_BUSY,
     PLEX_PASS_UNKNOWN,
@@ -68,6 +70,7 @@ from .pipeline import (
     cached_capability,
     kind_handlers,
     online_recheck_files,
+    run_detector_checks,
     sequence_number,
 )
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
@@ -91,6 +94,8 @@ _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLE
 # Job sources where the user chose the files (API/Start job dialog, Inspector re-detect, Season view Publish).
 _USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
 SEASON_SOURCE = "season"
+# The follow-up of a scheduled Recently Added scan (``jobs.orchestrator._queue_intro_credits_follow_ups``).
+RECENTLY_ADDED_SOURCE = "recently_added"
 # A job that checks files again once TheIntroDB's daily budget has reset (``_queue_budget_recheck``).
 BUDGET_RECHECK_SOURCE = "theintrodb_recheck"
 # How long after the UTC day roll that job starts, so the limiter and TheIntroDB have both started the new day.
@@ -123,8 +128,10 @@ FOLLOW_UP_LOCK = threading.Lock()
 # Config keys files join a job through (``_queue_season_followups``, ``triggers._join``) or its seals write.
 _JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED, LATE_REQUESTS, LATE_SEALED)
 # Job sources whose files no sender just reported: a file missing from disk won't appear by waiting (and nothing was
-# just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain.
+# just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain. A scheduled
+# Recently Added scan's follow-up lists what servers had already indexed, like a library listing.
 _NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {
+    RECENTLY_ADDED_SOURCE,
     SEASON_SOURCE,
     RECONCILE_SOURCE,
     BUDGET_RECHECK_SOURCE,
@@ -138,6 +145,26 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def server_pin(config: object) -> str | None:
+    """The one server a job publishes to (its config's ``server_id``), or None for every server with markers on.
+
+    Args:
+        config: The job's config.
+
+    Returns:
+        The pinned server's id; None when the job isn't pinned.
+    """
+    pin = config.get("server_id") if isinstance(config, dict) else None
+    return pin if isinstance(pin, str) and pin else None
+
+
+def _pinned_to(config: object) -> dict[str, str]:
+    """``create_intro_credits_job``'s ``server_id`` for a job this job queues for its own files (a retry, a verify
+    job, a TheIntroDB recheck): they publish only where it does. Empty for an unpinned job."""
+    pin = server_pin(config)
+    return {"server_id": pin} if pin else {}
+
+
 def retry_reason(row: object) -> str | None:
     """Why a per-server row's file is worth trying again later, if it is.
 
@@ -146,7 +173,8 @@ def retry_reason(row: object) -> str | None:
 
     Returns:
         The reason code of a waiting row the job retries (the server hasn't indexed the file yet, Plex didn't answer
-        its Plex Pass check, or another version of its Plex item hasn't been checked yet), or ``PLEX_DB_BUSY`` for a
+        its Plex Pass check, another version of its Plex item hasn't been checked yet, or another job kept running the
+        file past the worker's wait), or ``PLEX_DB_BUSY`` for a
         failed row whose write gave up waiting for Plex's database; None for any other row.
     """
     if not isinstance(row, dict):
@@ -159,20 +187,6 @@ def retry_reason(row: object) -> str | None:
     return code if code in RETRY_REASON_CODES else None
 
 
-def retry_delay_s(attempt: int, retry_delay: int) -> int:
-    """Delay before retry ``attempt`` (1-based): the preview retries' backoff, scaled by ``webhook_retry_delay``.
-
-    Args:
-        attempt: Which retry this is.
-        retry_delay: The ``webhook_retry_delay`` setting (seconds, 30 = the schedule as is).
-
-    Returns:
-        Seconds to wait.
-    """
-    scale = max(0.5, retry_delay / 30.0)
-    return max(1, int(BACKOFF_SCHEDULE[min(attempt - 1, len(BACKOFF_SCHEDULE) - 1)] * scale))
-
-
 NOT_ON_DISK = "not_on_disk"
 # Retry log wording per reason, in the order a combined line lists them.
 _RETRY_WORDS = {
@@ -181,6 +195,7 @@ _RETRY_WORDS = {
     PLEX_PASS_UNKNOWN: "not checked on Plex",
     VERSIONS_UNCHECKED: "with another version not checked",
     PLEX_DB_BUSY: "not written to Plex's busy database",
+    FILE_BUSY: "not released by another job",
 }
 
 
@@ -342,7 +357,7 @@ def _queue_retry(
         if len(paths) > MAX_RETRY_FILES:
             jm.add_log(job.id, f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} get no retry; {again}")
             paths = paths[:MAX_RETRY_FILES]
-        delay = retry_delay_s(attempt, delay_setting)
+        delay = scaled_backoff_delay(attempt, delay_setting)
         base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         # A retry's own retry joins the same chain; any other job (an old top-level "Retry:" job included) heads one.
         head_id = cfg.get("parent_job_id") or job.id
@@ -357,6 +372,7 @@ def _queue_retry(
             verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
             parent_job_id=head_id,
             max_retries=count,
+            **_pinned_to(cfg),
         )
         _upsert_chain(
             jm,
@@ -431,7 +447,7 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
                 f"INFO - {len(sent) - len(paths)} more replaced file(s) aren't checked again later; the next run for "
                 "them checks them",
             )
-        delay = max(MIN_VERIFY_DELAY_S, retry_delay_s(1, delay_setting) * VERIFY_DELAY_FACTOR)
+        delay = max(MIN_VERIFY_DELAY_S, scaled_backoff_delay(1, delay_setting) * VERIFY_DELAY_FACTOR)
         base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         check = create_intro_credits_job(
             library_name=f"Verify: {base_name}",
@@ -442,6 +458,7 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
             retry_delay_s=delay,
             verify=True,
             chain_attempt=int(cfg.get("retry_attempt") or 0),
+            **_pinned_to(cfg),
         )
         jm.add_log(job.id, f"INFO - {len(paths)} replaced file(s) are checked again in {delay}s (job {check.id[:8]})")
     except Exception:
@@ -477,6 +494,13 @@ def _waiting_season_jobs(jm) -> list:
     ]
 
 
+def _covers_pin(job_pin: str | None, request_pin: str | None) -> bool:
+    """Whether a job with ``job_pin`` publishes a file everywhere a request with ``request_pin`` wants it: an unpinned
+    job covers any request, a pinned one only a request with the same pin (``triggers._queued_in_waiting_follow_ups``).
+    """
+    return job_pin is None or job_pin == request_pin
+
+
 def _running_season_jobs(jm, priority: int) -> list:
     """Running Season jobs at ``priority`` that still take requests (call under ``FOLLOW_UP_LOCK``).
 
@@ -490,10 +514,11 @@ def _running_season_jobs(jm, priority: int) -> list:
     ]
 
 
-def _leave_to_running_season_jobs(jm, job, paths: list[str], priority: int) -> list[str]:
-    """Hand each file to a running Season job at ``priority`` that lists an episode of its folder (call under
-    ``FOLLOW_UP_LOCK``). The Season job runs it again once it has finished, in one follow-up, only when its own run of
-    the file started before this request (``_pass_on_late_requests``).
+def _leave_to_running_season_jobs(jm, job, paths: list[str], priority: int, pin: str | None = None) -> list[str]:
+    """Hand each file to a running Season job at ``priority`` that lists an episode of its folder and publishes where the
+    request does (``pin``; call under ``FOLLOW_UP_LOCK``). The Season job runs it again once it has finished, in one
+    follow-up, only when its own run of the file started before this request (``_pass_on_late_requests``), under its
+    own pin.
 
     Returns:
         The files no running Season job took.
@@ -501,6 +526,9 @@ def _leave_to_running_season_jobs(jm, job, paths: list[str], priority: int) -> l
     left = list(paths)
     for season_job in _running_season_jobs(jm, priority):
         cfg = season_job.config or {}
+        if server_pin(cfg) != pin:
+            # Its follow-up publishes where it does: a request for other servers would lose them, one for fewer gain.
+            continue
         late = dict(cfg.get(LATE_REQUESTS) or {})
         folders = {os.path.dirname(path) for path in [*(cfg.get("file_paths") or []), *late]}
         room = MAX_RETRY_FILES - len(late)
@@ -545,17 +573,24 @@ def _queue_season_followups(job, paths: list[str], *, priority: int | None = Non
         from .triggers import _queued_in_waiting_follow_ups, create_intro_credits_job
 
         cfg = job.config or {}
+        # The episodes publish where the asking job does, as its retries and verify jobs do.
+        pin = server_pin(cfg)
         if priority is None:
             priority = max(PRIORITY_NORMAL, job.priority) if cfg.get("follows_job_id") else PRIORITY_LOW
         with FOLLOW_UP_LOCK:
             waiting = _waiting_season_jobs(jm)
-            queued = {path for season_job in waiting for path in season_job.config.get("file_paths") or []}
-            queued |= _queued_in_waiting_follow_ups(jm)
+            queued = {
+                path
+                for season_job in waiting
+                if _covers_pin(server_pin(season_job.config), pin)
+                for path in season_job.config.get("file_paths") or []
+            }
+            queued |= _queued_in_waiting_follow_ups(jm, server_id=pin)
             fresh = sorted(set(paths) - queued)
             if not fresh:
                 jm.add_log(job.id, f"INFO - {len(paths)} episode(s) of the same season are already queued")
                 return
-            fresh = _leave_to_running_season_jobs(jm, job, fresh, priority)
+            fresh = _leave_to_running_season_jobs(jm, job, fresh, priority, pin)
             if not fresh:
                 return
             chosen = fresh[:MAX_RETRY_FILES]
@@ -568,6 +603,7 @@ def _queue_season_followups(job, paths: list[str], *, priority: int | None = Non
                     season_job
                     for season_job in waiting
                     if season_job.priority == priority
+                    and server_pin(season_job.config) == pin
                     and len(season_job.config.get("file_paths") or []) + len(chosen) <= MAX_RETRY_FILES
                 ),
                 None,
@@ -581,7 +617,11 @@ def _queue_season_followups(job, paths: list[str], *, priority: int | None = Non
                     target = None
             if target is None:
                 target = create_intro_credits_job(
-                    library_name=_season_job_name(chosen), priority=priority, source=SEASON_SOURCE, file_paths=chosen
+                    library_name=_season_job_name(chosen),
+                    priority=priority,
+                    source=SEASON_SOURCE,
+                    file_paths=chosen,
+                    **_pinned_to(cfg),
                 )
         jm.add_log(
             job.id,
@@ -691,8 +731,9 @@ def budget_recheck_due(refused_at: datetime) -> datetime:
     return next_day + BUDGET_RECHECK_AFTER_RESET
 
 
-def _waiting_budget_recheck(jm):
-    """The recheck job still counting down to the next reset, if any (call under ``FOLLOW_UP_LOCK``).
+def _waiting_budget_recheck(jm, pin: str | None = None):
+    """The recheck job with this server pin still counting down to the next reset, if any (call under
+    ``FOLLOW_UP_LOCK``).
 
     One already due (waiting for a slot) runs before the budget resets again: files refused since then would only be
     refused again, so they get a new job.
@@ -701,6 +742,8 @@ def _waiting_budget_recheck(jm):
     for job in jm.get_pending_jobs():
         cfg = job.config or {}
         if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != BUDGET_RECHECK_SOURCE or cfg.get(FILES_SEALED):
+            continue
+        if server_pin(cfg) != pin:
             continue
         try:
             due = datetime.fromisoformat(cfg.get("retry_not_before") or "")
@@ -715,8 +758,8 @@ def _queue_budget_recheck(job, ctx) -> None:
     """Queue the files this job checked without TheIntroDB, because its daily budget had run out, that it left with a
     type undecided: they're checked again just after the budget resets at 00:00 UTC. Never raises.
 
-    One waiting recheck job (LOW, like a backfill) takes the files of every job that ran out that day, up to
-    ``MAX_RETRY_FILES``; it lists each file only if TheIntroDB is still on and the file still has a type undecided when
+    One waiting recheck job (LOW, like a backfill) takes the files of every job with the same server pin that ran out
+    that day, up to ``MAX_RETRY_FILES``; it lists each file only if TheIntroDB is still on and the file still has a type undecided when
     it runs (``_budget_recheck_items``). Its own files that run out again are queued for the next reset the same way.
 
     Args:
@@ -731,7 +774,7 @@ def _queue_budget_recheck(job, ctx) -> None:
         from .triggers import create_intro_credits_job
 
         with FOLLOW_UP_LOCK:
-            target = _waiting_budget_recheck(jm)
+            target = _waiting_budget_recheck(jm, server_pin(job.config))
             listed = list((target.config or {}).get("file_paths") or []) if target is not None else []
             fresh = [path for path in paths if path not in listed]
             room = MAX_RETRY_FILES - len(listed)
@@ -751,6 +794,7 @@ def _queue_budget_recheck(job, ctx) -> None:
                     source=BUDGET_RECHECK_SOURCE,
                     file_paths=chosen,
                     retry_delay_s=max(0, int((due - _utcnow()).total_seconds())),
+                    **_pinned_to(job.config),
                 )
         if chosen:
             jm.add_log(
@@ -849,6 +893,7 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
         retry_eta=raw,
         retry_wait_total=int(cfg.get("retry_delay") or remaining),
     )
+    was_paused = False
     while _utcnow() < due:
         if cancel_check():
             return False
@@ -856,7 +901,15 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
         if _is_force_fire_now_set(jm, job_id):
             jm.add_log(job_id, "INFO - Retry backoff skipped — operator forced fire-now")
             break
+        paused = get_settings_manager().processing_paused
+        if was_paused and not paused:
+            jm.update_progress(job_id, retry_eta=due.isoformat())
+        was_paused = paused
+        slept_from = _utcnow()
         time.sleep(_POLL_S)
+        if paused:
+            # The countdown stands still while everything is paused (Pause all, quiet hours), as a preview retry's does.
+            due += _utcnow() - slept_from
     jm.update_progress(job_id, retry_eta=None)
     return True
 
@@ -1270,7 +1323,20 @@ def _retries_missing_files(cfg: dict) -> bool:
 
 def _sends_files(cfg: dict) -> bool:
     """Whether the job lists files a sender just reported (not a listing, nor a source that picks files itself)."""
-    return bool(cfg.get("file_paths")) and cfg.get("source") not in _NO_RETRY_SOURCES
+    return bool(cfg.get("file_paths")) and sent_by_a_sender(cfg.get("source"))
+
+
+def sent_by_a_sender(source: object) -> bool:
+    """Whether a job of this source lists files a sender just reported (a webhook, its retries), which get a retry when
+    missing from disk and a later verify when replaced, rather than files a listing or the user picked.
+
+    Args:
+        source: The job's ``source``.
+
+    Returns:
+        True for a sender's files.
+    """
+    return source not in _NO_RETRY_SOURCES
 
 
 def _log_missing(ctx: PipelineContext) -> None:
@@ -1291,18 +1357,43 @@ def _log_summary(jm, job_id: str, outcome: dict[str, int], ctx: PipelineContext)
 
 
 def _complete(
-    jm, job_id: str, outcome: dict[str, int], warnings: list[str], ctx: PipelineContext | None = None
+    jm,
+    job_id: str,
+    outcome: dict[str, int],
+    warnings: list[str],
+    ctx: PipelineContext | None = None,
+    *,
+    retried: bool = False,
 ) -> None:
-    """Complete the job: failed (red) when every counted file failed, a warning (amber) when some did or on warnings.
+    """Complete the job: failed (red) when every counted file failed or wasn't on disk, a warning (amber) when some
+    failed or on warnings.
 
-    Given the job's pipeline context, the job's log gets its closing lines first (``PipelineContext.summary_lines``).
+    Files missing from disk count against the job like failures only when it queued no retry, as in the preview
+    runner (``web.routes.job_runner._classify_job_completion``'s ``all_not_found``: any retry keeps the job's chain
+    pending). Given the job's pipeline context,
+    the job's log gets its closing lines first (``PipelineContext.summary_lines``).
+
+    Args:
+        jm: The job manager.
+        job_id: The job.
+        outcome: Its file outcome counts.
+        warnings: Lines for the job's completion message.
+        ctx: The job's pipeline context, for its closing log lines.
+        retried: Whether this run queued a retry.
     """
     if ctx is not None:
         _log_summary(jm, job_id, outcome, ctx)
     failed = outcome.get(FileOutcome.FAILED.value, 0)
-    succeeded = sum(count for key, count in outcome.items() if key != FileOutcome.FAILED.value)
-    if failed and not succeeded:
-        jm.complete_job(job_id, error=" | ".join([f"All {failed} file(s) failed — see the Files panel", *warnings]))
+    missing = 0 if retried else outcome.get(FileOutcome.FILE_NOT_FOUND.value, 0)
+    succeeded = sum(outcome.values()) - failed - missing
+    if (failed or missing) and not succeeded:
+        if not missing:
+            message = f"All {failed} file(s) failed — see the Files panel"
+        elif not failed:
+            message = f"All {missing} file(s) weren't found on disk — check the path mappings"
+        else:
+            message = f"All {failed + missing} file(s) failed or weren't found on disk — see the Files panel"
+        jm.complete_job(job_id, error=" | ".join([message, *warnings]))
         return
     parts = ([f"{failed} file(s) failed"] if failed else []) + warnings
     jm.complete_job(job_id, warning=" | ".join(parts) or None)
@@ -1384,6 +1475,38 @@ def _wait_releasing_slot_while_paused(
             ):
                 slot["priority"] = priority
                 slot["held"] = True
+
+
+def _freeze_check(jm, job_id: str) -> Callable[[], bool]:
+    """The job's ``PipelineContext.freeze_check``: True while its running files' ffmpeg must stop where it is, as
+    previews' does -- all processing paused (Pause all, quiet hours) or this job paused by its schedule's stop time
+    (``PAUSED_BY_SCHEDULE``). A pause of this job by hand is not one: it gives the job's slot back and lets the running
+    file finish (:func:`_wait_releasing_slot_while_paused`).
+    """
+
+    def frozen() -> bool:
+        if get_settings_manager().processing_paused:
+            return True
+        if not jm.is_pause_requested(job_id):
+            return False
+        job = jm.get_job(job_id)
+        return bool(job is not None and (job.config or {}).get(PAUSED_BY_SCHEDULE))
+
+    return frozen
+
+
+def _start_decode_checks(ctx: PipelineContext, config, selected_gpus: Sequence[tuple]) -> None:
+    """Start the credits decode check of each GPU the pool has workers for, in the background, when this job reads
+    credit text (``decode_check.start_checks``: once per GPU for the process, never on a worker, nothing waits)."""
+    if not any(spec.source is Source.CREDITS_TEXT for spec in ctx.local_detectors):
+        return
+    try:
+        decode_check.start_checks(
+            [(gpu_type, device) for gpu_type, device, *_info in selected_gpus],
+            ffmpeg=getattr(config, "ffmpeg_path", None) or "ffmpeg",
+        )
+    except Exception as exc:  # a diagnostic: it never stops the job
+        logger.warning("Couldn't start the credits decoding check: {}", exc)
 
 
 def _cancel_check_releasing_slot_while_paused(
@@ -1492,6 +1615,7 @@ def run_intro_credits_job(job_id: str) -> None:
             total_items=0,
             current_item=format_wait_message(active, cap, effective_cap),
         )
+        jm.note_slot_wait(job_id)  # JobManager.requeue_interrupted_jobs ages a waiting job by the downtime only
 
     try:
         with failure_scope(job_id):
@@ -1508,7 +1632,14 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.add_log(job_id, "WARNING - Job cancelled while paused")
                     jm.cancel_job(job_id)
                     return
+                # The first job of a process pays for these (ffmpeg listing its muxers, up to 30 s of the text
+                # detection check), so they run before the job holds a slot; build_context reads the answers they keep.
+                # None: the ffmpeg load_config picks is one of the same candidates (``fingerprint._ffmpeg_candidates``).
+                run_detector_checks(None)
                 slot["priority"] = live_priority()
+                # A restart ages a job waiting for its slot from here and from each wait tick (on_wait), not from when
+                # it was queued: a follow-up has waited for its preview job, a retry for its due time.
+                jm.note_slot_wait(job_id)
                 if not get_job_gate().acquire(priority=slot["priority"], cancel_check=cancel_check, on_wait=on_wait):
                     jm.add_log(job_id, "WARNING - Job cancelled while waiting for active slot")
                     jm.cancel_job(job_id)
@@ -1564,6 +1695,8 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.emit_worker_statuses()
 
                 config = load_config()
+                # A job following a pinned preview job (and its retries and checks) publishes where the previews did.
+                config.server_id_filter = server_pin(cfg)
                 registry = _build_multi_server_registry(config)
                 if registry is None:
                     jm.complete_job(job_id, error="Couldn't load the media servers configuration")
@@ -1585,6 +1718,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 )
                 ctx.busy_writes_retried = _retry_follows(cfg)
                 ctx.retry_file_cap = MAX_RETRY_FILES
+                ctx.freeze_check = _freeze_check(jm, job_id)
                 sweep_configs = list(registry.configs())
                 listing = None
                 if cfg.get("reconcile"):
@@ -1699,11 +1833,11 @@ def run_intro_credits_job(job_id: str) -> None:
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that can take the file later, even when another server was written. Check servers
-                    # retries only a write Plex's busy database refused (its next run is a day away for a failed item)
-                    # and the files whose old item a server confirmed gone (below).
+                    # retries only a write Plex's busy database refused or a file another job kept running (its next
+                    # run is a day away) and the files whose old item a server confirmed gone (below).
                     codes = {code for row in servers or [] if (code := retry_reason(row))}
                     if listing is not None:
-                        codes &= {PLEX_DB_BUSY}
+                        codes &= {PLEX_DB_BUSY, FILE_BUSY}
                     for code in codes:
                         waiting.setdefault(code, set()).add(file_path)
                     if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
@@ -1734,7 +1868,9 @@ def run_intro_credits_job(job_id: str) -> None:
                 set_file_result_callback(on_file_result, job_id=job_id)
                 # Detected before the settings lock below, so detection never runs while it's held.
                 detected_gpus = _ensure_gpu_cache()
-                dispatcher = get_or_create_dispatcher(config, _build_selected_gpus(settings, detected=detected_gpus))
+                selected_gpus = _build_selected_gpus(settings, detected=detected_gpus)
+                dispatcher = get_or_create_dispatcher(config, selected_gpus)
+                _start_decode_checks(ctx, config, selected_gpus)
                 # The running job's pool for the per-job worker routes, as the preview runner registers it; complete_job
                 # and cancel_job clear it.
                 jm.set_active_worker_pool(job_id, dispatcher.worker_pool)
@@ -1810,7 +1946,14 @@ def run_intro_credits_job(job_id: str) -> None:
                 # file still waiting keeps its item and is listed again by a later run.
                 retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
-                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)], ctx)
+                _complete(
+                    jm,
+                    job_id,
+                    outcome,
+                    [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)],
+                    ctx,
+                    retried=bool(retried),
+                )
                 _settle_decide_again(jm, job_id, cfg)
                 _queue_next_batch(jm, job_id, cfg)
                 if chain_head and not retried:

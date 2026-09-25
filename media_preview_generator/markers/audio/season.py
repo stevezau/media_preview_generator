@@ -35,6 +35,7 @@ from ...plex_client import VIDEO_EXTENSIONS
 from ..carry_over import is_carried_over
 from ..decide import DecisionStatus, intro_chapter_length_ms, intro_chapter_limit_ms
 from ..external_ids import ids_from_path, is_extra
+from ..freeze import Freeze
 from ..models import Candidate, FileIdentity, MarkerType, Source
 from ..outcomes import is_kept_own
 from ..probe import MediaProbe, ProbeError, ProbeStalledError, probe_media
@@ -43,6 +44,7 @@ from ..speed import FILM_FPS, PAL_FPS, match_speed, playback_speed, retime_facto
 from ..store import PAIR_VERSION_STEP, EndPictureKey
 from . import POINT_S, end_picture
 from .fingerprint import (
+    FingerprintBusyError,
     FingerprintError,
     FingerprintSkippedError,
     FingerprintStalledError,
@@ -1236,6 +1238,9 @@ class _EndPictures:
         gpu_device_path: str | None = None,
         cancel_check: Callable[[], bool] | None = None,
         phase: Callable[[str], None] | None = None,
+        pause_check: Callable[[], bool] | None = None,
+        ffmpeg_threads: int | None = None,
+        fallback_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._ctx, self._target, self._records, self._decode = ctx, target, records, decode
         self._phase = phase or (lambda _text: None)
@@ -1244,6 +1249,9 @@ class _EndPictures:
             gpu=gpu,
             gpu_device_path=gpu_device_path,
             cancel_check=cancel_check,
+            pause_check=pause_check,
+            ffmpeg_threads=ffmpeg_threads,
+            fallback_callback=fallback_callback,
         )
         self._shares: dict[EndPictureKey, float | None] = {}
 
@@ -1496,6 +1504,9 @@ def detect_season_audio(
     phase_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
+    gpu_worker: bool = False,
 ) -> DetectorAnswer:
     """Match this episode's opening against its season (or, alone, the previous season's cached episodes).
 
@@ -1510,7 +1521,13 @@ def detect_season_audio(
         gpu_device_path: The worker's device.
         phase_callback: Worker row step text.
         cancel_check: True once the job is cancelled.
-        pause_check: Unused (a paused job doesn't block a worker).
+        pause_check: True while everything is paused (Pause all, quiet hours, the job's schedule's stop time): each
+            running ffmpeg stops where it is, and the step waits before its next sibling, until the resume
+            (:mod:`..freeze`). A job's own pause isn't one: the step runs on.
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads``, for its end-picture decodes (its fingerprints are CPU
+            work, at ffmpeg's own thread count); None on a CPU worker (ffmpeg's own thread count, as previews).
+        fallback_callback: Shows on the worker's row that an end-picture decode fell back to the CPU.
+        gpu_worker: Unused (no text detection here); every detector gets it (``LocalDetectorSpec.detect``).
 
     Returns:
         At most one intro candidate (season audio, or the previous-season hint), with the signature of the season files
@@ -1518,8 +1535,9 @@ def detect_season_audio(
 
     Raises:
         DetectorUnavailableError: No chromaprint ffmpeg, this episode couldn't be fingerprinted, earlier fingerprint
-            ffmpegs or ffprobes are still stuck on their files (the season stops there), an end-picture read stalled or
-            timed out, or cancelled.
+            ffmpegs or ffprobes are still stuck on their files (the season stops there), another job frozen by its
+            schedule's stop time holds this episode's fingerprint, an end-picture read stalled or timed out, or
+            cancelled.
     """
     from ..pipeline import DetectorAnswer, DetectorUnavailableError
 
@@ -1542,12 +1560,19 @@ def detect_season_audio(
                 skip=None if own_file else functools.partial(_fingerprint_failed_lately, ctx, member),
                 on_failure=functools.partial(_record_fingerprint_failure, ctx, member),
                 retime=retime,
+                pause_check=pause_check,
             )
         except FingerprintSkippedError:
             logger.debug(
                 "Season audio leaves out {}: it couldn't be fingerprinted lately",
                 os.path.basename(member.canonical_path),
             )
+            return None
+        except FingerprintBusyError as exc:
+            # Another job frozen by its schedule's stop time holds the file: nothing about the file, nothing recorded.
+            if own_file:
+                raise DetectorUnavailableError(str(exc)) from exc
+            logger.info("Season audio leaves out {} this time: {}", os.path.basename(member.canonical_path), exc)
             return None
         except FingerprintStalledError as exc:
             # The mount's fault, not this file's: nothing recorded. Every later sibling would meet the same stalled
@@ -1584,7 +1609,9 @@ def detect_season_audio(
     points: dict[str, np.ndarray] = {rec.canonical_path: own}
     others = [p for p in group.episodes if p != rec.canonical_path]
     left_out_changed = False
+    freeze = Freeze(pause_check)
     for n, path in enumerate(others, 1):
+        freeze.hold(cancel_check=cancel_check, name=os.path.basename(path))
         if cancel_check and cancel_check():
             raise DetectorUnavailableError("cancelled")
         try:
@@ -1618,6 +1645,9 @@ def detect_season_audio(
         gpu_device_path=gpu_device_path,
         cancel_check=cancel_check,
         phase=phase,
+        pause_check=pause_check,
+        ffmpeg_threads=ffmpeg_threads,
+        fallback_callback=fallback_callback,
     )
     try:
         segment = None if matching is None else _intro(ctx, rec.canonical_path, matching, records, end_pictures)

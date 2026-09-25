@@ -29,6 +29,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -40,6 +41,7 @@ from enum import Enum
 from loguru import logger
 
 from ..config import Config
+from .ffmpeg_runner import STALL_WATCHDOG_LINE
 from .filter_chain import (
     DV5_PATH_INTEL_OPENCL,
     DV5_PATH_LIBPLACEBO,
@@ -142,6 +144,36 @@ class ProcessingResult(Enum):
 # If FFmpeg produces no progress output for this many seconds, the process is
 # killed to avoid hanging the worker indefinitely (e.g. unresponsive NAS).
 FFMPEG_STALL_TIMEOUT_SEC = 300
+
+# A run that ended on the file (exited non-zero on its own, or crashed; not stopped from outside) is published once it
+# wrote this share of the frames the file's duration asks for. Two things put a complete run just under 100%: the
+# container's duration can run a few seconds past the video stream's (so fewer frames exist than the duration
+# implies), and some decoders report an error on damaged or cut packets at the very end of the file after decoding
+# everything before them. The trade-off: such a GPU run publishes without falling back to the CPU even when up to 5%
+# of the tail is missing.
+PUBLISH_MIN_FRAME_RATIO = 0.95
+# What FFmpeg itself exits with once it handled a SIGTERM or SIGINT: stopped from outside, wherever it was.
+FFMPEG_SIGNALLED_EXIT = 255
+# AVERROR(EIO): a read or write failed. A GPU decoder or an OpenCL filter that fails exits with it too; only the stderr
+# tells the two apart (``_was_interrupted``).
+FFMPEG_IO_ERROR_EXIT = 251
+# The signals FFmpeg dies of on the file itself. A crash is deterministic: the same file crashes the same way on every
+# scan. Any other signal (SIGTERM, SIGINT, SIGHUP, the stall watchdog's or an OOM kill's SIGKILL) stopped it from
+# outside, wherever it was. Popen reports a signal as -n; a wrapper shell as 128+n.
+_CRASH_SIGNALS = frozenset({signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE, signal.SIGILL})
+
+# Why a GPU run is handed to the CPU (``CodecNotSupportedError.kind``); the announcements word each one for the user.
+FALLBACK_CODEC = "codec"
+FALLBACK_HWACCEL = "hwaccel"
+FALLBACK_STOPPED_PART_WAY = "stopped_part_way"
+FALLBACK_IO_ERROR = "io_error"
+FALLBACK_STALL = "stall"
+FALLBACK_SIGNAL = "signal"
+# Where an I/O error (exit 251) comes from: reading the video, or writing thumbnails to the working folder.
+_IO_ERROR_PLACES = (
+    "the disk or network share the video is on, and that the working folder (Settings → Advanced) isn't full and "
+    "is writable"
+)
 
 # ---------------------------------------------------------------------------
 # Failure tracker — collects per-file failure info for end-of-run summary
@@ -384,13 +416,75 @@ except Exception:
 
 
 class CodecNotSupportedError(Exception):
-    """Exception raised when a video codec is not supported by GPU hardware.
+    """A GPU run couldn't produce the preview; the same worker runs the file again on the CPU.
 
-    This exception signals that the file should be processed by a CPU worker
-    instead of attempting CPU fallback within the GPU worker thread.
+    Attributes:
+        kind: Why (``FALLBACK_*``): an unsupported codec (the default, and the usual cause), a hardware accelerator
+            error, a run that stopped part-way, an I/O error, a stall, or a signal.
     """
 
-    pass
+    def __init__(self, message: str = "", *, kind: str = FALLBACK_CODEC) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def gpu_fallback_announcement(kind: str, video_file: str) -> str:
+    """The INFO line saying a file is retried on the CPU, worded by why its GPU run was handed off.
+
+    Args:
+        kind: ``CodecNotSupportedError.kind``.
+        video_file: The file.
+
+    Returns:
+        The line.
+    """
+    if kind == FALLBACK_STALL:
+        return (
+            f"FFmpeg stopped making progress on {video_file} on the GPU — retrying on CPU automatically. If this keeps "
+            "happening, check the disk or network share the file is on: a stalled read stalls the CPU run too."
+        )
+    if kind == FALLBACK_IO_ERROR:
+        return (
+            f"FFmpeg hit an I/O error on {video_file} on the GPU — retrying on CPU automatically. If this keeps "
+            f"happening, check {_IO_ERROR_PLACES}."
+        )
+    if kind == FALLBACK_STOPPED_PART_WAY:
+        return f"The GPU run for {video_file} stopped part-way — retrying on CPU automatically, from the start."
+    if kind == FALLBACK_SIGNAL:
+        return f"FFmpeg was stopped by a signal on the GPU for {video_file} — retrying on CPU automatically."
+    if kind == FALLBACK_HWACCEL:
+        return f"The GPU's decoder or filters failed on {video_file} — retrying on CPU automatically."
+    return (
+        f"Hardware acceleration could not handle the codec for {video_file} — retrying on CPU automatically. "
+        "No action needed; this is a normal fallback for codecs your GPU doesn't support."
+    )
+
+
+def gpu_fallback_advice(kind: str) -> str:
+    """What a user seeing many CPU retries of this kind could check.
+
+    Args:
+        kind: ``CodecNotSupportedError.kind``.
+
+    Returns:
+        One or two sentences.
+    """
+    if kind == FALLBACK_STALL:
+        return (
+            "No action needed for one file. If it keeps happening, check the disk or network share your media is on; "
+            "a slow or failing read slows the CPU retry too."
+        )
+    if kind == FALLBACK_IO_ERROR:
+        return f"No action needed for one file. If it keeps happening, check {_IO_ERROR_PLACES}."
+    if kind == FALLBACK_CODEC:
+        return (
+            "No action needed — the file will still get a preview, it'll just be slower. If this happens for many "
+            "files, your GPU may not support the codec; consider raising CPU worker count under Settings → CPU."
+        )
+    return (
+        "No action needed — the file will still get a preview, it'll just be slower. If this happens for many files, "
+        "check the GPU driver under Settings → Processing Options → GPU Configuration."
+    )
 
 
 class CancellationError(Exception):
@@ -424,6 +518,7 @@ def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
         return f"signal:{abs(returncode)}"
 
     known_signals = {
+        129: "SIGHUP",
         130: "SIGINT",
         137: "SIGKILL",
         143: "SIGTERM",
@@ -431,7 +526,7 @@ def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
     if returncode in known_signals:
         return f"signal:{known_signals[returncode]}"
 
-    if returncode == 251:
+    if returncode == FFMPEG_IO_ERROR_EXIT:
         return "io_error"
 
     if returncode > 128:
@@ -443,6 +538,94 @@ def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
 def _is_signal_killed(returncode: int) -> bool:
     """Detect if FFmpeg was killed by a known signal."""
     return _diagnose_ffmpeg_exit_code(returncode).startswith("signal:")
+
+
+def _crash_signal(returncode: int) -> signal.Signals | None:
+    """The signal FFmpeg crashed with (SIGSEGV, SIGABRT, SIGBUS, SIGFPE or SIGILL), raw or as a shell's 128+n.
+
+    Args:
+        returncode: FFmpeg exit code.
+
+    Returns:
+        The crash signal, or None when the code reports no crash.
+    """
+    for crash in _CRASH_SIGNALS:
+        if returncode in (-crash, 128 + crash):
+            return crash
+    return None
+
+
+def _was_interrupted(returncode: int, stderr_lines: list[str]) -> bool:
+    """Whether a run was stopped from outside wherever it was, rather than ending on the file itself.
+
+    Interrupted: a SIGTERM, SIGINT, SIGHUP or SIGKILL (raw, as FFmpeg's own 255 after a SIGTERM or SIGINT it handled, or
+    as a shell's 129/130/143/137), the stall watchdog, or an I/O error (exit 251) whose stderr shows no GPU, hardware
+    accelerator or OpenCL error. Such a run's frames say nothing about how much of the file decodes.
+
+    Ended on the file: a non-zero exit of its own, a crash (SIGSEGV, SIGABRT, SIGBUS, SIGFPE or SIGILL, raw or as
+    128+n), or exit 251 from a GPU error. These happen at the same place on every scan.
+
+    Args:
+        returncode: FFmpeg exit code.
+        stderr_lines: That run's stderr (with ``STALL_WATCHDOG_LINE`` when the watchdog stopped it).
+
+    Returns:
+        True when the run was stopped from outside.
+    """
+    if returncode == 0:
+        return False
+    if STALL_WATCHDOG_LINE in stderr_lines:
+        return True
+    if returncode == FFMPEG_IO_ERROR_EXIT:
+        return not _detect_hwaccel_runtime_error(stderr_lines)
+    if returncode < 0:
+        return _crash_signal(returncode) is None
+    return returncode == FFMPEG_SIGNALLED_EXIT or _is_signal_killed(returncode)
+
+
+def _io_cut_off(returncode: int, stderr_lines: list[str]) -> bool:
+    """An I/O error (exit 251) that isn't a GPU error: the video's disk or share, or the working folder, failed."""
+    return returncode == FFMPEG_IO_ERROR_EXIT and _was_interrupted(returncode, stderr_lines)
+
+
+def _gpu_hand_off(
+    rc: int, stderr_lines: list[str], stderr_lines_all: list[str], *, stopped_part_way: bool
+) -> tuple[str, str] | None:
+    """Whether a failed GPU run goes to the CPU, and why.
+
+    Args:
+        rc: The last run's exit code.
+        stderr_lines: The last run's stderr (with ``STALL_WATCHDOG_LINE`` when the watchdog stopped it).
+        stderr_lines_all: Every run's stderr.
+        stopped_part_way: A run's frames were discarded, or a run was cut off, before this point.
+
+    Returns:
+        ``(kind, reason)`` for the hand-off (``FALLBACK_*``), or None when the CPU wouldn't do better.
+    """
+    if rc != 0 and STALL_WATCHDOG_LINE in stderr_lines:
+        return FALLBACK_STALL, f"FFmpeg stopped making progress for {FFMPEG_STALL_TIMEOUT_SEC} s"
+    should_fallback, reason = classify_cpu_fallback_reason(
+        rc,
+        stderr_lines,
+        stderr_lines_all,
+        detect_codec_error=_detect_codec_error,
+        detect_hwaccel_runtime_error=_detect_hwaccel_runtime_error,
+        is_signal_killed=_is_signal_killed,
+    )
+    if should_fallback and reason == "codec error":
+        return FALLBACK_CODEC, reason
+    # Judged on the last run's own stderr: a GPU error in an earlier tier's run doesn't make this run's plain 251 one.
+    if _io_cut_off(rc, stderr_lines):
+        return FALLBACK_IO_ERROR, "I/O error"
+    if should_fallback and reason == "hardware accelerator runtime error":
+        return FALLBACK_HWACCEL, reason
+    if should_fallback:
+        return FALLBACK_SIGNAL, reason or "signal kill"
+    if rc == FFMPEG_SIGNALLED_EXIT:
+        return FALLBACK_SIGNAL, f"FFmpeg was stopped by a signal (exit code {rc})"
+    if stopped_part_way:
+        return FALLBACK_STOPPED_PART_WAY, "GPU run stopped part-way"
+    return None
 
 
 def _extract_ffmpeg_error_summary(stderr_lines: list[str]) -> str:
@@ -765,8 +948,6 @@ def _detect_hwaccel_runtime_error(stderr_lines: list[str]) -> bool:
         # VAAPI / VDPAU surface errors
         "failed to sync surface",
         "failed to transfer data to output frame",
-        # Generic AVHWFramesContext failures (covers VAAPI, CUDA, D3D11VA, QSV)
-        "avhwframescontext",
         # CUDA-specific decode errors
         "cuda error",
         "cuvid decode error",
@@ -777,9 +958,23 @@ def _detect_hwaccel_runtime_error(stderr_lines: list[str]) -> bool:
         "failed to get hw frames constraints",
         "failed to initialise vaapi connection",
         "failed to create surface",
+        # OpenCL filters (Intel and AMD tone-map Dolby Vision Profile 5 in OpenCL); these often end in exit 251. Not a
+        # bare "opencl": at -loglevel debug a working run names OpenCL on many lines (platforms, devices, formats).
+        "failed to enqueue kernel",
+        "cl image",
+        "opencl error",
     ]
 
-    return any(pattern in stderr_text for pattern in hwaccel_error_patterns)
+    if any(pattern in stderr_text for pattern in hwaccel_error_patterns):
+        return True
+
+    # Generic AVHWFramesContext failures (VAAPI, CUDA, D3D11VA, QSV). Only a line that also reads as an error counts:
+    # at -loglevel debug a working VAAPI run logs "[AVHWFramesContext @ …] Created surface …" for every surface.
+    error_words = ("fail", "error", "unable", "cannot", "could not", "unsupported", "invalid")
+    return any(
+        "avhwframescontext" in line and any(word in line for word in error_words)
+        for line in (raw.lower() for raw in stderr_lines)
+    )
 
 
 def _clean_output_images(output_folder: str) -> None:
@@ -810,6 +1005,22 @@ def _video_duration_seconds(media_info) -> float | None:
     except (TypeError, ValueError, IndexError):
         return None
     return duration_ms / 1000.0 if duration_ms > 0 else None
+
+
+def _expected_frame_count(media_info, interval: float) -> float | None:
+    """How many thumbnails a complete run writes: the runtime over the thumbnail interval.
+
+    Args:
+        media_info: The file's parsed MediaInfo.
+        interval: Seconds between thumbnails.
+
+    Returns:
+        The expected count, or ``None`` when the runtime is unknown.
+    """
+    duration_s = _video_duration_seconds(media_info)
+    if duration_s is None or interval <= 0:
+        return None
+    return duration_s / interval
 
 
 def _warn_if_frame_count_disagrees_with_duration(
@@ -1258,11 +1469,11 @@ def generate_images(
                     #   upstream (libplacebo's vkCreateImage returns
                     #   VK_ERROR_OUT_OF_DEVICE_MEMORY on Mesa ANV for the
                     #   format+modifier combinations used for DV5 hwmap —
-                    #   reproduces on my own UHD 770 in-container and on
+                    #   reproduces on an Intel iGPU in-container and on
                     #   the reporter's Arc A380).  Jellyfin-ffmpeg's
                     #   patched tonemap_opencl reads DV RPU side-data and
                     #   produces correct colours — benchmarked 17x/0 CPU
-                    #   on UHD 770.  See issue #212.
+                    #   on that iGPU.  See issue #212.
                     #
                     # AMD Radeon: use VAAPI→Vulkan DMA-BUF libplacebo.
                     #   Jellyfin ships this pattern in production for
@@ -1446,6 +1657,83 @@ def generate_images(
     os.makedirs(output_folder, exist_ok=True)
     _clean_output_images(output_folder)
 
+    # Set once a run's frames were discarded, or a run was interrupted (stopped from outside: a SIGTERM, SIGINT, SIGHUP
+    # or SIGKILL, FFmpeg's 255, the stall watchdog, or an I/O error with no GPU error; see ``_was_interrupted``) whatever
+    # it wrote. The software-libplacebo and DV-safe tiers are for runs that ended on the file having written nothing (a
+    # filter chain the GPU or file can't take, or a crash), so they're skipped: a DV-safe rerun would turn a stalled disk
+    # into a full-length wrong-colour preview. A GPU run goes to the CPU fallback instead; a CPU run fails and is retried
+    # later.
+    partial_discarded = False
+    expected_frames = _expected_frame_count(media_info, config.plex_bif_frame_interval)
+
+    def _count_usable_frames(rc: int, run_stderr: list[str]) -> int:
+        """Frames the last FFmpeg run wrote that may be published; a discarded set is deleted and counts as none.
+
+        An interrupted run (``_was_interrupted``) stopped wherever that landed, so its frames are discarded on every
+        tier: published, they'd be a preview that ends early which ``.meta`` then marks fresh. A run that ended on the
+        file (a non-zero exit of its own, a crash, or exit 251 from a GPU error) is kept once it wrote
+        ``PUBLISH_MIN_FRAME_RATIO`` of the expected frames. Short of that a GPU run's frames are discarded, since the
+        CPU still gets a turn, and a CPU run's are kept: a truncated or damaged file fails (or crashes) the same way on
+        every scan, and a short preview beats decoding it again each time. With no known runtime a run can't show it
+        came close, so it counts as short.
+
+        Args:
+            rc: Exit code of the run that wrote the frames.
+            run_stderr: That run's stderr.
+
+        Returns:
+            How many frames to publish.
+        """
+        nonlocal partial_discarded
+        count = len(glob.glob(os.path.join(output_folder, "img*.jpg")))
+        interrupted = _was_interrupted(rc, run_stderr)
+        if interrupted:
+            partial_discarded = True  # stopped wherever it was: no filter-chain tier helps, frames or not
+        if rc == 0 or count == 0:
+            return count
+        share = f", {count / expected_frames:.0%} of the {expected_frames:.0f} expected," if expected_frames else ""
+        if interrupted:
+            logger.warning(
+                "FFmpeg {} (exit code {}) after writing {} thumbnails for {} — discarding them rather than "
+                "publishing a preview that ends where it stopped.",
+                "hit an I/O error" if rc == FFMPEG_IO_ERROR_EXIT else "was stopped",
+                rc,
+                count,
+                video_file,
+            )
+        elif expected_frames and count / expected_frames >= PUBLISH_MIN_FRAME_RATIO:
+            logger.warning(
+                "FFmpeg exited with code {} after writing {} thumbnails{} for {} — publishing them. Some decoders "
+                "report an error right at the end of a file; if this preview stops early, try playing the file.",
+                rc,
+                count,
+                share,
+                video_file,
+            )
+            return count
+        elif gpu is None:
+            logger.warning(
+                "FFmpeg exited with code {} on CPU after writing {} thumbnails{} for {} — publishing them, but the "
+                "preview may be short. The file is likely truncated or damaged; try playing it to check.",
+                rc,
+                count,
+                share,
+                video_file,
+            )
+            return count
+        else:
+            logger.warning(
+                "FFmpeg exited with code {} on the GPU after writing {} thumbnails{} for {} — discarding them so "
+                "the CPU can try the whole file.",
+                rc,
+                count,
+                share,
+                video_file,
+            )
+        _clean_output_images(output_folder)
+        partial_discarded = True
+        return 0
+
     # First attempt
     rc, seconds, speed, stderr_lines = _run_ffmpeg(use_skip_initial, init_vulkan=use_libplacebo)
     stderr_lines_all: list[str] = list(stderr_lines) if stderr_lines else []
@@ -1500,8 +1788,8 @@ def generate_images(
             if retry_stderr_lines:
                 stderr_lines_all.extend(retry_stderr_lines)
 
-    # Count images first to see if we have any (even if rc != 0, we might have partial success)
-    image_count = len(glob.glob(os.path.join(output_folder, "img*.jpg")))
+    # A discarded partial run counts as no frames (see _count_usable_frames).
+    image_count = _count_usable_frames(rc, stderr_lines)
 
     # Hardware DV5 path unavailable — retry with software decode + libplacebo.
     #
@@ -1520,7 +1808,7 @@ def generate_images(
     # at ~5-10× (CPU-bound HEVC) — preferable to falling through to the
     # DV-safe fps+scale chain (~1.7× and a green and purple tint).
     did_sw_libplacebo_retry = False
-    if rc != 0 and image_count == 0 and (use_vaapi_dv5_path or use_intel_opencl_dv5_path):
+    if rc != 0 and image_count == 0 and not partial_discarded and (use_vaapi_dv5_path or use_intel_opencl_dv5_path):
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         did_sw_libplacebo_retry = True
@@ -1558,7 +1846,7 @@ def generate_images(
         )
         if stderr_lines:
             stderr_lines_all.extend(stderr_lines)
-        image_count = len(glob.glob(os.path.join(output_folder, "img*.jpg")))
+        image_count = _count_usable_frames(rc, stderr_lines)
 
     did_dv_safe_retry = False
 
@@ -1567,7 +1855,7 @@ def generate_images(
     # transfer characteristics or RPU parsing failures.
     # On both CPU and GPU, retry once with a DV-safe filter chain that
     # avoids zscale/tonemap/libplacebo entirely.
-    if rc != 0 and image_count == 0:
+    if rc != 0 and image_count == 0 and not partial_discarded:
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         diag_label = classify_dv_safe_retry_reason(stderr_lines_all, use_libplacebo=use_libplacebo)
@@ -1598,13 +1886,33 @@ def generate_images(
             rc, seconds, speed, stderr_lines = _run_ffmpeg(use_skip=False, path_kind_override="sdr")
             if stderr_lines:
                 stderr_lines_all.extend(stderr_lines)
-            image_count = len(glob.glob(os.path.join(output_folder, "img*.jpg")))
+            image_count = _count_usable_frames(rc, stderr_lines)
 
             if rc != 0 and image_count == 0:
+                cut_off = _gpu_hand_off(rc, stderr_lines, stderr_lines_all, stopped_part_way=False)
+                disk = cut_off if cut_off and cut_off[0] in (FALLBACK_STALL, FALLBACK_IO_ERROR) else None
                 if gpu is not None:
                     # Still failing on GPU even with DV-safe filter -> hand off to CPU worker.
                     _clean_output_images(output_folder)
-                    raise CodecNotSupportedError(f"{diag_label} in GPU context for {video_file}")
+                    if disk is not None:
+                        raise CodecNotSupportedError(
+                            f"GPU processing failed ({disk[1]}) for {video_file} (exit code {rc})", kind=disk[0]
+                        )
+                    # With no other cause named, the simpler chain failed on the GPU too: its decoder or filters.
+                    raise CodecNotSupportedError(
+                        f"{diag_label} in GPU context for {video_file}",
+                        kind=cut_off[0] if cut_off else FALLBACK_HWACCEL,
+                    )
+                elif disk is not None:
+                    # The simpler chain's own run was stopped by the disk, not the file: no remux helps.
+                    logger.error(
+                        "{} for {}, and the retry with the simpler filter chain failed too: {}. The file is tried "
+                        "again on a later run; if this keeps happening, check {}.",
+                        diag_label,
+                        video_file,
+                        disk[1],
+                        _IO_ERROR_PLACES if disk[0] == FALLBACK_IO_ERROR else "the disk or network share it is on",
+                    )
                 else:
                     # Already on CPU: no further fallback available without remuxing/bitstream filtering.
                     logger.error(
@@ -1625,31 +1933,26 @@ def generate_images(
     if rc != 0 and image_count == 0 and gpu is not None:
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
-        should_fallback, fallback_reason = classify_cpu_fallback_reason(
-            rc,
-            stderr_lines,
-            stderr_lines_all,
-            detect_codec_error=_detect_codec_error,
-            detect_hwaccel_runtime_error=_detect_hwaccel_runtime_error,
-            is_signal_killed=_is_signal_killed,
-        )
-
-        if should_fallback:
+        hand_off = _gpu_hand_off(rc, stderr_lines, stderr_lines_all, stopped_part_way=partial_discarded)
+        if hand_off is not None:
+            fallback_kind, fallback_reason = hand_off
             # Log relevant stderr excerpt for debugging
             stderr_excerpt = "\n".join(stderr_lines[-5:]) if len(stderr_lines) > 0 else "No stderr output"
             logger.warning(
-                "GPU processing failed for {} (reason: {}, exit code {}) — automatically handing off "
-                "to a CPU worker. No action needed unless this happens to most files, which usually "
-                "indicates a GPU driver problem worth checking under Settings → Processing Options → GPU Configuration.",
+                "GPU processing failed for {} (reason: {}, exit code {}) — automatically handing off to a CPU "
+                "worker. {}",
                 video_file,
                 fallback_reason,
                 rc,
+                gpu_fallback_advice(fallback_kind),
             )
             logger.debug("FFmpeg stderr excerpt (last 5 lines): {}", stderr_excerpt)
             # Clean up any partial files from GPU attempts
             _clean_output_images(output_folder)
             # Raise exception to signal worker pool to re-queue for CPU worker
-            raise CodecNotSupportedError(f"GPU processing failed ({fallback_reason}) for {video_file} (exit code {rc})")
+            raise CodecNotSupportedError(
+                f"GPU processing failed ({fallback_reason}) for {video_file} (exit code {rc})", kind=fallback_kind
+            )
 
     if rc != 0 and image_count == 0 and gpu is None:
         if _detect_codec_error(rc, stderr_lines):
@@ -1675,7 +1978,9 @@ def generate_images(
             frame_second = frame_no * config.plex_bif_frame_interval
             os.rename(image, os.path.join(output_folder, f"{frame_second:010d}.jpg"))
         image_count = len(glob.glob(os.path.join(output_folder, "*.jpg")))
-        _warn_if_frame_count_disagrees_with_duration(video_file, output_folder, image_count, media_info, config)
+        # A short set kept from a non-zero exit was already warned about; the drift backstop would call it a bug.
+        if rc == 0:
+            _warn_if_frame_count_disagrees_with_duration(video_file, output_folder, image_count, media_info, config)
 
     hw = gpu is not None
     success = image_count > 0
@@ -1753,6 +2058,56 @@ def _cleanup_temp_directory(tmp_path: str) -> None:
         )
 
 
+def _bif_temp_path(bif_filename: str) -> str:
+    """Where a BIF is written before it's renamed over ``bif_filename``.
+
+    The same folder, so the rename is atomic. A short hidden name fixed per target: it can't push a long Emby sidecar
+    name past the filesystem's 255-byte limit, and a leftover from a crash is reused by the next write of that file.
+
+    Args:
+        bif_filename: The BIF's final path.
+
+    Returns:
+        The temporary path beside it.
+    """
+    folder, name = os.path.split(bif_filename)
+    digest = hashlib.sha1(name.encode("utf-8", "surrogateescape"), usedforsecurity=False).hexdigest()[:16]
+    return os.path.join(folder, f".{digest}.bif-tmp")
+
+
+def _keep_owner_and_mode(new_file: str, replaced_file: str) -> None:
+    """Give a replacement file the mode and owner of the file it replaces.
+
+    BIFs used to be rewritten in place, which kept the existing file's inode and so its mode and owner (a BIF
+    Plex made itself stays Plex's). A renamed-in replacement is a new file, so copy them across. A new BIF (nothing
+    to replace) keeps the defaults it was created with, as before. Best-effort: a non-root process can't give a
+    file away, so it falls back to keeping the group, which is what lets the server read it.
+
+    Args:
+        new_file: The freshly written file.
+        replaced_file: The path it is about to be renamed over.
+    """
+    try:
+        replaced = os.stat(replaced_file)
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(new_file, replaced.st_mode & 0o7777)
+    if not hasattr(os, "chown"):
+        return
+    try:
+        current = os.stat(new_file)
+    except OSError:
+        return
+    if (current.st_uid, current.st_gid) == (replaced.st_uid, replaced.st_gid):
+        return
+    try:
+        os.chown(new_file, replaced.st_uid, replaced.st_gid)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.chown(new_file, -1, replaced.st_gid)
+
+
 def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
     """Build a .bif file from thumbnail images.
 
@@ -1781,8 +2136,14 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
         raise
     images.sort()
 
+    # Written beside the target and renamed over it once complete, so a crash or error part-way never leaves a
+    # short BIF where Plex/Emby read it.
+    tmp_filename = _bif_temp_path(bif_filename)
+    # A leftover from a crash may belong to another user (an earlier run as root); unlinking needs only the folder.
+    with contextlib.suppress(FileNotFoundError, PermissionError):
+        os.remove(tmp_filename)
     try:
-        f = open(bif_filename, "wb")
+        f = open(tmp_filename, "wb")
     except PermissionError as e:
         logger.error(
             "Cannot write the preview file at {}: permission denied ({}). "
@@ -1845,8 +2206,12 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
                     )
                     raise
                 f.write(data)
-    except PermissionError:
-        # Re-raise PermissionError (already logged above)
+        _keep_owner_and_mode(tmp_filename, bif_filename)
+        os.replace(tmp_filename, bif_filename)
+    except BaseException:
+        # The target keeps what it had; only the partial write goes.
+        with contextlib.suppress(OSError):
+            os.remove(tmp_filename)
         raise
     # K2: server context — destination path encodes the server but the log is silent on it.
     _bif_server_prefix = f"[{config.server_display_name}] " if getattr(config, "server_display_name", None) else ""

@@ -11,6 +11,9 @@ Revision 2 is archived at `evidence/history/spec-rev2-2026-09-13.md`.
 **What this is.** Skip Intro / Skip Credits markers for Plex, Emby and Jellyfin, detected once per media file and
 published to every server that has the file. Feature name in the UI: **"Intro & Credits"**.
 
+**Portability.** This is a public app; libraries aren't all English. See §5.7 for exactly which two lookup tables
+are language-aware (chapter names, season folder names) and what the rest of detection doesn't care about.
+
 **Read in this order.**
 1. This file, top to bottom. It is the source of truth. If code and spec disagree, stop and ask the owner.
 2. The implementation plans next to this file (`plan-*.md`) — which task is next is the first unchecked box.
@@ -127,7 +130,7 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 2. Correct markers on all three servers that survive each server's scans, refreshes and restarts (or self-heal).
 3. User control: review, adjust, lock; locked markers are never overwritten.
 4. Measurable accuracy: an eval harness against ground truth gates every detector change.
-5. Light on the host: capped threads, lowest priority, one worker by default.
+5. Light on the host: capped threads, priority below previews, the preview workers and none of its own.
 
 **Non-goals (v1)**
 - Commercial/ad detection. Recap/preview only when chapters or an online source supply them (Jellyfin shows these;
@@ -261,7 +264,8 @@ featurettes, `Extras/` folders…), get no ids. TheIntroDB is queried with `dura
 -fp_format raw -` → uint32 LE, **0.1238 s/point** (measured). `W = min(900 s, 35% of duration)`. The app image's
 `/usr/lib/jellyfin-ffmpeg/ffmpeg` has chromaprint; `/usr/local/bin/ffmpeg` does not, and the arm64 image has no
 jellyfin-ffmpeg, so there season audio is unavailable with a message (Settings "Not available",
-`GET /api/markers/sources/local`). CPU only (no GPU chromaprint), ~2 s per episode; at most 2 at a time.
+`GET /api/markers/sources/local`). CPU only (no GPU chromaprint), ~2 s per episode; as many at once as workers run
+them, with the worker's threads and the pause of §5.6.
 
 **Matcher (v3)** for every episode pair: inverted index (±2 value shift); per shift, runs where
 `popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, length 8–120 s; keep all non-overlapping runs. Per episode: cluster candidates
@@ -390,8 +394,9 @@ queues a Season job for same-season episodes outside the job whose inputs change
 footage — **not** on epilogue text cards ("Two months later…").
 
 **Frames.** The job samples **keyframes of the tail itself** (no dependency on preview frames):
-`ffmpeg -threads 2 [-hwaccel cuda -hwaccel_output_format cuda] -skip_frame nokey -ss <tail start> -copyts -i <file>
--an -sn -dn -fps_mode passthrough -vf "scale…320:180…,showinfo" -f rawvideo -` (pts from `showinfo`). Tail = last
+`ffmpeg [-threads N -filter_threads N] [-hwaccel cuda -hwaccel_output_format cuda] -skip_frame nokey -ss <tail start>
+-copyts -i <file> -an -sn -dn -fps_mode passthrough -vf "scale…320:180…,showinfo" -f rawvideo -` (pts from
+`showinfo`; N is the GPU worker's own `ffmpeg_threads`, §5.6). Tail = last
 **900 s** for a movie or a file of unknown kind, **450 s** for a TV episode (a `season_key` on the file's record;
 T-R4 — a longer tail on an unknown-kind file only costs extra decode) **by default**, user-adjustable in Advanced
 (`markers.credits_window`, §8): 5, 10, 15, 20 or 30 min, separately for TV episodes and for movies (a file of unknown
@@ -445,8 +450,9 @@ frames on NVIDIA, Intel and the CPU. Season audio's end-picture check reads its 
 a GPU failure, read again on the CPU, whose frames are the same.
 **Every GPU's credits decode is compared with the CPU's, as a diagnostic** (`markers/credits/decode_check.py`,
 2026-09-25 in §14): with one scaler everywhere an answer depends on the decoder alone, bit-exact against the CPU on
-NVIDIA and Intel VAAPI for H.264 and HEVC (no pixel differed on 8 real files). Before a device's first credits decode,
-once per process, two packaged reference clips (`reference_clips/`, made by the `make_reference_clips.sh` beside them:
+NVIDIA and Intel VAAPI for H.264 and HEVC (no pixel differed on 8 real files). Once per process per GPU, in the
+background when an Intro & Credits job that reads credit text builds the worker pool (`decode_check.start_checks`), two
+packaged reference clips (`reference_clips/`, made by the `make_reference_clips.sh` beside them:
 1280×720, 9 frames at 1 fps, a keyframe every 3 frames with a B and a P frame between, credit text 9–14 px scrolling
 over black, a dark caption on a light band, a zooming fractal; 8-bit H.264 High and 10-bit HEVC Main 10, 127 KB
 together) are decoded through the credits decode's own command (`frames.decode_rows` as a 1 fps refine window builds it:
@@ -465,10 +471,10 @@ XviD/DivX: 4 movies, 4 episodes), the app's `find_credits` decoding on storage's
 answer for every file (12 with credits, 3 without; the same start, end and scale), although nearly every frame differed
 (MPEG-2 by at most 3 levels on 1.7–3.1% of luma pixels, MPEG-4 by at most 12 on 1.4–9.0%) and the text boxes differed on
 263 of 9,439 frames read (`evidence/credits/decode_answers_gpu_vs_cpu.py`). Text detection has its own per-device
-self-test (`textdet_helper`). One check per device: the first worker to reach it runs it, and one arriving meanwhile
-goes on decoding without waiting for a diagnostic; a check a cancel cut short isn't kept, and the next file checks
-again. A CPU worker, or a GPU worker without a usable device, runs none. Only the app runs it
-(`find_credits(check_gpu_decode=True)`); the eval harness decodes where it is told. Cost on storage's P5000: 2.9 s once
+self-test (`textdet_helper`). One check per device, on a daemon thread of its own: no worker and no job waits for it
+(until 2026-09-25 a worker ran it on its first credits decode, up to 60 s), and a device checked or being checked isn't
+started again. The CPU, or a GPU without a usable device, gets none. Only the app runs it; the eval harness decodes
+where it is told. Cost on storage's P5000: 2.9 s once
 per process, 2.4 s of it the four GPU decodes (mostly CUDA starting up each time) and 0.5 s the CPU's, which every later
 device reuses. Previews and season audio's end-picture check are not checked.
 A file whose credits rest on an answer from before version 5, or are still undecided beside one, is read again once
@@ -515,15 +521,45 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
   boxes — **only** after applying the app's Vulkan probe env (`gpu/vulkan_probe.py` `get_vulkan_env_overrides()`,
   e.g. `__EGL_VENDOR_LIBRARY_FILENAMES`) before the session is created. Without it the NVIDIA ICD fails and Dawn
   silently uses llvmpipe at 430 ms/frame.
-- **Guard:** use the GPU only when `get_vulkan_device_info()` reports a hardware device and a 20-frame self-test on
-  that device finds exactly the CPU's boxes, in the same places, faster — a GPU that only matches the CPU's speed, or
-  finds the same *number* of boxes somewhere else, doesn't pass (it compared counts alone until 2026-09-21, which
-  was a complete test only while rule J read a row's count; version 3 reads where the boxes are). Otherwise CPU.
+- **Guard (owner 2026-09-25: "we set GPU workers and CPU workers … just like it works for previews"):** a GPU
+  worker's text detection runs on its GPU whenever `get_vulkan_device_info()` reports a hardware device, the helper's
+  WebGPU session is on a hardware Vulkan adapter, and a 20-frame self-test on that device finds exactly the CPU's
+  boxes, in the same places, at 320×180 and 640×360. **Speed decides nothing**: a GPU slower than the CPU is still
+  used, and the self-test's timing only goes in the log. A GPU finding the same *number* of boxes somewhere else
+  doesn't pass (it compared counts alone until 2026-09-21, which was a complete test only while rule J read a row's
+  count; version 3 reads where the boxes are); a box mismatch keeps that device on the CPU for the process, with one
+  WARNING, since an answer mustn't depend on the device that read it. A software renderer (llvmpipe, lavapipe,
+  SwiftShader) is not a GPU: Dawn runs on whichever adapter the helper's pinned Vulkan environment leaves it, and a
+  software renderer finds the CPU's boxes, so the helper lists the Vulkan devices that environment exposes
+  (`_vulkan_adapters`, through the loader) and serves from the CPU when a software renderer is all there is (INFO,
+  for the process).
+- **A GPU failure costs one request, not the device** (as previews rerun one item on the CPU): a GPU helper that
+  crashes, hangs, fails to start, answers wrongly, exits between requests, or whose WebGPU session fails (ready line
+  `"failed": true`; a session with no adapter at a device's first start is a verdict, the GPU can't run it), or that
+  comes back on the CPU after having served from the GPU, hands that request to the CPU, and the GPU is tried again
+  after `GPU_RETRY_BASE_S` (5 s), the wait doubling with each failure in a row up to `GPU_RETRY_MAX_S` (600 s); a
+  success resets it, and there is no "CPU for the rest of the process" switch (as previews keep trying the GPU). Every
+  failure costs the request that tries: a failing start seconds (up to its start timeout), a hung request its 60 s,
+  so one file's back-to-back 64-frame requests don't each pay it. The first failure of a run of them is one WARNING (the
+  rest DEBUG),
+  and "back on the GPU after N failed requests" (INFO) ends it. A GPU worker's request read on the CPU, for a
+  failure or a CPU verdict, sets the worker row's fallback flag (`detect_boxes(on_cpu=…)`, the detector's
+  `fallback_callback`), as a CPU rerun and the end picture's fallback do. A CPU worker's wait for a helper (a lowered
+  CPU worker count) ends on its job's cancel (`TextDetCancelledError`).
   A GPU helper runs on the WebGPU EP device whose `pci_bus_id` matches the worker GPU's; with no PCI match it falls back to the CPU, except on a host with a single WebGPU device when the
   worker's PCI address is unknown (T-R3) — the EP lists every display PCI device from sysfs, not only
   Vulkan-capable ones (storage's own ASPEED BMC VGA is listed beside the P5000), so refusing the GPU whenever
   several devices are listed would disable it on ordinary servers.
-- **CPU:** ONNX Runtime CPU, `intra_op_num_threads=2`, 18–23 ms/frame.
+- **CPU:** ONNX Runtime CPU, `intra_op_num_threads=2`, 18–23 ms/frame. **One CPU helper per request in flight,
+  sized by the CPU workers:** CPU workers' requests hold at most the saved CPU worker count of helpers at once
+  (`cpu_threads`, read on every request; at least one), and a GPU worker's request on the CPU always gets one of its
+  own, so it neither waits for nor counts against the CPU workers. A GPU worker is known by its GPU; its CPU rerun
+  after a failed GPU decode arrives with no GPU, so the worker's type travels with the file (`process_fn`'s
+  `gpu_worker`, through `pipeline.process_item` to each detector) and the credits detector passes
+  `detect_boxes(gpu_worker=True)`. Helpers start on first use and exit after 10 idle minutes; a lower
+  saved count stops the idle ones beyond it at once (the settings save calls `reconcile_textdet_cpu_helpers`; a count
+  saved another way applies on the next request) and busy CPU workers' ones when their request ends. There is no
+  per-worker CPU thread setting (`cpu_threads` is the worker count), so each helper keeps 2 threads.
 - Rejected: CUDA-only `onnxruntime-gpu` (+2.8 GB, NVIDIA only); ncnn Vulkan (fast, but the pnnx-converted model
   output was wrong); OpenVINO (Intel only, +180 MB); ROCm/MIGraphX (GB-scale, removed from ORT); OpenCV DNN (no
   Vulkan in pip wheels).
@@ -531,8 +567,11 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
 - **Proven:** storage P5000 13.3 vs 18.7 ms (planning bench); the shipped helper's own self-test on storage measured
   11.2–11.4 ms/frame on WebGPU against 17.4–18.8 ms on the CPU (GPU kept, pinned to the card's PCI address,
   `evidence/eval/phase3-harness.md`); plex TITAN RTX 4.8 vs 7.7 ms; plex Intel UHD 770 16.1 vs 8.0 ms (iGPU slower
-  than that CPU → self-test picks CPU). All 100% identical boxes. **AMD not tested** (no hardware, owner
-  confirmed): same Vulkan/RADV path, self-test decides (Q6).
+  than that CPU: the CPU until 2026-09-25, its own GPU since, as speed no longer decides). All 100% identical boxes.
+  **AMD not tested** (no hardware, owner confirmed): same Vulkan/RADV path, self-test decides (Q6). A helper pinned to
+  the NVIDIA card with only lavapipe's Vulkan driver (`VK_DRIVER_FILES`) comes up on the CPU with the software
+  renderer's name, and pinned with the card's own driver on the GPU
+  (`test_the_real_helper_serves_from_the_gpu_only_on_a_hardware_adapter`, 2026-09-25).
 - CPU runtime size ≈ +300 MB (onnxruntime 62 MB, rapidocr 16 MB, opencv-headless ≈ 150 MB, numpy 59 MB,
   pyclipper ≈ 3.5 MB — all in the image; shapely ≈ 11 MB is a test-only dependency, used only to check the
   vendored post-processing against rapidocr's own, and stays out of the image). `rapidocr_onnxruntime` 1.4.4 is
@@ -883,10 +922,69 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     `carried_over` alone ("carried over from the file it replaced (same length)"; the job log and summary name "the
     file it replaced"), so the season audio follow-ups, the weekly online re-check and the TheIntroDB recheck treat it
     as undecided: the new file's first answer of its own replaces it.
+16. **A rule change alone doesn't take a published marker off** (§14 2026-09-25 "Worker waits and rule-only
+    re-decides"). A file decided under older rules (`DECIDE_RULES` in `version_reruns` below today's
+    `DECIDE_RULES_VERSION`) is decided again from what it has stored (§6.2 step 3). Where today's rules would put a
+    type in Needs review or leave it without a marker, a marker of ours that the older rules decided for it and that
+    was sent to a server (its type and start in a publish state) stays, while a source it was decided by still gives
+    an answer agreeing with it (rule 4's tolerances: 5 s on an intro's end, 10 s on credits' start) and no new or
+    changed answer disagrees with it: one not stored when the job's first stage of the file began
+    (`decide.keep_published`, `pipeline._keep_published_before_rule_change`). An answer that disagreed before and is
+    only stored again (a forced run, a parser's new version reading the same answer) is no news. Its reason is "kept:
+    published before a rule change; today's rules: …" (the job log adds "kept: published before a rule change" to its
+    line), and later runs keep it the same way. Replaced by today's decision when today's rules decide the type
+    (whatever the answer), a new or changed answer disagrees, the source it rests on no longer agrees (its entry moved
+    or went) or is turned off; a marker no server was sent, a carried-over marker (it rests on no source) and every new
+    file get today's rules, and a locked type is always decided. The case
+    that asked for it: SkipDB never deciding alone (rule 6) would otherwise take intros users already see off every
+    install that has no season audio to confirm them (arm64 has no chromaprint).
 
 ### 5.6 Resource rules
-Intro & Credits jobs: 1 worker by default, lowest priority, ffmpeg `-threads 2`, ONNX Runtime `intra_op_num_threads=2`,
-fingerprints ≤ 2 in parallel, online lookups paced by headers. Never parallel per-frame seeks.
+Intro & Credits jobs run on the preview workers with no worker cap of their own: priority alone orders the work. The
+dispatcher always gives a free worker the highest-priority item waiting, then the oldest job's (webhook follow-ups are
+NORMAL behind HIGH preview jobs; backfill, schedules and re-checks are LOW), and the gate keeps a slot for HIGH jobs; a
+marker item already running isn't preempted. ONNX Runtime `intra_op_num_threads=2`, online lookups paced by headers.
+Never parallel per-frame seeks. A worker never sleeps on a network wait it can leave to a retry (§6.4 item 4).
+
+Inside a worker, markers work follows the worker model as previews' FFmpeg does (2026-09-25 in §14):
+- **Threads.** A GPU worker's credits decodes and end-picture decodes run with its own GPU's `ffmpeg_threads` from
+  `gpu_config` (`-threads N -filter_threads N`; 0 or none is no cap), the same flags previews put on a GPU worker's
+  FFmpeg. CPU work runs at ffmpeg's own thread count: a CPU worker's, a GPU worker's CPU rerun, and fingerprints
+  (chromaprint is CPU work on any worker). A value saved for a GPU reaches the workers already running on it.
+- **No app-wide fingerprint limit.** The worker counts cap how many fingerprints run at once, as they cap previews; a
+  worker never waits on a limit while it holds its slot. Two killed fingerprint ffmpegs still stuck on a stalled
+  mount stop new ones starting (`fingerprint.STALLED_LIMIT`).
+- **Pause.** Pause all, quiet hours and a job's schedule's stop time stop a running decode or fingerprint where it is:
+  SIGSTOP to its process group (it runs in its own session), SIGCONT on resume, and its time limit (and the credits
+  look-back's shared one) moves out by the time paused (`markers/freeze.py`). No new ffmpeg starts meanwhile, the
+  season step waits before its next sibling, and a retry's countdown stands still. A cancel still ends a paused
+  decode. A job paused by hand is not frozen: it gives its slot back and the running file finishes
+  (`PipelineContext.freeze_check`). A job frozen by its schedule's stop time keeps holding the files it runs until
+  that schedule's next start: another job waiting for one of them stops waiting when it is cancelled, and never
+  waits for a file's fingerprint longer than a running one takes (`fingerprint.LOCK_WAIT_S`, its own paused time not
+  counted): a sibling is left out this time, and an episode's own file gives no answer this time, with nothing
+  recorded against either.
+- **Fallback.** A GPU failure in the credits decode reruns the file on the worker's CPU; the end-picture check decodes
+  its few seconds again on the CPU on the spot. Both show on the worker's row (`fallback_active`); the end picture's
+  also warns once per GPU for the process.
+
+### 5.7 Portability
+This app runs against libraries in any language, so two lookup tables are deliberately language-aware:
+
+- **Chapter names → marker type** (`markers/sources/chapters.py`, §5.1): whole-title, case-insensitive matches for
+  English plus German (Vorspann/Abspann), French (Générique/Générique de fin, accent optional), Spanish
+  (Cabecera/Créditos, which also reuses the English words "Intro"/"Credits"), Italian (Sigla/Titoli di coda),
+  Portuguese (Abertura/Créditos finais) and Dutch (Aftiteling). Anime's romanised "OP"/"ED" are matched
+  case-sensitively, unchanged by this. Bump `CHAPTER_RULES_VERSION` when this table changes so already-probed files
+  are read again.
+- **Season folder names** (`markers/external_ids.py`'s `is_season_folder`): English "Season"/"Series" plus German
+  "Staffel", French "Saison", Spanish/Portuguese "Temporada", Italian "Stagione", Dutch "Seizoen", Polish "Sezon",
+  Swedish "Säsong", Danish "Sæson", Finnish "Kausi", a bare "S01"-style folder, and "Specials".
+
+Everything else the detection pipeline uses is language-independent: `SxxEyy` filename parsing, tmdb/tvdb/imdb id
+tags, on-screen credit-text detection (pixel/box based, not OCR), season audio fingerprinting, and the online
+lookups (IntroDB/TheIntroDB/SkipDB key by id + duration, not by title language). Adding a language means extending
+the two tables above, not touching the rest of the pipeline.
 
 ## 6. Architecture
 
@@ -909,11 +1007,30 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 (scans, schedules, Sonarr/Radarr/server webhooks), owner/path resolution, job storage and the dashboard/job UI.
 
 1. **Trigger.** Webhook: the debounced batch submits the preview job (HIGH) as today, then an Intro & Credits job for
-   the same files at NORMAL, grouped by season folder — it runs after the previews (§6.4). Backfill: "Start job →
+   the same files at NORMAL, grouped by season folder — it runs after the previews (§6.4). The batch asks for that job
+   in the preview job's saved config when it opens (`INTRO_CREDITS_FOLLOW_UP`, next to `webhook_paths` and the pin),
+   and the preview runner queues it whenever it starts the job — fired, or revived after a restart during the
+   debounce — then takes the request off, so it is queued once. A scheduled "Recently added" scan queues the same
+   follow-up (source `recently_added`) for the files it lists, before dispatching them; its files are a server
+   listing, so a file missing from disk gets no retry and a replaced one no later verify. Backfill: "Start job →
    Intro & Credits" for chosen libraries, or a schedule, at LOW. Schedules are independent from preview schedules;
    each skips files already done.
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
-   `library_ids`. No enabled owner → nothing is detected.
+   `library_ids`. No enabled owner → nothing is detected. **A follow-up publishes where its files' previews do**:
+   each file's server is resolved as the preview workers resolve it (`jobs.worker.resolve_per_item_pin`: the preview
+   job's pin wins — a webhook to `/api/webhooks/server/<id>` or with `?server_id=`, a pinned Recently Added schedule —
+   else an Emby or Jellyfin webhook through `/api/webhooks/incoming`, or a file a Recently Added scan listed from
+   Emby or Jellyfin, goes to that server alone; else every owner), one follow-up per server, stored as the job's
+   `server_id`; the owners are cut to it, its retries, verify job and TheIntroDB recheck carry it, and a pin to a
+   server with Intro & Credits off queues nothing. A waiting follow-up covers a new request for its files only when
+   it publishes at least as widely (unpinned, or the same pin), and episodes join only a follow-up with the same pin.
+   A Recently Added follow-up neither covers nor takes a webhook's files (they would lose their missing-file retry and
+   verify, and wait behind the scan); a webhook's follow-up covers a Recently Added file but doesn't take its season's
+   other episodes. A Season job carries the pin of the job that queued it, as its retries do: a pinned request is covered
+   only by a waiting or running Season job that publishes at least as widely, and joins only one with the same pin. A
+   scheduled Intro & Credits job for one server's libraries is pinned to that server, as its scheduled preview job is.
+   Unpinned jobs are unchanged. An unpinned Recently Added job keeps, in its config's `webhook_item_id_hints`, the item ids of the files
+   its previews went to their own server only (the server first), so a preview retry of them publishes there too.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
    gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone. **A decided type
    doesn't ask a local detector again on a normal run** (only a forced run, an answer of another version, or an
@@ -948,8 +1065,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    listed when an unlocked type has a stored answer of its type the rules could decide differently (decided, Needs
    review, not found because its answers failed a check, or kept as the servers' own; not detection off). Its run
    decides again from what is stored and asks only what is due or from an older version, as any run does (a credits
-   chapter rule 3 holds for credit text has it read, §5.5). Version 1 is the 2026-09-25 rules (§14 "Decision
-   rules"). Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
+   chapter rule 3 holds for credit text has it read, §5.5); a marker it had sent to a server stays where today's rules
+   would leave its type in Needs review or without a marker, until an answer disagrees with it (§5.5 rule 16).
+   Version 1 is the 2026-09-25 rules (§14 "Decision rules"). Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
    so rule 3's chapter waits for it (`pipeline._answered_at_this_version`), unless that read fails on the file as
    it is (a decode error or a timeout), which ends the wait. They run as ordinary Intro &
    Credits jobs at LOW priority on the worker pool ("Intro & Credits: re-checking files after an update"), at most
@@ -988,8 +1106,22 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    backoff, until a server has it. Locked markers re-assert (§5.5 rule 1). Plex
    `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
    `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
-7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
-8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately (`POST /api/markers/item/markers`; `DELETE` on the same route unlocks and publishes nothing). It is one web request, so it is bounded: the save and the lock land before any server is contacted, each call to a server is capped at 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`; Plex's database waits the same 8 s for its locks), and a server the fan-out hasn't started 25 s in isn't started (`PUBLISH_NOW_DEADLINE_S`, a start gate, not a cancellation, so a server already under way can run to a small multiple of 8 s). A server not reached says so in its row and is published by the next run; a job already running on the same file makes the request give up on the whole publish after 2 s. No retries, and no thread that outlives the request.
+7. **Outcomes** per server: markers written / reused / needs review / skipped + reason. The job is red when every
+   file it counted failed or wasn't on disk and it queued no retry (previews' `all_not_found` rule), amber when some
+   failed or on warnings, green otherwise.
+8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately (`POST /api/markers/item/markers`; `DELETE` on the same route unlocks and publishes nothing). It is one web request, so it is bounded: the save and the lock land before any server is contacted, each call to a server is capped at 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`; Plex's database waits the same 8 s for its locks), and a server the fan-out hasn't started 25 s in isn't started (`PUBLISH_NOW_DEADLINE_S`, a start gate, not a cancellation, so a server already under way can run to a small multiple of 8 s). A server not reached says so in its row and is published by the next run; a job already running on the same file makes the request give up on the whole publish after 2 s. No retries, and no thread that outlives the request. **When the editor shows any server waiting or failed** (a server with Intro & Credits on that couldn't take it, down or its plugin missing, reads "failed" too), **the save queues that next run**: one single-file HIGH job, not forced (it publishes the saved markers and asks no source again), whose retry chain takes a server that hasn't indexed the file yet (`triggers.submit_publish_retry`); a job for the file that hasn't started (an earlier one, or a queued re-detect) is reused, a running one isn't (it decided before the save). The answer carries its id as `queued_job_id`.
+
+**Restart.** Jobs waiting for a due time (`retry_not_before`: retries, verify jobs, the TheIntroDB recheck, version
+batches) are aged from that time, not from when they were queued, by the restart revival (`requeue_max_age_minutes`,
+12 h by default): a TheIntroDB recheck queued in the morning is due after the next UTC midnight, and was failed by any
+restart more than 12 h after it was queued. A follow-up waiting for its preview job (`follows_job_id`) stays wherever
+that job does, whatever its own age: revived with it, or held PENDING with it while Pause all holds the leftover
+preview jobs (`JobManager.requeue_interrupted_followers`); a preview job the restart fails takes its follow-up with it.
+A job that never started is aged from the latest moment it could first run: its due time (`retry_not_before`, a
+preview retry's `scheduled_at`) and, for a follow-up, its preview job's end. Any job waiting for a slot is aged from
+the last time it was seen waiting (`slot_wait_since`, written by both runners as they start waiting and refreshed at
+most once a minute while they wait), so a job queued behind a long scan is aged by the downtime only. A Recently Added tick queues nothing while the
+schedule's last scan hasn't started (its window runs to its start; a longer lookback widens it).
 
 ### 6.3 Publishers
 `MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | Disabled | NeedsConfirmation |
@@ -1127,47 +1259,71 @@ Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly lik
    counts cap total load. No extra workers, no parallel pool. Dashboard worker rows show
    "Intro & Credits · <title> · <step>" through the existing worker status updates.
 3. **Check stage (no worker slot):** file identity, chapters (ffprobe), online lookups through one shared rate
-   limiter per source (all jobs), decision. Only files still needing local detection enter `item_queue`.
+   limiter per source (all jobs), decision. Only files still needing local detection enter `item_queue`. It never
+   waits for a file another job is running (`FILE_RUN_LOCKS.try_hold(path, 0)`): that file enters `item_queue` too,
+   as a preview check hands on what it can't finish. Its worker waits for the other run in 0.5 s slices and stops on a
+   cancel; it gives the file back after `pipeline.WORKER_FILE_WAIT_S` (60 s), or at once while its job is paused or
+   frozen or the holder's job is frozen, as a waiting row with `FILE_BUSY` ("Another Intro & Credits job is running
+   this file; this job tries again in a few minutes"), and the job's retry runs it. The retry promise is taken as the
+   file is given back; with none left (the chain's last attempt, retries off, the job's retry full) the worker waits
+   on, and gives the file back for the next run ("…; trying again on the next run") once the holder is frozen or after
+   `WORKER_FILE_WAIT_NO_RETRY_S` (15 min): a worker never waits out a job paused for hours. The rows name only the
+   servers the job publishes to (its pin's, for a pinned job).
 4. **Worker stage, per movie/episode:**
-   - Audio fingerprint when its season needs one: CPU ffmpeg `-threads 2` on whichever worker picked the item.
+   - Audio fingerprint when its season needs one: CPU ffmpeg on whichever worker picked the item, with that worker's
+     threads (§5.6).
    - Credits: keyframe tail decode with **the worker's GPU** using the same hwaccel argument builder as previews
      (`processing/ffmpeg_runner.py`: CUDA / VAAPI / QSV…); a CPU worker decodes in software. Then text detection on
      the worker's GPU (item 7) or CPU.
    - GPU error → rerun that step on CPU in the same worker, mirroring previews.
+   - No sleeping on the network while holding the worker. An online source the checking stage asked for this file
+     and got no answer to store from isn't asked again. A lookup waits at most 1 s for its source's next slot
+     (`pipeline.WORKER_LOOKUP_WAIT_S` through `ratelimit.capped_waits`; the checking stage keeps the limiter's 60 s):
+     a 429 block or a queue of requests is "unavailable (blocked)" and the next run asks. A Plex publish waits
+     `plex_db.WORKER_BUSY_TIMEOUT_S` (10 s) for its database, and for another thread's check of the same server, when
+     the job retries a busy write (`PLEX_DB_BUSY`, a few minutes later); a job that retries nothing (its chain's last
+     attempt, retries off) keeps the 120 s.
 5. **Season decision** (cheap numpy matching): a job fingerprints the season folder's missing episodes on its
    workers, matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose
    inputs changed (R3; the engine has no completion hook; phase 2 Task 3). A pair with more than 2,000,000 value
    matches is matched on a worker instead of a checking thread.
 6. **Priority and gate.** Webhook-triggered Intro & Credits jobs submit at NORMAL (preview jobs are HIGH), so previews
    drain first; backfill and schedules submit at LOW; users can change it live with the existing priority API.
-   Intro & Credits jobs count toward `max_concurrent_jobs` like any job.
-7. **Text detection on the worker's device.** One long-lived helper subprocess per GPU device plus one shared CPU
-   helper (`python -m media_preview_generator.markers.credits.textdet_helper`, T-R1 — the roadmap's module name, not
-   `markers.textdet`), started lazily by the first marker item on that device; requests from that device's workers
-   are serialized. Why a subprocess: the Vulkan loader reads its env once per process, and NVIDIA needs overrides
-   (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs — the plex host has NVIDIA + Intel; a
-   driver crash or hang can't take the web app down; the WebGPU plugin has a known Linux hang at shutdown without
-   adapters (ORT PR #29591). On start the helper runs a 20-frame self-test against CPU and falls back to a CPU
-   helper unless it finds exactly the same boxes, corner for corner, faster; result cached per device for the
-   process lifetime. A GPU helper that crashes or fails during a request, or that fails to answer between requests, moves its device to the
-   CPU helper for the rest of that run of the app, with one WARNING. A helper with no request for 10 minutes exits
+   Intro & Credits jobs count toward `max_concurrent_jobs` like any job. The detector availability checks
+   (`pipeline.run_detector_checks`: ffmpeg's muxer list, up to 30 s of the text detection check, both kept for the
+   process) run before a job takes its gate slot. Retries wait `retry_queue.scaled_backoff_delay`, the preview
+   retries' own function.
+7. **Text detection on the worker's device.** One long-lived helper subprocess per GPU device, plus CPU helpers
+   sized by the CPU workers (§5.4 CPU) (`python -m media_preview_generator.markers.credits.textdet_helper`, T-R1 —
+   the roadmap's module name, not `markers.textdet`), started lazily by the first marker item on that device;
+   requests from that device's workers are serialized. Why a subprocess: the Vulkan loader reads its env once per
+   process, and NVIDIA needs overrides (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs —
+   a host can have NVIDIA + Intel; a driver crash or hang can't take the web app down; the WebGPU plugin has a known
+   Linux hang at shutdown without adapters (ORT PR #29591). On start the helper checks its WebGPU session is on a
+   hardware adapter and runs a 20-frame self-test against CPU; it falls back to the CPU for the process only when the
+   GPU can't run text detection or doesn't find exactly the same boxes, corner for corner (speed decides nothing).
+   A GPU helper that crashes or fails during a request, or that fails to answer between requests, hands that request
+   to a CPU helper and the GPU is tried again after a back-off (§5.4 "A GPU failure costs one request"). A helper
+   with no request for 10 minutes exits
    (code 75) and is started again on demand without a new self-test; one within 5 s of that idle exit is replaced
    before the next request instead of racing its own timer. On a timeout, cancel or failure the helper's whole
    process group is killed with a bounded wait, and any pipe a stuck process still holds is handed to a daemon
    reaper instead of being closed on the worker thread. The availability check (`GET /api/markers/sources/local` or
    the first job) runs its `--check` subprocess once per process under a lock; the first caller waits up to 30 s,
    later callers reuse the cached answer (M17). Measured: storage P5000 13.3 vs 18.7 ms; plex TITAN RTX 4.8 vs
-   7.7 ms (GPU kept); plex Intel UHD 770 16.1 vs 8.0 ms (→ CPU). Device mapping: worker device (CUDA index / render
+   7.7 ms; plex Intel UHD 770 16.1 vs 8.0 ms (the CPU until 2026-09-25, its GPU since). Device mapping: worker device (CUDA index / render
    node) → PCI bus id → EP device with the same `pci_bus_id`, with no PCI match falling back to the CPU except on a
    single-WebGPU-device host with an unknown worker PCI address (T-R3); phase 3 must prove the EP honours the chosen
    device on a two-GPU host (plugin README: it "selects the physical GPU independently") — open until Task 13 row
    14 (§13).
 8. **Per-job pause** for Intro & Credits jobs: change the job pause/resume routes to set the job-level flag for
    `kind=intro_credits` (global pause still pauses everything). This is what "pause a long backfill without touching
-   previews" needs; today it is not possible.
-9. **Webhooks:** `_execute_webhook_job` submits the preview job as today, then an Intro & Credits job for the same
-   files when any owning server has markers enabled, items grouped by season folder. No extra debounce: the lower
-   priority already runs it after the previews.
+   previews" needs; today it is not possible. A pause by hand lets the running file finish; Pause all, quiet hours and
+   the job's schedule's stop time freeze its running ffmpeg as they freeze previews' (§5.6).
+9. **Webhooks:** the preview runner (`_start_job_async`) queues an Intro & Credits job for the same files when it
+   starts the preview job the batch asked for one in (§6.2 step 1), when any owning server has markers enabled
+   (the pinned server, for a pinned job), items grouped by season folder. No extra debounce: the lower priority
+   already runs it after the previews, and it waits for the preview job to finish.
 10. **Cancel:** online lookups check `cancel_check` between requests; text detection is asked chunk by chunk
     (64 frames) and the decode checks for cancel between chunks; ffmpeg steps use the existing cancellation path.
 
@@ -1303,8 +1459,11 @@ setting, and `settings.json` never stores it (§5.4).
 - `frames.py`: tail length by kind (T-R4), row order and non-increasing rows (T-R5), luma/pts rounding and the
   `-copyts` start-time subtraction (T-R6), chunked decode and cancel between chunks, decode/timeout error mapping
   (T-R7).
-- `textdet_helper.py`: self-test picks GPU/CPU by the exact boxes both sides find, not their count and not speed
-  alone; crash or a between-request failure → CPU for the process lifetime; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
+- `textdet_helper.py`: self-test picks GPU/CPU by the exact boxes both sides find, not their count and never speed;
+  a software renderer → CPU; a crash or between-request failure → CPU for that request, the GPU again on the next one
+  (a failed start after a 5 s cool-down), one WARNING per run of failures; CPU helpers 1/4/8 under concurrent requests never
+  exceed the saved count, GPU workers' CPU requests get their own, a lower count stops idle ones at once and busy ones
+  on return; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
   reaper; device → PCI mapping (T-R3); the availability check's once-per-process lock (M17).
 - `detector.py` and rule J: the anonymised 80-file fixture (`test_reproduces_the_spec_table`) and the decision
   matrix through `decide()` — chapters/credits-text-alone/agreement cells exist and pass.
@@ -2930,3 +3089,140 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   14 s, whose credits sit 15 px from the left edge). Cost: the same decodes per file; a file whose 640×360 reading now
   answers pays its refine window there. The harness gains the regression sets (`--sets accused,isurvived`,
   frame-checked truth, reported, never gated) and leaves out files gone from disk. `evidence/credits/small-text-retry.md`.
+- 2026-09-25 · **Worker waits and rule-only re-decides** (owner; §5.5 rule 16, §5.6, §6.2 steps 3 and 7, §6.4 items 3,
+  4 and 6). Aligns Intro & Credits with the preview workers:
+  - **No worker cap for Intro & Credits.** Priority alone orders the work; the "1 worker by default" line of §5.6 is
+    gone.
+  - **A worker doesn't sleep on network waits it can leave to a retry.** No second ask of an online source the
+    checking stage got no answer from; 1 s at most for a limiter slot (was up to 60 s, plus the 15 s request, per
+    source); 10 s for Plex's database when the job retries busy writes (was 120 s per server). How often a worker
+    slept on either in production is **not proven**: 167 Intro & Credits jobs in the storage lab logged no "blocked"
+    lookup and no busy database; the 120 s came from a 30.8 s hold by another program in production (#301).
+  - **The checking stage doesn't wait on a file another job runs**; its worker does, for at most 60 s (none while
+    paused) when the job retries the file (`FILE_BUSY`), and a cancel stops that wait.
+  - **The detector checks run before the gate slot**; **a job with every file missing and no retry is red**, as a
+    preview job is; **the retry backoff is the preview retries' own function**, not a copy.
+  - **SkipDB keeps its rule** (a second source for new decisions), but a re-decide that only a rule change causes
+    doesn't pull a marker already sent to a server unless new or changed evidence contradicts it (rule 16); an
+    answer only stored again isn't new.
+- 2026-09-25 · **Triggers and restarts no longer lose markers where previews are kept** (§6.2 steps 1, 2 and 8, §6.4
+  item 9; owner: markers from a pinned webhook follow the pin, no new settings).
+  - **A restart during the webhook debounce dropped the markers.** The preview job was saved at batch-open and
+    revived; the follow-up was queued only when the timer fired. The batch now asks in the preview job's config
+    (`INTRO_CREDITS_FOLLOW_UP`, with `webhook_paths` and the pin) and the preview runner queues the follow-up whenever
+    it starts the job, then takes the request off (`triggers.submit_pending_follow_up`, once per job).
+  - **Scheduled Recently Added never queued markers**, and had no Files-panel rows or retries and ended green with
+    nothing done after a restart. It now runs through the preview runner like every preview job (rows, retry chain,
+    revival over the window it was created for) and queues the follow-up for the files it lists.
+  - **The pin was dropped.** A pinned or vendor webhook's markers went to every server with markers on. Follow-ups now
+    carry the pin the preview workers resolve per file (`resolve_per_item_pin`); detection stays shared through
+    markers.db, so only owners and publishing are scoped.
+  - **An Inspector save a server didn't take queued nothing.** It now queues a non-forced single-file HIGH job.
+  - **A TheIntroDB recheck was failed by a restart more than 12 h after it was queued.** Delayed jobs are aged from
+    their due time.
+  - Architecture review (0 HIGH, 6 MED, 8 LOW). Fixed: the Recently Added window is measured from the job's creation
+    minus the lookback to when it runs, after the gate, and no longer rounded up (a fresh 1 h run listed 2 h); an
+    unpinned scan keeps each Emby/Jellyfin file's origin for its preview retries; a Recently Added follow-up never
+    covers or takes a webhook's files; the Inspector decides from the editor's own words (a not-ready server reads
+    "failed"); and the LOWs on stale config writes, the flag's take, cancelled scans and dropped enumeration warnings.
+    Kept by the owner's rule ("exactly as previews"): an unpinned Emby or Jellyfin webhook's markers go to that server
+    only, as its previews do.
+- 2026-09-25 · **Markers work on a worker follows the worker model, as previews' FFmpeg** (§5.3, §5.4, §5.6, §6.4
+  items 4 and 8). Owner: "we set GPU workers and CPU workers. You need to respect that. Just like it works for
+  previews." Five gaps closed:
+  1. **Pause.** Pause all, quiet hours and a schedule's stop time left a running credits read (up to 2 × 600 s) or a
+     season step (every sibling fingerprinted) running; the detectors ignored `pause_check` (T-R9, 2026-09-16). Now
+     each running decode and fingerprint is frozen with SIGSTOP of its process group and let go with SIGCONT, its time
+     limit and the credits look-back's moved out by the time paused, no new ffmpeg starts, the season step waits
+     before its next sibling, and a retry's countdown stands still (`markers/freeze.py`). The check is the global
+     pause or the job's schedule's stop time (`PipelineContext.freeze_check`); a pause by hand keeps T-R9's behaviour
+     (the slot goes back, the running file finishes). A job frozen by its stop time holds its files' locks until the
+     next start; waits for them are cancellable, and a fingerprint's is bounded (architecture review, MED).
+  2. **Chromaprint limit removed.** Season audio held its worker while it waited on an app-wide limit of 2
+     fingerprints. The limit protected nothing the pool doesn't: fingerprints run only on workers (the check stage
+     reads cached ones and hands the file to a worker when one is missing, `season_audio_needs_worker`; only a sibling
+     replaced between the check and the run could make a checking thread fingerprint, bounded by `check_share`), and
+     the stalled-mount guard is its own count (`STALLED_LIMIT`, kept). No limit is kept on the checking threads, and
+     nothing there is frozen by a pause: a job frozen by its stop time would otherwise keep the kind's share of
+     checking threads from every other job until its next start (architecture review, MED).
+  3. **Threads.** `-threads 2` was hardcoded for every decode and fingerprint. A GPU worker now uses its own GPU's
+     `ffmpeg_threads` (`-threads N -filter_threads N`, previews' flags) and a CPU worker ffmpeg's own count. Threads
+     don't change what a decoder or the nearest-pixel scaler gives, so no stored answer moves.
+  4. **End-picture fallback** was a DEBUG line; it now sets the worker row's fallback flag and warns once per GPU.
+  5. **Decode check** ran on a worker's first credits decode (up to 60 s, with a CPU reference decode on a GPU
+     worker). It now starts in the background, once per GPU, when an Intro & Credits job that reads credit text builds
+     the worker pool; it stays log-only.
+- 2026-09-25 · **Text detection follows the worker model, like previews** (owner: "we set GPU workers and CPU
+  workers. You need to respect that"; §5.4 Guard, CPU; §6.4 item 7). Three changes in `textdet_helper.py`. (1) The
+  speed rule is gone: a GPU worker's text detection runs on its GPU whenever its WebGPU session is on a hardware
+  adapter and the self-test finds the CPU's boxes, however fast (an iGPU slower than its CPU was kept off before). A
+  software renderer is checked for directly now (the helper lists the Vulkan devices its pinned environment exposes),
+  since the speed rule was what used to keep Dawn off llvmpipe. A box mismatch still means the CPU, with a WARNING.
+  (2) A GPU helper failure costs that request, not the device for the run: CPU for that request, the GPU again after
+  30 s (doubling), one WARNING and an hourly retry at 3 failures in a row, reset by a success. (3) CPU text detection
+  scales with the CPU workers: a helper per request in flight up to the saved CPU worker count, instead of one
+  serialised helper for every CPU worker; a GPU worker's request on the CPU gets its own, as a preview's CPU rerun
+  stays on its worker. Settings saves resize them. A GPU worker's rerun after a failed GPU decode, which reaches text
+  detection with no GPU, says it is a GPU worker's (`gpu_worker`, wired at the integration; §5.4 CPU).
+- 2026-09-25 · **Integration of round 3 (portability, previews bugs, worker waits, triggers, worker parity, text
+  detection)**. Where the lanes met:
+  - **A file another job runs.** The checking stage never waits for it (it hands the file to a worker); a worker waits
+    in 0.5 s slices, stops at once on a cancel, and, when its job retries the file, gives it back with `FILE_BUSY`
+    after `WORKER_FILE_WAIT_S` or at once while the job is paused (the dispatcher's pause) or frozen
+    (`ctx.freeze_check`: Pause all, quiet hours, its schedule's stop time). The detectors still get only
+    `freeze_check`, so a pause by hand lets a running file finish.
+  - **`reconcile_gpu_workers`** pushes a GPU's saved `ffmpeg_threads` once, after the count change, to every worker on
+    that GPU (previews and markers read the same attribute), and new workers are built from the new entry.
+  - **Recently Added** now runs through the preview runner, so it dispatches at its job's priority like a full scan.
+  - **Text detection on a GPU worker's CPU rerun** (the open item of the text detection entry above): the worker
+    passes `gpu_worker` to `process_fn`, the pipeline hands it to every detector, and the credits detector asks
+    `detect_boxes(..., gpu_worker=True)`, so the rerun gets a CPU helper of its own even with no CPU workers.
+  - **Restarts.** A follow-up older than the revival window stayed failed while its preview job was revived (it had
+    waited for a slot) or held by the pause; it now goes where its preview job goes (§6.2 "Restart"). A Re-run of a
+    preview job drops a follow-up request the old job never took.
+- 2026-09-25 · **Final alignment pass: markers follow the webhook pin and the worker model the way previews do**
+  (parity re-check and final architecture review; §5.4, §5.6, §6.2 steps 1, 2 and 3 and "Restart").
+  - **Pins.** A worker giving back a file another job runs names only the pinned server (and answers `NO_OWNERS` like
+    `_attempt` when that server doesn't take the file); Season jobs carry the pin of the job that queued them, and a
+    waiting or running Season job or webhook follow-up covers a request only when it publishes at least as widely; a
+    scheduled Intro & Credits job for one server's libraries is pinned to that server.
+  - **Worker behaviour.** Text detection tries the GPU again after a back-off of 5 s, doubling with failures in a row up
+    to 600 s and reset by a success (never given up on), warns once per run of failures and says when it is back; a GPU
+    worker's request
+    read on the CPU sets the worker row's fallback flag; a CPU worker's wait for a helper ends on a cancel. Chromaprint
+    runs at ffmpeg's own thread count on any worker.
+  - **Waits.** A worker whose job can't promise a retry no longer waits without bound for another job's run: at once
+    when the holder is frozen, else after 15 min, it leaves the file to the next run. The retry promise is taken when
+    the file is given back, so a file is never given back to a retry that has no room left for it.
+  - **Restarts.** A never-started job is aged from when it could first run (due time, slot wait, its preview job's
+    end); a schedule doesn't queue a second Recently Added scan while its last one hasn't started.
+- 2026-09-25 · **Architecture review of the final alignment pass** (1 HIGH, 3 MED, 8 LOW; all applied).
+  - **HIGH: a cancel was stored as "nothing found".** `TextDetCancelledError` no longer subclasses
+    `TextDetUnavailableError`, so the 640x360 reading's failure handling can't keep an answer for a cancelled job; the
+    detector turns it into "cancelled", as a cancelled decode.
+  - **Text detection back-off** (above, §5.4): 5 s doubling to 600 s on failures in a row, starts and requests alike.
+  - **Previews:** FFmpeg's own exit 255 after a SIGTERM or SIGINT counts as stopped from outside; a Dolby Vision
+    Profile 5 run stopped that way or by an I/O error skips the software-libplacebo and DV-safe tiers even with no frame
+    written (DV-safe would publish wrong colours); every CPU hand-off is worded by its cause (a codec, a run that
+    stopped part-way, an I/O error, a stall, a signal) and nothing a disk did is answered with "remux".
+  - **LOWs:** the check stage takes no retry promise and a give-back that ends in no owner hands its promise back; a
+    Recently Added scan reads its window again after the gate; the Emby temp sweep unlinks file by file after a fresh
+    check (never the generic removal); v19 leaves the auto-pause flag exactly "paused with no workers"; a job waiting
+    at the gate refreshes `slot_wait_since`.
+- 2026-09-25 · **Second review of the previews publish rule and the gate** (1 MED, 1 split, 2 LOW; all applied).
+  - **Interrupted or ended on the file.** A run stopped from outside (a SIGTERM, SIGINT, SIGHUP or SIGKILL, raw or as
+    255/129/130/143/137; the stall watchdog; an I/O error, exit 251) keeps today's rule: its frames are discarded, the
+    software-libplacebo and DV-safe tiers are skipped, a GPU run goes to the CPU and a CPU run fails for a later retry.
+    A crash (SIGSEGV, SIGABRT, SIGBUS, SIGFPE or SIGILL, raw or as 128+n) is the file's own and happens on every scan,
+    so it is judged as a non-zero exit of its own: 95% of the frames publish, a CPU run below that publishes the short
+    preview, and a Profile 5 run with none still gets the DV-safe chain last.
+  - **MED: exit 251 is also a GPU error.** With a GPU, hardware accelerator or OpenCL error in that run's stderr
+    ("failed to enqueue kernel", "cl image", "opencl error" added to the patterns; not a bare "opencl", which a working
+    run prints on many lines at `-loglevel debug`) it counts as the GPU's: nothing is
+    discarded for it, a Profile 5 run with no frames goes on to the software-libplacebo tier, and the hand-off says
+    `hwaccel`. Only a plain 251 is an I/O error, and its lines name both places one comes from: the disk or share the
+    video is on, and the working folder.
+  - **LOWs:** a DV-safe run that fails on the GPU hands off with its real cause (the cut-off's kind, else the GPU's
+    decoder or filters), not "codec"; the gate runs `on_wait` (a database write and an emit) with its lock released and
+    looks for a freed slot again before it sleeps; the runner puts only a SIGKILL down to the out-of-memory killer, and
+    words a crash signal as FFmpeg crashing on the file.

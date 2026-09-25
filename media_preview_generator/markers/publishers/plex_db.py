@@ -63,9 +63,12 @@ SAME_HOST_PATH_ADVICE = (
 # The default for how long one write() waits for locks in total (this process's lock on the database, then Plex's
 # write lock) before giving up; a job then tries the file again a few minutes later. capability() allows this twice:
 # once for the lock probe, once for its read-only checks after the Plex calls. It is a job's wait: another program
-# writing to Plex's database (a Kometa-style tool) held its write lock 30.8 s in production, past the 30 s this was.
+# writing to Plex's database (a Kometa-style tool) was observed holding its write lock 30.8 s, past the 30 s this was.
 # A caller that must answer sooner passes its own ``db_timeout_s`` (the Inspector's publish, ruling P-R1).
 BUSY_TIMEOUT_S = 120.0
+# A job's worker holds a GPU or CPU worker previews need, so its publish waits this long instead, when the job retries a
+# write the database refused a few minutes later (the checking stage, which holds no worker, keeps BUSY_TIMEOUT_S).
+WORKER_BUSY_TIMEOUT_S = 10.0
 # A write whose wait for another program's write lock begins this soon after the previous one gave up waiting for it
 # counts the time Plex's database has been busy from where that one started (``_DatabaseLock``).
 BUSY_STRETCH_GAP_S = 5.0

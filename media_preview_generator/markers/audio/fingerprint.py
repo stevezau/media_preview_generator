@@ -1,8 +1,10 @@
 """Chromaprint fingerprints of an episode's opening (spec §5.3), cached per file identity in markers.db.
 
-CPU only (there is no GPU chromaprint), ``-threads 2`` and at most two at a time across the whole app (spec §5.6).
-Only jellyfin-ffmpeg carries the chromaprint muxer in the image; the arm64 image has none, so season audio is then
-unavailable rather than failing every episode.
+CPU only (there is no GPU chromaprint). As many run at once as workers run them: the worker pool is the cap, as it is
+for previews. Each runs at ffmpeg's own thread count on any worker: a GPU worker's ``ffmpeg_threads`` caps its GPU
+work, and chromaprint is CPU work (spec §5.6). Pause all, quiet hours and a schedule's stop time stop a running one where it is
+(:mod:`..freeze`). Only jellyfin-ffmpeg carries the chromaprint muxer in the image; the arm64 image has none, so season
+audio is then unavailable rather than failing every episode.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from loguru import logger
 
+from ..freeze import Freeze
 from ..fs import gone_from_disk
 from ..locks import KeyedLocks
 from ..missing import sweep_missing_files
@@ -40,8 +43,8 @@ RETIME_BASE_RATE = 48_000
 MIN_RETIME, MAX_RETIME = 0.5, 2.0
 MAX_WINDOW_S = 900.0
 WINDOW_FRACTION = 0.35
-FFMPEG_THREADS = 2
-MAX_PARALLEL = 2
+# Killed fingerprint ffmpegs still stuck reading their files (a stalled mount) at which no new one starts.
+STALLED_LIMIT = 2
 # Fingerprinted files one cache sweep looks for on disk (about 28 KiB of markers.db each once gone): a 100k-episode
 # library is gone through every 50 sweeps, at a few seconds of file stats each on a network mount.
 MAX_SWEEP_CHECKS = 2_000
@@ -57,10 +60,15 @@ CHROMAPRINT_RETRY_S = 600.0
 JELLYFIN_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 # How long a killed ffmpeg may take to let go of its output before it is left to a reaper thread.
 KILL_WAIT_S = 5.0
+# The time limit of one fingerprint's ffmpeg (a hung network mount must not hold a worker).
+FINGERPRINT_TIMEOUT_S = 300.0
+# The longest a caller waits for another run of the same file's fingerprint: the most a running one takes, with its kill
+# and its store write. Only a run frozen by its job's schedule's stop time holds the file longer, until that schedule's
+# next start; time the waiter itself is paused doesn't count.
+LOCK_WAIT_S = FINGERPRINT_TIMEOUT_S + KILL_WAIT_S + 10.0
 _POLL_S = 0.5
 # ffmpeg's wording when a file has no audio stream to fingerprint: a stored empty answer, not a retryable failure.
 _NO_AUDIO_HINTS = ("does not contain any stream", "matches no streams", "Output file is empty")
-_PARALLEL = threading.BoundedSemaphore(MAX_PARALLEL)
 _FILE_LOCKS = KeyedLocks()
 _monotonic = time.monotonic
 # Per ffmpeg binary: what its muxer list said, and when to ask again (None: never).
@@ -70,7 +78,7 @@ _SWEEP_LOCK = threading.Lock()
 _sweep_started_at: float | None = None
 _stuck_warned_at: float | None = None
 # Killed ffmpegs that still held their output are counted under this reaper name (probe.stuck_processes). They no
-# longer hold a fingerprint slot, so without the count every freed slot would start another one on the same mount.
+# longer hold a worker, so without the count every freed worker would start another one on the same mount.
 REAPER = "fingerprint-reaper"
 
 
@@ -91,8 +99,13 @@ class FingerprintError(Exception):
 
 
 class FingerprintStalledError(FingerprintError):
-    """``MAX_PARALLEL`` earlier fingerprint ffmpegs are still stuck reading their files (a stalled mount), so no new one
-    is started. Not the file's fault: nothing is recorded against it, and nothing else should be."""
+    """``STALLED_LIMIT`` earlier fingerprint ffmpegs are still stuck reading their files (a stalled mount), so no new
+    one is started. Not the file's fault: nothing is recorded against it, and nothing else should be."""
+
+
+class FingerprintBusyError(Exception):
+    """Another job's run of the file's fingerprint held it for longer than a running one takes (that job is frozen by
+    its schedule's stop time). Nothing about the file: nothing is recorded against it, and it is asked again later."""
 
 
 class FingerprintSkippedError(Exception):
@@ -219,7 +232,7 @@ def fingerprint_command(ffmpeg: str, path: str, length_s: float, retime: float |
         [] if retime is None else ["-af", f"aresample={RETIME_BASE_RATE},asetrate={round(RETIME_BASE_RATE * retime)}"]
     )
     return [
-        ffmpeg, "-nostdin", "-v", "error", "-threads", str(FFMPEG_THREADS),
+        ffmpeg, "-nostdin", "-v", "error",
         "-ss", "0", "-t", f"{length_s:.3f}", "-i", path,
         "-vn", "-sn", "-dn", "-ac", "2", *speed,
         "-f", "chromaprint", "-algorithm", str(ALGORITHM), "-fp_format", "raw", "-",
@@ -232,8 +245,9 @@ def compute_fingerprint(
     *,
     ffmpeg: str,
     cancel_check: Callable[[], bool] | None = None,
-    timeout_s: float = 300.0,
+    timeout_s: float = FINGERPRINT_TIMEOUT_S,
     retime: float | None = None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
 ) -> np.ndarray:
     """Run ffmpeg and return the fingerprint points.
 
@@ -243,29 +257,44 @@ def compute_fingerprint(
         ffmpeg: An ffmpeg with chromaprint.
         cancel_check: True once the job is cancelled; ffmpeg is killed.
         timeout_s: Hard limit (a hung network mount must not hold a worker): the call returns within it plus
-            ``KILL_WAIT_S`` and one poll.
+            ``KILL_WAIT_S`` and one poll, not counting time paused.
         retime: Fingerprint the audio retimed to another speed (:func:`fingerprint_command`); None for its own.
+        pause_check: True while everything is paused (:class:`..freeze.Freeze`): ffmpeg doesn't start, or its process
+            group is stopped where it is until the resume, and the time limit moves out by the time paused. A cancel
+            still ends it.
 
     Returns:
         uint32 points (little-endian); empty for a file without an audio stream.
 
     Raises:
         FingerprintError: ffmpeg failed, timed out or the job was cancelled.
+        FingerprintStalledError: A pause before the start outlasted a mount stall (``STALLED_LIMIT`` ffmpegs stuck).
     """
     name = os.path.basename(path)
     command = fingerprint_command(ffmpeg, path, window_s(duration_ms), retime)
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            out, err = proc.communicate(timeout=_POLL_S)
-            break
-        except subprocess.TimeoutExpired:
-            cancelled = bool(cancel_check and cancel_check())
-            if cancelled or time.monotonic() > deadline:
-                _stop(proc, name)
-                why = "cancelled" if cancelled else f"timed out after {timeout_s:.0f} s"
-                raise FingerprintError(f"Fingerprinting {name} {why}") from None
+    freeze = Freeze.of(pause_check)
+    if freeze.hold(cancel_check=cancel_check, name=name):
+        # Held before the start: what was checked before the pause may no longer hold.
+        if cancel_check and cancel_check():
+            raise FingerprintError(f"Fingerprinting {name} cancelled")
+        _raise_if_stalled(name)
+    # Its own session, so a pause stops ffmpeg's whole group and never the app's.
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    deadline = freeze.clock() + timeout_s
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                freeze.hold(proc, cancel_check=cancel_check, name=name)
+                cancelled = bool(cancel_check and cancel_check())
+                if cancelled or freeze.clock() > deadline:
+                    why = "cancelled" if cancelled else f"timed out after {timeout_s:.0f} s"
+                    raise FingerprintError(f"Fingerprinting {name} {why}") from None
+    except BaseException:
+        _stop(proc, name)  # whatever ended the wait, even a failing pause or cancel check: ffmpeg never runs on
+        raise
     if proc.returncode != 0:
         text = (err or b"").decode("utf-8", errors="replace")
         if any(hint in text for hint in _NO_AUDIO_HINTS):
@@ -279,8 +308,8 @@ def _stop(proc: subprocess.Popen, name: str) -> None:
     """Kill ffmpeg and collect it, waiting at most ``KILL_WAIT_S``.
 
     A read stuck on a stalled network mount leaves ffmpeg unkillable until the read returns, holding its pipes. Waiting
-    for that would keep the worker, one of the two fingerprint slots and the file's lock for as long as the mount
-    stalls, so such a process goes to a daemon reaper instead, and counts as stalled until the reaper collects it.
+    for that would keep the worker and the file's lock for as long as the mount stalls, so such a process goes to a
+    daemon reaper instead, and counts as stalled until the reaper collects it.
     """
     kill_and_collect(proc, what=f"ffmpeg fingerprinting {name}", reaper_name=REAPER, wait_s=KILL_WAIT_S)
 
@@ -292,7 +321,7 @@ def stalled_ffmpegs() -> int:
 
 def _raise_if_stalled(name: str) -> None:
     stalled = stalled_ffmpegs()
-    if stalled >= MAX_PARALLEL:
+    if stalled >= STALLED_LIMIT:
         raise FingerprintStalledError(
             f"Not fingerprinting {name}: {stalled} earlier fingerprint ffmpegs are still stuck reading their files"
         )
@@ -337,10 +366,13 @@ def ensure_fingerprint(
     skip: Callable[[], bool] | None = None,
     on_failure: Callable[[], None] | None = None,
     retime: float | None = None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
 ) -> np.ndarray | None:
     """A file's fingerprint from the cache, computing and storing it when missing.
 
-    Two callers asking for one file share one ffmpeg run; at most ``MAX_PARALLEL`` run app-wide.
+    Two callers asking for one file share one ffmpeg run: the second waits for the first, at most ``LOCK_WAIT_S`` (not
+    counting time it is paused itself), and a cancel ends its wait. There is no app-wide limit: each worker that needs
+    one runs it, so the worker counts cap how many run at once, as they cap previews' FFmpeg.
 
     Args:
         store: The markers store.
@@ -353,17 +385,32 @@ def ensure_fingerprint(
             before the lock is released, so a ``skip`` of a caller waiting on the lock sees what it records.
         retime: The file's audio retimed to its season group's speed (:func:`fingerprint_command`), cached apart from
             its own; None for its own.
+        pause_check: True while everything is paused (:func:`compute_fingerprint`).
 
     Returns:
         The points, or None when the file's row changed identity while ffmpeg ran (nothing stored).
 
     Raises:
-        FingerprintStalledError: ``MAX_PARALLEL`` earlier ffmpegs are still stuck reading their files; none is started.
-        FingerprintError: The file has no known duration, or ffmpeg failed.
+        FingerprintStalledError: ``STALLED_LIMIT`` earlier ffmpegs are still stuck reading their files; none is started.
+        FingerprintBusyError: Another job's run of the file held it past ``LOCK_WAIT_S``.
+        FingerprintError: The file has no known duration, ffmpeg failed, or the job was cancelled.
         FingerprintSkippedError: ``skip`` said not to run ffmpeg.
     """
     name = os.path.basename(rec.canonical_path)
-    with _FILE_LOCKS.hold(rec.id):
+    freeze = Freeze.of(pause_check)
+    give_up_at = freeze.clock() + LOCK_WAIT_S
+
+    def while_waiting() -> None:
+        freeze.hold(cancel_check=cancel_check, name=name)
+        if cancel_check and cancel_check():
+            raise FingerprintError(f"Fingerprinting {name} cancelled")
+        if freeze.clock() > give_up_at:
+            raise FingerprintBusyError(
+                f"Not fingerprinting {name}: another job has held it for longer than a fingerprint takes (paused by "
+                "its schedule's stop time)"
+            )
+
+    with _FILE_LOCKS.hold(rec.id, while_waiting=while_waiting):
         if not rec.duration_ms:
             raise FingerprintError(f"No known duration for {name}")
         stored = cached_fingerprint(store, rec, retime)
@@ -371,20 +418,16 @@ def ensure_fingerprint(
             return points_of(stored)
         if skip is not None and skip():
             raise FingerprintSkippedError(f"Not fingerprinting {name} again yet")
-        _raise_if_stalled(name)  # rather than wait for a slot only to find the mount still stalled
-        while not _PARALLEL.acquire(timeout=_POLL_S):
-            if cancel_check and cancel_check():
-                raise FingerprintError(f"Fingerprinting {name} cancelled")
+        _raise_if_stalled(name)
         try:
-            try:
-                # A stalled ffmpeg is counted just before it gives back its slot, and a caller waiting for that slot
-                # takes it at once: only a check here sees it.
-                _raise_if_stalled(name)
-                points = compute_fingerprint(
-                    rec.canonical_path, rec.duration_ms, ffmpeg=ffmpeg, cancel_check=cancel_check, retime=retime
-                )
-            finally:
-                _PARALLEL.release()
+            points = compute_fingerprint(
+                rec.canonical_path,
+                rec.duration_ms,
+                ffmpeg=ffmpeg,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+                retime=retime,
+            )
         except FingerprintStalledError:
             raise
         except FingerprintError:

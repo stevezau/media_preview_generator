@@ -6,6 +6,8 @@ priority-aware dispatcher scheduling, and the priority update API.
 """
 
 import os
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -382,6 +384,130 @@ class TestJobGateReservation:
         assert self._admit(gate, PRIORITY_NORMAL) is True
         assert self._admit(gate, PRIORITY_NORMAL) is True
         assert self._admit(gate, PRIORITY_NORMAL) is False
+
+
+class TestJobGateOnWait:
+    """``on_wait`` writes the job's queued state (a database upsert and a SocketIO emit), so it runs with the gate
+    lock released: every other acquire and release would otherwise queue behind that I/O."""
+
+    @staticmethod
+    def _gate(cap, poll_s):
+        from media_preview_generator.web.job_gate import JobGate
+
+        gate = JobGate(lambda: cap)
+        gate._POLL_SECONDS = poll_s
+        return gate
+
+    @staticmethod
+    def _another_thread_can_take(lock) -> bool:
+        took: list[bool] = []
+
+        def probe():
+            got = lock.acquire(blocking=False)
+            took.append(got)
+            if got:
+                lock.release()
+
+        # The gate's Condition wraps an RLock, which the waiting thread itself could always re-enter: only another
+        # thread shows whether the lock is really free.
+        prober = threading.Thread(target=probe)
+        prober.start()
+        prober.join(timeout=5)
+        return took == [True]
+
+    def test_on_wait_runs_with_the_gate_lock_released(self):
+        gate = self._gate(1, poll_s=0.05)
+        assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
+        free_during_on_wait: list[bool] = []
+
+        def on_wait(active, cap, effective_cap):
+            free_during_on_wait.append(self._another_thread_can_take(gate._cond))
+
+        admitted = gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: bool(free_during_on_wait), on_wait=on_wait)
+
+        assert admitted is False
+        assert free_during_on_wait == [True]
+        assert gate.snapshot() == (1, 0, 1), "the cancelled waiter left the heap and took no slot"
+
+    def test_a_slot_freed_while_on_wait_runs_is_taken_without_waiting_out_the_poll(self):
+        gate = self._gate(1, poll_s=5.0)
+        assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
+        calls: list[tuple] = []
+
+        def on_wait(active, cap, effective_cap):
+            calls.append((active, cap, effective_cap))
+            gate.release(PRIORITY_NORMAL)  # the running job ends while the queued state is being written
+
+        started = time.monotonic()
+        admitted = gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False, on_wait=on_wait)
+
+        assert admitted is True
+        assert time.monotonic() - started < 2.0, "the freed slot's notify came before the wait; look again first"
+        assert calls == [(1, 1, 1)]
+        assert gate.snapshot() == (1, 0, 1)
+
+    def test_waiters_are_admitted_in_priority_then_submission_order(self):
+        gate = self._gate(1, poll_s=0.05)
+        assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
+        admitted: list[str] = []
+        lock = threading.Lock()
+
+        def on_wait(active, cap, effective_cap):
+            time.sleep(0.01)  # widen the window in which the gate lock is down
+
+        def wait_for_slot(name, priority):
+            if gate.acquire(priority, cancel_check=lambda: False, on_wait=on_wait):
+                with lock:
+                    admitted.append(name)
+
+        threads = []
+        for name, priority in [("low", PRIORITY_LOW), ("normal-1", PRIORITY_NORMAL), ("high", PRIORITY_HIGH)]:
+            threads.append(threading.Thread(target=wait_for_slot, args=(name, priority)))
+            threads[-1].start()
+            _wait_until(lambda n=len(threads): gate.snapshot()[1] == n)
+        threads.append(threading.Thread(target=wait_for_slot, args=("normal-2", PRIORITY_NORMAL)))
+        threads[-1].start()
+        _wait_until(lambda: gate.snapshot()[1] == 4)
+
+        # Each release settles the slot of the job admitted before it: the first holder, then each waiter in turn.
+        for count, finished in enumerate([PRIORITY_NORMAL, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_NORMAL], start=1):
+            gate.release(finished)
+            _wait_until(lambda n=count: len(admitted) == n)
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert admitted == ["high", "normal-1", "normal-2", "low"]
+
+    def test_a_cancelled_waiter_leaves_and_the_next_one_takes_the_slot(self):
+        gate = self._gate(1, poll_s=0.05)
+        assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
+        cancel_first = threading.Event()
+        results: dict[str, bool] = {}
+
+        def wait_for_slot(name, cancel_check):
+            results[name] = gate.acquire(PRIORITY_NORMAL, cancel_check=cancel_check, on_wait=lambda *_: None)
+
+        first = threading.Thread(target=wait_for_slot, args=("first", cancel_first.is_set))
+        first.start()
+        _wait_until(lambda: gate.snapshot()[1] == 1)
+        second = threading.Thread(target=wait_for_slot, args=("second", lambda: False))
+        second.start()
+        _wait_until(lambda: gate.snapshot()[1] == 2)
+
+        cancel_first.set()
+        first.join(timeout=5)
+        gate.release(PRIORITY_NORMAL)
+        second.join(timeout=5)
+
+        assert results == {"first": False, "second": True}
+        assert gate.snapshot() == (1, 0, 1)
+
+
+def _wait_until(condition, timeout_s: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting for the gate"
+        time.sleep(0.005)
 
 
 class TestFormatWaitMessage:

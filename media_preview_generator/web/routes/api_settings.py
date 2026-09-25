@@ -116,11 +116,29 @@ def _reconcile_live_cpu_workers(settings) -> int:
         return 0
 
 
+def _resize_text_detection_cpu_helpers() -> None:
+    """Resize credit text detection's CPU helpers (one per CPU worker) to the saved CPU worker count.
+
+    Called outside the settings lock: the helper pool reads the saved count itself, never while holding its own lock.
+    """
+    try:
+        from ...markers.credits.textdet_helper import reconcile_textdet_cpu_helpers
+
+        reconcile_textdet_cpu_helpers()
+    except Exception:
+        logger.warning(
+            "Could not resize credit text detection's CPU helpers to the new CPU worker count. "
+            "The setting was saved and applies to the next file; idle helpers stop on their own within 10 minutes. "
+            "See the traceback below for the underlying cause.",
+            exc_info=True,
+        )
+
+
 def _auto_pause_if_needed(settings) -> None:
     """Pause processing when all worker counts drop to zero."""
     if settings.processing_paused:
         return
-    settings.processing_paused = True
+    settings.pause_for_no_workers()
     logger.info("Processing auto-paused — no workers configured")
     try:
         from ..jobs import get_job_manager
@@ -282,7 +300,19 @@ def _route_legacy_plex_fields_into_media_servers(settings, updates: dict) -> tup
 
 
 def _auto_resume_if_needed(settings) -> None:
-    """Resume processing when workers become available again."""
+    """Undo the zero-workers auto-pause once workers are available again.
+
+    Any other pause (Pause all, quiet hours) is the user's and a settings save leaves it in place.
+    """
+    if not settings.processing_auto_paused:
+        return
+    from ..scheduler import is_now_in_any_quiet_window
+
+    if is_now_in_any_quiet_window(settings.get("quiet_hours")):
+        # Quiet hours take the pause over; the window's end resumes processing.
+        settings.processing_paused = True
+        logger.info("Workers available again, but quiet hours are active — processing stays paused until they end")
+        return
     settings.processing_paused = False
     logger.info("Processing auto-resumed — workers available")
     try:
@@ -696,10 +726,12 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
 
     1. **Worker reconciliation** — if ``gpu_config`` or ``cpu_threads``
        changed, scale the live worker pool to match. A ``cpu_threads`` save
-       reports how many busy CPU workers will stop after their current file.
+       reports how many busy CPU workers will stop after their current file,
+       and resizes credit text detection's CPU helpers (one per CPU worker).
     2. **Worker-count gate** — if total processing threads dropped to zero,
-       auto-pause; if they rose above zero and we were paused, auto-resume.
-       Reports the warning for the response.
+       auto-pause; if they rose above zero while that auto-pause holds,
+       auto-resume. Any other pause is left alone. Reports the warning for
+       the response.
     3. **Library cache bust** — if any Plex connection field changed (URL,
        token, verify_ssl), invalidate the cached library list. Uses
        ``incoming_field_keys`` rather than ``updates`` so the hook still
@@ -723,6 +755,7 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
         _reconcile_live_gpu_workers(settings)
     if "cpu_threads" in updates:
         response_fields["cpu_workers_retiring"] = _reconcile_live_cpu_workers(settings)
+        _resize_text_detection_cpu_helpers()
 
     ok, thread_warning = validate_processing_thread_totals(settings.get_all())
     if not ok:

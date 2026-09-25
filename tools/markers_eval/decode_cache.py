@@ -24,6 +24,7 @@ import numpy as np
 from loguru import logger
 
 from media_preview_generator.markers.credits import frames
+from media_preview_generator.markers.freeze import Freeze
 
 
 def rows_to_json(rows: Sequence[frames.Row]) -> list[list]:
@@ -178,6 +179,8 @@ class DecodeCache:
         drop_non_key: bool = False,
         scale: int = 1,
         download_format: str | None = None,
+        pause_check: Callable[[], bool] | Freeze | None = None,
+        ffmpeg_threads: int | None = None,
     ) -> list[frames.Row]:
         """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection backend.
 
@@ -196,7 +199,7 @@ class DecodeCache:
         command, _ = frames.decode_command(
             ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
             gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key, scale=scale,
-            download_format=download_format,
+            download_format=download_format, ffmpeg_threads=ffmpeg_threads,
         )  # fmt: skip
         if start_time_s is None:
             start_time_s = self.container_start_s(path, ffmpeg, cancel_check=cancel_check)
@@ -224,7 +227,7 @@ class DecodeCache:
                 path, ffmpeg=ffmpeg, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps,
                 gpu=gpu, gpu_device_path=gpu_device_path, detect_boxes=detect_boxes, cancel_check=cancel_check,
                 timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every, drop_non_key=drop_non_key,
-                scale=scale, download_format=download_format,
+                scale=scale, download_format=download_format, pause_check=pause_check, ffmpeg_threads=ffmpeg_threads,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})

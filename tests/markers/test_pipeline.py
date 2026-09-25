@@ -18,7 +18,9 @@ from media_preview_generator.markers.audio.fingerprint import ChromaprintState
 from media_preview_generator.markers.decide import DECIDE_RULES, DECIDE_RULES_VERSION, DecisionStatus, FileLimits
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from media_preview_generator.markers.outcomes import (
+    FILE_BUSY,
     OUTCOME_KEYS,
+    PLEX_DB_BUSY,
     VERSIONS_UNCHECKED,
     FileOutcome,
     ServerStatus,
@@ -26,6 +28,7 @@ from media_preview_generator.markers.outcomes import (
 )
 from media_preview_generator.markers.pipeline import LocalDetectorSpec, PipelineContext, check_item, process_item
 from media_preview_generator.markers.probe import Chapter, MediaProbe, ProbeError
+from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import (
     Capability,
     CapabilityReport,
@@ -34,6 +37,7 @@ from media_preview_generator.markers.publishers.base import (
     Shown,
 )
 from media_preview_generator.markers.settings import load_global, validate_global
+from media_preview_generator.markers.sources import ratelimit
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.processing.generator import CodecNotSupportedError
@@ -4394,31 +4398,225 @@ class TestDecideRulesVersion:
         assert store.version_rerun(store.get_file(media).id, DECIDE_RULES) == DECIDE_RULES_VERSION
         assert versions.files_to_read_again(store, self._settings()) == {}
 
-    def test_a_file_decided_under_older_rules_is_decided_again_from_its_stored_answers(self, store, media, monkeypatch):
+    SKIPDB_AND_THEINTRODB = {
+        "sources": [{"id": "skipdb", "enabled": True}, {"id": "theintrodb", "enabled": True}],
+        "detect": {"intro": True, "credits": False},
+    }
+    SKIPDB_INTRO = Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB)
+    SKIPDB_MARKER = Marker(T.INTRO, 127_894, 156_824, ("skipdb",))
+    # TheIntroDB's intro of another stretch: a second opinion that contradicts the SkipDB one.
+    OTHER_INTRO = Candidate(T.INTRO, 300_000, 330_000, Source.THEINTRODB)
+
+    def _publish_under_older_rules(self, store, media, monkeypatch, plex, clients, *, published=True):
+        """A lone SkipDB intro decided and published by the rules before version 1, which let SkipDB decide alone."""
         reg = _registry(media, ServerType.PLEX)
-        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB),)))
-
-        plex = ready_publisher()
-
-        def run():
-            ctx = _ctx(store, reg, clients=clients, settings_raw=self.SKIPDB_ONLY)
-            return _run(ctx, media, {"plex-1": plex})[0]
-
-        # Until 2026-09-25 a lone SkipDB intro decided (rules version 1 made it wait for a second source).
         with monkeypatch.context() as older:
             older.setattr(decide, "_AGREEMENT_ONLY", decide._AGREEMENT_ONLY - {Source.SKIPDB})
-            assert run().outcome_key == FileOutcome.PUBLISHED.value
+            if not published:
+                plex.capability.return_value = CapabilityReport(Capability.UNREACHABLE, "Plex is down")
+            out = self._run(store, reg, plex, clients)
+            plex.capability.return_value = CapabilityReport(Capability.READY, "ok")
+        rec = store.get_file(media)
         store.record_version_reruns([(media, DECIDE_RULES, DECIDE_RULES_VERSION - 1)])
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+        assert out.outcome_key == (FileOutcome.PUBLISHED.value if published else FileOutcome.SKIPPED.value)
+        return reg, rec
+
+    @pytest.fixture(autouse=True)
+    def _media_path(self, media):
+        self.media = media
+
+    def _run(self, store, reg, plex, clients, settings_raw=None):
+        ctx = _ctx(store, reg, clients=clients, settings_raw=settings_raw or self.SKIPDB_ONLY)
+        return _run(ctx, self.media, {"plex-1": plex})[0]
+
+    def test_a_lone_skipdb_intro_published_before_the_rule_change_is_kept(
+        self, store, media, monkeypatch, loguru_caplog
+    ):
+        # Owner ruling 2026-09-25: SkipDB needs a second source for new decisions, but a re-decide that only the rule
+        # change causes doesn't pull an intro users already see (on arm64 no season audio would ever confirm it).
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
         assert versions.files_to_read_again(store, self._settings()) == {media: {DECIDE_RULES: DECIDE_RULES_VERSION}}
 
-        run()
+        out = self._run(store, reg, plex, clients)
 
-        rec = store.get_file(media)
-        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NEEDS_REVIEW
-        assert plex.write.call_args.args == ("item-plex-1", [])  # the lone SkipDB intro comes off
+        decision = store.get_decisions(rec.id)[T.INTRO]
+        assert decision.status is DecisionStatus.DECIDED
+        assert decision.reason.startswith("kept: published before a rule change")
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert all(c.args[1] != [] for c in plex.write.call_args_list)  # never taken off Plex
+        assert _state(store, media, "plex-1").markers == (self.SKIPDB_MARKER,)
+        assert "kept: published before a rule change" in loguru_caplog.text
         assert len(clients["skipdb"].calls) == 1  # decided from the stored answer, not asked again
         assert store.version_rerun(rec.id, DECIDE_RULES) == DECIDE_RULES_VERSION
         assert versions.files_to_read_again(store, self._settings()) == {}
+
+        # Later runs, under today's rules all along, keep it too.
+        assert self._run(store, reg, plex, clients).outcome_key == FileOutcome.UP_TO_DATE.value
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+
+    @pytest.mark.parametrize("arrives", ["with-the-rule-change", "on-a-later-run"])
+    def test_new_evidence_that_contradicts_the_kept_intro_replaces_it(self, store, media, monkeypatch, arrives):
+        plex = ready_publisher()
+        clients = _clients(
+            skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)), theintrodb=LookupResult("ok", (self.OTHER_INTRO,))
+        )
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
+        if arrives == "on-a-later-run":
+            self._run(store, reg, plex, clients)
+            assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+
+        out = self._run(store, reg, plex, clients, settings_raw=self.SKIPDB_AND_THEINTRODB)
+
+        assert len(clients["theintrodb"].calls) == 1
+        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert store.get_markers(rec.id) == {}
+        assert plex.write.call_args.args == ("item-plex-1", [])  # the SkipDB intro comes off
+        assert out.publisher_rows[0]["status"] == ServerStatus.WRITTEN.value
+
+    def test_a_changed_answer_from_the_source_it_rests_on_replaces_it(self, store, media, monkeypatch):
+        # SkipDB's own entry moved: the published intro no longer has the answer it was decided from.
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
+        store.replace_evidence(
+            rec.id,
+            Source.SKIPDB,
+            [Candidate(T.INTRO, 200_000, 230_000, Source.SKIPDB)],
+            version=pipeline.PARSER_VERSIONS[Source.SKIPDB],
+        )
+
+        self._run(store, reg, plex, clients)
+
+        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert store.get_markers(rec.id) == {}
+        assert plex.write.call_args.args == ("item-plex-1", [])
+
+    def test_an_intro_no_server_was_sent_before_the_rule_change_isnt_kept(self, store, media, monkeypatch):
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients, published=False)
+
+        self._run(store, reg, plex, clients)
+
+        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert store.get_markers(rec.id) == {}
+
+    def test_a_kept_intro_whose_source_is_turned_off_is_withdrawn(self, store, media, monkeypatch):
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
+        self._run(store, reg, plex, clients)
+
+        skipdb_off = {**self.SKIPDB_ONLY, "sources": [{"id": "skipdb", "enabled": False}]}
+        self._run(store, reg, plex, clients, settings_raw=skipdb_off)
+
+        assert store.get_markers(rec.id) == {}
+        assert plex.write.call_args.args == ("item-plex-1", [])
+
+    def test_an_answer_that_disagreed_before_the_rule_change_and_is_only_stored_again_doesnt_replace_it(
+        self, store, media, monkeypatch
+    ):
+        # The older rules decided SkipDB's intro beside TheIntroDB's other one. The rule change leaves the type in
+        # review, and the intro stays; a forced run then stores both answers again, unchanged: nothing new contradicts it.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        clients = _clients(
+            skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)), theintrodb=LookupResult("ok", (self.OTHER_INTRO,))
+        )
+        real_decide = pipeline.decide
+
+        def older_rules(candidates, dctx, locked):
+            out = real_decide(candidates, dctx, locked)
+            if {c.source for c in candidates} < {Source.SKIPDB, Source.THEINTRODB}:
+                return out  # both are asked and stored before the older rules decide
+            decided = decide.TypeDecision(T.INTRO, DecisionStatus.DECIDED, self.SKIPDB_MARKER, None, "single source")
+            return {**out, T.INTRO: decided}
+
+        def run(**kw):
+            ctx = _ctx(store, reg, clients=clients, settings_raw=self.SKIPDB_AND_THEINTRODB, **kw)
+            return _run(ctx, media, {"plex-1": plex})[0]
+
+        with patch.object(pipeline, "decide", older_rules):
+            run()
+        rec = store.get_file(media)
+        store.record_version_reruns([(media, DECIDE_RULES, DECIDE_RULES_VERSION - 1)])
+        run()
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+
+        run(force=True)
+
+        assert [len(c.calls) for c in (clients["skipdb"], clients["theintrodb"])] == [2, 2]
+        assert store.get_decisions(rec.id)[T.INTRO].reason.startswith("kept: published before a rule change")
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+        assert all(c.args[1] != [] for c in plex.write.call_args_list)
+
+    def test_an_intro_whose_last_times_never_reached_a_server_isnt_kept(self, store, media, monkeypatch):
+        # Plex shows the intro the older rules first sent; they then moved it and that write failed, so the times the
+        # rule change would keep were never shown anywhere.
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
+        moved = Marker(T.INTRO, 200_000, 230_000, ("skipdb",))
+        store.replace_evidence(
+            rec.id,
+            Source.SKIPDB,
+            [Candidate(T.INTRO, 200_000, 230_000, Source.SKIPDB)],
+            version=pipeline.PARSER_VERSIONS[Source.SKIPDB],
+        )
+        store.save_decisions(
+            rec.id,
+            {T.INTRO: decide.TypeDecision(T.INTRO, DecisionStatus.DECIDED, moved, None, "single source (skipdb)")},
+            settings_fingerprint=self._settings().detection_fingerprint(),
+        )
+        assert _state(store, media, "plex-1").markers == (self.SKIPDB_MARKER,)
+
+        self._run(store, reg, plex, clients)
+
+        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert store.get_markers(rec.id) == {}
+
+    def test_a_new_file_with_a_lone_skipdb_intro_waits_in_needs_review(self, store, media):
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg = _registry(media, ServerType.PLEX)
+
+        out = self._run(store, reg, plex, clients)
+
+        rec = store.get_file(media)
+        decision = store.get_decisions(rec.id)[T.INTRO]
+        assert decision.status is DecisionStatus.NEEDS_REVIEW
+        assert not decision.reason.startswith("kept")
+        assert store.get_markers(rec.id) == {}
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+
+    def test_a_rule_change_that_decides_a_different_answer_updates_the_marker(self, store, media, monkeypatch):
+        # The older rules decided the Intro chapter somewhere else; today's decide the chapter as it is.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        older_intro = Marker(T.INTRO, 100_000, 130_000, ("chapters",))
+        real_decide = pipeline.decide
+
+        def older_rules(candidates, dctx, locked):
+            out = real_decide(candidates, dctx, locked)
+            return {**out, T.INTRO: decide.TypeDecision(T.INTRO, DecisionStatus.DECIDED, older_intro, None, "chapters")}
+
+        ctx_raw = {"sources": [{"id": "chapters", "enabled": True}], "detect": {"intro": True, "credits": False}}
+        with patch.object(pipeline, "decide", older_rules):
+            _run(_ctx(store, reg, settings_raw=ctx_raw), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        rec = store.get_file(media)
+        assert store.get_markers(rec.id) == {T.INTRO: older_intro}
+        store.record_version_reruns([(media, DECIDE_RULES, DECIDE_RULES_VERSION - 1)])
+
+        out, _ = _run(_ctx(store, reg, settings_raw=ctx_raw), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+
+        assert store.get_markers(rec.id) == {T.INTRO: INTRO_CH}
+        assert not store.get_decisions(rec.id)[T.INTRO].reason.startswith("kept")
+        assert plex.write.call_args.args[1] == [INTRO_CH]
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
 
 
 class TestStages:
@@ -4463,6 +4661,7 @@ class TestStages:
         plex = ready_publisher()
         cancel = MagicMock(return_value=False)
         pause = MagicMock(return_value=False)
+        ctx.freeze_check = MagicMock(return_value=False)
         phase = MagicMock()
         with (
             patch.object(pipeline, "probe_media", return_value=_probe()),
@@ -4480,7 +4679,9 @@ class TestStages:
         (rec,), kwargs = detector.call_args
         assert rec.canonical_path == media and rec.duration_ms == DUR
         assert kwargs["ctx"] is ctx and kwargs["gpu"] == "NVIDIA" and kwargs["gpu_device_path"] == "cuda:0"
-        assert kwargs["cancel_check"] is cancel and kwargs["pause_check"] is pause and kwargs["phase_callback"] is phase
+        assert kwargs["cancel_check"] is cancel and kwargs["phase_callback"] is phase
+        # The job's own pause lets the running file finish; what freezes its ffmpeg is the job's freeze check.
+        assert kwargs["pause_check"] is ctx.freeze_check and kwargs["pause_check"] is not pause
         assert clients["theintrodb"].calls[0]["cancel_check"] is cancel
         assert store.get_evidence(rec.id) == [TIDB_INTRO, *detected] or set(store.get_evidence(rec.id)) == {
             TIDB_INTRO,
@@ -5035,26 +5236,25 @@ class TestForce:
 class TestConcurrentJobs:
     def test_two_jobs_on_one_file_never_interleave(self, store, media):
         # Job L waits on a lookup for the old cut while Sonarr replaces the file and webhook job N starts on it.
-        # N must queue behind L on the file, so L's answer for the old cut can never overwrite N's for the new one.
+        # N must queue behind L on the file, so L's answer for the old cut can never overwrite N's for the new one:
+        # N's checking stage hands the file to its worker stage without waiting, and that waits for L.
         old_duration, new_duration = 1_321_000, 1_380_000
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
         raw = INTRO_ONLY
-        entered = []
         n_queued = threading.Event()
 
         class SpyLock:
             def __init__(self):
                 self._lock = threading.Lock()
 
-            def __enter__(self):
-                entered.append(threading.current_thread().name)
-                if len(entered) == 2:
-                    n_queued.set()
-                self._lock.acquire()
-                return self
+            def acquire(self, blocking=True, timeout=-1):
+                got = self._lock.acquire(blocking, timeout)
+                if not got and threading.current_thread().name == "N" and results.get("N_check", 0) is None:
+                    n_queued.set()  # N's worker stage is waiting for L
+                return got
 
-            def __exit__(self, *exc):
+            def release(self):
                 self._lock.release()
 
         results = {}
@@ -5074,7 +5274,12 @@ class TestConcurrentJobs:
                 with open(media, "wb") as f:
                     f.write(b"y" * 200)
                 os.utime(media, ns=(9, 9))
-                job_n = threading.Thread(target=lambda: results.update(N=check_item(_item(media), ctx=ctx_n)), name="N")
+
+                def job_n_stages():
+                    results["N_check"] = check_item(_item(media), ctx=ctx_n)
+                    results["N"] = process_item(_item(media), ctx=ctx_n)
+
+                job_n = threading.Thread(target=job_n_stages, name="N")
                 results["N"] = None
                 results["thread"] = job_n
                 job_n.start()
@@ -5094,10 +5299,16 @@ class TestConcurrentJobs:
             patch.object(pipeline, "probe_media", side_effect=probe),
             patch.object(pipeline, "publisher_for", side_effect=lambda server, cfg, **kw: plex),
         ):
-            out_l = check_item(_item(media), ctx=_ctx(store, reg, settings_raw=raw, clients=clients))
+            ctx_l = _ctx(store, reg, settings_raw=raw, clients=clients)
+            out_l = check_item(_item(media), ctx=ctx_l)
             results["thread"].join(timeout=10)
+            if out_l is None:
+                # L detects the replaced file again; when N's worker took the file first, L's checking stage hands it on
+                # too, and L's worker stage runs it after N's.
+                out_l = process_item(_item(media), ctx=ctx_l)
             later, _ = _run(_ctx(store, reg, settings_raw=raw, clients=clients), media, {"plex-1": plex})
         assert results["queued"] is True
+        assert results["N_check"] is None
         new_intro = Marker(T.INTRO, 186_000, 216_000, ("introdb", "skipdb"))
         rec = store.get_file(media)
         assert (rec.size, rec.mtime_ns, rec.duration_ms) == (200, 9, new_duration)
@@ -5242,6 +5453,331 @@ class TestConcurrentJobs:
     def test_path_locks_are_released_and_forgotten(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         _run(_ctx(store, reg), media, {"plex-1": ready_publisher()}, probe=_probe(CHAPTERS_BOTH))
+        assert pipeline._PATH_LOCKS._locks == {}
+
+
+class TestWorkerStageWaits:
+    """A worker holds a GPU or CPU worker previews need: it never sleeps on an online source's pacing, doesn't ask again
+    a source the checking stage just found unavailable, and waits only briefly for a busy Plex database when the job
+    retries the file. The checking stage holds no worker and keeps its waits."""
+
+    @staticmethod
+    def _recording_client(result=NO_DATA):
+        client = FakeClient(result)
+        caps = []
+
+        def lookup(ids, *, duration_ms, priority, cancel_check=None):
+            caps.append(ratelimit.wait_cap())
+            client.calls.append({"ids": ids})
+            return client.result
+
+        client.lookup = lookup
+        return client, caps
+
+    @pytest.mark.parametrize(
+        ("stage", "cap"), [("check", None), ("process", pipeline.WORKER_LOOKUP_WAIT_S)], ids=["check", "worker"]
+    )
+    def test_an_online_lookup_waits_for_a_slot_as_long_as_its_stage_allows(self, store, media, stage, cap):
+        reg = _registry(media, ServerType.PLEX)
+        client, caps = self._recording_client()
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, settings_raw=INTRO_ONLY)
+        _run(ctx, media, {"plex-1": ready_publisher()}, stage=stage)
+        assert caps == [cap]
+        assert ratelimit.wait_cap() is None  # the cap ends with the lookup
+
+    def test_a_workers_slot_wait_is_near_zero(self):
+        # Long enough for one source's own spacing between two requests (0.5 s), far short of the 60 s a check waits.
+        assert 0.5 <= pipeline.WORKER_LOOKUP_WAIT_S <= 1.0
+
+    @pytest.mark.parametrize(
+        ("check_answer", "worker_asks"),
+        [
+            (LookupResult("unavailable", detail="TheIntroDB blocked"), False),
+            (LookupResult("unavailable", detail="TheIntroDB HTTP 503"), False),
+            (NO_DATA, False),  # stored: the worker reads it
+        ],
+        ids=["blocked", "http-error", "answered"],
+    )
+    def test_the_worker_doesnt_ask_again_a_source_the_checking_stage_just_asked(
+        self, store, media, check_answer, worker_asks
+    ):
+        reg = _registry(media, ServerType.PLEX)
+        client, caps = self._recording_client(check_answer)
+        detector = MagicMock(return_value=[])
+        spec = LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), detector)
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, detectors=(spec,), settings_raw=INTRO_ONLY)
+        pubs = {"plex-1": ready_publisher()}
+        assert _run(ctx, media, pubs)[0] is None  # season audio needs a worker
+        client.result = LookupResult("ok", (TIDB_INTRO,))
+        out, _ = _run(ctx, media, pubs, stage="process")
+        detector.assert_called_once()
+        assert len(client.calls) == (2 if worker_asks else 1)
+        assert caps == [None]
+        assert out.outcome_key != FileOutcome.FAILED.value
+
+    def test_a_file_the_checking_stage_never_ran_is_looked_up_on_the_worker(self, store, media):
+        # Handed on because another job ran the file (the checking stage doesn't wait for it): nothing was asked yet.
+        reg = _registry(media, ServerType.PLEX)
+        client, caps = self._recording_client()
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, settings_raw=INTRO_ONLY)
+        with pipeline._PATH_LOCKS.hold(media):
+            assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
+        _run(ctx, media, {"plex-1": ready_publisher()}, stage="process")
+        assert caps == [pipeline.WORKER_LOOKUP_WAIT_S]
+
+    @pytest.mark.parametrize(
+        ("stage", "retried", "expected"),
+        [
+            ("check", True, None),
+            ("check", False, None),
+            ("process", True, plex_db.WORKER_BUSY_TIMEOUT_S),
+            # Nothing retries the file soon: a short wait would leave the write to the next run, maybe a week away.
+            ("process", False, None),
+        ],
+        ids=["check-retried", "check", "worker-retried", "worker-not-retried"],
+    )
+    def test_the_plex_database_wait_is_short_only_on_a_worker_whose_job_retries_a_busy_write(
+        self, store, media, stage, retried, expected
+    ):
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(store, reg)
+        ctx.busy_writes_retried = retried
+        plex = ready_publisher()
+        timeouts = []
+        with (
+            patch.object(pipeline, "probe_media", return_value=_probe(CHAPTERS_BOTH)),
+            patch.object(
+                pipeline,
+                "publisher_for",
+                side_effect=lambda server, cfg, **kw: timeouts.append(kw["db_timeout_s"]) or plex,
+            ),
+        ):
+            out = (check_item if stage == "check" else process_item)(_item(media), ctx=ctx)
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert timeouts == [expected]
+
+    def test_a_file_past_the_jobs_retry_cap_waits_on_a_worker_as_long_as_a_check(self, store, media):
+        # The retry takes at most retry_file_cap files a busy database refused: one past it gets no retry soon.
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(store, reg)
+        ctx.busy_writes_retried = True
+        ctx.retry_file_cap = 1
+        assert ctx.promise_busy_retry("/media/tv/another.mkv")
+        timeouts = []
+        with (
+            patch.object(pipeline, "probe_media", return_value=_probe(CHAPTERS_BOTH)),
+            patch.object(
+                pipeline,
+                "publisher_for",
+                side_effect=lambda server, cfg, **kw: timeouts.append(kw["db_timeout_s"]) or ready_publisher(),
+            ),
+        ):
+            process_item(_item(media), ctx=ctx)
+        assert timeouts == [None]
+        assert ctx.busy_promised() == {"/media/tv/another.mkv"}  # asking didn't take a promise
+
+    def test_a_workers_database_wait_is_short(self):
+        assert plex_db.WORKER_BUSY_TIMEOUT_S <= 10.0 < plex_db.BUSY_TIMEOUT_S
+
+    @pytest.mark.parametrize(
+        ("stage", "server_type", "busy"),
+        [
+            ("process", ServerType.PLEX, True),
+            ("check", ServerType.PLEX, False),  # the checking stage waits for the other thread's check
+            ("process", ServerType.JELLYFIN, False),  # no database lock behind a Jellyfin check
+            ("process", ServerType.EMBY, False),  # nor an Emby one: both are plugin HTTP calls
+        ],
+        ids=["worker-plex", "check-plex", "worker-jellyfin", "worker-emby"],
+    )
+    def test_a_worker_waits_briefly_for_another_threads_check_of_a_plex_server(
+        self, store, media, monkeypatch, stage, server_type, busy
+    ):
+        # A checking thread's capability check may wait minutes for Plex's busy database; a worker that needs the same
+        # server's answer gives up as a busy write does, and the job retries the file.
+        monkeypatch.setattr(pipeline, "WORKER_BUSY_TIMEOUT_S", 0.05)
+        reg = _registry(media, server_type)
+        sid = f"{server_type.value}-1"
+        ctx = _ctx(store, reg)
+        ctx.busy_writes_retried = True
+        other_check = ctx._capability_locks.setdefault(sid, threading.Lock())
+        other_check.acquire()
+        release = threading.Timer(0.5, other_check.release)
+        release.start()
+        try:
+            out, _ = _run(ctx, media, {sid: ready_publisher()}, stage=stage, probe=_probe(CHAPTERS_BOTH))
+        finally:
+            release.join(5)
+        row = _rows(out)[sid]
+        if busy:
+            assert (row["status"], row["reason_code"]) == (ServerStatus.FAILED.value, PLEX_DB_BUSY)
+            assert "this job tries again in a few minutes" in row["message"]
+        else:
+            assert row["status"] == ServerStatus.WRITTEN.value
+
+    def test_a_cancel_during_the_workers_wait_for_another_threads_check_is_no_busy_database(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(store, reg)
+        ctx.busy_writes_retried = True
+        cancelled = threading.Event()
+
+        class OtherThreadsCheck:
+            def acquire(self, blocking=True, timeout=-1):
+                cancelled.set()  # the job is cancelled while this worker waits for the other thread's check
+                return False
+
+        ctx._capability_locks["plex-1"] = OtherThreadsCheck()
+        out, _ = _run(
+            ctx,
+            media,
+            {"plex-1": ready_publisher()},
+            stage="process",
+            probe=_probe(CHAPTERS_BOTH),
+            cancel_check=cancelled.is_set,
+        )
+        row = _rows(out)["plex-1"]
+        assert (row["status"], row["message"]) == (ServerStatus.FAILED.value, plex_db.WAIT_CANCELLED)
+        assert "reason_code" not in row  # nothing to retry
+
+
+class TestFileRunLockStages:
+    """Another job may run a file for minutes. The checking stage never waits for it: the item goes to a worker, as a
+    preview check hands on what it can't finish; the worker waits for the file, and stops waiting on a cancel."""
+
+    class SpyLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.timeouts = []
+
+        def acquire(self, blocking=True, timeout=-1):
+            self.timeouts.append(timeout)
+            return self._lock.acquire(blocking, timeout)
+
+        def release(self):
+            self._lock.release()
+
+        def __enter__(self):
+            self.acquire()
+
+        def __exit__(self, *exc):
+            self.release()
+
+    def test_the_checking_stage_hands_a_file_another_job_runs_to_a_worker_without_waiting(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        spies = []
+        locks = pipeline._KeyedLocks(lock_factory=lambda: spies.append(self.SpyLock()) or spies[-1])
+        plex = ready_publisher()
+        with patch.object(pipeline, "_PATH_LOCKS", locks), locks.hold(media):
+            out, probe = _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        assert out is None
+        assert spies[0].timeouts == [-1, 0]  # the other job's hold, then one attempt that doesn't wait
+        probe.assert_not_called()
+        plex.write.assert_not_called()
+        assert store.get_file(media) is None
+
+    def test_the_worker_runs_the_file_once_the_other_job_lets_it_go(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        other = threading.Lock()
+        other.acquire()
+        locks = pipeline._KeyedLocks(lock_factory=lambda: other)
+        release = threading.Timer(0.3, other.release)
+        release.start()
+        with patch.object(pipeline, "_PATH_LOCKS", locks):
+            out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, stage="process", probe=_probe(CHAPTERS_BOTH))
+        release.join(5)
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert locks._locks == {}
+
+    @pytest.mark.parametrize(
+        "pin", [None, "plex-1", "emby-1", "jellyfin-1"], ids=["no-pin", "plex", "emby", "jellyfin"]
+    )
+    @pytest.mark.parametrize("why", ["waited-long-enough", "paused", "frozen"])
+    def test_a_worker_whose_job_retries_gives_the_file_back_for_the_retry(self, store, media, monkeypatch, why, pin):
+        # The other job holds the file for good (a long season step, or it is paused): the worker frees itself for
+        # previews, and the job's retry runs the file a few minutes later. "paused" is the dispatcher's pause for the
+        # job; "frozen" is Pause all or the job's schedule's stop time (ctx.freeze_check), which the detectors get.
+        # A pinned job's rows name only the server it publishes to, as its other outcomes do.
+        monkeypatch.setattr(pipeline, "WORKER_FILE_WAIT_S", 0.2 if why == "waited-long-enough" else 30.0)
+        reg = _registry(media, ServerType.PLEX, ServerType.EMBY, ServerType.JELLYFIN)
+        ctx = _ctx(store, reg)
+        ctx.config.server_id_filter = pin
+        ctx.busy_writes_retried = True
+        ctx.freeze_check = lambda: why == "frozen"
+        publishers = {sid: ready_publisher() for sid in ("plex-1", "emby-1", "jellyfin-1")}
+        started = time.monotonic()
+        with pipeline._PATH_LOCKS.hold(media):
+            out, probe = _run(ctx, media, publishers, stage="process", pause_check=lambda: why == "paused")
+        assert time.monotonic() - started < 5
+        assert out.outcome_key == FileOutcome.WAITING.value
+        rows = _rows(out)
+        assert set(rows) == ({pin} if pin else {"plex-1", "emby-1", "jellyfin-1"})
+        for row in rows.values():
+            assert (row["status"], row["reason_code"]) == (ServerStatus.WAITING.value, FILE_BUSY)
+            assert row["message"] == (
+                "Another Intro & Credits job is running this file; this job tries again in a few minutes"
+            )
+        probe.assert_not_called()
+        for publisher in publishers.values():
+            publisher.write.assert_not_called()
+        assert store.get_file(media) is None
+        assert pipeline._PATH_LOCKS._locks == {}
+        assert ctx.busy_promised() == {media}
+
+    def test_a_pinned_worker_gives_back_a_file_its_server_doesnt_own_as_no_owner(self, store, media, monkeypatch):
+        # The same answer the pinned job gives the file when it runs it (_attempt): no row for servers it never writes.
+        reg = _registry(media, ServerType.PLEX, ServerType.EMBY)
+        reg.configs_by_id["emby-1"].markers.update({"enabled": False})
+        ctx = _ctx(store, reg)
+        ctx.config.server_id_filter = "emby-1"
+        ctx.busy_writes_retried = True
+        with pipeline._PATH_LOCKS.hold(media):
+            out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, stage="process", pause_check=lambda: True)
+        assert out.outcome_key == FileOutcome.NO_OWNERS.value
+        assert out.publisher_rows == []
+        assert "publishes to" in out.message and "only" in out.message
+        # No retry follows a file the job doesn't publish: the promise taken to give it back is handed back.
+        assert ctx.busy_promised() == set()
+
+    def test_a_worker_whose_job_retries_nothing_waits_for_the_file_even_while_paused(self, store, media):
+        # Nothing would run the file again soon, and an old file's answer must not be written over a new file's.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        other = threading.Lock()
+        other.acquire()
+        locks = pipeline._KeyedLocks(lock_factory=lambda: other)
+        release = threading.Timer(0.3, other.release)
+        release.start()
+        with patch.object(pipeline, "_PATH_LOCKS", locks):
+            out, _ = _run(
+                _ctx(store, reg),
+                media,
+                {"plex-1": plex},
+                stage="process",
+                probe=_probe(CHAPTERS_BOTH),
+                pause_check=lambda: True,
+            )
+        release.join(5)
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+    def test_process_items_docstring_states_the_no_retry_bound(self):
+        # Comments-vs-code drift guard: the no-retry wait is bounded (holder frozen: at once; else the cap).
+        doc = " ".join(pipeline.process_item.__doc__.split())
+        assert "WORKER_FILE_WAIT_NO_RETRY_S" in doc and "holder" in doc and "frozen" in doc
+        assert "until that run ends or the job is cancelled" not in doc
+
+    def test_a_workers_wait_for_a_file_is_bounded(self):
+        assert 10.0 <= pipeline.WORKER_FILE_WAIT_S <= 120.0
+
+    def test_a_cancel_stops_the_workers_wait_for_the_file(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        cancelled = threading.Event()
+        threading.Timer(0.2, cancelled.set).start()
+        with pipeline._PATH_LOCKS.hold(media):
+            out, probe = _run(_ctx(store, reg), media, {"plex-1": plex}, stage="process", cancel_check=cancelled.is_set)
+        assert out.outcome_key == FileOutcome.FAILED.value and out.message == "cancelled by user"
+        probe.assert_not_called()
+        plex.write.assert_not_called()
         assert pipeline._PATH_LOCKS._locks == {}
 
 

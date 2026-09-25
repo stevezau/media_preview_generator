@@ -162,7 +162,9 @@
                     </div>
                     <div class="form-text">
                         When the server restarts, automatically re-queue any jobs that were running or waiting.
-                        Only jobs created within the configured time window are requeued; older jobs are left as-is.
+                        Only jobs created within the configured time window are requeued; older ones are marked failed,
+                        unless processing is paused, when they wait for Resume. With this off, interrupted jobs are
+                        marked failed. Use Reprocess to run one again.
                     </div>
                 </div>
 
