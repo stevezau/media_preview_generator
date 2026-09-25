@@ -24,7 +24,7 @@ from media_preview_generator.markers.pipeline import LocalDetectorSpec
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, wait_cancelled
 from media_preview_generator.markers.publishers.plex_db import STALE_READ_WAIT_S
 from media_preview_generator.markers.sources.online import LookupResult
-from media_preview_generator.markers.sources.server_markers import READER_VERSION
+from media_preview_generator.markers.sources.server_markers import PLEX_CHECKED_SINCE, READER_VERSION
 from media_preview_generator.servers.base import ServerType
 from tests.markers import test_pipeline
 from tests.markers.fakes import ready_publisher, server_config
@@ -574,7 +574,12 @@ class TestPlexsMarkerMadeForAnEarlierFile:
     # only reader version 5 on checked whether Plex made it for this file.
     @pytest.mark.parametrize(
         ("stored", "shift_ms", "counts"),
-        [(4, 0, False), (4, 4_000, False), (None, 0, False), (READER_VERSION, 0, True)],
+        [
+            (PLEX_CHECKED_SINCE - 1, 0, False),
+            (PLEX_CHECKED_SINCE - 1, 4_000, False),
+            (None, 0, False),
+            (PLEX_CHECKED_SINCE, 0, True),
+        ],
         ids=["unchecked-matching-ours", "unchecked-not-matching-ours", "no-version", "checked"],
     )
     def test_after_a_later_reader_only_an_answer_checked_for_an_earlier_file_still_counts(
@@ -599,7 +604,25 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         if not counts:
             [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
             assert row.detail == pipeline.OURS_SHOWN_DETAIL
+        # Kept or emptied, the answer counts as today's reader's, so it isn't due on every run from now on.
+        assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1") == READER_VERSION + 1
         assert reg.get("plex-1").get_markers.call_count == reads  # ours are there: never read back
+
+    def test_after_a_later_reader_an_answer_plex_couldnt_tell_about_still_counts(self, store, media, monkeypatch):
+        # Kept as it is kept today: it can't be asked again once ours are shown, and dropping it would take Plex's own
+        # marker away wherever Plex can never tell (an agent older than the answer), a real marker thrown away again.
+        reg, detectors, plex, rec = self._published_with_plexs_intro(store, media, stale=None)
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert row.detail == pipeline.STALENESS_UNKNOWN_DETAIL
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+        monkeypatch.setattr(pipeline, "READER_VERSION", READER_VERSION + 1)
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert [r.detail for r in store.evidence_rows(rec.id) if r.origin == "plex-1"] == [
+            pipeline.STALENESS_UNKNOWN_DETAIL
+        ]
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
 
     def test_after_a_later_reader_a_checked_answer_made_for_an_earlier_file_still_confirms_nothing(
         self, store, media, monkeypatch
@@ -678,7 +701,11 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         ]
         assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
 
-    @pytest.mark.parametrize(("version", "counts"), [(4, False), (READER_VERSION, True)], ids=["unchecked", "checked"])
+    @pytest.mark.parametrize(
+        ("version", "counts"),
+        [(PLEX_CHECKED_SINCE - 1, False), (PLEX_CHECKED_SINCE, True)],
+        ids=["unchecked", "checked"],
+    )
     @pytest.mark.parametrize("item_state", ITEM_MAY_SHOW_OURS.values(), ids=ITEM_MAY_SHOW_OURS.keys())
     def test_beside_an_item_that_may_show_ours_a_later_reader_drops_only_an_unchecked_answer(
         self, store, media, monkeypatch, item_state, version, counts
@@ -693,6 +720,8 @@ class TestPlexsMarkerMadeForAnEarlierFile:
 
         assert [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"] == (before if counts else [])
         assert ("server_markers" in _decision(store, media, T.INTRO).reason) is counts
+        # Not due again, so later runs don't look the item up only to skip it.
+        assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1") == READER_VERSION + 1
 
     def test_with_jellyfin_beside_it_the_intro_only_that_answer_confirmed_comes_off_jellyfin(self, store, media):
         # Plex keeps its own intro, Jellyfin takes ours. The older answer no longer confirms IntroDB, so the intro goes

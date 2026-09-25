@@ -66,6 +66,9 @@ _PTS_RE = re.compile(rb"pts_time:(\S+)")
 # The input's video stream as ffmpeg lists it: "Stream #0:0(eng): Video: hevc (Main 10), yuv420p10le, ...".
 _VIDEO_STREAM_RE = re.compile(r"Stream #\d+:\d+\S*: Video: (\w+)")
 _CODEC_NAMES = {"h264": "H.264", "mpeg2video": "MPEG-2", "mpeg4": "MPEG-4", "vc1": "VC-1"}
+# Lines that never say why ffmpeg failed: showinfo's per-frame lines ("color_space:unknown" reads as an error to the
+# summary) and the "Conversion failed!" every failed run ends on, which would hide the line before it.
+_SAYS_NOTHING_RE = re.compile(r"\[Parsed_showinfo_\d+ @|^Conversion failed!\s*$")
 # The GPUs whose decoded frames stay surfaces for the filter graph to download (CUDA, and VAAPI on Intel and AMD);
 # any other GPU decodes and lets ffmpeg download each frame itself, as it does for a stream whose surface format isn't
 # known (``DOWNLOAD_FORMATS``).
@@ -552,7 +555,7 @@ def run_decode(
         stderr_file.seek(0)
         stderr = stderr_file.read()
     if returncode != 0:
-        lines = [line for line in stderr.decode("utf-8", "replace").splitlines() if "pts_time:" not in line]
+        lines = [line for line in stderr.decode("utf-8", "replace").splitlines() if not _SAYS_NOTHING_RE.search(line)]
         logger.debug("ffmpeg exited {} decoding {}; its last lines: {}", returncode, name, "\n".join(lines[-8:]))
         if hw_active:
             raise GpuDecodeError(_gpu_failure(returncode, lines, name))

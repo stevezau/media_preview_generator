@@ -1966,8 +1966,8 @@ def _read_server_markers(
             (``MarkerStore.server_recheck_due``). A Plex answer stored while Plex couldn't tell whether its markers
             were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
             is never read, nor a Plex or Emby item that may show ours (another version's, or a type kept as the
-            server's own); an older reader's answer from such a Plex server or item stops counting
-            (``_drop_older_reader_answer``).
+            server's own); an answer from such a Plex server or item stored before ``PLEX_CHECKED_SINCE`` stops
+            counting (``_drop_older_reader_answer``).
 
     Returns:
         The ids of the servers whose answer was stored.
@@ -2053,7 +2053,9 @@ def _drop_older_reader_answer(
     Such an answer can't be read again to be checked, so, as when the reader can't read the server
     (``_read_server_markers``), it goes: kept, a stale Plex marker would still confirm online times timed on another
     release. A checked answer stays as it was stored, whatever ``READER_VERSION`` is now: counted, flagged as made for
-    an earlier file (``Candidate.stale``), or counted while Plex couldn't tell (``STALENESS_UNKNOWN_DETAIL``).
+    an earlier file (``Candidate.stale``), or counted while Plex couldn't tell (``STALENESS_UNKNOWN_DETAIL``; dropping
+    that one would take Plex's own marker away wherever Plex can never tell, e.g. an agent older than the answer). It
+    is recorded as today's reader's, so it isn't due, and its item looked up, on every run after a version bump.
 
     Args:
         ctx: The job's context.
@@ -2069,6 +2071,8 @@ def _drop_older_reader_answer(
         return False
     version = ctx.store.evidence_version(rec.id, rows[0].source, server_id)
     if version is not None and version >= PLEX_CHECKED_SINCE:
+        if version != READER_VERSION:
+            ctx.store.restamp_evidence_version(rec.id, rows[0].source, server_id, READER_VERSION)
         return False
     ctx.store.replace_evidence(
         rec.id,

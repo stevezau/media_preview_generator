@@ -635,11 +635,28 @@ class TestRunDecode:
             frames.run_decode(command, hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p))
         assert str(excinfo.value) == "ffmpeg was stopped by a signal (exit -9)"
 
-    def test_a_cpu_failure_quotes_ffmpegs_whole_line(self):
-        # Never cut mid-word: the error line ffmpeg ends on is quoted whole, however long, without its "[x @ 0x…]".
-        reason = "Invalid data found when processing input " + "while reading the header of the file " * 8
-        stderr = "".join(f"[Parsed_showinfo_3 @ 0x1] n:{i} pts:{i} pts_time:{i}\n" for i in range(20))
-        stderr += f"[in#0 @ 0x55d2] Error opening input: {reason.strip()}\n"
+    LONG_REASON = "Invalid data found when processing input" + " while reading the header of the file" * 8
+    # showinfo's per-frame lines, the second of which reads as an error to a summary ("unknown").
+    SHOWINFO = (
+        "[Parsed_showinfo_2 @ 0x1] n:   0 pts:      0 pts_time:0       duration:1\n"
+        "[Parsed_showinfo_2 @ 0x1]   color_range:tv color_space:unknown color_primaries:unknown color_trc:unknown\n"
+    ) * 10
+
+    @pytest.mark.parametrize(
+        ("stderr", "error"),
+        [
+            (f"{SHOWINFO}[in#0 @ 0x55d2] Error opening input: {LONG_REASON}\n", f"Error opening input: {LONG_REASON}"),
+            (
+                f"{SHOWINFO}[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] Decoding error: Invalid data found when processing "
+                "input\nConversion failed!\n",
+                "Decoding error: Invalid data found when processing input",
+            ),
+        ],
+        ids=["longer-than-300-characters", "no-line-starts-with-error"],
+    )
+    def test_a_cpu_failure_quotes_ffmpegs_whole_line(self, stderr, error):
+        # Never cut mid-word: the error line ffmpeg ends on is quoted whole, however long, without its "[x @ 0x…]", and
+        # neither showinfo's lines nor the "Conversion failed!" every failed run ends on stand in for it.
         with pytest.raises(FrameDecodeError) as excinfo:
             frames.run_decode(
                 _fake_ffmpeg([], [], exit_code=1, stderr_tail=stderr),
@@ -648,10 +665,7 @@ class TestRunDecode:
                 detect_boxes=lambda p: [()] * len(p),
                 name="Movie.mkv",
             )
-        assert (
-            str(excinfo.value)
-            == f"ffmpeg exited 1 decoding Movie.mkv on the CPU: Error opening input: {reason.strip()}"
-        )
+        assert str(excinfo.value) == f"ffmpeg exited 1 decoding Movie.mkv on the CPU: {error}"
 
     def test_no_frames_on_the_gpu_is_a_gpu_failure(self):
         with pytest.raises(GpuDecodeError, match="no frames") as excinfo:

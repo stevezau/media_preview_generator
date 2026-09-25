@@ -3244,8 +3244,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     before reader version 5 on a server showing ours still counts for nothing.
   - **The rule is narrowed to those answers** (`server_markers.PLEX_CHECKED_SINCE` = 5). It dropped any answer whose
     version wasn't today's, so the next reader-version bump, for any reason, would have dropped every checked Plex
-    answer on every published file, the same loss for every user. A checked answer now stays, flagged or not; a flagged
-    one still counts for nothing (`Candidate.stale`). No decision changes today, so no rules version moves.
+    answer on every published file, the same loss for every user. A checked answer now stays as it was stored, recorded
+    as today's reader's so it isn't due (and its item looked up) on every run: a flagged one still counts for nothing
+    (`Candidate.stale`), and one stored while Plex couldn't tell still counts, as today (dropping it would take Plex's
+    own marker away wherever Plex can never tell). No decision changes today, so no rules version moves.
   - **The three files don't correct themselves.** Their Plex answers are gone from markers.db (5557017, 5953298 and
     5008428 ms appear nowhere in the after copy), and each Plex item now holds our new credits instead of Plex's. Only the before
     copy of markers.db holds them; restored, the rule above would drop them again. The way back is the owner's: lock
