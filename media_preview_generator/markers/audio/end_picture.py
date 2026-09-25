@@ -251,7 +251,7 @@ def _note_cpu_fallback(
     fallback_callback: Callable[[str], None] | None,
 ) -> None:
     """Show a GPU decode's fallback to the CPU: on the worker's row every time, as a warning once per GPU."""
-    reason = f"The end-picture check couldn't decode {name} on the GPU ({exc}); decoded it on the CPU"
+    reason = f"The end-picture check couldn't decode {name} on the GPU and decoded it on the CPU: {exc}"
     device = (gpu, gpu_device_path)
     with _WARNED_LOCK:
         first = device not in _WARNED_DEVICES

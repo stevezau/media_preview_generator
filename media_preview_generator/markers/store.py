@@ -1409,6 +1409,21 @@ class MarkerStore:
             ).fetchone()
         return int(row["version"]) if row else None
 
+    def restamp_evidence_version(self, file_id: int, source: Source, origin: str, version: int) -> None:
+        """Record one lookup's stored answer, left as it is, as made with ``version``.
+
+        Args:
+            file_id: The file.
+            source: The source the answer is stored under.
+            origin: The lookup key.
+            version: The version it now counts as.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE evidence_versions SET version=? WHERE file_id=? AND source=? AND origin=?",
+                (version, file_id, source.value, origin),
+            )
+
     def evidence_fetched_at(self, file_id: int, source: Source, origin: str = "") -> datetime | None:
         """When a source was last looked up for this file (None = never)."""
         with self._lock:

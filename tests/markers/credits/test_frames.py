@@ -305,6 +305,7 @@ def _fake_ffmpeg(
     progress_file: str = "",
     width: int = 320,
     height: int = 180,
+    stderr_tail: str = "",
 ) -> list[str]:
     """A child that writes NV12 frames (Y plane filled with each value) to stdout and showinfo lines to stderr.
 
@@ -312,7 +313,7 @@ def _fake_ffmpeg(
     ``child_pid_file`` spawns a grandchild in the same process group, so the group kill can be asserted;
     ``ignore_sigterm`` stands in for an ffmpeg that won't take a polite signal; ``progress_file`` records how many
     frames have been written, so how far the decoder ran ahead of text detection can be read; ``width`` and ``height``
-    are the frames' size.
+    are the frames' size; ``stderr_tail`` is written to stderr after the frames (what ffmpeg says as it exits).
     """
     script = textwrap.dedent(f"""
         import os, signal, subprocess, sys, time
@@ -345,6 +346,7 @@ def _fake_ffmpeg(
             line(i)
         out.write(b"x" * {extra_bytes})
         out.flush()
+        sys.stderr.write({stderr_tail!r})
         if {close_stdout!r}:
             os.close(1)
         time.sleep({linger_s})
@@ -563,6 +565,107 @@ class TestRunDecode:
                 name="Movie.mkv",
             )
         assert type(excinfo.value) is error
+
+    # What jellyfin-ffmpeg 8.1.2 says for a 10-bit AV1 file on an NVIDIA GPU without AV1 decode (Pascal here, Turing
+    # on sflix: 21 Bridges, 2026-09-25), the input and the lines before its end kept.
+    AV1_ON_A_GPU_WITHOUT_AV1 = (
+        "Input #0, matroska,webm, from '/media/21 Bridges (2019).mkv':\n"
+        "  Stream #0:0(eng): Video: av1 (libdav1d) (Main), yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 3840x1600\n"
+        "Stream mapping:\n"
+        "  Stream #0:0 -> #0:0 (av1 (native) -> rawvideo (native))\n"
+        "[av1 @ 0x5c0071e12a80] Hardware is lacking required capabilities\n"
+        "[av1 @ 0x5c0071e12a80] Failed setup for format cuda: hwaccel initialisation returned error.\n"
+        "[av1 @ 0x5c0071e12a80] Your platform doesn't support hardware accelerated AV1 decoding.\n"
+        "[vist#0:0/av1 @ 0x5c0071e10e40] [dec:av1 @ 0x5c0071e12300] Decode error rate 1 exceeds maximum 0.666667\n"
+        "[vist#0:0/av1 @ 0x5c0071e10e40] [dec:av1 @ 0x5c0071e12300] Terminating thread with return code -22 "
+        "(Invalid argument)\n"
+        "[out#0/rawvideo @ 0x5acf76549a40] Nothing was written into output file, because at least one of its streams "
+        "received no packets.\n"
+        "frame=    0 fps=0.0 q=0.0 Lsize=       0KiB time=N/A bitrate=N/A speed=N/A elapsed=0:00:08.64    \n"
+        "Conversion failed!\n"
+    )
+
+    @pytest.mark.parametrize(
+        ("exit_code", "stderr", "message"),
+        [
+            (69, AV1_ON_A_GPU_WITHOUT_AV1, "the GPU can't decode this file's AV1 video (ffmpeg exited 69)"),
+            (
+                69,
+                "[h264 @ 0x1] Decode error rate 1 exceeds maximum 0.666667\nConversion failed!\n",
+                "the GPU can't decode this file's video (ffmpeg exited 69)",
+            ),
+            (
+                251,
+                "[hevc @ 0x1] Failed to sync surface 0x5 (operation failed).\n"
+                "[vist#0:0/hevc @ 0x2] Decoding error: Input/output error\nConversion failed!\n",
+                "the GPU's decoder hit a hardware or driver error (ffmpeg exited 251)",
+            ),
+            (
+                251,
+                "[matroska,webm @ 0x1] Read error at pos. 5234901 (0x4fe0d5)\n"
+                "[in#0/matroska,webm @ 0x2] Error during demuxing: Input/output error\nConversion failed!\n",
+                "ffmpeg couldn't read the file (an I/O error, ffmpeg exited 251); if this keeps happening, check the "
+                "disk or network share it is on",
+            ),
+            (
+                3,
+                "[Parsed_scale_0 @ 0x1] Error while filtering: Cannot allocate memory\nConversion failed!\n",
+                "ffmpeg exited 3 decoding Movie.mkv on the GPU: Error while filtering: Cannot allocate memory",
+            ),
+        ],
+        ids=["codec-av1", "codec-unnamed", "hwaccel", "io-error", "anything-else"],
+    )
+    def test_a_gpu_failure_names_the_cause_previews_gives_it(self, exit_code, stderr, message):
+        # The worker's CPU rerun shows this as its reason: the last 300 characters of stderr said "inating thread with
+        # return code -22 ... Conversion failed!" for a GPU that can't decode AV1.
+        with pytest.raises(GpuDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=exit_code, stderr_tail=stderr),
+                hw_active=True,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )
+        assert str(excinfo.value) == message
+
+    def test_a_gpu_decode_killed_by_a_signal_says_so(self):
+        # An OOM kill, say: the CPU rerun is previews' answer to it too.
+        command = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
+        with pytest.raises(GpuDecodeError) as excinfo:
+            frames.run_decode(command, hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p))
+        assert str(excinfo.value) == "ffmpeg was stopped by a signal (exit -9)"
+
+    LONG_REASON = "Invalid data found when processing input" + " while reading the header of the file" * 8
+    # showinfo's per-frame lines, the second of which reads as an error to a summary ("unknown").
+    SHOWINFO = (
+        "[Parsed_showinfo_2 @ 0x1] n:   0 pts:      0 pts_time:0       duration:1\n"
+        "[Parsed_showinfo_2 @ 0x1]   color_range:tv color_space:unknown color_primaries:unknown color_trc:unknown\n"
+    ) * 10
+
+    @pytest.mark.parametrize(
+        ("stderr", "error"),
+        [
+            (f"{SHOWINFO}[in#0 @ 0x55d2] Error opening input: {LONG_REASON}\n", f"Error opening input: {LONG_REASON}"),
+            (
+                f"{SHOWINFO}[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] Decoding error: Invalid data found when processing "
+                "input\nConversion failed!\n",
+                "Decoding error: Invalid data found when processing input",
+            ),
+        ],
+        ids=["longer-than-300-characters", "no-line-starts-with-error"],
+    )
+    def test_a_cpu_failure_quotes_ffmpegs_whole_line(self, stderr, error):
+        # Never cut mid-word: the error line ffmpeg ends on is quoted whole, however long, without its "[x @ 0x…]", and
+        # neither showinfo's lines nor the "Conversion failed!" every failed run ends on stand in for it.
+        with pytest.raises(FrameDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=1, stderr_tail=stderr),
+                hw_active=False,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )
+        assert str(excinfo.value) == f"ffmpeg exited 1 decoding Movie.mkv on the CPU: {error}"
 
     def test_no_frames_on_the_gpu_is_a_gpu_failure(self):
         with pytest.raises(GpuDecodeError, match="no frames") as excinfo:

@@ -27,6 +27,11 @@ if TYPE_CHECKING:
 #    pipeline asks Plex's database), so answers stored before are read again to be flagged; one from a Plex server that
 #    shows our markers now can't be read again, so it stops counting instead (``pipeline._drop_older_reader_answer``).
 READER_VERSION = 5
+# The first reader version whose Plex answers were checked for markers made for an earlier file. An older answer from a
+# Plex server that shows our markers now can't be read again to be checked, so it stops counting
+# (``pipeline._drop_older_reader_answer``); a checked one counts as it did when it was read, whatever READER_VERSION is
+# now. Raise it with READER_VERSION only when what a Plex answer holds changes.
+PLEX_CHECKED_SINCE = 5
 # Plex markers are one set per item: another version of the item further apart than this is another cut. Emby and
 # Jellyfin keep each version's markers on its own item (spec §3.3); Emby's reader checks instead that the item is this
 # file's own version.

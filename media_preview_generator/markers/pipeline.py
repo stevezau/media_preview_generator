@@ -135,7 +135,13 @@ from .sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from .sources.introdb import IntroDbClient
 from .sources.online import LookupResult, is_budget_exhausted
 from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL, capped_waits
-from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
+from .sources.server_markers import (
+    PLEX_CHECKED_SINCE,
+    READER_VERSION,
+    imported_detail,
+    importer_plugin,
+    read_server_markers,
+)
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient, is_key_refusal
 from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, PreviousDecision, get_marker_store
@@ -184,8 +190,9 @@ STALENESS_UNKNOWN_DETAIL = "Plex couldn't tell yet whether these markers were ma
 UNUSABLE_SERVER_MARKERS_DETAIL = (
     "Couldn't read this server's markers, they may describe another cut, or its library hides a type in Plex"
 )
-# What an older reader stored from a Plex server that shows our markers now: it can't be read again (Plex can't tell
-# ours from its own), so it isn't checked for markers made for an earlier file either, and counts for nothing.
+# What a reader older than ``PLEX_CHECKED_SINCE`` stored from a Plex server that shows our markers now: it can't be read
+# again (Plex can't tell ours from its own), so it is never checked for markers made for an earlier file, and counts for
+# nothing.
 OURS_SHOWN_DETAIL = "This server shows our markers now; what an older version read from it isn't used"
 # The same for a Plex item this file left nothing of ours on that may show ours all the same: another version's, or a
 # type kept as Plex's own that can hold a marker of ours (``MarkerStore.published_to_item``). The reader skips it too.
@@ -1959,8 +1966,8 @@ def _read_server_markers(
             (``MarkerStore.server_recheck_due``). A Plex answer stored while Plex couldn't tell whether its markers
             were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
             is never read, nor a Plex or Emby item that may show ours (another version's, or a type kept as the
-            server's own); an older reader's answer from such a Plex server or item stops counting
-            (``_drop_older_reader_answer``).
+            server's own); an answer from such a Plex server or item stored before ``PLEX_CHECKED_SINCE`` stops
+            counting (``_drop_older_reader_answer``).
 
     Returns:
         The ids of the servers whose answer was stored.
@@ -2040,11 +2047,15 @@ def _read_server_markers(
 def _drop_older_reader_answer(
     ctx: PipelineContext, rec: FileRecord, server_id: str, detail: str = OURS_SHOWN_DETAIL
 ) -> bool:
-    """Stop counting a Plex answer an older reader stored, once the server shows (or its item may show) our markers.
+    """Stop counting a Plex answer stored before answers were checked for markers made for an earlier file
+    (``PLEX_CHECKED_SINCE``), once the server shows (or its item may show) our markers.
 
-    Such an answer can't be read again to be checked for markers made for an earlier file (``READER_VERSION`` 5), so,
-    as when the reader can't read the server (``_read_server_markers``), it goes: kept, a stale Plex marker would
-    still confirm online times timed on another release.
+    Such an answer can't be read again to be checked, so, as when the reader can't read the server
+    (``_read_server_markers``), it goes: kept, a stale Plex marker would still confirm online times timed on another
+    release. A checked answer stays as it was stored, whatever ``READER_VERSION`` is now: counted, flagged as made for
+    an earlier file (``Candidate.stale``), or counted while Plex couldn't tell (``STALENESS_UNKNOWN_DETAIL``; dropping
+    that one would take Plex's own marker away wherever Plex can never tell, e.g. an agent older than the answer). It
+    is recorded as today's reader's, so it isn't due, and its item looked up, on every run after a version bump.
 
     Args:
         ctx: The job's context.
@@ -2056,7 +2067,12 @@ def _drop_older_reader_answer(
         Whether the stored answer was replaced.
     """
     rows = _server_rows(ctx, rec, server_id)
-    if not rows or ctx.store.evidence_version(rec.id, rows[0].source, server_id) == READER_VERSION:
+    if not rows:
+        return False
+    version = ctx.store.evidence_version(rec.id, rows[0].source, server_id)
+    if version is not None and version >= PLEX_CHECKED_SINCE:
+        if version != READER_VERSION:
+            ctx.store.restamp_evidence_version(rec.id, rows[0].source, server_id, READER_VERSION)
         return False
     ctx.store.replace_evidence(
         rec.id,

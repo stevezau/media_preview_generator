@@ -1051,9 +1051,10 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    decided)" is asked once more at the end of the same run** when a later step took away the evidence a type it
    answers was decided with (the server-marker step runs last: an older reader's Plex answer dropped, or Plex's markers
    read again and flagged "made for an earlier file"), through the same gates as the first pass (§14 2026-09-25). A
-   Plex server's older reader answer counts for nothing once the server shows our markers for the file, **or its item
-   may**: another version's markers of ours, or a type kept as Plex's own, which can hold ours; the reader never reads
-   such an item.
+   Plex answer stored before reader version 5, which never checked for markers made for an earlier file, counts for
+   nothing once the server shows our markers for the file, **or its item may**: another version's markers of ours, or
+   a type kept as Plex's own, which can hold ours; the reader never reads such an item. A checked answer keeps counting
+   when the reader's version moves on (`server_markers.PLEX_CHECKED_SINCE`; §14 2026-09-25, "after #314").
    **A detector's new version** (`markers.versions`, §14 2026-09-25). Every detector and reader stores its version
    with each answer (credit text, season audio with its end-picture check, the server-marker reader, chapters, the
    online parsers). On every start the app compares the stored versions with today's and lists the files, still on
@@ -3226,3 +3227,36 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     decoder or filters), not "codec"; the gate runs `on_wait` (a database write and an emit) with its lock released and
     looks for a freed slot again before it sleeps; the runner puts only a SIGKILL down to the out-of-memory killer, and
     words a crash signal as FFmpeg crashing on the file.
+- 2026-09-25 · **Production audit after #314: a real Plex marker thrown away, and a GPU fallback that said nothing**.
+  - **What moved.** The version re-run (§6.2 step 3) re-decided 10 Things I Hate About You (credits 1:32:37 → 1:32:09),
+    A Christmas Carol (1984) (1:39:13 → 1:38:59) and A Dash of Christmas (2023) (1:23:28 → 1:23:18): chapters alone,
+    no longer shortened to Plex's own marker, and the new start of 10 Things is on the final kiss. The before and after
+    copies of prod markers.db show why: each file's Plex answer was stored by reader version 4 on 2026-09-22 (read tens of
+    milliseconds before our first publish there, which carried Plex's time), and the run replaced it with the empty "shows our
+    markers now" answer of `_drop_older_reader_answer`. Before the upgrade 3 decisions were cut back to Plex's marker,
+    after it 0.
+  - **Why that rule exists, and why it stays for those answers.** It guards against a Plex marker **made for an
+    earlier file** (Bones, §14 "Integration of the five lanes"), not against our markers read back: no reader, since the
+    first (#241), reads a server showing ours, so every stored Plex answer is Plex's own and predates our first publish
+    there. Neither fact, nor whether its times match what we published (both hold for Bones' stale intro too), says
+    whether Plex made the marker for this file. Only Plex's database does (a row's tagging time against the file's
+    mtime, its `pv:` record), and our publish replaces those rows. markers.db keeps no such fact, so an answer from
+    before reader version 5 on a server showing ours still counts for nothing.
+  - **The rule is narrowed to those answers** (`server_markers.PLEX_CHECKED_SINCE` = 5). It dropped any answer whose
+    version wasn't today's, so the next reader-version bump, for any reason, would have dropped every checked Plex
+    answer on every published file, the same loss for every user. A checked answer now stays as it was stored, recorded
+    as today's reader's so it isn't due (and its item looked up) on every run: a flagged one still counts for nothing
+    (`Candidate.stale`), and one stored while Plex couldn't tell still counts, as today (dropping it would take Plex's
+    own marker away wherever Plex can never tell). No decision changes today, so no rules version moves.
+  - **The three files don't correct themselves.** Their Plex answers are gone from markers.db (5557017, 5953298 and
+    5008428 ms appear nowhere in the after copy), and each Plex item now holds our new credits instead of Plex's. Only the before
+    copy of markers.db holds them; restored, the rule above would drop them again. The way back is the owner's: lock
+    each credits start in the Inspector at Plex's time.
+  - **A GPU decode that fails says why** (§5.4). Credit text's and the end-picture check's GPU failure named the last
+    300 characters of ffmpeg's stderr, cut mid-word ("inating thread with return code -22 ... Conversion failed!" for 21
+    Bridges, a 4K AV1 file on a Turing GPU, which has no AV1 decoder). It is now classified as previews classifies its
+    own (`processing.generator._gpu_hand_off`): "the GPU can't decode this file's AV1 video (ffmpeg exited 69)", a
+    hardware or driver error, an I/O error, a signal; anything else quotes ffmpeg's error line whole. A CPU decode's
+    error quotes that line whole too. Every GPU failure is still read again on the CPU. Reproduced with the image's
+    jellyfin-ffmpeg 8.1.2 on storage's P5000 (Pascal, no AV1 decode either): exit 69 with "Your platform doesn't
+    support hardware accelerated AV1 decoding", then 72 rows from the CPU.
