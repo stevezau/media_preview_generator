@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -550,6 +551,73 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         assert "server_markers" not in after.reason, (after.status, after.reason)
         assert reg.get("plex-1").get_markers.call_count == reads  # ours are there: never read back
 
+    def _published_with_plexs_intro(self, store, media, *, stale=frozenset()):
+        """Run 1: IntroDB's intro, with Plex's own (flagged when ``stale`` names it); ours is on Plex after it."""
+        reg = _plex(media, "restore", rows=(PLEX_INTRO,))
+        detectors = _Detectors()
+        detectors.intro.return_value = []
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        plex.types_not_made_for_file.return_value = stale
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+        rec = store.get_file(media)
+        published = store.get_publish_state(rec.id, "plex-1")
+        if not (published and published.markers):
+            # Plex's stale intro confirmed nothing, so nothing was decided or sent: ours is put there by hand.
+            ours = [Marker(T.INTRO, 126_500, 157_000, ("introdb", "season_audio"))]
+            store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=ours, status="written")
+        return reg, detectors, plex, rec
+
+    # Every row: an answer stored for a file whose Plex shows our markers now. An older read after our publish can't
+    # exist (no reader, since the first, reads a server showing ours), so "before our first publish" is every row, and
+    # values that match ours or don't prove nothing either way: what an older reader stored is always Plex's own, and
+    # only reader version 5 on checked whether Plex made it for this file.
+    @pytest.mark.parametrize(
+        ("stored", "shift_ms", "counts"),
+        [(4, 0, False), (4, 4_000, False), (None, 0, False), (READER_VERSION, 0, True)],
+        ids=["unchecked-matching-ours", "unchecked-not-matching-ours", "no-version", "checked"],
+    )
+    def test_after_a_later_reader_only_an_answer_checked_for_an_earlier_file_still_counts(
+        self, store, media, monkeypatch, stored, shift_ms, counts
+    ):
+        # Production, 2026-09-25: a reader-version bump would have dropped every Plex answer on a file showing ours,
+        # checked or not, as the bump to 5 dropped 10 Things I Hate About You's (Plex's credits at 1:32:37, the roll's
+        # real start; chapters alone put them on the final kiss at 1:32:09).
+        reg, detectors, plex, rec = self._published_with_plexs_intro(store, media)
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+        read = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        stored_answer = [replace(c, start_ms=c.start_ms + shift_ms) for c in read]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, stored_answer, origin="plex-1", detail="", version=stored)
+        monkeypatch.setattr(pipeline, "READER_VERSION", READER_VERSION + 1)
+        reads = reg.get("plex-1").get_markers.call_count
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        kept = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        assert kept == (stored_answer if counts else [])
+        assert ("server_markers" in _decision(store, media, T.INTRO).reason) is counts
+        if not counts:
+            [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+            assert row.detail == pipeline.OURS_SHOWN_DETAIL
+        assert reg.get("plex-1").get_markers.call_count == reads  # ours are there: never read back
+
+    def test_after_a_later_reader_a_checked_answer_made_for_an_earlier_file_still_confirms_nothing(
+        self, store, media, monkeypatch
+    ):
+        # The stale rule is untouched: Plex's intro, flagged as made for an earlier file when it was read, stays flagged
+        # and counts for nothing, whatever the reader's version.
+        reg, detectors, plex, rec = self._published_with_plexs_intro(store, media, stale=frozenset({T.INTRO}))
+        before = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        assert [c.stale for c in before] == [True]
+        monkeypatch.setattr(pipeline, "READER_VERSION", READER_VERSION + 1)
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"] == before
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert row.detail == pipeline.STALE_SERVER_MARKERS_DETAIL
+        assert "server_markers" not in _decision(store, media, T.INTRO).reason
+
     def _older_answer_beside_an_item_that_may_show_ours(self, store, media, item_state, version):
         """Production (Doc S02E02/E03/E08, Westworld S03E03): Plex's intro counted with IntroDB's, the item recorded as
         ``item_state`` (a type kept as Plex's own, or another version's markers of ours) while this file left nothing of
@@ -609,6 +677,22 @@ class TestPlexsMarkerMadeForAnEarlierFile:
             r for r in before if r.origin == "plex-1"
         ]
         assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+
+    @pytest.mark.parametrize(("version", "counts"), [(4, False), (READER_VERSION, True)], ids=["unchecked", "checked"])
+    @pytest.mark.parametrize("item_state", ITEM_MAY_SHOW_OURS.values(), ids=ITEM_MAY_SHOW_OURS.keys())
+    def test_beside_an_item_that_may_show_ours_a_later_reader_drops_only_an_unchecked_answer(
+        self, store, media, monkeypatch, item_state, version, counts
+    ):
+        reg, detectors, plex, rec = self._older_answer_beside_an_item_that_may_show_ours(
+            store, media, item_state, version=version
+        )
+        before = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        monkeypatch.setattr(pipeline, "READER_VERSION", READER_VERSION + 1)
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"] == (before if counts else [])
+        assert ("server_markers" in _decision(store, media, T.INTRO).reason) is counts
 
     def test_with_jellyfin_beside_it_the_intro_only_that_answer_confirmed_comes_off_jellyfin(self, store, media):
         # Plex keeps its own intro, Jellyfin takes ours. The older answer no longer confirms IntroDB, so the intro goes
