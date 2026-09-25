@@ -388,8 +388,7 @@ class TestIntroCreditsSettings:
             "An online database's answer is published once an independent source agrees with it: on-screen credits, "
             "season audio, another database, or a server's own marker (IntroDB and TheIntroDB count as one). "
             "A single answer decides alone only when it checks your own file: on-screen credit text for credits, "
-            "season audio for intros (so a show no online database has still gets them), or SkipDB matched to your "
-            "file's length for intros and recaps. "
+            "or season audio for intros (so a show no online database has still gets them). "
             "If sources disagree, or the only answer can't decide alone, the file goes to Needs review so you can pick."
         )
 

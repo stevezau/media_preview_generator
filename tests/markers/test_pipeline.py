@@ -13,9 +13,9 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from media_preview_generator.job_kinds import ItemOutcome
-from media_preview_generator.markers import pipeline
+from media_preview_generator.markers import decide, pipeline, versions
 from media_preview_generator.markers.audio.fingerprint import ChromaprintState
-from media_preview_generator.markers.decide import DecisionStatus, FileLimits
+from media_preview_generator.markers.decide import DECIDE_RULES, DECIDE_RULES_VERSION, DecisionStatus, FileLimits
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from media_preview_generator.markers.outcomes import (
     OUTCOME_KEYS,
@@ -46,6 +46,8 @@ T = MarkerType
 DUR = 1_321_472
 # What every write for ``media`` carries as the file's limits.
 EPISODE_LIMITS = FileLimits(DUR)
+# A file replaced by another cut (another length): nothing of the file it replaced carries over (spec §5.5 rule 15).
+NEW_CUT = DUR + 2_000
 NO_DATA = LookupResult("no_data")
 
 
@@ -650,7 +652,7 @@ class TestIdentityAndProbe:
             Chapter(10_000, 40_000, "Intro"),
             Chapter(40_000, None, "Chapter 2"),
         )
-        _run(ctx, media, {"plex-1": plex}, probe=_probe(new_chapters))
+        _run(ctx, media, {"plex-1": plex}, probe=_probe(new_chapters, NEW_CUT))  # another cut: no credits carried
         args, kwargs = plex.write.call_args
         assert args[1] == [Marker(T.INTRO, 10_000, 40_000, ("chapters",))]
         assert [m.type for m in kwargs["previous"]] == [T.INTRO, T.CREDITS]
@@ -692,7 +694,7 @@ class TestIdentityAndProbe:
             if len(probes) == 1:
                 os.utime(path, ns=(7, 7))  # e.g. Sonarr replaced the file while chapters were read
                 return _probe(CHAPTERS_BOTH)
-            return _probe(new_chapters)
+            return _probe(new_chapters, NEW_CUT)  # another cut: nothing of the replaced one carries over
 
         out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe_effect=probe)
         assert len(probes) == 2
@@ -1131,20 +1133,32 @@ class TestEvidenceAndDecisions:
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
 
     def test_a_file_an_older_build_held_at_high_is_published_from_its_stored_answers(self, store, media, monkeypatch):
-        # Until 2026-09-24 the default rules ("high") held a lone SkipDB intro in Needs review; the row said why.
+        # Until 2026-09-24 the default rules ("high") held a lone season audio intro in Needs review; the row said why.
+        # (A lone SkipDB intro, the case this once covered, waits for a second source at "medium" too since 2026-09-25.)
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
-        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB),)))
+        clients = _clients()
+        audio = Candidate(T.INTRO, 127_894, 156_824, Source.SEASON_AUDIO, 1.0, "3/3")
+        detect = MagicMock(return_value=[audio])
+        spec = LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), detect)
+
+        def run():
+            ctx = _ctx(store, reg, clients=clients, detectors=(spec,), settings_raw=INTRO_ONLY)
+            return _run(ctx, media, {"plex-1": plex}, stage="process")[0]
+
         monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")
-        out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": plex})
+        out = run()
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
         assert _rows(out)["plex-1"]["status"] == ServerStatus.NEEDS_REVIEW.value
-        assert _rows(out)["plex-1"]["message"] == 'Only SkipDB found the intro; at "high" a second source must agree'
+        assert _rows(out)["plex-1"]["message"] == (
+            'Only season audio found the intro; at "high" a second source must agree'
+        )
         monkeypatch.undo()
-        out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": plex})
+        out = run()
         assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert detect.call_count == 1  # the stored answer decided; the season wasn't matched again
         assert [len(c.calls) for c in clients.values()] == [1, 1, 1]
-        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_894, 156_824, ("skipdb",))]
+        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_894, 156_824, ("season_audio",))]
 
     def test_a_needs_review_row_says_why_for_each_type_in_review(self, store, media):
         # IntroDB alone can't decide the intro, and two sources disagree on the credits: one sentence per type.
@@ -1251,16 +1265,21 @@ class TestEvidenceAndDecisions:
         assert out.outcome_key == FileOutcome.PUBLISHED.value
 
     def test_stops_querying_once_everything_is_decided(self, store, media):
+        # SkipDB alone never decides (rule 6), so TheIntroDB, next in the order, is asked; once the two agree the intro
+        # is decided and IntroDB, after them, isn't.
         reg = _registry(media, ServerType.PLEX)
-        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_000, 157_000, Source.SKIPDB),)))
+        clients = _clients(
+            skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_000, 157_000, Source.SKIPDB),)),
+            theintrodb=LookupResult("ok", (Candidate(T.INTRO, 127_500, 157_200, Source.THEINTRODB),)),
+        )
         raw = {
             "sources": [{"id": "skipdb", "enabled": True}, {"id": "theintrodb", "enabled": True}],
             "detect": {"intro": True, "credits": False},
         }
         plex = ready_publisher()
         _run(_ctx(store, reg, clients=clients, settings_raw=raw), media, {"plex-1": plex})
-        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_000, 157_000, ("skipdb",))]
-        assert [len(c.calls) for c in clients.values()] == [0, 0, 1]
+        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_500, 157_000, ("skipdb", "theintrodb"))]
+        assert [len(c.calls) for c in clients.values()] == [1, 0, 1]
         # The server is still read before the first publish: its own marker could shorten the decided skip (rule 7).
         reg.get("plex-1").get_markers.assert_called_once_with("item-plex-1", unknown_if_hidden=True)
 
@@ -2724,8 +2743,12 @@ class TestServerMarkersFromVendors:
     @pytest.mark.parametrize(
         ("plugins", "reason"),
         [
-            # SkipDB may decide an intro alone (rule 6), so both publish; only the reason tells a second vote apart.
-            (["SkipDB"], "single source (skipdb)"),
+            # SkipDB and its copy are one source, and SkipDB alone never decides (rule 6, 2026-09-25)
+            (
+                ["SkipDB"],
+                "only SkipDB and a server's imported marker have the intro; an online answer needs a check "
+                "against the file",
+            ),  # fmt: skip
             (["TheIntroDB"], "sources agree: skipdb, server_markers_imported"),
             (["AniSkip"], "sources agree: skipdb, server_markers_imported"),
             # importers of two databases: which one wrote the markers can't be told, so they count as IntroDB's copy
@@ -2753,9 +2776,14 @@ class TestServerMarkersFromVendors:
         rec = store.get_file(media)
         copies = [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS_IMPORTED]
         assert [c.origin for c in copies] == ["jellyfin-1"]
-        assert out.outcome_key == FileOutcome.PUBLISHED.value
-        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))]
         assert store.get_decisions(rec.id)[T.INTRO].reason == reason
+        if plugins == ["SkipDB"]:
+            assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+            plex.write.assert_not_called()
+        else:
+            assert out.outcome_key == FileOutcome.PUBLISHED.value
+            published = [Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))]
+            assert plex.write.call_args.args[1] == published
 
     def test_a_row_naming_one_of_two_importers_is_read_again_and_its_database_becomes_unknown(self, store, media):
         # Reader version 1 stored only the first importer plugin: ["SkipDB", "TheIntroDB"] read as a SkipDB copy, which
@@ -2862,10 +2890,15 @@ class TestServerMarkersFromVendors:
             {"plex-1": plex},
             probe=_probe(duration=S03E05_BLURAY_MS),
         )
-        # SkipDB decides an intro alone either way (rule 6); the copy only joins it, and moves nothing, while it counts.
-        decided_by = ("skipdb", "server_markers_imported") if server_markers_on else ("skipdb",)
-        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 25_000, 113_000, decided_by)]
-        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        # SkipDB never decides alone (rule 6, 2026-09-25): with the copy counted the two agree and publish; without it
+        # SkipDB waits for a second source.
+        if server_markers_on:
+            published = [Marker(T.INTRO, 25_000, 113_000, ("skipdb", "server_markers_imported"))]
+            assert plex.write.call_args.args[1] == published
+            assert out.outcome_key == FileOutcome.PUBLISHED.value
+        else:
+            plex.write.assert_not_called()
+            assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
 
     def test_a_server_with_no_markers_is_not_asked_for_its_plugins(self, store, media):
         reg = _registry(media, ServerType.JELLYFIN)
@@ -3454,7 +3487,7 @@ class TestPublishFanOut:
         _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
         os.utime(media, ns=(4, 4))
         pub.write.side_effect = PublishError("boom")
-        _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH[:3]))
+        _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH[:3], NEW_CUT))  # a cut without credits
         item_row = store.get_item_publish_state(sid, f"item-{sid}")
         assert (item_row.status, item_row.markers) == ("failed", (INTRO_CH, CREDITS_CH))
         pub.write.side_effect = pub.succeed
@@ -4285,6 +4318,109 @@ class TestReadBackVersions:
             assert pub.shows.call_count == 2
 
 
+class TestAOneVersionPlexItemShowingOtherTimes:
+    """Until 2026-09-25 the Plex publisher kept what a one-version item showed when a decision moved by under 2 s
+    (production: 29 items, e.g. Game of Thrones intros ending at 113.0 s where 110.5-112.4 s was decided). The decision
+    didn't change since, so its publish basis still matches: the next run publishes again instead of "Up to date"."""
+
+    SHOWN_INTRO = Marker(T.INTRO, 126_771, 158_000, ("chapters",))
+
+    def _published_as(self, store, media, shown, files):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+
+        def write(item_id, markers, **kwargs):
+            plex.last_item_files = files
+            plex.last_write_changed = True
+            return shown
+
+        plex.write.side_effect = write
+        _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        assert store.get_item_publish_state("plex-1", "item-plex-1").markers == tuple(shown)
+        plex.write.side_effect = plex.succeed
+        return reg, plex
+
+    def test_a_one_version_item_showing_other_times_is_published_again(self, store, media):
+        reg, plex = self._published_as(store, media, [self.SHOWN_INTRO, CREDITS_CH], ("/plex/a.mkv",))
+
+        outs = [_run(_ctx(store, reg), media, {"plex-1": plex})[0] for _ in range(2)]
+
+        assert plex.write.call_count == 2  # once more, then up to date
+        assert plex.write.call_args.args == ("item-plex-1", [INTRO_CH, CREDITS_CH])
+        assert plex.write.call_args.kwargs["previous"] == [self.SHOWN_INTRO, CREDITS_CH]
+        assert store.get_item_publish_state("plex-1", "item-plex-1").markers == (INTRO_CH, CREDITS_CH)
+        assert [o.outcome_key for o in outs] == [FileOutcome.PUBLISHED.value, FileOutcome.UP_TO_DATE.value]
+        assert plex.shows.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("shown", "files"),
+        [
+            (
+                [SHOWN_INTRO, CREDITS_CH],
+                ("/plex/a.mkv", "/plex/b.mkv"),
+            ),  # another version: the item keeps agreeing times
+            ([INTRO_CH, CREDITS_CH], ("/plex/a.mkv",)),  # shows what was decided
+        ],
+        ids=["two-versions", "same-times"],
+    )
+    def test_otherwise_the_item_is_up_to_date_without_a_write(self, store, media, shown, files):
+        reg, plex = self._published_as(store, media, shown, files)
+
+        out, _ = _run(_ctx(store, reg), media, {"plex-1": plex})
+
+        assert plex.write.call_count == 1
+        assert plex.shows.call_count == 1
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+
+
+class TestDecideRulesVersion:
+    """A file decided under older rules (``decide.DECIDE_RULES_VERSION``) is listed by the start check
+    (``versions.files_to_read_again``); its run decides it again from the stored answers, asking nothing already
+    answered, and records the rules it was decided under, as every run that decides a file does."""
+
+    SKIPDB_ONLY = {"sources": [{"id": "skipdb", "enabled": True}], "detect": {"intro": True, "credits": False}}
+
+    def _settings(self):
+        return load_global(validate_global(self.SKIPDB_ONLY, None)[0])
+
+    def test_a_run_records_the_rules_it_decided_under(self, store, media):
+        _run(
+            _ctx(store, _registry(media, ServerType.PLEX)),
+            media,
+            {"plex-1": ready_publisher()},
+            probe=_probe(CHAPTERS_BOTH),
+        )
+
+        assert store.version_rerun(store.get_file(media).id, DECIDE_RULES) == DECIDE_RULES_VERSION
+        assert versions.files_to_read_again(store, self._settings()) == {}
+
+    def test_a_file_decided_under_older_rules_is_decided_again_from_its_stored_answers(self, store, media, monkeypatch):
+        reg = _registry(media, ServerType.PLEX)
+        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB),)))
+
+        plex = ready_publisher()
+
+        def run():
+            ctx = _ctx(store, reg, clients=clients, settings_raw=self.SKIPDB_ONLY)
+            return _run(ctx, media, {"plex-1": plex})[0]
+
+        # Until 2026-09-25 a lone SkipDB intro decided (rules version 1 made it wait for a second source).
+        with monkeypatch.context() as older:
+            older.setattr(decide, "_AGREEMENT_ONLY", decide._AGREEMENT_ONLY - {Source.SKIPDB})
+            assert run().outcome_key == FileOutcome.PUBLISHED.value
+        store.record_version_reruns([(media, DECIDE_RULES, DECIDE_RULES_VERSION - 1)])
+        assert versions.files_to_read_again(store, self._settings()) == {media: {DECIDE_RULES: DECIDE_RULES_VERSION}}
+
+        run()
+
+        rec = store.get_file(media)
+        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert plex.write.call_args.args == ("item-plex-1", [])  # the lone SkipDB intro comes off
+        assert len(clients["skipdb"].calls) == 1  # decided from the stored answer, not asked again
+        assert store.version_rerun(rec.id, DECIDE_RULES) == DECIDE_RULES_VERSION
+        assert versions.files_to_read_again(store, self._settings()) == {}
+
+
 class TestStages:
     def test_check_defers_to_worker_when_a_local_detector_can_help(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -4525,9 +4661,9 @@ class TestPlexItems:
         return reg, FakePlexItems({"42": parts})
 
     @staticmethod
-    def _check(store, reg, items, path, chapters=(), **ctx_kwargs):
+    def _check(store, reg, items, path, chapters=(), duration=DUR, **ctx_kwargs):
         with (
-            patch.object(pipeline, "probe_media", return_value=_probe(chapters)),
+            patch.object(pipeline, "probe_media", return_value=_probe(chapters, duration)),
             patch.object(
                 pipeline, "publisher_for", side_effect=lambda server, cfg, **kw: items.publisher(kw["sibling_markers"])
             ),
@@ -4696,7 +4832,7 @@ class TestPlexItems:
         self._check(store, reg, items, media, CHAPTERS_BOTH)
         reg.get("plex-1").resolve_remote_path_to_item_id.return_value = "43"
         os.utime(media, ns=(4, 4))  # replaced by a cut without chapters: nothing decided, and item 43 has no row
-        out = self._check(store, reg, items, media)
+        out = self._check(store, reg, items, media, duration=NEW_CUT)
         last = items.calls[-1]
         assert (last["item_id"], last["markers"], last["previous"]) == ("43", [], [])
         assert last["own_previous"] == [INTRO_CH, CREDITS_CH]
@@ -4736,7 +4872,7 @@ class TestPlexItems:
         self._check(store, reg, items, media, CHAPTERS_BOTH)
         os.utime(media, ns=(3, 3))
         items.fail_next = PublishError("Plex's database is busy", state=Capability.UNREACHABLE)
-        failed = self._check(store, reg, items, media, CHAPTERS_BOTH[:3])
+        failed = self._check(store, reg, items, media, CHAPTERS_BOTH[:3], duration=NEW_CUT)  # a cut without credits
         assert failed.outcome_key == FileOutcome.FAILED.value
         row = store.get_item_publish_state("plex-1", "42")
         assert (row.status, row.markers) == ("failed", (INTRO_CH, CREDITS_CH))
@@ -4924,7 +5060,14 @@ class TestConcurrentJobs:
         results = {}
         clients = _clients()
         ctx_n = _ctx(store, reg, settings_raw=raw, clients=clients)
-        # SkipDB answers only a duration match, so its lone answer may publish at "Medium".
+        # IntroDB (asked first) and SkipDB agree on each cut, so each cut's answer publishes; SkipDB's lookup is where
+        # the file is replaced.
+
+        def introdb_lookup(ids, *, duration_ms, priority, cancel_check=None):
+            times = (128_000, 157_000) if duration_ms == old_duration else (186_000, 216_000)
+            return LookupResult("ok", (Candidate(T.INTRO, *times, Source.INTRODB),))
+
+        clients["introdb"].lookup = introdb_lookup
 
         def lookup(ids, *, duration_ms, priority, cancel_check=None):
             if duration_ms == old_duration and "N" not in results:
@@ -4955,7 +5098,7 @@ class TestConcurrentJobs:
             results["thread"].join(timeout=10)
             later, _ = _run(_ctx(store, reg, settings_raw=raw, clients=clients), media, {"plex-1": plex})
         assert results["queued"] is True
-        new_intro = Marker(T.INTRO, 186_000, 216_000, ("skipdb",))
+        new_intro = Marker(T.INTRO, 186_000, 216_000, ("introdb", "skipdb"))
         rec = store.get_file(media)
         assert (rec.size, rec.mtime_ns, rec.duration_ms) == (200, 9, new_duration)
         assert [(c.start_ms, c.end_ms) for c in store.get_evidence(rec.id) if c.source is Source.SKIPDB] == [

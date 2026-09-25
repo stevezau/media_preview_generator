@@ -1682,6 +1682,8 @@ const MARKER_SOURCE_NAMES = {
     server_markers: 'server markers',
     server_markers_imported: 'server markers',
     user: 'your edits',
+    // A marker kept from the file this one replaced (markers/carry_over.py; job_log.CARRIED_OVER_LABEL).
+    carried_over: 'the file it replaced',
 };
 const MARKER_SOURCE_TYPE_LABELS = { intro: 'Intro', credits: 'Credits', recap: 'Recap', preview: 'Preview' };
 const MARKER_SOURCE_GROUPS_SHOWN = 5;

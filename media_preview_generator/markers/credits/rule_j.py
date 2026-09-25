@@ -709,6 +709,74 @@ def coarse_start(
     )
 
 
+def start_on_dense_text(
+    rows: Sequence[Row],
+    coarse: Coarse,
+    raw: Sequence[Row],
+    shown: Sequence[Row],
+    *,
+    dense_boxes: int,
+    params: RuleParams = RULE_J,
+) -> Coarse:
+    """A roll read at 640x360 starts on dense text, or on the text it runs into without a break.
+
+    The larger frame boxes small print the smaller frame never does -- a news feed's date line, logo and caption, a
+    channel's fine print, a lower third's words -- and on lit story that makes credit frames of three to five boxes, on
+    and off with the shots, which the 24 s join puts in front of the roll (I Survived a Serial Killer S01E14: court
+    footage from 68 s before the roll). :func:`overlay_boxes` can't take them: they are on screen only in the stretch
+    the run itself opens on, not across the story before it, so they are never gathered. So the start moves to the
+    run's first dense frame -- a dark credit frame, or a lit one with ``dense_boxes`` boxes -- and from there steps
+    back over every keyframe that shows text, each no further from the next than the run's own cadence
+    (``ANCHOR_SPACING_FACTOR`` times the spacing of its credit frames as found, and never more than the 24 s join),
+    never before where the run started. Sparse text the roll runs into without a break stays its start (single-name
+    cards straight into columns of names); text cut off from it by a keyframe without any, or by a longer gap than the
+    roll keeps, is not.
+
+    Whether a keyframe shows text is read on ``shown``: as decoded, so a card of the roll the 320x180 reading boxed
+    whole -- nothing left of it where the runs are found -- doesn't stop the walk (Accused (2020): four starts 5-8 s
+    late read that way), and without the overlays, so a channel bug on every frame doesn't carry it back over story.
+
+    The start only ever moves later, and the run's end is read from the same last credit frame.
+
+    Args:
+        rows: The rows the rule read (``coarse_start``'s ``without``).
+        coarse: The coarse start found on them.
+        raw: The rows the runs were found on, indexed alike: the cadence is measured there.
+        shown: The rows as decoded without the overlays' boxes, indexed alike: the text the walk steps over.
+        dense_boxes: Boxes a lit frame needs to be dense.
+        params: Rule thresholds.
+
+    Returns:
+        ``coarse`` when it starts on dense text, or when its run holds none after its start; else the new start, which
+        is a row of the run itself (``run_index`` None).
+    """
+
+    def dense(row: Row) -> bool:
+        return is_credit(row, params) and (row[2] < params.dark or row[1] >= dense_boxes)
+
+    if dense(rows[coarse.index]):
+        return coarse
+    since = coarse.pts_s
+    first = coarse.index if coarse.run_index is None else coarse.run_index
+    run = sorted(range(first, coarse.end_index + 1), key=lambda i: rows[i][0])
+    start = next((i for i in run if rows[i][0] >= since and dense(rows[i])), None)
+    # A run with one credit frame left from its anchored start (the anchor stepped onto its last) has no cadence to
+    # walk at: its start stays where the band steps put it.
+    if start is None or _credit_bounds(raw, first, coarse.end_index, params) is None:
+        return coarse
+    limit = min(params.gap_s, ANCHOR_SPACING_FACTOR * _run_spacing(raw, first, coarse.end_index, params))
+    # Presentation order, as reach_back walks: the walk asks what comes before this frame.
+    order = sorted(range(len(rows)), key=lambda i: rows[i][0])
+    at = order.index(start)
+    while at > 0:
+        before = order[at - 1]
+        if rows[before][0] < since or shown[before][1] < 1 or rows[order[at]][0] - rows[before][0] > limit:
+            break
+        at -= 1
+    start = order[at]
+    return Coarse(index=start, end_index=coarse.end_index, pts_s=rows[start][0])
+
+
 def text_all_through(rows: Sequence[Row], coarse: Coarse) -> bool:
     """Whether the text a run was found in is on screen all through the tail rather than a roll after story.
 

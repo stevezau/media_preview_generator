@@ -135,9 +135,8 @@ _USER_FACING_NOTES: dict[int, str] = {
     ),
     16: (
         "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
-        "marker (on-screen credit text, chapters, or SkipDB matched to your file's length), so far fewer files wait "
-        "in Needs review. The files already waiting there are checked again by one Intro & Credits job, which "
-        "reuses what was already found."
+        "marker (on-screen credit text or chapters), so far fewer files wait in Needs review. The files already "
+        "waiting there are checked again by one Intro & Credits job, which reuses what was already found."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "

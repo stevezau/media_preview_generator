@@ -35,10 +35,13 @@ from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
+from .carry_over import carry_over, is_carried_over, previous_decisions
 from .credits.detector import credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
+    DECIDE_RULES,
+    DECIDE_RULES_VERSION,
     DecisionContext,
     DecisionStatus,
     FileLimits,
@@ -68,7 +71,7 @@ from .job_log import (
 )
 from .locks import FILE_RUN_LOCKS
 from .locks import KeyedLocks as _KeyedLocks
-from .missing import mark_if_missing
+from .missing import gone_now, mark_if_missing
 from .models import (
     SERVER_SOURCES,
     STALE_SERVER_MARKERS_DETAIL,
@@ -117,6 +120,7 @@ from .publishers.base import (
     PublishError,
     Shown,
     cancellable_waits,
+    same_times,
     wait_cancelled,
 )
 from .publishers.factory import publisher_for, supported_types_for
@@ -131,7 +135,7 @@ from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL
 from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient, is_key_refusal
-from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
+from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, PreviousDecision, get_marker_store
 
 NO_DATA_RETRY = timedelta(days=14)
 # TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
@@ -180,6 +184,9 @@ UNUSABLE_SERVER_MARKERS_DETAIL = (
 # What an older reader stored from a Plex server that shows our markers now: it can't be read again (Plex can't tell
 # ours from its own), so it isn't checked for markers made for an earlier file either, and counts for nothing.
 OURS_SHOWN_DETAIL = "This server shows our markers now; what an older version read from it isn't used"
+# The same for a Plex item this file left nothing of ours on that may show ours all the same: another version's, or a
+# type kept as Plex's own that can hold a marker of ours (``MarkerStore.published_to_item``). The reader skips it too.
+OURS_ON_ITEM_DETAIL = "This server's item may show our markers now; what an older version read from it isn't used"
 _CANCELLED = "cancelled by user"
 # A ready Plex whose Plex Pass didn't answer (usually restarting): files within this long share the answer instead of
 # each running the whole check (lock probe, Plex's HTTP connect with its retries, schema and library scans).
@@ -268,6 +275,9 @@ class LocalDetectorSpec:
         followups: ``followups(file, ctx)``: other files whose answer is out of date and whose decision could change
             with it (season audio: siblings matched before this episode arrived). Every run of a file of a type the
             detector decides asks the job to run them again, before any worker handoff (None: none).
+        failed_here: ``failed_here(file, ctx)``: whether it failed to read the file as it is now (credit text: a decode
+            error or a timeout recorded for this identity), so a rule waiting for its answer stops waiting (None:
+            never).
     """
 
     source: Source
@@ -279,6 +289,7 @@ class LocalDetectorSpec:
     due: Callable[[FileRecord, PipelineContext], bool] | None = None
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
     followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
+    failed_here: Callable[[FileRecord, PipelineContext], bool] | None = None
 
     def answer_version(self, rec: FileRecord, ctx: PipelineContext) -> int:
         """The version a stored answer for ``rec`` must have to count."""
@@ -1025,8 +1036,8 @@ def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, no
 
 
 def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
-    """Whether a file has a type undecided (True when the store knows no decisions for it) or one decided by season
-    audio alone (a locked marker never counts)."""
+    """Whether a file has a type undecided (True when the store knows no decisions for it), one decided by season
+    audio alone, or one carried over from a file it replaced (a locked marker never counts)."""
     rec = store.get_file(path)
     if rec is None:
         return False
@@ -1035,9 +1046,10 @@ def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
         return True
     if any(row.status in _UNDECIDED for row in decisions.values()):
         return True
-    # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``).
+    # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``). A marker carried over from a
+    # replaced file stands only until the file has evidence of its own.
     return any(
-        not marker.locked and set(marker.decided_by) <= _SEASON_AUDIO_AND_SERVERS
+        not marker.locked and (set(marker.decided_by) <= _SEASON_AUDIO_AND_SERVERS or is_carried_over(marker))
         for marker in store.get_markers(rec.id).values()
     )
 
@@ -1127,13 +1139,26 @@ def _decide(
         )
         return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
 
-    decisions = decide_from(order)
     registered = {source.value for spec in ctx.local_detectors for source in (spec.source, *spec.stored_sources)}
     unavailable = {source.value for source in _LOCAL_DETECTOR_SOURCES} - registered
     if ctx.chromaprint is ChromaprintState.UNKNOWN:
         unavailable -= {Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value}
     if ctx.credits_text is TextDetState.UNKNOWN:
         unavailable -= {Source.CREDITS_TEXT.value}
+    # A local detector with nothing stored stays in the order only while it may still answer this file: a rule waiting
+    # for its answer (credit text checking a credits chapter SkipDB contradicts, spec §5.5 rule 3) must not wait for
+    # a detector that can't run here, that found nothing at its version now, or that failed to read the file as it is
+    # (the owner's rule: decisions are automatic, never an open-ended wait in Needs review). An older version's
+    # "nothing" is read again (``_detector_pending``), so the rule waits for that.
+    answered = {c.source.value for c in evidence}
+    order = tuple(
+        source_id
+        for source_id in order
+        if source_id in answered
+        or Source(source_id) not in _LOCAL_DETECTOR_SOURCES
+        or (source_id not in unavailable and _may_still_answer(ctx, rec, Source(source_id)))
+    )
+    decisions = decide_from(order)
     if not any(c.source.value in unavailable and c.source.value in order for c in evidence):
         return decisions
     without = decide_from(tuple(source_id for source_id in order if source_id not in unavailable))
@@ -1141,6 +1166,65 @@ def _decide(
         mtype: without[mtype] if decision.status is DecisionStatus.DECIDED else decision
         for mtype, decision in decisions.items()
     }
+
+
+def _may_still_answer(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
+    """Whether a local detector registered here may still give an answer stored under ``source`` for this file: it
+    hasn't answered at its version now, and hasn't failed to read the file as it is (``LocalDetectorSpec.failed_here``).
+    """
+    if _answered_at_this_version(ctx, rec, source):
+        return False
+    return not any(
+        source in spec.stored_sources and spec.failed_here is not None and spec.failed_here(rec, ctx)
+        for spec in ctx.local_detectors
+    )
+
+
+def _answered_at_this_version(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
+    """Whether a local detector stored an answer under ``source`` for this file at its version now. A detector not
+    registered here can't say what its version is, so its stored answer counts as it is. Its ``due`` isn't asked: season
+    audio's reads the whole season, and credit text's is only ever true for an answer stored without
+    ``LOOK_BACK_BASIS``, which no answer of today's version is."""
+    if ctx.store.evidence_fetched_at(rec.id, source) is None:
+        return False
+    stored = ctx.store.evidence_version(rec.id, source)
+    return not any(
+        source in spec.stored_sources and stored != spec.answer_version(rec, ctx) for spec in ctx.local_detectors
+    )
+
+
+def _carry_over(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    servers: _ItemServers,
+    owners: list[_Owning],
+    decisions: dict[MarkerType, TypeDecision],
+) -> dict[MarkerType, TypeDecision]:
+    """The file's final decisions with the carry-over (spec §5.5 rule 15, ``carry_over``): a type no source answered
+    for keeps what the file it replaced had decided, at the same length. The servers' item ids are asked only when a
+    type has no evidence (publishing asks them next anyway); a server that can't name the item, or a replaced file's
+    disk that can't tell, leaves a marker carried before as it is."""
+
+    def previous(wanted: frozenset[MarkerType]) -> dict[MarkerType, PreviousDecision | None]:
+        item_ids = {owner.config.id: servers.item_id(owner) for owner in owners}
+        items = [(server_id, item_id) for server_id, item_id in item_ids.items() if item_id]
+        configs = list(ctx.registry.configs())
+        return previous_decisions(
+            ctx.store,
+            rec,
+            items,
+            wanted=wanted,
+            gone=lambda other: gone_now(other, configs),
+            items_known=len(items) == len(item_ids),
+        )
+
+    return carry_over(
+        decisions,
+        rec.duration_ms or 0,
+        previous,
+        kept=ctx.store.get_markers(rec.id),
+        enabled=_decision_order(ctx.settings),
+    )
 
 
 def _decisions_changed(
@@ -1177,12 +1261,13 @@ def _rests_only_on(decision: TypeDecision, sources: frozenset[str]) -> bool:
 
 def _decided_beyond_chapters(decision: TypeDecision) -> bool:
     """Decided, and not by chapters alone nor by season audio alone: two agreeing sources may still veto a chapter
-    (spec §5.5 rule 3), and one disagreeing source sends a season-audio intro to review (owner, 2026-09-24).
+    (spec §5.5 rule 3), and one disagreeing source sends a season-audio intro to review (owner, 2026-09-24). A marker
+    carried over from a replaced file (rule 15) stands only until the file has evidence of its own.
 
     A chapter or season audio answer that markers already on servers shortened or confirmed still stands alone: server
     markers never decide on their own (rule 7).
     """
-    if decision.status is not DecisionStatus.DECIDED:
+    if decision.status is not DecisionStatus.DECIDED or is_carried_over(decision.marker):
         return False
     return not (_rests_only_on(decision, _CHAPTERS_AND_SERVERS) or _rests_only_on(decision, _SEASON_AUDIO_AND_SERVERS))
 
@@ -1569,7 +1654,9 @@ def _read_server_markers(
             servers (``ctx.recheck_empty_server_markers``): then it is on its backoff
             (``MarkerStore.server_recheck_due``). A Plex answer stored while Plex couldn't tell whether its markers
             were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
-            is never read; an older reader's answer from a Plex one stops counting (``_drop_older_reader_answer``).
+            is never read, nor a Plex or Emby item that may show ours (another version's, or a type kept as the
+            server's own); an older reader's answer from such a Plex server or item stops counting
+            (``_drop_older_reader_answer``).
 
     Returns:
         The ids of the servers whose answer was stored.
@@ -1594,6 +1681,8 @@ def _read_server_markers(
             continue
         item_wide = cfg.type in _ITEM_WIDE_MARKERS
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
+            if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
+                read.add(cfg.id)
             continue
         found = servers.markers(owner, item_id, rec.duration_ms)
         if found is None:
@@ -1618,7 +1707,10 @@ def _read_server_markers(
                 ctx.store.count_failed_server_reread(rec.id, cfg.id)
             continue
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
-            continue  # another version of this item was published while the read was out: it may show ours
+            # Another version of this item was published while the read was out: it may show ours.
+            if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
+                read.add(cfg.id)
+            continue
         source, found, detail = _counted_as(ctx, owner, found)
         if found and cfg.type is ServerType.PLEX:
             stale = _plex_types_not_made_for_file(ctx, servers, owner, item_id)
@@ -1641,12 +1733,20 @@ def _read_server_markers(
     return read
 
 
-def _drop_older_reader_answer(ctx: PipelineContext, rec: FileRecord, server_id: str) -> bool:
-    """Stop counting a Plex answer an older reader stored, once the server shows our markers.
+def _drop_older_reader_answer(
+    ctx: PipelineContext, rec: FileRecord, server_id: str, detail: str = OURS_SHOWN_DETAIL
+) -> bool:
+    """Stop counting a Plex answer an older reader stored, once the server shows (or its item may show) our markers.
 
     Such an answer can't be read again to be checked for markers made for an earlier file (``READER_VERSION`` 5), so,
     as when the reader can't read the server (``_read_server_markers``), it goes: kept, a stale Plex marker would
     still confirm online times timed on another release.
+
+    Args:
+        ctx: The job's context.
+        rec: The file.
+        server_id: The Plex server.
+        detail: Why, as stored with the empty answer.
 
     Returns:
         Whether the stored answer was replaced.
@@ -1659,7 +1759,7 @@ def _drop_older_reader_answer(ctx: PipelineContext, rec: FileRecord, server_id: 
         Source.SERVER_MARKERS,
         [],
         origin=server_id,
-        detail=OURS_SHOWN_DETAIL,
+        detail=detail,
         version=READER_VERSION,
         also_replaces=SERVER_SOURCES - {Source.SERVER_MARKERS},
     )
@@ -1973,6 +2073,23 @@ def identity_changed(rec: FileRecord) -> bool:
     return (st.st_size, st.st_mtime_ns) != (rec.size, rec.mtime_ns)
 
 
+def _one_version_shows_other_times(cfg: ServerConfig, item_row: ItemPublishStateRow, wanted: list[Marker]) -> bool:
+    """Whether a one-version Plex item holds times of ours other than decided for a type both have.
+
+    Only another version can make a Plex item keep times other than the calling file's
+    (``publishers.base.agreed_across_versions``). Until 2026-09-25 a one-version item kept its earlier times too when a
+    decision moved by under ``VERSION_AGREEMENT_MS``; the decision hasn't changed since, so its publish basis still
+    matches and only this sends it again.
+    """
+    if cfg.type is not ServerType.PLEX or item_row.item_files is None or len(item_row.item_files) != 1:
+        return False
+    for mtype in {m.type for m in item_row.markers}:
+        decided = [m for m in wanted if m.type is mtype]
+        if decided and not same_times([m for m in item_row.markers if m.type is mtype], decided):
+            return True
+    return False
+
+
 def _previous_on_item(item_row: ItemPublishStateRow | None, publisher: MarkerPublisher) -> list[Marker] | None:
     """What this app last left on the server item, from any file (None = unknown).
 
@@ -2186,6 +2303,8 @@ def _publish_to(
                 # Recorded before this app kept a Plex item's versions, so a version added since can't be seen: one
                 # write records them (it changes nothing, and takes no write lock, while the item is as recorded).
                 reason = "the item's versions aren't recorded yet"
+            elif _one_version_shows_other_times(cfg, item_row, wanted):
+                reason = "it shows other times than decided"
             else:
                 shown = _shown_on_server(
                     publisher, cfg, item_id, list(item_row.markers), item_row.kept_types, item_row.item_files
@@ -2618,8 +2737,19 @@ def _attempt(
     # no local detector reads the file for them. Asked once a detector would run or a type ends undecided, at most once
     # per run.
     kept_everywhere: frozenset[MarkerType] | None = None
-    for source_id in ctx.settings.ordered_enabled_sources():
-        source = Source(source_id)
+    # A source skipped as "not needed (already decided)", with the types it was skipped for: a later step can take away
+    # the evidence they were decided with (an older reader's Plex answer dropped, markers Plex now says were made for an
+    # earlier file), so each is asked once more at the end of this run while one of them is no longer decided.
+    skipped_decided: dict[Source, frozenset[MarkerType]] = {}
+
+    def sources_in_order() -> Iterator[Source]:
+        yield from (Source(source_id) for source_id in ctx.settings.ordered_enabled_sources())
+        for skipped_source, skipped_for in list(skipped_decided.items()):
+            if not _all_decided(decisions, skipped_for):
+                notes.not_asked.pop(skipped_source, None)
+                yield skipped_source
+
+    for source in sources_in_order():
         refresh = _refreshing(ctx, path, source)
         if (
             not gather_all
@@ -2629,11 +2759,12 @@ def _attempt(
             and not _decided_with_a_due_answer(ctx, rec, source, decisions, types)
         ):
             notes.not_asked[source] = "not needed (already decided)"
+            skipped_decided[source] = types
             continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
         if source in _ONLINE_LABELS:
-            client = ctx.clients.get(source_id)
+            client = ctx.clients.get(source.value)
             if (
                 source is Source.THEINTRODB
                 and not gather_all
@@ -2682,6 +2813,9 @@ def _attempt(
                 notes.not_asked[source] = "doesn't apply to this file"
             elif not pending:
                 notes.not_asked[source] = "not needed (already decided)"
+                if not gather_all:
+                    answerable = frozenset(t for spec in here for t in spec.types & types)
+                    skipped_decided[source] = frozenset(t for t in answerable if _decided_beyond_chapters(decisions[t]))
             if pending and kept_everywhere is None:
                 kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, types)
             if pending and kept_everywhere:
@@ -2742,11 +2876,15 @@ def _attempt(
             **decisions,
             **{t: TypeDecision(t, DecisionStatus.DISABLED, None, None, reason) for t in kept_own},
         }
+    decisions = _carry_over(ctx, rec, servers, owners, decisions)
     fingerprint = ctx.settings.detection_fingerprint()
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
         ctx.note_answer_changed()
+    if ctx.store.version_rerun(rec.id, DECIDE_RULES) != DECIDE_RULES_VERSION:
+        # Decided under today's rules: only a start after they change lists it to be decided again (``markers.versions``).
+        ctx.store.record_version_reruns([(rec.canonical_path, DECIDE_RULES, DECIDE_RULES_VERSION)])
     if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)
@@ -2776,7 +2914,7 @@ def _attempt(
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
     if is_budget_exhausted(skipped.get(Source.THEINTRODB, "")) and any(
-        decisions[t].status in _UNDECIDED for t in types
+        decisions[t].status in _UNDECIDED or is_carried_over(decisions[t].marker) for t in types
     ):
         with ctx._budget_lock:
             ctx._budget_rechecks.add(path)
@@ -2790,6 +2928,7 @@ _UNUSED_SERVER_MARKERS = {
     UNUSABLE_SERVER_MARKERS_DETAIL: "couldn't be used (unreadable, another cut, or its library hides a type in Plex)",
     PLUGINS_UNKNOWN_DETAIL: "not used (couldn't read its plugins)",
     OURS_SHOWN_DETAIL: "not used (read by an older version; it shows our markers now)",
+    OURS_ON_ITEM_DETAIL: "not used (read by an older version; its item may show our markers now)",
 }
 
 

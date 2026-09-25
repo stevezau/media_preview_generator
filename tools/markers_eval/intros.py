@@ -27,7 +27,9 @@ from media_preview_generator.markers.audio.matcher import (
 from media_preview_generator.markers.audio.season import (
     SeasonClock,
     _mostly_silence,
+    clock_by_audio,
     guarded_pick,
+    heard_in,
     holds_no_intro,
     in_own_time,
     in_own_times,
@@ -171,15 +173,36 @@ class SeasonStep:
         retimed: Retimed | None = None,
     ) -> None:
         self._season, self._report, self._end_pictures = season, report, end_pictures
-        self._runs: dict[tuple[str, str], list[Run]] = {}
+        self._runs: dict[tuple[str, str, int], list[Run]] = {}
         audible = {f: points for f, points in fps.items() if len(points)}
-        self.clock = season_clock({f: speed(f) for f in audible}) if speed and retimed else SeasonClock()
-        self._fps = {**fps, **{f: retimed(f, factor) for f, factor in self.clock.factors.items()}}
         self.files = sorted(audible)
+        self.clock = SeasonClock()
+        self._fps = dict(fps)
+        if speed and retimed:
+            speeds = {f: speed(f) for f in audible}
+            by_rate = season_clock(speeds)
+            stretched = {f: retimed(f, factor) for f, factor in by_rate.factors.items()}
+
+            def heard(path: str, retimed_side: bool, reference: str) -> bool:
+                # As the app does (season._matching): matched both ways against the files at the group's speed.
+                own = stretched[path] if retimed_side else fps[path]
+                first = path < reference
+                side = SeasonClock(by_rate.speed, {path: 1.0} if retimed_side else {})
+                pair = (path, reference) if first else (reference, path)
+                runs = self._pair(*pair, side, {path: own, reference: fps[reference]})
+                return heard_in(runs, own, first=first)
+
+            references = [f for f in self.files if speeds[f] == by_rate.speed]
+            self.clock = clock_by_audio(by_rate, references, heard)
+            self._fps.update({f: stretched[f] for f in self.clock.factors})
 
     def runs_between(self, first: str, second: str) -> list[Run]:
-        if (first, second) not in self._runs:
-            a, b = self._fps[first], self._fps[second]
+        return self._pair(first, second, self.clock, self._fps)
+
+    def _pair(self, first: str, second: str, clock: SeasonClock, fps: Mapping[str, np.ndarray]) -> list[Run]:
+        key = (first, second, clock.pair_version(first, second))
+        if key not in self._runs:
+            a, b = fps[first], fps[second]
             runs = pair_runs(a, b)
             if holds_no_intro(a, b):  # what markers.audio.season.season_pair_runs leaves out
                 short = [r for r in runs if r.a_end_s - r.a_start_s <= MAX_INTRO_S]
@@ -187,8 +210,8 @@ class SeasonStep:
                     {"season": self._season, "a": first, "b": second, "intro_length_runs": len(short)}
                 )
                 runs = []
-            self._runs[(first, second)] = runs
-        return self._runs[(first, second)]
+            self._runs[key] = runs
+        return self._runs[key]
 
     def answer(self, episode: EvalEpisode) -> tuple | None:
         if episode.file not in self.files or len(self.files) < 2:

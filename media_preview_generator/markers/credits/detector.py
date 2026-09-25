@@ -23,7 +23,7 @@ from loguru import logger
 
 from ..decide import credits_limits_ms, earliest_credits_start_ms
 from ..models import Candidate, FileIdentity, MarkerType, Source
-from . import frames, rule_j
+from . import decode_check, frames, rule_j
 from .textdet_helper import TextDetShuttingDownError, TextDetUnavailableError, get_textdet_pool
 
 if TYPE_CHECKING:
@@ -49,10 +49,14 @@ if TYPE_CHECKING:
 # decoded there, to 320x180 by the nearest pixel (``frames._scale_filter``) -- where each vendor's own scaler blurred
 # text a few pixels tall differently, so credits found on NVIDIA were lost on Intel and the CPU; and a tail with no
 # answer at 320x180 is read again at 640x360 (``RETRY_SCALE``). Any stored answer, found or not, can move.
-CREDITS_TEXT_VERSION = 4
+# 5: the 640x360 reading of the rest of a file after an answer that ends in a scene reads a keyframe whole when it
+# holds text only that frame boxes (a roll the 320x180 reading half boxed), and a roll read at 640x360 starts on dense
+# text or the text it runs into without a break (``rule_j.start_on_dense_text``: small print on story before it is not
+# its start). Answers read at 640x360 can move; one found at 320x180 that runs to the end of the file can't.
+CREDITS_TEXT_VERSION = 5
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
-# (300 s) gives 300,004, so a chosen window's version never equals Automatic's, and another window's answer is asked
+# (300 s) gives 300,005, so a chosen window's version never equals Automatic's, and another window's answer is asked
 # again.
 _WINDOW_VERSION_STEP = 1000
 # Stored with every answer as what it was based on (``detector_runs``). An answer without it was read when the look-back
@@ -77,6 +81,11 @@ RETRY_SCALE = 2
 # roll (Lisa Ann Walter: It Was an Accident), 19 px lets a making-of's blobs back in as a run 336 s before its credits
 # (Frankenstein: The Anatomy Lesson), 15 px has neither (small-text-retry.md).
 SMALL_TEXT_MAX_HEIGHT_PX = 15
+# ... and whose roll starts on a frame this dense (``rule_j.start_on_dense_text``): a dark credit frame, or a lit one
+# with this many boxes, twice the 3 a lit credit frame needs. Swept at 4, 5, 6 and 8 on the 80, the 205, Accused and
+# I Survived a Serial Killer: 4 and 5 leave S01E14 starting on court footage whose small print boxes four and five a
+# frame, 68 s early; 6 and 8 give every file the same verdict, but 8 starts Animal (2023) 241 s later.
+DENSE_BOXES = rule_j.RULE_J.dense * RETRY_SCALE
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
@@ -107,8 +116,10 @@ class CreditsTextResult:
             either way. At ``RETRY_SCALE`` every row decoded at that size is as decoded less the boxes too tall for
             small text (:func:`_small_text`), and ``key_rows`` still holds the text the 320x180 reading had boxed.
         run_rows: At ``RETRY_SCALE``, the keyframe rows rule J found the runs on: ``key_rows`` without the text the
-            320x180 reading had already boxed (:func:`_not_seen`), which can't be gathered again from ``key_rows``
-            alone; a frame's own text is these without ``overlays``. Empty at 1, where the runs are ``key_rows``'.
+            320x180 reading had already boxed (:func:`_not_seen`; after a 320x180 answer's end, a keyframe that also
+            holds text only the larger frame boxes keeps all of its text), which can't be gathered again from
+            ``key_rows`` alone; a frame's own text is these without ``overlays``. Empty at 1, where the runs are
+            ``key_rows``'.
     """
 
     start_s: float | None
@@ -134,6 +145,7 @@ def find_credits(
     cancel_check: Callable[[], bool] | None = None,
     phase: Callable[[str], None] | None = None,
     earliest_start_s: float | None = None,
+    check_gpu_decode: bool = False,
 ) -> CreditsTextResult:
     """Decode the tail, find the roll, refine its start and, when a scene follows it, its end.
 
@@ -175,7 +187,12 @@ def find_credits(
     has the rest of the file, from that end, read again at 640x360 the same way, the keyframes before it being the
     320x180 reading's (all of their text seen). The roll whose names only the larger frame boxes is then the last run,
     after the scene: at 320x180 verdict and epilogue cards, or a card mid-episode, were the last run and answered 20 s
-    to 6 min early (Accused (2020): 26 of 47 answers). The larger reading's answer is kept only when it starts at or
+    to 6 min early (Accused (2020): 26 of 47 answers). After the end, a keyframe holding any text only the larger
+    frame boxes is read whole: a roll the 320x180 reading half boxed there -- its cards boxed as blocks, a frame short
+    of a 15 s run -- is made of that text too (I Survived a Serial Killer S01E04: without it, the roll kept too few boxes
+    for a run and story captions stayed the answer, 92 s early), while a card it boxed whole (an epilogue card on
+    black) is still seen text. The larger reading's roll starts on dense text (``rule_j.start_on_dense_text``, in
+    either case). The larger reading's answer is kept only when it starts at or
     after that end (its keyframes before it are all seen text, but its start's 1 fps walk can reach back past it); an
     answer that runs to the end of the file has nowhere after it for a roll to be, and is not read again.
 
@@ -199,6 +216,8 @@ def find_credits(
         earliest_start_s: The earliest credits start the decision keeps for this file
             (``decide.earliest_credits_start_ms``): the steps after the first stop 30 s before it, the story a start
             there needs. None reads the first step only.
+        check_gpu_decode: Run the process's decode check on ``gpu`` first (``decode_check.check_device``: once per
+            device, logged only). The decodes run on ``gpu`` either way; False, for the harness, runs no check.
 
     Returns:
         The start, the end, and the rows they came from, with the scale they were read at.
@@ -211,13 +230,15 @@ def find_credits(
             limit.
         frames.FrameDecodeError: ffprobe couldn't read the start time, either probe wasn't started (earlier ffprobes
             being stuck), or ffmpeg couldn't decode the frames.
-        frames.DecodeCancelledError: The job was cancelled before or during a decode.
+        frames.DecodeCancelledError: The job was cancelled before or during a decode, or during the GPU decode check.
         TextDetUnavailableError: Text detection couldn't answer.
     """
     show = phase or (lambda _text: None)
     show(READING_PHASE)
     start_time_s = frames.container_start_s(path, ffmpeg, cancel_check=cancel_check)
     thinning = frames.keyframe_thinning(path, ffmpeg, cancel_check=cancel_check)
+    if check_gpu_decode:
+        decode_check.check_device(gpu, gpu_device_path, ffmpeg=ffmpeg, cancel_check=cancel_check)
     decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "detect_boxes": detect_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s,
               "download_format": thinning.download_format}  # fmt: skip
@@ -288,12 +309,22 @@ def _read_credits(
     makes that the 320x180 reading didn't box in the same keyframe (:func:`_small_text`), right as it is decoded: they
     are not text. ``seen`` is every keyframe row the 320x180 reading decoded, when this is the larger one. The text it
     boxed is left out wherever rule J finds the runs or reads a frame's own text (:func:`_not_seen`), the join before
-    the tail included; the overlays and ``rule_j.text_all_through`` read the rows as decoded, as they do at 320x180.
-    ``decoded``, when given, collects every keyframe row this reading decodes, joined or not.
+    the tail included -- except, after ``from_s``, on a keyframe that also holds text only the larger frame boxes,
+    which is read whole; the overlays and ``rule_j.text_all_through`` read the rows as decoded, as they do at 320x180.
+    The larger reading's roll starts on dense text (``rule_j.start_on_dense_text``). ``decoded``, when given, collects
+    every keyframe row this reading decodes, joined or not.
     """
     decode = {**decode, "scale": scale}
     cancel_check = decode["cancel_check"]
     seen_boxes = {row[0]: rule_j.boxes_of(row) for row in seen}
+    # After a 320x180 answer's end, a keyframe holding text only the larger frame boxes is read whole: a roll that
+    # reading half boxed (as blocks, a frame short of a 15 s run) is that text too (I Survived a Serial Killer S01E04:
+    # left out, the roll kept too few boxes for a run and story captions stayed the answer, 92 s early). A keyframe
+    # whose text it boxed all of -- an epilogue card on black after the answer's end -- still has none, or the 24 s
+    # join glues the card onto the roll (Accused (2020) S04E05, S07E02: 25.5 and 17.5 s early read whole). A tail
+    # without an answer keeps the rule it was measured with: read whole there too, no wrong answer is fixed and five
+    # move, one from no answer to 20 s before its chapter (small-text-retry.md).
+    read_whole = from_s is not None
 
     def decode_rows(*, keyframes_only: bool, **window: Any) -> list[rule_j.Row]:
         rows = frames.decode_rows(path, **decode, keyframes_only=keyframes_only, **window)
@@ -328,14 +359,14 @@ def _read_credits(
     # Which run is the last one is still read from the rows with their overlays, and so is the share
     # text_all_through counts: that step is what catches a file whose overlay this one doesn't find, and counting the
     # overlay out would take its answer away. The larger reading finds its runs as well as a frame's own text without
-    # the 320x180 reading's text (new_text): that text held no roll there, and counted again, the words of a lower
-    # third that box apart at 640x360 make a run over lit story (A Season to Remember (2024), decoded on the CPU:
+    # the text the 320x180 reading boxed (new_text): that text held no roll there, and counted again, the words of a
+    # lower third that box apart at 640x360 make a run over lit story (A Season to Remember (2024), decoded on the CPU:
     # 347 s early, published at Medium). The overlays and text_all_through still read that text: gathered from rows
     # without it, a bug boxed at both sizes would have no sightings and stay in the 1 fps rows.
     overlays = rule_j.overlay_boxes(key_rows)
 
     def new_text(rows: Sequence[rule_j.Row]) -> list[rule_j.Row]:
-        return _not_seen(rows, seen_boxes)
+        return _not_seen(rows, seen_boxes, read_whole=read_whole)
 
     def own_text(rows: Sequence[rule_j.Row]) -> list[rule_j.Row]:
         return rule_j.without_overlays(new_text(rows), overlays)
@@ -375,6 +406,9 @@ def _read_credits(
             # roll moves the start back, and story is what the start needs before it.
             joined = rule_j.rows_before(before_rows, key_rows)
     run_rows = tuple(new_text(key_rows)) if scale > 1 else ()
+    if coarse is not None and scale > 1:
+        shown = rule_j.without_overlays(key_rows, overlays)
+        coarse = rule_j.start_on_dense_text(rule_rows, coarse, run_rows, shown, dense_boxes=DENSE_BOXES)
     if coarse is None or rule_j.text_all_through(key_rows, coarse):
         return CreditsTextResult(None, None, tuple(key_rows), (), (), overlays, scale, run_rows)
     show(REFINING_PHASE)
@@ -430,29 +464,39 @@ def _small_text(rows: Sequence[rule_j.Row], seen_boxes: dict[float, tuple[rule_j
     return out
 
 
-def _not_seen(rows: Sequence[rule_j.Row], seen_boxes: dict[float, tuple[rule_j.Box, ...]]) -> list[rule_j.Row]:
+def _not_seen(
+    rows: Sequence[rule_j.Row], seen_boxes: dict[float, tuple[rule_j.Box, ...]], *, read_whole: bool = False
+) -> list[rule_j.Row]:
     """The larger reading's keyframe rows without the text the 320x180 reading already boxed in the same frame.
 
     That text was read at 320x180 and rule J found no roll in it; the larger reading is for text too small to box
     there, so it finds its runs and reads a frame's own text without it. Read again, a card the smaller frame already
     showed -- an epilogue card on black, story captions, burnt-in subtitles -- is a credit frame the 24 s join glues
     onto the roll only the larger frame shows (Accused (2020): 4 of the 14 files with no answer at 320x180 started
-    13-34 s early on such cards). A box goes when it lies
-    ``rule_j.OVERLAY_CONTAINMENT`` or more inside one of that frame's 320x180 boxes, the same test an overlay's boxes
-    are dropped by, so a frame keeps whatever text only the larger frame shows. Frames are matched by their time: both
-    readings decode the same keyframes. A row the smaller reading never decoded (a step before the tail it didn't
-    take) keeps all its boxes.
+    13-34 s early on such cards). A box goes when it lies ``rule_j.OVERLAY_CONTAINMENT`` or more inside one of that
+    frame's 320x180 boxes, the same test an overlay's boxes are dropped by, so a frame keeps whatever text only the
+    larger frame shows. Frames are matched by their time: both readings decode the same keyframes. A row the smaller
+    reading never decoded (a step before the tail it didn't take) keeps all its boxes.
+
+    With ``read_whole`` (the rest of a file after a 320x180 answer's end, :func:`find_credits`), a frame that keeps any
+    box is kept whole instead: it shows text only the larger frame boxes, so the 320x180 reading saw only part of it,
+    and a roll it half boxed there is made of both. A frame whose every box it boxed still has none.
 
     Args:
         rows: The larger reading's keyframe rows, boxes in 320x180 pixels.
         seen_boxes: Each 320x180 keyframe row's boxes by its time.
+        read_whole: Keep a frame whole when it holds any box the 320x180 reading didn't box.
 
     Returns:
         Rows of the same length, order and times, each recounted.
     """
     if not seen_boxes:
         return list(rows)
-    return [rule_j.without_overlays([row], seen_boxes.get(row[0], ()))[0] for row in rows]
+    out = []
+    for row in rows:
+        unseen = rule_j.without_overlays([row], seen_boxes.get(row[0], ()))[0]
+        out.append(row if read_whole and unseen[1] > 0 else unseen)
+    return out
 
 
 def _next_step_start(read_from_s: float, earliest_start_s: float | None) -> float | None:
@@ -530,6 +574,26 @@ def _gives_up(rec: FileRecord, ctx: PipelineContext) -> str | None:
     return memo[_GIVES_UP]
 
 
+def credits_text_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:
+    """Whether reading this file's credit text failed as the file is now: a decode error (``detector_failures``,
+    dropped when the file's identity changes) or a timeout (``credits_text_timeouts``, keyed by the identity).
+
+    A credits chapter that rule 3 holds for credit text then decides as it did before rule 3 (spec §5.5): the file
+    would otherwise wait in Needs review for an answer that may never come. Text detection being unavailable says
+    nothing about the file and isn't recorded.
+
+    Args:
+        rec: The file.
+        ctx: The job's context.
+
+    Returns:
+        True when a failure is recorded for this identity.
+    """
+    if ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) is not None:
+        return True
+    return ctx.store.credits_text_timed_out_at(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)) is not None
+
+
 def credits_text_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
     """Whether reading a file's credit text needs a worker: only when it is going to be decoded.
 
@@ -559,6 +623,10 @@ def detect_credits_text(
     """The local detector: a credits candidate from the file's on-screen credit roll.
 
     A paused job doesn't block the worker here (T-R9): one file's decode is bounded, and the job pauses between files.
+
+    The file is decoded on the worker's GPU, whatever its codec; the first decode per device per process runs the
+    decode check (``decode_check``), which only logs. Text detection runs on the worker's GPU as its own self-test
+    decides.
 
     Args:
         rec: The file (its identity matches the disk: the pipeline just checked).
@@ -601,6 +669,7 @@ def detect_credits_text(
             cancel_check=cancel_check,
             phase=phase_callback,
             earliest_start_s=_earliest_start_s(rec, ctx),
+            check_gpu_decode=True,
         )
     except frames.GpuDecodeError as exc:
         raise CodecNotSupportedError(str(exc)) from exc
@@ -611,7 +680,13 @@ def detect_credits_text(
         identity = FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)
         ctx.store.record_credits_text_timeout(identity, now, forget_before=now - TIMEOUT_RETRY)
         raise DetectorUnavailableError(str(exc)) from exc
-    except (frames.FrameDecodeError, TextDetUnavailableError) as exc:
+    except frames.ReadStalledError as exc:
+        raise DetectorUnavailableError(str(exc)) from exc
+    except frames.FrameDecodeError as exc:
+        # Kept for this file as it is (a new identity drops it): rule 3 stops waiting for an answer it may never get.
+        ctx.store.set_detector_failure(rec.id, Source.CREDITS_TEXT, str(exc) or type(exc).__name__)
+        raise DetectorUnavailableError(str(exc)) from exc
+    except TextDetUnavailableError as exc:
         raise DetectorUnavailableError(str(exc)) from exc
     if result.start_s is None:
         logger.debug("No credit roll in the end of {}", os.path.basename(rec.canonical_path))
@@ -700,4 +775,5 @@ def credits_text_spec() -> LocalDetectorSpec:
         version_of=credits_answer_version,
         due=credits_text_due,
         needs_worker=credits_text_needs_worker,
+        failed_here=credits_text_failed_here,
     )

@@ -550,6 +550,124 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         assert "server_markers" not in after.reason, (after.status, after.reason)
         assert reg.get("plex-1").get_markers.call_count == reads  # ours are there: never read back
 
+    def _older_answer_beside_an_item_that_may_show_ours(self, store, media, item_state, version):
+        """Production (Doc S02E02/E03/E08, Westworld S03E03): Plex's intro counted with IntroDB's, the item recorded as
+        ``item_state`` (a type kept as Plex's own, or another version's markers of ours) while this file left nothing of
+        ours there, and the stored answer then set to reader ``version``."""
+        reg = _plex(media, "keep_plex", rows=(PLEX_INTRO,))
+        detectors = _Detectors()
+        detectors.intro.return_value = []
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+        rec = store.get_file(media)
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+        store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
+        markers, status, kwargs = item_state
+        store.set_item_publish_state("plex-1", "item-plex-1", markers, status, **kwargs)
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=version)
+        return reg, detectors, plex, rec
+
+    ITEM_MAY_SHOW_OURS = {
+        "kept-type-only": ([], "written", {"kept_types": {T.INTRO}}),
+        "another-versions-markers": ([Marker(T.INTRO, 126_000, 157_500, ("introdb",))], "written", {}),
+    }
+
+    @pytest.mark.parametrize("item_state", ITEM_MAY_SHOW_OURS.values(), ids=ITEM_MAY_SHOW_OURS.keys())
+    def test_an_older_readers_answer_from_a_plex_item_that_may_show_ours_confirms_nothing(
+        self, store, media, item_state
+    ):
+        # The reader never reads such an item (a kept type can hold ours), so its older answer can't be read again and
+        # flagged either: kept, a stale Plex marker went on counting as IntroDB's second source.
+        reg, detectors, plex, rec = self._older_answer_beside_an_item_that_may_show_ours(
+            store, media, item_state, version=4
+        )
+        reads = reg.get("plex-1").get_markers.call_count
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"] == []
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert (row.detail, store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1")) == (
+            pipeline.OURS_ON_ITEM_DETAIL,
+            READER_VERSION,
+        )
+        assert "server_markers" not in _decision(store, media, T.INTRO).reason
+        # "Keep Plex's" asks Plex what it shows on every run; the evidence read of the item is what stays skipped.
+        assert reg.get("plex-1").get_markers.call_count - reads <= 1
+
+    def test_a_current_readers_answer_from_a_plex_item_keeping_its_own_stays(self, store, media):
+        reg, detectors, plex, rec = self._older_answer_beside_an_item_that_may_show_ours(
+            store, media, self.ITEM_MAY_SHOW_OURS["kept-type-only"], version=READER_VERSION
+        )
+        before = store.evidence_rows(rec.id)
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"] == [
+            r for r in before if r.origin == "plex-1"
+        ]
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+
+    def test_with_jellyfin_beside_it_the_intro_only_that_answer_confirmed_comes_off_jellyfin(self, store, media):
+        # Plex keeps its own intro, Jellyfin takes ours. The older answer no longer confirms IntroDB, so the intro goes
+        # to Needs review and Jellyfin loses it: what a file first read by today's reader, which never reads such an
+        # item, gets. Plex keeps showing its own intro either way.
+        reg = _plex(media, "keep_plex", rows=(PLEX_INTRO,))
+        reg.configs_by_id["jellyfin-1"] = server_config("jellyfin-1", ServerType.JELLYFIN, root=_media_root(media))
+        reg.get("jellyfin-1").get_media_segments.return_value = []
+        detectors = _Detectors()
+        detectors.intro.return_value = []
+        detectors.credits.return_value = []
+        plex, jellyfin = ready_publisher(), ready_publisher("jellyfin_bridge")
+        pubs = {"plex-1": plex, "jellyfin-1": jellyfin}
+        _job(store, reg, media, detectors, pubs, introdb=True)
+        rec = store.get_file(media)
+        assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
+        assert [m.type for m in jellyfin.write.call_args.args[1]] == [T.INTRO]
+        store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
+        store.set_item_publish_state("plex-1", "item-plex-1", [], "written", kept_types={T.INTRO})
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+
+        _job(store, reg, media, detectors, pubs, introdb=True)
+
+        assert _decision(store, media, T.INTRO).status is DecisionStatus.NEEDS_REVIEW
+        assert jellyfin.write.call_args.args[1] == []
+        assert [m.type for m in jellyfin.write.call_args.kwargs["previous"]] == [T.INTRO]
+
+    def test_an_item_published_by_another_version_while_the_read_was_out_drops_it_too(self, store, media):
+        # Another version's publish lands between the reader's check and its answer: the item may show ours now.
+        reg = _plex(media, "restore", rows=(PLEX_INTRO,))
+        detectors = _Detectors()
+        detectors.intro.return_value = []
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+        rec = store.get_file(media)
+        store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
+        store.set_item_publish_state("plex-1", "item-plex-1", [], "written")
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        other_version = Marker(T.INTRO, 126_000, 157_500, ("introdb",))
+
+        def read_while_another_version_publishes(*_args, **_kwargs):
+            store.set_item_publish_state("plex-1", "item-plex-1", [other_version], "written")
+            return [PLEX_INTRO]
+
+        reg.get("plex-1").get_markers.side_effect = read_while_another_version_publishes
+
+        _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
+
+        assert reg.get("plex-1").get_markers.call_count >= 1
+        [row] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert (row.type, row.detail, store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1")) == (
+            None,
+            pipeline.OURS_ON_ITEM_DETAIL,
+            READER_VERSION,
+        )
+
     def test_emby_is_never_asked(self, store, movie):
         reg = _registry(movie, ServerType.EMBY)
         reg.configs_by_id["emby-1"] = _emby_config(movie, "keep_emby")
@@ -559,6 +677,170 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         _job(store, reg, movie, _Detectors(), {"emby-1": emby})
 
         emby.types_not_made_for_file.assert_not_called()
+
+
+INTRODB_CREDITS = Candidate(T.CREDITS, 1_290_000, DUR, Source.INTRODB)
+
+
+class TestADetectorSkippedForEvidenceALaterStepDrops:
+    """Production (Game of Thrones S03E04, S03E05, S05E02): credit text was skipped as "not needed (already decided)"
+    on an older reader's Plex credits, and the server-marker step, which runs last, then dropped that answer: the type
+    ended on Plex's marker without the file ever being read. The skipped detector now runs in the same run."""
+
+    def _decided_with_an_older_readers_answer(
+        self, store, media, *, setting="restore", keeps=frozenset(), intro_decided=True
+    ):
+        """Run 1 without credit text: IntroDB's and Plex's credits agree and are published, except the types Plex
+        ``keeps``; the Plex answer is then set to reader version 4 (stored before staleness existed). Without
+        ``intro_decided`` season audio finds nothing, so IntroDB's intro alone leaves the intro in review."""
+        reg = _plex(media, setting)
+        detectors = _Detectors()
+        if not intro_decided:
+            detectors.intro.return_value = []
+        plex = ready_publisher()
+        succeed = plex.write.side_effect
+
+        def write(item_id, markers, **kwargs):
+            plex.last_kept_types = keeps
+            return [m for m in succeed(item_id, markers, **kwargs) if m.type not in keeps]
+
+        plex.write.side_effect = write
+        clients = _clients(introdb=LookupResult("ok", (INTRODB_INTRO, INTRODB_CREDITS)))
+        ctx = _ctx(store, reg, settings_raw=_settings(introdb=True), clients=clients, detectors=detectors.specs[:1])
+        _run(ctx, media, {"plex-1": plex}, stage="process")
+        rec = store.get_file(media)
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, server_markers"
+        assert store.evidence_fetched_at(rec.id, Source.CREDITS_TEXT) is None
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        return reg, detectors, plex, clients, rec
+
+    def _run_again(self, store, media, reg, detectors, plex, clients, *, stage="process"):
+        ctx = _ctx(store, reg, settings_raw=_settings(introdb=True), clients=clients, detectors=detectors.specs)
+        out, _ = _run(ctx, media, {"plex-1": plex}, stage=stage)
+        return out
+
+    @pytest.mark.parametrize(
+        "intro_decided",
+        [True, False],
+        # Every type decided: the whole source is skipped. The intro in review: credit text alone says its credits are.
+        ids=["every-type-decided", "another-type-undecided"],
+    )
+    def test_an_answer_dropped_as_our_markers_are_shown_reads_the_file_in_the_same_run(
+        self, store, media, intro_decided
+    ):
+        reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(
+            store, media, intro_decided=intro_decided
+        )
+        assert (_decision(store, media, T.INTRO).status is DecisionStatus.DECIDED) is intro_decided
+
+        self._run_again(store, media, reg, detectors, plex, clients)
+
+        assert detectors.credits.call_count == 1
+        credits = _decision(store, media, T.CREDITS)
+        assert (credits.status, credits.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, credits_text")
+        assert "credits_text" in store.get_markers(rec.id)[T.CREDITS].decided_by
+
+    def test_an_answer_read_again_and_flagged_stale_reads_the_file_in_the_same_run(self, store, media):
+        # Nothing of ours on the item: the older answer is read again, and Plex now says its credits are stale.
+        reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(store, media)
+        store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
+        store.set_item_publish_state("plex-1", "item-plex-1", [], "written")
+        plex.types_not_made_for_file.return_value = frozenset({T.CREDITS})
+
+        self._run_again(store, media, reg, detectors, plex, clients)
+
+        assert detectors.credits.call_count == 1
+        [plex_credits] = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        assert plex_credits.stale
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, credits_text"
+
+    def test_keep_plexs_with_plexs_stale_credits_reads_the_file_in_the_same_run(self, store, media):
+        # Game of Thrones exactly: our intro on the item, Plex's credits kept, and they were made for an earlier file.
+        reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(
+            store, media, setting="keep_plex", keeps=frozenset({T.CREDITS})
+        )
+        plex.types_not_made_for_file.return_value = frozenset({T.CREDITS})
+
+        self._run_again(store, media, reg, detectors, plex, clients)
+
+        assert detectors.credits.call_count == 1
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, credits_text"
+
+    def test_keep_plexs_with_plexs_own_credits_still_doesnt_read_the_file(self, store, media):
+        # The revisit goes through the same gate as the first pass: Plex's own credits are made for this file and kept.
+        reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(
+            store, media, setting="keep_plex", keeps=frozenset({T.CREDITS})
+        )
+
+        out = self._run_again(store, media, reg, detectors, plex, clients)
+
+        detectors.credits.assert_not_called()
+        assert (_decision(store, media, T.CREDITS).status, _decision(store, media, T.CREDITS).reason) == (
+            DecisionStatus.DISABLED,
+            KEPT_PLEX,
+        )
+        assert out.publisher_rows[0]["message"] == "Keeping Plex's credits"
+
+    def test_a_checking_thread_hands_the_file_to_a_worker_which_reads_it(self, store, media):
+        reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(store, media)
+
+        handed = self._run_again(store, media, reg, detectors, plex, clients, stage="check")
+        detectors.credits.assert_not_called()
+        self._run_again(store, media, reg, detectors, plex, clients, stage="process")
+
+        assert handed is None
+        assert detectors.credits.call_count == 1
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, credits_text"
+
+    def test_an_online_source_skipped_the_same_way_is_asked_in_the_same_run(self, store, media):
+        # Credits only. Run 1: SkipDB and Plex's credits agree; IntroDB isn't set up yet and credit text finds nothing.
+        # Run 2, IntroDB set up: it is skipped as already decided, then the older answer is dropped (ours shown).
+        skipdb_credits = Candidate(T.CREDITS, 1_290_500, DUR, Source.SKIPDB)
+        settings = {
+            "detect": {"intro": False, "credits": True, "recap": False},
+            "sources": [
+                {"id": s, "enabled": s != "theintrodb"}
+                for s in (
+                    "chapters",
+                    "theintrodb",
+                    "introdb",
+                    "skipdb",
+                    "season_audio",
+                    "credits_text",
+                    "server_markers",
+                )
+            ],
+        }
+        reg = _plex(media, "restore")
+        detectors = _Detectors()
+        detectors.credits.return_value = []
+        plex = ready_publisher()
+        skipdb = _clients(skipdb=LookupResult("ok", (skipdb_credits,)))["skipdb"]
+        ctx = _ctx(store, reg, settings_raw=settings, clients={"skipdb": skipdb}, detectors=detectors.specs)
+        _run(ctx, media, {"plex-1": plex}, stage="process")
+        rec = store.get_file(media)
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: skipdb, server_markers"
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        clients = {**_clients(introdb=LookupResult("ok", (INTRODB_CREDITS,))), "skipdb": skipdb}
+
+        ctx = _ctx(store, reg, settings_raw=settings, clients=clients, detectors=detectors.specs)
+        _run(ctx, media, {"plex-1": plex}, stage="process")
+
+        assert len(clients["introdb"].calls) == 1
+        assert len(skipdb.calls) == 1  # its saved answer is reused on the revisit, as on any pass
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, skipdb"
+
+    def test_a_current_readers_answer_drops_nothing_and_the_detector_stays_skipped(self, store, media):
+        reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(store, media)
+        older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", version=READER_VERSION)
+
+        self._run_again(store, media, reg, detectors, plex, clients)
+
+        detectors.credits.assert_not_called()
+        assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, server_markers"
 
 
 class TestReadAsBefore:

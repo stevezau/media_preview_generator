@@ -1106,6 +1106,29 @@ def test_plex_a_locked_nudge_inside_the_version_tolerance_reads_as_will_replace(
     assert row["current"] == [{"type": "credits", "start_ms": 1_290_000, "end_ms": None}]
 
 
+@pytest.mark.parametrize(
+    ("versions", "plan"),
+    [
+        (1, "will_replace"),  # nothing to agree with: the publisher writes what was decided (§14 2026-09-25)
+        (2, "up_to_date"),  # the publisher keeps what the item shows while the versions agree within 2 s
+        (None, "will_replace"),  # unknown: "will replace" where the publisher may keep is the safe way round
+    ],
+    ids=["one-version", "two-versions", "unknown"],
+)
+def test_plex_times_of_ours_within_the_version_tolerance_read_by_the_items_versions(store, factory, versions, plan):
+    # 1-2 s is the band where this shows; under 1 s _SAME_TOLERANCE_MS hides it.
+    left = Marker(T.CREDITS, 1_288_500, DURATION, ("chapters",))
+    rec = _known_file(store, {T.INTRO: _none(T.INTRO), T.CREDITS: _decided(CREDITS)})
+    _published(store, rec, "plex", "rk-1", [left], basis_for=[CREDITS])
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    registry.get("plex").get_markers.return_value = _plex_rows(left)
+    registry.get("plex").get_version_count.return_value = versions
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+
+    assert (row["plan"], row["version_count"]) == (plan, versions)
+
+
 def test_plex_own_marker_of_a_type_we_did_not_decide_is_left_out_of_the_comparison(store, factory):
     rec = _known_file(
         store,
@@ -1999,7 +2022,8 @@ def _intro_only(marker):
 @pytest.mark.parametrize(
     ("stype", "ours", "decided", "current", "plan"),
     [
-        # The Plex publisher keeps what is already ours when it agrees within 2 s: nothing will change.
+        # A two-version Plex item (one version: the cells after the Jellyfin and Emby ones). The Plex publisher keeps
+        # what is already ours when the versions agree within 2 s: nothing will change.
         (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "up_to_date"),
         # Plex's own marker isn't ours: it is replaced by the decided times.
         (ServerType.PLEX, [], INTRO_DECIDED_LATER, Marker(T.INTRO, 60_000, 93_000, ()), "will_replace"),
@@ -2012,6 +2036,9 @@ def _intro_only(marker):
         # Jellyfin and Emby write the decided times whatever they had: no keep rule.
         (ServerType.JELLYFIN, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
         (ServerType.EMBY, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
+        # A one-version Plex item has nothing to agree with: the publisher writes what was decided.
+        ("plex-one-version", [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
+        ("plex-one-version", [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_DECIDED_LATER, "up_to_date"),
     ],
     ids=[
         "plex-kept",
@@ -2021,9 +2048,13 @@ def _intro_only(marker):
         "plex-shows-decided",
         "jellyfin-no-keep",
         "emby-no-keep",
+        "plex-one-version-kept-times-replaced",
+        "plex-one-version-shows-decided",
     ],
 )
 def test_plan_mirrors_the_plex_keep_rule(store, factory, stype, ours, decided, current, plan):
+    versions = 1 if stype == "plex-one-version" else 2
+    stype = ServerType.PLEX if stype == "plex-one-version" else stype
     rec = _known_file(store, _intro_only(decided))
     sid = {ServerType.PLEX: "plex", ServerType.JELLYFIN: "jf", ServerType.EMBY: "emby"}[stype]
     if ours:
@@ -2031,6 +2062,7 @@ def test_plan_mirrors_the_plex_keep_rule(store, factory, stype, ours, decided, c
     registry = _registry(server_config(sid, stype))
     if stype is ServerType.PLEX:
         registry.get(sid).get_markers.return_value = _plex_rows(current)
+        registry.get(sid).get_version_count.return_value = versions
     elif stype is ServerType.EMBY:
         registry.get(sid).get_chapter_markers.return_value = _emby_rows(current)
     else:

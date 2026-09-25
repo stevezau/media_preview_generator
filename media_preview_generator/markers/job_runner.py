@@ -43,6 +43,7 @@ from ..web.routes.job_runner import (
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
 from .audio.season import season_audio_answer_outdated
+from .carry_over import is_carried_over
 from .decide import DecisionStatus
 from .external_ids import is_season_folder
 from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL
@@ -74,6 +75,7 @@ from .settings import load_server
 from .source_counts import DecidedByTally, stored_groups
 from .sources.ratelimit import RESET_TIME_LABEL
 from .store import MarkerStore
+from .versions import BATCH_FILES, BATCH_GAP, next_batch, record_taken
 
 _POLL_S = 1.0
 # Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
@@ -102,6 +104,13 @@ DECIDE_AGAIN = "decide_again"
 # (``pipeline.online_recheck_files``).
 ONLINE_RECHECK_SOURCE = "online_recheck"
 ONLINE_RECHECK = "online_recheck"
+# A batch of the files whose answers rest on an older detector version (``triggers.submit_version_reruns``): its source,
+# the config key that takes the batch when it runs (``versions.next_batch``), and the key holding the batch taken, with
+# the versions each file was taken for, so a run revived after a restart runs the same files (taken off the job when
+# it ends, like the Check servers listing).
+VERSION_RERUN_SOURCE = "version_rerun"
+VERSION_RERUN = "version_rerun"
+VERSION_RERUN_FILES = "version_rerun_files"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
@@ -121,6 +130,7 @@ _NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {
     BUDGET_RECHECK_SOURCE,
     DECIDE_AGAIN_SOURCE,
     ONLINE_RECHECK_SOURCE,
+    VERSION_RERUN_SOURCE,
 }
 
 
@@ -759,11 +769,14 @@ def _queue_budget_recheck(job, ctx) -> None:
 
 
 def _still_undecided(store: MarkerStore, path: str) -> bool:
-    """Whether a file has a type left undecided (True when the store knows no decisions for it)."""
+    """Whether a file has a type left undecided (True when the store knows no decisions for it), a marker carried
+    over from a replaced file counting as undecided (spec §5.5 rule 15)."""
     rec = store.get_file(path)
     decisions = store.get_decisions(rec.id) if rec is not None else {}
-    return not decisions or any(
-        row.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE) for row in decisions.values()
+    return (
+        not decisions
+        or any(row.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE) for row in decisions.values())
+        or any(is_carried_over(marker) for marker in store.get_markers(rec.id).values())
     )
 
 
@@ -821,6 +834,10 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
         )
     elif cfg.get("source") == BUDGET_RECHECK_SOURCE:
         waiting_for = f"Check starting in {remaining}s — after TheIntroDB's daily limit resets at {RESET_TIME_LABEL}"
+    elif cfg.get(VERSION_RERUN):
+        waiting_for = (
+            f"Next batch starting in {remaining}s — re-checking files after an update, {BATCH_FILES} at a time"
+        )
     else:
         waiting_for = f"Retry starting in {remaining}s — waiting for these files to appear on disk or on a server"
     jm.update_progress(
@@ -875,6 +892,28 @@ def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] =
     if configs:
         mark_missing_files(store, sorted(_files_to_decide_again(store)), configs)
     return _stored_file_items(_files_to_decide_again(store))
+
+
+def _batch_to_read_again(
+    jm, job_id: str, cfg: dict, ctx: PipelineContext, configs: Sequence[ServerConfig]
+) -> dict[str, dict[str, int]]:
+    """The batch of files to re-check after an update (``versions.next_batch``), with the versions each is read
+    for, held on the job so a run revived after a restart runs the same files. Nothing is recorded here: each file is
+    recorded as it finishes (``versions.record_taken``), so a file the batch never reaches (a cancel, a restart the job
+    isn't revived after) is taken by a later batch. With Intro & Credits off on every server (turned off during the gap
+    between batches) nothing is taken: those files would only end without an owner.
+    """
+    held = cfg.get(VERSION_RERUN_FILES)
+    if isinstance(held, dict):
+        return {str(path): dict(taken) for path, taken in held.items()}
+    from .triggers import markers_enabled_anywhere
+
+    if not markers_enabled_anywhere():
+        return {}
+    batch = next_batch(ctx.store, ctx.settings, configs)
+    if batch:
+        jm.merge_job_config(job_id, {VERSION_RERUN_FILES: batch})
+    return batch
 
 
 def _items_for_online_recheck(ctx: PipelineContext, cancel_check: Callable[[], bool]) -> list[ProcessableItem]:
@@ -1288,6 +1327,28 @@ def _settle_decide_again(jm, job_id: str, cfg: dict) -> None:
         logger.warning("Couldn't record that the decide-again job finished: {}; the next start queues it again", exc)
 
 
+def _queue_next_batch(jm, job_id: str, cfg: dict) -> None:
+    """Once a batch of files re-checked after an update has run, queue the next one to start after
+    ``versions.BATCH_GAP`` (``triggers.submit_version_reruns`` queues none when no file is left). Never raises.
+
+    Only a batch that completed (or whose retry chain now waits for the files a server hadn't indexed yet) is followed:
+    one cancelled or failed leaves the rest to the next start.
+    """
+    if not cfg.get(VERSION_RERUN):
+        return
+    try:
+        finished = jm.get_job(job_id)
+        if finished is None or not (finished.status is JobStatus.COMPLETED or is_live_retry_chain(finished.config)):
+            return
+        from .triggers import submit_version_reruns
+
+        submit_version_reruns(delay_s=int(BATCH_GAP.total_seconds()))
+    except Exception as exc:
+        logger.warning(
+            "Couldn't queue the next batch of files to re-check after an update: {}; the next start does", exc
+        )
+
+
 def _wait_releasing_slot_while_paused(
     tracker,
     *,
@@ -1409,6 +1470,9 @@ def run_intro_credits_job(job_id: str) -> None:
     # While the config holds the Check servers listing (a revived job's from the start): only a revive needs it, so the
     # teardown takes it off the ended job (the config ships in every job payload).
     listing_on_job = LISTING_CONFIG_KEY in cfg
+    # A batch of files to re-check after an update, with the versions each is read for: each file is recorded as it
+    # finishes (``versions.record_taken``). Empty for any other job.
+    rerun_batch: dict[str, dict[str, int]] = {}
     # A Season job's requests from other jobs, passed on where it completes; the teardown passes on the rest whatever
     # ended the job (``_pass_on_late_requests``).
     requests_passed_on = False
@@ -1557,6 +1621,9 @@ def run_intro_credits_job(job_id: str) -> None:
                     items, warnings, sender_paths = _items_to_decide_again(ctx.store, sweep_configs), [], {}
                 elif cfg.get(ONLINE_RECHECK):
                     items, warnings, sender_paths = _items_for_online_recheck(ctx, cancel_check), [], {}
+                elif cfg.get(VERSION_RERUN):
+                    rerun_batch = _batch_to_read_again(jm, job_id, cfg, ctx, sweep_configs)
+                    items, warnings, sender_paths = _stored_file_items(set(rerun_batch)), [], {}
                 else:
                     items, warnings, sender_paths = build_items(
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
@@ -1578,6 +1645,9 @@ def run_intro_credits_job(job_id: str) -> None:
                     elif cfg.get(ONLINE_RECHECK):
                         jm.add_log(job_id, "INFO - No file is due to be asked again online")
                         jm.complete_job(job_id)
+                    elif cfg.get(VERSION_RERUN):
+                        jm.add_log(job_id, "INFO - No file on disk is left to read again after an update")
+                        jm.complete_job(job_id)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     if cfg.get("source") == SEASON_SOURCE:
@@ -1596,6 +1666,10 @@ def run_intro_credits_job(job_id: str) -> None:
                 items, carried, replaced_before_restart, carried_outcomes = _skip_finished_before_restart(
                     jm, chain_head or job_id, items, ctx.store
                 )
+                carried_reruns = {path: rerun_batch[path] for path in carried_outcomes if path in rerun_batch}
+                if carried_reruns:
+                    # Finished before a restart: its row was kept, but the restart may have come before its record.
+                    record_taken(ctx.store, carried_reruns)
                 if carried_outcomes:
                     # The pipeline never decides for a file without an owner; the store may still hold an old run's.
                     for path, outcome in sorted(carried_outcomes.items()):
@@ -1606,6 +1680,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.set_job_outcome(job_id, carried)
                     _complete(jm, job_id, carried, warnings, ctx)
                     _settle_decide_again(jm, job_id, cfg)
+                    _queue_next_batch(jm, job_id, cfg)
                     if chain_head:
                         # A retry revived after a restart that had settled all its files: nothing is left to wait.
                         _recount_chain_head(jm, chain_head, ctx.store)
@@ -1646,6 +1721,10 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.record_file_result(
                         chain_head or job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
+                    # After its row: a restart in between carries the file and records it then (above). Whatever the
+                    # outcome, the file ran; one that stopped part way on a cancel is left to a later batch.
+                    if file_path in rerun_batch and not cancel_check():
+                        record_taken(ctx.store, {file_path: rerun_batch[file_path]})
                     # The pipeline counted the file before handing its result here (``PipelineContext.decided_by``).
                     jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                     if listing is not None and (gone := _confirmed_gone_items(listing, registry, file_path, servers)):
@@ -1733,6 +1812,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)], ctx)
                 _settle_decide_again(jm, job_id, cfg)
+                _queue_next_batch(jm, job_id, cfg)
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
                 _queue_season_followups_after(job, cfg, ctx, listed)
@@ -1778,6 +1858,11 @@ def run_intro_credits_job(job_id: str) -> None:
                 jm.merge_job_config(job_id, {}, remove=(LISTING_CONFIG_KEY,))
             except Exception as exc:
                 logger.debug("Could not drop the Check servers listing of {}: {}", job_id, exc)
+        if rerun_batch:
+            try:
+                jm.merge_job_config(job_id, {}, remove=(VERSION_RERUN_FILES,))
+            except Exception as exc:
+                logger.debug("Could not drop the batch of files read again from {}: {}", job_id, exc)
         try:
             if not jm.get_running_jobs():
                 jm.clear_worker_statuses()

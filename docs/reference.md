@@ -300,9 +300,8 @@ Shared detection settings — one file is detected once, whatever the publish ru
 
 There is no publish rule setting. Every file is decided the same way: chapters decide alone unless two other
 independent sources agree on something different; any other source needs an independent source to agree, except that
-on-screen credit text (credits), season audio (intros) and a SkipDB `exact`/`shifted` match (intros and recaps) may
-decide alone. IntroDB, TheIntroDB, the previous-season hint (`season_audio_previous`) and markers already on servers
-never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
+on-screen credit text (credits) and season audio (intros) may decide alone. IntroDB, TheIntroDB, SkipDB, the
+previous-season hint (`season_audio_previous`) and markers already on servers never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
 pair on its own. An agreeing server marker doesn't hold season audio back (it decides as if alone, credited to
 `season_audio` only); the hint with only a server's marker stays in Needs review. The removed
 `publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
@@ -312,6 +311,21 @@ every file whose last row waits for its item's other versions, listed when it ru
 `_markers_decide_again`) is cleared when that job completes; until then every start queues it again (or finds it
 queued), and with Intro & Credits off on every server it waits. An intro season audio decided alone keeps asking the
 online sources on their schedule: one that later disagrees sends it to Needs review.
+
+After an update that raises a detector's or reader's version (credit text, season audio and its end-picture check,
+the server-marker reader, chapter rules, an online parser), every start queues **Intro & Credits: re-checking
+files after an update** (Low priority, source `version_rerun`) while a file is left: an ordinary Intro & Credits job
+over at most 100 files still on disk where an unlocked decided type rests on an older answer, or a type that answer
+covers is in Needs review or not found. It also takes files whose one-version Plex item still shows times within
+2 s of an older decision, and, after an update that changes the decision rules, every file not yet decided under
+them with an unlocked type that has a stored answer (decided, Needs review, not found, or kept as the server's own;
+not a type whose detection is off): each run that decides a file records the rules version it used (`decide_rules` in
+`version_reruns`). The next batch is queued 30 minutes after one completes; after a cancelled or failed batch
+the next start queues one. A job keeps its batch in its config (`version_rerun_files`, removed when it ends) so a job
+revived after a restart runs the same files, and each file is recorded in markers.db (`version_reruns`) with the
+versions it was read for as it finishes, whatever its outcome: a file is read again once per version, and one a batch
+never reached (a cancel, a restart the job isn't revived after) is taken by a later batch. With Intro & Credits off on
+every server a batch takes nothing.
 
 ### Per-server settings (`media_servers[].markers`)
 

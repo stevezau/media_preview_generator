@@ -1784,3 +1784,87 @@ class TestOverlayBoxes:
         key, fine = _synth_rows(item["key"]), _synth_rows(item["fine"])
         assert rule_j.overlay_boxes(key) == ()
         assert rule_j.credits_start(key, fine) == 541.0
+
+
+class TestStartOnDenseText:
+    """The larger reading's start (``detector.find_credits`` at 640x360): on the run's first dense frame, then back
+    over the keyframes before it that carry text at the run's own cadence, never before the run's start."""
+
+    DENSE = 6
+
+    def _tail(self, opening: list[rule_j.Row], roll_from: float = 124.0) -> list[rule_j.Row]:
+        story = [bright(float(t)) for t in range(0, 100, 2)]
+        roll = [bright(float(t), 8) for t in range(int(roll_from), 152, 2)]
+        return story + opening + roll
+
+    def _start(self, rows: list[rule_j.Row]) -> float:
+        coarse = rule_j.coarse_start(rows)
+        return rule_j.start_on_dense_text(rows, coarse, rows, rows, dense_boxes=self.DENSE).pts_s
+
+    def test_sparse_text_cut_off_from_the_roll_by_a_keyframe_without_text_is_not_its_start(self):
+        # I Survived a Serial Killer S01E14 at 640x360: court footage whose date line, logo and caption box 4 small
+        # boxes a lit frame, on and off for a minute, then a keyframe without text and the roll. The 24 s join puts
+        # them in one run, starting 68 s early; the roll starts on the first dense frame after the gap.
+        opening = [bright(100.0, 4), bright(102.0, 4)] + [bright(float(t), 2) for t in range(104, 112, 2)]
+        opening += [bright(float(t), 4) for t in range(112, 122, 2)] + [bright(122.0)]
+        rows = self._tail(opening)
+        assert rule_j.coarse_start(rows).pts_s == 100.0
+        assert self._start(rows) == 124.0
+
+    def test_sparse_text_the_roll_runs_into_without_a_break_is_its_start(self):
+        # Accused (2020): single-name cards over footage (3 boxes) straight into three-column cards. The walk back from
+        # the first dense card crosses every keyframe to the first card: the start stays where it was.
+        rows = self._tail([bright(float(t), 3) for t in range(100, 124, 2)])
+        assert self._start(rows) == 100.0
+
+    def test_a_start_on_dense_text_or_a_dark_card_or_a_run_without_dense_text_stays(self):
+        dense = self._tail([], roll_from=100.0)
+        dark_card = self._tail([dark(100.0, 1)] + [bright(float(t), 3) for t in range(102, 124, 2)])
+        sparse = [bright(float(t)) for t in range(0, 100, 2)] + [bright(float(t), 4) for t in range(100, 152, 2)]
+        for rows in (dense, dark_card, sparse):
+            coarse = rule_j.coarse_start(rows)
+            assert rule_j.start_on_dense_text(rows, coarse, rows, rows, dense_boxes=self.DENSE) is coarse
+
+    def test_the_walk_back_never_passes_the_runs_own_start(self):
+        # Text on the keyframes before the run -- a lower third off to one side, too little for a lit credit frame and
+        # out of the roll's band -- is not the run's, though the walk back from the dense frame reaches the run's start.
+        lower_third = ((10, 150, 60, 160), (10, 162, 60, 172))
+        opening = [(96.0, 2, 120.0, lower_third), (98.0, 2, 120.0, lower_third)]
+        opening += [bright(float(t), 3) for t in range(100, 124, 2)]
+        rows = self._tail(opening)
+        assert rule_j.coarse_start(rows).pts_s == 100.0
+        assert self._start(rows) == 100.0
+
+    def test_the_walk_back_stops_where_the_runs_cadence_breaks(self):
+        # The roll's keyframes are 2 s apart; the texted keyframe 10 s before its first dense one is not the roll's.
+        rows = self._tail([bright(float(t), 4) for t in range(100, 116, 2)])
+        assert rule_j.coarse_start(rows).pts_s == 100.0
+        assert self._start(rows) == 124.0
+
+    def test_the_new_start_keeps_the_runs_end(self):
+        opening = [bright(100.0, 4), bright(102.0, 4), bright(104.0)]
+        rows = self._tail(opening, roll_from=106.0)
+        coarse = rule_j.coarse_start(rows)
+        moved = rule_j.start_on_dense_text(rows, coarse, rows, rows, dense_boxes=self.DENSE)
+        assert (moved.pts_s, moved.end_index, moved.run_index) == (106.0, coarse.end_index, None)
+        assert rule_j.coarse_end_s(rows, moved) == rule_j.coarse_end_s(rows, coarse) == 150.0
+
+    def test_the_walk_reads_what_each_keyframe_shows_as_decoded(self):
+        # Accused (2020) S07E08 at 640x360: a single-name card the 320x180 reading boxed whole sits between two the
+        # larger frame boxes more of. Where the runs are found it holds nothing, which stopped the walk 8 s late; as
+        # decoded it shows text, and the start stays on the first card. Showing nothing as decoded, it stops the walk.
+        opening = [bright(float(t), 3) for t in range(100, 124, 2)]
+        rows = self._tail(opening)
+        seen = [(row[0], 0, row[2], ()) if row[0] == 110.0 else row for row in rows]  # the card boxed whole at 320x180
+        coarse = rule_j.coarse_start(seen)
+        assert coarse.pts_s == 100.0
+        stopped = rule_j.start_on_dense_text(seen, coarse, seen, seen, dense_boxes=self.DENSE)
+        assert stopped.pts_s == 112.0
+        assert rule_j.start_on_dense_text(seen, coarse, seen, rows, dense_boxes=self.DENSE).pts_s == 100.0
+
+    def test_a_run_left_with_one_credit_frame_from_its_anchored_start_keeps_its_start(self):
+        # The anchor stepped onto the run's last credit frame, and the band steps reached back before it: no cadence
+        # to walk at, so the start stays where they put it (and nothing is measured on a single frame).
+        rows = [bright(0.0, 3), bright(2.0), bright(4.0, 8)]
+        coarse = Coarse(index=0, end_index=2, pts_s=0.0, run_index=2)
+        assert rule_j.start_on_dense_text(rows, coarse, rows, rows, dense_boxes=self.DENSE) is coarse

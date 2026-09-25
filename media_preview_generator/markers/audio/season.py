@@ -32,6 +32,7 @@ import numpy as np
 from loguru import logger
 
 from ...plex_client import VIDEO_EXTENSIONS
+from ..carry_over import is_carried_over
 from ..decide import DecisionStatus, intro_chapter_length_ms, intro_chapter_limit_ms
 from ..external_ids import ids_from_path, is_extra
 from ..models import Candidate, FileIdentity, MarkerType, Source
@@ -39,7 +40,7 @@ from ..outcomes import is_kept_own
 from ..probe import MediaProbe, ProbeError, ProbeStalledError, probe_media
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from ..speed import FILM_FPS, PAL_FPS, match_speed, playback_speed, retime_factor
-from ..store import EndPictureKey
+from ..store import PAIR_VERSION_STEP, EndPictureKey
 from . import POINT_S, end_picture
 from .fingerprint import (
     FingerprintError,
@@ -71,13 +72,21 @@ if TYPE_CHECKING:
     from ..store import FileRecord
 
 # The season step's own version (matcher v3 plus the silence guard, the provable pair skip, the group rule, the guards
-# against idents and music beds with where a stretch needs no dense core, and matching a season of 25 fps and film-rate
-# releases at one speed): stored with its answers and with cached pairs, so a change to any of them is matched again.
-SEASON_AUDIO_VERSION = 7
+# against idents and music beds with where a stretch needs no dense core, matching a season of 25 fps and film-rate
+# releases at one speed, v8 with the end-picture check's move to one scaler for every vendor, and v9 a file retimed
+# only when its audio says so): stored with its answers and with cached pairs, so a change to any of them is matched
+# again.
+SEASON_AUDIO_VERSION = 9
+# What an answer is stored under: this version, and the end-picture check's (the guard's ``end_picture.CHECK_VERSION``)
+# past its first, so a new check makes every stored answer older too, for its next run and for the re-run of answers
+# from an older version (``markers.versions``): a change to the check alone needs only the check's version. The check's
+# first version adds nothing: answers stored before it counted stay current.
+_CHECK_VERSION_STEP = 1_000
+SEASON_AUDIO_ANSWER_VERSION = SEASON_AUDIO_VERSION + (end_picture.CHECK_VERSION - 1) * _CHECK_VERSION_STEP
 # A pair's runs are cached under a version naming the speed each side was matched at (its own, or retimed to film or
 # to 25 fps), so runs matched from one pair of fingerprints never stand in for another pair's. A file's cached pairs
 # also go when its stored frame rate changes (``MarkerStore.set_frame_rate``).
-_PAIR_VERSION_STEP = 1_000
+_PAIR_VERSION_STEP = PAIR_VERSION_STEP
 _RETIMED_TO = {FILM_FPS: 1, PAL_FPS: 2}
 # Guards on the repeated stretches season audio takes for the intro (§5.3, owner 2026-09-24): a network ident at the
 # very start of the file, or a music bed under the cold open, repeats in every episode as well as the theme does
@@ -512,8 +521,9 @@ class SeasonClock:
     A 25 fps release of a film-rate show plays 4.3 % fast, pitch raised with it, and its opening fingerprints like
     nothing a film-rate release of the same show plays (Bones season 5: 0 of 85 such pairs matched, against 85 of 85
     with the 25 fps audio slowed to film speed). A group whose files play at two speeds is matched at the speed most of
-    them play at (``speed.match_speed``); each file at the other speed is matched on its audio retimed to it, and what
-    it matches is read back at its own speed (``factors``: its own seconds per second of the group's).
+    them play at (``speed.match_speed``); each file at the other frame rate whose audio says it plays at the other speed
+    (:func:`clock_by_audio`) is matched on its audio retimed to it, and what it matches is read back at its own speed
+    (``factors``: its own seconds per second of the group's).
 
     Attributes:
         speed: The group's speed, None when nothing is retimed.
@@ -526,11 +536,15 @@ class SeasonClock:
     def pair_version(self, first: str, second: str) -> int:
         """The version a pair's runs are cached under: :data:`SEASON_AUDIO_VERSION` for two files at their own speed,
         and another for each combination of the two sides' speeds (own, retimed to film, retimed to 25 fps)."""
+        return _pair_version(self.side(first), self.side(second))
 
-        def side(path: str) -> int:
-            return _RETIMED_TO[self.speed] if path in self.factors else 0
+    def side(self, path: str) -> int:
+        """The speed a file is matched at as the pair version names it: 0 as it plays, else the speed retimed to."""
+        return _RETIMED_TO[self.speed] if path in self.factors else 0
 
-        return SEASON_AUDIO_VERSION + _PAIR_VERSION_STEP * (3 * side(first) + side(second))
+
+def _pair_version(first_side: int, second_side: int) -> int:
+    return SEASON_AUDIO_VERSION + _PAIR_VERSION_STEP * (3 * first_side + second_side)
 
 
 def season_clock(speeds: Mapping[str, float | None]) -> SeasonClock:
@@ -545,6 +559,51 @@ def season_clock(speeds: Mapping[str, float | None]) -> SeasonClock:
     group_speed = match_speed(speeds.values())
     factors = {path: factor for path, own in speeds.items() if (factor := retime_factor(own, group_speed)) is not None}
     return SeasonClock(group_speed, factors)
+
+
+def clock_by_audio(
+    clock: SeasonClock, references: Sequence[str], heard: Callable[[str, bool, str], bool]
+) -> SeasonClock:
+    """The clock with only the files whose audio plays at the other speed retimed, told by the audio itself.
+
+    A frame rate alone doesn't say it. A 25 fps release of a film-rate show plays its audio 4.3 % fast (Bones: slowed
+    to film speed it matches the Blu-rays, as it plays nothing), but a release can change only the frame rate and keep
+    the audio as it was (RuPaul's Drag Race UK S08E04: a 23.976 fps AMZN release of a 25 fps show, whose audio, sped
+    up, matched nothing, and as it plays matched the 25 fps copy of the episode 897 of 900 s). So each file at the other
+    frame rate is matched both ways against the files at the group's speed, and is retimed only when its retimed audio
+    matches more of them than its own does; on a tie it is matched as it plays.
+
+    Args:
+        clock: :func:`season_clock`, from the files' frame rates.
+        references: The files at the group's speed (as they play).
+        heard: Whether a file (as it plays, or retimed: the second argument) has a run with a reference that isn't
+            mostly silence (:func:`heard_in`).
+
+    Returns:
+        The clock with the files that stay as they play left out of its factors.
+    """
+    retimed = {}
+    for path, factor in clock.factors.items():
+        others = [reference for reference in references if reference != path]
+        if sum(heard(path, True, r) for r in others) > sum(heard(path, False, r) for r in others):
+            retimed[path] = factor
+    return SeasonClock(clock.speed, retimed)
+
+
+def heard_in(runs: Sequence[Run], points: np.ndarray, *, first: bool) -> bool:
+    """Whether a pair's runs hold one that isn't mostly silence on one file's side: silence fingerprints to one value
+    whatever the speed, so a run over it tells nothing about which speed the file plays at.
+
+    Args:
+        runs: The pair's runs.
+        points: The file's points (as matched).
+        first: Whether the file is the pair's first (its side of a run is ``a``).
+    """
+    for run in runs:
+        start_s, end_s = (run.a_start_s, run.a_end_s) if first else (run.b_start_s, run.b_end_s)
+        if not _mostly_silence(points, IntroSegment(start_s, end_s, 0)):
+            return True
+    return False
 
 
 def in_own_time(segment: IntroSegment, factor: float | None) -> IntroSegment:
@@ -866,9 +925,10 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
 
     It does while an episode of the folder (this one included) still needs ffmpeg or ffprobe (a sibling's frame rate
     included; this episode's own is read here, inline like its own probe, when it was stored before frame rates were
-    read), while a file that plays at another speed than the group has no retimed fingerprint yet
-    (:class:`SeasonClock`), while a pair this episode hasn't been matched with yet is too slow for a checking thread
-    (:func:`slow_to_match`: long constant stretches in both openings that don't provably rule out an intro), or while
+    read), while a file at another frame rate than the group has no retimed fingerprint yet (:class:`SeasonClock`),
+    while a pair not matched yet is too slow for a checking thread (:func:`slow_to_match`: long constant stretches in
+    both openings that don't provably rule out an intro) — one of this episode's, or one that tells a file at another
+    frame rate which speed its audio plays at (:func:`clock_by_audio`, pairs of other episodes included) — or while
     the season step would meet a cluster starting in the first 30 s whose end picture isn't checked yet (decoding is a
     worker's job). That last question is the season step itself, run here with the end-picture check reading only
     markers.db: the pairs it matches are cached for the detector, whichever thread it then runs on. Otherwise matching
@@ -917,8 +977,9 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
             group_size=len(group.episodes),
             previous_files=view.previous_season(),
             retimed=functools.partial(_cached_retimed, ctx, rec),
+            inline=True,
         )
-    except _RetimedUnmadeError:
+    except (_RetimedUnmadeError, _SlowPairError):
         return True
     if matching is None:
         return False
@@ -1020,6 +1081,45 @@ class _Matching:
     rates: dict[str, float | None] = field(default_factory=dict)
 
 
+class _SlowPairError(Exception):
+    """A pair not matched yet is too slow for a checking thread (``needs_worker``: matching it is a worker's job)."""
+
+
+def _cached_runs(
+    ctx: PipelineContext,
+    records: Mapping[str, FileRecord],
+    first: str,
+    second: str,
+    a: np.ndarray,
+    b: np.ndarray,
+    version: int,
+    *,
+    inline: bool = False,
+) -> list[Run]:
+    """:func:`season_pair_runs` of two files' points (``first``'s as the matcher's first argument), cached in
+    markers.db under ``version``.
+
+    Raises:
+        _SlowPairError: ``inline`` and the pair isn't cached yet and :func:`slow_to_match`.
+    """
+    rec_a, rec_b = records[first], records[second]
+    cached = ctx.store.get_season_pair(rec_a.id, rec_b.id, version)
+    if cached is not None:
+        return [Run(*run) for run in cached]
+    if inline and slow_to_match(a, b):
+        raise _SlowPairError(f"{os.path.basename(first)} and {os.path.basename(second)}")
+    runs = season_pair_runs(a, b)
+    ctx.store.set_season_pair(
+        rec_a.id,
+        rec_b.id,
+        version,
+        [tuple(run) for run in runs],
+        identity_a=(rec_a.size, rec_a.mtime_ns),
+        identity_b=(rec_b.size, rec_b.mtime_ns),
+    )
+    return runs
+
+
 def _matching(
     ctx: PipelineContext,
     rec: FileRecord,
@@ -1029,12 +1129,15 @@ def _matching(
     group_size: int,
     previous_files: Sequence[str] | None,
     retimed: Callable[[FileRecord, float], np.ndarray | None],
+    inline: bool = False,
 ) -> _Matching | None:
     """The files this episode is matched with, at one speed: its group's audible files, or, alone in its folder, the
     previous season's cached ones (their records are added to ``records``).
 
-    Every file that plays at another speed than most of them (:func:`season_clock`) is matched on its retimed
-    fingerprint (``retimed``: None leaves a sibling out, which only a file other than this episode may be).
+    Every file at another frame rate than most of them (:func:`season_clock`) is fingerprinted with its audio retimed
+    (``retimed``: None leaves a sibling out, which only a file other than this episode may be), and is matched on that
+    fingerprint only when its audio says it plays at the other speed (:func:`clock_by_audio`: both ways against the
+    files at the group's speed, each pair cached per version).
 
     Args:
         ctx: The job's context.
@@ -1044,9 +1147,13 @@ def _matching(
         group_size: How many episodes the group has.
         previous_files: The previous season's files (None: listed here).
         retimed: A file's fingerprint retimed by a factor.
+        inline: On a checking thread (``needs_worker``): a pair too slow for it isn't matched.
 
     Returns:
         The matching, or None when there is nothing to match (this episode is silent, or has no audible partner).
+
+    Raises:
+        _SlowPairError: ``inline``, and telling a file's speed needs a pair too slow for a checking thread.
     """
     target = rec.canonical_path
     if not len(points[target]):
@@ -1062,18 +1169,39 @@ def _matching(
             return None
         audible, source = {target: points[target], **previous}, Source.SEASON_AUDIO_PREVIOUS
     rates = {path: ctx.store.get_frame_rate(records[path].id)[1] for path in audible}
-    clock = season_clock({path: playback_speed(rate) for path, rate in rates.items()})
+    by_rate = season_clock({path: playback_speed(rate) for path, rate in rates.items()})
     matched = dict(audible)
-    for path, factor in clock.factors.items():
+    stretched: dict[str, np.ndarray] = {}
+    for path, factor in by_rate.factors.items():
         found = retimed(records[path], factor)
         if found is None or not len(found):
             del matched[path]
         else:
-            matched[path] = found
+            stretched[path] = found
     if target not in matched or len(matched) < 2:
         return None
-    # A lone episode goes first, then the previous season's files by path: the order few_siblings.py measured.
-    files = [target, *sorted(path for path in previous if path in matched)] if previous else sorted(matched)
+
+    def order(path: str) -> tuple[bool, str]:
+        # A lone episode goes first, then the previous season's files by path: the order few_siblings.py measured.
+        return (bool(previous) and path != target, path)
+
+    def heard(path: str, retimed_side: bool, reference: str) -> bool:
+        side = _RETIMED_TO[by_rate.speed] if retimed_side else 0
+        own = stretched[path] if retimed_side else audible[path]
+        first = order(path) < order(reference)
+        pair = (path, reference) if first else (reference, path)
+        version = _pair_version(side, 0) if first else _pair_version(0, side)
+        a, b = (own, audible[reference]) if first else (audible[reference], own)
+        return heard_in(_cached_runs(ctx, records, *pair, a, b, version, inline=inline), own, first=first)
+
+    references = [path for path in matched if playback_speed(rates[path]) == by_rate.speed]
+    clock = clock_by_audio(
+        SeasonClock(by_rate.speed, {path: f for path, f in by_rate.factors.items() if path in stretched}),
+        references,
+        heard,
+    )
+    matched.update({path: stretched[path] for path in clock.factors})
+    files = sorted(matched, key=order)
     return _Matching(files, matched, clock, source, tuple(previous), rates)
 
 
@@ -1202,21 +1330,9 @@ def _intro(
     points, clock = matching.points, matching.clock
 
     def runs_between(first: str, second: str) -> list[Run]:
-        a, b = records[first], records[second]
-        version = clock.pair_version(first, second)
-        cached = ctx.store.get_season_pair(a.id, b.id, version)
-        if cached is not None:
-            return [Run(*run) for run in cached]
-        runs = season_pair_runs(points[first], points[second])
-        ctx.store.set_season_pair(
-            a.id,
-            b.id,
-            version,
-            [tuple(run) for run in runs],
-            identity_a=(a.size, a.mtime_ns),
-            identity_b=(b.size, b.mtime_ns),
+        return _cached_runs(
+            ctx, records, first, second, points[first], points[second], clock.pair_version(first, second)
         )
-        return runs
 
     segment = season_intro(
         target,
@@ -1273,13 +1389,18 @@ def intro_rests_on_season_audio(ctx: PipelineContext, rec: FileRecord) -> bool:
 def _intro_settled(ctx: PipelineContext, rec: FileRecord) -> bool:
     """Whether a new season audio answer can't change a file's intro: decided by other sources, or left to every
     server's own marker (the kept status, ``outcomes.is_kept_own``: season audio never runs for it, so its stored
-    answer never catches up, and its own run checks the servers again)."""
+    answer never catches up, and its own run checks the servers again). An intro carried over from a replaced file
+    isn't settled: the file's first answer of its own replaces it."""
     intro = ctx.store.get_decisions(rec.id).get(MarkerType.INTRO)
     if intro is None:
         return False
     if is_kept_own(intro.status, intro.reason):
         return True
-    return intro.status is DecisionStatus.DECIDED and not intro_rests_on_season_audio(ctx, rec)
+    if intro.status is not DecisionStatus.DECIDED:
+        return False
+    return not intro_rests_on_season_audio(ctx, rec) and not is_carried_over(
+        ctx.store.get_markers(rec.id).get(MarkerType.INTRO)
+    )
 
 
 def _request_redecide(
@@ -1560,7 +1681,7 @@ def season_audio_spec(ffmpeg_path: str | None) -> LocalDetectorSpec | None:
         types=frozenset({MarkerType.INTRO}),
         detect=detect_season_audio,
         stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}),
-        version=SEASON_AUDIO_VERSION,
+        version=SEASON_AUDIO_ANSWER_VERSION,
         due=season_audio_due,
         needs_worker=season_audio_needs_worker,
         followups=season_audio_followups,

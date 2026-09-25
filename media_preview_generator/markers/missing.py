@@ -158,6 +158,33 @@ def mark_if_missing(store: MarkerStore, rec: FileRecord | None, configs: Sequenc
         return False
 
 
+def gone_now(rec: FileRecord, configs: Sequence[ServerConfig]) -> bool | None:
+    """Whether another file's run finds this file gone from disk, told apart from "can't tell now". Marks nothing (the
+    caller doesn't hold this file's run lock) and never raises; the check takes at most ``CHECK_TIMEOUT_S``.
+
+    Args:
+        rec: The file's row.
+        configs: The servers' configs (for its disk roots).
+
+    Returns:
+        False when something is at its path; True when it is marked missing, or gone by this module's rules now
+        (its disk roots there and holding entries); None when that can't be told now (no answer in time, its roots
+        missing, empty or unreadable, or an error).
+    """
+    answer: list[bool | None] = []
+
+    def check(_stop: threading.Event) -> None:
+        if _on_disk(rec.canonical_path):
+            answer.append(False)
+        elif rec.missing_since is not None or _missing(rec.canonical_path, configs, {}):
+            answer.append(True)
+        else:
+            answer.append(None)
+
+    _within(check, CHECK_TIMEOUT_S)
+    return answer[0] if answer else None
+
+
 def mark_missing_files(store: MarkerStore, paths: Iterable[str], configs: Sequence[ServerConfig]) -> int:
     """Mark the files among ``paths`` that are missing from disk, checking for at most ``LIST_BUDGET_S``, and log how
     many. A file a job is running is skipped. Never raises.
@@ -184,6 +211,37 @@ def mark_missing_files(store: MarkerStore, paths: Iterable[str], configs: Sequen
     _within(work, LIST_BUDGET_S)
     _log_marked(len(marked))
     return len(marked)
+
+
+def files_on_disk(
+    paths: Sequence[str], *, limit: int | None = None, budget_s: float = LIST_BUDGET_S
+) -> tuple[list[str], list[str]]:
+    """Which of ``paths`` something is at now, in order, until ``limit`` are found, checking for at most ``budget_s``
+    on a helper thread (a stalled hard-mounted share blocks a stat rather than fail). Never raises.
+
+    Args:
+        paths: Local paths, in the order to check them.
+        limit: Stop once this many are found; None checks them all.
+        budget_s: How long the checks may take in all; paths not checked by then are in neither list.
+
+    Returns:
+        The paths found on disk and the paths checked and not found, each in ``paths`` order.
+    """
+    lock = threading.Lock()
+    present: list[str] = []
+    absent: list[str] = []
+
+    def work(stop: threading.Event) -> None:
+        for path in paths:
+            if stop.is_set() or (limit is not None and len(present) >= limit):
+                return
+            found = _on_disk(path)
+            with lock:
+                (present if found else absent).append(path)
+
+    _within(work, budget_s)
+    with lock:
+        return list(present), list(absent)
 
 
 def sweep_missing_files(

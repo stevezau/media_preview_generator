@@ -346,6 +346,71 @@ class TestFindCredits:
                                        detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert (result.start_s, result.scale) == (5700.0, 2)
 
+    # After the verdict card's answer (5600-5617 s), a roll over footage from 5700 to 5720 s. Its titles box at 320x180
+    # as blocks on its first 12 s and one block after: lit frames with three boxes are credit frames, but 12 s is no
+    # run. At 640x360 the titles box as lines inside those blocks, and the names under them box only there.
+    TITLE_BLOCKS = ((40, 120, 140, 140), (160, 120, 260, 140), (100, 145, 220, 165))
+    TITLE_LINES = ((42, 122, 138, 130), (42, 131, 138, 139), (162, 122, 258, 130), (102, 147, 218, 155))
+    NAME_LINES = ((42, 150, 98, 158), (162, 150, 218, 158))
+    EPILOGUE_320, EPILOGUE_640 = (60, 80, 260, 100), (64, 82, 256, 97)
+
+    def _half_boxed_roll(self, *, epilogue: bool = False):
+        # With ``epilogue``, a card on black at 5680-5684 s and a roll 320x180 boxes nothing of.
+        calls = []
+
+        def row(t, scale):
+            if 5600 <= t < 5618:
+                return (float(t), 1, 12.0, (self.VERDICT,))
+            if epilogue and 5680 <= t <= 5684:  # a card on black, boxed at both sizes
+                card = self.EPILOGUE_640 if scale == 2 else self.EPILOGUE_320
+                return (float(t), 1, 12.0, (card,))
+            if 5700 <= t <= 5720 and scale == 2:
+                boxes = (*self.TITLE_LINES, *self.NAME_LINES)
+                return (float(t), len(boxes), 110.0, boxes)
+            if 5700 <= t <= 5712 and not epilogue:
+                return (float(t), 3, 110.0, self.TITLE_BLOCKS)
+            if 5714 <= t <= 5720 and not epilogue:
+                return (float(t), 1, 110.0, self.TITLE_BLOCKS[:1])
+            return (float(t), 0, 110.0, ())
+
+        def decode(path, *, start_s, length_s, keyframes_only, scale, **kwargs):
+            calls.append((start_s, keyframes_only, scale))
+            end_s = 6000.0 if length_s is None else start_s + length_s
+            step = 2 if keyframes_only else 1
+            first = int(start_s) + (int(start_s) % 2 if keyframes_only else 0)
+            return [row(t, scale) for t in range(max(5100, first), 6000, step) if start_s <= t <= end_s]
+
+        return calls, row, decode
+
+    def test_a_roll_the_320x180_reading_half_boxed_after_the_answers_end_is_read_whole(self, monkeypatch, probes):
+        # I Survived a Serial Killer S01E04: the roll after the scene is a frame short of a 15 s run at 320x180, so story
+        # before it is the last run, 92 s early, and ends in a scene. Its frames at 640x360 hold its titles, lines
+        # inside the blocks 320x180 boxed, and names only the larger frame boxes. Without the titles as seen text, two
+        # names are no lit credit frame, no run, and the early answer stayed. After the answer's end a frame showing
+        # text only the larger frame boxes is read whole: the roll is the answer.
+        calls, row, decode = self._half_boxed_roll()
+        assert rule_j.coarse_start([row(t, 1) for t in range(5100, 6000, 2)]).pts_s == 5600.0  # no roll at 320x180
+        monkeypatch.setattr(detector.frames, "decode_rows", decode)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.end_s, result.scale) == (5700.0, 5720.0, 2)
+        assert calls[3:] == [(5617.0, True, 2), (5680.0, False, 2), (5719.0, False, 2)]
+        assert result.run_rows[300] == (5700.0, 6, 110.0, (*self.TITLE_LINES, *self.NAME_LINES))  # read whole
+        assert result.run_rows[250] == (5600.0, 0, 12.0, ())  # the answer's own card: seen text
+
+    def test_a_card_after_the_answers_end_the_320x180_reading_boxed_all_of_stays_seen_text(self, monkeypatch, probes):
+        # Accused (2020) S04E05 and S07E02: an epilogue card on black after the answer's end, 16-20 s before a roll
+        # only 640x360 boxes, and boxed whole at 320x180 (a lone card: no run there). Read as text at 640x360, the 24 s
+        # join glues it onto the roll: 25.5 and 17.5 s early. A frame holding no text only the larger frame boxes
+        # stays without the text 320x180 boxed, so the start is the roll's.
+        calls, _row, decode = self._half_boxed_roll(epilogue=True)
+        monkeypatch.setattr(detector.frames, "decode_rows", decode)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.scale) == (5700.0, 2)
+        assert result.run_rows[290] == (5680.0, 0, 12.0, ())
+        assert result.key_rows[290] == (5680.0, 1, 12.0, (self.EPILOGUE_640,))  # as decoded
+
     def test_an_answer_that_runs_to_the_end_of_the_file_is_not_read_again(self, monkeypatch, probes):
         # No scene after it: there is nowhere after the answer for a roll to be, and every answered file would pay for
         # the larger reading otherwise.
@@ -392,6 +457,86 @@ class TestFindCredits:
             "Kept the 320x180 answer for the credits of Movie (2020).mkv: reading the rest of its file at 640x360 failed"
             in loguru_caplog.text
         )
+
+    # I Survived a Serial Killer S01E14: court footage over the last minute before the roll, whose date line, logo
+    # and caption only 640x360 boxes (4-10 px tall): four small boxes a lit frame, on and off. A keyframe without text,
+    # then the roll, a dozen names a frame. 320x180 boxes none of it.
+    COURT = ((30, 19, 86, 29), (247, 145, 266, 154), (282, 163, 308, 171), (0, 173, 26, 179))
+    BUG = (280, 8, 312, 24)
+    NAMES_640 = tuple((40 + 90 * (n % 3), 115 + 9 * (n // 3), 110 + 90 * (n % 3), 122 + 9 * (n // 3)) for n in range(9))
+
+    def _court_then_roll(self, scale: int, t: int, keyframe: bool = True, bug: bool = False) -> tuple:
+        row = self._court_then_roll_without_bug(scale, t)
+        if bug and keyframe and t % 4 == 0 and t < 5720:  # a logo over busy footage, boxed every other keyframe
+            return (row[0], row[1] + 1, row[2], (*row[3], self.BUG))
+        return row
+
+    def _court_then_roll_without_bug(self, scale: int, t: int) -> tuple:
+        if scale == 1 or t < 5640 or t >= 5720:
+            return (float(t), 0, 110.0, ())
+        if t < 5700:
+            court = self.COURT if (t // 2) % 5 else self.COURT[:1]  # on and off with the shots
+            return (float(t), len(court), 100.0, court)
+        if t < 5702:
+            return (float(t), 0, 118.0, ())  # the cut to the roll's footage
+        return (float(t), len(self.NAMES_640), 120.0, self.NAMES_640)
+
+    def test_small_print_on_story_before_a_roll_only_640x360_reads_is_not_its_start(self, monkeypatch, probes):
+        # Read as credit frames, the court footage's frames join the roll over the 24 s join: 62 s early. Its text
+        # isn't across the story before the run, so it is no overlay. At 640x360 the roll starts on its first dense
+        # frame, and walks back over keyframes with text only as far as the cut: the start is the roll's.
+        calls = []
+
+        def decode(path, *, start_s, length_s, keyframes_only, scale, **kwargs):
+            calls.append((start_s, keyframes_only, scale))
+            end_s = 6000.0 if length_s is None else start_s + length_s
+            step = 2 if keyframes_only else 1
+            first = int(start_s) + (int(start_s) % 2 if keyframes_only else 0)
+            times = range(max(5100, first), 6000, step)
+            return [self._court_then_roll(scale, t, keyframes_only) for t in times if start_s <= t <= end_s]
+
+        at_640 = [self._court_then_roll(2, t) for t in range(5100, 6000, 2)]
+        assert rule_j.coarse_start(at_640).pts_s == 5642.0 and rule_j.overlay_boxes(at_640) == ()
+        monkeypatch.setattr(detector.frames, "decode_rows", decode)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.scale) == (5702.0, 2)
+        assert calls[2] == (5682.0, False, 2)  # refined before the roll, not before the court footage
+
+    def test_a_channel_bug_on_the_cut_before_the_roll_doesnt_carry_the_start_back(self, monkeypatch, probes):
+        # The same file under a channel logo boxed at both sizes on every other keyframe, the cut in front of the roll
+        # included. The walk back from the roll's first dense frame reads what each keyframe shows without the
+        # overlays: with the logo counted, the cut shows text and the start walks back onto the court footage.
+        calls = []
+
+        def decode(path, *, start_s, length_s, keyframes_only, scale, **kwargs):
+            calls.append((start_s, keyframes_only, scale))
+            end_s = 6000.0 if length_s is None else start_s + length_s
+            step = 2 if keyframes_only else 1
+            first = int(start_s) + (int(start_s) % 2 if keyframes_only else 0)
+            times = range(max(5100, first), 6000, step)
+            return [self._court_then_roll(scale, t, keyframes_only, bug=True) for t in times if start_s <= t <= end_s]
+
+        monkeypatch.setattr(detector.frames, "decode_rows", decode)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.scale, result.overlays) == (5702.0, 2, (self.BUG,))
+        assert result.key_rows[300] == (5700.0, 1, 118.0, (self.BUG,))  # the cut, as decoded
+
+    def test_the_320x180_reading_keeps_its_start_on_sparse_text(self, monkeypatch, probes):
+        # The same frames boxed at 320x180, the roll running to the end of the file: the dense start is the larger
+        # reading's alone, where small print is read, and the 320x180 reading starts on the court footage as before.
+        at_320 = [self._court_then_roll(2, t) for t in range(5100, 5720, 2)]
+        at_320 += [(float(t), len(self.NAMES_640), 120.0, self.NAMES_640) for t in range(5720, 6000, 2)]
+        fine = [(float(t), 0, 110.0, ()) for t in range(5622, 5640)] + [
+            (float(t), 4, 100.0, self.COURT) for t in range(5640, 5644)
+        ]  # fmt: skip
+        decodes = Decodes(at_320, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.end_s, result.scale) == (5640.0, None, 1)
+        assert [call["scale"] for call in decodes.calls] == [1, 1]
 
     def test_text_the_320x180_reading_boxed_makes_no_run_in_the_larger_reading(self, monkeypatch, probes):
         # A Season to Remember (2024), decoded on the CPU: an interview's lower third (a name, a station) over lit
@@ -1436,6 +1581,8 @@ class TestDetect:
         assert (call["path"], call["duration_ms"], call["is_episode"], call["ffmpeg"], call["gpu"], call["gpu_device_path"]) == (
             MOVIE.canonical_path, 6_000_000, False, "/usr/lib/jellyfin-ffmpeg/ffmpeg", "NVIDIA", "cuda:0")  # fmt: skip
         assert call["cancel_check"] is cancel
+        # The app runs the process's GPU decode check (a diagnostic; find_credits alone doesn't run it).
+        assert call["check_gpu_decode"] is True
         # Call it rather than checking it is set: a phase callback wired to something else would leave the worker row
         # showing the pipeline's last text for the whole decode. Equality, not identity — ``phase.append`` is a fresh
         # bound method on every access.
@@ -1514,21 +1661,133 @@ class TestDetect:
         with pytest.raises(CodecNotSupportedError, match="no frames"):
             detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
 
-    @pytest.mark.parametrize(
-        ("error", "message"),
-        [
-            (frames.FrameDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the CPU"), "exited 1"),
-            (frames.DecodeCancelledError("cancelled while decoding"), "cancelled"),
-            (TextDetUnavailableError("Text detection failed: the helper exited"), "Text detection failed"),
-        ],
-    )
-    def test_other_failures_are_no_answer_this_time_and_not_remembered(self, monkeypatch, pool, ctx, error, message):
-        self._find(monkeypatch, error)
-        with pytest.raises(DetectorUnavailableError, match=message):
-            detector.detect_credits_text(MOVIE, ctx=ctx)
+    @staticmethod
+    def _checks(monkeypatch, *, matches=True, error=None):
+        """The process's decode checks, run on fakes: every check decode is recorded, and the GPU's frames match the
+        CPU's unless ``matches`` is False (or each decode raises ``error``)."""
+        checked: list[dict] = []
+
+        def decode_clip(ffmpeg, clip, *, scale, gpu, gpu_device_path, cancel_check, timeout_s):
+            checked.append({"ffmpeg": ffmpeg, "clip": clip.name, "scale": scale, "gpu": gpu,
+                            "device": gpu_device_path, "cancel_check": cancel_check})  # fmt: skip
+            if error is not None:
+                raise error
+            return ((0.0, "the CPU's pixels" if matches or gpu is None else "other pixels"),)
+
+        monkeypatch.setattr(detector.decode_check, "_checks", detector.decode_check.DecodeChecks(decode=decode_clip))
+        return checked
+
+    @staticmethod
+    def _commands(monkeypatch):
+        commands: list[dict] = []
+
+        def run_decode(command, **kwargs):
+            commands.append({"command": command, **kwargs})
+            kwargs["detect_boxes"](frames.np.zeros((1, 180, 320), frames.np.uint8))
+            return []
+
+        monkeypatch.setattr(detector.frames, "run_decode", run_decode)
+        return commands
+
+    @pytest.mark.parametrize("matches", [True, False], ids=["gpu-matches-the-reference", "gpu-differs"])
+    @pytest.mark.parametrize("pix_fmt_surfaces", [DOWNLOAD, None], ids=["4:2:0-surfaces", "ffmpeg-downloads"])
+    def test_the_files_decodes_run_on_the_workers_gpu_whatever_the_check_finds(
+        self, monkeypatch, pool, ctx, probes, matches, pix_fmt_surfaces, loguru_caplog
+    ):
+        # The owner's worker model: a GPU worker decodes on its GPU, every codec included (MPEG-2 and MPEG-4 Part 2,
+        # which a GPU may decode a level or two off, as much as H.264). The check only says what it found.
+        probes.thinning = frames.KeyframeThinning(None, False, pix_fmt_surfaces)
+        check_decodes = self._checks(monkeypatch, matches=matches)
+        commands = self._commands(monkeypatch)
+        cancel = lambda: False  # noqa: E731
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", cancel_check=cancel)
+        # The check ran on the worker's own device, through the job's ffmpeg and its cancel.
+        assert {(c["gpu"], c["device"]) for c in check_decodes} == {(None, None), ("NVIDIA", "cuda:0")}
+        assert {c["ffmpeg"] for c in check_decodes} == {"/usr/lib/jellyfin-ffmpeg/ffmpeg"}
+        assert all(c["cancel_check"] is cancel for c in check_decodes)
+        warned = [m for m in loguru_caplog.messages if "doesn't match the reference decode" in m]
+        assert len(warned) == (0 if matches else 1)
+        hwaccel = ["-hwaccel", "cuda", "-hwaccel_device", "0"]
+        if pix_fmt_surfaces:
+            hwaccel += ["-hwaccel_output_format", "cuda"]
+            video_filter = "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12,showinfo"
+        else:
+            video_filter = "scale=320:180:flags=neighbor,format=nv12,showinfo"
+        # The tail's keyframe pass, on the GPU either way.
+        (call,) = commands
+        assert call["command"] == [
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2",
+            *hwaccel, "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE.canonical_path, "-an", "-sn",
+            "-dn", "-fps_mode", "passthrough", "-vf", video_filter, "-f", "rawvideo", "-",
+        ]  # fmt: skip
+        assert call["hw_active"] is True
+        # Text detection is not the decode's: it stays on the worker's GPU (its own self-test decides it).
+        assert pool.calls == [("NVIDIA", "cuda:0")]
+
+    def test_every_file_on_a_device_shares_the_processs_one_check(self, monkeypatch, pool, ctx, probes):
+        probes.thinning = frames.KeyframeThinning(None, False, "p010le")
+        check_decodes = self._checks(monkeypatch)
+        commands = self._commands(monkeypatch)
+        cancel = lambda: False  # noqa: E731
+        for _ in range(2):
+            detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", cancel_check=cancel)
+        # Both clips at both sizes, on the GPU and the CPU, once: not again for the second file.
+        assert len(check_decodes) == 8
+        assert all(c["cancel_check"] is cancel for c in check_decodes)
+        assert [call["hw_active"] for call in commands] == [True, True]
+
+    def test_the_harness_decodes_on_the_gpu_it_is_given_without_a_check(self, monkeypatch, probes):
+        # find_credits alone (tools/markers_eval) measures the decode path it is handed.
+        probes.thinning = frames.KeyframeThinning(None, False, DOWNLOAD)
+        check_decodes = self._checks(monkeypatch, matches=False)
+        decodes = Decodes([], [])
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="ffmpeg",
+                              detect_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
+        assert check_decodes == []
+        assert {(call["gpu"], call["gpu_device_path"]) for call in decodes.calls} == {("NVIDIA", "cuda:0")}
+
+    def test_a_job_cancelled_during_the_decode_check_is_no_answer_and_decodes_nothing(
+        self, monkeypatch, pool, ctx, probes
+    ):
+        probes.thinning = frames.KeyframeThinning(None, False, DOWNLOAD)
+        self._checks(monkeypatch, error=frames.DecodeCancelledError("cancelled while decoding h264-8bit.mkv"))
+        commands = self._commands(monkeypatch)
+        with pytest.raises(DetectorUnavailableError, match="cancelled"):
+            detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
+        assert commands == []
         assert (
             ctx.store.credits_text_timed_out_at(FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)) is None
         )
+
+    @pytest.mark.parametrize(
+        ("error", "message", "failed_here"),
+        [
+            # The file's own: rule 3 stops waiting for credit text on it (spec §5.5); it is still read on later runs.
+            (frames.FrameDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the CPU"), "exited 1", True),
+            # The mount's, or the helper's: nothing about the file.
+            (frames.ReadStalledError("2 earlier ffprobes are still stuck"), "still stuck", False),
+            (frames.DecodeCancelledError("cancelled while decoding"), "cancelled", False),
+            (TextDetUnavailableError("Text detection failed: the helper exited"), "Text detection failed", False),
+        ],
+    )
+    def test_other_failures_are_no_answer_this_time_and_only_the_files_own_is_remembered(
+        self, monkeypatch, pool, ctx, error, message, failed_here
+    ):
+        identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        rec = ctx.store.upsert_file(identity, duration_ms=MOVIE.duration_ms, season_key=None, is_movie=True)
+        self._find(monkeypatch, error)
+        with pytest.raises(DetectorUnavailableError, match=message):
+            detector.detect_credits_text(rec, ctx=ctx)
+        assert ctx.store.credits_text_timed_out_at(identity) is None
+        assert detector.credits_text_failed_here(rec, ctx) is failed_here
+        assert detector.credits_text_needs_worker(rec, ctx) is True  # asked again on the next run either way
+
+        replaced = ctx.store.upsert_file(
+            FileIdentity(MOVIE.canonical_path, MOVIE.size + 1, MOVIE.mtime_ns), duration_ms=MOVIE.duration_ms,
+            season_key=None, is_movie=True,
+        )  # fmt: skip
+        assert detector.credits_text_failed_here(replaced, ctx) is False
 
     def test_a_timed_out_640x360_reading_of_a_tail_with_no_answer_waits_a_day(self, monkeypatch, pool, ctx, probes):
         decodes = Decodes(STORY, frames.DecodeTimeoutError("decoding Movie (2020).mkv timed out after 600 s"))
@@ -1632,10 +1891,12 @@ class TestDetect:
         monkeypatch.setattr(frames, "probe_media", lambda path, **kwargs: MediaProbe(6_000_000, ()))
         monkeypatch.setattr(frames, "video_packets", gated)
         monkeypatch.setattr(frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
-        with pytest.raises(DetectorUnavailableError, match="could not read the video packets of Movie \\(2020\\).mkv"):
-            detector.detect_credits_text(MOVIE, ctx=ctx)
         identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        rec = ctx.store.upsert_file(identity, duration_ms=MOVIE.duration_ms, season_key=None, is_movie=True)
+        with pytest.raises(DetectorUnavailableError, match="could not read the video packets of Movie \\(2020\\).mkv"):
+            detector.detect_credits_text(rec, ctx=ctx)
         assert ctx.store.credits_text_timed_out_at(identity) is None
+        assert detector.credits_text_failed_here(rec, ctx) is False
 
     def test_an_unknown_duration_is_no_answer(self, pool, ctx):
         rec = FileRecord(9, "/m/x.mkv", 1, 1, None, None, True)
@@ -1764,7 +2025,9 @@ VP9 = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt
 def _generated_roll(path, ffmpeg: str, *, scene_s: int, gop: int, encoder: list[str] = H264, fontsize: int = 24) -> str:
     """420 s of text-free gradients, then 120 s of names scrolling up over black (a new line every 3 s, 20 px/s), then
     optionally a scene after the credits (Q3); a keyframe every ``gop`` frames at 24 fps, names ``fontsize`` px high
-    on the 640x360 picture."""
+    on the 640x360 picture. The gradients' colours are given: left "random", ffmpeg draws them from a source its
+    ``seed`` doesn't set, so every run made another picture (grey 94-170 on the first frame) and the small-text test
+    answered at 320x180 on some of them."""
     import subprocess as sp
 
     roll = ",".join(
@@ -1772,14 +2035,16 @@ def _generated_roll(path, ffmpeg: str, *, scene_s: int, gop: int, encoder: list[
         for i in range(40)
     )
     inputs = ["-f", "lavfi", "-i",
-              "gradients=size=640x360:rate=24:speed=0.02:seed=3,trim=duration=420,setpts=PTS-STARTPTS",  # fmt: skip
+              "gradients=size=640x360:rate=24:speed=0.02:seed=3:c0=0x3050a0:c1=0xc08040,trim=duration=420,"
+              "setpts=PTS-STARTPTS",  # fmt: skip
               "-f", "lavfi", "-i", f"color=c=black:size=640x360:rate=24:duration=120,{roll}"]  # fmt: skip
     if scene_s:
         inputs += [
             "-f",
             "lavfi",
             "-i",
-            f"gradients=size=640x360:rate=24:speed=0.05:seed=9,trim=duration={scene_s},setpts=PTS-STARTPTS",
+            f"gradients=size=640x360:rate=24:speed=0.05:seed=9:c0=0x406030:c1=0xa0a0c0,trim=duration={scene_s},"
+            "setpts=PTS-STARTPTS",
         ]
     streams = "".join(f"[{i}:v]" for i in range(len(inputs) // 4))
     sp.run([ffmpeg, "-v", "error", *inputs, "-filter_complex", f"{streams}concat=n={len(inputs) // 4}:v=1:a=0[v]", "-map", "[v]",

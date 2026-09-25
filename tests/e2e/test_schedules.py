@@ -17,6 +17,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 
 from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, mock_servers_list
+from .conftest import expect_modal_shown, watch_modal_shown
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -397,12 +398,11 @@ class TestScheduleIntroCredits:
         authed_page.goto(f"{app_url}/automation#schedules")
         authed_page.wait_for_load_state("domcontentloaded")
         row = authed_page.locator("#scheduleList tr", has_text="Weekly Intro & Credits")
+        # Bootstrap ignores a close click while the modal is still opening (its dialog slides in after the fade).
+        watch_modal_shown(authed_page, "newScheduleModal")
         row.locator('button[aria-label="Edit schedule"]').click()
         expect(authed_page.locator("#scheduleMarkersCheckServers")).to_be_checked(timeout=2000)
-        # Bootstrap ignores a close click while the modal is still fading in.
-        authed_page.wait_for_function(
-            "() => getComputedStyle(document.getElementById('newScheduleModal')).opacity === '1'"
-        )
+        expect_modal_shown(authed_page, "newScheduleModal")
         authed_page.locator("#newScheduleModal .btn-close").click()
         expect(authed_page.locator("#newScheduleModal")).to_be_hidden(timeout=3000)
 

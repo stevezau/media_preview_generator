@@ -3711,6 +3711,204 @@ class TestInReviewJob:
         )
 
 
+class TestVersionRerunJob:
+    """A batch of files whose answers rest on an older detector version (``triggers.submit_version_reruns``): taken
+    when the job runs and held on the job so a restart runs the same files; each file is recorded as it finishes, so
+    no later batch takes it again for those versions, and one the batch never reached is taken by a later one. The next
+    batch follows after ``versions.BATCH_GAP``."""
+
+    CONFIG = {
+        "kind": JOB_KIND_INTRO_CREDITS,
+        "source": job_runner.VERSION_RERUN_SOURCE,
+        "libraries": [],
+        "file_paths": [],
+        job_runner.VERSION_RERUN: True,
+    }
+    BATCH = {"/tv/B/S01/e2.mkv": {"credits_text": 4}, "/tv/B/S01/e1.mkv": {"credits_text": 4, "server_markers": 5}}
+
+    @pytest.fixture
+    def taken(self, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+
+        calls = MagicMock()
+        calls.next_batch.return_value = dict(self.BATCH)
+        calls.markers_enabled_anywhere.return_value = True
+        monkeypatch.setattr(job_runner, "next_batch", calls.next_batch)
+        monkeypatch.setattr(job_runner, "record_taken", calls.record_taken)
+        env.jm.merge_job_config.side_effect = calls.merge_job_config
+        env.jm.record_file_result.side_effect = calls.record_file_result
+        monkeypatch.setattr(triggers, "submit_version_reruns", calls.submit_version_reruns)
+        monkeypatch.setattr(triggers, "markers_enabled_anywhere", calls.markers_enabled_anywhere)
+        env.registry.configs.return_value = ["plex-config"]
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+        calls.results = []
+
+        def during_wait(timeout=None):
+            callback = set_cb.call_args_list[0].args[0]
+            for path, outcome in calls.results:
+                callback(path, outcome, "", "GPU Worker 1", servers=[])
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        return calls
+
+    @staticmethod
+    def _ends(env, status, config=None):
+        from media_preview_generator.web.jobs import JobStatus
+
+        def complete(*_args, **_kwargs):
+            env.job.status = JobStatus[status]
+            if config:
+                env.job.config = {**env.job.config, **config}
+
+        env.jm.complete_job.side_effect = complete
+
+    def test_it_takes_the_next_batch_holds_it_on_the_job_and_runs_it(self, env, taken):
+        env.job.config = dict(self.CONFIG)
+        self._ends(env, "COMPLETED")
+        with patch.object(job_runner, "build_items") as build:
+            job_runner.run_intro_credits_job("j1")
+
+        build.assert_not_called()
+        taken.next_batch.assert_called_once_with(env.ctx.store, env.ctx.settings, ["plex-config"])
+        assert taken.merge_job_config.call_args_list[0] == call("j1", {job_runner.VERSION_RERUN_FILES: self.BATCH})
+        taken.record_taken.assert_not_called()  # nothing ran yet
+        ctx_kwargs = env.build_context.call_args.kwargs
+        assert (ctx_kwargs["force"], ctx_kwargs["decide_again"], ctx_kwargs["online_recheck"]) == (False, False, False)
+        items = env.dispatcher.submit_items.call_args.kwargs["items"]
+        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
+            ("/tv/B/S01/e1.mkv", {}),
+            ("/tv/B/S01/e2.mkv", {}),
+        ]
+        assert env.dispatcher.submit_items.call_args.kwargs["priority"] == 3
+
+    def test_each_file_is_recorded_as_it_finishes_whatever_its_outcome(self, env, taken):
+        # A file that fails or has no owner ran too: taken again, it would fail again in every batch.
+        env.job.config = dict(self.CONFIG)
+        taken.results = [("/tv/B/S01/e1.mkv", "markers_published"), ("/tv/B/S01/e2.mkv", "failed")]
+        job_runner.run_intro_credits_job("j1")
+
+        assert taken.record_taken.call_args_list == [
+            call(env.ctx.store, {"/tv/B/S01/e1.mkv": self.BATCH["/tv/B/S01/e1.mkv"]}),
+            call(env.ctx.store, {"/tv/B/S01/e2.mkv": self.BATCH["/tv/B/S01/e2.mkv"]}),
+        ]
+        # After the job's own row: a restart in between carries the file (and records it then), never runs it twice.
+        order = [name for name, *_ in taken.method_calls if name in ("record_file_result", "record_taken")]
+        assert order == ["record_file_result", "record_taken"] * 2
+
+    def test_a_file_that_stopped_part_way_on_a_cancel_isnt_recorded(self, env, taken):
+        env.job.config = dict(self.CONFIG)
+        stopped = []
+        env.jm.is_cancellation_requested.side_effect = lambda job_id: bool(stopped)
+        taken.results = [("/tv/B/S01/e1.mkv", "failed")]
+        taken.record_file_result.side_effect = lambda *a, **kw: stopped.append(True)
+
+        job_runner.run_intro_credits_job("j1")
+
+        taken.record_taken.assert_not_called()
+
+    def test_a_job_revived_after_a_restart_runs_the_batch_it_held_and_records_what_it_carries(self, env, taken):
+        env.job.config = {**self.CONFIG, job_runner.VERSION_RERUN_FILES: self.BATCH}
+        env.jm.get_file_results.return_value = [{"file": "/tv/B/S01/e1.mkv", "outcome": "markers_published"}]
+        self._ends(env, "COMPLETED")
+        with patch.object(job_runner, "_unchanged_since_analysed", return_value=True):
+            job_runner.run_intro_credits_job("j1")
+
+        taken.next_batch.assert_not_called()
+        assert call("j1", {job_runner.VERSION_RERUN_FILES: self.BATCH}) not in taken.merge_job_config.call_args_list
+        # Finished before the restart: its row was kept, but maybe not its record.
+        taken.record_taken.assert_called_once_with(env.ctx.store, {"/tv/B/S01/e1.mkv": self.BATCH["/tv/B/S01/e1.mkv"]})
+        items = env.dispatcher.submit_items.call_args.kwargs["items"]
+        assert [i.canonical_path for i in items] == ["/tv/B/S01/e2.mkv"]
+
+    def test_a_revived_batch_that_had_finished_every_file_queues_the_next(self, env, taken):
+        from media_preview_generator.markers.versions import BATCH_GAP
+
+        env.job.config = {**self.CONFIG, job_runner.VERSION_RERUN_FILES: self.BATCH}
+        env.jm.get_file_results.return_value = [{"file": p, "outcome": "markers_published"} for p in self.BATCH]
+        self._ends(env, "COMPLETED")
+        with patch.object(job_runner, "_unchanged_since_analysed", return_value=True):
+            job_runner.run_intro_credits_job("j1")
+
+        env.dispatcher.submit_items.assert_not_called()
+        taken.record_taken.assert_called_once_with(env.ctx.store, self.BATCH)
+        taken.submit_version_reruns.assert_called_once_with(delay_s=int(BATCH_GAP.total_seconds()))
+
+    def test_the_batch_leaves_the_jobs_config_once_it_ends(self, env, taken):
+        # Only a revive needs it, and the config ships in every job payload.
+        env.job.config = dict(self.CONFIG)
+        self._ends(env, "COMPLETED")
+        job_runner.run_intro_credits_job("j1")
+
+        assert taken.merge_job_config.call_args_list[-1] == call("j1", {}, remove=(job_runner.VERSION_RERUN_FILES,))
+
+    @pytest.mark.parametrize(
+        ("status", "config", "queued"),
+        [
+            ("COMPLETED", None, True),
+            # Its retry chain keeps the row pending: this batch's own run is done all the same.
+            ("PENDING", {"is_retry_chain": True, "last_outcome": "scheduled"}, True),
+            ("FAILED", None, False),  # e.g. every file failed: the next start takes the next batch
+        ],
+        ids=["completed", "retry-chain-scheduled", "failed"],
+    )
+    def test_the_next_batch_is_queued_after_the_gap_once_this_one_has_run(self, env, taken, status, config, queued):
+        from media_preview_generator.markers.versions import BATCH_GAP
+
+        env.job.config = dict(self.CONFIG)
+        self._ends(env, status, config)
+        job_runner.run_intro_credits_job("j1")
+
+        expected = [call(delay_s=int(BATCH_GAP.total_seconds()))] if queued else []
+        assert taken.submit_version_reruns.call_args_list == expected
+
+    def test_a_cancelled_batch_queues_no_next_one(self, env, taken):
+        env.job.config = dict(self.CONFIG)
+        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        job_runner.run_intro_credits_job("j1")
+
+        env.jm.cancel_job.assert_called_once_with("j1")
+        taken.submit_version_reruns.assert_not_called()
+
+    @pytest.mark.parametrize("enabled", [True, False], ids=["nothing-left", "intro-and-credits-off-everywhere"])
+    def test_with_nothing_to_take_it_completes_and_queues_no_next_batch(self, env, taken, enabled):
+        # Turned off during the gap: nothing is taken, so no file is run without an owner and recorded as done.
+        env.job.config = dict(self.CONFIG)
+        taken.markers_enabled_anywhere.return_value = enabled
+        if enabled:
+            taken.next_batch.return_value = {}
+        self._ends(env, "COMPLETED")
+        job_runner.run_intro_credits_job("j1")
+
+        assert taken.next_batch.call_count == int(enabled)
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.complete_job.assert_called_once_with("j1")
+        taken.record_taken.assert_not_called()
+        taken.submit_version_reruns.assert_not_called()
+
+    def test_any_other_job_takes_no_batch(self, env, taken):
+        self._ends(env, "COMPLETED")
+        taken.results = [("/m/a.mkv", "markers_published")]
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+
+        taken.next_batch.assert_not_called()
+        taken.record_taken.assert_not_called()
+        taken.submit_version_reruns.assert_not_called()
+
+    def test_a_batch_waiting_for_its_gap_says_so(self, env, taken, monkeypatch):
+        due = datetime.now(UTC) + timedelta(seconds=90)
+        env.job.config = {**self.CONFIG, "retry_not_before": due.isoformat(), "retry_delay": 1800}
+        env.jm.is_cancellation_requested.return_value = True  # stop the wait at its first check
+        job_runner.run_intro_credits_job("j1")
+
+        message = env.jm.update_progress.call_args_list[0].kwargs["current_item"]
+        assert message.startswith("Next batch starting in ")
+        assert message.endswith(" — re-checking files after an update, 100 at a time")
+        taken.next_batch.assert_not_called()
+
+
 class TestOnlineRecheckJob:
     """The weekly job (``triggers.submit_online_recheck``): an ordinary Intro & Credits job over the files whose "no
     entry" from an online database is due again, listed when it runs."""

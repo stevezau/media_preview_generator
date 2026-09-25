@@ -174,25 +174,6 @@ class TestCommand:
                        "-vf", "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12,showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
 
-    @pytest.mark.parametrize(
-        ("gpu", "device", "hw_args", "video_filter"),
-        [
-            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], "fps=2,scale_cuda=320:180:format=nv12,hwdownload,format=nv12"),
-            ("INTEL", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi"], "fps=2,scale_vaapi=w=320:h=180:format=nv12,hwdownload,format=nv12"),
-            ("ARM", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER], "fps=2,scale=320:180,format=nv12"),
-            (None, None, [], "fps=2,scale=320:180,format=nv12"),
-        ],
-        ids=["cuda", "vaapi", "other-gpu", "cpu"],
-    )  # fmt: skip
-    def test_the_end_picture_check_keeps_each_vendors_own_scaler(self, gpu, device, hw_args, video_filter):
-        # Season audio's end-picture check (markers.audio.end_picture) was measured on these commands, byte for byte;
-        # it moves to the neighbor scaler only with its own measurement. The download format changes nothing there.
-        cmd, _ = frames.decode_command(FF, MOVIE, start_s=33.5, length_s=3.5, keyframes_only=False, fps=2, gpu=gpu,
-                                       gpu_device_path=device, download_format="nv12", vendor_scaler=True)  # fmt: skip
-        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
-                       "-ss", "33.500", "-t", "3.500", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", f"{video_filter},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
-
     GPU_DOWNLOAD = "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12"
     CPU_SCALE = "scale=320:180:flags=neighbor,format=nv12"
 
@@ -1094,9 +1075,8 @@ class TestDecodeRows:
             raise ProbeStalledError(f"Not reading {path}: 2 earlier ffprobes are still stuck reading their files")
 
         monkeypatch.setattr(frames, "probe_media", gated)
-        with pytest.raises(FrameDecodeError, match="could not read the start time of Recording.ts") as caught:
+        with pytest.raises(frames.ReadStalledError, match="could not read the start time of Recording.ts"):
             frames.container_start_s("/m/Recording.ts", FF)
-        assert type(caught.value) is FrameDecodeError
 
     @pytest.mark.parametrize(
         ("keep_every", "drop_non_key", "bsf"),
@@ -1247,9 +1227,10 @@ class TestKeyframeThinning:
     def test_a_probe_not_started_for_earlier_stuck_ones_is_no_answer_this_time(self, probed):
         # Not this file's fault, and not a timeout of its own: no answer this run, nothing recorded against it.
         probed.error = ProbeStalledError("Not reading x: 2 earlier ffprobes are still stuck reading their files")
-        with pytest.raises(FrameDecodeError, match="could not read the video packets of Movie.mkv: Not reading x") as e:
+        with pytest.raises(
+            frames.ReadStalledError, match="could not read the video packets of Movie.mkv: Not reading x"
+        ):
             frames.keyframe_thinning(MOVIE, FF)
-        assert type(e.value) is FrameDecodeError
 
     def test_a_cancelled_job_is_not_probed(self, probed):
         with pytest.raises(DecodeCancelledError, match="cancelled before decoding Movie.mkv"):

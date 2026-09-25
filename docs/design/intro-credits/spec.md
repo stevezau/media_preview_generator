@@ -78,6 +78,15 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
   (`evidence/credits/small-text-retry.md` "Before release").
 - **The Alias S02E09 miss:** season audio alone ends its intro 8.4 s early, nothing else answers
   (`evidence/intro-end/README.md`).
+- **A replaced file with no evidence drops an intro that worked** (owner's call; §14 2026-09-25, RuPaul's Drag Race
+  UK S08E04): and season audio's "no match" for that episode.
+- **After the 2026-09-25 decision rules** (§14 "Decision rules", `evidence/decide-rules/README.md`): the decision
+  rules' version (§6.2 step 3) decides every file they could move again after the update (486 files on the audit's
+  copy), so production's lone-SkipDB intros (Westworld S04, Somebody Somewhere S03) come off. Westworld S04's
+  intros then wait in Needs review: production's season audio has no answer for them, and where today's season audio
+  answers (the harness: S04E01 563.6–661.4 s, right) SkipDB's shorter answer disagrees with it; letting season audio
+  win such a pair was wrong on In Treatment S02 ×4 and Family Guy S14E01. Westworld S03E07 stays there too (lengths
+  5.03 s apart), and the rule 4 composition gap the property test found (predates these rules) is unfixed.
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -284,10 +293,16 @@ must have the quorum, as today, and the silence guard then runs on it (`season.g
   cluster, every 0.5 s, decoded at 2 fps as 64×36 grey (the credit text decode, `credits.frames`: 320×180 luma
   averaged 5×5, the worker's GPU then the CPU, its cancel, time limit and stall handling), in this episode and in the
   two partners whose longest hit in the cluster is longest, at their aligned times (`Hit.partner_start_s -
-  Hit.start_s`). Each fingerprint time moves to its file's audio start (`probe.stream_starts`: the first audio stream's
+  Hit.start_s`). Every vendor scales with the credit text decode's one scaler (§5.4 Frames: the whole frame after
+  `hwdownload` in the stream's own format, NV12 or P010 as `probe.stream_starts` reads its pixel format, then the
+  nearest pixel), so a partner decoded by another worker's GPU gives the same frames and the same answer (season
+  audio v8, check version 2; §14 2026-09-25). Each fingerprint time moves to its file's audio start
+  (`probe.stream_starts`: the first audio stream's
   start minus the container's; an HBO Max release's audio starts 0.976 s in). Two frames match when their correlation
   is above 0.6, or, both flat (σ < 4), when their mean brightness is within 12; a pair's share is the matching part of
-  the instants with a frame in both, and the cluster passes when the median share is at least 75 %. A pair with
+  the instants with a frame in both, or 1 when the last 1.5 s (3 instants) all match on pictures that aren't flat (the
+  same end card after shots that differ: an anime opening re-cut in later episodes, Tomb Raider King S01E12; a shared
+  fade to black is no card; §14 2026-09-25), and the cluster passes when the median share is at least 75 %. A pair with
   certainly no frames to compare (no video stream, or ffmpeg exited cleanly without frames at the instants) doesn't
   count; with none at all the cluster passes. Shares are cached per file pair, stretch and offset in `markers.db`
   (`season_end_pictures`, cleared when either file changes; a forced re-detect reads none). `season_audio_needs_worker`
@@ -295,7 +310,10 @@ must have the quorum, as today, and the silence guard then runs on it (`season.g
   fails (ffprobe error, a non-zero ffmpeg exit, a timeout) is never a pass: the file is remembered for a day
   (`end_picture_failures`, `END_PICTURE_RETRY`) and not read for the check meanwhile. This episode's own file then gives
   no season audio answer (given up on the checking thread); a partner has no share, and the other partner decides (none
-  left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file.
+  left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file. The check's
+  version (`end_picture.CHECK_VERSION`) keys the cached shares and rides in the version season audio's answers are
+  stored under (`SEASON_AUDIO_ANSWER_VERSION`: its first version adds nothing), so a new check makes every stored
+  answer older, like a new season audio version (§6.2 step 3, "A detector's new version").
 
 **Two playback speeds in one season** (season audio v6, §14 2026-09-24). A 25 fps release of a show made at 23.976
 fps plays every frame and sound 25/23.976 (4.3 %) faster, pitch raised with it (a PAL speed-up), and its opening
@@ -308,10 +326,17 @@ too; a failed read is remembered for a day like a member's failed probe, and the
 and names two speeds only: film (23.976, 24) and PAL (25); any other rate is matched as it plays. A group whose
 files play at both is matched at the speed most of them play at (film on a tie, `speed.match_speed`,
 `season.SeasonClock`); every file at the other speed is fingerprinted once more with its audio
-retimed to it (`aresample=48000,asetrate=round(48000 × factor)`, cached as window `intro@<factor>`), and what it
-matches is read back at its own speed (its answer, and its end-picture instants, aligned at the stretch's end). A
-pair's runs are cached under a version naming each side's speed (own, retimed to film, retimed to 25 fps:
-`SeasonClock.pair_version`), and a file's pairs go when its stored rate changes (a first rate included). A sibling whose
+retimed to it (`aresample=48000,asetrate=round(48000 × factor)`, cached as window `intro@<factor>`). A frame rate alone
+doesn't say the audio was sped up: a release can change only the frame rate (RuPaul's Drag Race UK S08E04, a 23.976 fps
+AMZN release of a 25 fps show: retimed it matched nothing, as it plays it matched the 25 fps copy of the episode 897 of
+900 s). So each such file is matched both ways against the files at the group's speed and is retimed only when its
+retimed audio matches more of them than its own does, a run counting only when it isn't mostly silence (silence
+fingerprints alike at any speed); on a tie it is matched as it plays (`season.clock_by_audio`, §14 2026-09-25). A
+retimed file's matches are read back at its own speed (its answer, and its end-picture instants, aligned at the
+stretch's end). A pair's runs are cached under a version naming each side's speed (own, retimed to film, retimed to 25
+fps: `SeasonClock.pair_version`), one row per version (`season_pair_runs`, so both speeds of a pair stay cached), and a
+file's pairs go when its stored rate changes (a first rate included). Telling a sibling's speed may need pairs this
+episode's own match doesn't: one too slow for a checking thread sends the episode to a worker. A sibling whose
 retimed fingerprint fails is left out of the match (a day, like a failed fingerprint) and enters the answer's signature
 without it, so the answer is due again once it is made; every matched file enters it with the rate it was matched at
 (`_Matching.rates`), so a rate read meanwhile makes the answer due too. Measured on Bones S05: retimed so
@@ -328,6 +353,7 @@ the pitch when it speeds up stays unmatched, as before.
 | **v3** (+ window min(900 s, 35%), prefer ≥ 15 s) — alg1 stereo | **91 (77%)** | **13** | **14** |
 | **v3 + guards** (season audio v5: file start, dense core, end picture; §14 2026-09-24) | **91 (77%)** | **12** | **15** |
 | **v3 + guards, dense-core exemptions** (season audio v7; §14 2026-09-24) | **91 (77%)** | **12** | **15** |
+| **v3 + guards, one end-picture scaler** (season audio v8, NVIDIA and CPU alike; §14 2026-09-25) | **91 (77%)** | **12** | **15** |
 | alg4 stereo | 87 | 11 | 20 |
 | alg0 stereo | 86 | 15 | 17 |
 | front-channel mono | 80 | 20 | 18 |
@@ -413,10 +439,41 @@ nearest pixel (`scale=320:180:flags=neighbor`), after `hwdownload` in the stream
 4:2:0, P010 for 10-bit; `-extra_hw_frames 8`) on CUDA and VAAPI, and after ffmpeg's own download on any other GPU or
 surface format. Each vendor's own scaler (`scale_cuda`, `scale_vaapi`, swscale's bicubic) blurred text a few pixels
 tall differently, so the same file's credits were found on one vendor and lost on another; this gives bit-identical
-frames on NVIDIA, Intel and the CPU. (The end-picture check of season audio still reads frames with each vendor's own
-scaler, `frames.decode_command(vendor_scaler=True)`, as it was measured.) AMD is untested (no hardware):
+frames on NVIDIA, Intel and the CPU. Season audio's end-picture check reads its frames the same way (§5.3, since
+2026-09-25). AMD is untested (no hardware):
 `-extra_hw_frames 8` and the full-frame `hwdownload` have never run on an AMD GPU's VAAPI; a decode that fails there is
 a GPU failure, read again on the CPU, whose frames are the same.
+**Every GPU's credits decode is compared with the CPU's, as a diagnostic** (`markers/credits/decode_check.py`,
+2026-09-25 in §14): with one scaler everywhere an answer depends on the decoder alone, bit-exact against the CPU on
+NVIDIA and Intel VAAPI for H.264 and HEVC (no pixel differed on 8 real files). Before a device's first credits decode,
+once per process, two packaged reference clips (`reference_clips/`, made by the `make_reference_clips.sh` beside them:
+1280×720, 9 frames at 1 fps, a keyframe every 3 frames with a B and a P frame between, credit text 9–14 px scrolling
+over black, a dark caption on a light band, a zooming fractal; 8-bit H.264 High and 10-bit HEVC Main 10, 127 KB
+together) are decoded through the credits decode's own command (`frames.decode_rows` as a 1 fps refine window builds it:
+the device's hwaccel arguments, `hwdownload` in the clip's surface format, the shared scaler) at 320×180 and 640×360, on
+the device and on the CPU, and every frame's timestamp and Y-plane SHA-256 are compared. Every frame of a clip is
+decoded, so the keyframe pass (`-skip_frame nokey`) is covered too. **The result is only logged; the work never moves.**
+A match is an info line, `Credits decoding on <device> matches the reference decode (<clips> at <sizes>; checked in <n>
+ms)`. Any difference, decode error or timeout (60 s for the whole check, plus up to 7 s to stop ffmpeg) is one warning,
+`Credits decoding on <device> doesn't match the reference decode: <clip> at <size>: <reason>. Credits detection keeps
+decoding on this GPU.` A GPU worker decodes every file's credits on its GPU, whatever the codec and whatever the check
+found (the owner's worker model: a GPU worker's work runs on its GPU); a file its GPU can't decode at all
+(`frames.GpuDecodeError`) is still read again on the worker's CPU. MPEG-2 and MPEG-4 Part 2 leave the inverse transform
+to each decoder, so storage's P5000 decodes both a few levels off the CPU (the clips: 9 of 9 frames,
+`evidence/credits/decode_check_codecs.py`). On 15 real files (7 MPEG-2: a DVD movie and 6 DVD episodes; 8 MPEG-4 Part 2
+XviD/DivX: 4 movies, 4 episodes), the app's `find_credits` decoding on storage's P5000 and on the CPU gave the same
+answer for every file (12 with credits, 3 without; the same start, end and scale), although nearly every frame differed
+(MPEG-2 by at most 3 levels on 1.7–3.1% of luma pixels, MPEG-4 by at most 12 on 1.4–9.0%) and the text boxes differed on
+263 of 9,439 frames read (`evidence/credits/decode_answers_gpu_vs_cpu.py`). Text detection has its own per-device
+self-test (`textdet_helper`). One check per device: the first worker to reach it runs it, and one arriving meanwhile
+goes on decoding without waiting for a diagnostic; a check a cancel cut short isn't kept, and the next file checks
+again. A CPU worker, or a GPU worker without a usable device, runs none. Only the app runs it
+(`find_credits(check_gpu_decode=True)`); the eval harness decodes where it is told. Cost on storage's P5000: 2.9 s once
+per process, 2.4 s of it the four GPU decodes (mostly CUDA starting up each time) and 0.5 s the CPU's, which every later
+device reuses. Previews and season audio's end-picture check are not checked.
+A file whose credits rest on an answer from before version 5, or are still undecided beside one, is read again once
+after the update by the version re-run (§6.2 step 3, "A detector's new version"): 317 files on the audit's copy of
+production's markers.db (158 on version 3 answers alone, before version 5; §14 2026-09-25).
 **A tail with no answer at 320×180 is read again at 640×360** (`detector.RETRY_SCALE`, 2026-09-24 in §14): small
 credit cards box nothing at 320×180. The same keyframes, steps and refine windows are decoded at twice the size, the
 boxes are halved back to 320×180 pixels, and the text the 320×180 reading already boxed is left out where rule J
@@ -427,6 +484,18 @@ text boxes 4–11 px tall. An answer found at 320×180 that ends in a scene (mor
 Q3) has the rest of the file, from that end, read the same way at 640×360, the keyframes before the end being the
 320×180 ones (all their text seen): a roll only the larger frame shows is then the last run, and the answer moves
 to it; nothing found there keeps the 320×180 answer. An answer that runs to the end of the file is never read again.
+After the end, a keyframe holding any text only the larger frame boxes is read whole (version 5, 2026-09-25 in §14):
+a roll 320×180 half boxed there — its cards boxed as blocks, a frame short of a 15 s run — is that text too, and left
+out it kept too few boxes for a run (I Survived a Serial Killer S01E04: story captions stayed the answer, 92 s early).
+A keyframe whose every box 320×180 boxed (an epilogue card on black) still has none, or the join glues it onto the
+roll. A tail without an answer keeps the rule as measured. **A roll the larger reading finds starts on dense text**
+(`rule_j.start_on_dense_text`, version 5): its first dark credit frame or lit frame with 6 boxes (`detector.DENSE_BOXES`,
+twice a lit credit frame's 3), stepped back from over every keyframe that shows text (as decoded, overlays aside) at
+the run's own cadence, never before the run's start. At 640×360 small print on lit story — a news feed's date line
+and logo, a lower third's words — makes credit frames of 3–5 boxes that the 24 s join puts in front of the roll, and
+`overlay_boxes` can't take it: it is on screen only in the stretch the run opens on, never across the story before
+(I Survived S01E14: court footage, 68 s early). Sparse text the roll runs into without a break stays its start. It
+moves starts later only.
 An intra-only file's thinned keyframe pass counts its stride from the seek, so its rest of the file is decoded from the
 tail's own start and the rows before the end dropped: the frames after the end are then the ones the 320×180 reading
 read (the cost: its whole tail again, thinned; 450 frames for a movie). At 640×360 each text detection request carries 16 frames, the pixels of 64 at 320×180, so the helper's
@@ -656,6 +725,9 @@ frame-checks every answer shaped like that.
   `reach_back`) bar one, a stand-up special whose stage signage step 4 takes for the overlay it is. The end's rules
   and the text-all-through step move no answer on either set or decode path, and no online decision moves under
   either version.
+- Regression sets (`--sets accused,isurvived`; frame-checked first-card truth, local-only; reported, not gated):
+  Accused (2020), 57 files, and I Survived a Serial Killer S01, 16 files — seasons whose credit cards only 640×360
+  boxes. Version 5: 50 / 4 / 3 / 0 and 14 / 1 / 0 / 1 (version 4: 49 / 5 / 3 / 0 and 12 / 3 / 0 / 1; §14 2026-09-25).
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
@@ -671,8 +743,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    the credit text detector's reads before its tail are bounded by, §5.4 step 8.) An IntroDB or TheIntroDB intro (or
    an importer plugin's copy of one) that starts in the first 2 s and is shorter than 10 s fails too: it is a logo at
    the start of the file, not the show's intro (The Fixers: IntroDB gives Netflix's "N", 0–7 s, for all 10 episodes),
-   the stretch season audio passes over in its own clusters (§5.3 "File start"; §14 2026-09-24). A marker composed
-   from agreeing sources is judged on its times alone.
+   the stretch season audio passes over in its own clusters (§5.3 "File start"; §14 2026-09-24). Credits or a preview
+   of IntroDB or TheIntroDB (or an importer plugin's copy of one) may end up to 5 s past the file
+   (`decide.ONLINE_END_PAST_FILE_MS`) and are clamped to it: their end is the timed release's (Game of Thrones: IntroDB
+   2.8–4.8 s past on 20 episodes; §14 2026-09-25 "Decision rules"). SkipDB matches the file's duration and keeps
+   2 s. A marker composed from agreeing sources is judged on its times alone.
 3. Chapters → accept (first intro/recap chapter, last credits/preview chapter; on a tie the one with the earlier end),
    unless two agreeing independent non-chapter sources contradict the chapter → **"Needs review"**. One contradicting
    source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
@@ -680,7 +755,18 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    chapter-intro check (F1):** when at least 2 other episodes of the season group have an intro chapter, an intro
    chapter longer than max(2 × their median, median + 30 s) doesn't decide alone: it needs one agreeing independent
    source that isn't markers already on a server (else "Needs review", reason "Intro chapter is much longer than the
-   rest of the season's"); the agreeing candidates may then shorten it the same way.
+   rest of the season's"); the agreeing candidates may then shorten it the same way. **Credits and credit text
+   (2026-09-25):** a cluster holding credit text is weighed at credit text's start (it reads this file's frames). When
+   every agreeing cluster that contradicts a credits chapter holds credit text and a non-server source of another group,
+   they decide instead of "Needs review" (start from credit text, the rest composed as rule 4; reason "credit text and
+   agreeing sources contradict the chapters: …"). A SkipDB answer (or a SkipDB importer's copy) that contradicts a
+   credits chapter nothing else agrees with, while credit text is among the sources and hasn't answered, holds the
+   chapter in "Needs review" (reason `decide.TEXT_CHECKS_CHAPTER_REASON`) so the pipeline reads credit text in the same
+   run; a local detector that can't run here, answered nothing at its version, or failed to read the file as it is
+   (credit text: a decode error or a timeout recorded for this size and mtime, `LocalDetectorSpec.failed_here`) leaves
+   the source order (`pipeline._decide`), so the chapter then decides as before, on the same run or the next. A
+   replaced file waits again for its own read. Somebody Somewhere S03E02–E07: HMAX "Credits" chapters 40–70 s late, SkipDB and
+   credit text within 2 s of the frame-checked start.
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. An agreeing set needs a candidate that is neither markers already on a server nor season audio (or its
    previous-season hint): season audio and a server's own detection never decide together (G3; with season audio
@@ -699,10 +785,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
 6. A single source is accepted only at the **"Medium"** rules (the app's only rules since 2026-09-24, §14:
    `decide.APP_PUBLISH_WHEN`; "High" stays in `DecisionContext` for the evaluation harness), only when that source checks the file's
-   cut itself — chapters, credits text (it reads this file's own frames), season audio for an intro (since
-   2026-09-24, §14; not the previous-season hint), or SkipDB `exact`/`shifted` matches for an intro or recap (IntroDB
-   and TheIntroDB return an answer whatever the file's length, so alone they never decide; SkipDB alone never decides
-   credits or a preview, which need an agreeing independent source as at High) — and only
+   cut itself — chapters, credits text (it reads this file's own frames), or season audio for an intro (since
+   2026-09-24, §14; not the previous-season hint). IntroDB and TheIntroDB return an answer whatever the file's length,
+   so alone they never decide; SkipDB's duration match proves the cut but not the segment's edges, so since 2026-09-25
+   it never decides alone either (§14 "Decision rules": Westworld S04 intros covering 20 s of a 97 s title sequence,
+   credits minutes early on the lab scale run) — and only
    when no sane candidate from another independent source (markers already on a server included) contradicts it and
    every pair of the source's own candidates agrees; its other edge takes the safer value across those candidates.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
@@ -764,6 +851,38 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     agrees, shortens the start and is credited. The same composition feeds rule 5's contradiction check of a chapter.
     Credits and previews keep the source order: their checked edge is the start, which rule 12 already reads on the
     file's clock.
+14. **Another release's intro beside season audio** (§14 2026-09-25 "Decision rules"). An intro or recap of IntroDB or
+    TheIntroDB (or an importer plugin's copy of one) that, as rule 12 reads it, agrees with no other independent source
+    is left out when a season audio answer (not the previous-season hint) has its length within 5 s, a start more than
+    15 s away (`decide.OTHER_RELEASE_MIN_SHIFT_MS`), and both are at least 30 s long
+    (`decide.OTHER_RELEASE_MIN_LENGTH_MS`): it is the same intro timed on a release with more or less before it
+    (Westworld S03E03–E08: 50–80 s earlier, a release without the episode's recap; not a constant offset and not a
+    speed, so rule 12 can't read it). It neither confirms nor contradicts, and season audio decides as it would alone.
+    A shift of a few seconds is a real disagreement about one segment's edges (Daredevil S03, Invasion S03: season audio
+    was the wrong one), and a short card can match another stretch's length by chance (The Big Door Prize S02E03: a
+    16 s card beside a 15 s audio answer), so both limits stay.
+15. **A replaced file's decision carries over at the same length** (§14 2026-09-25). Plex keeps an item's markers
+    across a file replacement; deciding the new file from its own evidence alone did worse: Tomb Raider King S01E12's
+    replacement (identical length, the same opening on screen, no chapters) lost the 0–92 s intro the old file's Intro
+    chapter had decided, and RuPaul's Drag Race UK S08E04's (408 ms shorter) lost its intro too. After every other
+    rule (a lock, "Keep Plex's" included), a type with no candidate from any source (`decide`'s "no evidence") keeps
+    the marker of the file it replaced, when that file's length is within 1 s of the new one's and one of the
+    marker's deciding sources is still turned on (a user's marker, or one carried before, always counts)
+    (`carry_over`). The file it replaced is an earlier identity at the same path (`upsert_file` keeps its decisions
+    and their sources aside in `replaced_decisions` before clearing them; a "nothing" of another length never
+    replaces a marker kept there, and a file moved here from a path markers.db knows, same size and mtime, replaced
+    nothing) or a file last published to one of the new file's server items that is gone from disk (one still there
+    is another version, decided on its own); the one stored last speaks for the type, and if it had no marker nothing
+    is carried. When that can't be told now (the old file's disk doesn't answer within 5 s or its roots are gone, a
+    server can't name the item), a marker carried before stays: "can't tell" never takes one off the servers. A source that read the new file and found nothing gives no candidate
+    and doesn't stop the carry-over: none of them tells an intro that isn't there from one it missed (no intro
+    chapter, a season match its guards passed over, no crowd entry, no roll found), and what does tell another cut,
+    the length, is checked instead. Any candidate of the type, even one failing sanity or leaving the type in review,
+    is the new file's own evidence and wins. The carried marker is clamped to the new file's end, dropped when it
+    would overlap the file's own intro/recap or credits/preview more than rules 9–10 allow, and decided by
+    `carried_over` alone ("carried over from the file it replaced (same length)"; the job log and summary name "the
+    file it replaced"), so the season audio follow-ups, the weekly online re-check and the TheIntroDB recheck treat it
+    as undecided: the new file's first answer of its own replaces it.
 
 ### 5.6 Resource rules
 Intro & Credits jobs: 1 worker by default, lowest priority, ffmpeg `-threads 2`, ONNX Runtime `intra_op_num_threads=2`,
@@ -780,7 +899,8 @@ evidence(file_id, source, type, start_ms, end_ms, confidence, meta_json, fetched
 markers(file_id, type, start_ms, end_ms, decided_by, locked, updated_at)   -- desired state
 publish_state(file_id, server_id, item_id, markers_hash, status, message, verified_at)
 ```
-- File identity = path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers.
+- File identity = path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers (what was
+  decided is kept aside first, `replaced_decisions`, for the carry-over of §5.5 rule 15).
 - `markers` is the single source of truth; servers are projections of it. `publish_state` is per `server_id`, so two
   Plex servers are tracked independently.
 
@@ -810,7 +930,41 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    out again on every run and never stored as an answer, so
    "Use ours", a server losing its marker or a new destination without one reads the file on the next run (§14
    2026-09-23). Decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose
-   stored version is older is probed or asked again on the next run.
+   stored version is older is probed or asked again on the next run. **A source skipped as "not needed (already
+   decided)" is asked once more at the end of the same run** when a later step took away the evidence a type it
+   answers was decided with (the server-marker step runs last: an older reader's Plex answer dropped, or Plex's markers
+   read again and flagged "made for an earlier file"), through the same gates as the first pass (§14 2026-09-25). A
+   Plex server's older reader answer counts for nothing once the server shows our markers for the file, **or its item
+   may**: another version's markers of ours, or a type kept as Plex's own, which can hold ours; the reader never reads
+   such an item.
+   **A detector's new version** (`markers.versions`, §14 2026-09-25). Every detector and reader stores its version
+   with each answer (credit text, season audio with its end-picture check, the server-marker reader, chapters, the
+   online parsers). On every start the app compares the stored versions with today's and lists the files, still on
+   disk, where an unlocked decided type rests on an older answer or a type it answers is undecided (Needs review, no
+   evidence) beside one; a type decided by other sources waits for the file's own next run, as before. Also listed:
+   files whose one-version Plex item still shows times an older publish rule kept (§6.3), and **files decided under
+   older decision rules**: the rules of §5.5 carry a version (`decide.DECIDE_RULES_VERSION`, recorded as
+   `decide_rules` in `version_reruns` by every run that decides a file), and a file not recorded under today's is
+   listed when an unlocked type has a stored answer of its type the rules could decide differently (decided, Needs
+   review, not found because its answers failed a check, or kept as the servers' own; not detection off). Its run
+   decides again from what is stored and asks only what is due or from an older version, as any run does (a credits
+   chapter rule 3 holds for credit text has it read, §5.5). Version 1 is the 2026-09-25 rules (§14 "Decision
+   rules"). Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
+   so rule 3's chapter waits for it (`pipeline._answered_at_this_version`), unless that read fails on the file as
+   it is (a decode error or a timeout), which ends the wait. They run as ordinary Intro &
+   Credits jobs at LOW priority on the worker pool ("Intro & Credits: re-checking files after an update"), at most
+   100 files a job (`BATCH_FILES`), each batch queued 30 min after the last one ran (`BATCH_GAP`); after a cancelled
+   or failed batch the next start queues one. A job holds its batch in its config (removed when it ends), so a run
+   revived after a restart runs the same files, and records each file as it finishes, whatever its outcome
+   (`version_reruns`: file, detector, version; a file carried over a restart is recorded then): no file is read twice
+   for one version, a file a batch never reached (a cancel, a restart the job isn't revived after) is taken by a later
+   one, and a later version takes it again. With Intro & Credits off everywhere a batch takes nothing. Not listed: a
+   Plex item whose other version is gone from disk and never decided (the publisher counts it as one version, the
+   recorded version files as two); its times follow the decision when that next changes. A start check rather than a
+   settings migration: it needs no migration per
+   version (#312's credit text version 4 had none, and 181 of 345 credit text answers were still version 3 a day
+   later), it sees what is stored (a migration can only ask for a job), and it covers files a new or restored
+   markers.db, or a disk that was unmounted, brings back.
 4. **Season step.** Intros need siblings. A job fingerprints the season folder's missing episodes on its workers,
    matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose inputs
    changed (R3). An episode alone in its season group uses up to 4 cached fingerprints of the previous season (§5.3).
@@ -877,7 +1031,10 @@ at the last write), `atomic_writes`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s. A part never
   decided whose file is on none of its path-mapped disks (Plex lists a deleted file until it scans) takes no part; one
-  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24).
+  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24). What this app
+  already left on the item stays while it agrees with every version within 2 s, so versions don't rewrite each other;
+  a one-version item shows exactly what was decided (§14 2026-09-25), and one left showing other times is published
+  again on its next run.
 - Unknown schema (columns/JSON shape differ from 1.43, `extra_data` in neither of Plex's two forms) → stop writing,
   show message. A part is written back in the form it has (JSON with `url`, or the URL-encoded form alone). A
   URL-encoded part we empty is left as `""` — what Plex's own rollback makes of the `{"url":""}` an emptied JSON part
@@ -2516,3 +2673,260 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     decided by its chapter), chapters with IntroDB agreeing 13 either way, and no answer turns wrong. Succession
     S04E01 counts as wrong only through bad chapter truth; its frames show it useful. Evidence: `evidence/intro-end/`,
     `evidence/stale-plex-markers/`, `evidence/speed/integration-proof/`.
+- 2026-09-25 · **Every GPU's credits decode is compared with the CPU's, as a diagnostic** (§5.4). Version 4 made an
+  answer depend on the decoder alone; NVIDIA and Intel VAAPI are bit-exact against the CPU on H.264 and HEVC, AMD and
+  every other hwaccel unmeasured, and the owner wants each user's GPU checked on their own machine. The first credits
+  decode per device per process decodes two packaged reference clips (8-bit H.264, 10-bit HEVC) at both sizes through
+  the production command on the GPU and the CPU, and logs what it found: an info line on a match, one warning on a
+  differing frame, decode error or timeout. It never moves the work. The first version of the check sent a device that
+  failed it, and every codec but H.264 and HEVC (MPEG-2 and MPEG-4 Part 2 differ from the CPU on storage's P5000, 9 of 9
+  frames each, since those standards don't fix the inverse transform; `evidence/credits/decode_check_codecs.py`), to the
+  CPU. The owner's worker model overrules that: users choose GPU or CPU workers, often to take the work off the CPU, so
+  a GPU worker's credits decode on its GPU for every codec, and the check is a diagnostic. Measured: on
+  15 real files (7 MPEG-2: a DVD movie and 6 DVD episodes; 8 MPEG-4 Part 2 XviD/DivX: 4 movies, 4 episodes), the app's
+  `find_credits` decoding on storage's P5000 and on the CPU gave the same answer for every file (12 with credits, 3
+  without; the same start, end and scale), although nearly every frame differed (MPEG-2 by at most 3 levels on 1.7–3.1%
+  of luma pixels, MPEG-4 by at most 12 on 1.4–9.0%) and the text boxes differed on 263 of 9,439 frames read
+  (`evidence/credits/decode_answers_gpu_vs_cpu.py`). Not a version: nothing that decodes changed from what the previous
+  release did on a GPU worker. The existing `GpuDecodeError` → CPU rerun for a file the GPU can't decode at all stays.
+  Storage's P5000 passes (2.9 s); the same GPU with its frames scaled bilinear instead of by the nearest pixel differs
+  on 9 of 9 frames and is warned about, so the comparison sees real pixel differences. VAAPI's integration test runs in
+  the lab image only (storage has no Intel or AMD render node).
+- 2026-09-25 · **Season audio v8: the end-picture check on the one scaler** (§5.3 End picture). The check still read its
+  frames with each vendor's own scaler (`scale_cuda`, `scale_vaapi`, swscale's bicubic; `vendor_scaler=True`, kept so
+  #310's measurements held), and partners of one season can be decoded by workers of different vendors: the last place
+  a worker's GPU vendor could change an answer. It now reads them as credit text does (§5.4 Frames): the whole frame
+  after `hwdownload` in the stream's own format (NV12 or P010, from the pixel format `probe.stream_starts` now reads),
+  `-extra_hw_frames 8` on VAAPI, then the nearest pixel. `vendor_scaler` is gone. `end_picture.CHECK_VERSION` 2 stops
+  the cached shares being read back and `SEASON_AUDIO_VERSION` 8 makes the answers due. Since the version re-run (next
+  entry) an answer carries the check's version too (`SEASON_AUDIO_ANSWER_VERSION`), so the check version alone
+  would have made them due. Merged with the speed by ear and the end card (below): season audio v9, check version 3,
+  answers stored under 2009. Season audio alone, measured from scratch on NVIDIA and the CPU,
+  before and after: lab 118 **91 / 12 / 15**, held-out 175 **124 / 4 / 47**, Accused **3 / 0 / 53**, library chapter
+  set **111 / 59 / 54**, Bones S05–S08 **82 / 0 / 0**, on all four runs. After, NVIDIA and the CPU give the same
+  answers and the same 303 shares; before → after on NVIDIA no answer moved and one share did (Bob's Burgers
+  S10E07/E08, 0.83 → 1.0, a pass either way: at 18.2 s `scale_cuda`'s frames correlated 0.599, the one scaler's
+  0.604, and the frames show the same title card). The integration test's clips: before, CUDA's planes differ from
+  the CPU's (mean 1.3 grey levels, up to 85); after, byte-identical, 8-bit and 10-bit. Production (markers.db snapshot
+  of 2026-09-24): of 466 fingerprinted TV files, 63 in 9 seasons re-decode end pictures (163–284 windows of 3.5–4 s);
+  the v7 release already re-runs every season audio answer there. VAAPI is unmeasured (no Intel/AMD GPU on storage;
+  its integration test runs in the lab image). Evidence: `evidence/end-picture-scaler/`.
+- 2026-09-25 · **Production audit after #312: every detector version reaches its files, and three pipeline gaps**
+  (audit of prod markers.db joined with Plex's rows and what Plex serves).
+  - **A detector's new version is read again once, in batches** (§6.2 step 3). #312 raised `CREDITS_TEXT_VERSION` to
+    4, but 181 of 345 credit text answers were still version 3 and 136 decided credits rested on one (34 end more
+    than 30 s before the file's end, 29 of them Accused, exactly what version 4 fixes: re-read files went 4 / 7 / 6 →
+    15 / 2 / 0); 325 server-marker answers were still reader version 4. No migration asked for them, and the
+    decide-again job doesn't list them. Now a start check lists them from the stored versions (`markers.versions`)
+    and LOW jobs read them 100 at a time, 30 min apart, each file once per version (`version_reruns`). Season audio's
+    stored version carries its end-picture check's (`SEASON_AUDIO_ANSWER_VERSION`). From the audit's copy of prod
+    markers.db with prod's source switches: **232 files, 3 batches**: credit text 158 (136 decided credits, 22
+    undecided), season audio 153 (undecided intros), server-marker reader 187 (31 decided), one-version Plex items
+    showing other times 27 (below). Integrated with credit text version 5, season audio v9 and check version 3
+    (answer version 2009: every stored season audio answer is older) and the decision rules' version 1 (§6.2 step 3,
+    "Decision rules" below), the same start lists **507 files, 6 batches**: credit text 317 (version 5 makes version
+    4's answers older too), season audio 355, server-marker reader 187, published times 27, decision rules 486 (107 of
+    them for the rules alone). Tomb Raider King S01E12, the one production file the carry-over (§5.5 rule 15) keeps an
+    intro for, is listed by credit text and season audio.
+  - **An older reader's Plex answer beside an item that may show ours stops counting** (§6.2 step 3). The reader skips
+    an item holding another version's markers of ours or a type kept as Plex's own, and the older answer was dropped
+    only when this file itself had markers of ours there, so Plex's stale marker still counted as IntroDB's second
+    source under "Keep Plex's" (Doc S02E02, E03, E08; Westworld S03E03; no wrong answer yet).
+  - **A detector skipped for evidence a later step drops runs in the same run** (§6.2 step 3). Game of Thrones S03E04,
+    S03E05, S05E02: credit text was "not needed (already decided)" on the older reader's Plex credits; the
+    server-marker step, which runs last, then dropped them, and the credits ended on Plex's marker (made for an earlier
+    file) without the file ever being read. The source is asked again at the end of the run, through the same gates:
+    under "Keep Plex's" a fresh Plex marker still isn't read past.
+  - **The 2 s "keep what the item shows" applies across versions only** (§6.3). It kept earlier times on one-version
+    items too: 29 types on 27 files served up to 2 s off the decision, e.g. Game of Thrones intros ending at 113.0 s
+    (IntroDB's end, before rule 13) where 110.5–112.4 s was decided. The pinned reason, that a detector wobbling
+    under 2 s must not rewrite Plex every run, doesn't hold for one version: a run reuses stored answers, and an
+    unchanged decision is never sent (the publish basis). Such an item is published again on its next run (the version
+    re-run lists them); the Inspector reads a one-version item (or one whose versions can't be counted) the same way.
+  - **RuPaul's Drag Race UK S08E04 is not a Plex bug, nor a malformed row.** Plex's DB no longer holds the intro: this
+    app removed it at 21:08:04 UTC after Sonarr replaced the file (20:58:43; the new Kitsune release has no chapters,
+    no IntroDB or SkipDB entry, and season audio found no match), and the audit compared a markers.db read from 20:59
+    with Plex's answer from 21:14. Our intro rows have the same form as Plex's own (`pv:version` 5). Open with the
+    owner: whether a replacement that is nearly the same file (4,086,040 vs 4,085,632 ms) should drop an intro that
+    worked when it has no evidence of its own, and why season audio found no match for E04 (E01 and E03 have Plex's
+    own intros at 1.2 s and 290.3 s). An audit comparing the two should read markers.db after the served fetch.
+  - Architecture review (0 HIGH, 3 MED, 5 LOW; two LOWs kept and documented: the start listing's cost, and an item
+    whose other version is gone from disk, §6.2 step 3; the rest applied). A batch recorded its files
+    when it took them, so a batch cancelled, failed or not revived after a restart (past `requeue_max_age_minutes`)
+    lost its files for that version: each file is now recorded as it finishes, and a batch takes nothing while Intro &
+    Credits is off everywhere. A batch's own retry chain keeping its row pending doesn't stop the next batch (tested).
+    Dropping the older answer beside an item that may show ours also changes a second destination: with "Keep
+    Plex's" on Plex and Jellyfin beside it, an intro only that answer confirmed goes to Needs review and comes off
+    Jellyfin, as for a file today's reader reads first (tested, intended). The batch leaves the job's config when it
+    ends. The start listing runs the full queries: 0.02 s on the prod copy (1,986 files).
+- 2026-09-25 · **Decision rules after the production audit** (§5.5 rules 2, 3, 6, 14; five proposed rules measured at
+  decide level on every set, before = `dev` 40311c3; owner's bar: automatic, useful ≥ Plex and wrong ≤ Plex on each
+  set). Three adopted, one adopted narrowed, one rejected. Evidence and scripts: `evidence/decide-rules/`.
+  - **Adopted: SkipDB never decides alone** (rule 6). Its duration match proves the cut, not the edges. Production:
+    Westworld S04E01/E07/E08 alone covered about 20 s of a 97 s title sequence, S04E05/E06 ended 11 s before it did,
+    Somebody Somewhere S03E07's 24.5–45.2 s is story; S03E03 (126.8–143.0 s) and S03E06 (66.3–76.7 s) were right and
+    now wait in Needs review too (Plex had no intro on any of them). Online set: Outlander S08E02/E05/E06/E08 (ends
+    5–11 s late) wrong → Needs review, online-only intros **10 / 7 / 26 → 10 / 3 / 30**. Held-out 175 with SkipDB:
+    Mr. Robot S04E01 (370–394 s, the title is at 586 s) wrong → missed. A narrower rule (SkipDB alone only when its
+    length fits the season's) wasn't needed: the Outlander ones are too long, not short. "SkipDB inside season audio's
+    answer doesn't contradict it" was measured and rejected: season audio was the wrong one there (In Treatment S02 ×4,
+    Family Guy S14E01).
+  - **Adopted: credit text checks a credits chapter SkipDB disagrees with** (rule 3). A cluster holding credit text is
+    weighed at credit text's start; clusters that each hold credit text and another non-server group outvote the
+    chapter; a lone SkipDB answer against a credits chapter holds it in Needs review until credit text has run (same
+    run: SkipDB is asked first). Somebody Somewhere S03E02–E07: HMAX chapters 40–70 s late, credit text and SkipDB
+    within 2 s of the frame-checked start; the stale Plex markers that agreed with SkipDB are neither needed nor used.
+    The only pipeline change: `pipeline._decide` leaves a local detector out of the source order once it can't run
+    here, has run and answered nothing, or has a decode error or timeout recorded for the file as it is
+    (`LocalDetectorSpec.failed_here`; a replaced file is read again first), so a chapter never waits on it for ever.
+    "Chapter and credit text beat an agreeing pair" (the mirror case) changed nothing measured and wasn't added.
+  - **Adopted: IntroDB/TheIntroDB credits may end up to 5 s past the file** (rule 2). IntroDB's Game of Thrones
+    credits end 2.8–4.8 s past the file on all 20 production episodes; they now count and are clamped, which decides
+    S03E03–E05, E07–E09, S05E02 and S05E06. SkipDB stays at 2 s (with it, The Simpsons S03E01 on the
+    online set lost a useful answer); 15 s or no limit added Daredevil S03E12 (online set, 8 s past, 10 s early) and
+    moved The Big Bang Theory S12E15's start 8 s late.
+  - **Adopted, narrowed: another release's intro beside season audio** (new rule 14). The proposal ("same-length
+    shifted IntroDB → season audio decides") needs both answers ≥ 30 s and a shift > 15 s: without the length floor
+    The Big Door Prize S02E03 turned wrong. Not a constant offset (50–80 s, the episode's recap) and not a speed, so
+    rule 12 can't read it. Westworld S03E07 stays in Needs review (lengths 5.03 s apart).
+  - **Rejected: a source that can't decide a type alone must not block one that can.** With Plex's markers it
+    changed nothing; without them it turned tv40's Outlander S08E02 and 5 of the 205 movies wrong (credit text that
+    disagrees with SkipDB was wrong on 6 of 17 credits-set files). The Game of Thrones files it aimed at are decided by
+    the 5 s rule. A wider form (any disagreeing agreement-only source ignored) added 1 wrong on held-out, 1 on lab 118
+    and 4 on the online set.
+  - **Numbers, before → after** (useful / wrong / missed; credits useful / late / wrong / missed; Plex's own in
+    brackets). Intros from season audio, IntroDB and Plex's markers: lab 118 **87 / 4 / 27 → 89 / 4 / 25** (23 / 15 /
+    80; Interview With The Vampire S03E05/E07), held-out 175 **125 / 3 / 47 → 126 / 3 / 46** (69 / 4 / 102; Jujutsu
+    Kaisen S02E13), Accused **3 / 0 / 53** unchanged (0 / 0 / 56), Bones S05–S08 **82 / 0 / 0** unchanged (41 / 41 / 0),
+    library chapter set **225 / 8 / 19** unchanged, decided without a chapter 32 → 33 (The Westies S01E07: season audio
+    273.8–362.1 s, frame-checked right; IntroDB's 289–379 s ran 17 s into the story). With SkipDB as well: lab 118
+    **88 / 10 / 20 → 90 / 10 / 18**, held-out **126 / 4 / 45 → 127 / 3 / 45**, the rest unchanged. Credits (movies40,
+    tv40, 205 movies) from credit text, Plex and SkipDB: unchanged (26/1/0/13, 35/0/2/3, 102/11/19/72; Plex 28/1/9/2,
+    19/0/4/17, 124/11/61/8 — credit text's useful gap there is not these rules'). With chapters: 205 movies
+    **151/11/1/41 → 152/11/1/40** (Taylor Tomlinson: Prodigal Daughter), the rest unchanged. Without Plex: unchanged.
+    Chapters without Plex: tv40 **39/0/0/1 → 40/0/0/0** (Daredevil S03E09), 205 **199/1/3/1 → 200/1/3/0**. Online set
+    with chapters and credit text: credits missed 6 → 4; Daredevil S03E06/E12 now decided at credit text's 3126.0 /
+    3186.0 s and scored wrong against the set's chapter truth, which is 16–17 s late (frames: the roll starts 3125–3126
+    / 3185.6 s), so both are useful.
+  - **Production replay** (the audit's `markers.db` copy, 919 file × type rows, credit text read where a run now reads
+    it): 40 changes. 14 credits Needs review → decided (Game of Thrones ×8, Somebody Somewhere S03E02–E07), 6 intros
+    Needs review → decided by season audio (Westworld S03E02–E06, E08): all 20 frame-checked useful. 12 Game of
+    Thrones credits stay decided with IntroDB joining, starts moved ≤ 3.1 s. 8 lone-SkipDB intros decided → Needs
+    review (above: 6 bad, 2 right); with Plex's markers read as the next run stores them, Westworld S04E03 (9 s of the
+    title) joins them. Existing decisions change when a file is decided again: these rules are the decision rules'
+    version 1 (`decide.DECIDE_RULES_VERSION`, §6.2 step 3), so after the update the start check lists every file with
+    an unlocked type they could decide differently from its stored answers (decided, Needs review, not found with an
+    answer that failed a check, or kept as Plex's own: 5 of the 8 Game of Thrones credits and Westworld S03E02's
+    intro above are kept as Plex's own today, re-decided from the audit's copy) and batches decide them again: 486
+    files on the audit's copy (459 decided or in Needs review, 27 more kept as the server's own or not found with an
+    answer).
+  - Found while testing, **not fixed** (it predates these rules; same result on 40311c3): rule 4 composes a cluster
+    from its own members only, while the single-source path takes the other edge across all of a group's candidates,
+    so a server marker agreeing with one candidate of a group can move a composed start that group's other candidates
+    would have made safer (a generated recap: 57.5 s with the server marker, 65.0 s without). The property test's new
+    draws are seeded per file so the shared random stream, which has never drawn that file, is unchanged.
+- 2026-09-25 · **Three intro fixes after #312: speed by ear, carry-over, end card** (owner: automatic, at par or better
+  than Plex's own markers; prod losses found after the #312 deploy). Numbers are useful / wrong / missed.
+  1. **Speed by ear** (season audio v9 merged, v8 in its lane; §5.3 "Two playback speeds"). RuPaul's Drag Race UK S08E04's AMZN release is
+     23.976 fps in a native 25 fps season, with its audio untouched: stretched to 25 fps it matched nothing (0 runs
+     against every sibling); as it plays it matched the 25 fps copy of the episode 897 of 900 s at offset 0. A file at
+     the other frame rate is now retimed only when its retimed audio matches more of the group-speed files (runs not
+     mostly silence) than its own does, a tie keeping it as it plays (`season.clock_by_audio`; the harness's
+     `SeasonStep` the same). Both speeds of a pair are cached (`season_pair_runs`, one row per version; the old
+     one-row-per-pair `season_pairs` cache is dropped). Scores (group-speed files matched, own / retimed): every Bones
+     minority file 0–1 / all → retimed; RPDR 2 / 0 → as it plays. Bones S05–S08 season audio alone **82 / 0 / 0 →
+     82 / 0 / 0**, no answer changed; lab 118, held-out 175, Accused and the library chapter set have no mixed-speed
+     group, so no answer there can move. Even as it plays, RPDR's AMZN file has no quorum in its group of four; its
+     intro comes from fix 2.
+  2. **Carry-over** (§5.5 rule 15). Plex keeps an item's markers across a file replacement; we removed ours when the
+     replacement had no evidence. Tomb Raider King S01E12 (identical length, no chapters, every source "nothing") lost
+     the 0–92 s intro the old file's chapter decided, though the new file shows the same opening; RPDR S08E04 (408 ms
+     shorter) lost its intro the same way. A type with no candidate at all now keeps the replaced file's marker within
+     1 s of its length. A source that read the file and found nothing doesn't count as evidence: none of them tells an
+     intro that isn't there from one it missed, and the length tells another cut. Architecture review (1 HIGH, 3 MED,
+     7 LOW; all applied): "can't tell now" (the old file's disk not answering within 5 s, a server not naming the item)
+     took a carried marker off the servers → a carried marker now stays then; a file moved to the path (a renumbered
+     episode) carried the path's old decisions → not when its size and mtime are another row's; a marker whose
+     deciding sources are all turned off now isn't carried (sources kept aside with it); two carried markers are
+     checked against each other for overlap; a "nothing" of another length never replaces a marker kept aside; the
+     disk is asked only about files with a decision of a wanted type; carried types count as undecided for the
+     TheIntroDB recheck; a pair's rows of other season audio versions are dropped when it is cached again. Production
+     replay (post-#312 markers.db, a copy): of the 174 files on disk with a type in "no evidence", 2 have a replaced
+     file on the same item; one marker is carried, Tomb Raider King S01E12's intro 0–92 s (RPDR's AMZN file is gone
+     from disk now: its STAN replacement has its own intro chapter; the unit test reproduces it).
+  3. **End card** (end-picture check v3 merged, v2 in its lane; §5.3). Tomb Raider King S01E12's cluster 0.3–89.2 s is supported by all 4
+     other episodes of its folder, but its end picture scored 0.5 with both partners. The last 1.5 s (the opening's
+     sword card) match at correlation 1.00; the 1.5 s before don't, at any shift within ±1 s: the opening is re-cut
+     before its card in the later episode (a creature shot E02–E05 don't have, the crow and the black frame half a
+     second earlier) and its pictures run about 0.4 s ahead of the audio against E02, E03 and E05. The season split
+     over two disks isn't the cause (its folder still had 4 partners). A partner's share is now 1 when the last 1.5 s
+     (3 instants) all match on pictures whose inside (a border of about 11 % cropped) isn't flat. A half-second sync
+     search alone (0.5 either way) and a per-instant ±0.5 s search (0.5) don't pass it. On the four intro sets the
+     season step's answers don't move (season audio alone: lab 118 **91 / 12 / 15**, held-out 175 **124 / 4 / 47**,
+     Accused **3 / 0 / 53**, library chapter set **111 / 59 / 54**, each before and after; decided with IntroDB and
+     Plex's markers: held-out **125 / 3 / 47**, lab 118 **87 / 4 / 27**, Accused **3 / 0 / 53**, chapter set
+     **225 / 8 / 19**, unchanged); Bones **82 / 0 / 0**. Of the 195 end-picture checks of those sets that fail today
+     (the #310 exploration's clusters, Accused's idents and music beds included) the card passes 23: 22 the file's real
+     intro, 1 without truth (Physical 100 Mexico S01E07 0.0–11.7 s), none wrong. Of production's 16 failing early
+     clusters (14 files) it passes one, Tomb Raider King S01E12 0.3–89.2 s (the old chapter said 0–92 s); Accused's
+     idents, Physical 100 Mexico's start, Strange New Worlds' "Star Trek 60" bumper and Game of Thrones' cold opens
+     still fail. A review finding (black with a channel logo in its corner counted as a card) is why the inside is
+     cropped.
+  Merged with the shared end-picture scaler (above, which took both to 8 and 2): `SEASON_AUDIO_VERSION` 9 and the
+  end-picture `CHECK_VERSION` 3, so season audio's answers are stored under 2009 (`SEASON_AUDIO_ANSWER_VERSION`) and
+  every season audio answer and end picture is due once; the version re-run (§6.2 step 3) lists the files whose
+  intro rests on one or is undecided beside one.
+  **Rollback** (integration of this batch). markers.db stays schema 3, with no copy made: the rollback image (dev
+  98bed80) and prod's 40311c3 both open a markers.db this build touched and work (`evidence/replaced-speed-endcard/
+  rollback_probe.py`, each build's own store code: open, a file replaced, a pair cached, a carried marker read). They
+  recreate `season_pairs` (their pair cache, empty) and ignore `season_pair_runs`, `replaced_decisions` and
+  `version_reruns`; a carried marker shows its source as `carried_over` there and comes off on that build's next run
+  of the file, as before the carry-over. What they can't do is keep those three tables in step: the pair cache would
+  hand a file they replaced its old fingerprint's runs. So this build, finding `season_pairs` again when it next opens
+  markers.db, empties the three (`store._STALE_AFTER_AN_OLDER_BUILD`, logged once): pairs are matched again, a
+  replacement kept aside before the rollback isn't carried over, and the version re-run lists again what the older
+  build read or decided with its older detectors and rules. A schema bump was the alternative and is worse: the
+  rollback image would refuse markers.db, and going back would mean restoring a copy from before the upgrade and
+  losing everything decided since. To roll back: run the older image as is; to come back, run this one.
+  Evidence: `evidence/replaced-speed-endcard/`.
+- 2026-09-25 · **Two credits text regressions the production audit found after #312** (credits text version 5; §5.4).
+  Numbers are useful / wrong / late / missed, credits text alone, GPU decode.
+  1. **I Survived a Serial Killer S01E04, 92 s early.** Its roll is small text over footage. At 320×180 its credit
+     keyframes span 14.0 s, under rule J's 15 s run, so the last run was story captions 92 s before it, which end in a
+     scene. The rest of the file was then read at 640×360, where the roll boxes 4–18 boxes a keyframe, but without
+     the text 320×180 had boxed: its cards were boxed there as blocks, and every line inside them went, leaving 0–7
+     boxes and no run. Version 3's per-vendor scaler got 1231 s: `scale_cuda` boxes 4 on the 1249 s keyframe where
+     the nearest-pixel scaler boxes 2, which made an 18 s run (the same keyframes decoded both ways,
+     `evidence/credits/isurvived/`); swscale's bicubic found no run at all. The one scaler stays (frames identical on
+     every vendor); instead, after an answer's end, a keyframe holding any text only 640×360 boxes is read whole. Just
+     counting all text after the end, as proposed, made two Accused answers wrong (S04E05 −25.5 s, S07E02 −17.5 s:
+     epilogue cards on black after the end, boxed whole at 320×180, glued onto the roll), so a keyframe whose every
+     box 320×180 boxed still counts none.
+  2. **I Survived S01E14, 68 s early.** A tail with no answer at 320×180; at 640×360 court footage for the last
+     minute before the roll carries a date line, a logo and a caption, 4–10 px tall: four and five boxes a lit
+     keyframe, on and off with the shots, which the 24 s join put in front of the roll. `overlay_boxes` can't remove
+     them: it gathers only the story before the chosen run and needs a box across 80 % of it, and this text is on
+     screen only in the minute the run opens on (none of it before 1171 s). Now a roll read at 640×360 starts on its
+     first dense frame — a dark credit frame, or a lit one with 6 boxes — and steps back from there over keyframes
+     showing text (as decoded, overlays aside) at the run's cadence, never before the run's start
+     (`rule_j.start_on_dense_text`). 4 and 5 boxes leave E14 wrong; 6 and 8 give the same verdicts everywhere, 8
+     starting Animal (2023) 241 s later. Read on the rows the runs are found on, the walk stopped at single-name cards
+     320×180 had boxed whole: four Accused starts 5–8 s later, none with the rows as decoded.
+  Measured before (dev `40311c3`) → after, text / Medium / High (Medium and text are the same on the two TV sets,
+  which have no Plex markers; High needs a second source): **the 80** 70/5/5/0, 62/1/0/17, 43/1/0/36 unchanged, rule
+  J 67 within 10 s and 2 early (chapter truth) unchanged, no answer moves; **the 205** (204 on disk: Paradise (2024)
+  was replaced) 126/35/38/5, 101/15/10/78, 98/14/9/83 unchanged, no answer moves; **the online set** 28/5/3/7 and
+  33/5/3/2 unchanged; **Accused** (57, frame-checked) **49/5/3/0 → 50/4/3/0** (S05E01 −27.5 → −0.5 s, off an
+  epilogue card onto the roll's first card; S04E07 +7.5 → −0.5 s, S06E06 +12.5 → +7.5 s; within 10 s 44 → 46,
+  within 5 s 21 → 23); **I Survived S01** (16, frame-checked, new, `credits/isurvived/`) **12/3/0/1 → 14/1/0/1** (E04
+  −92.2 → −0.3 s, E14 −68.1 → −0.1 s). Still open there: E13 −11.3 s (story graphics glued onto the front of a roll
+  320×180 sees, an answer to the end of the file: the Accused epilogue-card gap) and E11 (its roll's text keyframes
+  span 14 s at either size, under the 15 s run). The CPU decode (text read on the CPU; the GPU runs read it on WebGPU)
+  gives every file of the 80, Accused and I Survived the same start, end, Medium and High as the GPU decode, before
+  and after (the 205 and the online set were read on the GPU only).
+  Measured and not taken: lit frames needing 6 boxes at 640×360 everywhere (Accused 39/11/3/4); reading keyframes
+  whole in a tail without an answer too (no wrong answer fixed, five more move); a title-safe margin at 640×360
+  (fixes E14, but loses Once Upon a Time in the West, whose crawl leaves through the top, and moves Revenant S01E05
+  14 s, whose credits sit 15 px from the left edge). Cost: the same decodes per file; a file whose 640×360 reading now
+  answers pays its refine window there. The harness gains the regression sets (`--sets accused,isurvived`,
+  frame-checked truth, reported, never gated) and leaves out files gone from disk. `evidence/credits/small-text-retry.md`.

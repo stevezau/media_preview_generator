@@ -297,6 +297,34 @@ def test_season_truth_matches_a_file_at_another_speed_on_its_retimed_fingerprint
     assert before.tally.as_dict() == {"useful": 0, "wrong": 0, "missed": 1}
 
 
+def test_season_truth_matches_a_re_encode_whose_audio_was_never_sped_up_as_it_plays(tmp_path):
+    # RuPaul's Drag Race UK S08E04: a 23.976 fps release of a 25 fps show, its audio untouched. The app hears which
+    # speed a file's audio plays at (season.clock_by_audio); the harness must too.
+    from tools.markers_eval.intros import season_truth
+
+    fps = _truth_season(tmp_path, episodes=4)
+    files = sorted(fps)
+    reencode = files[3]
+    speeds = {f: PAL_FPS for f in files[:3]} | {reencode: FILM_FPS}
+    stretched = np.random.default_rng(7).integers(0, 2**32, size=len(fps[reencode]), dtype=np.uint64).astype("<u4")
+    retimes = []
+
+    def retimed(path, factor):
+        retimes.append((path, factor))
+        return stretched  # sped up, the audio matches nothing
+
+    truth = {reencode: (140 * POINT_S, 339 * POINT_S)}
+    report = season_truth(truth, points=fps.__getitem__, end_pictures=ALIKE, speed=speeds.get, retimed=retimed)
+    assert retimes == [(reencode, pytest.approx(PAL_FPS / FILM_FPS))]
+    assert report.tally.as_dict() == {"useful": 1, "wrong": 0, "missed": 0}
+    start, end, support = report.details[reencode]["answer"]
+    assert (start, end) == (
+        pytest.approx(truth[reencode][0], abs=POINT_S),
+        pytest.approx(truth[reencode][1], abs=POINT_S),
+    )
+    assert support == 3
+
+
 def test_a_film_rate_episode_counts_the_retimed_one_as_support_in_the_gate(tmp_path):
     native, film_speed, speeds, fast = _mixed_speed_season(tmp_path)
     files = sorted(native)

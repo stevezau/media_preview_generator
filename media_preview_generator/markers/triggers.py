@@ -25,12 +25,15 @@ from .job_runner import (
     MAX_RETRY_FILES,
     ONLINE_RECHECK,
     ONLINE_RECHECK_SOURCE,
+    VERSION_RERUN,
+    VERSION_RERUN_SOURCE,
     start_intro_credits_job_async,
 )
 from .ownership import marker_matches
 from .pipeline import ONLINE_SOURCES, online_recheck_files
 from .settings import get_global_settings, load_server
 from .store import get_marker_store
+from .versions import BATCH_FILES, files_to_read_again
 
 # Serialises Inspector re-detect's "is this file already queued?" with the job creation, so a double-click queues one
 # job. Webhook follow-ups use job_runner.FOLLOW_UP_LOCK, which their runner also takes to read the files.
@@ -39,6 +42,7 @@ _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
 DECIDE_AGAIN_JOB_NAME = "Intro & Credits: Needs review and waiting files, decided again"
 ONLINE_RECHECK_JOB_NAME = "Intro & Credits: weekly online re-check"
+VERSION_RERUN_JOB_NAME = "Intro & Credits: re-checking files after an update"
 ONLINE_RECHECK_EVERY = timedelta(days=7)
 # The timer that queues the next weekly online re-check (``schedule_online_recheck``), replaced under its lock.
 _online_recheck_timer: threading.Timer | None = None
@@ -119,6 +123,7 @@ def create_intro_credits_job(
     max_retries: int = 0,
     decide_again: bool = False,
     online_recheck: bool = False,
+    version_rerun: bool = False,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -148,6 +153,8 @@ def create_intro_credits_job(
             instead of libraries or paths.
         online_recheck: List the files the online databases are due to be asked about again when the job runs
             (``job_runner._items_for_online_recheck``) instead of libraries or paths.
+        version_rerun: Take the next batch of files to re-check after an update when the job runs
+            (``job_runner._items_to_read_again``) instead of libraries or paths.
 
     Returns:
         The created job.
@@ -169,6 +176,8 @@ def create_intro_credits_job(
         config[DECIDE_AGAIN] = True
     if online_recheck:
         config[ONLINE_RECHECK] = True
+    if version_rerun:
+        config[VERSION_RERUN] = True
     if chain_attempt:
         config["chain_attempt"] = int(chain_attempt)
     if verify_chain:
@@ -487,6 +496,57 @@ def submit_decide_again() -> str | None:
         len(in_review),
         len(waiting - in_review),
         len(season_audio - in_review - waiting),
+        job.id[:8],
+    )
+    return job.id
+
+
+def submit_version_reruns(delay_s: int = 0) -> str | None:
+    """Queue the job that reads again the next batch of files whose answers rest on an older detector version.
+
+    Called on every start (``web.app._read_again_after_detector_updates``) and when a batch has run
+    (``job_runner._queue_next_batch``, with ``versions.BATCH_GAP`` as ``delay_s``). It is an ordinary Intro & Credits
+    job at LOW priority, behind previews: it takes at most ``versions.BATCH_FILES`` files still on disk when it runs,
+    and a run asks again only what is due or from an older version, as on any run. While one waits or runs, that job is
+    returned instead.
+
+    Args:
+        delay_s: Seconds the job waits before it takes a slot (the gap between batches).
+
+    Returns:
+        The job's id; None when Intro & Credits is off on every server or no file is left to read again.
+    """
+    if not markers_enabled_anywhere():
+        logger.info("Intro & Credits is off on every server; no file is read again for an updated detector")
+        return None
+    due = files_to_read_again(get_marker_store(), get_global_settings())
+    if not due:
+        logger.debug("No file has an answer from an older detector version or older decision rules to read again")
+        return None
+    jm = get_job_manager()
+    with _redetect_lock:
+        for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
+            cfg = job.config or {}
+            if job.kind == JOB_KIND_INTRO_CREDITS and cfg.get(VERSION_RERUN) and not is_live_retry_chain(cfg):
+                return job.id
+        job = create_intro_credits_job(
+            library_name=VERSION_RERUN_JOB_NAME,
+            priority=PRIORITY_LOW,
+            source=VERSION_RERUN_SOURCE,
+            version_rerun=True,
+            retry_delay_s=int(delay_s),
+        )
+    by_detector: dict[str, int] = {}
+    for taken in due.values():
+        for detector in taken:
+            by_detector[detector] = by_detector.get(detector, 0) + 1
+    logger.info(
+        "{} file(s) rest on an answer from an older detector version, were decided under older rules, or show times an "
+        "older publish rule kept ({}); "
+        "read again {} at a time (job {})",
+        len(due),
+        ", ".join(f"{detector} {count}" for detector, count in sorted(by_detector.items())),
+        BATCH_FILES,
         job.id[:8],
     )
     return job.id

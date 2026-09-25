@@ -546,6 +546,31 @@ def _decide_again_after_upgrade(config_dir: str) -> None:
         )
 
 
+def _read_again_after_detector_updates(config_dir: str) -> None:
+    """Queue the first batch of files whose Intro & Credits answers rest on an older detector version
+    (``markers.triggers.submit_version_reruns``; ``markers.versions`` says which).
+
+    Runs on every start, after the restart requeue, so a revived batch is found instead of queueing a second; each
+    batch that runs queues the next. With Intro & Credits off on every server markers.db stays unopened. Never raises:
+    a failure leaves the files for the next start.
+    """
+    from .settings_manager import get_settings_manager
+
+    try:
+        get_settings_manager(config_dir)
+        from ..markers.triggers import markers_enabled_anywhere, submit_version_reruns
+
+        if not markers_enabled_anywhere():
+            return
+        submit_version_reruns()
+    except Exception as exc:
+        logger.warning(
+            "Couldn't queue the Intro & Credits re-check of files after an update ({}: {}); the next start tries again",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _schedule_weekly_online_recheck(config_dir: str) -> None:
     """Arm the weekly Intro & Credits job that asks the online databases again about files they had no entry for
     (``markers.triggers.schedule_online_recheck``: its due time is kept in markers.db, so a restart doesn't reset it).
@@ -977,6 +1002,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     _requeue_interrupted_on_startup(config_dir)
     # After it, so a revived one is found instead of queueing a second.
     _decide_again_after_upgrade(config_dir)
+    _read_again_after_detector_updates(config_dir)
     _schedule_weekly_online_recheck(config_dir)
 
     # Start scheduler

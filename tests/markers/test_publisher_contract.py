@@ -469,6 +469,8 @@ INTRO_X = (126_771, 157_068)
 CREDITS_AT = 1_295_324
 SHOWN_INTRO = ("intro", *INTRO_X)
 SHOWN_CREDITS = ("credits", CREDITS_AT, DUR)
+# A replaced file of another length: nothing of the file it replaced carries over (spec §5.5 rule 15).
+NEW_CUT = DUR + 2_000
 
 
 def _outcomes(*outs) -> list[str]:
@@ -486,9 +488,24 @@ def test_single_version_publishes_once_then_is_up_to_date(plex_item):
     assert item.commits == 1
 
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
+    item.durations[item.paths["1080p"]] = NEW_CUT  # a new cut without credits: nothing carries over
     item.touch("1080p", 6)
     assert _outcomes(item.run("1080p"), item.run("1080p")) == ["published", "up_to_date"]
     assert item.served() == item.recorded() == [SHOWN_INTRO] and item.commits == 2
+
+
+def test_a_same_length_replacement_without_chapters_keeps_what_the_item_shows(plex_item):
+    # Spec §5.5 rule 15 (Tomb Raider King S01E12): the new file has no evidence at all, and the same length.
+    item = plex_item(versions=("1080p",))
+    path = item.paths["1080p"]
+    item.chapters[path] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("1080p")) == ["published"]
+    item.chapters[path] = chapters()
+    item.touch("1080p", 5)
+    assert _outcomes(item.run("1080p"), item.run("1080p")) == ["up_to_date", "up_to_date"]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 1
+    markers = item.store.get_markers(item.store.get_file(path).id)
+    assert {m.decided_by for m in markers.values()} == {("carried_over",)}
 
 
 def test_a_version_added_later_takes_off_the_credits_it_disagrees_with(plex_item):
@@ -513,9 +530,11 @@ def test_partial_agreement_then_agreeing_credits_with_different_times(plex_item)
     assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting"] * 3
     assert item.served() == item.recorded() == [("intro", 11_000, 37_000)] and item.commits == 1
 
-    # Both re-encoded without an intro chapter; the credits now agree 576 ms apart.
+    # Both re-cut without an intro chapter (a new length each: nothing carries over); the credits now agree 576 ms
+    # apart.
     item.chapters[a] = chapters(credits=CREDITS_AT)
     item.chapters[b] = chapters(credits=CREDITS_AT + 576)
+    item.durations[a] = item.durations[b] = NEW_CUT
     item.touch("1080p", 11)
     item.touch("2160p", 12)
     assert _outcomes(item.run("1080p")) == ["waiting"]  # B not decided again yet: our intro comes off
@@ -575,6 +594,7 @@ def test_a_version_replaced_by_a_file_never_run_gets_that_files_markers_through_
     old, new = item.paths["720p"], item.paths["1080p"]
     item.chapters[old] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.chapters[new] = chapters(intro=INTRO_Y)
+    item.durations[new] = NEW_CUT  # another cut: the old file's credits don't carry over to it
     assert _outcomes(item.run("720p")) == ["published"]
     assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
     os.remove(old)
@@ -838,6 +858,7 @@ def test_a_transient_failure_keeps_the_item_row_so_the_next_run_removes_the_cred
     item.chapters[path] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.run("1080p")
     item.chapters[path] = chapters(intro=INTRO_X)
+    item.durations[path] = NEW_CUT  # a new cut without credits: nothing carries over
     item.touch("1080p", 3)
     real_database = plex_db.LocalPlexDb._database
 
@@ -901,6 +922,7 @@ def test_a_split_takes_the_credits_that_went_to_review_off_the_moved_part(plex_i
 
     item.move_part("2160p", 8)  # the user splits B off into its own item
     item.chapters[b] = chapters(intro=INTRO_X)  # and B's credits chapter is gone in a new cut
+    item.durations[b] = NEW_CUT
     item.touch("2160p", 31)
     assert _outcomes(item.run("2160p")) == ["published"]
     assert item.served(8) == item.recorded(8) == [SHOWN_INTRO]
@@ -922,6 +944,7 @@ def test_concurrent_versions_leave_the_item_row_matching_what_plex_serves(plex_i
     item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.touch("2160p", 21)
     item.chapters[a] = chapters()
+    item.durations[a] = NEW_CUT
     item.touch("1080p", 22)
 
     b_decided_what_to_show = threading.Event()
@@ -1626,7 +1649,8 @@ class TestKeepPlexsPerType:
         item.run("1080p")
         assert (item.recorded(), item.kept()) == ([], {"intro"})
         statements = _plex_statements(monkeypatch)
-        item.chapters[path] = chapters()  # re-encoded without its intro chapter: nothing decided any more
+        item.chapters[path] = chapters()  # re-cut without its intro chapter: nothing decided any more
+        item.durations[path] = NEW_CUT  # another length: nothing carries over
         item.touch("1080p", 9)
         item.run("1080p")
         assert item.kept() == {"intro"} and item.served() == [PLEX_INTRO]  # Plex's own intro, still kept
@@ -1731,7 +1755,8 @@ class TestKeepPlexsPerType:
         text, detectors = _credit_text()
         item.chapters[first] = chapters(intro=INTRO_X)
         item.run("1080p", detectors=detectors)  # our intro written, Plex's credits left to it
-        item.chapters[first] = chapters()  # re-encoded without its intro chapter: ours goes, the versions stay recorded
+        item.chapters[first] = chapters()  # re-cut without its intro chapter: ours goes, the versions stay recorded
+        item.durations[first] = NEW_CUT  # another length: nothing carries over
         item.touch("1080p", 9)
         item.run("1080p", detectors=detectors)
         assert (item.recorded(), item.kept(), item.served()) == ([], set(), [PLEX_CREDITS])

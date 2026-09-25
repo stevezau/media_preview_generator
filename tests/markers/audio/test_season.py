@@ -397,7 +397,9 @@ class TestSeasonAudio:
 
     def test_the_detector_is_registered_with_the_season_audio_source_and_version(self):
         spec = _spec()
-        assert (spec.source, spec.types, spec.version) == (Source.SEASON_AUDIO, frozenset({MarkerType.INTRO}), 7)
+        assert (spec.source, spec.types) == (Source.SEASON_AUDIO, frozenset({MarkerType.INTRO}))
+        # An answer is stored under the step's version and the end-picture check's past its first (9 + 2 × 1000).
+        assert (season.SEASON_AUDIO_VERSION, season.end_picture.CHECK_VERSION, spec.version) == (9, 3, 2009)
         assert spec.stored_sources == {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
         assert (spec.due, spec.needs_worker) == (season.season_audio_due, season.season_audio_needs_worker)
 
@@ -461,6 +463,50 @@ class TestEndPictureCheck:
             start, end, offset = by_partner[partner]
             assert (round(start * 1000), round(end * 1000)) == (cand.start_ms, cand.end_ms)
             assert offset == pytest.approx((_early_ms(partner) - _early_ms(e1)) / 1000, abs=POINT_S)
+
+    def test_an_answer_checked_on_each_vendors_own_scaler_is_due_and_decoded_again_on_the_one_scaler(
+        self, store, show, monkeypatch
+    ):
+        # Season audio v8, end-picture check 2 (spec §14 2026-09-25): a share measured with scale_cuda, scale_vaapi or
+        # swscale's bicubic isn't read back, and the answer resting on it is due again.
+        e1, _e2, _e3 = show(1, 3)
+        with _Audio(points=early_points) as audio:
+            with monkeypatch.context() as before:
+                before.setattr(season, "SEASON_AUDIO_VERSION", 7)
+                before.setattr(season.end_picture, "CHECK_VERSION", 1)
+                before.setattr(season, "SEASON_AUDIO_ANSWER_VERSION", 7)
+                _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+            checked_before = sorted(audio.compared)
+            audio.compared.clear()
+            ctx = _season_ctx(store, e1)
+            rec = store.get_file(e1)
+            assert pipeline._detector_due(ctx, rec, _spec()) is True
+            assert season.season_audio_needs_worker(rec, ctx) is True  # its end picture is unchecked again
+            assert _detect_and_store(ctx, rec)
+        assert len(checked_before) == 2 and sorted(audio.compared) == checked_before
+
+    @pytest.mark.parametrize(("bumped", "share_unchecked"), [("check", True), ("season", False)])
+    def test_either_version_bumped_alone_makes_the_answer_due(self, store, show, monkeypatch, bumped, share_unchecked):
+        # An answer carries both versions (SEASON_AUDIO_ANSWER_VERSION): a new check alone makes it due with its end
+        # pictures unchecked (a worker decodes them again), a new season audio version alone re-runs it on the cached
+        # shares, decoding nothing.
+        e1, _e2, _e3 = show(1, 3)
+        with _Audio(points=early_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+            audio.compared.clear()
+            if bumped == "check":
+                monkeypatch.setattr(season.end_picture, "CHECK_VERSION", season.end_picture.CHECK_VERSION + 1)
+                monkeypatch.setattr(season, "SEASON_AUDIO_ANSWER_VERSION", season.SEASON_AUDIO_ANSWER_VERSION + 1_000)
+            else:
+                monkeypatch.setattr(season, "SEASON_AUDIO_VERSION", season.SEASON_AUDIO_VERSION + 1)
+                monkeypatch.setattr(season, "SEASON_AUDIO_ANSWER_VERSION", season.SEASON_AUDIO_ANSWER_VERSION + 1)
+            ctx = _season_ctx(store, e1)
+            rec = store.get_file(e1)
+            assert pipeline._detector_due(ctx, rec, _spec()) is True
+            assert season.season_audio_needs_worker(rec, ctx) is share_unchecked
+            if not share_unchecked:
+                _detect_and_store(ctx, rec)
+        assert audio.compared == []
 
     def test_a_checked_share_is_read_from_markers_db_and_not_decoded_again(self, store, show):
         e1, e2, e3 = show(1, 3)
@@ -746,6 +792,34 @@ class TestMixedSpeeds:
         assert cand.origin == "3/3"
         assert audio.retimes == [(e4, pytest.approx(TO_FILM))]
 
+    def test_a_film_rate_re_encode_whose_audio_was_never_sped_up_is_matched_as_it_plays(self, store, show):
+        # RuPaul's Drag Race UK S08E04: a native 25 fps show whose AMZN release is 23.976 fps with the audio untouched.
+        # Sped up to 25 fps it matched nothing; as it plays it matched the 25 fps copy of the episode 897 of 900 s.
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: 25.0, e2: 25.0, e3: 25.0, e4: FILM}
+        with _Audio(points=fake_points, rates=rates, retimed=retimed_points) as audio:
+            out, _ = _run(_season_ctx(store, e4), e4, {"plex-1": ready_publisher()}, stage="process",
+                          probe_effect=audio.probe)  # fmt: skip
+        assert audio.retimes == [(e4, pytest.approx(TO_PAL))]  # made, to hear which speed its audio plays at
+        (cand,) = _evidence(store, e4, Source.SEASON_AUDIO)
+        start, end = planted_ms(e4)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500  # its own seconds, not stretched
+        assert cand.origin == "3/3"
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+    def test_the_25_fps_episodes_count_a_re_encode_at_its_own_speed_as_support(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: 25.0, e2: 25.0, e3: 25.0, e4: FILM}
+        with _Audio(points=fake_points, rates=rates, retimed=retimed_points) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process", probe_effect=audio.probe)
+        (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        start, end = planted_ms(e1)
+        assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
+        assert cand.origin == "3/3"
+        a, d = store.get_file(e1), store.get_file(e4)
+        # Matched as it plays: the pair's answer is the one cached at both files' own speed.
+        assert store.get_season_pair(a.id, d.id, season.SEASON_AUDIO_VERSION) is not None
+
     def test_a_group_at_one_speed_fingerprints_nothing_retimed(self, store, show):
         paths = show(1, 4)
         with _Audio(points=speed_points(set(paths)), rates=dict.fromkeys(paths, 25.0)) as audio:
@@ -766,7 +840,7 @@ class TestMixedSpeeds:
         (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
         assert cand.origin == "2/3"
 
-    def test_retimed_pairs_are_cached_apart_from_the_files_own_speed_pairs(self, store, show):
+    def test_both_speeds_of_a_pair_are_cached_and_never_matched_again(self, store, show):
         e1, e2, e3, e4 = show(1, 4)
         rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
         ctx = _season_ctx(store, e4)
@@ -776,8 +850,62 @@ class TestMixedSpeeds:
                 _detect_and_store(ctx, store.get_file(e4))
         a, d = store.get_file(e1), store.get_file(e4)
         clock = season.SeasonClock(FILM, {e4: TO_FILM})
-        assert store.get_season_pair(a.id, d.id, season.SEASON_AUDIO_VERSION) is None
-        assert store.get_season_pair(a.id, d.id, clock.pair_version(e1, e4)) is not None
+        assert store.get_season_pair(a.id, d.id, season.SEASON_AUDIO_VERSION) == []  # as it plays: nothing
+        assert store.get_season_pair(a.id, d.id, clock.pair_version(e1, e4))  # slowed to film speed: the theme
+
+    def test_telling_a_siblings_speed_from_a_pair_too_slow_to_match_inline_needs_a_worker(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        own = {
+            e1: fake_points(e1),
+            e2: _constant_then_intro(1, 0x12345678, gap=40),
+            e3: fake_points(e3),
+            e4: _constant_then_intro(2, 0x12345678, gap=60),  # with e2: millions of value matches, and a shared intro
+        }
+        recs = {path: _store_fingerprint(store, path, points) for path, points in own.items()}
+        for path, rate in {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}.items():
+            store.set_frame_rate(recs[path].id, rate, identity=(recs[path].size, recs[path].mtime_ns))
+        fourth = recs[e4]
+        store.set_fingerprint(fourth.id, size=fourth.size, mtime_ns=fourth.mtime_ns,
+                              window=fingerprint.fingerprint_window(TO_FILM), start_s=0.0,
+                              length_s=fingerprint.window_s(DUR), algorithm=1,
+                              points=retimed_points(e4, TO_FILM).tobytes())  # fmt: skip
+        assert season.slow_to_match(own[e2], own[e4])
+        assert season.season_audio_needs_worker(recs[e1], _season_ctx(store, e1)) is True
+        second = recs[e2]
+        store.set_season_pair(second.id, fourth.id, season.SEASON_AUDIO_VERSION, [],
+                              identity_a=(second.size, second.mtime_ns), identity_b=(fourth.size, fourth.mtime_ns))  # fmt: skip
+        assert season.season_audio_needs_worker(recs[e1], _season_ctx(store, e1)) is False
+
+    def test_a_file_is_retimed_only_when_its_retimed_audio_matches_more_of_the_group(self):
+        clock = season.SeasonClock(FILM, {"/d": TO_FILM, "/e": TO_FILM, "/f": TO_FILM})
+        references = ["/a", "/b", "/c"]
+        heard = {
+            ("/d", False): {"/a"},  # a stray match as it plays; slowed to film speed it matches all three
+            ("/d", True): {"/a", "/b", "/c"},
+            ("/e", False): {"/a", "/b"},  # its audio plays at the group's speed: only its frame rate differs
+            ("/e", True): set(),
+            ("/f", False): set(),  # matches nothing either way: left as it plays
+            ("/f", True): set(),
+        }
+        settled = season.clock_by_audio(clock, references, lambda path, retimed, ref: ref in heard[(path, retimed)])
+        assert settled == season.SeasonClock(FILM, {"/d": TO_FILM})
+
+    def test_a_group_whose_files_all_play_at_one_speed_by_ear_retimes_nothing(self):
+        clock = season.SeasonClock(25.0, {"/d": TO_PAL})
+        settled = season.clock_by_audio(clock, ["/a", "/b"], lambda path, retimed, ref: not retimed)
+        assert settled.factors == {} and settled.pair_version("/a", "/d") == season.SEASON_AUDIO_VERSION
+
+    @pytest.mark.parametrize(("first", "silent", "heard"), [(True, False, True), (True, True, False),
+                                                           (False, False, True), (False, True, False)])  # fmt: skip
+    def test_a_run_over_silence_is_not_heard(self, first, silent, heard):
+        # Silence fingerprints to one value whatever the speed, so it matches both ways and tells nothing.
+        points = noise(5, 1_000)
+        if silent:
+            points[100:300] = SIL
+        at = (100 * POINT_S, 299 * POINT_S)
+        run = matcher.Run(*at, 0.0, 24.6) if first else matcher.Run(0.0, 24.6, *at)
+        assert season.heard_in([run], points, first=first) is heard
+        assert season.heard_in([], points, first=first) is False
 
     def test_each_sides_speed_names_its_pairs_version(self):
         film, pal = (
@@ -1944,11 +2072,11 @@ class TestDegenerateInput:
         assert season.season_audio_needs_worker(rec, _season_ctx(store, s2e1)) is True
 
 
-def _chapter_probe(intro_ms: int | None, at_ms: int = 30_000) -> MediaProbe:
+def _chapter_probe(intro_ms: int | None, at_ms: int = 30_000, duration_ms: int = DUR) -> MediaProbe:
     if intro_ms is None:
-        return MediaProbe(DUR, (Chapter(0, 600_000, "Chapter 1"), Chapter(600_000, None, "Chapter 2")))
+        return MediaProbe(duration_ms, (Chapter(0, 600_000, "Chapter 1"), Chapter(600_000, None, "Chapter 2")))
     return MediaProbe(
-        DUR,
+        duration_ms,
         (
             Chapter(0, at_ms, "Chapter 1"),
             Chapter(at_ms, at_ms + intro_ms, "Intro"),
@@ -1960,13 +2088,15 @@ def _chapter_probe(intro_ms: int | None, at_ms: int = 30_000) -> MediaProbe:
 class _Chapters:
     """Each episode's ffprobe answer by episode number, for the pipeline and the season step."""
 
-    def __init__(self, lengths: dict[int, int | None]):
+    def __init__(self, lengths: dict[int, int | None], durations: dict[int, int] | None = None):
         self.lengths = lengths
+        self.durations = durations if durations is not None else {}
         self.probed: list[str] = []
 
     def probe(self, path, *, ffprobe, timeout_s=60.0):
         self.probed.append(path)
-        return _chapter_probe(self.lengths[int(re.search(r"E(\d\d)", os.path.basename(path)).group(1))])
+        e = int(re.search(r"E(\d\d)", os.path.basename(path)).group(1))
+        return _chapter_probe(self.lengths[e], duration_ms=self.durations.get(e, DUR))
 
     def __enter__(self):
         self._patch = patch.object(season, "probe_media", side_effect=self.probe)
@@ -2452,17 +2582,21 @@ def _fuzz_decisions(root, lengths, events, detectors):
     db = str(root / "markers.db")
     store = MarkerStore(db)
     paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in lengths}
-    registry = _registry(paths[1], ServerType.PLEX)
+    registry = _own_items(_registry(paths[1], ServerType.PLEX))
     current = dict(lengths)
+    durations: dict[int, int] = {}
     sizes = {e: 100 + e for e in lengths}
     try:
-        with _Audio(points=_episode_noise), _Chapters(current) as chapters:
+        with _Audio(points=_episode_noise), _Chapters(current, durations) as chapters:
             for kind, e, restart in events:
                 if kind == "delete":
                     os.remove(paths[e])
                     continue
                 if kind == "replace":
                     current[e] = None if current[e] else 60_000
+                    # Another cut (another length): nothing of the file it replaced carries over (spec §5.5 rule 15),
+                    # so the decisions can't depend on the order files arrived in.
+                    durations[e] = durations.get(e, DUR) + 2_000
                     sizes[e] += 1000
                 if kind in ("arrive", "replace"):
                     _write(paths[e], sizes[e])
@@ -2471,12 +2605,19 @@ def _fuzz_decisions(root, lengths, events, detectors):
                     store.close()
                     store = MarkerStore(db)
         on_disk = {e for e in lengths if os.path.exists(paths[e])}
-        return {e: _intro_decision(store, paths[e])[:2] for e in sorted(on_disk)}, current, on_disk
+        return {e: _intro_decision(store, paths[e])[:2] for e in sorted(on_disk)}, (current, durations), on_disk
     finally:
         store.close()
 
 
-def _baseline(root, lengths, on_disk):
+def _own_items(registry):
+    """Each episode on its own Plex item (the fake server otherwise puts every file on one)."""
+    registry.get("plex-1").resolve_remote_path_to_item_id.side_effect = lambda path, **_kw: os.path.basename(path)
+    return registry
+
+
+def _baseline(root, final, on_disk):
+    lengths, durations = final
     folder = root / "media" / "tv" / "Show (2020) {tvdb-1}" / "Season 01"
     folder.mkdir(parents=True)
     store = MarkerStore(str(root / "markers.db"))
@@ -2484,8 +2625,9 @@ def _baseline(root, lengths, on_disk):
     try:
         for e, path in paths.items():
             _write(path, 100 + e)
-        with _Chapters(lengths) as chapters:
-            _job(store, _registry(next(iter(paths.values())), ServerType.PLEX), sorted(paths.values()), chapters)
+        with _Chapters(lengths, durations) as chapters:
+            registry = _own_items(_registry(next(iter(paths.values())), ServerType.PLEX))
+            _job(store, registry, sorted(paths.values()), chapters)
         return {e: _intro_decision(store, paths[e])[:2] for e in sorted(on_disk)}
     finally:
         store.close()

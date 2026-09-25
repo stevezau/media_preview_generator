@@ -73,8 +73,9 @@ _SURFACE_VENDORS = ("NVIDIA", "INTEL", "AMD")
 # VAAPI JPEG surfaces aren't reliably NV12) is left to ffmpeg to download: a wrong guess fails the GPU decode.
 DOWNLOAD_FORMATS = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}
 # Spare VAAPI decoder surfaces for the frames the filter graph holds while it downloads them: a 4K VAAPI decode failed
-# without them (measured on the plex host's Intel GPU, 2026-09-24). Not on CUDA, which never needed them: its
-# scale_cuda chain held more frames than hwdownload alone does, and each spare is a full-size NVDEC surface.
+# without them (measured on the plex host's Intel GPU, 2026-09-24). Not on CUDA, where this same full-frame hwdownload
+# ran without them on every measured set (credit text's and the end-picture check's, on storage's P5000), and each spare
+# is a full-size NVDEC surface.
 EXTRA_HW_FRAMES = 8
 _POLL_S = 0.1
 _KILL_WAIT_S = 5.0
@@ -84,6 +85,10 @@ _END = object()
 
 class FrameDecodeError(Exception):
     """ffmpeg couldn't decode the frames."""
+
+
+class ReadStalledError(FrameDecodeError):
+    """The file wasn't read: earlier reads of its mount are still stuck. Nothing about the file itself."""
 
 
 class GpuDecodeError(FrameDecodeError):
@@ -156,19 +161,6 @@ def _scale_filter(download_format: str | None, scale: int) -> str:
     return size if download_format is None else f"hwdownload,format={download_format},{size}"
 
 
-def _vendor_scale_filter(gpu: str | None, surfaces: bool) -> str:
-    """Each vendor's own scaler to 320x180: ``scale_cuda`` or ``scale_vaapi`` on surfaces, swscale's default otherwise.
-
-    Only the end-picture check (``markers.audio.end_picture``) reads frames this way: season audio was measured on
-    these commands, and it moves to :func:`_scale_filter` only with a measurement of its own.
-    """
-    if surfaces and gpu == "NVIDIA":
-        return f"scale_cuda={FRAME_W}:{FRAME_H}:format=nv12,hwdownload,format=nv12"
-    if surfaces:
-        return f"scale_vaapi=w={FRAME_W}:h={FRAME_H}:format=nv12,hwdownload,format=nv12"
-    return f"scale={FRAME_W}:{FRAME_H},format=nv12"
-
-
 def decode_command(
     ffmpeg: str,
     path: str,
@@ -183,7 +175,6 @@ def decode_command(
     drop_non_key: bool = False,
     scale: int = 1,
     download_format: str | None = None,
-    vendor_scaler: bool = False,
 ) -> tuple[list[str], bool]:
     """The spec §5.4 ffmpeg command for one decode.
 
@@ -206,22 +197,14 @@ def decode_command(
         download_format: The format of the stream's decoded GPU surfaces (``KeyframeThinning.download_format``). On
             CUDA and VAAPI (``_SURFACE_VENDORS``) the frames then stay surfaces until the filter graph downloads them,
             after ``fps`` has picked the ones kept; None, or any other GPU, lets ffmpeg download each frame itself.
-        vendor_scaler: Scale 320x180 frames with each vendor's own scaler instead (:func:`_vendor_scale_filter`, the
-            end-picture check's); ``scale`` and ``download_format`` are then not read.
 
     Returns:
         The argv, and whether decode runs on the GPU.
     """
-    if vendor_scaler:
-        keep_on_gpu = gpu in _SURFACE_VENDORS
-        decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
-        surfaces = False  # no spare surfaces: the command stays the one season audio was measured on
-        video_filter = _vendor_scale_filter(gpu, keep_on_gpu and decode.active)
-    else:
-        keep_on_gpu = gpu in _SURFACE_VENDORS and download_format is not None
-        decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
-        surfaces = keep_on_gpu and decode.active
-        video_filter = _scale_filter(download_format if surfaces else None, scale)
+    keep_on_gpu = gpu in _SURFACE_VENDORS and download_format is not None
+    decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
+    surfaces = keep_on_gpu and decode.active
+    video_filter = _scale_filter(download_format if surfaces else None, scale)
     if fps:
         video_filter = f"fps={fps},{video_filter}"
     command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", str(FFMPEG_THREADS), *decode.args]
@@ -279,6 +262,7 @@ def container_start_s(
         DecodeCancelledError: Already cancelled (nothing is probed).
         DecodeTimeoutError: ffprobe ran past ``timeout_s``: the file is left alone for a day like a decode that
             timed out, instead of taking a worker every run only to stall again.
+        ReadStalledError: Earlier ffprobes are still stuck, so this one wasn't started.
         FrameDecodeError: ffprobe couldn't read the file, so there is no answer this run.
     """
     name = os.path.basename(path)
@@ -288,6 +272,8 @@ def container_start_s(
         probe = probe_media(path, ffprobe=ffprobe_path_for(ffmpeg), timeout_s=timeout_s)
     except ProbeTimeoutError as exc:
         raise DecodeTimeoutError(f"reading the start time of {name} timed out after {timeout_s:g} s") from exc
+    except ProbeStalledError as exc:
+        raise ReadStalledError(f"could not read the start time of {name}: {exc}") from exc
     except ProbeError as exc:
         raise FrameDecodeError(f"could not read the start time of {name}: {exc}") from exc
     return (probe.start_time_ms or 0) / 1000.0
@@ -318,15 +304,16 @@ def keyframe_thinning(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool
         timeout_s: Hard limit for the probe (plus ``probe.KILL_WAIT_S``).
 
     Returns:
-        What to drop. Nothing when neither applies, or when ffprobe fails on the packets (not a timeout or a stall,
-        which raise): the file is then read the ordinary way, exactly as before this check existed. For a VP9 or
+        What to drop, with the stream's surface format. Nothing when neither applies, or when ffprobe fails on the
+        packets (not a timeout or a stall, which raise): the file is then read the ordinary way, exactly as before this
+        check existed. For a VP9 or
         intra-only file that means every frame of the tail, bounded by ``DECODE_TIMEOUT_S`` (rare: the start time
         probe of the same file has just succeeded).
 
     Raises:
         DecodeCancelledError: Already cancelled (nothing is probed).
         DecodeTimeoutError: ffprobe ran past ``timeout_s``, as :func:`container_start_s` does.
-        FrameDecodeError: Earlier ffprobes are still stuck, so this one wasn't started.
+        ReadStalledError: Earlier ffprobes are still stuck, so this one wasn't started.
     """
     name = os.path.basename(path)
     if cancel_check and cancel_check():
@@ -336,7 +323,7 @@ def keyframe_thinning(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool
     except ProbeTimeoutError as exc:
         raise DecodeTimeoutError(f"reading the video packets of {name} timed out after {timeout_s:g} s") from exc
     except ProbeStalledError as exc:
-        raise FrameDecodeError(f"could not read the video packets of {name}: {exc}") from exc
+        raise ReadStalledError(f"could not read the video packets of {name}: {exc}") from exc
     except ProbeError as exc:
         logger.debug("Couldn't read the video packets of {}, so it is read the ordinary way: {}", name, exc)
         return KeyframeThinning()

@@ -14,6 +14,19 @@ def _no_background_fingerprint_sweep(monkeypatch):
     monkeypatch.setattr(job_runner, "start_fingerprint_sweep", lambda store, **_kw: False)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_gpu_decode_checks(monkeypatch):
+    """Each test starts with the process's GPU decode checks unrun, on a fake decoder instead of ffmpeg where every
+    device decodes like the CPU (the check only logs; it moves nothing). Tests of the check install their own
+    (``decode_check._checks``)."""
+    from media_preview_generator.markers.credits import decode_check
+
+    def like_the_cpu(ffmpeg, clip, **_kwargs):
+        return ((0.0, clip.name),)
+
+    monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=like_the_cpu))
+
+
 @pytest.fixture
 def app(tmp_path):
     """Same app fixture as tests/test_routes.py (setup complete, fixed API token)."""

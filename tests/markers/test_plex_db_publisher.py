@@ -15,7 +15,7 @@ import time
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -111,6 +111,33 @@ def sql_log(monkeypatch):
 
 def _writes(log: list[str]) -> list[str]:
     return [sql for sql in log if sql.split(None, 1)[0].upper() in {"INSERT", "UPDATE", "DELETE", "REPLACE"}]
+
+
+@contextlib.contextmanager
+def _committed_once_the_publisher_asks_for_the_lock(locker: sqlite3.Connection):
+    """Commit ``locker``'s open write (another program holding Plex's write lock) as soon as the publisher asks for
+    that lock (``LocalPlexDb._begin_write``): after the publisher's read before the lock, and before it holds the lock,
+    however slow the machine. A timer let a slow start read after the commit, so the lock was never waited for."""
+    asked = threading.Event()
+    begin_write = LocalPlexDb._begin_write
+
+    def asking(conn, deadline):
+        asked.set()
+        begin_write(conn, deadline)
+
+    def commit():
+        asked.wait()
+        locker.execute("COMMIT")
+        locker.close()
+
+    committer = threading.Thread(target=commit, daemon=True)
+    with patch.object(LocalPlexDb, "_begin_write", staticmethod(asking)):
+        committer.start()
+        try:
+            yield
+        finally:
+            asked.set()  # a publisher that never asked: the other program's write still lands
+            committer.join(timeout=30)
 
 
 def _make_db(
@@ -593,12 +620,10 @@ class TestWrite:
             "UPDATE media_parts SET extra_data=? WHERE id=1",
             ('{"ma:container":"mkv","ma:x":"1","url":"ma%3Acontainer=mkv&ma%3Ax=1"}',),
         )
-        threading.Timer(0.5, lambda: (locker.execute("COMMIT"), locker.close())).start()
-        start = time.monotonic()
-        _publisher(tmp_path, folder).write(
-            "7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv"
-        )
-        assert time.monotonic() - start >= 0.4
+        with _committed_once_the_publisher_asks_for_the_lock(locker):
+            _publisher(tmp_path, folder).write(
+                "7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv"
+            )
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 1
         extra = json.loads(_rows(db, "SELECT extra_data FROM media_parts WHERE id=1")[0][0])
         assert extra["ma:x"] == "1" and extra["ma:container"] == "mkv"
@@ -612,8 +637,10 @@ class TestWrite:
         locker = sqlite3.connect(db, check_same_thread=False, isolation_level=None)
         locker.execute("BEGIN IMMEDIATE")
         locker.execute("UPDATE media_parts SET file='/data/tv/S01E01.PROPER.mkv' WHERE id=1")
-        threading.Timer(0.3, lambda: (locker.execute("COMMIT"), locker.close())).start()
-        with pytest.raises(PublishError, match="changed") as ei:
+        with (
+            _committed_once_the_publisher_asks_for_the_lock(locker),
+            pytest.raises(PublishError, match="changed") as ei,
+        ):
             _publisher(tmp_path, folder).write(
                 "7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv"
             )
@@ -968,16 +995,17 @@ class TestLockWaitRechecks:
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", None), ("/data/tv/S01E01 - 4K.mkv", None)))
         pub = _publisher(tmp_path, folder, sibling_markers=lambda p: {T.INTRO: INTRO})
-        self._locked_change(db, "UPDATE media_items SET proxy_type=42 WHERE id=2")
-        with pytest.raises(PublishError, match="changed"):
-            _write_one(pub, [INTRO])
+        with self._locked_change(db, "UPDATE media_items SET proxy_type=42 WHERE id=2"):
+            with pytest.raises(PublishError, match="changed"):
+                _write_one(pub, [INTRO])
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
 
     def _locked_change(self, db, sql):
+        """Another program's write of ``sql``, committed once the publisher asks for the write lock."""
         locker = sqlite3.connect(db, check_same_thread=False, isolation_level=None)
         locker.execute("BEGIN IMMEDIATE")
         locker.execute(sql)
-        threading.Timer(0.3, lambda: (locker.execute("COMMIT"), locker.close())).start()
+        return _committed_once_the_publisher_asks_for_the_lock(locker)
 
     @pytest.mark.parametrize(
         ("sql", "state"),
@@ -991,8 +1019,7 @@ class TestLockWaitRechecks:
     def test_tag_row_and_schema_are_rechecked_under_the_lock(self, tmp_path, sql, state):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
-        self._locked_change(db, sql)
-        with pytest.raises(PublishError) as ei:
+        with self._locked_change(db, sql), pytest.raises(PublishError) as ei:
             _write_one(_publisher(tmp_path, folder), [INTRO])
         assert ei.value.state is state
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
@@ -3243,24 +3270,6 @@ class TestAgreeingVersionsDoNotPingPong:
         assert [(m.start_ms, m.end_ms, m.locked) for m in unlocked_run] == [(1_300_500, DUR, False)]
         assert _rows(db, "SELECT time_offset FROM taggings") == [(1_298_500,)]
 
-    def test_an_unlocked_single_version_item_still_keeps_what_it_shows(self, tmp_path, sql_log):
-        # The shortcut's own cell, pinned because the locked fix sits right beside it: with no sibling version
-        # ``all([])`` is True, so a single-version item takes it. A detector that wobbles by under 2 s between runs
-        # must not rewrite Plex every time -- that churn is the whole reason the shortcut exists. Only a *locked*
-        # type is exempt, because there the moved times are the user's own and discarding them is silent data loss.
-        folder = tmp_path / "Plex Media Server"
-        db = _make_db(folder, parts=((self.A, None),))
-        pub = _publisher(tmp_path, folder)
-        item_row = _write_one(pub, [self.CREDITS_A], path=self.A)
-        wobbled = Marker(T.CREDITS, 1_300_500, DUR, ("chapters",))
-
-        again = _write_one(pub, [wobbled], previous=item_row, path=self.A)
-
-        assert again == [self.CREDITS_A]
-        assert pub.last_write_changed is False
-        assert sql_log.count("COMMIT") == 1
-        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_297_000,)]
-
     @pytest.mark.parametrize(
         ("mine", "sibling"),
         [
@@ -3282,6 +3291,58 @@ class TestAgreeingVersionsDoNotPingPong:
         _db, pub = self._item(tmp_path, decided)
         assert _write_one(pub, [INTRO], previous=[CREDITS_FINAL], path=self.A) == [INTRO]
         assert _write_one(pub, [INTRO], previous=None, path=self.A) == [INTRO]
+
+
+class TestOneVersionShowsWhatWasDecided:
+    """The 2 s window only stops versions rewriting each other's times. Production (Game of Thrones intros served
+    ending at 113.0 s where 110.5-112.4 s was decided, RuPaul's Drag Race UK S08E04's credits): one-version items kept
+    their earlier times too, although there was no other version to agree with. There is no churn to damp there: a
+    file's decision moves only when its evidence or the rules change (a run reuses stored answers), and the pipeline
+    doesn't publish a decision that didn't (``pipeline._publish_to``'s unchanged test)."""
+
+    A, B = TestAgreeingVersionsDoNotPingPong.A, TestAgreeingVersionsDoNotPingPong.B
+    SHOWN = Marker(T.INTRO, 6_000, 113_000, ("introdb", "season_audio"))
+    DECIDED = Marker(T.INTRO, 6_000, 112_075, ("introdb", "season_audio"))
+
+    def test_a_decision_within_2s_of_what_the_item_shows_is_written(self, tmp_path, sql_log):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None),))
+        pub = _publisher(tmp_path, folder)
+        shown = _write_one(pub, [self.SHOWN], path=self.A)
+
+        item_row = _write_one(pub, [self.DECIDED], previous=shown, path=self.A)
+
+        assert item_row == [self.DECIDED]
+        assert _rows(db, "SELECT text, time_offset, end_time_offset FROM taggings") == [("intro", 6_000, 112_075)]
+        assert sql_log.count("COMMIT") == 2
+
+    def test_a_version_gone_from_disk_takes_no_part_so_the_decision_is_written(self, tmp_path, monkeypatch):
+        # B was never decided and its file is gone (Plex lists a deleted file until its next scan): A stands alone.
+        monkeypatch.setattr(plex_db, "gone_from_disk", lambda *_a, **_kw: True)
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.B, None)))
+        pub = _publisher(tmp_path, folder, sibling_markers={}.get)
+        shown = _write_one(pub, [self.SHOWN], path=self.A)
+
+        item_row = _write_one(pub, [self.DECIDED], previous=shown, path=self.A)
+
+        assert item_row == [self.DECIDED]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(6_000, 112_075)]
+
+    def test_with_another_version_agreeing_the_item_keeps_what_it_shows(self, tmp_path):
+        # The window's purpose, unchanged: B decided alike, so A's new times within 2 s don't rewrite the item.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.B, None)))
+        decided = {self.B: {T.INTRO: self.SHOWN}}
+        pub = _publisher(tmp_path, folder, sibling_markers=decided.get)
+        shown = _write_one(pub, [self.SHOWN], path=self.A)
+        assert shown == [self.SHOWN]
+        decided[self.B] = {T.INTRO: self.DECIDED}
+
+        item_row = _write_one(pub, [self.DECIDED], previous=shown, path=self.A)
+
+        assert item_row == [self.SHOWN]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(6_000, 113_000)]
 
 
 class TestOwnPreviousAfterTheItemChanged:
@@ -3543,8 +3604,8 @@ class TestServedTimesDecideWhatIsAlreadyThere:
         locker.execute("BEGIN IMMEDIATE")  # the same markers, not yet committed when our snapshot is read
         locker.execute("INSERT INTO taggings SELECT * FROM ref.taggings")
         locker.execute("UPDATE media_parts SET extra_data=(SELECT extra_data FROM ref.media_parts WHERE id=1)")
-        threading.Timer(0.3, lambda: (locker.execute("COMMIT"), locker.close())).start()
-        assert _write_one(_publisher(tmp_path, folder), [INTRO]) == [INTRO]
+        with _committed_once_the_publisher_asks_for_the_lock(locker):
+            assert _write_one(_publisher(tmp_path, folder), [INTRO]) == [INTRO]
         assert "BEGIN IMMEDIATE" in sql_log
         assert "COMMIT" not in sql_log
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 1

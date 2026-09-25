@@ -932,3 +932,105 @@ class TestInReviewRedecide:
         self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
         assert triggers.submit_decide_again() is None
         assert self._ic_jobs(jm) == []
+
+
+class TestVersionReruns:
+    """On every start, and after each batch, one LOW job over the next files whose answers rest on an older detector
+    version (``markers.versions``)."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        from media_preview_generator.markers.store import MarkerStore
+
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        monkeypatch.setattr(triggers, "get_marker_store", lambda: store)
+        yield store
+        store.close()
+
+    @pytest.fixture
+    def jm(self, tmp_path, monkeypatch, settings):
+        from media_preview_generator.web.jobs import JobManager
+
+        settings["media_servers"] = [_server("jf-1", "jellyfin")]
+        jm = JobManager(config_dir=str(tmp_path))
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            yield jm
+
+    @pytest.fixture
+    def due(self, monkeypatch):
+        state = {"files": {"/tv/A/S01/e1.mkv": {"credits_text": 4}}}
+        listed = MagicMock(side_effect=lambda store, settings: dict(state["files"]))
+        monkeypatch.setattr(triggers, "files_to_read_again", listed)
+        monkeypatch.setattr(triggers, "get_global_settings", lambda: "global-settings")
+        state["listed"] = listed
+        return state
+
+    def _ic_jobs(self, jm):
+        return [j for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS]
+
+    def test_it_queues_one_low_job_that_takes_its_batch_when_it_runs(self, jm, store, due):
+        job_id = triggers.submit_version_reruns()
+
+        (job,) = self._ic_jobs(jm)
+        assert job.id == job_id
+        assert (job.library_name, job.priority) == ("Intro & Credits: re-checking files after an update", 3)
+        assert job.config == {
+            "kind": JOB_KIND_INTRO_CREDITS,
+            "source": "version_rerun",
+            "libraries": [],
+            "file_paths": [],
+            "follows_job_id": None,
+            "force": False,
+            "webhook_item_id_hints": {},
+            "version_rerun": True,
+        }
+        due["listed"].assert_called_once_with(store, "global-settings")
+
+    def test_the_next_batch_waits_for_the_gap_before_it_takes_a_slot(self, jm, store, due):
+        from datetime import datetime, timedelta
+
+        before = datetime.now(UTC)
+        job = jm.get_job(triggers.submit_version_reruns(delay_s=1800))
+
+        assert job.config["retry_delay"] == 1800
+        due_at = datetime.fromisoformat(job.config["retry_not_before"])
+        assert before + timedelta(seconds=1800) <= due_at <= datetime.now(UTC) + timedelta(seconds=1800)
+        assert "is_retry" not in job.config and "retry_attempt" not in job.config
+
+    @pytest.mark.parametrize("state", ["pending", "running"])
+    def test_one_queued_or_running_is_reused(self, jm, store, due, state):
+        first = triggers.submit_version_reruns()
+        if state == "running":
+            jm.start_job(first)
+
+        assert triggers.submit_version_reruns() == first
+        assert len(self._ic_jobs(jm)) == 1
+
+    def test_a_batch_whose_retry_chain_keeps_its_row_pending_isnt_reused(self, jm, store, due):
+        # The batch ran; its hidden retry waits for files a server hadn't indexed. Reused, the next batch never comes.
+        first = triggers.submit_version_reruns()
+        jm.merge_job_config(first, {"is_retry_chain": True, "last_outcome": "scheduled"})
+
+        second = triggers.submit_version_reruns()
+
+        assert second != first
+        assert jm.get_job(second).config["version_rerun"] is True
+
+    def test_a_decide_again_job_queued_isnt_taken_for_it(self, jm, store, due, monkeypatch):
+        monkeypatch.setattr(store, "files_in_review", lambda: ["/m/a.mkv"])
+        decide_again = triggers.submit_decide_again()
+
+        assert triggers.submit_version_reruns() != decide_again
+        assert len(self._ic_jobs(jm)) == 2
+
+    def test_nothing_is_queued_when_no_file_is_left(self, jm, store, due):
+        due["files"] = {}
+        assert triggers.submit_version_reruns() is None
+        assert self._ic_jobs(jm) == []
+
+    def test_nothing_is_queued_or_listed_when_intro_and_credits_is_off_everywhere(self, jm, store, due, settings):
+        settings["media_servers"] = [_server("jf-1", "jellyfin", markers={"enabled": False})]
+        assert triggers.submit_version_reruns() is None
+        due["listed"].assert_not_called()
+        assert self._ic_jobs(jm) == []

@@ -42,7 +42,14 @@ _MISSING_CHECKED_UP_TO = "missing_files_checked_up_to"
 # build refuses the new schema, and the copy is what a downgrade puts back.
 _BACKUP_BEFORE_SCHEMA = 3
 BACKUP_SUFFIX = ".pre-v3.bak"
-# The fingerprint window whose points ``season_pairs`` runs are matched from: ``audio.fingerprint.WINDOW`` (which
+# A pair's cached runs are versioned ``SEASON_AUDIO_VERSION + step × speeds`` (``audio.season.SeasonClock``, which
+# takes the step from here): caching a pair drops its rows of another season audio version, which nothing reads again.
+PAIR_VERSION_STEP = 1_000
+# How far a replaced file's length may be from the new one's for the carry-over (``carry_over``): a snapshot with no
+# marker doesn't replace one with a marker unless their lengths are this close (a run over a half-copied file reads a
+# wrong length and finds nothing).
+REPLACED_LENGTH_TOLERANCE_MS = 1_000
+# The fingerprint window whose points ``season_pair_runs`` runs are matched from: ``audio.fingerprint.WINDOW`` (which
 # imports this module, so it can't be imported here; test_store_audio pins the two together).
 SEASON_PAIR_WINDOW = "intro"
 
@@ -162,14 +169,18 @@ _SCHEMA = (
         kind TEXT NOT NULL,
         confirmed_at TEXT NOT NULL)""",
     # Runs the v3 matcher found between two fingerprinted files. file_a is the matcher's first argument: the matcher
-    # isn't symmetric, and the season step always pairs two files the same way round (Task 7).
-    """CREATE TABLE IF NOT EXISTS season_pairs (
+    # isn't symmetric, and the season step always pairs two files the same way round (Task 7). One row per version:
+    # the version names the speed each side was matched at, and a file at another frame rate than most of its season
+    # is matched at both to tell which one its audio plays at. The cache before this one kept one row per pair
+    # (``season_pairs``); it is only a cache, so it is dropped.
+    "DROP TABLE IF EXISTS season_pairs",
+    """CREATE TABLE IF NOT EXISTS season_pair_runs (
         file_a INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         file_b INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         matcher_version INTEGER NOT NULL,
         runs_json TEXT NOT NULL,
-        PRIMARY KEY (file_a, file_b))""",
-    "CREATE INDEX IF NOT EXISTS idx_season_pairs_b ON season_pairs(file_b)",
+        PRIMARY KEY (file_a, file_b, matcher_version))""",
+    "CREATE INDEX IF NOT EXISTS idx_season_pair_runs_b ON season_pair_runs(file_b)",
     # Season audio's end-picture check (``audio.end_picture``): the share of matching frames at the end of file_a's
     # candidate intro (start_ms-end_ms on its side) and the same stretch of file_b, offset_ms later there. NULL: no
     # frames could be compared. A separate table, so a markers.db from before it only gains it.
@@ -214,6 +225,19 @@ _SCHEMA = (
         size INTEGER NOT NULL,
         mtime_ns INTEGER NOT NULL,
         frame_rate REAL)""",
+    # What a file's decisions were before a new file replaced it at its path (a transcode, a same-named upgrade), per
+    # type we had decided, needed review for or found nothing for: its marker (NULL: none decided) and the sources
+    # that decided it, the replaced file's length and when it was last stored. A new identity clears the file's decisions; the carry-over
+    # (``carry_over``) reads this instead. A separate table, so a markers.db from before it only gains it.
+    """CREATE TABLE IF NOT EXISTS replaced_decisions (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        start_ms INTEGER,
+        end_ms INTEGER,
+        decided_by TEXT NOT NULL DEFAULT '[]',
+        duration_ms INTEGER NOT NULL,
+        seen_at TEXT NOT NULL,
+        PRIMARY KEY (file_id, type))""",
     # A file another episode's season step couldn't probe, with the identity it had then: it isn't probed again (up to
     # a 60 s ffprobe on a checking thread) until that identity changes or the entry is old. Not tied to a file row: an
     # unreadable file never gets one.
@@ -301,7 +325,25 @@ _SCHEMA = (
         series_key TEXT NOT NULL,
         paused_at TEXT NOT NULL,
         PRIMARY KEY (source, series_key))""",
+    # The version of a detector (or other stored rule) a file was last taken to be read again for, because an answer
+    # its decisions rest on was from an older one (``markers.versions``): it isn't taken again until that version rises.
+    # For the decision rules (``decide.DECIDE_RULES``) every run that decides the file records the version it used.
+    # A separate table, so a markers.db from before it only gains it.
+    """CREATE TABLE IF NOT EXISTS version_reruns (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        detector TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        taken_at TEXT NOT NULL,
+        PRIMARY KEY (file_id, detector))""",
 )
+
+# Tables an older build of the same schema (from before ``season_pair_runs``) neither reads nor clears, emptied when one
+# has opened markers.db meanwhile (``MarkerStore._forget_what_an_older_build_left_stale``): the pair cache would hand a
+# file it replaced its old fingerprint's runs, a replaced file's decisions kept aside may be from a file before the one
+# it replaced, and the version re-run's records predate what it read and decided with its older detectors and rules
+# (emptied, the start check lists those files again). No schema bump: that would make the older build refuse
+# markers.db, and a rollback would have to put back a copy from before the upgrade.
+_STALE_AFTER_AN_OLDER_BUILD = ("season_pair_runs", "replaced_decisions", "version_reruns")
 
 # Ordered migrations: _MIGRATIONS[v] holds the statements that take an existing database from schema
 # version v to v+1. `_SCHEMA` is CREATE TABLE IF NOT EXISTS only, so a column added there alone never
@@ -428,6 +470,28 @@ class FingerprintCheck:
     mtime_ns: int
 
 
+class PreviousDecision(NamedTuple):
+    """What we last decided for one type of a file that has since been replaced.
+
+    Attributes:
+        type: The marker type.
+        marker: ``(start_ms, end_ms)`` of its decided marker; None when it needed review or had no evidence.
+        duration_ms: The replaced file's length.
+        seen_at: When the replaced file was last stored (``files.updated_at``, an ISO time): the latest one counts.
+        decided_by: The sources that decided the marker (empty without one).
+    """
+
+    type: MarkerType
+    marker: tuple[int, int] | None
+    duration_ms: int
+    seen_at: str
+    decided_by: tuple[str, ...] = ()
+
+
+# The statuses of a decision of ours (a type turned off, or left to a server's own marker, is none).
+_JUDGED = (DecisionStatus.DECIDED.value, DecisionStatus.NEEDS_REVIEW.value, DecisionStatus.NO_EVIDENCE.value)
+
+
 class EndPictureKey(NamedTuple):
     """What one end-picture share was measured on: ``file_a``'s candidate intro (``start_ms``-``end_ms`` on its side)
     against the same stretch of ``file_b``, ``offset_ms`` later there."""
@@ -521,11 +585,38 @@ class MarkerStore:
                 for stmt in _MIGRATIONS.get(current, ()):
                     conn.execute(stmt)
                 current += 1
+            self._forget_what_an_older_build_left_stale(conn)
             for stmt in _SCHEMA:
                 conn.execute(stmt)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(current),),
+            )
+
+    @staticmethod
+    def _forget_what_an_older_build_left_stale(conn: sqlite3.Connection) -> None:
+        """Empty the tables an older build left out of step (``_STALE_AFTER_AN_OLDER_BUILD``), when one has opened
+        markers.db since this build last did.
+
+        Such a build (schema 3 from before ``season_pair_runs``: a rollback to 40311c3 or 98bed80) opens it and works,
+        but it never reads or clears these tables when it replaces or reads a file again. It recreates
+        ``season_pairs``, which ``_SCHEMA`` drops on every open, so that table being there is the sign; on the first
+        upgrade the tables aren't there yet and nothing is emptied.
+
+        Args:
+            conn: The connection, inside the open's transaction.
+        """
+        existing = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "season_pairs" not in existing:
+            return
+        emptied = [table for table in _STALE_AFTER_AN_OLDER_BUILD if table in existing]
+        for table in emptied:
+            conn.execute(f"DELETE FROM {table}")
+        if emptied:
+            logger.info(
+                "markers.db was opened by an older version of the app since this one last ran; emptied what it couldn't "
+                "keep up to date: {}",
+                ", ".join(emptied),
             )
 
     def _backup_before_migrating(self) -> None:
@@ -660,7 +751,8 @@ class MarkerStore:
         stored size differs. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to
         replace. ``duration_ms=None`` on a changed identity stores NULL, since the old duration can no longer be
         trusted; on an unchanged identity it keeps the previous value. Either way the file is on disk again, so a
-        ``missing_since`` mark is cleared.
+        ``missing_since`` mark is cleared. What the replaced identity's decisions were is kept aside first
+        (``replaced_decisions``, :meth:`replaced_in_place`), for the carry-over.
 
         Returns:
             The record.
@@ -686,6 +778,7 @@ class MarkerStore:
             else:
                 file_id = row["id"]
                 if (row["size"], row["mtime_ns"]) != (identity.size, identity.mtime_ns):
+                    self._keep_replaced_decisions(conn, row)
                     for table in (
                         "evidence",
                         "evidence_versions",
@@ -698,9 +791,10 @@ class MarkerStore:
                         "intro_chapter_limits",
                         "server_marker_rereads",
                         "frame_rates",
+                        "version_reruns",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
-                    for table in ("season_pairs", "season_end_pictures"):
+                    for table in ("season_pair_runs", "season_end_pictures"):
                         conn.execute(f"DELETE FROM {table} WHERE file_a=? OR file_b=?", (file_id, file_id))
                     conn.execute("DELETE FROM markers WHERE file_id=? AND locked=0", (file_id,))
                     conn.execute(
@@ -728,6 +822,124 @@ class MarkerStore:
         with self._lock:
             row = self._conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
         return self._file(row) if row else None
+
+    @staticmethod
+    def _judged(conn: sqlite3.Connection, file_id: int) -> list[tuple[str, tuple[int, int] | None, tuple[str, ...]]]:
+        """A file's decisions of ours per type: its decided marker's times and sources, or None and no sources
+        (Needs review, no evidence)."""
+        markers = {r["type"]: r for r in conn.execute("SELECT * FROM markers WHERE file_id=?", (file_id,)).fetchall()}
+        judged = []
+        for r in conn.execute("SELECT type, status FROM decisions WHERE file_id=?", (file_id,)).fetchall():
+            if r["status"] not in _JUDGED:
+                continue
+            marker = markers.get(r["type"]) if r["status"] == DecisionStatus.DECIDED.value else None
+            if marker is None:
+                judged.append((r["type"], None, ()))
+            else:
+                times = (marker["start_ms"], marker["end_ms"])
+                judged.append((r["type"], times, tuple(json.loads(marker["decided_by"]))))
+        return judged
+
+    def _keep_replaced_decisions(self, conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+        """Keep aside what a file's decisions were before its identity changes (``replaced_decisions``). An identity
+        of unknown length has nothing to compare a new one with; one never decided leaves the earlier snapshot, the
+        last decision made at this path; and "no marker" leaves a marker kept aside from a file of another length
+        (a run over a half-copied file reads a wrong length and finds nothing)."""
+        if not row["duration_ms"]:
+            return
+        for mtype, marker, decided_by in self._judged(conn, row["id"]):
+            if marker is None:
+                held = conn.execute(
+                    "SELECT duration_ms FROM replaced_decisions WHERE file_id=? AND type=? AND start_ms IS NOT NULL",
+                    (row["id"], mtype),
+                ).fetchone()
+                if held is not None and abs(held["duration_ms"] - row["duration_ms"]) > REPLACED_LENGTH_TOLERANCE_MS:
+                    continue
+            start, end = marker if marker else (None, None)
+            conn.execute(
+                "INSERT OR REPLACE INTO replaced_decisions (file_id, type, start_ms, end_ms, decided_by, duration_ms, "
+                "seen_at) VALUES (?,?,?,?,?,?,?)",
+                (row["id"], mtype, start, end, json.dumps(list(decided_by)), row["duration_ms"], row["updated_at"]),
+            )
+
+    def moved_here(self, rec: FileRecord) -> bool:
+        """Whether a file's identity (size and mtime) is another path's row too: it was moved here from there (a
+        rename keeps both), so it didn't replace this path's earlier file."""
+        with self._lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM files WHERE size=? AND mtime_ns=? AND id != ? LIMIT 1",
+                    (rec.size, rec.mtime_ns, rec.id),
+                ).fetchone()
+                is not None
+            )
+
+    def replaced_in_place(self, file_id: int) -> list[PreviousDecision]:
+        """What a file's earlier identities at its path last decided, per type (the carry-over).
+
+        Args:
+            file_id: The file.
+
+        Returns:
+            One per type an earlier identity decided, needed review for or found nothing for.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT type, start_ms, end_ms, decided_by, duration_ms, seen_at FROM replaced_decisions "
+                "WHERE file_id=? ORDER BY type",
+                (file_id,),
+            ).fetchall()
+        return [
+            PreviousDecision(
+                MarkerType(r["type"]),
+                None if r["start_ms"] is None else (r["start_ms"], r["end_ms"]),
+                r["duration_ms"],
+                r["seen_at"],
+                tuple(json.loads(r["decided_by"])),
+            )
+            for r in rows
+        ]
+
+    def files_published_to(self, items: Iterable[tuple[str, str]], *, other_than: int) -> list[FileRecord]:
+        """The files whose last publish to a server went to one of these items, sorted by id (the carry-over looks for
+        the file a new one replaced among them).
+
+        Args:
+            items: ``(server_id, item_id)`` pairs.
+            other_than: A file to leave out (the new one).
+
+        Returns:
+            Their records.
+        """
+        found: dict[int, FileRecord] = {}
+        with self._lock:
+            for server_id, item_id in items:
+                for r in self._conn.execute(
+                    "SELECT f.* FROM publish_state p JOIN files f ON f.id = p.file_id "
+                    "WHERE p.server_id=? AND p.item_id=? AND f.id != ?",
+                    (server_id, item_id, other_than),
+                ):
+                    found[r["id"]] = self._file(r)
+        return [found[file_id] for file_id in sorted(found)]
+
+    def previous_decisions_of(self, file_id: int) -> list[PreviousDecision]:
+        """A file's own decisions as :class:`PreviousDecision` (it was replaced by another file).
+
+        Args:
+            file_id: The replaced file.
+
+        Returns:
+            One per type it decided, needed review for or found nothing for; none when its length is unknown.
+        """
+        with self._lock:
+            row = self._conn.execute("SELECT duration_ms, updated_at FROM files WHERE id=?", (file_id,)).fetchone()
+            if row is None or not row["duration_ms"]:
+                return []
+            judged = self._judged(self._conn, file_id)
+        return [
+            PreviousDecision(MarkerType(mtype), marker, row["duration_ms"], row["updated_at"], decided_by)
+            for mtype, marker, decided_by in sorted(judged, key=lambda j: j[0])
+        ]
 
     def files_in_season(self, season_key: str) -> list[FileRecord]:
         """All known files of a season folder that aren't missing from disk, sorted by path."""
@@ -800,6 +1012,156 @@ class MarkerStore:
                 ),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
+
+    def files_with_older_answers(
+        self,
+        detector: str,
+        *,
+        sources: Iterable[Source],
+        types: Iterable[MarkerType],
+        version: int,
+        version_step: int = 0,
+    ) -> list[str]:
+        """Canonical paths of the files with an answer stored under ``sources`` from a version older than ``version``
+        that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``) or that
+        an undecided type of ``types`` was decided without (Needs review, no evidence), sorted; files marked missing,
+        and files already taken for ``detector`` at ``version`` (``record_version_reruns``), are left out.
+
+        Args:
+            detector: The name its re-runs are recorded under.
+            sources: The sources its answers are stored under.
+            types: The marker types it answers.
+            version: Its version now.
+            version_step: A stored version is compared modulo this; 0 compares it whole (credit text stores the
+                user's window above its version).
+
+        Returns:
+            The paths.
+        """
+        names = [source.value for source in sources]
+        type_names = [mtype.value for mtype in types]
+        in_sources = ",".join("?" * len(names))
+        in_types = ",".join("?" * len(type_names))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT f.canonical_path FROM evidence_versions v "
+                "JOIN files f ON f.id = v.file_id "
+                "JOIN decisions d ON d.file_id = v.file_id "
+                "LEFT JOIN markers m ON m.file_id = d.file_id AND m.type = d.type "
+                "LEFT JOIN version_reruns r ON r.file_id = v.file_id AND r.detector = ? "
+                f"WHERE f.missing_since IS NULL AND v.source IN ({in_sources}) AND d.type IN ({in_types}) "
+                "AND (CASE WHEN ? > 0 THEN v.version % ? ELSE v.version END) < ? "
+                "AND (r.version IS NULL OR r.version < ?) "
+                "AND (d.status IN (?, ?) OR (d.status = ? AND m.locked = 0 AND EXISTS "
+                f"(SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN ({in_sources})))) "
+                "ORDER BY f.canonical_path",
+                (
+                    detector,
+                    *names,
+                    *type_names,
+                    version_step,
+                    version_step,
+                    version,
+                    version,
+                    DecisionStatus.NEEDS_REVIEW.value,
+                    DecisionStatus.NO_EVIDENCE.value,
+                    DecisionStatus.DECIDED.value,
+                    *names,
+                ),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
+
+    def files_decided_under_older_rules(self, detector: str, version: int) -> list[str]:
+        """Canonical paths of the files not recorded as decided under ``version`` of the decision rules (``detector``
+        in ``version_reruns``) with a type those rules could decide differently from what is stored, sorted: an
+        unlocked type with a stored answer of its type, decided, in Needs review, not found (its answers failed a
+        check a rule may have changed) or left to the servers' own markers; not one whose detection is off. Files
+        marked missing are left out.
+
+        Args:
+            detector: The name the rules' version is recorded under.
+            version: The rules' version now.
+
+        Returns:
+            The paths.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.canonical_path, d.status, d.reason FROM decisions d "
+                "JOIN files f ON f.id = d.file_id "
+                "LEFT JOIN markers m ON m.file_id = d.file_id AND m.type = d.type "
+                "LEFT JOIN version_reruns r ON r.file_id = d.file_id AND r.detector = ? "
+                "WHERE f.missing_since IS NULL AND (r.version IS NULL OR r.version < ?) AND COALESCE(m.locked, 0) = 0 "
+                "AND EXISTS (SELECT 1 FROM evidence e WHERE e.file_id = d.file_id AND e.type = d.type)",
+                (detector, version),
+            ).fetchall()
+        found = {
+            r["canonical_path"]
+            for r in rows
+            if DecisionStatus(r["status"]) is not DecisionStatus.DISABLED
+            or is_kept_own(DecisionStatus.DISABLED, r["reason"])
+        }
+        return sorted(found)
+
+    def files_on_one_version_items_showing_other_times(self, detector: str, version: int) -> list[str]:
+        """Canonical paths of the files whose one-version Plex item holds, of a type they decided, times of ours other
+        than decided, sorted; files marked missing, and files already taken for ``detector`` at ``version``, are left
+        out. Only a Plex publish records an item's versions (``item_versions``).
+
+        Until 2026-09-25 such an item kept its earlier times when a decision moved by under 2 s
+        (``publishers.base.agreed_across_versions``); the pipeline sends it the decided times on the file's next run
+        (``pipeline._one_version_shows_other_times``).
+
+        Args:
+            detector: The name its re-runs are recorded under.
+            version: Its version now.
+
+        Returns:
+            The paths.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.canonical_path, i.markers_json, m.type, m.start_ms, m.end_ms FROM publish_state p "
+                "JOIN files f ON f.id = p.file_id "
+                "JOIN item_publish_state i ON i.server_id = p.server_id AND i.item_id = p.item_id "
+                "JOIN item_versions iv ON iv.server_id = i.server_id AND iv.item_id = i.item_id "
+                "JOIN markers m ON m.file_id = f.id "
+                "LEFT JOIN version_reruns r ON r.file_id = f.id AND r.detector = ? "
+                "WHERE f.missing_since IS NULL AND i.status = 'written' AND json_array_length(iv.files_json) = 1 "
+                "AND (r.version IS NULL OR r.version < ?)",
+                (detector, version),
+            ).fetchall()
+        decided: dict[tuple[str, str], dict[MarkerType, tuple[int, int]]] = {}
+        for r in rows:
+            decided.setdefault((r["canonical_path"], r["markers_json"]), {})[MarkerType(r["type"])] = (
+                r["start_ms"],
+                r["end_ms"],
+            )
+        found = set()
+        for (path, markers_json), times in decided.items():
+            for left in self._markers_from_json(markers_json):
+                if left.type in times and times[left.type] != (left.start_ms, left.end_ms):
+                    found.add(path)
+        return sorted(found)
+
+    def record_version_reruns(self, entries: Iterable[tuple[str, str, int]]) -> None:
+        """Record that files were taken to be read again: ``(canonical_path, detector, version)`` each. A path
+        markers.db doesn't know is skipped."""
+        now = self._now()
+        with self._tx() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO version_reruns (file_id, detector, version, taken_at) "
+                "SELECT id, ?, ?, ? FROM files WHERE canonical_path=?",
+                [(detector, int(version), now, path) for path, detector, version in entries],
+            )
+
+    def version_rerun(self, file_id: int, detector: str) -> int | None:
+        """The version of ``detector`` the file was last taken to be read again for, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM version_reruns WHERE file_id=? AND detector=?", (file_id, detector)
+            ).fetchone()
+        return int(row["version"]) if row else None
 
     def files_with_old_empty_lookups(self, sources: Iterable[Source], before: datetime) -> list[str]:
         """Canonical paths of the files whose stored lookup of any of these online sources found nothing ("no entry")
@@ -1385,7 +1747,7 @@ class MarkerStore:
                 "SELECT 1 FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
             ).fetchone()
             if replaced:
-                conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
+                conn.execute("DELETE FROM season_pair_runs WHERE file_a=? OR file_b=?", (file_id, file_id))
             conn.execute(
                 "INSERT OR REPLACE INTO fingerprints (file_id, window, start_s, length_s, algorithm, points) "
                 "VALUES (?,?,?,?,?,?)",
@@ -1491,7 +1853,7 @@ class MarkerStore:
                     continue
                 dropped += 1
                 conn.execute("DELETE FROM fingerprints WHERE file_id=?", (check.file_id,))
-                for table in ("season_pairs", "season_end_pictures"):
+                for table in ("season_pair_runs", "season_end_pictures"):
                     conn.execute(f"DELETE FROM {table} WHERE file_a=? OR file_b=?", (check.file_id, check.file_id))
                 for table in ("member_probe_failures", "member_fingerprint_failures", "end_picture_failures"):
                     conn.execute(f"DELETE FROM {table} WHERE canonical_path=?", (check.canonical_path,))
@@ -1590,7 +1952,7 @@ class MarkerStore:
         """Cached matcher runs between two files (``file_a`` was the matcher's first argument); None when not computed."""
         with self._lock:
             r = self._conn.execute(
-                "SELECT runs_json FROM season_pairs WHERE file_a=? AND file_b=? AND matcher_version=?",
+                "SELECT runs_json FROM season_pair_runs WHERE file_a=? AND file_b=? AND matcher_version=?",
                 (file_a, file_b, matcher_version),
             ).fetchone()
         return None if r is None else [tuple(run) for run in json.loads(r["runs_json"])]
@@ -1629,7 +1991,11 @@ class MarkerStore:
             if len(rows) != 2 or any((r["size"], r["mtime_ns"]) != matched[r["id"]] for r in rows):
                 return False
             conn.execute(
-                "INSERT OR REPLACE INTO season_pairs (file_a, file_b, matcher_version, runs_json) VALUES (?,?,?,?)",
+                "DELETE FROM season_pair_runs WHERE file_a=? AND file_b=? AND matcher_version % ? != ?",
+                (file_a, file_b, PAIR_VERSION_STEP, matcher_version % PAIR_VERSION_STEP),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO season_pair_runs (file_a, file_b, matcher_version, runs_json) VALUES (?,?,?,?)",
                 (file_a, file_b, matcher_version, json.dumps([list(run) for run in runs])),
             )
         return True
@@ -1762,7 +2128,7 @@ class MarkerStore:
     ) -> None:
         old = conn.execute("SELECT size, mtime_ns, frame_rate FROM frame_rates WHERE file_id=?", (file_id,)).fetchone()
         if old is None or (old["size"], old["mtime_ns"], old["frame_rate"]) != (*identity, frame_rate):
-            conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
+            conn.execute("DELETE FROM season_pair_runs WHERE file_a=? OR file_b=?", (file_id, file_id))
         conn.execute(
             "INSERT OR REPLACE INTO frame_rates (file_id, size, mtime_ns, frame_rate) VALUES (?,?,?,?)",
             (file_id, *identity, frame_rate),

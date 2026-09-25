@@ -125,6 +125,11 @@ Documentation = "https://mediapreviewgenerator.dev/"
 where = ["."]
 include = ["media_preview_generator*"]
 
+[tool.setuptools.package-data]
+# The GPU decode check's reference clips (markers/credits/decode_check.py), in the wheel even where the build can't
+# ask git which files it tracks (the Docker builder has no .git).
+"media_preview_generator.markers.credits" = ["reference_clips/*.mkv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = [

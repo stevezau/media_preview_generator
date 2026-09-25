@@ -1,5 +1,6 @@
 """Real ffmpeg: the end-picture check lines up two episodes' pictures from their fingerprints' alignment, in mkv and
-mpegts, with the audio starting with the picture or 2 s late, on the CPU and (when present) CUDA.
+mpegts, with the audio starting with the picture or 2 s late, on the CPU and (when present) CUDA; and every vendor's
+decode gives the CPU's frames byte for byte.
 
 Each synthetic episode shows a different picture every second over random-note audio; the partners carry the same
 content 5 s later, some with the audio shifted late in the container. The check must find every picture alike at the
@@ -19,7 +20,9 @@ import pytest
 from media_preview_generator.markers.audio import end_picture as ep
 from media_preview_generator.markers.audio.fingerprint import chromaprint_ffmpeg, compute_fingerprint
 from media_preview_generator.markers.audio.season import season_pair_runs
+from media_preview_generator.markers.credits import frames
 from media_preview_generator.markers.probe import ffprobe_path_for, stream_starts
+from tests.markers.credits.test_frames_integration import vaapi_node
 
 pytestmark = pytest.mark.integration
 W, H, FPS, RATE = 320, 180, 10, 44100
@@ -107,3 +110,80 @@ def test_the_aligned_pictures_match_and_a_second_either_way_do_not(season_files,
     end_s = min(run.a_end_s, 30.0)
     shares = [reader.share(paths["A.mkv"], paths[partner], run.a_start_s, end_s, offset_s + d) for d in (0, -1, 1)]
     assert shares == [1.0, 0.0, 0.0]
+
+
+@pytest.fixture(scope="module")
+def detailed_clips(tmp_path_factory):
+    """12 s of fine moving detail at 1280x720, as 8-bit H.264 and (with an HEVC encoder) 10-bit HEVC: detail each
+    vendor's own scaler blurred differently (scale_cuda, scale_vaapi, swscale's bicubic)."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg")
+    root = tmp_path_factory.mktemp("end-picture-vendors")
+    source = "mandelbrot=size=1280x720:rate=24,trim=duration=12,setpts=PTS-STARTPTS"
+    encodes = {"8-bit": ["-c:v", "libx264", "-g", "48", "-pix_fmt", "yuv420p"]}
+    if "libx265" in subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout:
+        encodes["10-bit"] = ["-c:v", "libx265", "-x265-params", "keyint=48:log-level=error", "-pix_fmt", "yuv420p10le"]
+    for name, codec in encodes.items():
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", source, *codec, str(root / f"{name}.mkv")],
+                       check=True)  # fmt: skip
+    return ffmpeg, {name: str(root / f"{name}.mkv") for name in encodes}
+
+
+def _end_picture_frames(monkeypatch, ffmpeg, path, gpu, device):
+    """The check's decode of 8.2-11.7 s (the reader's window for a stretch ending at 11.2 s): each frame's time, its
+    320x180 luma plane as ffmpeg wrote it, and whether each ffmpeg run was on the GPU."""
+    planes, runs = [], []
+    shrink, run_decode = ep._shrink, frames.run_decode
+
+    def keep_planes(chunk):
+        planes.extend(plane.tobytes() for plane in chunk)
+        return shrink(chunk)
+
+    def note_run(command, *, hw_active, **kwargs):
+        runs.append(hw_active)
+        return run_decode(command, hw_active=hw_active, **kwargs)
+
+    monkeypatch.setattr(ep, "_shrink", keep_planes)
+    monkeypatch.setattr(frames, "run_decode", note_run)
+    starts = stream_starts(path, ffprobe=ffprobe_path_for(ffmpeg))
+    got = ep.decode_frames(path, 8.2, 3.5, ffmpeg=ffmpeg, gpu=gpu, gpu_device_path=device,
+                           container_start_s=starts.container_s,
+                           download_format=frames.DOWNLOAD_FORMATS.get(starts.pix_fmt or ""))  # fmt: skip
+    monkeypatch.undo()
+    return [t for t, _ in got], planes, runs
+
+
+def _same_frames_as_the_cpu(monkeypatch, detailed_clips, clip_name, gpu, device):
+    ffmpeg, paths = detailed_clips
+    if clip_name not in paths:
+        pytest.skip("no HEVC encoder")
+    starts = stream_starts(paths[clip_name], ffprobe=ffprobe_path_for(ffmpeg))
+    # Downloaded as surfaces in the stream's own format, so this is the hwdownload path, not ffmpeg's own download.
+    assert frames.DOWNLOAD_FORMATS[starts.pix_fmt] == {"8-bit": "nv12", "10-bit": "p010le"}[clip_name]
+    cpu_times, cpu_planes, cpu_runs = _end_picture_frames(monkeypatch, ffmpeg, paths[clip_name], None, None)
+    gpu_times, gpu_planes, gpu_runs = _end_picture_frames(monkeypatch, ffmpeg, paths[clip_name], gpu, device)
+    assert (cpu_runs, gpu_runs) == ([False], [True])  # one ffmpeg each: the GPU decode didn't fall back to the CPU
+    assert len(cpu_planes) == 7 and cpu_times == gpu_times
+    assert gpu_planes == cpu_planes
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("clip_name", ["8-bit", "10-bit"])
+def test_cuda_gives_the_cpus_end_picture_frames_byte_for_byte(monkeypatch, detailed_clips, clip_name):
+    # Partners of one season can be decoded by workers of different vendors: only the same frames on every one keep
+    # the answer from depending on which worker's GPU read which file (scale_cuda's frames weren't the CPU's).
+    if shutil.which("nvidia-smi") is None:
+        pytest.skip("no NVIDIA GPU")
+    _same_frames_as_the_cpu(monkeypatch, detailed_clips, clip_name, "NVIDIA", "cuda:0")
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("clip_name", ["8-bit", "10-bit"])
+def test_vaapi_gives_the_cpus_end_picture_frames_byte_for_byte(monkeypatch, detailed_clips, clip_name):
+    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    node = vaapi_node()
+    if node is None:
+        pytest.skip("no Intel or AMD render node")
+    device, vendor = node
+    _same_frames_as_the_cpu(monkeypatch, detailed_clips, clip_name, vendor, device)

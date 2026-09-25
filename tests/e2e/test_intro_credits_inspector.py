@@ -1917,6 +1917,7 @@ class TestLockAndUnlock:
         inspector = _Inspector(authed_page, app_url, south_park())
         inspector.open_result()
         page = inspector.open_tab()
+        watch_modal_shown(page, "markersLockModal")  # its dismiss button is ignored while it fades in
 
         page.locator("#markersLockBtn").click()
 
@@ -1929,6 +1930,7 @@ class TestLockAndUnlock:
         expect(page.locator("#markersLockConfirm")).to_have_text("Lock and publish to 3 servers")
         assert inspector.save_bodies == []
 
+        expect_modal_shown(page, "markersLockModal")
         modal.get_by_role("button", name="Leave them as they are").click()
         expect(modal).to_be_hidden()
         assert inspector.save_bodies == []
@@ -2075,11 +2077,13 @@ class TestLockAndUnlock:
         inspector.open_result()
         page = inspector.open_tab()
         modal = page.locator("#markersUnlockModal")
+        watch_modal_shown(page, "markersUnlockModal")  # its ✕ is ignored while it fades in
         page.locator("#markersLockBtn").click()
         expect(modal).to_be_visible()
         page.locator("#markersUnlockConfirm").click()
 
         # The user gives up on the dialog while the request is still going.
+        expect_modal_shown(page, "markersUnlockModal")
         modal.locator(".btn-close").click()
         expect(modal).to_be_hidden()
         held[0].fulfill(

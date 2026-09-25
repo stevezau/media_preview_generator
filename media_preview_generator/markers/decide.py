@@ -17,6 +17,13 @@ from itertools import combinations
 from .models import SERVER_SOURCES, Candidate, Marker, MarkerType, Source
 from .speed import online_time_scale
 
+# These rules' version: a change that can decide stored answers differently raises it, and every file decided under
+# older rules is decided again from what it has stored (``markers.versions``; each run records the version a file was
+# decided under in ``version_reruns``, under ``DECIDE_RULES``). 1: the 2026-09-25 rules (SkipDB never decides alone,
+# credit text checks a credits chapter SkipDB disagrees with, online credits may end up to 5 s past the file, another
+# release's intro beside season audio; spec §5.5 rules 2, 3, 6 and 14).
+DECIDE_RULES = "decide_rules"
+DECIDE_RULES_VERSION = 1
 INTRO_END_TOLERANCE_MS = 5_000
 CREDITS_START_TOLERANCE_MS = 10_000
 EOF_CLAMP_MS = 2_000
@@ -31,6 +38,10 @@ PREVIEW_CREDITS_MAX_OVERLAP_MS = 10_000
 SEASON_INTRO_CHAPTERS_MIN_OTHERS = 2
 SEASON_INTRO_CHAPTER_MIN_MARGIN_MS = 30_000
 LONG_INTRO_CHAPTER_REASON = "Intro chapter is much longer than the rest of the season's"
+# Rule 3 for credits (2026-09-25 audit, Somebody Somewhere S03): a SkipDB answer against a credits chapter nothing else
+# agrees with has credit text read the file's frames; credit text with an independent source outvotes the chapter.
+TEXT_CHECKS_CHAPTER_REASON = "chapters contradicted by skipdb; waiting for credit text to check them"
+TEXT_OVER_CHAPTER_REASON = "credit text and agreeing sources contradict the chapters: "
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
 # independence group -- never two votes, whether or not they agree with each other.
 _INTRODB_GROUP = "introdb/theintrodb"
@@ -48,16 +59,18 @@ _INDEPENDENCE_GROUP = {
 # changes a result today: the other two restate the default above, spelled out so the AniSkip choice is a visible
 # decision, not a fallback someone "simplifies" away.
 _IMPORTED_GROUP = {"introdb": _INTRODB_GROUP, "skipdb": Source.SKIPDB.value, "aniskip": _INTRODB_GROUP}
-# At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): chapters, SkipDB's
-# duration-matched intros and recaps, credits text, which reads this file's own frames (owner, Q1, 2026-09-16), and
-# season audio's intros (owner, 2026-09-24, overriding R2: alone 91 useful / 13 wrong / 14 missed on 118 episodes,
-# against Plex's own 23 right / 15 wrong; "if it doesn't exist online then use the GPU/CPU check"). IntroDB takes no
-# duration, TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7). The
-# previous season's audio stays a hint: alone it was 48 useful / 10 wrong / 24 missed (precision 83 %), and the owner
-# ruled on 2026-09-13 that it needs a second source.
+# At "Medium" a lone source publishes only when it reads this file itself (rule 6): chapters, credits text, which reads
+# this file's own frames (owner, Q1, 2026-09-16), and season audio's intros (owner, 2026-09-24, overriding R2: alone 91
+# useful / 13 wrong / 14 missed on 118 episodes, against Plex's own 23 right / 15 wrong; "if it doesn't exist online
+# then use the GPU/CPU check"). IntroDB takes no duration and TheIntroDB answers the closest cut it has. SkipDB's
+# duration match proves the cut, not the segment's edges (2026-09-25 audit: Westworld S04E01/E07/E08 alone covered 20 s
+# of a 97 s title sequence, Outlander S08 ended 5-11 s late on 4 of 4 online cases), so it too waits for a check against
+# the file. Markers already on servers never decide alone (rule 7). The previous season's audio stays a hint: alone it
+# was 48 useful / 10 wrong / 24 missed (precision 83 %), and the owner ruled on 2026-09-13 that it needs a second source.
 _AGREEMENT_ONLY = SERVER_SOURCES | {
     Source.INTRODB,
     Source.THEINTRODB,
+    Source.SKIPDB,
     Source.SEASON_AUDIO_PREVIOUS,
 }
 # Season audio doesn't confirm markers already on a server on its own: a server's own intro detection matches audio across
@@ -110,7 +123,23 @@ _TIMED_ON_ANY_RELEASE_COPY = "introdb"
 # to these); none of 43 verified online intros is one.
 ONLINE_LOGO_BEFORE_MS = 2_000
 MIN_ONLINE_INTRO_AT_START_MS = 10_000
+# Credits or a preview of IntroDB, TheIntroDB or an importer plugin's copy of them run to the end of the release their
+# users timed, which can run a few seconds past this file's end (Game of Thrones: IntroDB 2.8-4.8 s past on 20 episodes;
+# S03E08/E09 and S05E06 start within 1 s of credit text). Up to this far past the end such an answer is clamped like any other; further,
+# the release's clock is off by as much (The Big Bang Theory S12E15: 9.8 s past, starting 8 s after the file's credits;
+# Daredevil S03E12 on the online set: 8 s past, 10 s early).
+ONLINE_END_PAST_FILE_MS = 5_000
+# An IntroDB or TheIntroDB intro with season audio's length (within the 5 s end tolerance) that starts more than this
+# far from it is the same intro on another release's clock (Westworld S03E03-E08: 50-80 s earlier, a release without
+# the episode's recap), not a contradiction (rule 14). A shift of a few seconds is two answers disagreeing about one
+# segment's edges (Daredevil S03, Invasion S03: season audio wrong), so it still disagrees.
+OTHER_RELEASE_MIN_SHIFT_MS = 15_000
+# Both must be at least this long: a short card matches a stretch of another length by chance (The Big Door Prize S02E03,
+# a 16 s title card beside a 15 s season audio answer elsewhere).
+OTHER_RELEASE_MIN_LENGTH_MS = 30_000
 SHORTENED_NOTE = "shortened to the server's own marker"
+# The reason of a type no source gave a candidate of (not even one failing sanity): nothing to go on.
+NO_EVIDENCE_REASON = "no evidence"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
 _ENUM_ORDER = {source: i for i, source in enumerate(Source)}
 
@@ -166,8 +195,8 @@ class TypeDecision:
 def resolve_end_ms(candidate: Candidate, duration_ms: int) -> int:
     """Resolve a candidate's end offset against the file duration.
 
-    Clamps to duration_ms when the candidate has no end or overshoots; the <= 2 s bound on how
-    much overshoot is tolerable is enforced by :func:`sanity_problem`, not here.
+    Clamps to duration_ms when the candidate has no end or overshoots; the bound on how much overshoot is tolerable
+    (2 s, or 5 s for online credits timed on another release) is enforced by :func:`sanity_problem`, not here.
 
     Args:
         candidate: The candidate whose end offset to resolve.
@@ -218,7 +247,7 @@ def _times_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
         return "starts past the end of the file"
     if candidate.end_ms is not None and candidate.end_ms < start:
         return "ends before it starts"
-    if candidate.end_ms is not None and candidate.end_ms > d + EOF_CLAMP_MS:
+    if candidate.end_ms is not None and candidate.end_ms > d + _end_allowance_ms(candidate):
         return "ends past the end of the file"
     end = resolve_end_ms(candidate, d)
     length = end - start
@@ -247,6 +276,14 @@ def _times_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
         ):
             return f"movie credits start more than {ctx.movie_credits_max_from_end_ms // 1000} s before the end"
     return None
+
+
+def _end_allowance_ms(candidate: Candidate) -> int:
+    """How far past the file's end a candidate may end and still be clamped to it: ``ONLINE_END_PAST_FILE_MS`` for
+    credits or a preview :func:`timed_on_any_release` (their end is another release's), ``EOF_CLAMP_MS`` otherwise."""
+    if candidate.type not in _START_SEGMENTS and timed_on_any_release(candidate):
+        return ONLINE_END_PAST_FILE_MS
+    return EOF_CLAMP_MS
 
 
 @dataclass(frozen=True)
@@ -496,7 +533,9 @@ def _marker_is_sane(marker: Marker, ctx: DecisionContext) -> bool:
     return _times_problem(probe, ctx) is None
 
 
-def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionContext) -> tuple[Marker, Candidate]:
+def _compose_cluster(
+    cluster: list[Candidate], mtype: MarkerType, ctx: DecisionContext, *, text_start: bool = False
+) -> tuple[Marker, Candidate]:
     """Build the marker a cluster of >= 2 independent groups would publish, and its time winner.
 
     Only confirming candidates (those agreeing with a member of a different independent group)
@@ -512,13 +551,19 @@ def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionC
 
     An intro's or recap's end: with a confirming source that reads this file (``_READS_THE_FILE``), an answer
     :func:`timed_on_any_release` doesn't supply it, whatever the order -- its times come from another release (South
-    Park S01: IntroDB's 30.0 s and season audio's 33.6 s agree, the theme ends at 35.5 s). Credits keep the order.
+    Park S01: IntroDB's 30.0 s and season audio's 33.6 s agree, the theme ends at 35.5 s). Credits keep the order, except
+    with ``text_start`` (a cluster weighed against a credits chapter, rule 3): a confirming credit text answer then
+    supplies the start, which it reads from this file's frames.
     """
     confirmed = [c for c in cluster if any(_group(o) != _group(c) and _agree(c, o, ctx.duration_ms) for o in cluster)]
     confirmed_non_server = [c for c in confirmed if c.source not in SERVER_SOURCES]
     rank = _sort_key(ctx)
     file_edge = mtype in _START_SEGMENTS and any(c.source in _READS_THE_FILE for c in confirmed_non_server)
-    winner = min(confirmed_non_server, key=lambda c: (file_edge and timed_on_any_release(c), rank(c)))
+
+    def winner_key(c: Candidate) -> tuple:
+        return file_edge and timed_on_any_release(c), text_start and c.source is not Source.CREDITS_TEXT, rank(c)
+
+    winner = min(confirmed_non_server, key=winner_key)
     other_edge, edge_suppliers = _safer_other_edge(mtype, confirmed, ctx)
     agreeing_with_winner = [c for c in confirmed if _agree(winner, c, ctx.duration_ms)]
     sources = {c.source for c in [winner, *edge_suppliers, *agreeing_with_winner]}
@@ -596,16 +641,32 @@ def _decide_from_chapters(
     An intro chapter longer than the season's limit (``ctx.intro_chapter_limit_ms``) needs one agreeing group instead
     of none, and not markers already on a server (a chapter they alone confirm still counts as chapters alone, rule
     7); the agreeing candidates then shorten the skip the same way and are always credited.
+
+    Credits (rule 3, 2026-09-25): a cluster holding credit text is weighed at credit text's start. When every cluster
+    that contradicts the chapter holds credit text and a source of another group that isn't a server's marker, they
+    decide instead of Needs review (:func:`_text_over_chapter`). A SkipDB answer contradicting a chapter nothing else
+    agrees with sends it to Needs review while credit text is among the sources and hasn't answered, so the file's frames
+    are read (``TEXT_CHECKS_CHAPTER_REASON``).
     """
     chosen = min(chapters, key=lambda c: _chapter_choice_key(c, ctx.duration_ms))
     chapter_marker = _own_marker(chosen, ctx)
     chapter_value = _checked_value(mtype, chapter_marker)
     tol = _tolerance_ms(mtype)
+    text_start = mtype is MarkerType.CREDITS
+    contradicting: list[tuple[list[Candidate], Marker]] = []
     for cluster in _agreeing_cliques(others, mtype, ctx):
-        other_marker, _ = _compose_cluster(cluster, mtype, ctx)
+        other_marker, _ = _compose_cluster(cluster, mtype, ctx, text_start=text_start)
         if abs(_checked_value(mtype, other_marker) - chapter_value) > tol:
-            names = ", ".join(other_marker.decided_by)
-            return _review(mtype, chapter_marker, f"chapters contradicted by agreeing sources: {names}")
+            contradicting.append((cluster, other_marker))
+    if contradicting:
+        if text_start:
+            overruled = _text_over_chapter([cluster for cluster, _ in contradicting], mtype, ctx)
+            if overruled is not None:
+                return overruled
+        names = ", ".join(contradicting[0][1].decided_by)
+        return _review(mtype, chapter_marker, f"chapters contradicted by agreeing sources: {names}")
+    if text_start and _text_should_check_chapter(chapter_value, others, ctx):
+        return _review(mtype, chapter_marker, TEXT_CHECKS_CHAPTER_REASON)
 
     marker = chapter_marker
     agreeing = [c for c in others if abs(_agree_value(c, ctx.duration_ms) - chapter_value) <= tol]
@@ -631,8 +692,45 @@ def _decide_from_chapters(
     return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "chapters")
 
 
-def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx: DecisionContext) -> TypeDecision:
-    composed = [_compose_cluster(cl, mtype, ctx) for cl in cliques]
+def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: DecisionContext) -> TypeDecision | None:
+    """Credits decided by the agreeing clusters that contradict a credits chapter, when each holds credit text and a
+    source of another group that isn't a server's marker (rule 3): the file's own frames and an independent answer
+    outvote the chapter (Somebody Somewhere S03E02-E07: HMAX "Credits" chapters 40-70 s late, credit text and SkipDB
+    within 2 s of the frame-checked start). The start is credit text's; the rest is composed as rule 4 composes.
+
+    Returns:
+        The decision, or None when a cluster lacks such a pair, the clusters disagree with each other, or the composed
+        marker fails sanity: the chapter then goes to Needs review as before.
+    """
+    for cluster in clusters:
+        if not any(c.source is Source.CREDITS_TEXT for c in cluster):
+            return None
+        if not any(c.source not in SERVER_SOURCES and _group(c) != Source.CREDITS_TEXT.value for c in cluster):
+            return None
+    decision = _decide_from_cliques(mtype, clusters, ctx, text_start=True)
+    if decision.status is not DecisionStatus.DECIDED:
+        return None
+    return replace(decision, reason=TEXT_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
+
+
+def _text_should_check_chapter(chapter_value: int, others: list[Candidate], ctx: DecisionContext) -> bool:
+    """Whether a credits chapter waits for credit text (rule 3): a SkipDB answer (or an importer plugin's copy of one)
+    starts more than the tolerance from it, nothing else agrees with it, credit text is among the sources and hasn't
+    answered. SkipDB matches this file's duration, so its disagreement is worth reading the frames for; one source
+    still never overrides a chapter. A server's marker made for an earlier file never reaches here (it confirms
+    nothing, :func:`decide`)."""
+    if Source.CREDITS_TEXT.value not in ctx.source_order or any(c.source is Source.CREDITS_TEXT for c in others):
+        return False
+    tol = _tolerance_ms(MarkerType.CREDITS)
+    if any(abs(c.start_ms - chapter_value) <= tol for c in others):
+        return False
+    return any(_group(c) == Source.SKIPDB.value for c in others)
+
+
+def _decide_from_cliques(
+    mtype: MarkerType, cliques: list[list[Candidate]], ctx: DecisionContext, *, text_start: bool = False
+) -> TypeDecision:
+    composed = [_compose_cluster(cl, mtype, ctx, text_start=text_start) for cl in cliques]
     values = [_checked_value(mtype, m) for m, _ in composed]
     if max(values) - min(values) > _tolerance_ms(mtype):
         rank = _sort_key(ctx)
@@ -642,31 +740,32 @@ def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx:
         return _review(mtype, ranked[0][0], f"agreeing sources conflict: {names}")
 
     merged = list({id(c): c for cl in cliques for c in cl}.values())
-    marker, winner = _compose_cluster(merged, mtype, ctx)
+    marker, winner = _compose_cluster(merged, mtype, ctx, text_start=text_start)
     if not _marker_is_sane(marker, ctx):
         return _review(mtype, _own_marker(winner, ctx), "agreeing sources disagree on the other edge")
     return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "sources agree: " + ", ".join(marker.decided_by))
 
 
 def _may_decide_alone(candidate: Candidate) -> bool:
-    """Whether a candidate's source checks this file's cut well enough to publish alone at "Medium" (rule 6): chapters,
-    credits text, season audio for intros, and SkipDB for intros and recaps.
+    """Whether a candidate's source reads this file well enough to publish alone at "Medium" (rule 6): chapters, credits
+    text, and season audio for intros.
 
-    SkipDB's duration match holds for intros and recaps, not for credits or previews: on the lab scale run every lone
-    SkipDB credits answer started early, some by minutes (Battlestar Galactica S04E05: 6.7 min of story). Season audio
-    was only ever measured on intros (its credits were rejected at 54 % precision), so only an intro of it decides.
+    Season audio was only ever measured on intros (its credits were rejected at 54 % precision), so only an intro of it
+    decides. SkipDB never does (``_AGREEMENT_ONLY``): its lone credits started early on the lab scale run, some by
+    minutes (Battlestar Galactica S04E05: 6.7 min of story), and its lone intros missed their edges in the 2026-09-25
+    audit.
     """
     if candidate.source in _AGREEMENT_ONLY:
         return False
     if candidate.source is Source.SEASON_AUDIO:
         return candidate.type is MarkerType.INTRO
-    return candidate.type in _START_SEGMENTS or candidate.source is not Source.SKIPDB
+    return True
 
 
 def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: DecisionContext) -> TypeDecision:
     """No two independent sources agree. Only "medium" may publish, and only a lone, self-consistent group that
-    checks this file's cut itself (not IntroDB/TheIntroDB, not the previous season's audio, not markers already on
-    servers; SkipDB only for an intro or recap, season audio only for an intro).
+    checks this file's cut itself (not IntroDB/TheIntroDB, not SkipDB, not the previous season's audio, not markers
+    already on servers; season audio only for an intro).
 
     Any second independent group here stops "medium" when it disagrees, or when it agrees without being able to
     form a cluster (a server's own markers and an importer plugin's copy). The one exception is G3's: markers already
@@ -764,7 +863,7 @@ def file_clock_may_matter(candidates: Iterable[Candidate], duration_ms: int) -> 
         if not others:
             continue
         outside = duration_ms > 0 and (
-            c.start_ms >= duration_ms or (c.end_ms is not None and c.end_ms > duration_ms + EOF_CLAMP_MS)
+            c.start_ms >= duration_ms or (c.end_ms is not None and c.end_ms > duration_ms + _end_allowance_ms(c))
         )
         if outside or not any(_agree(c, o, duration_ms) for o in others):
             return True
@@ -818,13 +917,53 @@ def _on_file_clock(of_type: list[Candidate], ctx: DecisionContext) -> list[Candi
     return out
 
 
+def _without_another_releases_intro(sane: list[Candidate], ctx: DecisionContext) -> list[Candidate]:
+    """The candidates without an intro or recap that is season audio's on another release's clock (rule 14).
+
+    An answer :func:`timed_on_any_release` is left out when, as it is, it agrees with no candidate of another group, and
+    a season audio answer (this season's, not the previous season's hint) has its length within the 5 s end tolerance,
+    a start more than ``OTHER_RELEASE_MIN_SHIFT_MS`` away, and both are at least ``OTHER_RELEASE_MIN_LENGTH_MS`` long.
+    Its times then say where the intro sits on a release with more or less before it, nothing about this file: it
+    neither confirms nor contradicts, so season audio decides as it would alone. Each answer is judged against the
+    candidates as they came, so the result doesn't depend on their order.
+
+    Args:
+        sane: One type's candidates as read on the file's clock (:func:`_on_file_clock`).
+        ctx: The file's context.
+
+    Returns:
+        ``sane`` without such answers.
+    """
+    audio = [c for c in sane if c.source is Source.SEASON_AUDIO]
+    if not audio:
+        return sane
+    d = ctx.duration_ms
+
+    def length(c: Candidate) -> int:
+        return resolve_end_ms(c, d) - c.start_ms
+
+    def on_another_clock(c: Candidate) -> bool:
+        if c.type not in _START_SEGMENTS or not timed_on_any_release(c):
+            return False
+        if any(_group(o) != _group(c) and _agree(c, o, d) for o in sane):
+            return False
+        return any(
+            min(length(c), length(a)) >= OTHER_RELEASE_MIN_LENGTH_MS
+            and abs(length(c) - length(a)) <= INTRO_END_TOLERANCE_MS
+            and abs(c.start_ms - a.start_ms) > OTHER_RELEASE_MIN_SHIFT_MS
+            for a in audio
+        )
+
+    return [c for c in sane if not on_another_clock(c)]
+
+
 def _decide_type(
     mtype: MarkerType, of_type: list[Candidate], sane: list[Candidate], ctx: DecisionContext
 ) -> TypeDecision:
     """One type's decision from its candidates (``of_type``) and those of them read on the file's clock (``sane``,
     :func:`_on_file_clock`)."""
     if not sane:
-        reason = "no evidence" if not of_type else f"{len(of_type)} candidate(s) failed sanity checks"
+        reason = NO_EVIDENCE_REASON if not of_type else f"{len(of_type)} candidate(s) failed sanity checks"
         return TypeDecision(mtype, DecisionStatus.NO_EVIDENCE, None, None, reason)
 
     chapters = [c for c in sane if c.source is Source.CHAPTERS]
@@ -981,7 +1120,7 @@ def decide(
             out[mtype] = TypeDecision(mtype, DecisionStatus.DISABLED, None, None, "detection off")
         else:
             of_type = [c for c in candidates if c.type is mtype]
-            on_clock[mtype] = _on_file_clock(of_type, ctx)
+            on_clock[mtype] = _without_another_releases_intro(_on_file_clock(of_type, ctx), ctx)
             out[mtype] = _decide_type(mtype, of_type, on_clock[mtype], ctx)
 
     _apply_overlap_demotions(out)

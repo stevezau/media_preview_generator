@@ -552,13 +552,21 @@ def _kept_on_server(
 
 
 def _expected(
-    server_type: ServerType, wanted: list[Marker], ours: tuple[Marker, ...], shown: list[dict], duration_ms: int
+    server_type: ServerType,
+    wanted: list[Marker],
+    ours: tuple[Marker, ...],
+    shown: list[dict],
+    duration_ms: int,
+    *,
+    other_versions: bool = False,
 ) -> list[dict]:
     """What the server should show once published, per type.
 
     Mirrors :func:`~.publishers.base.agreed_across_versions`, which is the rule that decides it: the Plex publisher
-    keeps (and writes back) what is already ours on the item when it agrees with the decision within its version
-    tolerance, **except for a locked type**, whose own times are written however close they are.
+    keeps (and writes back) what is already ours on an item with ``other_versions`` when it agrees with the decision
+    within its version tolerance, **except for a locked type**, whose own times are written however close they are. A
+    one-version item shows what was decided. An item whose versions couldn't be counted is read as one version: "will
+    replace" where the publisher may keep is the safe way round.
 
     This never reads sibling versions, so every part of the publisher's rule that depends on them can differ. The
     locked exception ending when the item shows a locked version's exact times reads as "will replace" where the
@@ -571,7 +579,7 @@ def _expected(
         want = [m for m in wanted if m.type is mtype]
         kept = [m for m in ours if m.type is mtype]
         locked = any(m.locked for m in want)
-        if server_type is ServerType.PLEX and not locked and kept and versions_agree(kept, want):
+        if server_type is ServerType.PLEX and other_versions and not locked and kept and versions_agree(kept, want):
             expected.extend(_marker_dict(m) for m in kept)
         else:
             expected.extend(_marker_dict(m) for m in want)
@@ -590,6 +598,7 @@ def _plan(
     keep_own: bool = False,
     recorded_kept: frozenset[MarkerType] = frozenset(),
     kept_own: frozenset[MarkerType] = frozenset(),
+    other_versions: bool = False,
 ) -> tuple[str, str]:
     if off_reason:
         return "not_enabled", off_reason
@@ -631,7 +640,7 @@ def _plan(
     # Only the types we manage here: Plex keeps its own marker of a type we didn't decide.
     managed = {m.type.value for m in wanted} | {m.type.value for m in ours}
     shown = [c for c in current if c["type"] in managed]
-    expected = _expected(server_type, wanted, ours, shown, duration_ms)
+    expected = _expected(server_type, wanted, ours, shown, duration_ms, other_versions=other_versions)
     if server_type is ServerType.JELLYFIN:
         # Jellyfin serves every provider's segments side by side: another provider's beside ours changes nothing
         # (the job reads ours as shown and sends nothing).
@@ -684,6 +693,7 @@ def _server_row(
         and {m.type for m in wanted} - {m.type for m in item_state.markers} - item_state.kept_types
     )
     current = _current(server, cfg, item_id, can_show)
+    version_count = _version_count(server, cfg, item_id)
     plan, reason = _plan(
         server_type=cfg.type,
         off_reason=off_reason,
@@ -700,6 +710,7 @@ def _server_row(
             for mtype, d in (store.get_decisions(rec.id) if rec else {}).items()
             if is_kept_own(d.status, d.reason)
         ),
+        other_versions=(version_count or 0) > 1,
     )
     return {
         "server_id": cfg.id,
@@ -716,7 +727,7 @@ def _server_row(
         "item_status": item_state.status if item_state else None,
         "plan": plan,
         "plan_reason": reason,
-        "version_count": _version_count(server, cfg, item_id),
+        "version_count": version_count,
         "error": None,
     }
 

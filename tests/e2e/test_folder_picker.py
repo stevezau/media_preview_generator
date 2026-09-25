@@ -11,6 +11,7 @@ from ._mocks import (
     mock_setup_status,
     mock_validate_plex_config_folder,
 )
+from .conftest import expect_modal_shown, watch_modal_shown
 
 
 def _open_picker_via_wizard(page: Page, app_url: str) -> None:
@@ -29,8 +30,10 @@ def _open_picker_via_wizard(page: Page, app_url: str) -> None:
     page.locator(".library-card").first.click()
     page.locator("#step2Next").click()
     expect(page.locator('div.setup-step[data-step="3"]')).to_have_class("setup-step active")
+    watch_modal_shown(page, "folderPickerModal")  # Pick and ✕ are ignored while it opens
     page.locator("#wizardPlexConfigFolderBrowseBtn").click()
     expect(page.locator("#folderPickerModal")).to_be_visible(timeout=2000)
+    expect_modal_shown(page, "folderPickerModal")
 
 
 def _wizard_mocks(page: Page) -> None:

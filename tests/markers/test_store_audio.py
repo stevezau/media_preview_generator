@@ -109,6 +109,49 @@ class TestSeasonPairs:
         _pair(store, a, b, [])
         assert store.get_season_pair(a.id, b.id, 3) == []
 
+    def test_each_version_of_a_pair_is_kept(self, store):
+        # Season audio matches a file at another frame rate than most of its season at both speeds to tell which one
+        # its audio plays at: both answers stay cached, neither replaces the other.
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _fp(store, a), _fp(store, b)
+        _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)], version=8)
+        _pair(store, a, b, [], version=3008)
+        assert store.get_season_pair(a.id, b.id, 8) == [(1.0, 2.0, 3.0, 4.0)]
+        assert store.get_season_pair(a.id, b.id, 3008) == []
+        _pair(store, a, b, [(5.0, 6.0, 7.0, 8.0)], version=8)
+        assert store.get_season_pair(a.id, b.id, 8) == [(5.0, 6.0, 7.0, 8.0)]
+        assert store.get_season_pair(a.id, b.id, 3008) == []
+
+    def test_caching_a_pair_drops_its_rows_of_another_season_audio_version(self, store):
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _fp(store, a), _fp(store, b)
+        _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)], version=7)
+        _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)], version=2007)
+        _pair(store, a, b, [], version=8)
+        assert store.get_season_pair(a.id, b.id, 7) is None and store.get_season_pair(a.id, b.id, 2007) is None
+        _pair(store, a, b, [], version=1008)
+        assert store.get_season_pair(a.id, b.id, 8) == [] and store.get_season_pair(a.id, b.id, 1008) == []
+        with store._lock:
+            assert store._conn.execute("SELECT COUNT(*) FROM season_pair_runs").fetchone()[0] == 2
+
+    def test_a_database_with_the_old_one_row_per_pair_cache_drops_it(self, tmp_path):
+        path = tmp_path / "markers.db"
+        MarkerStore(str(path)).close()
+        with sqlite3.connect(path) as older_build:
+            older_build.execute("DROP TABLE IF EXISTS season_pairs")
+            older_build.execute(
+                "CREATE TABLE season_pairs (file_a INTEGER NOT NULL, file_b INTEGER NOT NULL, "
+                "matcher_version INTEGER NOT NULL, runs_json TEXT NOT NULL, PRIMARY KEY (file_a, file_b))"
+            )
+            older_build.execute("INSERT INTO season_pairs VALUES (1, 2, 7, '[]')")
+        reopened = MarkerStore(str(path))
+        try:
+            with reopened._lock:
+                tables = {r[0] for r in reopened._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            reopened.close()
+        assert "season_pairs" not in tables and "season_pair_runs" in tables
+
     def test_refused_when_a_fingerprint_is_gone(self, store):
         a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
         _fp(store, a)
