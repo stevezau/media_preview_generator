@@ -63,6 +63,9 @@ _Y_BYTES = FRAME_W * FRAME_H
 # Every showinfo line is matched, `pts_time:NOPTS` included: a line that can't be read has to drop its own frame's row,
 # never shift later frames onto an earlier frame's timestamp.
 _PTS_RE = re.compile(rb"pts_time:(\S+)")
+# The input's video stream as ffmpeg lists it: "Stream #0:0(eng): Video: hevc (Main 10), yuv420p10le, ...".
+_VIDEO_STREAM_RE = re.compile(r"Stream #\d+:\d+\S*: Video: (\w+)")
+_CODEC_NAMES = {"h264": "H.264", "mpeg2video": "MPEG-2", "mpeg4": "MPEG-4", "vc1": "VC-1"}
 # The GPUs whose decoded frames stay surfaces for the filter graph to download (CUDA, and VAAPI on Intel and AMD);
 # any other GPU decodes and lets ffmpeg download each frame itself, as it does for a stream whose surface format isn't
 # known (``DOWNLOAD_FORMATS``).
@@ -549,10 +552,11 @@ def run_decode(
         stderr_file.seek(0)
         stderr = stderr_file.read()
     if returncode != 0:
-        tail = stderr.decode("utf-8", "replace").strip()[-300:]
-        where = "on the GPU" if hw_active else "on the CPU"
-        error = GpuDecodeError if hw_active else FrameDecodeError
-        raise error(f"ffmpeg exited {returncode} decoding {name} {where}: {tail}")
+        lines = [line for line in stderr.decode("utf-8", "replace").splitlines() if "pts_time:" not in line]
+        logger.debug("ffmpeg exited {} decoding {}; its last lines: {}", returncode, name, "\n".join(lines[-8:]))
+        if hw_active:
+            raise GpuDecodeError(_gpu_failure(returncode, lines, name))
+        raise FrameDecodeError(_with_ffmpegs_error(f"ffmpeg exited {returncode} decoding {name} on the CPU", lines))
     if not boxes and hw_active:
         raise GpuDecodeError(f"the GPU decoded no frames from {name}")
     pts = [_parse_pts(value, pts_offset_s) for value in _PTS_RE.findall(stderr)]
@@ -564,6 +568,57 @@ def run_decode(
     if len(rows) != len(boxes):
         logger.warning("{} frames of {} have no timestamp and are dropped", len(boxes) - len(rows), name)
     return rows
+
+
+def _gpu_failure(returncode: int, stderr_lines: list[str], name: str) -> str:
+    """Why a GPU decode failed, as previews names the same failure before its CPU rerun (``_gpu_hand_off``).
+
+    Every GPU failure is rerun on the CPU, as before; this only words it. Previews' classifier judges the exit code and
+    stderr (an unsupported codec, a hardware accelerator error, an I/O error, a signal); a failure it names none of
+    (a stall or a part-way stop can't come from here) quotes ffmpeg's error line.
+    """
+    from ...processing.generator import (
+        FALLBACK_CODEC,
+        FALLBACK_HWACCEL,
+        FALLBACK_IO_ERROR,
+        FALLBACK_SIGNAL,
+        _gpu_hand_off,
+    )
+
+    hand_off = _gpu_hand_off(returncode, stderr_lines, stderr_lines, stopped_part_way=False)
+    kind = hand_off[0] if hand_off else None
+    if kind == FALLBACK_CODEC:
+        codec = _video_codec(stderr_lines)
+        video = f"{codec} video" if codec else "video"
+        return f"the GPU can't decode this file's {video} (ffmpeg exited {returncode})"
+    if kind == FALLBACK_HWACCEL:
+        return f"the GPU's decoder hit a hardware or driver error (ffmpeg exited {returncode})"
+    if kind == FALLBACK_IO_ERROR:
+        return (
+            f"ffmpeg couldn't read the file (an I/O error, ffmpeg exited {returncode}); if this keeps happening, "
+            "check the disk or network share it is on"
+        )
+    if kind == FALLBACK_SIGNAL:
+        return f"ffmpeg was stopped by a signal (exit {returncode})"
+    return _with_ffmpegs_error(f"ffmpeg exited {returncode} decoding {name} on the GPU", stderr_lines)
+
+
+def _video_codec(stderr_lines: list[str]) -> str | None:
+    """The decoded video stream's codec as people know it (AV1, HEVC, H.264), from ffmpeg's listing of the input."""
+    for line in stderr_lines:
+        found = _VIDEO_STREAM_RE.search(line)
+        if found:
+            codec = found.group(1)
+            return _CODEC_NAMES.get(codec, codec.upper())
+    return None
+
+
+def _with_ffmpegs_error(message: str, stderr_lines: list[str]) -> str:
+    """``message`` with the error line ffmpeg ended on, whole (previews' ``_extract_ffmpeg_error_summary``)."""
+    from ...processing.generator import _extract_ffmpeg_error_summary
+
+    error = _extract_ffmpeg_error_summary(stderr_lines)
+    return f"{message}: {error}" if error else message
 
 
 def decode_rows(
