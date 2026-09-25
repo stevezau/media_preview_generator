@@ -457,8 +457,12 @@ class TestRequeueInterruptedOnStartup:
 
         jm = mock_get_job_manager.return_value
         jm.requeue_interrupted_jobs.assert_not_called()
-        # Nothing is revived, so Intro & Credits jobs left PENDING are settled instead of blocking their schedule.
-        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        # Nothing is revived, so jobs left PENDING are settled: Intro & Credits ones would block their schedule,
+        # preview ones would be started by the next resume.
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         mock_start_job.assert_not_called()
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -470,13 +474,17 @@ class TestRequeueInterruptedOnStartup:
             "auto_requeue_on_restart": "true",
             "requeue_max_age_minutes": "45",
         }.get(key, default)
+        mock_get_settings_manager.return_value.processing_paused = False
         requeued_job = type("RequeuedJob", (), {"id": "job-123", "config": {"foo": "bar"}})()
         mock_get_job_manager.return_value.requeue_interrupted_jobs.return_value = [requeued_job]
 
         _requeue_interrupted_on_startup("/tmp/config")
 
         mock_get_job_manager.return_value.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=45)
-        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        assert [c.args for c in mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         mock_start_job.assert_called_once_with("job-123", {"foo": "bar"})
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -500,6 +508,9 @@ class TestRequeueInterruptedOnStartup:
 
         assert sm.processing_paused is True, "an explicit pause must survive the restart"
         mock_start_job.assert_called_once_with("job-456", {})
+        # Older preview jobs are held by the pause too: left PENDING for Resume, not settled.
+        jm = mock_get_job_manager.return_value
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [("intro_credits",)]
 
     @pytest.mark.parametrize("auto_requeue", [True, False])
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -527,7 +538,10 @@ class TestRequeueInterruptedOnStartup:
         finally:
             logger.remove(sink)
 
-        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         if auto_requeue:
             mock_start_job.assert_called_once_with("job-123", {"a": 1})
         else:
@@ -549,13 +563,17 @@ class TestRequeueInterruptedOnStartup:
             "auto_requeue_on_restart": True,
             "requeue_max_age_minutes": 30,
         }.get(key, default)
+        mock_get_settings_manager.return_value.processing_paused = False
         jm = mock_get_job_manager.return_value
         jm.requeue_interrupted_jobs.return_value = []
 
         _requeue_interrupted_on_startup("/tmp/config")
 
         jm.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=30)
-        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("previews",),
+        ]
         mock_start_job.assert_not_called()
 
     @patch("media_preview_generator.markers.job_runner.pass_on_requests_of_unrevived_jobs")
@@ -1021,3 +1039,47 @@ class TestWeeklyOnlineRecheckOnStart:
             patch(self.SCHEDULE, side_effect=OSError("markers.db is locked")),
         ):
             _schedule_weekly_online_recheck(str(tmp_path))  # never raises
+
+
+class TestVersionRerunsOnStart:
+    """Every start queues the first batch of files whose answers rest on an older detector version
+    (``markers.triggers.submit_version_reruns``), after the restart requeue so a revived batch is found."""
+
+    SUBMIT = "media_preview_generator.markers.triggers.submit_version_reruns"
+
+    def test_create_app_queues_it_after_the_restart_requeue(self, tmp_path, monkeypatch):
+        import media_preview_generator.web.app as app_mod
+
+        order = []
+        monkeypatch.setattr(app_mod, "_requeue_interrupted_on_startup", lambda config_dir: order.append("requeue"))
+        monkeypatch.setattr(
+            app_mod, "_read_again_after_detector_updates", lambda config_dir: order.append(("read", config_dir))
+        )
+        config_dir = str(tmp_path / "config")
+        os.makedirs(config_dir, exist_ok=True)
+        with patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}):
+            app_mod.create_app(config_dir=config_dir)
+        assert order == ["requeue", ("read", config_dir)]
+
+    @pytest.mark.parametrize("enabled", [True, False], ids=["on-somewhere", "off-everywhere"])
+    def test_it_queues_only_while_intro_and_credits_is_on_somewhere(self, tmp_path, enabled):
+        from media_preview_generator.web.app import _read_again_after_detector_updates
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        servers = [{"id": "jf-1", "type": "jellyfin", "enabled": True, "markers": {"enabled": enabled}}]
+        get_settings_manager(str(tmp_path)).apply_changes(updates={"media_servers": servers})
+        with patch(self.SUBMIT) as submit:
+            _read_again_after_detector_updates(str(tmp_path))
+        # Off everywhere: markers.db isn't opened.
+        assert submit.call_count == int(enabled)
+        if enabled:
+            submit.assert_called_once_with()  # no gap: the first batch starts as soon as a slot is free
+
+    def test_a_failure_never_stops_the_start(self, tmp_path):
+        from media_preview_generator.web.app import _read_again_after_detector_updates
+
+        with (
+            patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=True),
+            patch(self.SUBMIT, side_effect=OSError("markers.db is locked")),
+        ):
+            _read_again_after_detector_updates(str(tmp_path))  # never raises

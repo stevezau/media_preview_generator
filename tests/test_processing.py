@@ -643,11 +643,12 @@ class TestMultiServerGuards:
             patch(f"{MODULE}.WorkerPool") as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            # Simulate dispatch returning FAILED for the item.
-            MockPool.return_value.process_items_headless.return_value = _pool_result(
-                completed=0,
-                failed=1,
-            )
+            # Simulate dispatch returning FAILED for the item, named by its
+            # (server-view) canonical path as the pool reports it.
+            MockPool.return_value.process_items_headless.side_effect = lambda items, *a, **kw: {
+                **_pool_result(completed=0, failed=1),
+                "failed_paths": [item.canonical_path for item in items],
+            }
             mock_sm.return_value.get.return_value = [
                 {
                     "id": "plex-1",

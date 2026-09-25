@@ -3,7 +3,10 @@ the nth box at ``[n, 2n, n + 10, 2n + 12]`` so a test can tell the positions apa
 
     python fake_textdet_helper.py --backend cpu|webgpu --mode MODE [--idle-exit-s S] [--no-selftest]
 
-Modes: ok, selftest-cpu, crash-on-request, crash-after-reply, idle-exit-on-request, idle-exit-slow-shutdown
+Modes: ok, slow (each answer takes 0.5 s), held (each answer waits until the file $FAKE_RELEASE_FILE exists),
+selftest-cpu (the self-test found other boxes than the CPU),
+software-adapter (WebGPU would run on llvmpipe), session-failed (the WebGPU session failed: not a verdict on the GPU),
+crash-on-request, crash-after-reply, idle-exit-on-request, idle-exit-slow-shutdown
 (closes its pipes on a request, then takes 0.5 s to exit 75, so the answer stream ends before poll() has a code),
 hang-on-request, hang-start, bad-ready, hang-on-exit, error-reply, hold-stdin (never reads; a process in its own
 session keeps stdin open after a kill, its pid written to $FAKE_HOLDER_PID_FILE), hang-with-child (hangs on a request
@@ -46,29 +49,24 @@ def main() -> int:
         out.flush()
         time.sleep(3600)
     webgpu = args.backend == "webgpu"
-    backend = "cpu" if args.mode == "selftest-cpu" else args.backend
+    on_cpu = webgpu and args.mode in ("selftest-cpu", "software-adapter", "session-failed")
+    backend = "cpu" if on_cpu else args.backend
     selftest = (
         None
-        if (not webgpu or args.no_selftest)
-        else {
-            "gpu_ms": 20.0 if backend == "cpu" else 9.0,
-            "cpu_ms": 18.0,
-            "ratio": 1.1111 if backend == "cpu" else 0.5,
-            "same_boxes": True,
-        }
+        if (not webgpu or args.no_selftest or args.mode in ("software-adapter", "session-failed"))
+        else {"gpu_ms": 9.0, "cpu_ms": 18.0, "ratio": 0.5, "same_boxes": args.mode != "selftest-cpu"}
     )
-    send(
-        out,
-        {
-            "ready": True,
-            "backend": backend,
-            "selftest": selftest,
-            "reason": "the GPU wasn't at least 10% faster than the CPU "
-            "(median 20.0 vs 18.0 ms per frame; GPU/CPU 1.1111 per round)"
-            if backend != args.backend
-            else "",
-        },
-    )
+    ready = {"ready": True, "backend": backend, "selftest": selftest, "reason": ""}
+    if on_cpu:
+        ready["reason"] = {
+            "selftest-cpu": "the GPU was finding different boxes than the CPU",
+            "software-adapter": "WebGPU would run on llvmpipe (LLVM 19.1.1, 256 bits), a software renderer, "
+            "not on this GPU",
+            "session-failed": "the WebGPU session failed: RuntimeError: the device was lost",
+        }[args.mode]
+    if args.mode == "session-failed":
+        ready["failed"] = True
+    send(out, ready)
     stdin = sys.stdin.buffer
     if args.mode == "hold-stdin":
         holder = subprocess.Popen(["sleep", "60"], start_new_session=True)
@@ -106,6 +104,12 @@ def main() -> int:
             os._exit(75)
         if args.mode in ("hang-on-request", "hang-with-child"):
             time.sleep(3600)
+        if args.mode == "slow":
+            time.sleep(0.5)
+        if args.mode == "held":
+            deadline = time.monotonic() + 60
+            while not os.path.exists(os.environ["FAKE_RELEASE_FILE"]) and time.monotonic() < deadline:
+                time.sleep(0.02)
         if args.mode == "error-reply":
             send(out, {"id": request["id"], "error": "boom"})
             continue

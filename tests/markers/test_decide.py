@@ -933,13 +933,13 @@ class TestSingleSource:
     @pytest.mark.parametrize(
         ("cands", "medium", "reason"),
         [
-            # the source checks this file's cut itself: SkipDB answers only a duration match, credit text reads
-            # the file. Only "high" (the evaluation harness; the app decides at "medium") holds them back.
+            # SkipDB's duration match proves the cut, not the edges (2026-09-25): an online answer like IntroDB's
             (
                 [intro(S.SKIPDB, 127_000, 157_000)],
-                DecisionStatus.DECIDED,
-                'only SkipDB found the intro; at "high" a second source must agree',
+                DecisionStatus.NEEDS_REVIEW,
+                "only SkipDB has the intro; an online answer needs a check against the file",
             ),
+            # credit text reads the file. Only "high" (the evaluation harness; the app decides at "medium") holds it back.
             (
                 [intro(S.CREDITS_TEXT, 127_000, 157_000)],
                 DecisionStatus.DECIDED,
@@ -1024,14 +1024,14 @@ class TestMediumContradiction:
 
     @pytest.mark.parametrize("other", [S.THEINTRODB, S.SEASON_AUDIO, S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
     def test_contradicting_independent_source_blocks_medium_single_source(self, other):
-        cands = [intro(S.SKIPDB, 10_000, 40_000), intro(other, 100_000, 130_000, "plex-1")]
+        cands = [intro(S.CREDITS_TEXT, 10_000, 40_000), intro(other, 100_000, 130_000, "plex-1")]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
         first = min(cands, key=lambda c: ORDER.index(c.source.value))
         assert d.proposed == Marker(T.INTRO, first.start_ms, first.end_ms, (first.source.value,))
         crowd = other in (S.THEINTRODB, S.SERVER_MARKERS_IMPORTED)
-        groups = sorted({"skipdb", "introdb/theintrodb" if crowd else other.value})
+        groups = sorted({"credits_text", "introdb/theintrodb" if crowd else other.value})
         assert d.reason == f"sources disagree: {', '.join(groups)}"
 
     def test_agreeing_server_marker_decides_with_any_source(self):
@@ -1045,19 +1045,19 @@ class TestMediumContradiction:
     @pytest.mark.parametrize(
         ("low_end", "high_end", "expected", "reason"),
         [
-            (98_000, 102_000, DecisionStatus.DECIDED, "single source (skipdb)"),
-            # each other SkipDB end is within 5s of the first's, but 8s from the other one
+            (98_000, 102_000, DecisionStatus.DECIDED, "single source (season_audio)"),
+            # each other season audio end is within 5s of the first's, but 8s from the other one
             (96_000, 104_000, DecisionStatus.NEEDS_REVIEW, "source disagrees with itself"),
         ],
     )
     def test_every_pair_of_a_single_sources_candidates_must_agree_at_medium(self, low_end, high_end, expected, reason):
         cands = [
-            Candidate(T.INTRO, 60_000, 100_000, S.SKIPDB, confidence=1.0),
-            Candidate(T.INTRO, 60_000, low_end, S.SKIPDB, confidence=0.5),
-            Candidate(T.INTRO, 60_000, high_end, S.SKIPDB, confidence=0.5),
+            Candidate(T.INTRO, 60_000, 100_000, S.SEASON_AUDIO, confidence=1.0),
+            Candidate(T.INTRO, 60_000, low_end, S.SEASON_AUDIO, confidence=0.5),
+            Candidate(T.INTRO, 60_000, high_end, S.SEASON_AUDIO, confidence=0.5),
         ]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
-        own = Marker(T.INTRO, 60_000, 100_000, ("skipdb",))
+        own = Marker(T.INTRO, 60_000, 100_000, ("season_audio",))
         assert d.status is expected
         assert d.reason == reason
         if expected is DecisionStatus.DECIDED:
@@ -1069,8 +1069,8 @@ class TestMediumContradiction:
     @pytest.mark.parametrize(
         ("longer", "shorter"),
         [
-            (intro(S.SKIPDB, 10_000, 100_000), intro(S.SKIPDB, 80_000, 100_000)),
-            # SkipDB never decides credits alone (rule 6), so a local detector stands in for the credits row
+            # SkipDB never decides alone (rule 6), so the sources that read the file stand in
+            (intro(S.SEASON_AUDIO, 10_000, 100_000), intro(S.SEASON_AUDIO, 80_000, 100_000)),
             (credits(S.CREDITS_TEXT, 1_300_000), credits(S.CREDITS_TEXT, 1_300_000, 1_310_000)),
         ],
     )
@@ -1099,18 +1099,20 @@ class TestMediumContradiction:
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
         assert d.proposed == Marker(shorter.type, shorter.start_ms, shorter.end_ms, ("skipdb",))
-        if longer.type is T.INTRO:  # SkipDB may decide an intro alone at "medium", never credits (rule 6)
-            assert d.reason == 'only SkipDB found the intro; at "high" a second source must agree'
-        else:
-            assert d.reason == "only SkipDB has the credits; an online answer needs a check against the file"
+        # SkipDB never decides alone (rule 6), whatever the type
+        why = f"only SkipDB has the {longer.type.value}; an online answer needs a check against the file"
+        assert d.reason == why
 
     @pytest.mark.parametrize(
         ("cands", "marker"),
         [
             # the other answer says the intro starts 70s later: that later start wins
             (
-                [Candidate(T.INTRO, 10_000, 100_000, S.SKIPDB), Candidate(T.INTRO, 80_000, 100_000, S.SKIPDB, 0.5)],
-                Marker(T.INTRO, 80_000, 100_000, ("skipdb",)),
+                [
+                    Candidate(T.INTRO, 10_000, 100_000, S.SEASON_AUDIO),
+                    Candidate(T.INTRO, 80_000, 100_000, S.SEASON_AUDIO, 0.5),
+                ],
+                Marker(T.INTRO, 80_000, 100_000, ("season_audio",)),
             ),
             (
                 [
@@ -1130,15 +1132,18 @@ class TestMediumContradiction:
 
     def test_medium_composed_marker_failing_sanity_needs_review(self):
         # the other answer's later start (98s) with the first's end (100s) leaves a 2s segment
-        cands = [Candidate(T.INTRO, 60_000, 100_000, S.SKIPDB), Candidate(T.INTRO, 98_000, 101_000, S.SKIPDB, 0.5)]
+        cands = [
+            Candidate(T.INTRO, 60_000, 100_000, S.SEASON_AUDIO),
+            Candidate(T.INTRO, 98_000, 101_000, S.SEASON_AUDIO, 0.5),
+        ]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
-        assert d.proposed == Marker(T.INTRO, 60_000, 100_000, ("skipdb",))
+        assert d.proposed == Marker(T.INTRO, 60_000, 100_000, ("season_audio",))
         assert d.reason == "sources disagree on the other edge"
 
     def test_single_source_disagreeing_with_its_own_duplicate_does_not_decide_at_medium(self):
-        cands = [intro(S.SKIPDB, 10_000, 40_000), intro(S.SKIPDB, 100_000, 130_000)]
+        cands = [intro(S.SEASON_AUDIO, 10_000, 40_000), intro(S.SEASON_AUDIO, 100_000, 130_000)]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
@@ -1150,33 +1155,10 @@ class TestMediumContradiction:
         assert d.status is DecisionStatus.NEEDS_REVIEW and d.marker is None
 
 
-class TestMediumSkipDbAlone:
-    """Rule 6: at "Medium" SkipDB alone may decide an intro or recap, never credits or a preview (lab scale run: every
-    lone SkipDB credits answer started early, Battlestar Galactica S04E05 by 6.7 min)."""
-
-    @pytest.mark.parametrize(
-        ("cand", "medium"),
-        [
-            (intro(S.SKIPDB, 127_000, 157_000), DecisionStatus.DECIDED),
-            (Candidate(T.RECAP, 20_000, 60_000, S.SKIPDB), DecisionStatus.DECIDED),
-            (credits(S.SKIPDB, 1_239_000, 1_300_000), DecisionStatus.NEEDS_REVIEW),
-            (Candidate(T.PREVIEW, 1_290_000, 1_310_000, S.SKIPDB), DecisionStatus.NEEDS_REVIEW),
-        ],
-        ids=["intro", "recap", "credits", "preview"],
-    )
-    def test_skipdb_alone_decides_only_intros_and_recaps_at_medium(self, cand, medium):
-        own = Marker(cand.type, cand.start_ms, cand.end_ms, ("skipdb",))
-        for publish_when, expected in (("high", DecisionStatus.NEEDS_REVIEW), ("medium", medium)):
-            d = decide([cand], ctx(publish_when, types=(cand.type,)), {})[cand.type]
-            assert d.status is expected, publish_when
-            if expected is DecisionStatus.DECIDED:
-                assert (d.marker, d.proposed, d.reason) == (own, None, "single source (skipdb)")
-            elif cand.type in (T.INTRO, T.RECAP):
-                why = f'only SkipDB found the {cand.type.value}; at "high" a second source must agree'
-                assert (d.marker, d.proposed, d.reason) == (None, own, why)
-            else:
-                why = f"only SkipDB has the {cand.type.value}; an online answer needs a check against the file"
-                assert (d.marker, d.proposed, d.reason) == (None, own, why)
+class TestMediumSkipDbWithAnotherSource:
+    """Rule 6: SkipDB alone never decides (lab scale run: every lone SkipDB credits answer started early, Battlestar
+    Galactica S04E05 by 6.7 min; 2026-09-25 audit: lone intros missed their edges, ``TestALoneSkipDbAnswerNeverDecides``),
+    but it still decides with an agreeing independent source."""
 
     def test_skipdb_credits_still_decide_with_an_agreeing_independent_source_at_medium(self):
         cands = [credits(S.SKIPDB, 1_239_000), credits(S.CREDITS_TEXT, 1_243_000, 1_300_000)]
@@ -1847,9 +1829,12 @@ _REF_SOURCES = list(S)
 # Rule 7: markers already on servers (an importer plugin's copy included) confirm and may shorten, never decide alone;
 # they only move the checked edge of an already decided marker toward a shorter skip.
 _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
-# Rule 6: at "Medium" these only agree -- they don't check this file's cut, or (the previous season's audio, owner
-# 2026-09-13) are a hint. This season's audio decides an intro alone (owner 2026-09-24, overriding R2).
-_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SEASON_AUDIO_PREVIOUS)
+# Rule 6: at "Medium" these only agree -- they don't read this file (SkipDB's duration match proves the cut, not the
+# edges: 2026-09-25 audit), or (the previous season's audio, owner 2026-09-13) are a hint. This season's audio decides
+# an intro alone (owner 2026-09-24, overriding R2).
+_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SKIPDB, S.SEASON_AUDIO_PREVIOUS)
+_REF_TEXT_WAITS = "chapters contradicted by skipdb; waiting for credit text to check them"
+_REF_TEXT_WINS = "credit text and agreeing sources contradict the chapters"
 _REF_LONG_INTRO_CHAPTER = "Intro chapter is much longer than the rest of the season's"
 _REF_AUDIO = (S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
 _REF_AUDIO_WITH_SERVER = (
@@ -1943,7 +1928,9 @@ def _ref_times_sane(c, x):
     d, start = x.duration_ms, c.start_ms
     if d <= 0 or start < 0 or start >= d:
         return False
-    if c.end_ms is not None and (c.end_ms < start or c.end_ms > d + 2_000):
+    # Credits or a preview timed on another release may end up to 5 s past this file (2026-09-25); anything else 2 s.
+    past = 5_000 if c.type not in _REF_START_TYPES and _ref_timed_on_any_release(c) else 2_000
+    if c.end_ms is not None and (c.end_ms < start or c.end_ms > d + past):
         return False
     end = _ref_end(c, d)
     if end - start < 3_000:
@@ -2008,16 +1995,25 @@ def _ref_agreeing_sets(cands, x):
     return sorted(sets, key=lambda s: min(_ref_value(c, d) for c in s))
 
 
-def _ref_compose(members, mtype, x):
+def _ref_compose(members, mtype, x, text_start=False):
     d = x.duration_ms
     confirmed = [c for c in members if any(_ref_group(o) != _ref_group(c) and _ref_agree(c, o, d) for o in members)]
     suppliers = [c for c in confirmed if c.source not in _REF_SERVER]
     # Checked edge: the best-ranked agreeing non-server candidate (source order first); other edge: the safer value of
     # every confirmed candidate, server markers included (they may shorten the skip). An intro's or recap's end comes
-    # from a source that reads this file when one agrees: IntroDB's and TheIntroDB's times are another release's.
+    # from a source that reads this file when one agrees: IntroDB's and TheIntroDB's times are another release's. Weighed
+    # against a credits chapter (text_start), a set's start is credit text's when it holds one.
     reads_file = (S.CHAPTERS, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS, S.CREDITS_TEXT)
     file_edge = mtype in _REF_START_TYPES and any(c.source in reads_file for c in suppliers)
-    winner = min(suppliers, key=lambda c: (file_edge and _ref_timed_on_any_release(c), _ref_rank(c, x)))
+    text_first = text_start and any(c.source is S.CREDITS_TEXT for c in suppliers)
+    winner = min(
+        suppliers,
+        key=lambda c: (
+            file_edge and _ref_timed_on_any_release(c),
+            text_first and c.source is not S.CREDITS_TEXT,
+            _ref_rank(c, x),
+        ),
+    )
     if mtype in _REF_START_TYPES:
         start, end = max(c.start_ms for c in confirmed), _ref_end(winner, d)
         edge = [c for c in confirmed if c.start_ms == start]
@@ -2040,10 +2036,28 @@ def _ref_decide_type(mtype, cands, x):
     if not sane:
         reason = f"{len(of_type)} candidate(s) failed sanity checks" if of_type else "no evidence"
         return TypeDecision(mtype, DecisionStatus.NO_EVIDENCE, None, None, reason)
+
+    # Rule 14: an IntroDB/TheIntroDB intro (or recap) agreeing with nothing else, of season audio's length (5 s) but
+    # starting more than 15 s from it, both at least 30 s long, is timed on another release: it is left out.
+    def another_release(c):
+        if c.type not in _REF_START_TYPES or not _ref_timed_on_any_release(c):
+            return False
+        if any(_ref_group(o) != _ref_group(c) and _ref_agree(c, o, d) for o in sane):
+            return False
+        own_length = _ref_end(c, d) - c.start_ms
+        for a in (a for a in sane if a.source is S.SEASON_AUDIO):
+            audio_length = _ref_end(a, d) - a.start_ms
+            same = abs(own_length - audio_length) <= 5_000 and min(own_length, audio_length) >= 30_000
+            if same and abs(c.start_ms - a.start_ms) > 15_000:
+                return True
+        return False
+
+    sane = [c for c in sane if not another_release(c)]
     chapters = [c for c in sane if c.source is S.CHAPTERS]
     others = [c for c in sane if c.source is not S.CHAPTERS]
     agreeing_sets = _ref_agreeing_sets(others if chapters else sane, x)
     guard_pool = others
+    overruled = False
     if chapters:
         if mtype in _REF_START_TYPES:
             chosen = min(chapters, key=lambda c: (c.start_ms, _ref_end(c, d)))
@@ -2051,17 +2065,46 @@ def _ref_decide_type(mtype, cands, x):
             chosen = max(chapters, key=lambda c: (c.start_ms, -_ref_end(c, d)))
         guard_pool = [c for c in sane if c is not chosen]
         result, reason = _ref_own_marker(chosen, x), "chapters"
+        credits_chapter = mtype is T.CREDITS
+        against = []
         for members in agreeing_sets:
-            marker, _ = _ref_compose(members, mtype, x)
+            marker, _ = _ref_compose(members, mtype, x, text_start=credits_chapter)
             if abs(_ref_marker_value(marker) - _ref_marker_value(result)) > tol:
-                return review(result, "chapters contradicted by agreeing sources: " + ", ".join(marker.decided_by))
+                against.append((members, marker))
+        if against:
+            # Rule 3 for credits: sets that each hold credit text and a non-server source of another group decide,
+            # at credit text's start, as rule 4 would decide them.
+            paired = credits_chapter and all(
+                any(c.source is S.CREDITS_TEXT for c in members)
+                and any(c.source not in _REF_SERVER and _ref_group(c) != "credits_text" for c in members)
+                for members, _ in against
+            )
+            if paired:
+                composed = [_ref_compose(members, mtype, x, text_start=True) for members, _ in against]
+                values = [_ref_marker_value(marker) for marker, _ in composed]
+                merged = list({id(c): c for members, _ in against for c in members}.values())
+                won, winner = _ref_compose(merged, mtype, x, text_start=True)
+                agreed = not any(abs(a - b) > tol for a, b in itertools.combinations(values, 2))
+                if agreed and _ref_times_sane(Candidate(mtype, won.start_ms, won.end_ms, winner.source), x):
+                    result, reason, overruled = won, f"{_REF_TEXT_WINS}: " + ", ".join(won.decided_by), True
+            if not overruled:
+                names = ", ".join(against[0][1].decided_by)
+                return review(result, "chapters contradicted by agreeing sources: " + names)
+        text_can_check = (
+            credits_chapter
+            and "credits_text" in x.source_order
+            and not any(c.source is S.CREDITS_TEXT for c in others)
+            and not any(abs(c.start_ms - result.start_ms) <= tol for c in others)
+        )
+        if not overruled and text_can_check and any(_ref_group(c) == "skipdb" for c in others):
+            return review(result, _REF_TEXT_WAITS)
         backing = [c for c in others if abs(_ref_value(c, d) - _ref_marker_value(result)) <= tol]
         # Finding F1: an intro chapter far longer than the season's other intro chapters needs one agreeing source.
         limit = x.intro_chapter_limit_ms
         suspect = mtype is T.INTRO and limit is not None and result.end_ms - result.start_ms > limit
         if suspect and not [c for c in backing if c.source not in _REF_SERVER]:
             return review(result, _REF_LONG_INTRO_CHAPTER)
-        if len({_ref_group(c) for c in backing}) >= (1 if suspect else 2):
+        if not overruled and len({_ref_group(c) for c in backing}) >= (1 if suspect else 2):
             chapter = result
             everyone = {S.CHAPTERS, *(c.source for c in backing)}
             shorter, other = _ref_shorter(mtype, _ref_marker_value(chapter), backing, x, everyone)
@@ -2092,10 +2135,10 @@ def _ref_decide_type(mtype, cands, x):
         ranked = sorted(sane, key=lambda c: _ref_rank(c, x))
 
         def may_decide_alone(c):
-            # SkipDB alone: intros and recaps only; season audio alone: intros only
+            # season audio alone: intros only
             if c.source is S.SEASON_AUDIO:
                 return mtype is T.INTRO
-            return c.source not in _REF_AGREEMENT_ONLY and (mtype in _REF_START_TYPES or c.source is not S.SKIPDB)
+            return c.source not in _REF_AGREEMENT_ONLY
 
         proposal = next((c for c in ranked if may_decide_alone(c)), None)
         own = [c for c in sane if proposal is not None and _ref_group(c) == _ref_group(proposal)]
@@ -2231,6 +2274,8 @@ _EVERY_REASON = (
     "preview overlaps credits",
     _REF_LONG_INTRO_CHAPTER,
     _REF_AUDIO_WITH_SERVER,
+    _REF_TEXT_WAITS,
+    _REF_TEXT_WINS,
 )
 
 
@@ -2338,6 +2383,53 @@ def _random_file(rng):
                 start = rng.choice((0, 1_999, 2_000))
                 moved[id(c)] = replace(c, start_ms=start, end_ms=start + rng.choice((7_000, 9_999, 10_000, 12_000)))
         cands = [moved.get(id(c), c) for c in cands]
+    return _draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor)
+
+
+def _draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor):
+    """The shapes rules 2, 3, 6 and 14 of the 2026-09-25 audit need, from a generator seeded by the file itself, so the
+    shared stream -- and every file the seeds drew before -- stays as it was.
+
+    A fifth of the files have credits and previews ending just past the file, on both sides of the 5 s an online answer
+    may overshoot by (rule 2); a fifth get an IntroDB/TheIntroDB intro of a season audio answer's length (or 5-5.001 s
+    off it) shifted 10-80 s (rule 14).
+    """
+    # Not the frozenset of enabled types: its order follows string hashing, which changes from run to run.
+    rng = random.Random(repr((cands, x.duration_ms, x.publish_when, x.source_order)))
+    duration = x.duration_ms
+    if rng.random() < 0.2:
+        ended = {}
+        for c in cands:
+            if c.type in (T.CREDITS, T.PREVIEW) and id(c) not in ended and rng.random() < 0.5:
+                ended[id(c)] = replace(c, end_ms=duration + rng.choice((2_001, 4_999, 5_000, 5_001)))
+        cands = [ended.get(id(c), c) for c in cands]
+    audio = [c for c in cands if c.type is T.INTRO and c.source is S.SEASON_AUDIO and c.end_ms is not None]
+    if audio and rng.random() < 0.2:
+        a = rng.choice(audio)
+        shift = rng.choice((-80_000, -40_000, -15_001, -15_000, -10_000, 15_001, 40_000))
+        length = a.end_ms - a.start_ms + rng.choice((-5_001, -5_000, 0, 3_000, 5_000, 5_001))
+        start = max(0, a.start_ms + shift)
+        crowd = rng.choice((S.INTRODB, S.THEINTRODB))
+        cands.append(Candidate(T.INTRO, start, start + length, crowd, rng.choice((0.9, 1.0))))
+    # And a twentieth have their credits replaced by a credits chapter SkipDB contradicts (Somebody Somewhere S03), with
+    # credit text agreeing with SkipDB, with the chapter, or not yet answered, and sometimes a server's marker (rule 3).
+    if rng.random() < 0.05:
+        early = end_anchor - rng.choice((15_000, 60_000))
+        scene = [Candidate(T.CREDITS, end_anchor, None, S.CHAPTERS), Candidate(T.CREDITS, early, duration, S.SKIPDB)]
+        text_at = rng.choice((None, early + 2_000, end_anchor + 1_000))
+        if text_at is not None:
+            scene.append(Candidate(T.CREDITS, text_at, None, S.CREDITS_TEXT))
+        if rng.random() < 0.3:
+            scene.append(Candidate(T.CREDITS, rng.choice((early + 3_000, end_anchor)), None, S.SERVER_MARKERS,
+                                   origin="server-1"))  # fmt: skip
+        cands = [c for c in cands if c.type is not T.CREDITS] + scene
+    # SkipDB no longer decides alone, so one source's own answers leaving too short a skip once composed (rule 6) come
+    # up less: a thirtieth of the files get two season audio intros agreeing on the end, one starting 2 s before it.
+    if rng.random() < 0.03:
+        end = start_anchor + 30_000
+        pair = [Candidate(T.INTRO, start_anchor, end, S.SEASON_AUDIO, 1.0, "3/5"),
+                Candidate(T.INTRO, end - 2_000, end + 1_000, S.SEASON_AUDIO, 1.0, "2/5")]  # fmt: skip
+        cands = [c for c in cands if c.type is not T.INTRO] + pair
     return cands, x, locked
 
 
@@ -2822,7 +2914,7 @@ def _only(names, mtype, why="an online answer needs a check against the file"):
 _COPY = "a server's imported marker"
 _IDB_AND_COPY_INTRO = _only(f"IntroDB and {_COPY}", "intro")
 _TIDB_AND_COPY_INTRO = _only(f"TheIntroDB and {_COPY}", "intro")
-_SKIPDB_AND_COPY_INTRO_AT_HIGH = _only(f"SkipDB and {_COPY}", "intro", 'at "high" a second source must agree')
+_SKIPDB_AND_COPY_INTRO = _only(f"SkipDB and {_COPY}", "intro")
 _IDB_AND_COPY_CREDITS = _only(f"IntroDB and {_COPY}", "credits")
 _TIDB_AND_COPY_CREDITS = _only(f"TheIntroDB and {_COPY}", "credits")
 _SKIPDB_AND_COPY_CREDITS = _only(f"SkipDB and {_COPY}", "credits")
@@ -2838,8 +2930,6 @@ _SKIPDB_COPY_CREDITS = _agreed(
 _INTRODB_COPY_CREDITS = _agreed(
     1_241_000, DUR, ("introdb", "server_markers_imported"), "sources agree: introdb, server_markers_imported"
 )
-# At Medium SkipDB may decide an intro alone (rule 6); its copy is the same source and may still give the later start.
-_SKIPDB_ALONE_INTRO = _agreed(128_000, 157_000, ("skipdb", "server_markers_imported"), "single source (skipdb)")
 
 
 class TestImportedCopiesJoinTheDatabaseTheyImport:
@@ -2849,7 +2939,8 @@ class TestImportedCopiesJoinTheDatabaseTheyImport:
     @pytest.mark.parametrize(
         ("crowd", "copied_from", "high", "medium"),
         [
-            (S.SKIPDB, "skipdb", _SKIPDB_AND_COPY_INTRO_AT_HIGH, _SKIPDB_ALONE_INTRO),
+            # SkipDB and its copy are one source, and SkipDB alone never decides (rule 6)
+            (S.SKIPDB, "skipdb", _SKIPDB_AND_COPY_INTRO, _SKIPDB_AND_COPY_INTRO),
             (S.SKIPDB, "introdb", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
             (S.SKIPDB, "aniskip", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
             (S.SKIPDB, "", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
@@ -2966,13 +3057,8 @@ def _plain_group(kind):
 
 
 def _alone_at_medium(source, mtype):
-    """Rule 6 (and Q1, F3, 2026-09-24): credit text alone, SkipDB alone for intros and recaps, season audio alone for
-    intros."""
-    return (
-        source is S.CREDITS_TEXT
-        or (source is S.SKIPDB and mtype in (T.INTRO, T.RECAP))
-        or (source is S.SEASON_AUDIO and mtype is T.INTRO)
-    )
+    """Rule 6 (and Q1, 2026-09-24, 2026-09-25): credit text alone, season audio alone for intros; SkipDB never."""
+    return source is S.CREDITS_TEXT or (source is S.SEASON_AUDIO and mtype is T.INTRO)
 
 
 def _credited(*sources):
@@ -3024,6 +3110,9 @@ def _expected_disagreeing(kinds, near, far, level):
     if chapter is not None:  # one contradicting source never overrides a chapter (rule 3)
         other = far if chapter is near else near
         start, end = _own(chapter)
+        if chapter.type is T.CREDITS and _plain_group(kinds[1] if chapter is near else kinds[0]) == "skipdb":
+            # but SkipDB against a credits chapter nothing else agrees with has credit text read the file first
+            return DecisionStatus.NEEDS_REVIEW, None, None, _REF_TEXT_WAITS
         # Rule 7: a server's own credits/preview starting inside the decided skip, more than 10 s from both ends,
         # moves the start to it.
         if other.source is S.SERVER_MARKERS and chapter.type in (T.CREDITS, T.PREVIEW):
@@ -3626,3 +3715,370 @@ class TestTheFilesOwnIntroEnd:
         d = decide(cands, ctx("medium"), {})[T.CREDITS]
         assert d.status is DecisionStatus.DECIDED
         assert d.marker.start_ms == 1_250_000
+
+
+class TestALoneSkipDbAnswerNeverDecides:
+    """Case 1 of the 2026-09-25 audit (spec §5.5 rule 6): SkipDB's duration match proves the file's cut, not the
+    segment's edges. Westworld S04E01/E07/E08 each had a lone SkipDB intro covering 20 s of a 97 s title sequence,
+    Outlander S08 (online set) four lone SkipDB intros ending 5-11 s late, Mr. Robot S04E01 (held-out) one marking
+    another 24 s. A lone SkipDB answer now waits for a check against the file, as IntroDB's does."""
+
+    WW_S04E01 = 3_249_600
+
+    @pytest.mark.parametrize("level", ["high", "medium"])
+    @pytest.mark.parametrize(
+        "cand",
+        [
+            intro(S.SKIPDB, 563_100, 582_600),
+            Candidate(T.RECAP, 20_000, 60_000, S.SKIPDB),
+            credits(S.SKIPDB, 2_900_000, 3_000_000),
+            Candidate(T.PREVIEW, 3_100_000, 3_140_000, S.SKIPDB),
+        ],
+        ids=["intro", "recap", "credits", "preview"],
+    )
+    def test_skipdb_alone_is_reviewed_for_every_type(self, cand, level):
+        x = ctx(level, duration=self.WW_S04E01, types=(cand.type,))
+        d = decide([cand], x, {})[cand.type]
+        own = Marker(cand.type, cand.start_ms, cand.end_ms, ("skipdb",))
+        why = f"only SkipDB has the {cand.type.value}; an online answer needs a check against the file"
+        assert (d.status, d.marker, d.proposed, d.reason) == (DecisionStatus.NEEDS_REVIEW, None, own, why)
+
+    def test_westworld_s04e08_a_short_skipdb_intro_waits_beside_a_failing_chapter_and_a_stale_marker(self):
+        chapter = Candidate(T.INTRO, 223_000, 3_454_000, S.CHAPTERS, origin="Intro")  # runs to the credits: too long
+        skipdb = intro(S.SKIPDB, 214_500, 237_100)
+        stale = Candidate(T.INTRO, 216_402, 315_037, S.SERVER_MARKERS, origin="plex", stale=True)
+        d = decide([chapter, skipdb, stale], ctx("medium", duration=3_525_600, types=(T.INTRO,)), {})[T.INTRO]
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "only SkipDB has the intro; an online answer needs a check against the file",
+        )
+
+    def test_season_audio_that_ends_the_title_sequence_later_disagrees_with_a_short_skipdb_intro(self):
+        # Westworld S04E08 once season audio has read the season: 217.8-315.9 s, the frame-checked title sequence.
+        cands = [intro(S.SKIPDB, 214_500, 237_100), Candidate(T.INTRO, 217_834, 315_915, S.SEASON_AUDIO, 1.0, "1/1")]
+        for order in (cands, cands[::-1]):
+            d = decide(order, ctx("medium", duration=3_525_600, types=(T.INTRO,)), {})[T.INTRO]
+            assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, "sources disagree: season_audio, skipdb")
+
+    def test_skipdb_agreeing_with_season_audio_decides(self):
+        # Somebody Somewhere S03E06: SkipDB 66.3-76.7 s, season audio 66.1-76.9 s.
+        cands = [intro(S.SKIPDB, 66_300, 76_700), Candidate(T.INTRO, 66_130, 76_904, S.SEASON_AUDIO, 1.0, "3/6")]
+        for order in (cands, cands[::-1]):
+            d = decide(order, ctx("medium", duration=1_721_472, types=(T.INTRO,)), {})[T.INTRO]
+            assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: skipdb, season_audio")
+            assert d.marker == Marker(T.INTRO, 66_300, 76_700, ("skipdb", "season_audio"))
+
+
+class TestAnOnlineCreditsEndJustPastTheFile:
+    """Case 3 of the 2026-09-25 audit (spec §5.5 rule 2): IntroDB's and TheIntroDB's times come from another release,
+    so credits running to that release's end can end a few seconds past this file's. Game of Thrones S03E08/E09 and
+    S05E06: IntroDB's credits agree with credit text within 1 s but end 3.5-4.7 s past the file, so the whole answer was
+    dropped and a lone SkipDB answer 30-530 s early held credit text in review. Up to 5 s past the end such an answer
+    is now clamped; further (The Big Bang Theory S12E15: 9.8 s past, starting 8 s after the file's credits) it still
+    fails."""
+
+    @pytest.mark.parametrize(
+        ("duration", "introdb", "text_at", "skipdb"),
+        [
+            (3_379_712, (3_300_000, 3_384_000), 3_301_000, (2_702_812, 3_379_712)),
+            (3_046_304, (2_968_000, 3_051_000), 2_968_000, (2_436_104, 3_046_304)),
+            (3_218_528, (3_139_000, 3_222_000), 3_140_000, (3_114_228, 3_218_528)),
+        ],
+        ids=["got-s03e08", "got-s03e09", "got-s05e06"],
+    )
+    def test_game_of_thrones_credits_decide_with_introdb_and_credit_text(self, duration, introdb, text_at, skipdb):
+        chapter_past_the_end = Candidate(T.CREDITS, duration + 32_613, duration + 32_613, S.CHAPTERS, origin="Credits")
+        cands = [
+            chapter_past_the_end,
+            credits(S.INTRODB, *introdb),
+            credits(S.SKIPDB, *skipdb),
+            credits(S.CREDITS_TEXT, text_at),
+        ]
+        x = ctx("medium", duration=duration, types=(T.CREDITS,))
+        for order in (cands, cands[::-1]):
+            d = decide(order, x, {})[T.CREDITS]
+            assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, credits_text")
+            assert d.marker == Marker(T.CREDITS, introdb[0], duration, ("introdb", "credits_text"))
+
+    @pytest.mark.parametrize(
+        ("source", "copied_from", "allowed_ms"),
+        [
+            (S.INTRODB, "", 5_000),
+            (S.THEINTRODB, "", 5_000),
+            (S.SERVER_MARKERS_IMPORTED, "introdb", 5_000),
+            (S.SKIPDB, "", 2_000),
+            (S.CHAPTERS, "", 2_000),
+            (S.CREDITS_TEXT, "", 2_000),
+            (S.SERVER_MARKERS, "", 2_000),
+            (S.SERVER_MARKERS_IMPORTED, "skipdb", 2_000),
+            (S.SERVER_MARKERS_IMPORTED, "", 2_000),
+        ],
+        ids=[
+            "introdb",
+            "theintrodb",
+            "introdb-copy",
+            "skipdb",
+            "chapters",
+            "credits_text",
+            "server",
+            "skipdb-copy",
+            "unknown-copy",
+        ],  # fmt: skip
+    )
+    @pytest.mark.parametrize("mtype", [T.CREDITS, T.PREVIEW], ids=lambda t: t.value)
+    def test_how_far_past_the_end_a_credits_or_preview_answer_may_end(self, source, copied_from, allowed_ms, mtype):
+        x = ctx("medium", types=(mtype,))
+        at_limit = Candidate(mtype, 1_250_000, DUR + allowed_ms, source, copied_from=copied_from)
+        past_it = replace(at_limit, end_ms=DUR + allowed_ms + 1)
+        assert sanity_problem(at_limit, x) is None
+        assert sanity_problem(past_it, x) == "ends past the end of the file"
+
+    def test_an_intro_is_never_allowed_past_the_end(self):
+        x = ctx("medium", duration=SHORT_DUR, types=(T.INTRO,))
+        assert sanity_problem(intro(S.INTRODB, 60_000, SHORT_DUR + 3_000), x) == "ends past the end of the file"
+
+    @pytest.mark.parametrize(("past_ms", "may_matter"), [(4_000, False), (5_000, False), (5_001, True)])
+    def test_the_frame_rate_is_read_only_for_an_answer_still_outside_the_file(self, past_ms, may_matter):
+        cands = [credits(S.INTRODB, 1_250_000, DUR + past_ms), credits(S.CREDITS_TEXT, 1_252_000)]
+        assert file_clock_may_matter(cands, DUR) is may_matter
+
+
+_TEXT_WAITS = "chapters contradicted by skipdb; waiting for credit text to check them"
+
+
+def _text_wins(names):
+    return "credit text and agreeing sources contradict the chapters: " + names
+
+
+class TestSkipDbAgainstACreditsChapter:
+    """Case 2 of the 2026-09-25 audit (spec §5.5 rule 3): Somebody Somewhere S03E02-E07's HMAX "Credits" chapters start
+    40-70 s after the credits do; SkipDB (and Plex's marker, made for an earlier file) say so within 2 s. One source
+    never overrides a chapter, but SkipDB's times are this file's (its duration matches), so its disagreement has credit
+    text read the file's frames: until it answers the credits wait in review; credit text agreeing with SkipDB (or
+    another source that isn't a server's marker) outvotes the chapter, with credit text's start; agreeing with the
+    chapter, the chapter stands."""
+
+    DUR = 1_638_304  # Somebody Somewhere S03E05
+    CHAPTER = Candidate(T.CREDITS, 1_620_243, 1_638_304, S.CHAPTERS, origin="Credits")
+    SKIPDB = credits(S.SKIPDB, 1_559_200, 1_638_300)
+    PLEX = credits(S.SERVER_MARKERS, 1_562_444, 1_638_272, origin="plex")
+
+    def _decide(self, cands, order=ORDER, level="medium"):
+        x = DecisionContext(self.DUR, False, level, frozenset({T.CREDITS}), order)
+        results = [decide(list(p), x, {})[T.CREDITS] for p in itertools.permutations(cands)]
+        assert all(r == results[0] for r in results)
+        return results[0]
+
+    @pytest.mark.parametrize("level", ["high", "medium"])
+    def test_skipdb_against_the_chapter_waits_for_credit_text(self, level):
+        d = self._decide([self.CHAPTER, self.SKIPDB], level=level)
+        chapter = Marker(T.CREDITS, 1_620_243, 1_638_304, ("chapters",))
+        assert (d.status, d.marker, d.proposed, d.reason) == (DecisionStatus.NEEDS_REVIEW, None, chapter, _TEXT_WAITS)
+
+    def test_credit_text_agreeing_with_skipdb_outvotes_the_chapter_with_its_own_start(self):
+        d = self._decide([self.CHAPTER, self.SKIPDB, credits(S.CREDITS_TEXT, 1_560_000)])
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, _text_wins("skipdb, credits_text"))
+        assert d.marker == Marker(T.CREDITS, 1_560_000, 1_638_300, ("skipdb", "credits_text"))
+
+    def test_credit_text_agreeing_with_the_chapter_keeps_it(self):
+        d = self._decide([self.CHAPTER, self.SKIPDB, credits(S.CREDITS_TEXT, 1_621_000)])
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
+        assert d.marker == Marker(T.CREDITS, 1_620_243, 1_638_304, ("chapters",))
+
+    def test_credit_text_agreeing_with_neither_leaves_the_chapter(self):
+        d = self._decide([self.CHAPTER, self.SKIPDB, credits(S.CREDITS_TEXT, 1_590_000)])
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
+
+    def test_without_credit_text_among_the_sources_the_chapter_decides_as_before(self):
+        order = tuple(s for s in ORDER if s != "credits_text")
+        d = self._decide([self.CHAPTER, self.SKIPDB], order=order)
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
+
+    def test_another_source_agreeing_with_the_chapter_needs_no_check(self):
+        plex_at_the_chapter = credits(S.SERVER_MARKERS, 1_622_000, None, origin="plex")
+        d = self._decide([self.CHAPTER, self.SKIPDB, plex_at_the_chapter])
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
+
+    def test_a_skipdb_importer_copy_is_skipdb_again(self):
+        copy = Candidate(T.CREDITS, 1_559_200, 1_638_300, S.SERVER_MARKERS_IMPORTED, origin="jf", copied_from="skipdb")
+        d = self._decide([self.CHAPTER, copy])
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, _TEXT_WAITS)
+
+    def test_a_marker_made_for_an_earlier_file_confirms_nothing_either_way(self):
+        stale = replace(self.PLEX, stale=True)
+        waiting = self._decide([self.CHAPTER, self.SKIPDB, stale])
+        assert (waiting.status, waiting.reason) == (DecisionStatus.NEEDS_REVIEW, _TEXT_WAITS)
+        d = self._decide([self.CHAPTER, self.SKIPDB, stale, credits(S.CREDITS_TEXT, 1_560_000)])
+        assert d.marker == Marker(T.CREDITS, 1_560_000, 1_638_300, ("skipdb", "credits_text"))
+
+    def test_a_fresh_server_marker_and_skipdb_still_contradict_the_chapter_until_credit_text_reads(self):
+        d = self._decide([self.CHAPTER, self.SKIPDB, self.PLEX])
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "chapters contradicted by agreeing sources: skipdb, server_markers",
+        )
+
+    def test_credit_text_joining_skipdb_and_a_server_marker_decides_with_the_text_start(self):
+        # Source order would give SkipDB's start (1559.2 s); the file's own frames say 1565.0 s.
+        d = self._decide([self.CHAPTER, self.SKIPDB, self.PLEX, credits(S.CREDITS_TEXT, 1_565_000)])
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, _text_wins("skipdb, credits_text, server_markers"))
+        assert d.marker == Marker(T.CREDITS, 1_565_000, 1_638_272, ("skipdb", "credits_text", "server_markers"))
+
+    def test_credit_text_with_only_a_server_marker_still_leaves_the_chapter_in_review(self):
+        d = self._decide([self.CHAPTER, self.PLEX, credits(S.CREDITS_TEXT, 1_560_000)])
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "chapters contradicted by agreeing sources: credits_text, server_markers",
+        )
+
+    def test_an_intro_chapter_skipdb_contradicts_still_decides(self):
+        cands = [intro(S.CHAPTERS, 60_000, 90_000), intro(S.SKIPDB, 150_000, 200_000)]
+        d = decide(cands, ctx("medium", types=(T.INTRO,)), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
+
+
+class TestAnotherReleasesIntroBesideSeasonAudio:
+    """Case 4 of the 2026-09-25 audit (spec §5.5 rule 14): Westworld S03E03-E08's IntroDB intros have season audio's
+    length (within 5 s) but sit 50-80 s earlier: a release without the episode's recap. An IntroDB or TheIntroDB intro
+    (or an importer plugin's copy of one) agreeing with no other source, with season audio's length and a start more
+    than 15 s from it, both at least 30 s long, is that intro on another release's clock and is left out, so season
+    audio decides as it would alone. A few seconds' shift is two answers disagreeing about one segment's edges
+    (Daredevil S03, Invasion S03: season audio wrong), and a short one matches by chance (The Big Door Prize's 16 s
+    card)."""
+
+    WW_S03E03 = 3_573_574
+    DISAGREE = "sources disagree: introdb/theintrodb, season_audio"
+
+    @staticmethod
+    def _audio(start, end, source=S.SEASON_AUDIO):
+        return Candidate(T.INTRO, start, end, source, 1.0, "5/5")
+
+    def _decide(self, cands, duration=DUR):
+        x = ctx("medium", duration=duration, types=(T.INTRO,))
+        results = [decide(list(p), x, {})[T.INTRO] for p in itertools.permutations(cands)]
+        assert all(r == results[0] for r in results)
+        return results[0]
+
+    def test_westworld_s03e03_season_audio_decides(self):
+        d = self._decide([intro(S.INTRODB, 243_000, 341_000), self._audio(293_253, 390_838)], self.WW_S03E03)
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+        assert d.marker == Marker(T.INTRO, 293_253, 390_838, ("season_audio",))
+
+    def test_westworld_s03e07_five_seconds_longer_still_disagrees(self):
+        d = self._decide([intro(S.INTRODB, 232_000, 334_000), self._audio(288_051, 385_018)], 3_617_638)
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, self.DISAGREE)
+
+    @pytest.mark.parametrize(
+        ("online", "left_out"),
+        [
+            ((240_000, 305_000), True),  # 5 s longer
+            ((240_000, 305_001), False),  # 5.001 s longer
+            ((240_000, 295_000), True),  # 5 s shorter
+            ((284_999, 344_999), True),  # starts 15.001 s earlier
+            ((285_000, 345_000), False),  # starts 15 s earlier: the same segment's edges disagree
+            ((375_001, 435_001), True),  # starts 75 s later
+        ],
+    )
+    def test_the_length_and_shift_bounds(self, online, left_out):
+        d = self._decide([intro(S.INTRODB, *online), self._audio(300_000, 360_000)])
+        if left_out:
+            assert (d.status, d.marker) == (
+                DecisionStatus.DECIDED,
+                Marker(T.INTRO, 300_000, 360_000, ("season_audio",)),
+            )
+        else:
+            assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, self.DISAGREE)
+
+    @pytest.mark.parametrize(("length", "left_out"), [(29_999, False), (30_000, True)])
+    def test_both_must_be_at_least_30_seconds_long(self, length, left_out):
+        d = self._decide([intro(S.INTRODB, 250_000, 250_000 + length), self._audio(300_000, 300_000 + length)])
+        assert (d.status is DecisionStatus.DECIDED) is left_out
+
+    @pytest.mark.parametrize(
+        ("source", "copied_from", "decided"),
+        [
+            (S.INTRODB, "", True),
+            (S.THEINTRODB, "", True),
+            (S.SERVER_MARKERS_IMPORTED, "introdb", True),
+            (S.SKIPDB, "", False),
+            (S.SERVER_MARKERS_IMPORTED, "skipdb", False),
+        ],
+        ids=["introdb", "theintrodb", "introdb-copy", "skipdb", "skipdb-copy"],
+    )
+    def test_only_answers_timed_on_any_release_are_read_this_way(self, source, copied_from, decided):
+        other = Candidate(T.INTRO, 243_000, 341_000, source, origin="x", copied_from=copied_from)
+        d = self._decide([other, self._audio(293_253, 390_838)], self.WW_S03E03)
+        assert d.status is (DecisionStatus.DECIDED if decided else DecisionStatus.NEEDS_REVIEW)
+        if decided:
+            assert d.marker == Marker(T.INTRO, 293_253, 390_838, ("season_audio",))
+
+    def test_an_answer_another_source_agrees_with_is_kept(self):
+        plex = intro(S.SERVER_MARKERS, 243_500, 340_000, "plex")
+        d = self._decide([intro(S.INTRODB, 243_000, 341_000), plex, self._audio(293_253, 390_838)], self.WW_S03E03)
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, server_markers")
+
+    def test_the_previous_seasons_audio_is_no_such_check(self):
+        cands = [intro(S.INTRODB, 243_000, 341_000), self._audio(293_253, 390_838, S.SEASON_AUDIO_PREVIOUS)]
+        d = self._decide(cands, self.WW_S03E03)
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, self.DISAGREE)
+
+
+class TestKeepPublishedThroughARuleChange:
+    """``keep_published``: a marker published before a rule change stays where today's rules would leave its type in
+    Needs review or without a marker, while an answer it rests on still agrees and nothing newer disagrees."""
+
+    INTRO = Marker(T.INTRO, 60_000, 90_000, ("skipdb",))
+    CREDITS = Marker(T.CREDITS, 1_250_000, DUR, ("skipdb",))
+    REVIEW = TypeDecision(T.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "SkipDB alone: needs a check")
+
+    def _keep(self, decision, published, candidates, changed=()):
+        return decide_module.keep_published(
+            decision, published, candidates=candidates, changed=changed, duration_ms=DUR
+        )
+
+    @pytest.mark.parametrize(
+        "status", [DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE], ids=["needs-review", "no-evidence"]
+    )
+    def test_kept_where_todays_rules_leave_the_type_undecided(self, status):
+        decision = TypeDecision(T.INTRO, status, None, None, "why today")
+        kept = self._keep(decision, self.INTRO, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)])
+        assert (kept.status, kept.marker, kept.proposed) == (DecisionStatus.DECIDED, self.INTRO, None)
+        assert kept.reason == "kept: published before a rule change; today's rules: why today"
+        assert decide_module.kept_before_rule_change(kept.reason)
+
+    @pytest.mark.parametrize("status", [DecisionStatus.DECIDED, DecisionStatus.DISABLED], ids=["decided", "off"])
+    def test_todays_decided_or_disabled_type_wins(self, status):
+        other = Marker(T.INTRO, 10_000, 40_000, ("chapters",)) if status is DecisionStatus.DECIDED else None
+        decision = TypeDecision(T.INTRO, status, other, None, "today")
+        assert self._keep(decision, self.INTRO, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)]) is decision
+
+    @pytest.mark.parametrize(
+        ("end_ms", "kept"), [(95_000, True), (95_001, False), (85_000, True), (84_999, False)], ids=str
+    )
+    def test_an_intros_answer_agrees_within_5_s_of_its_end(self, end_ms, kept):
+        out = self._keep(self.REVIEW, self.INTRO, [Candidate(T.INTRO, 60_000, end_ms, S.SKIPDB)])
+        assert (out.status is DecisionStatus.DECIDED) is kept
+
+    @pytest.mark.parametrize(("start_ms", "kept"), [(1_260_000, True), (1_260_001, False)], ids=str)
+    def test_a_credits_answer_agrees_within_10_s_of_its_start(self, start_ms, kept):
+        review = TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, None, "why")
+        out = self._keep(review, self.CREDITS, [Candidate(T.CREDITS, start_ms, None, S.SKIPDB)])
+        assert (out.status is DecisionStatus.DECIDED) is kept
+
+    def test_an_agreeing_answer_from_a_source_it_wasnt_decided_by_doesnt_hold_it(self):
+        out = self._keep(self.REVIEW, self.INTRO, [Candidate(T.INTRO, 60_000, 90_000, S.THEINTRODB)])
+        assert out is self.REVIEW
+
+    def test_nothing_left_of_its_source_doesnt_hold_it(self):
+        assert self._keep(self.REVIEW, self.INTRO, []) is self.REVIEW
+
+    def test_a_new_or_changed_disagreeing_answer_replaces_it_and_an_agreeing_one_doesnt(self):
+        own = Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)
+        agreeing = Candidate(T.INTRO, 61_000, 92_000, S.THEINTRODB)
+        disagreeing = Candidate(T.INTRO, 200_000, 230_000, S.THEINTRODB)
+        assert self._keep(self.REVIEW, self.INTRO, [own, agreeing], [agreeing]).status is DecisionStatus.DECIDED
+        assert self._keep(self.REVIEW, self.INTRO, [own, disagreeing], [disagreeing]) is self.REVIEW
+
+    def test_a_marker_carried_over_from_a_replaced_file_rests_on_no_source_and_isnt_kept(self):
+        carried = Marker(T.INTRO, 60_000, 90_000, ("carried_over",))
+        assert self._keep(self.REVIEW, carried, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)]) is self.REVIEW

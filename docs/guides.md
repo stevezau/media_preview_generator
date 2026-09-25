@@ -129,12 +129,13 @@ Each pick becomes a removable chip; **Start Job** processes them all. The **Publ
 
 **Pause / Resume (global):**
 
-- **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process finish first, then workers go idle (a "soft" pause — nothing is killed mid-frame). Use this to cap bandwidth or pause overnight.
+- **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
 - **Resume Processing** — Clears the global pause; new jobs can start and the current job resumes dispatching.
 - Controls appear in the **Current Job** header and to the left of **Clear Jobs** in the Job Queue. State is persisted and survives restarts.
 - An **Intro & Credits** job also has its own **Pause** button on its row: files already in progress finish, the job
-  hands its slot back so other jobs can run, and it waits until you click its **Resume**. **Pause Processing** holds
-  it too, but **Resume Processing** doesn't resume a job you paused on its own.
+  hands its slot back so other jobs can run, and it waits until you click its **Resume**. **Pause Processing**, quiet
+  hours and a schedule's stop time hold it too, and stop its files in progress where they are, as they do previews.
+  **Resume Processing** doesn't resume a job you paused on its own.
 
 **Scheduling:**
 
@@ -169,13 +170,17 @@ Every GPU worker includes automatic CPU fallback — no extra configuration
 is needed. If FFmpeg fails on the GPU for any of the common reasons:
 
 - Unsupported codec on the HW decoder
-- Hardware-accelerator runtime error (CUDA sync/transfer failure, VAAPI surface exhaustion)
-- Driver crash or FFmpeg signal kill (segfault, OOM)
+- Hardware-accelerator runtime error (CUDA sync/transfer failure, VAAPI surface exhaustion, an OpenCL filter failing)
+- FFmpeg stopped from outside (out of memory, a stalled or failing read) wherever it was
+- A crash (segfault) before it wrote 95% of the thumbnails (past that, the thumbnails it wrote are published)
 
 …the same worker retries the file on CPU in-place.  The job log records
 the specific reason ("Dolby Vision Profile 5 rejected by Intel VAAPI",
 "signal kill (signal 11)", etc.) and the dashboard shows a yellow
 "CPU fallback" badge on the affected worker card along with a toast.
+Intro & Credits work on a GPU worker shows the same badge whenever a step
+of it runs on the CPU instead: a credits decode rerun, an end-picture
+check, or credit text detection its GPU couldn't do for that request.
 
 The worker is busy on CPU while the retry runs.  If you have a lot of
 content that never decodes on the GPU, set **CPU Workers > 0** so that
@@ -601,24 +606,28 @@ drag-to-reorder:
 | Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). On a TV episode (a file whose name has a season and an episode number) a chapter named `Ending` counts as credits, since anime names its ending that way; on a movie it doesn't, because there it is usually the last scene. `End` alone never counts. An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
 | TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
 | IntroDB.app | No key needed, TV only. |
-| SkipDB | Free, only counts an answer matched to your file's own length. |
-| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro by itself when nothing else answers — a show no online database has still gets intros. The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
-| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
+| SkipDB | Free, only counts an answer matched to your file's own length, and only once another source agrees with it. |
+| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro by itself when nothing else answers — a show no online database has still gets intros. The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. An online intro of the same length (within 5 s) that starts more than 15 s away from season audio's, with nothing else agreeing with it, was timed on another release of the episode (one with a different cold open, say), so it is set aside rather than sending the episode to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, on the worker that runs the file. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
+| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Runs where the worker runs, as previews do: a GPU worker uses its GPU when a quick self-test shows it finds the same text as the CPU, and a CPU worker uses the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
 | Markers already on your servers | Second opinion only — see below. |
 
 **How it decides** (the note under the list says the same):
 
 - **Chapters** in the file decide on their own, unless two other independent sources agree on something different
   (then the file goes to **Needs review**), or an intro chapter is much longer than the rest of its season's (then one
-  other source has to agree).
+  other source has to agree). When SkipDB's credits disagree with a credits chapter, the on-screen credit text is read
+  in the same run: if it agrees with SkipDB, those two decide, starting where the credit text does; if not, the chapter
+  stands.
 - **An online database's answer** is published once an independent source agrees with it: on-screen credit text,
   season audio, another database, or a server's own marker. IntroDB and TheIntroDB count as one, because IntroDB's data
-  looks partly copied.
-- **A single answer** decides alone only when it checks *your* file's own cut: on-screen credit text (credits), season
-  audio (intros, so a show no online database has still gets them), or a SkipDB exact/shifted match (intros and
-  recaps). A lone IntroDB or TheIntroDB answer never publishes, because neither knows which cut of the file you have;
-  SkipDB's credits often start minutes before the real credit roll, so they need a second source too. The previous
-  season's audio (a season's first episode) never publishes alone.
+  looks partly copied. Their credits may end up to 5 s past the end of your file (they were timed on a slightly longer
+  release); the skip then stops at the end of the file.
+- **A single answer** decides alone only when it checks *your* file's own cut: on-screen credit text (credits) or season
+  audio (intros, so a show no online database has still gets them). A lone IntroDB or TheIntroDB answer never
+  publishes, because neither knows which cut of the file you have. Nor does a lone SkipDB answer: matching your file's
+  length finds the right cut but not the right edges (its credits often start minutes before the real credit roll, and
+  some of its intros cover only part of the title sequence). The previous season's audio (a season's first episode)
+  never publishes alone.
 - **Anything else** — sources that disagree, or an only answer that can't decide alone — goes to **Needs review** with
   the reason, e.g. "Only IntroDB has the intro; an online answer needs a check against the file".
 
@@ -686,7 +695,9 @@ for 3 or more episodes of \<show\> …; its episodes aren't looked up there unti
 always asks.
 
 **How often the online databases are asked again.** A database that had no entry for a file is asked again once that
-answer is 14 days old, by the next job that includes the file. So those files don't wait for one, a Low-priority
+answer is 14 days old, by the next job that includes the file. A lookup that has to wait for a database's rate limit
+waits only while the job is checking the file, never on a GPU or CPU worker: there it says "unavailable (blocked)" and
+the next job asks. So those files don't wait for one, a Low-priority
 **Intro & Credits: weekly online re-check** job runs once a week. It takes the files still on disk that have a marker
 in Needs review or not found, or an intro found by season audio alone, where a database you have on answered "no
 entry" more than 14 days ago. It asks only those databases again, reuses every other saved answer, and reads a file
@@ -694,6 +705,27 @@ only when one of its own saved answers is due; TheIntroDB's daily limit and its 
 any job. Its log ends with a line like "Weekly online re-check (12 files): 2 newly found online, 10 unchanged". The
 week counts from the first start with Intro & Credits on and carries over restarts; nothing is queued while Intro &
 Credits is off on every server, every online database is off, or the last re-check is still queued or running.
+
+**After an update that improves a detector.** When an update brings a better version of on-screen credit text,
+season audio, chapters, the reading of markers already on your servers or an online database's answers, the files
+whose markers relied on the older version are read again once, without you starting anything. Each start of the app
+checks, and a Low-priority **Intro & Credits: re-checking files after an update** job runs behind your previews,
+100 files at a time with 30 minutes between batches, so a large library doesn't keep your GPU busy for days. It takes
+the files still on disk whose marker was decided with the older version's answer, or is still in Needs review or not
+found beside one; a marker decided by other sources is left as it is until that file's next job. Each file is read
+again once per update, restarts included. Locked markers are never touched. Cancelling a batch stops it: the files
+it hadn't reached are taken by a later batch, from the next start. An update that changes how the answers are weighed
+against each other goes through the same batches: every file with a marker that isn't locked, one in Needs review, or
+one left to your server's own marker is decided again from what was already found, asking only what an ordinary job
+would ask. A marker already on your servers that the new weighing alone would send to Needs review (or leave out)
+stays, and the job log adds "kept: published before a rule change", until a new or changed answer disagrees with it
+(an answer that only comes back the same, on a **Re-detect** say, isn't new). New files get the new weighing.
+
+**When a file is replaced.** A Sonarr or Radarr upgrade, or a transcode, can leave out what decided a marker (the
+new release has no chapters, say). When the new file is the same length as the one it replaced (within a second) and
+no source finds anything for a marker type in it, the marker you had keeps its place, as Plex's own markers do; the
+job log says "from the file it replaced". Anything the new file's own sources find, even an answer that only puts the
+marker in Needs review, is used instead, and a file of another length is decided from scratch.
 
 ### Needs review
 
@@ -734,7 +766,8 @@ season audio again (a locked one is left alone) and takes any that no longer hol
 
 A season can mix releases that play at slightly different speeds: European broadcasts and some web releases play the
 whole episode a little faster than the film release. Season audio notices this, matches those episodes at the speed
-of the rest of the season, then gives their intro in their own time. Online databases' times come from whichever
+of the rest of the season, then gives their intro in their own time. It listens rather than trusting the frame rate:
+a release that only changed its frame rate, with its sound as it was, is matched as it plays. Online databases' times come from whichever
 release their users timed, so on such a file they are read at the file's speed only when that is what makes them
 agree with the file's own evidence. The published times are always the file's own. After updating, one job decides
 the episodes in **Needs review** again.
@@ -790,7 +823,9 @@ server that fails can't lose your edit. Each call to a server waits at most 8 se
 "Couldn't publish to this server in time; the next Intro & Credits run publishes it". These are per-call limits and a
 start gate, not a cap on the whole request, so a server already under way can take a few times 8 seconds. If an
 Intro & Credits job is running on the same file, the row says "Intro & Credits is running for this file; the next run
-publishes your marker".
+publishes your marker". Whenever a server's row comes back waiting or failed, the save queues that next run right
+away: a High-priority Intro & Credits job for the file that sends your markers (it doesn't detect again), and retries
+a server that hasn't added the file to its library yet. Saving again before it starts reuses it.
 
 ### Season view in the Inspector
 
@@ -1041,7 +1076,14 @@ ahead on a stale setting.
 
 ### Webhook follow-ups and retries
 
-A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files. It
+A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files, and so
+does each **Recently Added** scan for the files it finds. A restart while a webhook batch is still waiting to run
+doesn't lose it: the revived preview job queues its Intro & Credits job when it starts. An Intro & Credits job
+waiting for its preview job stays with it across a restart, revived with it or held with it by **Pause Processing**,
+however long ago it was queued. The job sends markers where the
+preview job sends previews: a webhook pinned to one server (`/api/webhooks/server/<id>`, or `?server_id=`), an Emby or
+Jellyfin webhook, a file a Recently Added scan found on Emby or Jellyfin, or a Recently Added schedule pinned to one
+server, publishes to that server only; anything else goes to every server with Intro & Credits on. It
 runs at Normal priority, or at Low when the preview job itself runs at Low, and it starts after that preview job's
 first try (it doesn't wait out the preview job's retries; episodes that join it later, see below, don't wait for their
 own preview jobs). If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer
@@ -1122,7 +1164,10 @@ table covers every state the check can report, using its exact wording:
 | *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working. Saved season audio answers can't help decide an intro meanwhile, so one decided with them goes to **Needs review** on its next check unless other sources agree; they can still keep an intro in review that they contradict |
 | *(Settings)* **Matching audio across a season** shows "Not available": "ffmpeg didn't answer the check for the chromaprint muxer; it is checked again in 10 minutes" | ffmpeg timed out, couldn't start, or exited with an error when asked for its muxers (a busy or slow container start) | Nothing: jobs started meanwhile match no episodes, but saved season audio answers still count, and the check runs again after 10 minutes |
 | *(Settings)* **On-screen credit text** says "Not available" with one of: "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here" · "Needs the text detection model, which the Docker image includes; it isn't at …" · "The text detection model at … isn't the expected file" · "The text detection check didn't answer; it is checked again in 10 minutes" | Running outside the Docker image without the packages/model installed, a moved or corrupted model file, or the check timed out/crashed | Use the Docker image, which ships the packages and model; every other source keeps working meanwhile. The last reason clears itself — the check runs again after 10 minutes |
-| Log line "Credit text detection on \<device\>: CPU (\<reason\>)" although this host has a GPU | The self-test or the device check picked the CPU: the reason is e.g. "the GPU wasn't at least 10% faster than the CPU (median 4.9 vs 5.2 ms per frame; GPU/CPU 0.94 per round)", "the GPU was finding different boxes than the CPU", "Vulkan reports no hardware GPU", "no WebGPU device is this GPU", "… GPUs have no WebGPU path here", "this GPU has no usable WebGPU adapter", or a WebGPU session or helper failure | Nothing to fix if the CPU really is faster or there's no hardware GPU for this device; otherwise check the GPU is passed into the container the way previews use it. arm64 has no GPU path for credit text either way |
+| Log line "Credit text detection on \<device\>: CPU (\<reason\>)" although this host has a GPU | The GPU can't run text detection in this container: the reason is e.g. "Vulkan reports no hardware GPU", "no WebGPU device is this GPU", "… GPUs have no WebGPU path in this app", "this GPU has no usable WebGPU adapter", or "WebGPU would run on llvmpipe …, a software renderer, not on this GPU" | Check the GPU is passed into the container the way previews use it. arm64 has no GPU path for credit text either way |
+| Log warning "Credit text detection on \<device\> runs on the CPU for the rest of this run of the app: the GPU was finding different boxes than the CPU" | This GPU finds other text than the CPU does, and a credits answer mustn't depend on which device read the file | Nothing to fix; that GPU's workers read credit text on the CPU |
+| Log warning "Credit text detection on \<device\>: its GPU helper failed (…); this request is read on the CPU and the GPU is tried again in 5 s" (or "couldn't start (…)") | Its GPU text detection crashed, hung or failed to start. That request, and the others of the next few seconds, are read on the CPU (the worker card shows the **CPU fallback** badge); the wait before the GPU is tried again doubles with each failure in a row, up to 10 minutes, and "back on the GPU after N failed requests" says when it works again. Failures in a row log once | If it keeps failing, check the GPU's driver and the log lines before the warning |
+| Log warning "Credits decoding on \<device\> doesn't match the reference decode: \<clip\> at \<size\>: \<reason\>. Credits detection keeps decoding on this GPU." | Once per start, in the background when the first Intro & Credits job that reads credits starts, each GPU decodes two small test clips and compares its frames with the CPU's. This one gave other frames, couldn't decode them, or took about a minute or more. Its credits are still read on the GPU: frames a few levels off the CPU's didn't change an answer where measured (some GPUs decode older MPEG-2 and MPEG-4 files that way every time) | Nothing to fix for the answers. For a decode error or a timeout, check the GPU is passed into the container the way previews use it; if the reason says frames differ, please open an issue with the line |
 | Log line "season_audio had no answer for \<file\> this time: Not fingerprinting \<episode\>: N earlier fingerprint ffmpegs are still stuck reading their files" | Earlier fingerprint reads stalled on the media mount and can't be stopped until it answers; no more are started meanwhile, so episodes that still need fingerprinting get no season audio answer (nothing is held against the files) | Check the media mount (NFS/SMB) is responding. It clears on its own once the stuck reads finish; the next run matches the season |
 | A file fails with "Couldn't read the file: Not reading \<path\>: N earlier ffprobes are still stuck reading their files", or a log line "season_audio (or credits_text) had no answer for \<file\> this time: … Not reading \<path\>: N earlier ffprobes are still stuck reading their files" | Earlier ffprobe reads stalled on the media mount; until they finish no new ffprobe is started, so new files can't be checked | Check the media mount is responding; it clears on its own once the stuck reads finish, and the files are tried again on the next run |
 | *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
@@ -1133,7 +1178,7 @@ table covers every state the check can report, using its exact wording:
 | *(Plex)* "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any item, then try again." | Markers reuse a database row Plex creates itself the first time it ever writes a marker | Run Plex's own intro or credits analysis once on any item, then recheck |
 | *(Jellyfin)* Amber "Update needed" badge, "— installed 1.0.0.0" (the version the plugin reports; "installed version unknown" when it doesn't say) + **Update** button; the job's rows say "Update Media Preview Bridge (installed …) to get markers support" | An older plugin build predates the markers feature | Click **Update** |
 | *(Plex)* "Plex \[…\] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
-| *(Plex)* "Plex's database was busy (held by another program) for N s; trying again on the next run" (or "Plex is busy writing its database; trying again on the next run (database is locked)", or "Another Intro & Credits task is still using this Plex database; trying again on the next run") | Another program kept Plex's database locked for longer than a job waits (2 minutes): Plex itself during a big scan or database optimize, or a tool that writes to Plex's database (Kometa and the like) | Nothing, usually. In a job the file's row says "this job tries again in a few minutes" instead, and the job does: 1, 2 then 5 minutes later with the default retry settings. Only a file still refused after the last retry stays **Failed**, for Check servers' next day. Cancelling the job stops its wait within a second when this app opens Plex's database itself; through the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) the agent's own wait (up to 2 minutes) runs out first. If it keeps happening, schedule that tool outside your Intro & Credits runs |
+| *(Plex)* "Plex's database was busy (held by another program) for N s; trying again on the next run" (or "Plex is busy writing its database; trying again on the next run (database is locked)", or "Another Intro & Credits task is still using this Plex database; trying again on the next run", or "Another Intro & Credits task is still checking this Plex server; trying again on the next run") | Another program kept Plex's database locked for longer than a job waits (2 minutes, or 10 seconds for a file on a GPU or CPU worker when the job retries it): Plex itself during a big scan or database optimize, or a tool that writes to Plex's database (Kometa and the like) | Nothing, usually. In a job the file's row says "this job tries again in a few minutes" instead, and the job does: 1, 2 then 5 minutes later with the default retry settings. Only a file still refused after the last retry stays **Failed**, for Check servers' next day. Cancelling the job stops its wait within a second when this app opens Plex's database itself; through the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) the agent's own wait (up to 2 minutes) runs out first. If it keeps happening, schedule that tool outside your Intro & Credits runs |
 | *(Jellyfin)* "Can't reach this Jellyfin server" / "Can't reach the Media Preview Bridge markers endpoint on this Jellyfin server" | A transient connection problem | Confirm the server is up and reachable; recheck |
 | *(Jellyfin)* "Jellyfin rejected this server's credentials; reconnect it" | The stored token/login no longer works | Reconnect the server from the Servers page |
 | *(Jellyfin)* "Jellyfin refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
@@ -1159,7 +1204,9 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Waiting**: "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's library, check this server's path mappings" | Emby groups several versions in this item, and none of them maps to this file with its own item id | Nothing while Emby is still scanning; otherwise fix the server's path mappings |
 | **Failed**: "This file is Emby item 55, another version of item 53; markers not written" | The job found another version's item for this file | Check how Emby grouped this item's versions |
 | **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
-| **Failed**: "Plex's database was busy (held by another program) for N s; this job tries again in a few minutes" | The write waited 2 minutes for another program (Plex itself, or a tool writing to Plex's database) to let go of it; other files that were waiting behind it say the same | Nothing: the job log says "N file(s) not written to Plex's busy database yet; retry 1 of 3 in 60s", and the retry writes it. The last retry's row says "trying again on the next run": that file stays **Failed**, and Check servers tries it again the next day |
+| **Failed**: "Plex's database was busy (held by another program) for N s; this job tries again in a few minutes" | The write waited 2 minutes (10 seconds on a GPU or CPU worker, which previews need back) for another program (Plex itself, or a tool writing to Plex's database) to let go of it; other files that were waiting behind it say the same | Nothing: the job log says "N file(s) not written to Plex's busy database yet; retry 1 of 3 in 60s", and the retry writes it. The last retry's row says "trying again on the next run": that file stays **Failed**, and Check servers tries it again the next day |
+| **Waiting**: "Another Intro & Credits job is running this file; this job tries again in a few minutes" (or "…; trying again on the next run") | Two jobs have the same file (a library job and a webhook, say): the other one kept running it for a minute, or is paused, so this job gave its GPU or CPU worker back. With no retry left to give it, the worker waits up to 15 minutes, or not at all while the other job is paused by Pause all or its schedule's stop time, and leaves the file to the next run | Nothing: the log says "N file(s) not released by another job yet; retry 1 of 3 in 60s", and the retry runs the file |
+| Job **Failed**: "All N file(s) weren't found on disk — check the path mappings" | None of the job's files is on disk where the app looks, and no retry waits for them, so the job ends **Failed** as a preview job does | Check the server's path mappings and that the disk is mounted |
 | **Not Found**: "File not found on disk", and the log line "N files are missing from disk; they're hidden from Needs review until they come back" | The file is gone from its library: a series removed by Sonarr (its season folders go with it), or an upgrade that renamed the file. The job marks it missing in `markers.db`, and a background check after jobs finds the rest. Nothing is marked while the library's folder is missing, empty or not answering (an unmounted or stalled disk), or when a symlink is still at the path (a remote mount behind it that dropped) | Nothing: a missing file leaves **Needs review** and the job that decides those again. Nothing about it is deleted — its markers, including ones you locked or edited, stay — so if it comes back (a disk that was only unmounted, an upgrade copied in under the same name) the next job that sees it, or the background check, takes the mark off and it is as it was |
 | Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
 | Evidence detail: "Markers on this server look imported from …; not a second opinion for that database" | That server's markers came from a plugin that imports a skip database (IntroDB/TheIntroDB, SkipDB or AniSkip), so they don't confirm that database's own answer | Nothing; this is expected |

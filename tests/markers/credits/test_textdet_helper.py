@@ -37,11 +37,13 @@ PIN_ENV = ("DRI_PRIME", "MESA_VK_DEVICE_SELECT", "MESA_VK_DEVICE_SELECT_FORCE_DE
 class Env:
     """A pool whose helpers are the fake, with a mode per backend that tests can change between calls."""
 
-    def __init__(self, monkeypatch, *, modes=None, vulkan=HARDWARE, idle_exit_s=600.0, **timeouts):
+    def __init__(self, monkeypatch, *, modes=None, vulkan=HARDWARE, idle_exit_s=600.0, cpu_workers=1, **timeouts):
         self.modes = {"cpu": "ok", "webgpu": "ok", **(modes or {})}
+        self.cpu_workers = cpu_workers  # the saved CPU worker count; a test may change it between calls
         self.specs: list[th.HelperSpec] = []
         self.procs: list[subprocess.Popen] = []
         self.started: list[dict] = []  # the kwargs each helper's popen really got
+        self.proc_backends: dict[subprocess.Popen, str] = {}
         monkeypatch.setattr(
             th,
             "worker_pci_bus_id",
@@ -59,10 +61,11 @@ class Env:
                    "--idle-exit-s", str(idle_exit_s)]  # fmt: skip
             return cmd + ([] if spec.selftest else ["--no-selftest"])
 
-        def popen(*args, **kwargs):
+        def popen(argv, **kwargs):
             self.started.append(kwargs)
-            proc = subprocess.Popen(*args, **kwargs)
+            proc = subprocess.Popen(argv, **kwargs)
             self.procs.append(proc)
+            self.proc_backends[proc] = argv[argv.index("--backend") + 1]
             return proc
 
         self.pool = th.TextDetectorPool(
@@ -72,10 +75,20 @@ class Env:
             vulkan_env=lambda: {"VK_DRIVER_FILES": NVIDIA_ICD},
             start_timeout_s=timeouts.get("start_timeout_s", 20.0),
             request_timeout_s=timeouts.get("request_timeout_s", 20.0),
+            cpu_limit=lambda: self.cpu_workers,
         )
 
     def backends(self):
         return [(s.key, s.backend, s.selftest) for s in self.specs]
+
+    def gpu_starts(self):
+        return [s for s in self.specs if s.backend == "webgpu"]
+
+    def cpu_starts(self):
+        return [s for s in self.specs if s.backend == "cpu"]
+
+    def cpu_procs(self):
+        return [proc for proc in self.procs if self.proc_backends[proc] == "cpu"]
 
 
 @pytest.fixture
@@ -89,6 +102,94 @@ def envs(monkeypatch):
     yield make
     for env in made:
         env.pool.close_all()
+
+
+class Clock:
+    """The pool's monotonic clock, moved on by a test (a GPU's back-off) instead of waiting it out."""
+
+    def __init__(self, monkeypatch):
+        self.offset = 0.0
+        monkeypatch.setattr(th, "_monotonic", lambda: time.monotonic() + self.offset)
+
+    def advance(self, seconds: float) -> None:
+        self.offset += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    return Clock(monkeypatch)
+
+
+def warnings_in(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def infos_in(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+
+
+class InFlight:
+    """Counts helper requests in flight at once (every helper's ``request``), and signals once ``wanted`` are."""
+
+    def __init__(self, monkeypatch, wanted: int = 0):
+        self.now = self.peak = 0
+        self.wanted = wanted
+        self.reached = threading.Event()
+        self._lock = threading.Lock()
+        real = th._Helper.request
+
+        def request(helper, planes):
+            with self._lock:
+                self.now += 1
+                self.peak = max(self.peak, self.now)
+                if self.wanted and self.now >= self.wanted:
+                    self.reached.set()
+            try:
+                return real(helper, planes)
+            finally:
+                with self._lock:
+                    self.now -= 1
+
+        monkeypatch.setattr(th._Helper, "request", request)
+
+
+class Concurrent:
+    """``call()`` ``each`` times on each of ``threads`` threads started together; their answers and errors."""
+
+    def __init__(self, call, *, threads: int, each: int = 1):
+        self.results: list = []
+        self.errors: list[BaseException] = []
+        start = threading.Barrier(threads)
+
+        def work():
+            start.wait(20)
+            for _ in range(each):
+                try:
+                    self.results.append(call())
+                except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+                    self.errors.append(exc)
+
+        self.threads = [threading.Thread(target=work) for _ in range(threads)]
+        for thread in self.threads:
+            thread.start()
+
+    def join(self) -> tuple[list, list[BaseException]]:
+        for thread in self.threads:
+            thread.join(60)
+        assert not any(thread.is_alive() for thread in self.threads)
+        return self.results, self.errors
+
+
+def run_concurrently(call, *, threads: int, each: int = 1) -> tuple[list, list[BaseException]]:
+    return Concurrent(call, threads=threads, each=each).join()
+
+
+@pytest.fixture
+def release(monkeypatch, tmp_path):
+    """Lets the fake's ``held`` requests answer: until it is called, each one waits."""
+    path = tmp_path / "release"
+    monkeypatch.setenv("FAKE_RELEASE_FILE", str(path))
+    return path.touch
 
 
 class TestRouting:
@@ -163,38 +264,188 @@ class TestRouting:
         assert [k["env"]["DRI_PRIME"] for k in env.started] == ["pci-0000_02_00_0", "pci-0000_65_00_0"]
 
 
-class TestFallback:
-    def test_a_self_test_that_picks_the_cpu_moves_the_device_to_the_cpu_helper(self, envs, loguru_caplog):
+class TestGpuVerdicts:
+    """What keeps a GPU worker's text detection on the CPU for good: only a GPU that can't run it, or wrong boxes."""
+
+    def test_a_gpu_that_finds_other_boxes_than_the_cpu_moves_to_the_cpu_for_good_with_a_warning(
+        self, envs, clock, loguru_caplog
+    ):
         env = envs(modes={"webgpu": "selftest-cpu"})
         for _ in range(2):
             assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        clock.advance(th.IDLE_EXIT_S / 2)  # past every short back-off: a verdict has none to wait out
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
         assert env.procs[0].wait(timeout=10) is not None  # the GPU helper was closed
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+        warnings = warnings_in(loguru_caplog)
+        assert len(warnings) == 1
+        assert "cuda:0" in warnings[0] and "the GPU was finding different boxes than the CPU" in warnings[0]
+
+    def test_a_software_adapter_moves_the_device_to_the_cpu_for_good_without_a_warning(
+        self, envs, clock, loguru_caplog
+    ):
+        # llvmpipe isn't a GPU: the CPU is right there, and nothing is wrong with the install's GPU worker.
+        env = envs(modes={"webgpu": "software-adapter"})
+        assert env.pool.detect_boxes(PLANES, gpu="INTEL", gpu_device_path="/dev/dri/renderD128") == ANSWER
+        clock.advance(th.IDLE_EXIT_S / 2)
+        assert env.pool.detect_boxes(PLANES, gpu="INTEL", gpu_device_path="/dev/dri/renderD128") == ANSWER
+        assert env.backends() == [("/dev/dri/renderD128", "webgpu", True), ("cpu", "cpu", False)]
+        assert env.pool.backend_of("INTEL", "/dev/dri/renderD128") == "cpu"
+        assert warnings_in(loguru_caplog) == []
         assert (
-            "Credit text detection on cuda:0: CPU (the GPU wasn't at least 10% faster than the CPU "
-            "(median 20.0 vs 18.0 ms per frame; GPU/CPU 1.1111 per round))" in loguru_caplog.text
+            "Credit text detection on /dev/dri/renderD128: CPU (WebGPU would run on llvmpipe (LLVM 19.1.1, 256 bits), "
+            "a software renderer, not on this GPU)" in infos_in(loguru_caplog)
         )
 
+
+class TestGpuFailures:
+    """A GPU helper failing costs that request, not the device: the GPU is tried again after a short back-off that
+    doubles with failures in a row (capped, never given up on), as previews keep trying the GPU on later files."""
+
+    def _detect(self, env, **kwargs):
+        return env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0", **kwargs)
+
     @pytest.mark.parametrize(
-        ("mode", "timeouts"),
+        ("mode", "timeouts", "self_tested"),
         [
-            ("crash-on-request", {}),
-            ("hang-on-request", {"request_timeout_s": 1.0}),
-            # The budget is the pool's, so it also has to cover the healthy CPU helper this cell falls back to.
-            ("hang-start", {"start_timeout_s": 4.0}),
-            ("bad-ready", {}),
-            ("error-reply", {}),
+            ("crash-on-request", {}, True),
+            ("hang-on-request", {"request_timeout_s": 1.0}, True),  # a request that times out
+            ("error-reply", {}, True),
+            ("hang-start", {"start_timeout_s": 4.0}, False),
+            ("bad-ready", {}, False),
+            ("session-failed", {}, False),
         ],
     )
-    def test_a_failing_gpu_helper_hands_the_same_frames_to_the_cpu_for_good(self, envs, loguru_caplog, mode, timeouts):
-        env = envs(modes={"webgpu": mode}, **timeouts)
-        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+    def test_a_failing_gpu_helper_hands_that_request_to_the_cpu_and_the_gpu_is_tried_after_the_back_off(
+        self, envs, clock, loguru_caplog, mode, timeouts, self_tested
+    ):
+        env = envs(modes={"webgpu": [mode, "ok"]}, **timeouts)
+        assert self._detect(env) == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
-        assert env.procs[0].poll() is not None  # killed, not left running
-        warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1 and "cuda:0" in warnings[0] and "CPU" in warnings[0]
+        assert env.procs[0].wait(timeout=10) is not None  # killed, not left running
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+        # Inside the first back-off the next request stays on the CPU: one file's back-to-back requests don't each pay
+        # a failing helper's start, hang or crash.
+        clock.advance(th.GPU_RETRY_BASE_S - 0.5)
+        assert self._detect(env) == ANSWER
+        assert len(env.gpu_starts()) == 1
+        clock.advance(1)
+        assert self._detect(env) == ANSWER
+        # A helper whose self-test had answered restarts without one; one that never got that far self-tests again.
+        assert env.backends()[-1] == ("cuda:0", "webgpu", not self_tested)
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
+        (warning,) = warnings_in(loguru_caplog)
+        assert warning.startswith("Credit text detection on cuda:0: its GPU helper ")
+        assert f"the GPU is tried again in {th.GPU_RETRY_BASE_S:g} s" in warning
+        assert "back on the GPU after 1 failed request" in " ".join(infos_in(loguru_caplog))
 
+    def test_the_back_off_doubles_with_failures_in_a_row_and_stops_at_the_cap(self, envs, clock):
+        env = envs(modes={"webgpu": "crash-on-request"})
+        expected = []
+        back_off = th.GPU_RETRY_BASE_S
+        while True:
+            expected.append(back_off)
+            if back_off >= th.GPU_RETRY_MAX_S:
+                break
+            back_off = min(back_off * 2, th.GPU_RETRY_MAX_S)
+        expected.append(th.GPU_RETRY_MAX_S)  # and stays there
+        waited = []
+        for failure, back_off in enumerate(expected, start=1):
+            assert self._detect(env) == ANSWER
+            assert len(env.gpu_starts()) == failure
+            clock.advance(back_off - 0.5)
+            assert self._detect(env) == ANSWER  # still inside this back-off: the CPU
+            assert len(env.gpu_starts()) == failure
+            assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+            clock.advance(0.5)
+            waited.append(back_off)
+        assert waited[:4] == [5.0, 10.0, 20.0, 40.0] and waited[-2:] == [600.0, 600.0]
+        assert th.GPU_RETRY_BASE_S == 5.0 and th.GPU_RETRY_MAX_S == 600.0
+
+    def test_a_success_resets_the_back_off(self, envs, clock):
+        # Fail, fail (a 10 s back-off), succeed, then fail again: the back-off starts over at 5 s.
+        env = envs(modes={"webgpu": ["crash-on-request", "crash-on-request", "crash-after-reply", "crash-on-request"]})
+        assert self._detect(env) == ANSWER
+        clock.advance(th.GPU_RETRY_BASE_S)
+        assert self._detect(env) == ANSWER
+        clock.advance(th.GPU_RETRY_BASE_S * 2)
+        assert self._detect(env) == ANSWER  # the third helper answers on the GPU
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
+        assert len(env.gpu_starts()) == 3
+        assert self._detect(env) == ANSWER  # it exited after its answer: a failure, read on the CPU
+        clock.advance(th.GPU_RETRY_BASE_S - 0.5)
+        assert self._detect(env) == ANSWER
+        assert len(env.gpu_starts()) == 3
+        clock.advance(1)
+        assert self._detect(env) == ANSWER
+        assert len(env.gpu_starts()) == 4  # 5 s after, not 20 s: the success reset the count
+
+    def test_failures_in_a_row_keep_trying_the_gpu_and_warn_once_per_streak(self, envs, clock, loguru_caplog):
+        # crash ×3 (one streak), a reply then an exit (the recovery, then a new streak), crash, ok.
+        modes = ["crash-on-request"] * 3 + ["crash-after-reply", "crash-on-request", "ok"]
+        env = envs(modes={"webgpu": modes})
+        for request in range(1, 8):
+            assert self._detect(env) == ANSWER, request
+            clock.advance(100)  # past any back-off of these streaks, well inside a helper's idle time
+        # Every request but the one that found the helper gone started a GPU helper: never given up on.
+        assert len(env.gpu_starts()) == 6
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
+        warnings = warnings_in(loguru_caplog)
+        assert len(warnings) == 2  # the first failure of each streak
+        assert all(w.startswith("Credit text detection on cuda:0: its GPU helper failed") for w in warnings)
+        recoveries = [m for m in infos_in(loguru_caplog) if "back on the GPU" in m]
+        assert recoveries == [
+            "Credit text detection on cuda:0: back on the GPU after 3 failed requests",
+            "Credit text detection on cuda:0: back on the GPU after 2 failed requests",
+        ]
+
+    def test_a_gpu_helper_that_restarts_on_the_cpu_is_a_failure_not_a_verdict(self, envs, clock, loguru_caplog):
+        # It ran on this GPU before: coming back on the CPU after an idle exit is the driver failing this time.
+        env = envs(modes={"webgpu": ["ok", "software-adapter", "ok"]}, idle_exit_s=0.3)
+        assert self._detect(env) == ANSWER
+        assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
+        assert self._detect(env) == ANSWER
+        assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False), ("cpu", "cpu", False)]
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+        clock.advance(th.GPU_RETRY_BASE_S + 1)
+        assert self._detect(env) == ANSWER
+        assert env.backends()[-1] == ("cuda:0", "webgpu", False)
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
+        assert any("came up on the CPU" in m and "software renderer" in m for m in warnings_in(loguru_caplog))
+
+
+class TestCpuFallbackOnTheWorkerRow:
+    """A GPU worker's text detection read on the CPU says so on the worker's row, as its other CPU fallbacks do."""
+
+    @pytest.mark.parametrize(
+        ("gpu", "modes", "requests", "reason"),
+        [
+            ("NVIDIA", {"webgpu": ["crash-on-request", "ok"]}, 1, "its GPU helper failed"),
+            ("NVIDIA", {"webgpu": ["bad-ready", "ok"]}, 2, "its GPU helper couldn't start"),  # then its back-off
+            ("NVIDIA", {"webgpu": "selftest-cpu"}, 2, "other text boxes than the CPU"),  # the verdict, every request
+            ("APPLE", {}, 1, "no WebGPU path"),
+        ],
+        ids=["request-failed", "start-failed-then-cool-down", "boxes-differ", "no-webgpu-path"],
+    )
+    def test_a_gpu_workers_request_read_on_the_cpu_is_reported(self, envs, gpu, modes, requests, reason):
+        env = envs(modes=modes)
+        reported: list[str] = []
+        device = "cuda:0" if gpu == "NVIDIA" else "videotoolbox"
+        for _ in range(requests):
+            assert env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path=device, on_cpu=reported.append) == ANSWER
+        assert len(reported) == requests
+        assert all(r.startswith("Credit text detection on the CPU: ") and reason in r for r in reported)
+
+    def test_a_request_read_on_the_gpu_or_by_a_cpu_worker_reports_nothing(self, envs):
+        env = envs()
+        reported: list[str] = []
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0", on_cpu=reported.append) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None, on_cpu=reported.append) == ANSWER
+        assert reported == []
+
+
+class TestFallback:
     def test_a_failing_cpu_helper_is_unavailable_and_the_next_call_starts_a_new_one(self, envs):
         env = envs(modes={"cpu": "crash-on-request"})
         with pytest.raises(th.TextDetUnavailableError, match="Text detection failed"):
@@ -202,17 +453,6 @@ class TestFallback:
         env.modes["cpu"] = "ok"
         assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert env.backends() == [("cpu", "cpu", False), ("cpu", "cpu", False)]
-
-    def test_a_gpu_helper_that_exits_between_requests_moves_the_device_to_the_cpu_for_good(self, envs, loguru_caplog):
-        env = envs(modes={"webgpu": "crash-after-reply"})
-        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-        assert env.procs[0].wait(timeout=10) == 9
-        for _ in range(2):
-            assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-        assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
-        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
-        warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1 and "exited 9 between requests" in warnings[0] and "CPU" in warnings[0]
 
     def test_a_cpu_helper_that_went_idle_is_started_again(self, envs, loguru_caplog):
         env = envs(idle_exit_s=0.3)
@@ -348,6 +588,386 @@ def test_close_all_kills_a_helper_that_hangs_at_exit(envs, monkeypatch):
     assert env.procs[0].poll() is not None and time.monotonic() - started < 10
 
 
+def cpu_request(env):
+    return lambda: env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
+
+
+def alive(procs) -> list[bool]:
+    return sorted(proc.poll() is None for proc in procs)
+
+
+def wait_until_alive_count(procs, count: int, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while sum(proc.poll() is None for proc in procs) > count and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+class TestCpuHelpers:
+    """CPU text detection scales with the CPU workers: a helper per request in flight, up to the saved count."""
+
+    @pytest.mark.parametrize("workers", [1, 4, 8])
+    def test_cpu_workers_get_up_to_their_count_of_helpers(self, envs, monkeypatch, release, workers):
+        env = envs(modes={"cpu": "held"}, cpu_workers=workers)
+        flight = InFlight(monkeypatch, wanted=workers)
+        running = Concurrent(cpu_request(env), threads=2 * workers, each=2)
+        assert flight.reached.wait(20)  # every CPU worker's request at once, each on its own helper
+        time.sleep(0.3)
+        assert flight.now == workers  # the rest wait for one of them
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * (4 * workers)
+        started = env.cpu_starts()
+        assert len(started) == workers  # as many as asked for, and no more
+        assert len({spec.key for spec in started}) == workers
+        assert all(spec.pci_bus_id is None and spec.selftest is False for spec in started)
+        assert flight.peak == workers
+        assert all("DRI_PRIME" not in kwargs["env"] for kwargs in env.started)
+
+    def test_no_cpu_helper_starts_before_a_request(self, envs):
+        env = envs(cpu_workers=8)
+        assert env.specs == []
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.backends() == [("cpu", "cpu", False)]  # one request, one helper, even with 8 allowed
+
+    def test_one_helper_serves_a_cpu_worker_request_after_request(self, envs):
+        env = envs(cpu_workers=4)
+        for _ in range(5):
+            assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.backends() == [("cpu", "cpu", False)]
+
+    @pytest.mark.parametrize("cpu_workers", [0, 1])
+    def test_gpu_workers_on_the_cpu_get_helpers_of_their_own(self, envs, monkeypatch, release, cpu_workers):
+        # A GPU worker whose GPU can't run text detection does it on the CPU itself, as a preview's CPU rerun does on
+        # the same worker: it neither waits for a CPU worker's helper nor counts against the CPU worker count.
+        env = envs(modes={"cpu": "held"}, cpu_workers=cpu_workers)
+        flight = InFlight(monkeypatch, wanted=3 + cpu_workers)
+        calls = [lambda: env.pool.detect_boxes(PLANES, gpu="APPLE", gpu_device_path="videotoolbox")] * 3
+        calls += [cpu_request(env)] * cpu_workers
+        pending = iter(calls)
+        lock = threading.Lock()
+
+        def next_call():
+            with lock:
+                call = next(pending)
+            return call()
+
+        running = Concurrent(next_call, threads=len(calls))
+        assert flight.reached.wait(20)  # all of them at once, none waiting on another's helper
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * len(calls)
+        assert len(env.cpu_starts()) == len(calls)
+        assert (env.pool._cpu_worker_holds, env.pool._gpu_worker_holds) == (0, 0)
+
+    def test_a_gpu_workers_cpu_rerun_gets_a_helper_of_its_own(self, envs, monkeypatch, release):
+        # A GPU decode that fails is read again on the same worker with no GPU (as previews do): the caller says it is
+        # still a GPU worker, so the rerun neither waits for nor counts against the CPU workers (none, here).
+        env = envs(modes={"cpu": "held"}, cpu_workers=0)
+        flight = InFlight(monkeypatch, wanted=2)
+        calls = iter([cpu_request(env), lambda: env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None,
+                                                                      gpu_worker=True)])  # fmt: skip
+        lock = threading.Lock()
+
+        def next_call():
+            with lock:
+                call = next(calls)
+            return call()
+
+        running = Concurrent(next_call, threads=2)
+        assert flight.reached.wait(20)
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * 2
+        assert len(env.cpu_starts()) == 2
+        assert all(spec.backend == "cpu" and spec.pci_bus_id is None for spec in env.specs)
+
+    def test_a_cpu_workers_wait_for_a_helper_ends_when_its_job_is_cancelled(self, envs, monkeypatch, release):
+        # The saved count was lowered while CPU workers were mid-file: a request waits for a helper to come back, and a
+        # cancel of its job ends that wait (previews' running CPU workers are never kept waiting either).
+        env = envs(modes={"cpu": "held"}, cpu_workers=1)
+        flight = InFlight(monkeypatch, wanted=1)
+        holder = Concurrent(cpu_request(env), threads=1)
+        assert flight.reached.wait(20)
+        cancelled = threading.Event()
+        raised: list[BaseException] = []
+
+        def waiter():
+            try:
+                env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None, cancel_check=cancelled.is_set)
+            except (th.TextDetUnavailableError, th.TextDetCancelledError) as exc:
+                raised.append(exc)
+
+        thread = threading.Thread(target=waiter, daemon=True)
+        thread.start()
+        thread.join(0.3)
+        assert thread.is_alive()  # waiting: the one helper CPU workers may hold is busy
+        cancelled.set()
+        thread.join(5)
+        assert not thread.is_alive()
+        # A cancel, never "text detection failed": a caller that keeps an earlier answer on a failure must not here.
+        assert [type(exc) for exc in raised] == [th.TextDetCancelledError] and str(raised[0]) == "cancelled"
+        assert not isinstance(raised[0], th.TextDetUnavailableError)
+        release()
+        results, errors = holder.join()
+        assert errors == [] and results == [ANSWER]
+        assert len(env.cpu_starts()) == 1
+        assert (env.pool._cpu_worker_holds, env.pool._gpu_worker_holds) == (0, 0)
+
+    def test_a_gpu_workers_cpu_rerun_through_the_detector_gets_a_helper_with_no_cpu_workers(
+        self, envs, monkeypatch, release, tmp_path
+    ):
+        # The path below the worker (which passes gpu_worker on its CPU rerun, test_job_runner_real): the credits
+        # detector with no GPU asks the real pool as a GPU worker, so with the saved CPU worker count at 0 it gets a
+        # helper of its own while a CPU worker's request holds the only one CPU workers may, and neither waits.
+        from media_preview_generator.markers.credits import detector
+        from media_preview_generator.markers.pipeline import DetectorAnswer
+        from media_preview_generator.markers.store import FileRecord, MarkerStore
+
+        env = envs(modes={"cpu": "held"}, cpu_workers=0)
+        monkeypatch.setattr(detector, "get_textdet_pool", lambda: env.pool)
+        boxes: list = []
+
+        def find(path, **kwargs):
+            boxes.append(kwargs["detect_boxes"](PLANES))
+            return detector.CreditsTextResult(None, None, (), (), ())
+
+        monkeypatch.setattr(detector, "find_credits", find)
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        rec = FileRecord(7, "/media/movies/Movie (2020)/Movie (2020).mkv", 100, 1, 6_000_000, None, True)
+        ctx = SimpleNamespace(config=SimpleNamespace(ffmpeg_path="ffmpeg"), force=False, store=store,
+                              now=lambda: None, run_memo=lambda path: {},
+                              settings=SimpleNamespace(credits_tv_s=None, credits_movie_s=None))  # fmt: skip
+        flight = InFlight(monkeypatch, wanted=2)
+        rerun = lambda: detector.detect_credits_text(rec, ctx=ctx, gpu=None, gpu_device_path=None, gpu_worker=True)  # noqa: E731
+        calls = iter([cpu_request(env), rerun])
+        lock = threading.Lock()
+
+        def next_call():
+            with lock:
+                call = next(calls)
+            return call()
+
+        try:
+            running = Concurrent(next_call, threads=2)
+            assert flight.reached.wait(20)  # both in flight at once: neither waited for the other's helper
+            release()
+            results, errors = running.join()
+        finally:
+            store.close()
+        assert errors == []
+        assert sorted(map(type, results), key=lambda t: t.__name__) == [DetectorAnswer, list]
+        assert boxes == [ANSWER]
+        assert len(env.cpu_starts()) == 2
+        assert (env.pool._cpu_worker_holds, env.pool._gpu_worker_holds) == (0, 0)
+
+    def test_a_gpu_workers_request_never_spends_a_cpu_workers_retirement(self, envs, monkeypatch, release):
+        # The count drops while two CPU workers' and one GPU worker's requests hold helpers. Whichever returns first,
+        # the CPU workers end at the new count and the GPU worker's helper is never the one stopped.
+        env = envs(modes={"cpu": "held"}, cpu_workers=2)
+        flight = InFlight(monkeypatch, wanted=3)
+        calls = iter([cpu_request(env), cpu_request(env),
+                      lambda: env.pool.detect_boxes(PLANES, gpu="APPLE", gpu_device_path="videotoolbox")])  # fmt: skip
+        lock = threading.Lock()
+
+        def next_call():
+            with lock:
+                call = next(calls)
+            return call()
+
+        running = Concurrent(next_call, threads=3)
+        assert flight.reached.wait(20)
+        env.cpu_workers = 1
+        env.pool.reconcile_cpu_helpers()
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * 3
+        wait_until_alive_count(env.cpu_procs(), 2)
+        assert alive(env.cpu_procs()) == [False, True, True]  # one CPU worker's helper stopped on its return
+
+        flight = InFlight(monkeypatch)
+        results, errors = run_concurrently(cpu_request(env), threads=3)
+        assert errors == [] and results == [ANSWER] * 3
+        assert flight.peak == 1  # CPU workers are held to the new count, idle helpers or not
+
+    def test_a_count_read_before_a_newer_one_was_applied_is_ignored(self, envs):
+        # Saved 3 → 1 → 3 in quick succession: a request that read the 1 but applies it after the second save's
+        # resize would stop two helpers the saved count wants.
+        env = envs(modes={"cpu": "slow"}, cpu_workers=3)
+        run_concurrently(cpu_request(env), threads=3)
+        reading = threading.Event()
+        go_on = threading.Event()
+        stale: dict[str, threading.Thread | None] = {"thread": None}
+
+        def limit():
+            value = env.cpu_workers
+            if threading.current_thread() is stale["thread"]:
+                reading.set()
+                go_on.wait(20)
+            return value
+
+        env.pool._cpu_limit = limit
+        env.cpu_workers = 1
+        slow = threading.Thread(target=cpu_request(env))
+        stale["thread"] = slow
+        slow.start()
+        assert reading.wait(20)
+        env.cpu_workers = 3
+        env.pool.reconcile_cpu_helpers()
+        go_on.set()
+        slow.join(30)
+        assert not slow.is_alive()
+        assert alive(env.cpu_procs()) == [True, True, True]
+        assert len(env.cpu_starts()) == 3
+
+    def test_a_request_whose_stopping_of_old_helpers_fails_leaves_no_helper_taken(self, envs, monkeypatch):
+        env = envs(modes={"cpu": "slow"}, cpu_workers=3)
+        run_concurrently(cpu_request(env), threads=3)
+        real_stop = th.TextDetectorPool._stop_helpers
+        failures = [RuntimeError("kill failed")]
+
+        def stop(helpers):
+            if helpers and failures:
+                raise failures.pop()
+            real_stop(helpers)
+
+        monkeypatch.setattr(env.pool, "_stop_helpers", stop)
+        env.cpu_workers = 1
+        with pytest.raises(RuntimeError, match="kill failed"):
+            env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
+        # No helper was taken for the failed request, so the one CPU worker still gets one without waiting.
+        answered = Concurrent(cpu_request(env), threads=1)
+        results, errors = answered.join()
+        assert errors == [] and results == [ANSWER]
+        assert env.pool._cpu_worker_holds == 0
+
+    def test_a_request_beyond_the_count_waits_for_a_free_helper(self, envs, monkeypatch, release):
+        env = envs(modes={"cpu": "held"}, cpu_workers=2)
+        flight = InFlight(monkeypatch, wanted=2)
+        running = Concurrent(cpu_request(env), threads=5)
+        assert flight.reached.wait(20)
+        time.sleep(0.3)
+        assert flight.now == 2
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * 5
+        assert len(env.cpu_starts()) == 2 and flight.peak == 2
+
+    def test_a_lower_count_stops_the_idle_helpers_beyond_it_at_once(self, envs, monkeypatch):
+        env = envs(modes={"cpu": "slow"}, cpu_workers=3)
+        run_concurrently(cpu_request(env), threads=3)
+        assert alive(env.cpu_procs()) == [True, True, True]
+
+        env.cpu_workers = 1
+        env.pool.reconcile_cpu_helpers()
+        assert alive(env.cpu_procs()) == [False, False, True]  # stopped now, not left to their idle timer
+
+        flight = InFlight(monkeypatch)
+        results, errors = run_concurrently(cpu_request(env), threads=3)
+        assert errors == [] and results == [ANSWER] * 3
+        assert len(env.cpu_starts()) == 3 and flight.peak == 1  # the one left serves them in turn
+
+    def test_a_lower_count_saved_another_way_takes_effect_on_the_next_request(self, envs):
+        # The workers API saves the count without the settings page's hooks; the next request reads it anyway.
+        env = envs(modes={"cpu": "slow"}, cpu_workers=3)
+        run_concurrently(cpu_request(env), threads=3)
+        env.cpu_workers = 1
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert alive(env.cpu_procs()) == [False, False, True]
+
+    def test_a_busy_helper_beyond_a_lower_count_stops_when_its_request_ends(self, envs, monkeypatch, release):
+        env = envs(modes={"cpu": "held"}, cpu_workers=2)
+        flight = InFlight(monkeypatch, wanted=2)
+        running = Concurrent(cpu_request(env), threads=2)
+        assert flight.reached.wait(20)
+        env.cpu_workers = 1
+        env.pool.reconcile_cpu_helpers()
+        assert alive(env.cpu_procs()) == [True, True]  # neither is pulled mid-request
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * 2
+        wait_until_alive_count(env.cpu_procs(), 1)
+        assert alive(env.cpu_procs()) == [False, True]
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert len(env.cpu_starts()) == 2
+
+    def test_a_raise_before_a_busy_helper_is_returned_keeps_it(self, envs, monkeypatch, release):
+        env = envs(modes={"cpu": "held"}, cpu_workers=2)
+        flight = InFlight(monkeypatch, wanted=2)
+        running = Concurrent(cpu_request(env), threads=2)
+        assert flight.reached.wait(20)
+        env.cpu_workers = 1
+        env.pool.reconcile_cpu_helpers()
+        env.cpu_workers = 2
+        env.pool.reconcile_cpu_helpers()
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * 2
+        assert alive(env.cpu_procs()) == [True, True]
+
+    def test_a_stopped_helper_leaves_the_pool_before_its_process_is_stopped(self, envs, monkeypatch):
+        # Its key can be handed out again the moment the pool's lock is released: a request starting a helper under
+        # that key must get a new process, never the one about to be killed.
+        env = envs(modes={"cpu": "slow"}, cpu_workers=2)
+        run_concurrently(cpu_request(env), threads=2)
+        seen: list[tuple[set[str], list[int]]] = []
+
+        def stop(helpers):
+            seen.append((set(env.pool._helpers), [helper.proc.pid for helper in helpers]))
+            th.TextDetectorPool._stop_helpers(helpers)
+
+        monkeypatch.setattr(env.pool, "_stop_helpers", stop)
+        env.cpu_workers = 1
+        env.pool.reconcile_cpu_helpers()
+        [(keys_left, stopped)] = [entry for entry in seen if entry[1]]
+        assert len(stopped) == 1 and len(keys_left) == 1  # out of the pool before its kill
+        assert stopped[0] not in {helper.proc.pid for helper in env.pool._helpers.values()}
+
+    def test_a_higher_count_lets_more_helpers_start(self, envs, monkeypatch, release):
+        env = envs(modes={"cpu": "held"}, cpu_workers=1)
+        release()
+        run_concurrently(cpu_request(env), threads=3)
+        assert len(env.cpu_starts()) == 1
+        Path(os.environ["FAKE_RELEASE_FILE"]).unlink()
+        env.cpu_workers = 3
+        flight = InFlight(monkeypatch, wanted=3)
+        running = Concurrent(cpu_request(env), threads=3)
+        assert flight.reached.wait(20)
+        release()
+        results, errors = running.join()
+        assert errors == [] and results == [ANSWER] * 3
+        assert len(env.cpu_starts()) == 3 and flight.peak == 3
+
+    def test_close_all_wakes_a_request_waiting_for_a_cpu_helper(self, envs, monkeypatch):
+        env = envs(modes={"cpu": "hang-on-request"}, cpu_workers=1, request_timeout_s=30.0)
+        flight = InFlight(monkeypatch, wanted=1)
+        failed: list[BaseException] = []
+
+        def work():
+            try:
+                env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
+            except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+                failed.append(exc)
+
+        first = threading.Thread(target=work)
+        first.start()
+        assert flight.reached.wait(20)
+        second = threading.Thread(target=work)  # waits: the only helper is busy
+        second.start()
+        time.sleep(0.3)
+        started = time.monotonic()
+        env.pool.close_all()
+        for thread in (first, second):
+            thread.join(30)
+        assert time.monotonic() - started < 10
+        assert len(failed) == 2 and all(isinstance(exc, th.TextDetShuttingDownError) for exc in failed)
+        assert len(env.cpu_starts()) == 1
+
+    def test_every_cpu_helper_keeps_to_two_threads(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(th.MODEL_ENV, str(tmp_path / "m.onnx"))
+        command = th.helper_command(th.HelperSpec("cpu#3", "cpu", None, False, {}))
+        assert command[command.index("--threads") + 1] == "2"
+
+
 class TestGpuPinning:
     """Only the helper's environment puts it on a physical GPU (controller note N1, measured 2026-09-16)."""
 
@@ -393,6 +1013,7 @@ class TestCommand:
             ("APPLE", None, "APPLE"),
             ("cpu", None, "gpu:cpu"),  # a GPU type or path spelt "cpu" must not share the CPU helper's key
             ("NVIDIA", "cpu", "gpu:cpu"),
+            ("NVIDIA", "cpu#2", "gpu:cpu#2"),  # nor one spelt like another CPU helper's
         ],
     )
     def test_device_key(self, gpu, path, expected):
@@ -430,7 +1051,7 @@ class FakeDetector:
         return [boxes_for(n, shift) for n in self.counts[: len(frames)]]
 
 
-class Clock:
+class FakeClock:
     now = 0.0
 
     def __call__(self):
@@ -441,17 +1062,18 @@ class Clock:
     ("gpu_counts", "gpu_shift", "gpu_s", "use_gpu", "same"),
     [
         ([1, 0, 3], 0, 0.005, True, True),
-        ([1, 0, 3], 0, 0.030, False, True),
+        # A GPU worker's work runs on its GPU (the owner's worker model): a slower GPU is still used.
+        ([1, 0, 3], 0, 0.030, True, True),
         ([1, 1, 3], 0, 0.005, False, False),
         # The same number of boxes in other places. Rule J version 3 reads row[3], so this backend answers
         # differently from the CPU path on every file with an overlay or a band step, and a count test
         # passes it.
         ([1, 0, 3], 40, 0.005, False, False),
     ],
-    ids=["same-boxes-and-faster", "same-boxes-too-slow", "different-counts", "same-counts-other-places"],
+    ids=["same-boxes-and-faster", "same-boxes-and-slower", "different-counts", "same-counts-other-places"],
 )
-def test_self_test_needs_the_same_boxes_and_more_speed(gpu_counts, gpu_shift, gpu_s, use_gpu, same):
-    clock = Clock()
+def test_the_self_test_needs_the_same_boxes_whatever_the_speed(gpu_counts, gpu_shift, gpu_s, use_gpu, same):
+    clock = FakeClock()
     frames = np.zeros((3, 180, 320), np.uint8)
     gpu = FakeDetector(gpu_counts, gpu_s, clock, shift=gpu_shift)
     result = th.self_test(gpu, FakeDetector([1, 0, 3], 0.018, clock), frames, clock=clock, warmup=1)
@@ -463,7 +1085,7 @@ def test_self_test_needs_the_same_boxes_and_more_speed(gpu_counts, gpu_shift, gp
 def test_the_self_test_compares_the_boxes_at_640x360_too(large_shift, use_gpu):
     # The detector's larger reading sends 640x360 frames to the same helper. A GPU that finds the CPU's boxes at
     # 320x180 and other ones at 640x360 would answer differently from the CPU on every file read at that size.
-    clock = Clock()
+    clock = FakeClock()
     frames = np.zeros((3, 180, 320), np.uint8)
     large = np.zeros((2, 360, 640), np.uint8)
     gpu = FakeDetector([1, 0, 3], 0.005, clock, large_shift=large_shift)
@@ -482,7 +1104,7 @@ def test_the_self_tests_larger_frames_are_the_detectors_larger_reading():
 
 
 def test_the_self_test_warms_both_detectors_before_timing():
-    clock = Clock()
+    clock = FakeClock()
     frames = np.zeros((6, 180, 320), np.uint8)
     gpu, cpu = FakeDetector([0] * 6, 0.001, clock), FakeDetector([0] * 6, 0.002, clock)
     seen: list[int] = []
@@ -611,18 +1233,16 @@ class PacedDetector:
         return [boxes_for(n) for n in counts[: len(frames)]]
 
 
-@pytest.mark.parametrize(
-    ("ratio", "use_gpu"),
-    [(0.89, True), (0.9, True), (0.901, False), (0.91, False), (1.0, False), (1.1, False)],
-)
-def test_the_self_test_needs_a_ten_percent_win_not_just_a_win(ratio, use_gpu):
-    # The per-side medians are reported, but only the median per-round ratio decides.
-    assert th.SelfTest(5.0, 10.0, ratio, True).use_gpu is use_gpu
+@pytest.mark.parametrize("ratio", [0.1, 0.9, 0.901, 1.0, 1.1, 2.0, 30.0])
+@pytest.mark.parametrize(("same_boxes", "same_large"), [(True, True), (False, True), (True, False)])
+def test_the_speed_ratio_never_decides(ratio, same_boxes, same_large):
+    # The timing is logged for information; only the boxes decide, at both sizes.
+    assert th.SelfTest(5.0, 10.0, ratio, same_boxes, same_large).use_gpu is (same_boxes and same_large)
 
 
 def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfTest:
     """The self-test on detectors whose timed rounds cost these seconds per frame (warm-up free)."""
-    clock = Clock()
+    clock = FakeClock()
     clock.now = 0.0
     frames = np.zeros((3, 180, 320), np.uint8)
     gpu = PacedDetector([[1, 0, 3]], [0.0, *gpu_rounds_s], clock)
@@ -635,9 +1255,9 @@ def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfT
     [
         # One slow GPU round: a single-sample test would say CPU; the other six rounds outvote it.
         ([0.100, *[0.001] * 6], [0.010] * 7, (1.0, 10.0, 0.1, True)),
-        # A GPU fast in one round only: its best round (4 ms) would pass, but six of seven back-to-back rounds say
-        # 0.95 of the CPU's time or more -- the side whose times spread more mustn't win on its luckiest round.
-        ([0.004, 0.0095, 0.100, *[0.0095] * 4], [0.010] * 7, (9.5, 10.0, 0.95, False)),
+        # A GPU fast in one round only: six of seven back-to-back rounds say 0.95 of the CPU's time, so that is what
+        # the log reports, not its luckiest round.
+        ([0.004, 0.0095, 0.100, *[0.0095] * 4], [0.010] * 7, (9.5, 10.0, 0.95, True)),
         # Host load slows both sides in round 3: its ratio (0.5) is the others', so nothing changes.
         ([0.005, 0.005, 0.050, *[0.005] * 4], [0.010, 0.010, 0.100, *[0.010] * 4], (5.0, 10.0, 0.5, True)),
         # The same rounds with no load at all: the same verdict.
@@ -646,9 +1266,7 @@ def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfT
         # card), rounds 5-7 the whole host. Six of seven back-to-back rounds say the GPU takes half the CPU's time;
         # the medians say 10 vs 10.
         ([*[0.005] * 3, *[0.010] * 4], [*[0.010] * 4, *[0.020] * 3], (10.0, 10.0, 0.5, True)),
-        # The CPU busy in six rounds of seven while the GPU isn't: six back-to-back rounds say 0.475, so the GPU is
-        # kept. (Judged at each side's best round, 9.5 vs 10 ms, this was the CPU: the controller's 2026-09-19 ruling
-        # chose the per-round ratio, which counts the GPU's steadiness under the load the host actually had.)
+        # The CPU busy in six rounds of seven while the GPU isn't: six back-to-back rounds say 0.475.
         ([0.0095] * 7, [0.020, 0.020, 0.010, *[0.020] * 4], (9.5, 20.0, 0.475, True)),
     ],
     ids=[
@@ -660,7 +1278,7 @@ def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfT
         "cpu-busy-in-most-rounds",
     ],
 )
-def test_the_median_per_round_ratio_decides(gpu_rounds_s, cpu_rounds_s, expected):
+def test_the_logged_ratio_is_the_median_per_round_ratio(gpu_rounds_s, cpu_rounds_s, expected):
     result = _self_test(gpu_rounds_s, cpu_rounds_s)
     assert (result.gpu_ms, result.cpu_ms, result.ratio, result.use_gpu) == expected
 
@@ -668,26 +1286,18 @@ def test_the_median_per_round_ratio_decides(gpu_rounds_s, cpu_rounds_s, expected
 @pytest.mark.parametrize(
     ("result", "reason"),
     [
-        (
-            th.SelfTest(9.5, 10.0, 0.95, True),
-            "the GPU wasn't at least 10% faster than the CPU (median 9.5 vs 10.0 ms per frame; GPU/CPU 0.95 per round)",
-        ),
-        (
-            th.SelfTest(20.0, 10.0, 2.0, True),
-            "the GPU wasn't at least 10% faster than the CPU (median 20.0 vs 10.0 ms per frame; GPU/CPU 2.0 per round)",
-        ),
         (th.SelfTest(1.0, 10.0, 0.1, False), "the GPU was finding different boxes than the CPU"),
+        (th.SelfTest(20.0, 10.0, 2.0, False, False), "the GPU was finding different boxes than the CPU"),
+        (th.SelfTest(1.0, 10.0, 0.1, True, False), "the GPU was finding different boxes than the CPU at 640x360"),
     ],
-    ids=["faster-but-not-enough", "slower", "different-boxes"],
+    ids=["different-boxes", "different-at-both-sizes", "different-at-640x360"],
 )
-def test_the_cpu_reason_says_what_the_self_test_measured(result, reason):
-    # A GPU a few percent faster than the CPU once logged "the GPU was slower than the CPU", and without the numbers
-    # nobody could tell why the verdict had changed.
+def test_the_cpu_reason_says_which_boxes_differed(result, reason):
     assert result.cpu_reason() == reason
 
 
 def test_boxes_that_differ_in_any_round_fail_the_self_test():
-    clock = Clock()
+    clock = FakeClock()
     clock.now = 0.0
     frames = np.zeros((3, 180, 320), np.uint8)
     gpu = PacedDetector([[1, 0, 3], [1, 0, 3], [1, 0, 3], [9, 9, 9]], [0.001], clock)
@@ -779,15 +1389,34 @@ class StubTextDet:
         return np.zeros((count, 180 * scale, 320 * scale), np.uint8)
 
 
+@pytest.mark.parametrize("error", [OSError("no libvulkan.so.1"), ValueError("a ctypes surprise")])
+def test_a_vulkan_listing_that_breaks_is_left_to_the_session(monkeypatch, error):
+    # Anything going wrong in the check itself skips it: it must never read as the GPU failing.
+    import ctypes
+
+    def broken(name):
+        raise error
+
+    monkeypatch.setattr(ctypes, "CDLL", broken)
+    assert th._vulkan_adapters() is None
+
+
 class TestHelperProcessBackendChoice:
     """``_start_detector``: what the helper process serves with, and the reason its ready line gives."""
 
     @pytest.fixture
     def clock(self, monkeypatch):
-        clock = Clock()
+        clock = FakeClock()
         clock.now = 0.0
         monkeypatch.setattr(th, "_perf_counter", clock)
         return clock
+
+    @pytest.fixture(autouse=True)
+    def adapters(self, monkeypatch):
+        """The Vulkan devices the helper's own environment exposes: one hardware GPU unless a test says otherwise."""
+        listed = [[("Test GPU", th.VK_DISCRETE_GPU)]]
+        monkeypatch.setattr(th, "_vulkan_adapters", lambda: listed[0])
+        return listed
 
     def _start(self, stub, **overrides):
         args = SimpleNamespace(
@@ -809,24 +1438,63 @@ class TestHelperProcessBackendChoice:
         # 20 frames at 320x180 timed, and 8 at 640x360 compared.
         assert stub.frame_sizes == [(th.SELFTEST_FRAMES, 1), (th.SELFTEST_LARGE_FRAMES, th.SELFTEST_LARGE_SCALE)]
 
-    def test_a_slower_gpu_serves_from_the_cpu(self, clock):
+    def test_a_slower_gpu_still_serves_from_the_gpu(self, clock):
+        # The worker is a GPU worker: its text detection runs on its GPU when the GPU finds the CPU's boxes.
         stub = StubTextDet(clock, gpu_ms=20.0, cpu_ms=10.0)
         detector, ready = self._start(stub)
-        assert detector.backend == "cpu"
-        assert ready["backend"] == "cpu"
-        assert ready["reason"] == (
-            "the GPU wasn't at least 10% faster than the CPU (median 20.0 vs 10.0 ms per frame; GPU/CPU 2.0 per round)"
-        )
+        assert detector.backend == "webgpu"
+        assert ready == {
+            "backend": "webgpu",
+            "selftest": {"gpu_ms": 20.0, "cpu_ms": 10.0, "ratio": 2.0, "same_boxes": True, "same_boxes_large": True},
+            "reason": "",
+        }
 
-    def test_a_gpu_that_only_ties_serves_from_the_cpu(self, clock):
+    def test_a_gpu_that_only_ties_serves_from_the_gpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=10.0, cpu_ms=10.0)
         detector, ready = self._start(stub)
+        assert detector.backend == "webgpu"
+        assert ready["selftest"]["ratio"] == 1.0
+
+    @pytest.mark.parametrize("selftest", [True, False], ids=["first-start", "restart"])
+    @pytest.mark.parametrize(
+        "listed",
+        [
+            [("llvmpipe (LLVM 19.1.1, 256 bits)", th.VK_CPU)],
+            # Named as a software renderer whatever type the driver reports.
+            [("SwiftShader Device (Subzero)", th.VK_OTHER)],
+        ],
+        ids=["llvmpipe", "swiftshader"],
+    )
+    def test_a_software_adapter_is_not_a_gpu(self, clock, adapters, listed, selftest):
+        # Dawn runs on whichever adapter the helper's Vulkan environment leaves it; llvmpipe finds the CPU's boxes, so
+        # only this check keeps a GPU worker's text detection off a software renderer.
+        adapters[0] = listed
+        stub = StubTextDet(clock)
+        detector, ready = self._start(stub, selftest=selftest)
         assert detector.backend == "cpu"
-        assert ready["selftest"] == {"gpu_ms": 10.0, "cpu_ms": 10.0, "ratio": 1.0, "same_boxes": True,
-                                     "same_boxes_large": True}  # fmt: skip
-        assert ready["reason"] == (
-            "the GPU wasn't at least 10% faster than the CPU (median 10.0 vs 10.0 ms per frame; GPU/CPU 1.0 per round)"
-        )
+        assert ready == {
+            "backend": "cpu",
+            "selftest": None,
+            "reason": f"WebGPU would run on {listed[0][0]}, a software renderer, not on this GPU",
+        }
+        assert stub.webgpu_sessions == []  # checked before a session is built on it
+
+    @pytest.mark.parametrize(
+        "listed",
+        [
+            [("Test GPU", th.VK_DISCRETE_GPU), ("llvmpipe (LLVM 19.1.1, 256 bits)", th.VK_CPU)],
+            [("Test iGPU", th.VK_INTEGRATED_GPU)],
+            [("Virtual GPU", th.VK_VIRTUAL_GPU)],
+            # Nothing listed, or Vulkan couldn't be asked: the WebGPU session itself says whether there's an adapter.
+            [],
+            None,
+        ],
+        ids=["hardware-beside-llvmpipe", "integrated", "virtual", "none-listed", "unknown"],
+    )
+    def test_anything_but_a_lone_software_renderer_is_left_to_the_session(self, clock, adapters, listed):
+        adapters[0] = listed
+        detector, ready = self._start(StubTextDet(clock))
+        assert detector.backend == "webgpu" and ready["backend"] == "webgpu"
 
     def test_a_gpu_that_finds_different_boxes_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0, gpu_counts=[99] * th.SELFTEST_FRAMES)
@@ -858,13 +1526,23 @@ class TestHelperProcessBackendChoice:
         assert detector.backend == "cpu"
         assert ready["selftest"] is None
         assert ready["reason"] == "the WebGPU session failed: RuntimeError: the device was lost"
+        # A failure, not a verdict on the GPU: the parent tries the GPU again later.
+        assert ready["failed"] is True
 
-    def test_a_webgpu_session_error_is_a_cpu_fallback_not_a_crash(self, clock):
+    @pytest.mark.parametrize(
+        "listed", [[("Test GPU", th.VK_DISCRETE_GPU)], [], None], ids=["hardware-listed", "none-listed", "unknown"]
+    )
+    def test_a_webgpu_session_error_is_a_cpu_fallback_not_a_crash(self, clock, adapters, listed):
+        # Dawn gave no adapter, whatever Vulkan lists (a GPU Dawn rejects, say): the GPU can't run text detection here,
+        # a verdict for the process rather than a failure retried every hour. A GPU that has served and then comes back
+        # this way is a failure all the same (_accept_gpu_helper).
+        adapters[0] = listed
         stub = StubTextDet(clock, webgpu_error=StubTextDet.WebGpuSessionError("providers: ['CPUExecutionProvider']"))
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
         assert ready["backend"] == "cpu"
         assert ready["reason"].startswith("this GPU has no usable WebGPU adapter: ")
+        assert "failed" not in ready
 
     def test_no_ep_device_for_this_gpu_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, addresses=("0000:07:00.0", "0000:65:00.0"))
@@ -878,6 +1556,11 @@ class TestHelperProcessBackendChoice:
         detector, ready = self._start(stub)
         assert detector.backend == "webgpu" and ready["backend"] == "webgpu"
         assert stub.webgpu_sessions == [stub.devices[1]]
+
+    def test_a_cpu_helper_never_lists_the_vulkan_adapters(self, clock, monkeypatch):
+        monkeypatch.setattr(th, "_vulkan_adapters", lambda: pytest.fail("a CPU helper has no adapter to check"))
+        detector, _ready = self._start(StubTextDet(clock), backend="cpu")
+        assert detector.backend == "cpu"
 
     def test_no_selftest_keeps_the_gpu_and_builds_no_cpu_session(self, clock):
         stub = StubTextDet(clock, gpu_ms=99.0, cpu_ms=1.0)
@@ -1013,20 +1696,17 @@ def test_a_second_worker_on_one_device_never_acts_on_a_stale_gpu_verdict(envs, m
     for thread in (first, second):
         thread.join(60)
     assert errors == [] and results == [ANSWER, ANSWER]
-    assert [spec for spec in env.specs if spec.backend == "webgpu"] == [env.specs[0]]
-    assert env.specs[0].selftest is True
-    assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
-
-
-def test_a_helper_that_restarts_on_the_cpu_says_so(envs, loguru_caplog):
-    env = envs(modes={"webgpu": ["ok", "selftest-cpu"]}, idle_exit_s=0.3)
-    assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-    assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
-    assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-    assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False), ("cpu", "cpu", False)]
-    assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
-    warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1 and "cuda:0 restarted on the CPU" in warnings[0]
+    gpu_starts = [spec for spec in env.specs if spec.backend == "webgpu"]
+    assert env.specs[0] is gpu_starts[0] and gpu_starts[0].selftest is True
+    if mode == "selftest-cpu":
+        # The first's self-test gave the device its CPU verdict: the second never starts a GPU helper.
+        assert gpu_starts == [env.specs[0]]
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+    else:
+        # The first's self-test passed and its request then failed: the second, asking inside the back-off that
+        # failure started, is read on the CPU rather than starting a second GPU helper.
+        assert gpu_starts == [env.specs[0]]
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
 
 
 def test_a_helper_that_goes_idle_on_every_request_is_not_restarted_forever(envs):
@@ -1043,6 +1723,51 @@ def test_get_textdet_pool_is_one_pool_for_the_process_closed_at_exit(monkeypatch
     pool = th.get_textdet_pool()
     assert th.get_textdet_pool() is pool
     assert registered == [pool.close_all]
+    # The app's pool sizes its CPU helpers by the saved CPU worker count.
+    assert pool._cpu_limit is th._configured_cpu_workers
+
+
+@pytest.mark.parametrize(("saved", "expected"), [(0, 0), (1, 1), (6, 6)])
+def test_the_app_reads_the_saved_cpu_worker_count(monkeypatch, saved, expected):
+    from media_preview_generator.web import settings_manager
+
+    monkeypatch.setattr(settings_manager, "peek_settings_manager", lambda: SimpleNamespace(cpu_threads=saved))
+    assert th._configured_cpu_workers() == expected
+
+
+def test_a_saved_count_that_cant_be_read_means_one_cpu_helper(monkeypatch):
+    from media_preview_generator.web import settings_manager
+
+    class Broken:
+        @property
+        def cpu_threads(self):
+            raise OSError("settings.json unreadable")
+
+    monkeypatch.setattr(settings_manager, "peek_settings_manager", Broken)
+    assert th._configured_cpu_workers() == 1
+
+
+def test_outside_the_app_the_count_is_one_and_no_settings_are_loaded(monkeypatch):
+    # The eval harness uses the process pool with no settings loaded; reading the count mustn't load /config's.
+    from media_preview_generator.web import settings_manager
+
+    monkeypatch.setattr(settings_manager, "_settings_manager", None)
+    monkeypatch.setattr(settings_manager, "get_settings_manager", lambda *a: pytest.fail("loaded the settings"))
+    assert th._configured_cpu_workers() == 1
+    assert settings_manager._settings_manager is None
+
+
+def test_reconciling_the_cpu_helpers_before_any_text_detection_starts_no_pool(monkeypatch):
+    monkeypatch.setattr(th, "_pool", None)
+    th.reconcile_textdet_cpu_helpers()
+    assert th._pool is None
+
+
+def test_reconciling_the_cpu_helpers_reaches_the_apps_pool(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(th, "_pool", SimpleNamespace(reconcile_cpu_helpers=lambda: calls.append("reconciled")))
+    th.reconcile_textdet_cpu_helpers()
+    assert calls == ["reconciled"]
 
 
 class TestProtocol:

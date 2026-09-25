@@ -21,7 +21,8 @@ import re
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
-from .decide import DecisionStatus, TypeDecision, shortened_by
+from .carry_over import CARRIED_OVER
+from .decide import KEPT_BEFORE_RULE_CHANGE, DecisionStatus, TypeDecision, kept_before_rule_change, shortened_by
 from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, STALE_SERVER_MARKERS_DETAIL, MarkerType, Source
 from .outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FileOutcome, ServerStatus, is_kept_own
@@ -176,9 +177,16 @@ def _types(types: Iterable[MarkerType]) -> str:
     return " and ".join(t.value for t in MarkerType if t in chosen)
 
 
+# A marker carried over from a replaced file names no source (``carry_over.CARRIED_OVER``; web/static/js/app.js too).
+CARRIED_OVER_LABEL = "the file it replaced"
+
+
 def _labels(sources: Iterable[str]) -> list[str]:
     names = []
     for source in sources:
+        if source == CARRIED_OVER:
+            names.append(CARRIED_OVER_LABEL)
+            continue
         try:
             names.append(SOURCE_LABELS[Source(source)])
         except ValueError:
@@ -208,6 +216,8 @@ def type_phrase(decision: TypeDecision) -> str:
             why = f"from {names[0]}" if names else decision.reason
         if not marker.locked and shortened_by(decision.reason) is not None:
             why += ", start moved to the server's own marker"
+        if kept_before_rule_change(decision.reason):
+            why += f", {KEPT_BEFORE_RULE_CHANGE}"
         return f"{mtype} {_span(marker.start_ms, marker.end_ms)} ({why})"
     if decision.status is DecisionStatus.NEEDS_REVIEW:
         reason = decision.reason

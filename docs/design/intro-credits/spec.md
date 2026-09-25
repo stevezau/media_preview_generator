@@ -11,6 +11,9 @@ Revision 2 is archived at `evidence/history/spec-rev2-2026-09-13.md`.
 **What this is.** Skip Intro / Skip Credits markers for Plex, Emby and Jellyfin, detected once per media file and
 published to every server that has the file. Feature name in the UI: **"Intro & Credits"**.
 
+**Portability.** This is a public app; libraries aren't all English. See §5.7 for exactly which two lookup tables
+are language-aware (chapter names, season folder names) and what the rest of detection doesn't care about.
+
 **Read in this order.**
 1. This file, top to bottom. It is the source of truth. If code and spec disagree, stop and ask the owner.
 2. The implementation plans next to this file (`plan-*.md`) — which task is next is the first unchecked box.
@@ -78,6 +81,15 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
   (`evidence/credits/small-text-retry.md` "Before release").
 - **The Alias S02E09 miss:** season audio alone ends its intro 8.4 s early, nothing else answers
   (`evidence/intro-end/README.md`).
+- **A replaced file with no evidence drops an intro that worked** (owner's call; §14 2026-09-25, RuPaul's Drag Race
+  UK S08E04): and season audio's "no match" for that episode.
+- **After the 2026-09-25 decision rules** (§14 "Decision rules", `evidence/decide-rules/README.md`): the decision
+  rules' version (§6.2 step 3) decides every file they could move again after the update (486 files on the audit's
+  copy), so production's lone-SkipDB intros (Westworld S04, Somebody Somewhere S03) come off. Westworld S04's
+  intros then wait in Needs review: production's season audio has no answer for them, and where today's season audio
+  answers (the harness: S04E01 563.6–661.4 s, right) SkipDB's shorter answer disagrees with it; letting season audio
+  win such a pair was wrong on In Treatment S02 ×4 and Family Guy S14E01. Westworld S03E07 stays there too (lengths
+  5.03 s apart), and the rule 4 composition gap the property test found (predates these rules) is unfixed.
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -118,7 +130,7 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 2. Correct markers on all three servers that survive each server's scans, refreshes and restarts (or self-heal).
 3. User control: review, adjust, lock; locked markers are never overwritten.
 4. Measurable accuracy: an eval harness against ground truth gates every detector change.
-5. Light on the host: capped threads, lowest priority, one worker by default.
+5. Light on the host: capped threads, priority below previews, the preview workers and none of its own.
 
 **Non-goals (v1)**
 - Commercial/ad detection. Recap/preview only when chapters or an online source supply them (Jellyfin shows these;
@@ -252,7 +264,8 @@ featurettes, `Extras/` folders…), get no ids. TheIntroDB is queried with `dura
 -fp_format raw -` → uint32 LE, **0.1238 s/point** (measured). `W = min(900 s, 35% of duration)`. The app image's
 `/usr/lib/jellyfin-ffmpeg/ffmpeg` has chromaprint; `/usr/local/bin/ffmpeg` does not, and the arm64 image has no
 jellyfin-ffmpeg, so there season audio is unavailable with a message (Settings "Not available",
-`GET /api/markers/sources/local`). CPU only (no GPU chromaprint), ~2 s per episode; at most 2 at a time.
+`GET /api/markers/sources/local`). CPU only (no GPU chromaprint), ~2 s per episode; as many at once as workers run
+them, with the worker's threads and the pause of §5.6.
 
 **Matcher (v3)** for every episode pair: inverted index (±2 value shift); per shift, runs where
 `popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, length 8–120 s; keep all non-overlapping runs. Per episode: cluster candidates
@@ -284,10 +297,16 @@ must have the quorum, as today, and the silence guard then runs on it (`season.g
   cluster, every 0.5 s, decoded at 2 fps as 64×36 grey (the credit text decode, `credits.frames`: 320×180 luma
   averaged 5×5, the worker's GPU then the CPU, its cancel, time limit and stall handling), in this episode and in the
   two partners whose longest hit in the cluster is longest, at their aligned times (`Hit.partner_start_s -
-  Hit.start_s`). Each fingerprint time moves to its file's audio start (`probe.stream_starts`: the first audio stream's
+  Hit.start_s`). Every vendor scales with the credit text decode's one scaler (§5.4 Frames: the whole frame after
+  `hwdownload` in the stream's own format, NV12 or P010 as `probe.stream_starts` reads its pixel format, then the
+  nearest pixel), so a partner decoded by another worker's GPU gives the same frames and the same answer (season
+  audio v8, check version 2; §14 2026-09-25). Each fingerprint time moves to its file's audio start
+  (`probe.stream_starts`: the first audio stream's
   start minus the container's; an HBO Max release's audio starts 0.976 s in). Two frames match when their correlation
   is above 0.6, or, both flat (σ < 4), when their mean brightness is within 12; a pair's share is the matching part of
-  the instants with a frame in both, and the cluster passes when the median share is at least 75 %. A pair with
+  the instants with a frame in both, or 1 when the last 1.5 s (3 instants) all match on pictures that aren't flat (the
+  same end card after shots that differ: an anime opening re-cut in later episodes, Tomb Raider King S01E12; a shared
+  fade to black is no card; §14 2026-09-25), and the cluster passes when the median share is at least 75 %. A pair with
   certainly no frames to compare (no video stream, or ffmpeg exited cleanly without frames at the instants) doesn't
   count; with none at all the cluster passes. Shares are cached per file pair, stretch and offset in `markers.db`
   (`season_end_pictures`, cleared when either file changes; a forced re-detect reads none). `season_audio_needs_worker`
@@ -295,7 +314,10 @@ must have the quorum, as today, and the silence guard then runs on it (`season.g
   fails (ffprobe error, a non-zero ffmpeg exit, a timeout) is never a pass: the file is remembered for a day
   (`end_picture_failures`, `END_PICTURE_RETRY`) and not read for the check meanwhile. This episode's own file then gives
   no season audio answer (given up on the checking thread); a partner has no share, and the other partner decides (none
-  left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file.
+  left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file. The check's
+  version (`end_picture.CHECK_VERSION`) keys the cached shares and rides in the version season audio's answers are
+  stored under (`SEASON_AUDIO_ANSWER_VERSION`: its first version adds nothing), so a new check makes every stored
+  answer older, like a new season audio version (§6.2 step 3, "A detector's new version").
 
 **Two playback speeds in one season** (season audio v6, §14 2026-09-24). A 25 fps release of a show made at 23.976
 fps plays every frame and sound 25/23.976 (4.3 %) faster, pitch raised with it (a PAL speed-up), and its opening
@@ -308,10 +330,17 @@ too; a failed read is remembered for a day like a member's failed probe, and the
 and names two speeds only: film (23.976, 24) and PAL (25); any other rate is matched as it plays. A group whose
 files play at both is matched at the speed most of them play at (film on a tie, `speed.match_speed`,
 `season.SeasonClock`); every file at the other speed is fingerprinted once more with its audio
-retimed to it (`aresample=48000,asetrate=round(48000 × factor)`, cached as window `intro@<factor>`), and what it
-matches is read back at its own speed (its answer, and its end-picture instants, aligned at the stretch's end). A
-pair's runs are cached under a version naming each side's speed (own, retimed to film, retimed to 25 fps:
-`SeasonClock.pair_version`), and a file's pairs go when its stored rate changes (a first rate included). A sibling whose
+retimed to it (`aresample=48000,asetrate=round(48000 × factor)`, cached as window `intro@<factor>`). A frame rate alone
+doesn't say the audio was sped up: a release can change only the frame rate (RuPaul's Drag Race UK S08E04, a 23.976 fps
+AMZN release of a 25 fps show: retimed it matched nothing, as it plays it matched the 25 fps copy of the episode 897 of
+900 s). So each such file is matched both ways against the files at the group's speed and is retimed only when its
+retimed audio matches more of them than its own does, a run counting only when it isn't mostly silence (silence
+fingerprints alike at any speed); on a tie it is matched as it plays (`season.clock_by_audio`, §14 2026-09-25). A
+retimed file's matches are read back at its own speed (its answer, and its end-picture instants, aligned at the
+stretch's end). A pair's runs are cached under a version naming each side's speed (own, retimed to film, retimed to 25
+fps: `SeasonClock.pair_version`), one row per version (`season_pair_runs`, so both speeds of a pair stay cached), and a
+file's pairs go when its stored rate changes (a first rate included). Telling a sibling's speed may need pairs this
+episode's own match doesn't: one too slow for a checking thread sends the episode to a worker. A sibling whose
 retimed fingerprint fails is left out of the match (a day, like a failed fingerprint) and enters the answer's signature
 without it, so the answer is due again once it is made; every matched file enters it with the rate it was matched at
 (`_Matching.rates`), so a rate read meanwhile makes the answer due too. Measured on Bones S05: retimed so
@@ -328,6 +357,7 @@ the pitch when it speeds up stays unmatched, as before.
 | **v3** (+ window min(900 s, 35%), prefer ≥ 15 s) — alg1 stereo | **91 (77%)** | **13** | **14** |
 | **v3 + guards** (season audio v5: file start, dense core, end picture; §14 2026-09-24) | **91 (77%)** | **12** | **15** |
 | **v3 + guards, dense-core exemptions** (season audio v7; §14 2026-09-24) | **91 (77%)** | **12** | **15** |
+| **v3 + guards, one end-picture scaler** (season audio v8, NVIDIA and CPU alike; §14 2026-09-25) | **91 (77%)** | **12** | **15** |
 | alg4 stereo | 87 | 11 | 20 |
 | alg0 stereo | 86 | 15 | 17 |
 | front-channel mono | 80 | 20 | 18 |
@@ -364,8 +394,9 @@ queues a Season job for same-season episodes outside the job whose inputs change
 footage — **not** on epilogue text cards ("Two months later…").
 
 **Frames.** The job samples **keyframes of the tail itself** (no dependency on preview frames):
-`ffmpeg -threads 2 [-hwaccel cuda -hwaccel_output_format cuda] -skip_frame nokey -ss <tail start> -copyts -i <file>
--an -sn -dn -fps_mode passthrough -vf "scale…320:180…,showinfo" -f rawvideo -` (pts from `showinfo`). Tail = last
+`ffmpeg [-threads N -filter_threads N] [-hwaccel cuda -hwaccel_output_format cuda] -skip_frame nokey -ss <tail start>
+-copyts -i <file> -an -sn -dn -fps_mode passthrough -vf "scale…320:180…,showinfo" -f rawvideo -` (pts from
+`showinfo`; N is the GPU worker's own `ffmpeg_threads`, §5.6). Tail = last
 **900 s** for a movie or a file of unknown kind, **450 s** for a TV episode (a `season_key` on the file's record;
 T-R4 — a longer tail on an unknown-kind file only costs extra decode) **by default**, user-adjustable in Advanced
 (`markers.credits_window`, §8): 5, 10, 15, 20 or 30 min, separately for TV episodes and for movies (a file of unknown
@@ -413,10 +444,42 @@ nearest pixel (`scale=320:180:flags=neighbor`), after `hwdownload` in the stream
 4:2:0, P010 for 10-bit; `-extra_hw_frames 8`) on CUDA and VAAPI, and after ffmpeg's own download on any other GPU or
 surface format. Each vendor's own scaler (`scale_cuda`, `scale_vaapi`, swscale's bicubic) blurred text a few pixels
 tall differently, so the same file's credits were found on one vendor and lost on another; this gives bit-identical
-frames on NVIDIA, Intel and the CPU. (The end-picture check of season audio still reads frames with each vendor's own
-scaler, `frames.decode_command(vendor_scaler=True)`, as it was measured.) AMD is untested (no hardware):
+frames on NVIDIA, Intel and the CPU. Season audio's end-picture check reads its frames the same way (§5.3, since
+2026-09-25). AMD is untested (no hardware):
 `-extra_hw_frames 8` and the full-frame `hwdownload` have never run on an AMD GPU's VAAPI; a decode that fails there is
 a GPU failure, read again on the CPU, whose frames are the same.
+**Every GPU's credits decode is compared with the CPU's, as a diagnostic** (`markers/credits/decode_check.py`,
+2026-09-25 in §14): with one scaler everywhere an answer depends on the decoder alone, bit-exact against the CPU on
+NVIDIA and Intel VAAPI for H.264 and HEVC (no pixel differed on 8 real files). Once per process per GPU, in the
+background when an Intro & Credits job that reads credit text builds the worker pool (`decode_check.start_checks`), two
+packaged reference clips (`reference_clips/`, made by the `make_reference_clips.sh` beside them:
+1280×720, 9 frames at 1 fps, a keyframe every 3 frames with a B and a P frame between, credit text 9–14 px scrolling
+over black, a dark caption on a light band, a zooming fractal; 8-bit H.264 High and 10-bit HEVC Main 10, 127 KB
+together) are decoded through the credits decode's own command (`frames.decode_rows` as a 1 fps refine window builds it:
+the device's hwaccel arguments, `hwdownload` in the clip's surface format, the shared scaler) at 320×180 and 640×360, on
+the device and on the CPU, and every frame's timestamp and Y-plane SHA-256 are compared. Every frame of a clip is
+decoded, so the keyframe pass (`-skip_frame nokey`) is covered too. **The result is only logged; the work never moves.**
+A match is an info line, `Credits decoding on <device> matches the reference decode (<clips> at <sizes>; checked in <n>
+ms)`. Any difference, decode error or timeout (60 s for the whole check, plus up to 7 s to stop ffmpeg) is one warning,
+`Credits decoding on <device> doesn't match the reference decode: <clip> at <size>: <reason>. Credits detection keeps
+decoding on this GPU.` A GPU worker decodes every file's credits on its GPU, whatever the codec and whatever the check
+found (the owner's worker model: a GPU worker's work runs on its GPU); a file its GPU can't decode at all
+(`frames.GpuDecodeError`) is still read again on the worker's CPU. MPEG-2 and MPEG-4 Part 2 leave the inverse transform
+to each decoder, so storage's P5000 decodes both a few levels off the CPU (the clips: 9 of 9 frames,
+`evidence/credits/decode_check_codecs.py`). On 15 real files (7 MPEG-2: a DVD movie and 6 DVD episodes; 8 MPEG-4 Part 2
+XviD/DivX: 4 movies, 4 episodes), the app's `find_credits` decoding on storage's P5000 and on the CPU gave the same
+answer for every file (12 with credits, 3 without; the same start, end and scale), although nearly every frame differed
+(MPEG-2 by at most 3 levels on 1.7–3.1% of luma pixels, MPEG-4 by at most 12 on 1.4–9.0%) and the text boxes differed on
+263 of 9,439 frames read (`evidence/credits/decode_answers_gpu_vs_cpu.py`). Text detection has its own per-device
+self-test (`textdet_helper`). One check per device, on a daemon thread of its own: no worker and no job waits for it
+(until 2026-09-25 a worker ran it on its first credits decode, up to 60 s), and a device checked or being checked isn't
+started again. The CPU, or a GPU without a usable device, gets none. Only the app runs it; the eval harness decodes
+where it is told. Cost on storage's P5000: 2.9 s once
+per process, 2.4 s of it the four GPU decodes (mostly CUDA starting up each time) and 0.5 s the CPU's, which every later
+device reuses. Previews and season audio's end-picture check are not checked.
+A file whose credits rest on an answer from before version 5, or are still undecided beside one, is read again once
+after the update by the version re-run (§6.2 step 3, "A detector's new version"): 317 files on the audit's copy of
+production's markers.db (158 on version 3 answers alone, before version 5; §14 2026-09-25).
 **A tail with no answer at 320×180 is read again at 640×360** (`detector.RETRY_SCALE`, 2026-09-24 in §14): small
 credit cards box nothing at 320×180. The same keyframes, steps and refine windows are decoded at twice the size, the
 boxes are halved back to 320×180 pixels, and the text the 320×180 reading already boxed is left out where rule J
@@ -427,6 +490,18 @@ text boxes 4–11 px tall. An answer found at 320×180 that ends in a scene (mor
 Q3) has the rest of the file, from that end, read the same way at 640×360, the keyframes before the end being the
 320×180 ones (all their text seen): a roll only the larger frame shows is then the last run, and the answer moves
 to it; nothing found there keeps the 320×180 answer. An answer that runs to the end of the file is never read again.
+After the end, a keyframe holding any text only the larger frame boxes is read whole (version 5, 2026-09-25 in §14):
+a roll 320×180 half boxed there — its cards boxed as blocks, a frame short of a 15 s run — is that text too, and left
+out it kept too few boxes for a run (I Survived a Serial Killer S01E04: story captions stayed the answer, 92 s early).
+A keyframe whose every box 320×180 boxed (an epilogue card on black) still has none, or the join glues it onto the
+roll. A tail without an answer keeps the rule as measured. **A roll the larger reading finds starts on dense text**
+(`rule_j.start_on_dense_text`, version 5): its first dark credit frame or lit frame with 6 boxes (`detector.DENSE_BOXES`,
+twice a lit credit frame's 3), stepped back from over every keyframe that shows text (as decoded, overlays aside) at
+the run's own cadence, never before the run's start. At 640×360 small print on lit story — a news feed's date line
+and logo, a lower third's words — makes credit frames of 3–5 boxes that the 24 s join puts in front of the roll, and
+`overlay_boxes` can't take it: it is on screen only in the stretch the run opens on, never across the story before
+(I Survived S01E14: court footage, 68 s early). Sparse text the roll runs into without a break stays its start. It
+moves starts later only.
 An intra-only file's thinned keyframe pass counts its stride from the seek, so its rest of the file is decoded from the
 tail's own start and the rows before the end dropped: the frames after the end are then the ones the 320×180 reading
 read (the cost: its whole tail again, thinned; 450 frames for a movie). At 640×360 each text detection request carries 16 frames, the pixels of 64 at 320×180, so the helper's
@@ -446,15 +521,45 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
   boxes — **only** after applying the app's Vulkan probe env (`gpu/vulkan_probe.py` `get_vulkan_env_overrides()`,
   e.g. `__EGL_VENDOR_LIBRARY_FILENAMES`) before the session is created. Without it the NVIDIA ICD fails and Dawn
   silently uses llvmpipe at 430 ms/frame.
-- **Guard:** use the GPU only when `get_vulkan_device_info()` reports a hardware device and a 20-frame self-test on
-  that device finds exactly the CPU's boxes, in the same places, faster — a GPU that only matches the CPU's speed, or
-  finds the same *number* of boxes somewhere else, doesn't pass (it compared counts alone until 2026-09-21, which
-  was a complete test only while rule J read a row's count; version 3 reads where the boxes are). Otherwise CPU.
+- **Guard (owner 2026-09-25: "we set GPU workers and CPU workers … just like it works for previews"):** a GPU
+  worker's text detection runs on its GPU whenever `get_vulkan_device_info()` reports a hardware device, the helper's
+  WebGPU session is on a hardware Vulkan adapter, and a 20-frame self-test on that device finds exactly the CPU's
+  boxes, in the same places, at 320×180 and 640×360. **Speed decides nothing**: a GPU slower than the CPU is still
+  used, and the self-test's timing only goes in the log. A GPU finding the same *number* of boxes somewhere else
+  doesn't pass (it compared counts alone until 2026-09-21, which was a complete test only while rule J read a row's
+  count; version 3 reads where the boxes are); a box mismatch keeps that device on the CPU for the process, with one
+  WARNING, since an answer mustn't depend on the device that read it. A software renderer (llvmpipe, lavapipe,
+  SwiftShader) is not a GPU: Dawn runs on whichever adapter the helper's pinned Vulkan environment leaves it, and a
+  software renderer finds the CPU's boxes, so the helper lists the Vulkan devices that environment exposes
+  (`_vulkan_adapters`, through the loader) and serves from the CPU when a software renderer is all there is (INFO,
+  for the process).
+- **A GPU failure costs one request, not the device** (as previews rerun one item on the CPU): a GPU helper that
+  crashes, hangs, fails to start, answers wrongly, exits between requests, or whose WebGPU session fails (ready line
+  `"failed": true`; a session with no adapter at a device's first start is a verdict, the GPU can't run it), or that
+  comes back on the CPU after having served from the GPU, hands that request to the CPU, and the GPU is tried again
+  after `GPU_RETRY_BASE_S` (5 s), the wait doubling with each failure in a row up to `GPU_RETRY_MAX_S` (600 s); a
+  success resets it, and there is no "CPU for the rest of the process" switch (as previews keep trying the GPU). Every
+  failure costs the request that tries: a failing start seconds (up to its start timeout), a hung request its 60 s,
+  so one file's back-to-back 64-frame requests don't each pay it. The first failure of a run of them is one WARNING (the
+  rest DEBUG),
+  and "back on the GPU after N failed requests" (INFO) ends it. A GPU worker's request read on the CPU, for a
+  failure or a CPU verdict, sets the worker row's fallback flag (`detect_boxes(on_cpu=…)`, the detector's
+  `fallback_callback`), as a CPU rerun and the end picture's fallback do. A CPU worker's wait for a helper (a lowered
+  CPU worker count) ends on its job's cancel (`TextDetCancelledError`).
   A GPU helper runs on the WebGPU EP device whose `pci_bus_id` matches the worker GPU's; with no PCI match it falls back to the CPU, except on a host with a single WebGPU device when the
   worker's PCI address is unknown (T-R3) — the EP lists every display PCI device from sysfs, not only
   Vulkan-capable ones (storage's own ASPEED BMC VGA is listed beside the P5000), so refusing the GPU whenever
   several devices are listed would disable it on ordinary servers.
-- **CPU:** ONNX Runtime CPU, `intra_op_num_threads=2`, 18–23 ms/frame.
+- **CPU:** ONNX Runtime CPU, `intra_op_num_threads=2`, 18–23 ms/frame. **One CPU helper per request in flight,
+  sized by the CPU workers:** CPU workers' requests hold at most the saved CPU worker count of helpers at once
+  (`cpu_threads`, read on every request; at least one), and a GPU worker's request on the CPU always gets one of its
+  own, so it neither waits for nor counts against the CPU workers. A GPU worker is known by its GPU; its CPU rerun
+  after a failed GPU decode arrives with no GPU, so the worker's type travels with the file (`process_fn`'s
+  `gpu_worker`, through `pipeline.process_item` to each detector) and the credits detector passes
+  `detect_boxes(gpu_worker=True)`. Helpers start on first use and exit after 10 idle minutes; a lower
+  saved count stops the idle ones beyond it at once (the settings save calls `reconcile_textdet_cpu_helpers`; a count
+  saved another way applies on the next request) and busy CPU workers' ones when their request ends. There is no
+  per-worker CPU thread setting (`cpu_threads` is the worker count), so each helper keeps 2 threads.
 - Rejected: CUDA-only `onnxruntime-gpu` (+2.8 GB, NVIDIA only); ncnn Vulkan (fast, but the pnnx-converted model
   output was wrong); OpenVINO (Intel only, +180 MB); ROCm/MIGraphX (GB-scale, removed from ORT); OpenCV DNN (no
   Vulkan in pip wheels).
@@ -462,8 +567,11 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
 - **Proven:** storage P5000 13.3 vs 18.7 ms (planning bench); the shipped helper's own self-test on storage measured
   11.2–11.4 ms/frame on WebGPU against 17.4–18.8 ms on the CPU (GPU kept, pinned to the card's PCI address,
   `evidence/eval/phase3-harness.md`); plex TITAN RTX 4.8 vs 7.7 ms; plex Intel UHD 770 16.1 vs 8.0 ms (iGPU slower
-  than that CPU → self-test picks CPU). All 100% identical boxes. **AMD not tested** (no hardware, owner
-  confirmed): same Vulkan/RADV path, self-test decides (Q6).
+  than that CPU: the CPU until 2026-09-25, its own GPU since, as speed no longer decides). All 100% identical boxes.
+  **AMD not tested** (no hardware, owner confirmed): same Vulkan/RADV path, self-test decides (Q6). A helper pinned to
+  the NVIDIA card with only lavapipe's Vulkan driver (`VK_DRIVER_FILES`) comes up on the CPU with the software
+  renderer's name, and pinned with the card's own driver on the GPU
+  (`test_the_real_helper_serves_from_the_gpu_only_on_a_hardware_adapter`, 2026-09-25).
 - CPU runtime size ≈ +300 MB (onnxruntime 62 MB, rapidocr 16 MB, opencv-headless ≈ 150 MB, numpy 59 MB,
   pyclipper ≈ 3.5 MB — all in the image; shapely ≈ 11 MB is a test-only dependency, used only to check the
   vendored post-processing against rapidocr's own, and stays out of the image). `rapidocr_onnxruntime` 1.4.4 is
@@ -656,6 +764,9 @@ frame-checks every answer shaped like that.
   `reach_back`) bar one, a stand-up special whose stage signage step 4 takes for the overlay it is. The end's rules
   and the text-all-through step move no answer on either set or decode path, and no online decision moves under
   either version.
+- Regression sets (`--sets accused,isurvived`; frame-checked first-card truth, local-only; reported, not gated):
+  Accused (2020), 57 files, and I Survived a Serial Killer S01, 16 files — seasons whose credit cards only 640×360
+  boxes. Version 5: 50 / 4 / 3 / 0 and 14 / 1 / 0 / 1 (version 4: 49 / 5 / 3 / 0 and 12 / 3 / 0 / 1; §14 2026-09-25).
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
@@ -671,8 +782,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    the credit text detector's reads before its tail are bounded by, §5.4 step 8.) An IntroDB or TheIntroDB intro (or
    an importer plugin's copy of one) that starts in the first 2 s and is shorter than 10 s fails too: it is a logo at
    the start of the file, not the show's intro (The Fixers: IntroDB gives Netflix's "N", 0–7 s, for all 10 episodes),
-   the stretch season audio passes over in its own clusters (§5.3 "File start"; §14 2026-09-24). A marker composed
-   from agreeing sources is judged on its times alone.
+   the stretch season audio passes over in its own clusters (§5.3 "File start"; §14 2026-09-24). Credits or a preview
+   of IntroDB or TheIntroDB (or an importer plugin's copy of one) may end up to 5 s past the file
+   (`decide.ONLINE_END_PAST_FILE_MS`) and are clamped to it: their end is the timed release's (Game of Thrones: IntroDB
+   2.8–4.8 s past on 20 episodes; §14 2026-09-25 "Decision rules"). SkipDB matches the file's duration and keeps
+   2 s. A marker composed from agreeing sources is judged on its times alone.
 3. Chapters → accept (first intro/recap chapter, last credits/preview chapter; on a tie the one with the earlier end),
    unless two agreeing independent non-chapter sources contradict the chapter → **"Needs review"**. One contradicting
    source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
@@ -680,7 +794,18 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    chapter-intro check (F1):** when at least 2 other episodes of the season group have an intro chapter, an intro
    chapter longer than max(2 × their median, median + 30 s) doesn't decide alone: it needs one agreeing independent
    source that isn't markers already on a server (else "Needs review", reason "Intro chapter is much longer than the
-   rest of the season's"); the agreeing candidates may then shorten it the same way.
+   rest of the season's"); the agreeing candidates may then shorten it the same way. **Credits and credit text
+   (2026-09-25):** a cluster holding credit text is weighed at credit text's start (it reads this file's frames). When
+   every agreeing cluster that contradicts a credits chapter holds credit text and a non-server source of another group,
+   they decide instead of "Needs review" (start from credit text, the rest composed as rule 4; reason "credit text and
+   agreeing sources contradict the chapters: …"). A SkipDB answer (or a SkipDB importer's copy) that contradicts a
+   credits chapter nothing else agrees with, while credit text is among the sources and hasn't answered, holds the
+   chapter in "Needs review" (reason `decide.TEXT_CHECKS_CHAPTER_REASON`) so the pipeline reads credit text in the same
+   run; a local detector that can't run here, answered nothing at its version, or failed to read the file as it is
+   (credit text: a decode error or a timeout recorded for this size and mtime, `LocalDetectorSpec.failed_here`) leaves
+   the source order (`pipeline._decide`), so the chapter then decides as before, on the same run or the next. A
+   replaced file waits again for its own read. Somebody Somewhere S03E02–E07: HMAX "Credits" chapters 40–70 s late, SkipDB and
+   credit text within 2 s of the frame-checked start.
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. An agreeing set needs a candidate that is neither markers already on a server nor season audio (or its
    previous-season hint): season audio and a server's own detection never decide together (G3; with season audio
@@ -699,10 +824,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
 6. A single source is accepted only at the **"Medium"** rules (the app's only rules since 2026-09-24, §14:
    `decide.APP_PUBLISH_WHEN`; "High" stays in `DecisionContext` for the evaluation harness), only when that source checks the file's
-   cut itself — chapters, credits text (it reads this file's own frames), season audio for an intro (since
-   2026-09-24, §14; not the previous-season hint), or SkipDB `exact`/`shifted` matches for an intro or recap (IntroDB
-   and TheIntroDB return an answer whatever the file's length, so alone they never decide; SkipDB alone never decides
-   credits or a preview, which need an agreeing independent source as at High) — and only
+   cut itself — chapters, credits text (it reads this file's own frames), or season audio for an intro (since
+   2026-09-24, §14; not the previous-season hint). IntroDB and TheIntroDB return an answer whatever the file's length,
+   so alone they never decide; SkipDB's duration match proves the cut but not the segment's edges, so since 2026-09-25
+   it never decides alone either (§14 "Decision rules": Westworld S04 intros covering 20 s of a 97 s title sequence,
+   credits minutes early on the lab scale run) — and only
    when no sane candidate from another independent source (markers already on a server included) contradicts it and
    every pair of the source's own candidates agrees; its other edge takes the safer value across those candidates.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
@@ -764,10 +890,101 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     agrees, shortens the start and is credited. The same composition feeds rule 5's contradiction check of a chapter.
     Credits and previews keep the source order: their checked edge is the start, which rule 12 already reads on the
     file's clock.
+14. **Another release's intro beside season audio** (§14 2026-09-25 "Decision rules"). An intro or recap of IntroDB or
+    TheIntroDB (or an importer plugin's copy of one) that, as rule 12 reads it, agrees with no other independent source
+    is left out when a season audio answer (not the previous-season hint) has its length within 5 s, a start more than
+    15 s away (`decide.OTHER_RELEASE_MIN_SHIFT_MS`), and both are at least 30 s long
+    (`decide.OTHER_RELEASE_MIN_LENGTH_MS`): it is the same intro timed on a release with more or less before it
+    (Westworld S03E03–E08: 50–80 s earlier, a release without the episode's recap; not a constant offset and not a
+    speed, so rule 12 can't read it). It neither confirms nor contradicts, and season audio decides as it would alone.
+    A shift of a few seconds is a real disagreement about one segment's edges (Daredevil S03, Invasion S03: season audio
+    was the wrong one), and a short card can match another stretch's length by chance (The Big Door Prize S02E03: a
+    16 s card beside a 15 s audio answer), so both limits stay.
+15. **A replaced file's decision carries over at the same length** (§14 2026-09-25). Plex keeps an item's markers
+    across a file replacement; deciding the new file from its own evidence alone did worse: Tomb Raider King S01E12's
+    replacement (identical length, the same opening on screen, no chapters) lost the 0–92 s intro the old file's Intro
+    chapter had decided, and RuPaul's Drag Race UK S08E04's (408 ms shorter) lost its intro too. After every other
+    rule (a lock, "Keep Plex's" included), a type with no candidate from any source (`decide`'s "no evidence") keeps
+    the marker of the file it replaced, when that file's length is within 1 s of the new one's and one of the
+    marker's deciding sources is still turned on (a user's marker, or one carried before, always counts)
+    (`carry_over`). The file it replaced is an earlier identity at the same path (`upsert_file` keeps its decisions
+    and their sources aside in `replaced_decisions` before clearing them; a "nothing" of another length never
+    replaces a marker kept there, and a file moved here from a path markers.db knows, same size and mtime, replaced
+    nothing) or a file last published to one of the new file's server items that is gone from disk (one still there
+    is another version, decided on its own); the one stored last speaks for the type, and if it had no marker nothing
+    is carried. When that can't be told now (the old file's disk doesn't answer within 5 s or its roots are gone, a
+    server can't name the item), a marker carried before stays: "can't tell" never takes one off the servers. A source that read the new file and found nothing gives no candidate
+    and doesn't stop the carry-over: none of them tells an intro that isn't there from one it missed (no intro
+    chapter, a season match its guards passed over, no crowd entry, no roll found), and what does tell another cut,
+    the length, is checked instead. Any candidate of the type, even one failing sanity or leaving the type in review,
+    is the new file's own evidence and wins. The carried marker is clamped to the new file's end, dropped when it
+    would overlap the file's own intro/recap or credits/preview more than rules 9–10 allow, and decided by
+    `carried_over` alone ("carried over from the file it replaced (same length)"; the job log and summary name "the
+    file it replaced"), so the season audio follow-ups, the weekly online re-check and the TheIntroDB recheck treat it
+    as undecided: the new file's first answer of its own replaces it.
+16. **A rule change alone doesn't take a published marker off** (§14 2026-09-25 "Worker waits and rule-only
+    re-decides"). A file decided under older rules (`DECIDE_RULES` in `version_reruns` below today's
+    `DECIDE_RULES_VERSION`) is decided again from what it has stored (§6.2 step 3). Where today's rules would put a
+    type in Needs review or leave it without a marker, a marker of ours that the older rules decided for it and that
+    was sent to a server (its type and start in a publish state) stays, while a source it was decided by still gives
+    an answer agreeing with it (rule 4's tolerances: 5 s on an intro's end, 10 s on credits' start) and no new or
+    changed answer disagrees with it: one not stored when the job's first stage of the file began
+    (`decide.keep_published`, `pipeline._keep_published_before_rule_change`). An answer that disagreed before and is
+    only stored again (a forced run, a parser's new version reading the same answer) is no news. Its reason is "kept:
+    published before a rule change; today's rules: …" (the job log adds "kept: published before a rule change" to its
+    line), and later runs keep it the same way. Replaced by today's decision when today's rules decide the type
+    (whatever the answer), a new or changed answer disagrees, the source it rests on no longer agrees (its entry moved
+    or went) or is turned off; a marker no server was sent, a carried-over marker (it rests on no source) and every new
+    file get today's rules, and a locked type is always decided. The case
+    that asked for it: SkipDB never deciding alone (rule 6) would otherwise take intros users already see off every
+    install that has no season audio to confirm them (arm64 has no chromaprint).
 
 ### 5.6 Resource rules
-Intro & Credits jobs: 1 worker by default, lowest priority, ffmpeg `-threads 2`, ONNX Runtime `intra_op_num_threads=2`,
-fingerprints ≤ 2 in parallel, online lookups paced by headers. Never parallel per-frame seeks.
+Intro & Credits jobs run on the preview workers with no worker cap of their own: priority alone orders the work. The
+dispatcher always gives a free worker the highest-priority item waiting, then the oldest job's (webhook follow-ups are
+NORMAL behind HIGH preview jobs; backfill, schedules and re-checks are LOW), and the gate keeps a slot for HIGH jobs; a
+marker item already running isn't preempted. ONNX Runtime `intra_op_num_threads=2`, online lookups paced by headers.
+Never parallel per-frame seeks. A worker never sleeps on a network wait it can leave to a retry (§6.4 item 4).
+
+Inside a worker, markers work follows the worker model as previews' FFmpeg does (2026-09-25 in §14):
+- **Threads.** A GPU worker's credits decodes and end-picture decodes run with its own GPU's `ffmpeg_threads` from
+  `gpu_config` (`-threads N -filter_threads N`; 0 or none is no cap), the same flags previews put on a GPU worker's
+  FFmpeg. CPU work runs at ffmpeg's own thread count: a CPU worker's, a GPU worker's CPU rerun, and fingerprints
+  (chromaprint is CPU work on any worker). A value saved for a GPU reaches the workers already running on it.
+- **No app-wide fingerprint limit.** The worker counts cap how many fingerprints run at once, as they cap previews; a
+  worker never waits on a limit while it holds its slot. Two killed fingerprint ffmpegs still stuck on a stalled
+  mount stop new ones starting (`fingerprint.STALLED_LIMIT`).
+- **Pause.** Pause all, quiet hours and a job's schedule's stop time stop a running decode or fingerprint where it is:
+  SIGSTOP to its process group (it runs in its own session), SIGCONT on resume, and its time limit (and the credits
+  look-back's shared one) moves out by the time paused (`markers/freeze.py`). No new ffmpeg starts meanwhile, the
+  season step waits before its next sibling, and a retry's countdown stands still. A cancel still ends a paused
+  decode. A job paused by hand is not frozen: it gives its slot back and the running file finishes
+  (`PipelineContext.freeze_check`). A job frozen by its schedule's stop time keeps holding the files it runs until
+  that schedule's next start: another job waiting for one of them stops waiting when it is cancelled, and never
+  waits for a file's fingerprint longer than a running one takes (`fingerprint.LOCK_WAIT_S`, its own paused time not
+  counted): a sibling is left out this time, and an episode's own file gives no answer this time, with nothing
+  recorded against either.
+- **Fallback.** A GPU failure in the credits decode reruns the file on the worker's CPU; the end-picture check decodes
+  its few seconds again on the CPU on the spot. Both show on the worker's row (`fallback_active`); the end picture's
+  also warns once per GPU for the process.
+
+### 5.7 Portability
+This app runs against libraries in any language, so two lookup tables are deliberately language-aware:
+
+- **Chapter names → marker type** (`markers/sources/chapters.py`, §5.1): whole-title, case-insensitive matches for
+  English plus German (Vorspann/Abspann), French (Générique/Générique de fin, accent optional), Spanish
+  (Cabecera/Créditos, which also reuses the English words "Intro"/"Credits"), Italian (Sigla/Titoli di coda),
+  Portuguese (Abertura/Créditos finais) and Dutch (Aftiteling). Anime's romanised "OP"/"ED" are matched
+  case-sensitively, unchanged by this. Bump `CHAPTER_RULES_VERSION` when this table changes so already-probed files
+  are read again.
+- **Season folder names** (`markers/external_ids.py`'s `is_season_folder`): English "Season"/"Series" plus German
+  "Staffel", French "Saison", Spanish/Portuguese "Temporada", Italian "Stagione", Dutch "Seizoen", Polish "Sezon",
+  Swedish "Säsong", Danish "Sæson", Finnish "Kausi", a bare "S01"-style folder, and "Specials".
+
+Everything else the detection pipeline uses is language-independent: `SxxEyy` filename parsing, tmdb/tvdb/imdb id
+tags, on-screen credit-text detection (pixel/box based, not OCR), season audio fingerprinting, and the online
+lookups (IntroDB/TheIntroDB/SkipDB key by id + duration, not by title language). Adding a language means extending
+the two tables above, not touching the rest of the pipeline.
 
 ## 6. Architecture
 
@@ -780,7 +997,8 @@ evidence(file_id, source, type, start_ms, end_ms, confidence, meta_json, fetched
 markers(file_id, type, start_ms, end_ms, decided_by, locked, updated_at)   -- desired state
 publish_state(file_id, server_id, item_id, markers_hash, status, message, verified_at)
 ```
-- File identity = path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers.
+- File identity = path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers (what was
+  decided is kept aside first, `replaced_decisions`, for the carry-over of §5.5 rule 15).
 - `markers` is the single source of truth; servers are projections of it. `publish_state` is per `server_id`, so two
   Plex servers are tracked independently.
 
@@ -789,11 +1007,30 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 (scans, schedules, Sonarr/Radarr/server webhooks), owner/path resolution, job storage and the dashboard/job UI.
 
 1. **Trigger.** Webhook: the debounced batch submits the preview job (HIGH) as today, then an Intro & Credits job for
-   the same files at NORMAL, grouped by season folder — it runs after the previews (§6.4). Backfill: "Start job →
+   the same files at NORMAL, grouped by season folder — it runs after the previews (§6.4). The batch asks for that job
+   in the preview job's saved config when it opens (`INTRO_CREDITS_FOLLOW_UP`, next to `webhook_paths` and the pin),
+   and the preview runner queues it whenever it starts the job — fired, or revived after a restart during the
+   debounce — then takes the request off, so it is queued once. A scheduled "Recently added" scan queues the same
+   follow-up (source `recently_added`) for the files it lists, before dispatching them; its files are a server
+   listing, so a file missing from disk gets no retry and a replaced one no later verify. Backfill: "Start job →
    Intro & Credits" for chosen libraries, or a schedule, at LOW. Schedules are independent from preview schedules;
    each skips files already done.
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
-   `library_ids`. No enabled owner → nothing is detected.
+   `library_ids`. No enabled owner → nothing is detected. **A follow-up publishes where its files' previews do**:
+   each file's server is resolved as the preview workers resolve it (`jobs.worker.resolve_per_item_pin`: the preview
+   job's pin wins — a webhook to `/api/webhooks/server/<id>` or with `?server_id=`, a pinned Recently Added schedule —
+   else an Emby or Jellyfin webhook through `/api/webhooks/incoming`, or a file a Recently Added scan listed from
+   Emby or Jellyfin, goes to that server alone; else every owner), one follow-up per server, stored as the job's
+   `server_id`; the owners are cut to it, its retries, verify job and TheIntroDB recheck carry it, and a pin to a
+   server with Intro & Credits off queues nothing. A waiting follow-up covers a new request for its files only when
+   it publishes at least as widely (unpinned, or the same pin), and episodes join only a follow-up with the same pin.
+   A Recently Added follow-up neither covers nor takes a webhook's files (they would lose their missing-file retry and
+   verify, and wait behind the scan); a webhook's follow-up covers a Recently Added file but doesn't take its season's
+   other episodes. A Season job carries the pin of the job that queued it, as its retries do: a pinned request is covered
+   only by a waiting or running Season job that publishes at least as widely, and joins only one with the same pin. A
+   scheduled Intro & Credits job for one server's libraries is pinned to that server, as its scheduled preview job is.
+   Unpinned jobs are unchanged. An unpinned Recently Added job keeps, in its config's `webhook_item_id_hints`, the item ids of the files
+   its previews went to their own server only (the server first), so a preview retry of them publishes there too.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
    gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone. **A decided type
    doesn't ask a local detector again on a normal run** (only a forced run, an answer of another version, or an
@@ -810,7 +1047,42 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    out again on every run and never stored as an answer, so
    "Use ours", a server losing its marker or a new destination without one reads the file on the next run (§14
    2026-09-23). Decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose
-   stored version is older is probed or asked again on the next run.
+   stored version is older is probed or asked again on the next run. **A source skipped as "not needed (already
+   decided)" is asked once more at the end of the same run** when a later step took away the evidence a type it
+   answers was decided with (the server-marker step runs last: an older reader's Plex answer dropped, or Plex's markers
+   read again and flagged "made for an earlier file"), through the same gates as the first pass (§14 2026-09-25). A
+   Plex server's older reader answer counts for nothing once the server shows our markers for the file, **or its item
+   may**: another version's markers of ours, or a type kept as Plex's own, which can hold ours; the reader never reads
+   such an item.
+   **A detector's new version** (`markers.versions`, §14 2026-09-25). Every detector and reader stores its version
+   with each answer (credit text, season audio with its end-picture check, the server-marker reader, chapters, the
+   online parsers). On every start the app compares the stored versions with today's and lists the files, still on
+   disk, where an unlocked decided type rests on an older answer or a type it answers is undecided (Needs review, no
+   evidence) beside one; a type decided by other sources waits for the file's own next run, as before. Also listed:
+   files whose one-version Plex item still shows times an older publish rule kept (§6.3), and **files decided under
+   older decision rules**: the rules of §5.5 carry a version (`decide.DECIDE_RULES_VERSION`, recorded as
+   `decide_rules` in `version_reruns` by every run that decides a file), and a file not recorded under today's is
+   listed when an unlocked type has a stored answer of its type the rules could decide differently (decided, Needs
+   review, not found because its answers failed a check, or kept as the servers' own; not detection off). Its run
+   decides again from what is stored and asks only what is due or from an older version, as any run does (a credits
+   chapter rule 3 holds for credit text has it read, §5.5); a marker it had sent to a server stays where today's rules
+   would leave its type in Needs review or without a marker, until an answer disagrees with it (§5.5 rule 16).
+   Version 1 is the 2026-09-25 rules (§14 "Decision rules"). Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
+   so rule 3's chapter waits for it (`pipeline._answered_at_this_version`), unless that read fails on the file as
+   it is (a decode error or a timeout), which ends the wait. They run as ordinary Intro &
+   Credits jobs at LOW priority on the worker pool ("Intro & Credits: re-checking files after an update"), at most
+   100 files a job (`BATCH_FILES`), each batch queued 30 min after the last one ran (`BATCH_GAP`); after a cancelled
+   or failed batch the next start queues one. A job holds its batch in its config (removed when it ends), so a run
+   revived after a restart runs the same files, and records each file as it finishes, whatever its outcome
+   (`version_reruns`: file, detector, version; a file carried over a restart is recorded then): no file is read twice
+   for one version, a file a batch never reached (a cancel, a restart the job isn't revived after) is taken by a later
+   one, and a later version takes it again. With Intro & Credits off everywhere a batch takes nothing. Not listed: a
+   Plex item whose other version is gone from disk and never decided (the publisher counts it as one version, the
+   recorded version files as two); its times follow the decision when that next changes. A start check rather than a
+   settings migration: it needs no migration per
+   version (#312's credit text version 4 had none, and 181 of 345 credit text answers were still version 3 a day
+   later), it sees what is stored (a migration can only ask for a job), and it covers files a new or restored
+   markers.db, or a disk that was unmounted, brings back.
 4. **Season step.** Intros need siblings. A job fingerprints the season folder's missing episodes on its workers,
    matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose inputs
    changed (R3). An episode alone in its season group uses up to 4 cached fingerprints of the previous season (§5.3).
@@ -834,8 +1106,22 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    backoff, until a server has it. Locked markers re-assert (§5.5 rule 1). Plex
    `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
    `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
-7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
-8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately (`POST /api/markers/item/markers`; `DELETE` on the same route unlocks and publishes nothing). It is one web request, so it is bounded: the save and the lock land before any server is contacted, each call to a server is capped at 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`; Plex's database waits the same 8 s for its locks), and a server the fan-out hasn't started 25 s in isn't started (`PUBLISH_NOW_DEADLINE_S`, a start gate, not a cancellation, so a server already under way can run to a small multiple of 8 s). A server not reached says so in its row and is published by the next run; a job already running on the same file makes the request give up on the whole publish after 2 s. No retries, and no thread that outlives the request.
+7. **Outcomes** per server: markers written / reused / needs review / skipped + reason. The job is red when every
+   file it counted failed or wasn't on disk and it queued no retry (previews' `all_not_found` rule), amber when some
+   failed or on warnings, green otherwise.
+8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately (`POST /api/markers/item/markers`; `DELETE` on the same route unlocks and publishes nothing). It is one web request, so it is bounded: the save and the lock land before any server is contacted, each call to a server is capped at 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`; Plex's database waits the same 8 s for its locks), and a server the fan-out hasn't started 25 s in isn't started (`PUBLISH_NOW_DEADLINE_S`, a start gate, not a cancellation, so a server already under way can run to a small multiple of 8 s). A server not reached says so in its row and is published by the next run; a job already running on the same file makes the request give up on the whole publish after 2 s. No retries, and no thread that outlives the request. **When the editor shows any server waiting or failed** (a server with Intro & Credits on that couldn't take it, down or its plugin missing, reads "failed" too), **the save queues that next run**: one single-file HIGH job, not forced (it publishes the saved markers and asks no source again), whose retry chain takes a server that hasn't indexed the file yet (`triggers.submit_publish_retry`); a job for the file that hasn't started (an earlier one, or a queued re-detect) is reused, a running one isn't (it decided before the save). The answer carries its id as `queued_job_id`.
+
+**Restart.** Jobs waiting for a due time (`retry_not_before`: retries, verify jobs, the TheIntroDB recheck, version
+batches) are aged from that time, not from when they were queued, by the restart revival (`requeue_max_age_minutes`,
+12 h by default): a TheIntroDB recheck queued in the morning is due after the next UTC midnight, and was failed by any
+restart more than 12 h after it was queued. A follow-up waiting for its preview job (`follows_job_id`) stays wherever
+that job does, whatever its own age: revived with it, or held PENDING with it while Pause all holds the leftover
+preview jobs (`JobManager.requeue_interrupted_followers`); a preview job the restart fails takes its follow-up with it.
+A job that never started is aged from the latest moment it could first run: its due time (`retry_not_before`, a
+preview retry's `scheduled_at`) and, for a follow-up, its preview job's end. Any job waiting for a slot is aged from
+the last time it was seen waiting (`slot_wait_since`, written by both runners as they start waiting and refreshed at
+most once a minute while they wait), so a job queued behind a long scan is aged by the downtime only. A Recently Added tick queues nothing while the
+schedule's last scan hasn't started (its window runs to its start; a longer lookback widens it).
 
 ### 6.3 Publishers
 `MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | Disabled | NeedsConfirmation |
@@ -877,7 +1163,10 @@ at the last write), `atomic_writes`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s. A part never
   decided whose file is on none of its path-mapped disks (Plex lists a deleted file until it scans) takes no part; one
-  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24).
+  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24). What this app
+  already left on the item stays while it agrees with every version within 2 s, so versions don't rewrite each other;
+  a one-version item shows exactly what was decided (§14 2026-09-25), and one left showing other times is published
+  again on its next run.
 - Unknown schema (columns/JSON shape differ from 1.43, `extra_data` in neither of Plex's two forms) → stop writing,
   show message. A part is written back in the form it has (JSON with `url`, or the URL-encoded form alone). A
   URL-encoded part we empty is left as `""` — what Plex's own rollback makes of the `{"url":""}` an emptied JSON part
@@ -970,47 +1259,71 @@ Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly lik
    counts cap total load. No extra workers, no parallel pool. Dashboard worker rows show
    "Intro & Credits · <title> · <step>" through the existing worker status updates.
 3. **Check stage (no worker slot):** file identity, chapters (ffprobe), online lookups through one shared rate
-   limiter per source (all jobs), decision. Only files still needing local detection enter `item_queue`.
+   limiter per source (all jobs), decision. Only files still needing local detection enter `item_queue`. It never
+   waits for a file another job is running (`FILE_RUN_LOCKS.try_hold(path, 0)`): that file enters `item_queue` too,
+   as a preview check hands on what it can't finish. Its worker waits for the other run in 0.5 s slices and stops on a
+   cancel; it gives the file back after `pipeline.WORKER_FILE_WAIT_S` (60 s), or at once while its job is paused or
+   frozen or the holder's job is frozen, as a waiting row with `FILE_BUSY` ("Another Intro & Credits job is running
+   this file; this job tries again in a few minutes"), and the job's retry runs it. The retry promise is taken as the
+   file is given back; with none left (the chain's last attempt, retries off, the job's retry full) the worker waits
+   on, and gives the file back for the next run ("…; trying again on the next run") once the holder is frozen or after
+   `WORKER_FILE_WAIT_NO_RETRY_S` (15 min): a worker never waits out a job paused for hours. The rows name only the
+   servers the job publishes to (its pin's, for a pinned job).
 4. **Worker stage, per movie/episode:**
-   - Audio fingerprint when its season needs one: CPU ffmpeg `-threads 2` on whichever worker picked the item.
+   - Audio fingerprint when its season needs one: CPU ffmpeg on whichever worker picked the item, with that worker's
+     threads (§5.6).
    - Credits: keyframe tail decode with **the worker's GPU** using the same hwaccel argument builder as previews
      (`processing/ffmpeg_runner.py`: CUDA / VAAPI / QSV…); a CPU worker decodes in software. Then text detection on
      the worker's GPU (item 7) or CPU.
    - GPU error → rerun that step on CPU in the same worker, mirroring previews.
+   - No sleeping on the network while holding the worker. An online source the checking stage asked for this file
+     and got no answer to store from isn't asked again. A lookup waits at most 1 s for its source's next slot
+     (`pipeline.WORKER_LOOKUP_WAIT_S` through `ratelimit.capped_waits`; the checking stage keeps the limiter's 60 s):
+     a 429 block or a queue of requests is "unavailable (blocked)" and the next run asks. A Plex publish waits
+     `plex_db.WORKER_BUSY_TIMEOUT_S` (10 s) for its database, and for another thread's check of the same server, when
+     the job retries a busy write (`PLEX_DB_BUSY`, a few minutes later); a job that retries nothing (its chain's last
+     attempt, retries off) keeps the 120 s.
 5. **Season decision** (cheap numpy matching): a job fingerprints the season folder's missing episodes on its
    workers, matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose
    inputs changed (R3; the engine has no completion hook; phase 2 Task 3). A pair with more than 2,000,000 value
    matches is matched on a worker instead of a checking thread.
 6. **Priority and gate.** Webhook-triggered Intro & Credits jobs submit at NORMAL (preview jobs are HIGH), so previews
    drain first; backfill and schedules submit at LOW; users can change it live with the existing priority API.
-   Intro & Credits jobs count toward `max_concurrent_jobs` like any job.
-7. **Text detection on the worker's device.** One long-lived helper subprocess per GPU device plus one shared CPU
-   helper (`python -m media_preview_generator.markers.credits.textdet_helper`, T-R1 — the roadmap's module name, not
-   `markers.textdet`), started lazily by the first marker item on that device; requests from that device's workers
-   are serialized. Why a subprocess: the Vulkan loader reads its env once per process, and NVIDIA needs overrides
-   (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs — the plex host has NVIDIA + Intel; a
-   driver crash or hang can't take the web app down; the WebGPU plugin has a known Linux hang at shutdown without
-   adapters (ORT PR #29591). On start the helper runs a 20-frame self-test against CPU and falls back to a CPU
-   helper unless it finds exactly the same boxes, corner for corner, faster; result cached per device for the
-   process lifetime. A GPU helper that crashes or fails during a request, or that fails to answer between requests, moves its device to the
-   CPU helper for the rest of that run of the app, with one WARNING. A helper with no request for 10 minutes exits
+   Intro & Credits jobs count toward `max_concurrent_jobs` like any job. The detector availability checks
+   (`pipeline.run_detector_checks`: ffmpeg's muxer list, up to 30 s of the text detection check, both kept for the
+   process) run before a job takes its gate slot. Retries wait `retry_queue.scaled_backoff_delay`, the preview
+   retries' own function.
+7. **Text detection on the worker's device.** One long-lived helper subprocess per GPU device, plus CPU helpers
+   sized by the CPU workers (§5.4 CPU) (`python -m media_preview_generator.markers.credits.textdet_helper`, T-R1 —
+   the roadmap's module name, not `markers.textdet`), started lazily by the first marker item on that device;
+   requests from that device's workers are serialized. Why a subprocess: the Vulkan loader reads its env once per
+   process, and NVIDIA needs overrides (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs —
+   a host can have NVIDIA + Intel; a driver crash or hang can't take the web app down; the WebGPU plugin has a known
+   Linux hang at shutdown without adapters (ORT PR #29591). On start the helper checks its WebGPU session is on a
+   hardware adapter and runs a 20-frame self-test against CPU; it falls back to the CPU for the process only when the
+   GPU can't run text detection or doesn't find exactly the same boxes, corner for corner (speed decides nothing).
+   A GPU helper that crashes or fails during a request, or that fails to answer between requests, hands that request
+   to a CPU helper and the GPU is tried again after a back-off (§5.4 "A GPU failure costs one request"). A helper
+   with no request for 10 minutes exits
    (code 75) and is started again on demand without a new self-test; one within 5 s of that idle exit is replaced
    before the next request instead of racing its own timer. On a timeout, cancel or failure the helper's whole
    process group is killed with a bounded wait, and any pipe a stuck process still holds is handed to a daemon
    reaper instead of being closed on the worker thread. The availability check (`GET /api/markers/sources/local` or
    the first job) runs its `--check` subprocess once per process under a lock; the first caller waits up to 30 s,
    later callers reuse the cached answer (M17). Measured: storage P5000 13.3 vs 18.7 ms; plex TITAN RTX 4.8 vs
-   7.7 ms (GPU kept); plex Intel UHD 770 16.1 vs 8.0 ms (→ CPU). Device mapping: worker device (CUDA index / render
+   7.7 ms; plex Intel UHD 770 16.1 vs 8.0 ms (the CPU until 2026-09-25, its GPU since). Device mapping: worker device (CUDA index / render
    node) → PCI bus id → EP device with the same `pci_bus_id`, with no PCI match falling back to the CPU except on a
    single-WebGPU-device host with an unknown worker PCI address (T-R3); phase 3 must prove the EP honours the chosen
    device on a two-GPU host (plugin README: it "selects the physical GPU independently") — open until Task 13 row
    14 (§13).
 8. **Per-job pause** for Intro & Credits jobs: change the job pause/resume routes to set the job-level flag for
    `kind=intro_credits` (global pause still pauses everything). This is what "pause a long backfill without touching
-   previews" needs; today it is not possible.
-9. **Webhooks:** `_execute_webhook_job` submits the preview job as today, then an Intro & Credits job for the same
-   files when any owning server has markers enabled, items grouped by season folder. No extra debounce: the lower
-   priority already runs it after the previews.
+   previews" needs; today it is not possible. A pause by hand lets the running file finish; Pause all, quiet hours and
+   the job's schedule's stop time freeze its running ffmpeg as they freeze previews' (§5.6).
+9. **Webhooks:** the preview runner (`_start_job_async`) queues an Intro & Credits job for the same files when it
+   starts the preview job the batch asked for one in (§6.2 step 1), when any owning server has markers enabled
+   (the pinned server, for a pinned job), items grouped by season folder. No extra debounce: the lower priority
+   already runs it after the previews, and it waits for the preview job to finish.
 10. **Cancel:** online lookups check `cancel_check` between requests; text detection is asked chunk by chunk
     (64 frames) and the decode checks for cancel between chunks; ffmpeg steps use the existing cancellation path.
 
@@ -1146,8 +1459,11 @@ setting, and `settings.json` never stores it (§5.4).
 - `frames.py`: tail length by kind (T-R4), row order and non-increasing rows (T-R5), luma/pts rounding and the
   `-copyts` start-time subtraction (T-R6), chunked decode and cancel between chunks, decode/timeout error mapping
   (T-R7).
-- `textdet_helper.py`: self-test picks GPU/CPU by the exact boxes both sides find, not their count and not speed
-  alone; crash or a between-request failure → CPU for the process lifetime; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
+- `textdet_helper.py`: self-test picks GPU/CPU by the exact boxes both sides find, not their count and never speed;
+  a software renderer → CPU; a crash or between-request failure → CPU for that request, the GPU again on the next one
+  (a failed start after a 5 s cool-down), one WARNING per run of failures; CPU helpers 1/4/8 under concurrent requests never
+  exceed the saved count, GPU workers' CPU requests get their own, a lower count stops idle ones at once and busy ones
+  on return; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
   reaper; device → PCI mapping (T-R3); the availability check's once-per-process lock (M17).
 - `detector.py` and rule J: the anonymised 80-file fixture (`test_reproduces_the_spec_table`) and the decision
   matrix through `decide()` — chapters/credits-text-alone/agreement cells exist and pass.
@@ -2516,3 +2832,397 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     decided by its chapter), chapters with IntroDB agreeing 13 either way, and no answer turns wrong. Succession
     S04E01 counts as wrong only through bad chapter truth; its frames show it useful. Evidence: `evidence/intro-end/`,
     `evidence/stale-plex-markers/`, `evidence/speed/integration-proof/`.
+- 2026-09-25 · **Every GPU's credits decode is compared with the CPU's, as a diagnostic** (§5.4). Version 4 made an
+  answer depend on the decoder alone; NVIDIA and Intel VAAPI are bit-exact against the CPU on H.264 and HEVC, AMD and
+  every other hwaccel unmeasured, and the owner wants each user's GPU checked on their own machine. The first credits
+  decode per device per process decodes two packaged reference clips (8-bit H.264, 10-bit HEVC) at both sizes through
+  the production command on the GPU and the CPU, and logs what it found: an info line on a match, one warning on a
+  differing frame, decode error or timeout. It never moves the work. The first version of the check sent a device that
+  failed it, and every codec but H.264 and HEVC (MPEG-2 and MPEG-4 Part 2 differ from the CPU on storage's P5000, 9 of 9
+  frames each, since those standards don't fix the inverse transform; `evidence/credits/decode_check_codecs.py`), to the
+  CPU. The owner's worker model overrules that: users choose GPU or CPU workers, often to take the work off the CPU, so
+  a GPU worker's credits decode on its GPU for every codec, and the check is a diagnostic. Measured: on
+  15 real files (7 MPEG-2: a DVD movie and 6 DVD episodes; 8 MPEG-4 Part 2 XviD/DivX: 4 movies, 4 episodes), the app's
+  `find_credits` decoding on storage's P5000 and on the CPU gave the same answer for every file (12 with credits, 3
+  without; the same start, end and scale), although nearly every frame differed (MPEG-2 by at most 3 levels on 1.7–3.1%
+  of luma pixels, MPEG-4 by at most 12 on 1.4–9.0%) and the text boxes differed on 263 of 9,439 frames read
+  (`evidence/credits/decode_answers_gpu_vs_cpu.py`). Not a version: nothing that decodes changed from what the previous
+  release did on a GPU worker. The existing `GpuDecodeError` → CPU rerun for a file the GPU can't decode at all stays.
+  Storage's P5000 passes (2.9 s); the same GPU with its frames scaled bilinear instead of by the nearest pixel differs
+  on 9 of 9 frames and is warned about, so the comparison sees real pixel differences. VAAPI's integration test runs in
+  the lab image only (storage has no Intel or AMD render node).
+- 2026-09-25 · **Season audio v8: the end-picture check on the one scaler** (§5.3 End picture). The check still read its
+  frames with each vendor's own scaler (`scale_cuda`, `scale_vaapi`, swscale's bicubic; `vendor_scaler=True`, kept so
+  #310's measurements held), and partners of one season can be decoded by workers of different vendors: the last place
+  a worker's GPU vendor could change an answer. It now reads them as credit text does (§5.4 Frames): the whole frame
+  after `hwdownload` in the stream's own format (NV12 or P010, from the pixel format `probe.stream_starts` now reads),
+  `-extra_hw_frames 8` on VAAPI, then the nearest pixel. `vendor_scaler` is gone. `end_picture.CHECK_VERSION` 2 stops
+  the cached shares being read back and `SEASON_AUDIO_VERSION` 8 makes the answers due. Since the version re-run (next
+  entry) an answer carries the check's version too (`SEASON_AUDIO_ANSWER_VERSION`), so the check version alone
+  would have made them due. Merged with the speed by ear and the end card (below): season audio v9, check version 3,
+  answers stored under 2009. Season audio alone, measured from scratch on NVIDIA and the CPU,
+  before and after: lab 118 **91 / 12 / 15**, held-out 175 **124 / 4 / 47**, Accused **3 / 0 / 53**, library chapter
+  set **111 / 59 / 54**, Bones S05–S08 **82 / 0 / 0**, on all four runs. After, NVIDIA and the CPU give the same
+  answers and the same 303 shares; before → after on NVIDIA no answer moved and one share did (Bob's Burgers
+  S10E07/E08, 0.83 → 1.0, a pass either way: at 18.2 s `scale_cuda`'s frames correlated 0.599, the one scaler's
+  0.604, and the frames show the same title card). The integration test's clips: before, CUDA's planes differ from
+  the CPU's (mean 1.3 grey levels, up to 85); after, byte-identical, 8-bit and 10-bit. Production (markers.db snapshot
+  of 2026-09-24): of 466 fingerprinted TV files, 63 in 9 seasons re-decode end pictures (163–284 windows of 3.5–4 s);
+  the v7 release already re-runs every season audio answer there. VAAPI is unmeasured (no Intel/AMD GPU on storage;
+  its integration test runs in the lab image). Evidence: `evidence/end-picture-scaler/`.
+- 2026-09-25 · **Production audit after #312: every detector version reaches its files, and three pipeline gaps**
+  (audit of prod markers.db joined with Plex's rows and what Plex serves).
+  - **A detector's new version is read again once, in batches** (§6.2 step 3). #312 raised `CREDITS_TEXT_VERSION` to
+    4, but 181 of 345 credit text answers were still version 3 and 136 decided credits rested on one (34 end more
+    than 30 s before the file's end, 29 of them Accused, exactly what version 4 fixes: re-read files went 4 / 7 / 6 →
+    15 / 2 / 0); 325 server-marker answers were still reader version 4. No migration asked for them, and the
+    decide-again job doesn't list them. Now a start check lists them from the stored versions (`markers.versions`)
+    and LOW jobs read them 100 at a time, 30 min apart, each file once per version (`version_reruns`). Season audio's
+    stored version carries its end-picture check's (`SEASON_AUDIO_ANSWER_VERSION`). From the audit's copy of prod
+    markers.db with prod's source switches: **232 files, 3 batches**: credit text 158 (136 decided credits, 22
+    undecided), season audio 153 (undecided intros), server-marker reader 187 (31 decided), one-version Plex items
+    showing other times 27 (below). Integrated with credit text version 5, season audio v9 and check version 3
+    (answer version 2009: every stored season audio answer is older) and the decision rules' version 1 (§6.2 step 3,
+    "Decision rules" below), the same start lists **507 files, 6 batches**: credit text 317 (version 5 makes version
+    4's answers older too), season audio 355, server-marker reader 187, published times 27, decision rules 486 (107 of
+    them for the rules alone). Tomb Raider King S01E12, the one production file the carry-over (§5.5 rule 15) keeps an
+    intro for, is listed by credit text and season audio.
+  - **An older reader's Plex answer beside an item that may show ours stops counting** (§6.2 step 3). The reader skips
+    an item holding another version's markers of ours or a type kept as Plex's own, and the older answer was dropped
+    only when this file itself had markers of ours there, so Plex's stale marker still counted as IntroDB's second
+    source under "Keep Plex's" (Doc S02E02, E03, E08; Westworld S03E03; no wrong answer yet).
+  - **A detector skipped for evidence a later step drops runs in the same run** (§6.2 step 3). Game of Thrones S03E04,
+    S03E05, S05E02: credit text was "not needed (already decided)" on the older reader's Plex credits; the
+    server-marker step, which runs last, then dropped them, and the credits ended on Plex's marker (made for an earlier
+    file) without the file ever being read. The source is asked again at the end of the run, through the same gates:
+    under "Keep Plex's" a fresh Plex marker still isn't read past.
+  - **The 2 s "keep what the item shows" applies across versions only** (§6.3). It kept earlier times on one-version
+    items too: 29 types on 27 files served up to 2 s off the decision, e.g. Game of Thrones intros ending at 113.0 s
+    (IntroDB's end, before rule 13) where 110.5–112.4 s was decided. The pinned reason, that a detector wobbling
+    under 2 s must not rewrite Plex every run, doesn't hold for one version: a run reuses stored answers, and an
+    unchanged decision is never sent (the publish basis). Such an item is published again on its next run (the version
+    re-run lists them); the Inspector reads a one-version item (or one whose versions can't be counted) the same way.
+  - **RuPaul's Drag Race UK S08E04 is not a Plex bug, nor a malformed row.** Plex's DB no longer holds the intro: this
+    app removed it at 21:08:04 UTC after Sonarr replaced the file (20:58:43; the new Kitsune release has no chapters,
+    no IntroDB or SkipDB entry, and season audio found no match), and the audit compared a markers.db read from 20:59
+    with Plex's answer from 21:14. Our intro rows have the same form as Plex's own (`pv:version` 5). Open with the
+    owner: whether a replacement that is nearly the same file (4,086,040 vs 4,085,632 ms) should drop an intro that
+    worked when it has no evidence of its own, and why season audio found no match for E04 (E01 and E03 have Plex's
+    own intros at 1.2 s and 290.3 s). An audit comparing the two should read markers.db after the served fetch.
+  - Architecture review (0 HIGH, 3 MED, 5 LOW; two LOWs kept and documented: the start listing's cost, and an item
+    whose other version is gone from disk, §6.2 step 3; the rest applied). A batch recorded its files
+    when it took them, so a batch cancelled, failed or not revived after a restart (past `requeue_max_age_minutes`)
+    lost its files for that version: each file is now recorded as it finishes, and a batch takes nothing while Intro &
+    Credits is off everywhere. A batch's own retry chain keeping its row pending doesn't stop the next batch (tested).
+    Dropping the older answer beside an item that may show ours also changes a second destination: with "Keep
+    Plex's" on Plex and Jellyfin beside it, an intro only that answer confirmed goes to Needs review and comes off
+    Jellyfin, as for a file today's reader reads first (tested, intended). The batch leaves the job's config when it
+    ends. The start listing runs the full queries: 0.02 s on the prod copy (1,986 files).
+- 2026-09-25 · **Decision rules after the production audit** (§5.5 rules 2, 3, 6, 14; five proposed rules measured at
+  decide level on every set, before = `dev` 40311c3; owner's bar: automatic, useful ≥ Plex and wrong ≤ Plex on each
+  set). Three adopted, one adopted narrowed, one rejected. Evidence and scripts: `evidence/decide-rules/`.
+  - **Adopted: SkipDB never decides alone** (rule 6). Its duration match proves the cut, not the edges. Production:
+    Westworld S04E01/E07/E08 alone covered about 20 s of a 97 s title sequence, S04E05/E06 ended 11 s before it did,
+    Somebody Somewhere S03E07's 24.5–45.2 s is story; S03E03 (126.8–143.0 s) and S03E06 (66.3–76.7 s) were right and
+    now wait in Needs review too (Plex had no intro on any of them). Online set: Outlander S08E02/E05/E06/E08 (ends
+    5–11 s late) wrong → Needs review, online-only intros **10 / 7 / 26 → 10 / 3 / 30**. Held-out 175 with SkipDB:
+    Mr. Robot S04E01 (370–394 s, the title is at 586 s) wrong → missed. A narrower rule (SkipDB alone only when its
+    length fits the season's) wasn't needed: the Outlander ones are too long, not short. "SkipDB inside season audio's
+    answer doesn't contradict it" was measured and rejected: season audio was the wrong one there (In Treatment S02 ×4,
+    Family Guy S14E01).
+  - **Adopted: credit text checks a credits chapter SkipDB disagrees with** (rule 3). A cluster holding credit text is
+    weighed at credit text's start; clusters that each hold credit text and another non-server group outvote the
+    chapter; a lone SkipDB answer against a credits chapter holds it in Needs review until credit text has run (same
+    run: SkipDB is asked first). Somebody Somewhere S03E02–E07: HMAX chapters 40–70 s late, credit text and SkipDB
+    within 2 s of the frame-checked start; the stale Plex markers that agreed with SkipDB are neither needed nor used.
+    The only pipeline change: `pipeline._decide` leaves a local detector out of the source order once it can't run
+    here, has run and answered nothing, or has a decode error or timeout recorded for the file as it is
+    (`LocalDetectorSpec.failed_here`; a replaced file is read again first), so a chapter never waits on it for ever.
+    "Chapter and credit text beat an agreeing pair" (the mirror case) changed nothing measured and wasn't added.
+  - **Adopted: IntroDB/TheIntroDB credits may end up to 5 s past the file** (rule 2). IntroDB's Game of Thrones
+    credits end 2.8–4.8 s past the file on all 20 production episodes; they now count and are clamped, which decides
+    S03E03–E05, E07–E09, S05E02 and S05E06. SkipDB stays at 2 s (with it, The Simpsons S03E01 on the
+    online set lost a useful answer); 15 s or no limit added Daredevil S03E12 (online set, 8 s past, 10 s early) and
+    moved The Big Bang Theory S12E15's start 8 s late.
+  - **Adopted, narrowed: another release's intro beside season audio** (new rule 14). The proposal ("same-length
+    shifted IntroDB → season audio decides") needs both answers ≥ 30 s and a shift > 15 s: without the length floor
+    The Big Door Prize S02E03 turned wrong. Not a constant offset (50–80 s, the episode's recap) and not a speed, so
+    rule 12 can't read it. Westworld S03E07 stays in Needs review (lengths 5.03 s apart).
+  - **Rejected: a source that can't decide a type alone must not block one that can.** With Plex's markers it
+    changed nothing; without them it turned tv40's Outlander S08E02 and 5 of the 205 movies wrong (credit text that
+    disagrees with SkipDB was wrong on 6 of 17 credits-set files). The Game of Thrones files it aimed at are decided by
+    the 5 s rule. A wider form (any disagreeing agreement-only source ignored) added 1 wrong on held-out, 1 on lab 118
+    and 4 on the online set.
+  - **Numbers, before → after** (useful / wrong / missed; credits useful / late / wrong / missed; Plex's own in
+    brackets). Intros from season audio, IntroDB and Plex's markers: lab 118 **87 / 4 / 27 → 89 / 4 / 25** (23 / 15 /
+    80; Interview With The Vampire S03E05/E07), held-out 175 **125 / 3 / 47 → 126 / 3 / 46** (69 / 4 / 102; Jujutsu
+    Kaisen S02E13), Accused **3 / 0 / 53** unchanged (0 / 0 / 56), Bones S05–S08 **82 / 0 / 0** unchanged (41 / 41 / 0),
+    library chapter set **225 / 8 / 19** unchanged, decided without a chapter 32 → 33 (The Westies S01E07: season audio
+    273.8–362.1 s, frame-checked right; IntroDB's 289–379 s ran 17 s into the story). With SkipDB as well: lab 118
+    **88 / 10 / 20 → 90 / 10 / 18**, held-out **126 / 4 / 45 → 127 / 3 / 45**, the rest unchanged. Credits (movies40,
+    tv40, 205 movies) from credit text, Plex and SkipDB: unchanged (26/1/0/13, 35/0/2/3, 102/11/19/72; Plex 28/1/9/2,
+    19/0/4/17, 124/11/61/8 — credit text's useful gap there is not these rules'). With chapters: 205 movies
+    **151/11/1/41 → 152/11/1/40** (Taylor Tomlinson: Prodigal Daughter), the rest unchanged. Without Plex: unchanged.
+    Chapters without Plex: tv40 **39/0/0/1 → 40/0/0/0** (Daredevil S03E09), 205 **199/1/3/1 → 200/1/3/0**. Online set
+    with chapters and credit text: credits missed 6 → 4; Daredevil S03E06/E12 now decided at credit text's 3126.0 /
+    3186.0 s and scored wrong against the set's chapter truth, which is 16–17 s late (frames: the roll starts 3125–3126
+    / 3185.6 s), so both are useful.
+  - **Production replay** (the audit's `markers.db` copy, 919 file × type rows, credit text read where a run now reads
+    it): 40 changes. 14 credits Needs review → decided (Game of Thrones ×8, Somebody Somewhere S03E02–E07), 6 intros
+    Needs review → decided by season audio (Westworld S03E02–E06, E08): all 20 frame-checked useful. 12 Game of
+    Thrones credits stay decided with IntroDB joining, starts moved ≤ 3.1 s. 8 lone-SkipDB intros decided → Needs
+    review (above: 6 bad, 2 right); with Plex's markers read as the next run stores them, Westworld S04E03 (9 s of the
+    title) joins them. Existing decisions change when a file is decided again: these rules are the decision rules'
+    version 1 (`decide.DECIDE_RULES_VERSION`, §6.2 step 3), so after the update the start check lists every file with
+    an unlocked type they could decide differently from its stored answers (decided, Needs review, not found with an
+    answer that failed a check, or kept as Plex's own: 5 of the 8 Game of Thrones credits and Westworld S03E02's
+    intro above are kept as Plex's own today, re-decided from the audit's copy) and batches decide them again: 486
+    files on the audit's copy (459 decided or in Needs review, 27 more kept as the server's own or not found with an
+    answer).
+  - Found while testing, **not fixed** (it predates these rules; same result on 40311c3): rule 4 composes a cluster
+    from its own members only, while the single-source path takes the other edge across all of a group's candidates,
+    so a server marker agreeing with one candidate of a group can move a composed start that group's other candidates
+    would have made safer (a generated recap: 57.5 s with the server marker, 65.0 s without). The property test's new
+    draws are seeded per file so the shared random stream, which has never drawn that file, is unchanged.
+- 2026-09-25 · **Three intro fixes after #312: speed by ear, carry-over, end card** (owner: automatic, at par or better
+  than Plex's own markers; prod losses found after the #312 deploy). Numbers are useful / wrong / missed.
+  1. **Speed by ear** (season audio v9 merged, v8 in its lane; §5.3 "Two playback speeds"). RuPaul's Drag Race UK S08E04's AMZN release is
+     23.976 fps in a native 25 fps season, with its audio untouched: stretched to 25 fps it matched nothing (0 runs
+     against every sibling); as it plays it matched the 25 fps copy of the episode 897 of 900 s at offset 0. A file at
+     the other frame rate is now retimed only when its retimed audio matches more of the group-speed files (runs not
+     mostly silence) than its own does, a tie keeping it as it plays (`season.clock_by_audio`; the harness's
+     `SeasonStep` the same). Both speeds of a pair are cached (`season_pair_runs`, one row per version; the old
+     one-row-per-pair `season_pairs` cache is dropped). Scores (group-speed files matched, own / retimed): every Bones
+     minority file 0–1 / all → retimed; RPDR 2 / 0 → as it plays. Bones S05–S08 season audio alone **82 / 0 / 0 →
+     82 / 0 / 0**, no answer changed; lab 118, held-out 175, Accused and the library chapter set have no mixed-speed
+     group, so no answer there can move. Even as it plays, RPDR's AMZN file has no quorum in its group of four; its
+     intro comes from fix 2.
+  2. **Carry-over** (§5.5 rule 15). Plex keeps an item's markers across a file replacement; we removed ours when the
+     replacement had no evidence. Tomb Raider King S01E12 (identical length, no chapters, every source "nothing") lost
+     the 0–92 s intro the old file's chapter decided, though the new file shows the same opening; RPDR S08E04 (408 ms
+     shorter) lost its intro the same way. A type with no candidate at all now keeps the replaced file's marker within
+     1 s of its length. A source that read the file and found nothing doesn't count as evidence: none of them tells an
+     intro that isn't there from one it missed, and the length tells another cut. Architecture review (1 HIGH, 3 MED,
+     7 LOW; all applied): "can't tell now" (the old file's disk not answering within 5 s, a server not naming the item)
+     took a carried marker off the servers → a carried marker now stays then; a file moved to the path (a renumbered
+     episode) carried the path's old decisions → not when its size and mtime are another row's; a marker whose
+     deciding sources are all turned off now isn't carried (sources kept aside with it); two carried markers are
+     checked against each other for overlap; a "nothing" of another length never replaces a marker kept aside; the
+     disk is asked only about files with a decision of a wanted type; carried types count as undecided for the
+     TheIntroDB recheck; a pair's rows of other season audio versions are dropped when it is cached again. Production
+     replay (post-#312 markers.db, a copy): of the 174 files on disk with a type in "no evidence", 2 have a replaced
+     file on the same item; one marker is carried, Tomb Raider King S01E12's intro 0–92 s (RPDR's AMZN file is gone
+     from disk now: its STAN replacement has its own intro chapter; the unit test reproduces it).
+  3. **End card** (end-picture check v3 merged, v2 in its lane; §5.3). Tomb Raider King S01E12's cluster 0.3–89.2 s is supported by all 4
+     other episodes of its folder, but its end picture scored 0.5 with both partners. The last 1.5 s (the opening's
+     sword card) match at correlation 1.00; the 1.5 s before don't, at any shift within ±1 s: the opening is re-cut
+     before its card in the later episode (a creature shot E02–E05 don't have, the crow and the black frame half a
+     second earlier) and its pictures run about 0.4 s ahead of the audio against E02, E03 and E05. The season split
+     over two disks isn't the cause (its folder still had 4 partners). A partner's share is now 1 when the last 1.5 s
+     (3 instants) all match on pictures whose inside (a border of about 11 % cropped) isn't flat. A half-second sync
+     search alone (0.5 either way) and a per-instant ±0.5 s search (0.5) don't pass it. On the four intro sets the
+     season step's answers don't move (season audio alone: lab 118 **91 / 12 / 15**, held-out 175 **124 / 4 / 47**,
+     Accused **3 / 0 / 53**, library chapter set **111 / 59 / 54**, each before and after; decided with IntroDB and
+     Plex's markers: held-out **125 / 3 / 47**, lab 118 **87 / 4 / 27**, Accused **3 / 0 / 53**, chapter set
+     **225 / 8 / 19**, unchanged); Bones **82 / 0 / 0**. Of the 195 end-picture checks of those sets that fail today
+     (the #310 exploration's clusters, Accused's idents and music beds included) the card passes 23: 22 the file's real
+     intro, 1 without truth (Physical 100 Mexico S01E07 0.0–11.7 s), none wrong. Of production's 16 failing early
+     clusters (14 files) it passes one, Tomb Raider King S01E12 0.3–89.2 s (the old chapter said 0–92 s); Accused's
+     idents, Physical 100 Mexico's start, Strange New Worlds' "Star Trek 60" bumper and Game of Thrones' cold opens
+     still fail. A review finding (black with a channel logo in its corner counted as a card) is why the inside is
+     cropped.
+  Merged with the shared end-picture scaler (above, which took both to 8 and 2): `SEASON_AUDIO_VERSION` 9 and the
+  end-picture `CHECK_VERSION` 3, so season audio's answers are stored under 2009 (`SEASON_AUDIO_ANSWER_VERSION`) and
+  every season audio answer and end picture is due once; the version re-run (§6.2 step 3) lists the files whose
+  intro rests on one or is undecided beside one.
+  **Rollback** (integration of this batch). markers.db stays schema 3, with no copy made: the rollback image (dev
+  98bed80) and prod's 40311c3 both open a markers.db this build touched and work (`evidence/replaced-speed-endcard/
+  rollback_probe.py`, each build's own store code: open, a file replaced, a pair cached, a carried marker read). They
+  recreate `season_pairs` (their pair cache, empty) and ignore `season_pair_runs`, `replaced_decisions` and
+  `version_reruns`; a carried marker shows its source as `carried_over` there and comes off on that build's next run
+  of the file, as before the carry-over. What they can't do is keep those three tables in step: the pair cache would
+  hand a file they replaced its old fingerprint's runs. So this build, finding `season_pairs` again when it next opens
+  markers.db, empties the three (`store._STALE_AFTER_AN_OLDER_BUILD`, logged once): pairs are matched again, a
+  replacement kept aside before the rollback isn't carried over, and the version re-run lists again what the older
+  build read or decided with its older detectors and rules. A schema bump was the alternative and is worse: the
+  rollback image would refuse markers.db, and going back would mean restoring a copy from before the upgrade and
+  losing everything decided since. To roll back: run the older image as is; to come back, run this one.
+  Evidence: `evidence/replaced-speed-endcard/`.
+- 2026-09-25 · **Two credits text regressions the production audit found after #312** (credits text version 5; §5.4).
+  Numbers are useful / wrong / late / missed, credits text alone, GPU decode.
+  1. **I Survived a Serial Killer S01E04, 92 s early.** Its roll is small text over footage. At 320×180 its credit
+     keyframes span 14.0 s, under rule J's 15 s run, so the last run was story captions 92 s before it, which end in a
+     scene. The rest of the file was then read at 640×360, where the roll boxes 4–18 boxes a keyframe, but without
+     the text 320×180 had boxed: its cards were boxed there as blocks, and every line inside them went, leaving 0–7
+     boxes and no run. Version 3's per-vendor scaler got 1231 s: `scale_cuda` boxes 4 on the 1249 s keyframe where
+     the nearest-pixel scaler boxes 2, which made an 18 s run (the same keyframes decoded both ways,
+     `evidence/credits/isurvived/`); swscale's bicubic found no run at all. The one scaler stays (frames identical on
+     every vendor); instead, after an answer's end, a keyframe holding any text only 640×360 boxes is read whole. Just
+     counting all text after the end, as proposed, made two Accused answers wrong (S04E05 −25.5 s, S07E02 −17.5 s:
+     epilogue cards on black after the end, boxed whole at 320×180, glued onto the roll), so a keyframe whose every
+     box 320×180 boxed still counts none.
+  2. **I Survived S01E14, 68 s early.** A tail with no answer at 320×180; at 640×360 court footage for the last
+     minute before the roll carries a date line, a logo and a caption, 4–10 px tall: four and five boxes a lit
+     keyframe, on and off with the shots, which the 24 s join put in front of the roll. `overlay_boxes` can't remove
+     them: it gathers only the story before the chosen run and needs a box across 80 % of it, and this text is on
+     screen only in the minute the run opens on (none of it before 1171 s). Now a roll read at 640×360 starts on its
+     first dense frame — a dark credit frame, or a lit one with 6 boxes — and steps back from there over keyframes
+     showing text (as decoded, overlays aside) at the run's cadence, never before the run's start
+     (`rule_j.start_on_dense_text`). 4 and 5 boxes leave E14 wrong; 6 and 8 give the same verdicts everywhere, 8
+     starting Animal (2023) 241 s later. Read on the rows the runs are found on, the walk stopped at single-name cards
+     320×180 had boxed whole: four Accused starts 5–8 s later, none with the rows as decoded.
+  Measured before (dev `40311c3`) → after, text / Medium / High (Medium and text are the same on the two TV sets,
+  which have no Plex markers; High needs a second source): **the 80** 70/5/5/0, 62/1/0/17, 43/1/0/36 unchanged, rule
+  J 67 within 10 s and 2 early (chapter truth) unchanged, no answer moves; **the 205** (204 on disk: Paradise (2024)
+  was replaced) 126/35/38/5, 101/15/10/78, 98/14/9/83 unchanged, no answer moves; **the online set** 28/5/3/7 and
+  33/5/3/2 unchanged; **Accused** (57, frame-checked) **49/5/3/0 → 50/4/3/0** (S05E01 −27.5 → −0.5 s, off an
+  epilogue card onto the roll's first card; S04E07 +7.5 → −0.5 s, S06E06 +12.5 → +7.5 s; within 10 s 44 → 46,
+  within 5 s 21 → 23); **I Survived S01** (16, frame-checked, new, `credits/isurvived/`) **12/3/0/1 → 14/1/0/1** (E04
+  −92.2 → −0.3 s, E14 −68.1 → −0.1 s). Still open there: E13 −11.3 s (story graphics glued onto the front of a roll
+  320×180 sees, an answer to the end of the file: the Accused epilogue-card gap) and E11 (its roll's text keyframes
+  span 14 s at either size, under the 15 s run). The CPU decode (text read on the CPU; the GPU runs read it on WebGPU)
+  gives every file of the 80, Accused and I Survived the same start, end, Medium and High as the GPU decode, before
+  and after (the 205 and the online set were read on the GPU only).
+  Measured and not taken: lit frames needing 6 boxes at 640×360 everywhere (Accused 39/11/3/4); reading keyframes
+  whole in a tail without an answer too (no wrong answer fixed, five more move); a title-safe margin at 640×360
+  (fixes E14, but loses Once Upon a Time in the West, whose crawl leaves through the top, and moves Revenant S01E05
+  14 s, whose credits sit 15 px from the left edge). Cost: the same decodes per file; a file whose 640×360 reading now
+  answers pays its refine window there. The harness gains the regression sets (`--sets accused,isurvived`,
+  frame-checked truth, reported, never gated) and leaves out files gone from disk. `evidence/credits/small-text-retry.md`.
+- 2026-09-25 · **Worker waits and rule-only re-decides** (owner; §5.5 rule 16, §5.6, §6.2 steps 3 and 7, §6.4 items 3,
+  4 and 6). Aligns Intro & Credits with the preview workers:
+  - **No worker cap for Intro & Credits.** Priority alone orders the work; the "1 worker by default" line of §5.6 is
+    gone.
+  - **A worker doesn't sleep on network waits it can leave to a retry.** No second ask of an online source the
+    checking stage got no answer from; 1 s at most for a limiter slot (was up to 60 s, plus the 15 s request, per
+    source); 10 s for Plex's database when the job retries busy writes (was 120 s per server). How often a worker
+    slept on either in production is **not proven**: 167 Intro & Credits jobs in the storage lab logged no "blocked"
+    lookup and no busy database; the 120 s came from a 30.8 s hold by another program in production (#301).
+  - **The checking stage doesn't wait on a file another job runs**; its worker does, for at most 60 s (none while
+    paused) when the job retries the file (`FILE_BUSY`), and a cancel stops that wait.
+  - **The detector checks run before the gate slot**; **a job with every file missing and no retry is red**, as a
+    preview job is; **the retry backoff is the preview retries' own function**, not a copy.
+  - **SkipDB keeps its rule** (a second source for new decisions), but a re-decide that only a rule change causes
+    doesn't pull a marker already sent to a server unless new or changed evidence contradicts it (rule 16); an
+    answer only stored again isn't new.
+- 2026-09-25 · **Triggers and restarts no longer lose markers where previews are kept** (§6.2 steps 1, 2 and 8, §6.4
+  item 9; owner: markers from a pinned webhook follow the pin, no new settings).
+  - **A restart during the webhook debounce dropped the markers.** The preview job was saved at batch-open and
+    revived; the follow-up was queued only when the timer fired. The batch now asks in the preview job's config
+    (`INTRO_CREDITS_FOLLOW_UP`, with `webhook_paths` and the pin) and the preview runner queues the follow-up whenever
+    it starts the job, then takes the request off (`triggers.submit_pending_follow_up`, once per job).
+  - **Scheduled Recently Added never queued markers**, and had no Files-panel rows or retries and ended green with
+    nothing done after a restart. It now runs through the preview runner like every preview job (rows, retry chain,
+    revival over the window it was created for) and queues the follow-up for the files it lists.
+  - **The pin was dropped.** A pinned or vendor webhook's markers went to every server with markers on. Follow-ups now
+    carry the pin the preview workers resolve per file (`resolve_per_item_pin`); detection stays shared through
+    markers.db, so only owners and publishing are scoped.
+  - **An Inspector save a server didn't take queued nothing.** It now queues a non-forced single-file HIGH job.
+  - **A TheIntroDB recheck was failed by a restart more than 12 h after it was queued.** Delayed jobs are aged from
+    their due time.
+  - Architecture review (0 HIGH, 6 MED, 8 LOW). Fixed: the Recently Added window is measured from the job's creation
+    minus the lookback to when it runs, after the gate, and no longer rounded up (a fresh 1 h run listed 2 h); an
+    unpinned scan keeps each Emby/Jellyfin file's origin for its preview retries; a Recently Added follow-up never
+    covers or takes a webhook's files; the Inspector decides from the editor's own words (a not-ready server reads
+    "failed"); and the LOWs on stale config writes, the flag's take, cancelled scans and dropped enumeration warnings.
+    Kept by the owner's rule ("exactly as previews"): an unpinned Emby or Jellyfin webhook's markers go to that server
+    only, as its previews do.
+- 2026-09-25 · **Markers work on a worker follows the worker model, as previews' FFmpeg** (§5.3, §5.4, §5.6, §6.4
+  items 4 and 8). Owner: "we set GPU workers and CPU workers. You need to respect that. Just like it works for
+  previews." Five gaps closed:
+  1. **Pause.** Pause all, quiet hours and a schedule's stop time left a running credits read (up to 2 × 600 s) or a
+     season step (every sibling fingerprinted) running; the detectors ignored `pause_check` (T-R9, 2026-09-16). Now
+     each running decode and fingerprint is frozen with SIGSTOP of its process group and let go with SIGCONT, its time
+     limit and the credits look-back's moved out by the time paused, no new ffmpeg starts, the season step waits
+     before its next sibling, and a retry's countdown stands still (`markers/freeze.py`). The check is the global
+     pause or the job's schedule's stop time (`PipelineContext.freeze_check`); a pause by hand keeps T-R9's behaviour
+     (the slot goes back, the running file finishes). A job frozen by its stop time holds its files' locks until the
+     next start; waits for them are cancellable, and a fingerprint's is bounded (architecture review, MED).
+  2. **Chromaprint limit removed.** Season audio held its worker while it waited on an app-wide limit of 2
+     fingerprints. The limit protected nothing the pool doesn't: fingerprints run only on workers (the check stage
+     reads cached ones and hands the file to a worker when one is missing, `season_audio_needs_worker`; only a sibling
+     replaced between the check and the run could make a checking thread fingerprint, bounded by `check_share`), and
+     the stalled-mount guard is its own count (`STALLED_LIMIT`, kept). No limit is kept on the checking threads, and
+     nothing there is frozen by a pause: a job frozen by its stop time would otherwise keep the kind's share of
+     checking threads from every other job until its next start (architecture review, MED).
+  3. **Threads.** `-threads 2` was hardcoded for every decode and fingerprint. A GPU worker now uses its own GPU's
+     `ffmpeg_threads` (`-threads N -filter_threads N`, previews' flags) and a CPU worker ffmpeg's own count. Threads
+     don't change what a decoder or the nearest-pixel scaler gives, so no stored answer moves.
+  4. **End-picture fallback** was a DEBUG line; it now sets the worker row's fallback flag and warns once per GPU.
+  5. **Decode check** ran on a worker's first credits decode (up to 60 s, with a CPU reference decode on a GPU
+     worker). It now starts in the background, once per GPU, when an Intro & Credits job that reads credit text builds
+     the worker pool; it stays log-only.
+- 2026-09-25 · **Text detection follows the worker model, like previews** (owner: "we set GPU workers and CPU
+  workers. You need to respect that"; §5.4 Guard, CPU; §6.4 item 7). Three changes in `textdet_helper.py`. (1) The
+  speed rule is gone: a GPU worker's text detection runs on its GPU whenever its WebGPU session is on a hardware
+  adapter and the self-test finds the CPU's boxes, however fast (an iGPU slower than its CPU was kept off before). A
+  software renderer is checked for directly now (the helper lists the Vulkan devices its pinned environment exposes),
+  since the speed rule was what used to keep Dawn off llvmpipe. A box mismatch still means the CPU, with a WARNING.
+  (2) A GPU helper failure costs that request, not the device for the run: CPU for that request, the GPU again after
+  30 s (doubling), one WARNING and an hourly retry at 3 failures in a row, reset by a success. (3) CPU text detection
+  scales with the CPU workers: a helper per request in flight up to the saved CPU worker count, instead of one
+  serialised helper for every CPU worker; a GPU worker's request on the CPU gets its own, as a preview's CPU rerun
+  stays on its worker. Settings saves resize them. A GPU worker's rerun after a failed GPU decode, which reaches text
+  detection with no GPU, says it is a GPU worker's (`gpu_worker`, wired at the integration; §5.4 CPU).
+- 2026-09-25 · **Integration of round 3 (portability, previews bugs, worker waits, triggers, worker parity, text
+  detection)**. Where the lanes met:
+  - **A file another job runs.** The checking stage never waits for it (it hands the file to a worker); a worker waits
+    in 0.5 s slices, stops at once on a cancel, and, when its job retries the file, gives it back with `FILE_BUSY`
+    after `WORKER_FILE_WAIT_S` or at once while the job is paused (the dispatcher's pause) or frozen
+    (`ctx.freeze_check`: Pause all, quiet hours, its schedule's stop time). The detectors still get only
+    `freeze_check`, so a pause by hand lets a running file finish.
+  - **`reconcile_gpu_workers`** pushes a GPU's saved `ffmpeg_threads` once, after the count change, to every worker on
+    that GPU (previews and markers read the same attribute), and new workers are built from the new entry.
+  - **Recently Added** now runs through the preview runner, so it dispatches at its job's priority like a full scan.
+  - **Text detection on a GPU worker's CPU rerun** (the open item of the text detection entry above): the worker
+    passes `gpu_worker` to `process_fn`, the pipeline hands it to every detector, and the credits detector asks
+    `detect_boxes(..., gpu_worker=True)`, so the rerun gets a CPU helper of its own even with no CPU workers.
+  - **Restarts.** A follow-up older than the revival window stayed failed while its preview job was revived (it had
+    waited for a slot) or held by the pause; it now goes where its preview job goes (§6.2 "Restart"). A Re-run of a
+    preview job drops a follow-up request the old job never took.
+- 2026-09-25 · **Final alignment pass: markers follow the webhook pin and the worker model the way previews do**
+  (parity re-check and final architecture review; §5.4, §5.6, §6.2 steps 1, 2 and 3 and "Restart").
+  - **Pins.** A worker giving back a file another job runs names only the pinned server (and answers `NO_OWNERS` like
+    `_attempt` when that server doesn't take the file); Season jobs carry the pin of the job that queued them, and a
+    waiting or running Season job or webhook follow-up covers a request only when it publishes at least as widely; a
+    scheduled Intro & Credits job for one server's libraries is pinned to that server.
+  - **Worker behaviour.** Text detection tries the GPU again after a back-off of 5 s, doubling with failures in a row up
+    to 600 s and reset by a success (never given up on), warns once per run of failures and says when it is back; a GPU
+    worker's request
+    read on the CPU sets the worker row's fallback flag; a CPU worker's wait for a helper ends on a cancel. Chromaprint
+    runs at ffmpeg's own thread count on any worker.
+  - **Waits.** A worker whose job can't promise a retry no longer waits without bound for another job's run: at once
+    when the holder is frozen, else after 15 min, it leaves the file to the next run. The retry promise is taken when
+    the file is given back, so a file is never given back to a retry that has no room left for it.
+  - **Restarts.** A never-started job is aged from when it could first run (due time, slot wait, its preview job's
+    end); a schedule doesn't queue a second Recently Added scan while its last one hasn't started.
+- 2026-09-25 · **Architecture review of the final alignment pass** (1 HIGH, 3 MED, 8 LOW; all applied).
+  - **HIGH: a cancel was stored as "nothing found".** `TextDetCancelledError` no longer subclasses
+    `TextDetUnavailableError`, so the 640x360 reading's failure handling can't keep an answer for a cancelled job; the
+    detector turns it into "cancelled", as a cancelled decode.
+  - **Text detection back-off** (above, §5.4): 5 s doubling to 600 s on failures in a row, starts and requests alike.
+  - **Previews:** FFmpeg's own exit 255 after a SIGTERM or SIGINT counts as stopped from outside; a Dolby Vision
+    Profile 5 run stopped that way or by an I/O error skips the software-libplacebo and DV-safe tiers even with no frame
+    written (DV-safe would publish wrong colours); every CPU hand-off is worded by its cause (a codec, a run that
+    stopped part-way, an I/O error, a stall, a signal) and nothing a disk did is answered with "remux".
+  - **LOWs:** the check stage takes no retry promise and a give-back that ends in no owner hands its promise back; a
+    Recently Added scan reads its window again after the gate; the Emby temp sweep unlinks file by file after a fresh
+    check (never the generic removal); v19 leaves the auto-pause flag exactly "paused with no workers"; a job waiting
+    at the gate refreshes `slot_wait_since`.
+- 2026-09-25 · **Second review of the previews publish rule and the gate** (1 MED, 1 split, 2 LOW; all applied).
+  - **Interrupted or ended on the file.** A run stopped from outside (a SIGTERM, SIGINT, SIGHUP or SIGKILL, raw or as
+    255/129/130/143/137; the stall watchdog; an I/O error, exit 251) keeps today's rule: its frames are discarded, the
+    software-libplacebo and DV-safe tiers are skipped, a GPU run goes to the CPU and a CPU run fails for a later retry.
+    A crash (SIGSEGV, SIGABRT, SIGBUS, SIGFPE or SIGILL, raw or as 128+n) is the file's own and happens on every scan,
+    so it is judged as a non-zero exit of its own: 95% of the frames publish, a CPU run below that publishes the short
+    preview, and a Profile 5 run with none still gets the DV-safe chain last.
+  - **MED: exit 251 is also a GPU error.** With a GPU, hardware accelerator or OpenCL error in that run's stderr
+    ("failed to enqueue kernel", "cl image", "opencl error" added to the patterns; not a bare "opencl", which a working
+    run prints on many lines at `-loglevel debug`) it counts as the GPU's: nothing is
+    discarded for it, a Profile 5 run with no frames goes on to the software-libplacebo tier, and the hand-off says
+    `hwaccel`. Only a plain 251 is an I/O error, and its lines name both places one comes from: the disk or share the
+    video is on, and the working folder.
+  - **LOWs:** a DV-safe run that fails on the GPU hands off with its real cause (the cut-off's kind, else the GPU's
+    decoder or filters), not "codec"; the gate runs `on_wait` (a database write and an emit) with its lock released and
+    looks for a freed slot again before it sleeps; the runner puts only a SIGKILL down to the out-of-memory killer, and
+    words a crash signal as FFmpeg crashing on the file.

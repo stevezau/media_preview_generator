@@ -145,6 +145,55 @@ again, thinned). An answer that runs to the end of the file pays nothing.
   moves. Of the answers that trigger the read in the 80 (3) and the 205 (17), only Come from Away moves (late either
   way).
 
+## The audit's two regressions (version 5, 2026-09-25)
+
+The production audit after #312 found two I Survived a Serial Killer (2021) episodes answered wrong. Traces, sheets
+and the frame-checked truth for the whole season: `isurvived/` (spec §14 2026-09-25).
+
+1. **S01E04, 92 s early.** At 320×180 the roll's credit keyframes span 14.0 s, under the 15 s run, so story captions
+   were the last run and ended in a scene. The rest of the file was read at 640×360, where the roll boxes 4–18 boxes
+   a keyframe, but without the text 320×180 had boxed -- its cards, boxed there as blocks -- leaving 0–7 and no run.
+   Version 3 answered 1231 s only because `scale_cuda` boxed 4 on the 1249 s keyframe where the one nearest-pixel
+   scaler boxes 2 (an 18 s run). **Fix:** after an answer's end, a keyframe that holds any text only 640×360 boxes is
+   read whole; one whose every box 320×180 boxed still counts none. Counting all text after the end, as first proposed,
+   glued epilogue cards on black onto two Accused rolls (S04E05 −25.5 s, S07E02 −17.5 s).
+2. **S01E14, 68 s early.** No answer at 320×180; at 640×360 court footage for the minute before the roll boxes a date
+   line, a logo and corner captions, 4–5 boxes a lit keyframe, which the 24 s join puts in front of the roll. Not an
+   overlay: none of it is on screen before the run starts, and `overlay_boxes` gathers the story before the run.
+   **Fix:** a roll read at 640×360 starts on its first dense frame (dark with a box, or lit with 6 boxes) and steps
+   back over keyframes showing text as decoded (overlays aside) at the run's cadence, never before the run's start
+   (`rule_j.start_on_dense_text`, `detector.DENSE_BOXES`).
+
+Before (dev `40311c3`) → after, GPU decode, useful / wrong / late / missed:
+
+| set | text | Medium | High |
+|---|---|---|---|
+| the 80 | 70/5/5/0 → same | 62/1/0/17 → same | 43/1/0/36 → same |
+| the 205 (204 on disk) | 126/35/38/5 → same | 101/15/10/78 → same | 98/14/9/83 → same |
+| online (default, High / TheIntroDB on) | 28/5/3/7, 33/5/3/2 → same | | |
+| Accused, 57 | **49/5/3/0 → 50/4/3/0** | same as text | 0/0/0/57 |
+| I Survived S01, 16 | **12/3/0/1 → 14/1/0/1** | same as text | 0/0/0/16 |
+
+No answer of the 80, the 205 or the online set moves (rule J on the 80: 67 within 10 s, 2 early on chapter truth,
+either way). Moved: I Survived E04 −92.2 → −0.3 s, E14 −68.1 → −0.1 s; Accused S05E01 −27.5 → −0.5 s (from its
+epilogue card onto the first card, sheet `isurvived/local/accused_s05e01.jpg`), S04E07 +7.5 → −0.5 s, S06E06 +12.5 →
++7.5 s; Accused within 10 s 44 → 46, within 5 s 21 → 23. Plex has no credits marker on either TV set. The CPU decode
+(text read on the CPU; the GPU runs read it on WebGPU) gives every file of the 80, Accused and I Survived the same
+start, end, Medium and High as the GPU decode, before and after; the 205 and the online set were read on the GPU only.
+
+Measured and not taken (same runs): lit frames needing 6 boxes as credit frames at 640×360 (Accused 39/11/3/4, A
+Season to Remember and Once Upon a Time in the West lost); reading keyframes whole in a tail without an answer too
+(no wrong answer fixed, five more move); dense start thresholds 4 and 5 (E14 stays wrong) and 8 (Animal (2023) 241 s
+later); the dense start's walk read on the rows the runs are found on (four Accused starts 5–8 s later: a card
+320×180 boxed whole reads empty there); a title-safe margin at 640×360 (Once Upon a Time in the West lost, its crawl
+leaving through the top; Revenant S01E05 14 s later, its credits 15 px from the left edge). Across all four sets the
+640×360 reading boxes the same keyframe's text in a median 1.0× the 320×180 boxes (1,616 keyframes boxed at both
+sizes), more only where 320×180 boxes 3 or more (1.2–2×): the 6 is the lowest threshold measured that fixes E14,
+not a scale factor.
+
+Cost: the same decodes per file; a file whose 640×360 reading now answers (I Survived S01E04) pays its refine window
+at that size.
+
 ## Before release
 
 The plex host was down for this round; these wait for it:

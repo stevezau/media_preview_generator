@@ -351,13 +351,16 @@ def accept_app_confirm(page: Page, timeout: int = 3000) -> None:
 def watch_modal_shown(page: Page, modal_id: str) -> None:
     """Start listening for a Bootstrap modal's ``shown.bs.modal`` before the click that opens it.
 
-    Bootstrap ignores a close (its ✕, a ``data-bs-dismiss`` button, ``hide()``) while a dialog is still fading in, and
-    Playwright's "visible" is true from the fade's first frame, so a test that closes a dialog it just opened pairs
-    this with :func:`expect_modal_shown`.
+    Bootstrap ignores a close (its ✕, a ``data-bs-dismiss`` button, Escape, ``hide()``) while a dialog is still opening
+    (until its ``.modal-dialog`` has slid in, after the fade), and Playwright's "visible" is true from the fade's first
+    frame, so a test that closes a dialog it just opened pairs this with :func:`expect_modal_shown`. The listener is on
+    the document (Bootstrap's events bubble), so it also catches a dialog the click creates (the folder picker).
     """
     page.evaluate(
-        "(id) => { const el = document.getElementById(id); delete el.dataset.e2eShown;"
-        " el.addEventListener('shown.bs.modal', () => { el.dataset.e2eShown = '1'; }, { once: true }); }",
+        "(id) => { const el = document.getElementById(id); if (el) delete el.dataset.e2eShown;"
+        " const mark = (event) => { if (event.target.id !== id) return; event.target.dataset.e2eShown = '1';"
+        " document.removeEventListener('shown.bs.modal', mark); };"
+        " document.addEventListener('shown.bs.modal', mark); }",
         modal_id,
     )
 

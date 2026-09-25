@@ -34,7 +34,7 @@ class _EmbyishProcessor(_MediaServerProcessor):
         self,
         server_config: ServerConfig,
         *,
-        lookback_hours: int,
+        lookback_hours: float,
         library_ids: list[str] | None = None,
     ) -> Iterator[ProcessableItem]:
         """Walk items added in the last ``lookback_hours``.

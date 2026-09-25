@@ -19,7 +19,7 @@ from flask_wtf.csrf import CSRFProtect
 from loguru import logger
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from ..job_kinds import JOB_KIND_INTRO_CREDITS
+from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
 from .auth import log_token_on_startup
 from .jobs import JobStatus, get_job_manager
 from .scheduler import get_schedule_manager
@@ -453,6 +453,24 @@ def _fail_unrevived_intro_credits_jobs() -> None:
         )
 
 
+def _fail_unrevived_preview_jobs() -> None:
+    """Settle the preview jobs a restart left behind and didn't revive.
+
+    Left PENDING with no thread behind them, the next resume (Resume all, a quiet-hours end, a Reprocess while
+    paused) would start them: work the restart decided not to revive. Its own failure is logged and never stops the
+    revived jobs from starting.
+    """
+    try:
+        get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_PREVIEWS)
+    except Exception as exc:
+        logger.warning(
+            "Couldn't mark the preview jobs left over from before the restart as failed ({}: {}). They stay pending "
+            "and the next resume will start them; cancel them on the dashboard if you don't want them to run",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _requeue_interrupted_on_startup(config_dir: str) -> None:
     """Revive jobs that were running or pending when the server last stopped.
 
@@ -472,6 +490,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         if not auto_requeue_enabled:
             logger.info("Auto-requeue on restart is disabled")
             _fail_unrevived_intro_credits_jobs()
+            _fail_unrevived_preview_jobs()
             return
 
         # A pause from the previous session is honored across the restart —
@@ -485,7 +504,22 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         max_age = int(settings.get("requeue_max_age_minutes", 720))
         job_manager = get_job_manager()
         revived = job_manager.requeue_interrupted_jobs(max_age_minutes=max_age)
+        # A follow-up waits for its preview job. One whose preview job the restart keeps (revived, or held by the pause
+        # below) stays with it whatever its own age, so a restart never keeps a file's previews and drops its markers;
+        # one whose preview job had finished was aged from that job's end above (requeue_interrupted_jobs).
+        kept = {job.id for job in revived}
+        if paused:
+            kept |= {
+                job.id
+                for job in job_manager.unrevived_interrupted_jobs()
+                if job.kind == JOB_KIND_PREVIEWS and job.status is JobStatus.PENDING
+            }
+        revived = [*revived, *job_manager.requeue_interrupted_followers(kept)]
         _fail_unrevived_intro_credits_jobs()
+        if not paused:
+            # While paused, the older ones are jobs the pause is holding (a webhook queued during a long pause
+            # isn't re-sent), so they stay PENDING and Resume starts them, as it would have without the restart.
+            _fail_unrevived_preview_jobs()
 
         if not revived:
             return
@@ -541,6 +575,31 @@ def _decide_again_after_upgrade(config_dir: str) -> None:
         logger.warning(
             "Couldn't queue the Intro & Credits job that decides the files in Needs review again ({}: {}); the "
             "next start tries again",
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _read_again_after_detector_updates(config_dir: str) -> None:
+    """Queue the first batch of files whose Intro & Credits answers rest on an older detector version
+    (``markers.triggers.submit_version_reruns``; ``markers.versions`` says which).
+
+    Runs on every start, after the restart requeue, so a revived batch is found instead of queueing a second; each
+    batch that runs queues the next. With Intro & Credits off on every server markers.db stays unopened. Never raises:
+    a failure leaves the files for the next start.
+    """
+    from .settings_manager import get_settings_manager
+
+    try:
+        get_settings_manager(config_dir)
+        from ..markers.triggers import markers_enabled_anywhere, submit_version_reruns
+
+        if not markers_enabled_anywhere():
+            return
+        submit_version_reruns()
+    except Exception as exc:
+        logger.warning(
+            "Couldn't queue the Intro & Credits re-check of files after an update ({}: {}); the next start tries again",
             type(exc).__name__,
             exc,
         )
@@ -977,6 +1036,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     _requeue_interrupted_on_startup(config_dir)
     # After it, so a revived one is found instead of queueing a second.
     _decide_again_after_upgrade(config_dir)
+    _read_again_after_detector_updates(config_dir)
     _schedule_weekly_online_recheck(config_dir)
 
     # Start scheduler

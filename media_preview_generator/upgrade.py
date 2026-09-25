@@ -20,12 +20,12 @@ from typing import Any
 
 from loguru import logger
 
-from .config.validation import MAX_CPU_THREADS
+from .config.validation import MAX_CPU_THREADS, validate_processing_thread_totals
 
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 18
+_CURRENT_SCHEMA_VERSION = 19
 
 #: Set by v16, v17 and v18: once the job manager runs, the app queues the one job that decides the files in Intro &
 #: Credits' Needs review, those waiting for their item's other versions, those whose intro rests on season audio and
@@ -135,9 +135,8 @@ _USER_FACING_NOTES: dict[int, str] = {
     ),
     16: (
         "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
-        "marker (on-screen credit text, chapters, or SkipDB matched to your file's length), so far fewer files wait "
-        "in Needs review. The files already waiting there are checked again by one Intro & Credits job, which "
-        "reuses what was already found."
+        "marker (on-screen credit text or chapters), so far fewer files wait in Needs review. The files already "
+        "waiting there are checked again by one Intro & Credits job, which reuses what was already found."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -412,6 +411,8 @@ def _migrate_schema(sm) -> None:
                those whose intro or credits rests on an online answer and a server's own marker alone again: season
                audio matches 25 fps and film-rate releases of one season at one speed, online times are read on
                such a file's own clock, and a Plex marker made for an earlier file counts for nothing.
+        v19 -- Marks a pause with no workers configured as the zero-workers auto-pause, so the settings save that
+               adds workers back resumes processing on installs paused before that pause was flagged.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -480,6 +481,8 @@ def _migrate_schema(sm) -> None:
         _run(17, _migrate_to_v17)
     if current < 18:
         _run(18, _migrate_to_v18)
+    if current < 19:
+        _run(19, _migrate_to_v19)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -1591,6 +1594,39 @@ def _migrate_to_v18(sm) -> list:
         No notes: nothing in the settings changes, and the job's own log says what it decided.
     """
     sm.set(DECIDE_AGAIN_KEY, True)
+    return []
+
+
+def _migrate_to_v19(sm) -> list:
+    """Mark a pause with no workers configured as the zero-workers auto-pause.
+
+    A settings save that leaves no workers pauses processing and flags the pause
+    (``SettingsManager.pause_for_no_workers``); only a flagged pause is undone by the save that adds workers back
+    (``api_settings._auto_resume_if_needed``). Installs auto-paused before the flag existed have none, so they stayed
+    paused after workers came back. Such a pause can't be told apart from a Pause all made while no workers were
+    configured, so both count as the auto-pause: with no workers nothing could run under either. "No workers" is
+    ``validate_processing_thread_totals``, the check the save uses to auto-pause.
+
+    The flag ends up exactly "paused and no workers": one that doesn't match (a ``settings.json.bak`` restored next
+    to a pause of the user's, or to no pause at all) is removed, so a later save can't resume the user's own pause.
+
+    Runs once, gated on ``_schema_version``, and a re-run finds the flag already right.
+
+    Returns:
+        A note when the flag was set or removed.
+    """
+    from .web.settings_manager import _AUTO_PAUSED_KEY
+
+    has_workers, _warning = validate_processing_thread_totals(sm.get_all())
+    auto_paused = sm.processing_paused and not has_workers
+    if auto_paused and not sm.processing_auto_paused:
+        sm.pause_for_no_workers()
+        return [
+            "v19: marked the pause as the no-workers auto-pause, so the save that adds workers back resumes processing"
+        ]
+    if not auto_paused and sm.get(_AUTO_PAUSED_KEY) is not None:
+        sm.apply_changes(deletes=[_AUTO_PAUSED_KEY])
+        return ["v19: removed a no-workers auto-pause flag the settings no longer match"]
     return []
 
 

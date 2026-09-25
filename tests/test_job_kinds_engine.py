@@ -126,8 +126,13 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
         "phase_callback",
         "cancel_check",
         "pause_check",
+        "ffmpeg_threads",
+        "fallback_callback",
+        "gpu_worker",
     }
     assert kwargs["gpu"] is None and kwargs["gpu_device_path"] is None
+    assert kwargs["ffmpeg_threads"] is None  # a CPU worker: FFmpeg's own thread count
+    assert kwargs["gpu_worker"] is False
     assert kwargs["cancel_check"] is cancel_cb
     assert kwargs["pause_check"] is pause_cb
     # The dispatcher hands each worker partial(pool._update_worker_progress, worker); the worker forwards it as-is.
@@ -486,6 +491,66 @@ def test_codec_error_reruns_on_cpu_only_for_gpu_workers(worker_type, expect_cpu_
         assert w.failed == 1 and w.last_task_outcome_delta()["failed"] == 1
 
 
+def _run_custom(worker, process):
+    done = threading.Event()
+    worker._done_event = done
+    with patch("media_preview_generator.jobs.worker._notify_file_result"):
+        worker.assign_task(_items("/m/t.mkv")[0], _config(), MagicMock(), job_id="jt", process_fn=process,
+                           outcome_keys=KEYS)  # fmt: skip
+        assert done.wait(timeout=10)
+        worker.current_thread.join(timeout=5)
+    worker.check_completion()  # what the dispatcher does before it hands the worker its next item
+
+
+@pytest.mark.parametrize(
+    ("worker_type", "gpu_threads", "codec_error", "expected"),
+    [
+        ("GPU", 3, False, [("NVIDIA", 3)]),
+        ("GPU", 3, True, [("NVIDIA", 3), (None, None)]),  # the CPU rerun: ffmpeg's own count, as previews'
+        ("GPU", None, False, [("NVIDIA", None)]),
+        ("CPU", None, False, [(None, None)]),
+    ],
+    ids=["gpu-worker", "gpu-worker-cpu-rerun", "gpu-worker-without-a-value", "cpu-worker"],
+)
+def test_a_kinds_process_fn_gets_the_workers_own_ffmpeg_threads_on_its_gpu_only(
+    worker_type, gpu_threads, codec_error, expected
+):
+    from media_preview_generator.jobs.worker import Worker
+
+    calls = []
+    gpu_workers = []
+
+    def process(item, **kwargs):
+        calls.append((kwargs["gpu"], kwargs["ffmpeg_threads"]))
+        gpu_workers.append(kwargs["gpu_worker"])
+        if codec_error and kwargs["gpu"] is not None:
+            raise CodecNotSupportedError("hevc")
+        return ItemOutcome("markers_published")
+
+    gpu = {"gpu": "NVIDIA", "gpu_device": "cuda:0", "ffmpeg_threads": gpu_threads} if worker_type == "GPU" else {}
+    _run_custom(Worker(1, worker_type, **gpu), process)
+    assert calls == expected
+    # The worker's own type on every run, its CPU rerun included (gpu None): text detection sizes helpers by it.
+    assert gpu_workers == [worker_type == "GPU"] * len(expected)
+
+
+def test_a_cpu_fallback_inside_a_kinds_step_shows_on_the_worker_row(caplog):
+    # The end-picture check decodes a few seconds on the CPU without failing the item: the row says so, as it does for
+    # a whole-item CPU rerun, and the next item starts clear.
+    from media_preview_generator.jobs.worker import Worker
+
+    def process(item, **kwargs):
+        kwargs["fallback_callback"]("decoded a.mkv on the CPU: the GPU decoded no frames")
+        return ItemOutcome("markers_published")
+
+    w = Worker(1, "GPU", gpu="NVIDIA", gpu_device="cuda:0", ffmpeg_threads=2)
+    _run_custom(w, process)
+    assert w.fallback_active is True and w.fallback_reason == "decoded a.mkv on the CPU: the GPU decoded no frames"
+    assert w.completed == 1
+    _run_custom(w, lambda item, **kwargs: ItemOutcome("markers_published"))
+    assert w.fallback_active is False and w.fallback_reason is None
+
+
 @pytest.mark.parametrize(
     ("worker_type", "cancel_requested", "effects", "expected_calls", "expected_message"),
     [
@@ -698,6 +763,7 @@ def test_counts_carried_from_before_a_restart_show_in_live_progress_and_the_resu
     assert tracker.get_result() == {
         "completed": expected_total,
         "failed": 0,
+        "failed_paths": [],
         "total": expected_total,
         "cancelled": False,
         "outcome": expected_outcome,

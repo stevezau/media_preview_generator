@@ -95,7 +95,9 @@ PLEX_PASS_UNKNOWN = "plex_pass_unknown"
 # Plex shows one marker set per item, and another version of this file's item is on disk but hasn't been checked yet.
 # Versions that were checked and disagree carry no code: trying again changes nothing until one of them changes.
 VERSIONS_UNCHECKED = "versions_unchecked"
-RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, VERSIONS_UNCHECKED})
+# Another job kept running the file past a worker's wait for it (``pipeline.WORKER_FILE_WAIT_S``): nothing was done.
+FILE_BUSY = "file_busy"
+RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, VERSIONS_UNCHECKED, FILE_BUSY})
 # ``reason_code`` of a failed row the job retries: the write gave up waiting for Plex's database (another program, or
 # another task of this app, held it past the wait). The row stays failed, and so does the file once the retries run out.
 PLEX_DB_BUSY = "plex_db_busy"

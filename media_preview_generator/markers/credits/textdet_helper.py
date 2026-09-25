@@ -1,11 +1,18 @@
-"""Credit text detection in helper processes: one per GPU device and one for the CPU (spec §6.4 item 7).
+"""Credit text detection in helper processes: one per GPU device, and one per request on the CPU up to the CPU worker
+count (spec §5.4, §6.4 item 7).
+
+A GPU worker's text detection runs on its GPU, as its previews do, whenever the GPU's WebGPU session is on a hardware
+adapter and finds exactly the CPU's boxes; how fast it is doesn't matter. A failure costs that request only (it is read
+on the CPU), and the GPU is tried again after a short back-off that doubles with failures in a row, up to a cap: it is
+never given up on, as previews keep trying the GPU on later files.
 
 Why processes: the Vulkan loader reads its environment once per process and NVIDIA needs overrides that hide other
-GPUs (the plex host has NVIDIA + Intel); a driver crash or hang can't take the web app down; the WebGPU plugin can hang
-at shutdown (ORT PR #29591).
+GPUs (a host can have an NVIDIA and an Intel GPU); a driver crash or hang can't take the web app down; the WebGPU plugin
+can hang at shutdown (ORT PR #29591).
 
 Protocol, one request at a time per helper:
-- helper → parent, once: ``{"ready": true, "backend": "webgpu"|"cpu", "selftest": {...}|null, "reason": str}``
+- helper → parent, once: ``{"ready": true, "backend": "webgpu"|"cpu", "selftest": {...}|null, "reason": str}``, plus
+  ``"failed": true`` when a GPU helper is on the CPU because its WebGPU session failed this time
 - parent → helper: ``{"id": n, "frames": N, "height": H, "width": W}`` and a newline, then N×H×W bytes of luma
 - helper → parent: ``{"id": n, "boxes": [N lists of [left, top, right, bottom]]}`` (one list per frame, in frame
   order) or ``{"id": n, "error": str}``
@@ -49,23 +56,27 @@ MODULE = "media_preview_generator.markers.credits.textdet_helper"
 MODEL_ENV = "MEDIA_PREVIEW_TEXTDET_MODEL"
 DEFAULT_MODEL_PATH = "/app/models/ch_PP-OCRv4_det_infer.onnx"
 CPU_KEY = "cpu"
+# ONNX Runtime threads per helper. Each CPU worker's request gets a helper of its own, so a small number keeps the
+# total in line with the worker count the user chose.
 THREADS = 2
 SELFTEST_FRAMES = 20
 # The detector reads a tail with no answer at 320x180 again at this many times the size (``detector.RETRY_SCALE``;
 # this module can't import the detector), so the self-test also compares the boxes on these many frames of that size.
-# Untimed: the speed verdict stays the 320x180 one, the size nearly every request is.
 SELFTEST_LARGE_SCALE = 2
 SELFTEST_LARGE_FRAMES = 8
-# Timed GPU/CPU pairs, each timed back to back; the median of the pairs' own GPU/CPU ratios decides (see self_test).
-# Seven, not five: on storage's P5000 (10 cold starts x 12 rounds, 2026-09-19) the median ratio of 5 rounds spread
-# 0.047 around its typical 0.67, of 7 rounds 0.038 -- the TITAN RTX's 4.94 vs 6.18 ms is only 0.1 inside the margin.
-# About 1.2 s more, once per device.
+# GPU/CPU pairs, each run back to back. Every round's boxes must match, so a backend whose answers vary from run to
+# run fails; the median of the rounds' own GPU/CPU time ratios goes in the log as information and decides nothing.
 SELFTEST_ROUNDS = 7
-# How much less time than the CPU the GPU must take, as that median ratio, to be worth using. A single 20-frame pair
-# once handed the whole process to the GPU on a 0.06% win (17.99 vs 18.00 ms). A real GPU has room to spare: this
-# self-test on storage's P5000 measures 10.7-11.6 vs 16.2-18.0 ms per frame (2026-09-19), about 35% faster (the
-# planning bench's own script measured 13.3 vs 18.7 ms on the same card); the TITAN RTX on plex, 4.94 vs 6.18 ms.
-GPU_SPEEDUP_MARGIN = 0.10
+# After a GPU helper fails, the requests of the next GPU_RETRY_BASE_S are read on the CPU before the GPU is tried
+# again, the wait doubling with each failure in a row up to GPU_RETRY_MAX_S; a success resets it. Every failure costs
+# the request that tries the GPU: a failing start seconds of driver setup (up to START_TIMEOUT_S when it hangs), a
+# crashed or hung request its own wait (up to REQUEST_TIMEOUT_S) plus a helper restart and self-test. A GPU that keeps
+# failing would pay that before every 64-frame request of every file, each about a second of CPU work; the cap keeps
+# a GPU that recovers in use within minutes. There is deliberately no "CPU for the rest of the process" switch.
+GPU_RETRY_BASE_S = 5.0
+GPU_RETRY_MAX_S = 600.0
+# How often a request waiting for a CPU helper reads the saved CPU worker count again, when nothing wakes it sooner.
+CPU_WAIT_POLL_S = 1.0
 START_TIMEOUT_S = 120.0
 REQUEST_TIMEOUT_S = 60.0
 IDLE_EXIT_S = 600.0
@@ -82,6 +93,10 @@ WRITER_UNWIND_S = 1.0
 # A helper this close to its idle exit is replaced before a request instead of racing its exit timer.
 IDLE_RESTART_MARGIN_S = 5.0
 _WEBGPU_VENDORS = frozenset({"NVIDIA", "INTEL", "AMD"})
+# VkPhysicalDeviceType values.
+VK_OTHER, VK_INTEGRATED_GPU, VK_DISCRETE_GPU, VK_VIRTUAL_GPU, VK_CPU = range(5)
+# Vulkan device names of software renderers, whatever device type their driver reports.
+_SOFTWARE_RENDERERS = ("llvmpipe", "lavapipe", "swiftshader", "software")
 NOT_INSTALLED = "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here"
 NO_ANSWER = "The text detection check didn't answer; it is checked again in 10 minutes"
 _monotonic = time.monotonic
@@ -102,8 +117,20 @@ class HelperError(Exception):
     """A helper process didn't start, answer or read a request."""
 
 
+class HelperStartError(HelperError):
+    """A helper process couldn't start, or a GPU helper came up without its GPU this time."""
+
+
 class TextDetUnavailableError(Exception):
     """Text detection can't answer this time (the CPU helper failed)."""
+
+
+class TextDetCancelledError(Exception):
+    """The job was cancelled while its request waited for a CPU helper.
+
+    Not a ``TextDetUnavailableError``: a caller that keeps an earlier answer when text detection fails (the credits
+    detector's 640x360 reading) must never keep one for a cancelled job.
+    """
 
 
 class TextDetShuttingDownError(TextDetUnavailableError):
@@ -162,7 +189,8 @@ def _cached_state() -> tuple[TextDetState, str]:
 
 
 def text_detection_state() -> TextDetState:
-    """Whether credit text detection can run here (checked once per process; UNKNOWN is asked again after 10 min)."""
+    """Whether credit text detection can run in this container (checked once per process; UNKNOWN is asked again
+    after 10 min)."""
     return _cached_state()[0]
 
 
@@ -184,9 +212,9 @@ class SelfTest:
     """A GPU session against the CPU on the same frames, over several back-to-back rounds.
 
     Attributes:
-        gpu_ms: The GPU's median milliseconds per frame.
-        cpu_ms: The CPU's median milliseconds per frame.
-        ratio: The median of each round's own GPU/CPU time ratio: what decides.
+        gpu_ms: The GPU's median milliseconds per frame (logged, not used to decide).
+        cpu_ms: The CPU's median milliseconds per frame (logged, not used to decide).
+        ratio: The median of each round's own GPU/CPU time ratio (logged, not used to decide).
         same_boxes: Every frame's boxes matched, corner for corner, in every round.
         same_boxes_large: Every larger frame's boxes matched too (``SELFTEST_LARGE_SCALE``), or none were compared.
     """
@@ -199,20 +227,15 @@ class SelfTest:
 
     @property
     def use_gpu(self) -> bool:
-        """The GPU is used only when it finds exactly the CPU's boxes, in the same places and at both sizes, at least
-        ``GPU_SPEEDUP_MARGIN`` faster."""
-        return self.same_boxes and self.same_boxes_large and self.ratio <= 1.0 - GPU_SPEEDUP_MARGIN
+        """The GPU is used when it finds exactly the CPU's boxes, in the same places and at both sizes, however fast
+        it is: a GPU worker's work runs on its GPU, and the credits answer mustn't depend on which one read it."""
+        return self.same_boxes and self.same_boxes_large
 
     def cpu_reason(self) -> str:
         """Why this result keeps the CPU (for the helper's ready line and the log)."""
         if not self.same_boxes:
             return "the GPU was finding different boxes than the CPU"
-        if not self.same_boxes_large:
-            return "the GPU was finding different boxes than the CPU at 640x360"
-        return (
-            f"the GPU wasn't at least {GPU_SPEEDUP_MARGIN:.0%} faster than the CPU "
-            f"(median {self.gpu_ms} vs {self.cpu_ms} ms per frame; GPU/CPU {self.ratio} per round)"
-        )
+        return "the GPU was finding different boxes than the CPU at 640x360"
 
 
 def self_test(
@@ -225,18 +248,16 @@ def self_test(
     rounds: int = SELFTEST_ROUNDS,
     large_frames: np.ndarray | None = None,
 ) -> SelfTest:
-    """Time both detectors on the same frames after a warm-up and compare the boxes they find.
+    """Run both detectors on the same frames after a warm-up, compare the boxes they find, and time them.
 
     **The boxes, not their count.** ``count`` is ``len(detect(...))``, so comparing counts costs the same and says
     less: a backend that finds the same *number* of boxes in different *places* passes a count test and then answers
     differently from the CPU everywhere rule J reads a position (``rule_j.overlay_boxes``, ``rule_j.same_roll``,
-    ``rule_j.reach_back``). This self-test is the only runtime check there is.
+    ``rule_j.reach_back``). This self-test is the only runtime check there is. Its verdict is kept for the process.
 
-    The pair is run ``rounds`` times, the GPU and then the CPU back to back, and the verdict is the median of the rounds'
-    own GPU/CPU ratios. Load that lasts across a round (another job's decode, a transcode) slows both halves alike and
-    leaves its ratio alone; a spike that hits one half only is one round of several, outvoted by the median. Comparing
-    each side's best round instead favours the side whose times spread more, usually the GPU. The verdict is kept for
-    the process.
+    The pair is run ``rounds`` times, the GPU and then the CPU back to back, and the boxes must match in every round.
+    The timing is reported for the log only: the median of the rounds' own GPU/CPU ratios, which load lasting across a
+    round (another job's decode) leaves alone, since it slows both halves alike.
 
     Args:
         gpu: A detector with ``detect(frames) -> list[tuple[Box, ...]]`` on the GPU.
@@ -244,8 +265,8 @@ def self_test(
         frames: (n, H, W) uint8 luma.
         clock: Seconds (tests pass a fake); ``time.perf_counter`` by default.
         warmup: Frames each detector runs before timing (session start-up and shader compilation: the first WebGPU
-            call measured 61-101 ms per frame against 11-14 ms after it).
-        rounds: How many GPU/CPU pairs to time.
+            calls take several times as long as later ones).
+        rounds: How many GPU/CPU pairs to run.
         large_frames: (n, H, W) uint8 luma at the detector's larger reading's size, each side's boxes compared once
             after the timed rounds (not timed); None compares none.
 
@@ -283,7 +304,7 @@ class HelperSpec:
     """How to start one helper.
 
     Attributes:
-        key: The device key (``device_key``) or ``cpu``.
+        key: The device key (``device_key``), or a CPU helper's own key (``cpu``, ``cpu#2``, ...).
         backend: ``webgpu`` or ``cpu``.
         pci_bus_id: The worker GPU's PCI address, for picking the EP device.
         selftest: Run the 20-frame self-test (the first start for a device).
@@ -298,15 +319,35 @@ class HelperSpec:
     env: dict[str, str]
 
 
+def _report_cpu_fallback(on_cpu: Callable[[str], None] | None, reason: str | None) -> None:
+    """Tell the worker a GPU worker's request is read on the CPU (its row's fallback flag). Never raises: the row is
+    only a display, and the request still has to be read."""
+    if on_cpu is None or not reason:
+        return
+    try:
+        on_cpu(f"Credit text detection on the CPU: {reason}")
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.debug("Couldn't show the text detection CPU fallback on the worker row: {}", exc)
+
+
 def device_key(gpu: str | None, gpu_device_path: str | None) -> str:
     """The helper a worker's requests go to: its device path (or GPU type), ``cpu`` for a CPU worker.
 
-    A GPU whose device path or type is itself spelt ``cpu`` is prefixed so it can never share the CPU helper's key.
+    A GPU whose device path or type is itself spelt like a CPU helper's key is prefixed so it can never share one.
     """
     if gpu is None:
         return CPU_KEY
     key = gpu_device_path or gpu
-    return f"gpu:{key}" if key == CPU_KEY else key
+    return f"gpu:{key}" if _is_cpu_helper_key(key) else key
+
+
+def _cpu_helper_key(number: int) -> str:
+    """The nth CPU helper's key: ``cpu``, then ``cpu#2``, ``cpu#3``, ..."""
+    return CPU_KEY if number == 1 else f"{CPU_KEY}#{number}"
+
+
+def _is_cpu_helper_key(key: str) -> bool:
+    return key == CPU_KEY or key.startswith(f"{CPU_KEY}#")
 
 
 def helper_command(spec: HelperSpec) -> list[str]:
@@ -514,16 +555,18 @@ def _start(spec: HelperSpec, *, command: Callable[[HelperSpec], list[str]], pope
                      start_new_session=True)  # fmt: skip
     except OSError as exc:
         stderr_file.close()
-        raise HelperError(f"couldn't start: {exc}") from exc
+        raise HelperStartError(f"couldn't start: {exc}") from exc
     helper = _Helper(proc, stderr_file, request_timeout_s)
     try:
         ready = helper.read_message(start_timeout_s)
         if ready.get("ready") is not True or ready.get("backend") not in ("webgpu", "cpu"):
-            raise HelperError(f"unexpected start line: {str(ready)[:200]}")
-    except HelperError:
+            raise HelperStartError(f"unexpected start line: {str(ready)[:200]}")
+    except HelperError as exc:
         helper.kill()
         helper.close(0)
-        raise
+        if isinstance(exc, HelperStartError):
+            raise
+        raise HelperStartError(str(exc)) from exc
     helper.ready = ready
     return helper
 
@@ -540,9 +583,35 @@ def _vulkan_env_overrides() -> dict[str, str]:
     return get_vulkan_env_overrides()
 
 
+@dataclass
+class _GpuState:
+    """What one GPU device's text detection runs on, and how its last attempts on the GPU went.
+
+    Attributes:
+        verdict: ``webgpu`` once a helper came up on the GPU; ``cpu`` once the GPU proved it can't run text detection
+            (no WebGPU path, a software renderer, other boxes than the CPU's), kept for the process; None before either.
+        failures: Failed attempts on the GPU in a row (a crash, a hang, a start that failed).
+        retry_at: ``_monotonic`` time before which the GPU isn't tried again after a start failed.
+        cpu_reason: Why its requests are read on the CPU now: the verdict's reason, or the start failure's.
+    """
+
+    verdict: str | None = None
+    failures: int = 0
+    retry_at: float = 0.0
+    cpu_reason: str = ""
+
+
 class TextDetectorPool:
-    """Text boxes for luma planes on a worker's device: its GPU helper when that is proven faster and finds the same
-    boxes, else the CPU helper."""
+    """Text boxes for luma planes on a worker's device.
+
+    A GPU worker's requests go to its device's GPU helper, one request at a time. A CPU worker's request, or a GPU
+    worker's that can't be on its GPU this time, goes to a CPU helper of its own: CPU workers' requests hold at most
+    the saved CPU worker count of them at once (at least one), and a GPU worker's request always gets one, as a
+    preview's CPU rerun runs on its own worker. A request with no GPU counts as a CPU worker's unless it says
+    ``gpu_worker=True``, as a GPU worker's rerun after a failed GPU decode does (the worker's type reaches the detector
+    through ``process_fn``, spec §5.4 CPU). A CPU helper is held by one request at a time, so it is started and used by
+    one thread at a time.
+    """
 
     def __init__(
         self,
@@ -553,6 +622,7 @@ class TextDetectorPool:
         request_timeout_s: float = REQUEST_TIMEOUT_S,
         vulkan_info: Callable[[], Any] | None = None,
         vulkan_env: Callable[[], dict[str, str]] | None = None,
+        cpu_limit: Callable[[], int] | None = None,
     ) -> None:
         """Create an empty pool (helpers start on first use).
 
@@ -563,19 +633,41 @@ class TextDetectorPool:
             request_timeout_s: Longest wait for one request's answer.
             vulkan_info: The app's Vulkan probe result.
             vulkan_env: The app's Vulkan env overrides (applied to NVIDIA helpers only).
+            cpu_limit: The saved CPU worker count, read on every CPU request (the app's pool reads the settings); one
+                CPU helper when None.
         """
         self._command, self._popen = command, popen
         self._start_timeout_s, self._request_timeout_s = start_timeout_s, request_timeout_s
         self._vulkan_info = vulkan_info or _vulkan_device_info
         self._vulkan_env = vulkan_env or _vulkan_env_overrides
+        self._cpu_limit = cpu_limit or (lambda: 1)
         self._helpers: dict[str, _Helper] = {}
-        self._backends: dict[str, str] = {}  # device key → "webgpu" | "cpu", for the process lifetime
+        self._gpus: dict[str, _GpuState] = {}  # device key → its state, for the process lifetime
         self._locks = KeyedLocks()
         self._guard = threading.Lock()
+        # Everything below is read and changed only while _guard is held (the condition shares it).
+        self._cpu_free = threading.Condition(self._guard)
+        # Every CPU helper key handed out (its process may have left on its idle timer since), and the idle ones.
+        self._cpu_helpers: list[str] = []
+        self._cpu_idle: list[str] = []  # the ones no request holds, the most recently used last
+        self._cpu_worker_holds = 0  # CPU helpers CPU workers' requests hold now: at most the saved count
+        self._gpu_worker_holds = 0  # CPU helpers GPU workers' requests hold now: no limit but the GPU workers
+        self._cpu_limit_seen: int | None = None  # the saved count the helpers follow
+        # Each read of the saved count takes a ticket; only the latest-started read's value is applied, so a read that
+        # began before a save can't undo the resize that save made.
+        self._cpu_limit_reads = 0
+        self._cpu_limit_applied = 0
         self._closed = False
 
     def detect_boxes(
-        self, planes: np.ndarray, *, gpu: str | None, gpu_device_path: str | None
+        self,
+        planes: np.ndarray,
+        *,
+        gpu: str | None,
+        gpu_device_path: str | None,
+        gpu_worker: bool | None = None,
+        on_cpu: Callable[[str], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> list[tuple[Box, ...]]:
         """Text boxes per luma plane on the worker's device.
 
@@ -583,61 +675,82 @@ class TextDetectorPool:
             planes: (n, H, W) uint8.
             gpu: The worker's GPU type, None on a CPU worker.
             gpu_device_path: The worker's device.
+            gpu_worker: Whether a GPU worker asks. None means ``gpu is not None``; a GPU worker rereading a file with
+                no GPU after its GPU decode failed passes True, so its CPU helper isn't one of the CPU workers'.
+            on_cpu: Told why when a request with a GPU is read on the CPU (the worker row's fallback flag).
+            cancel_check: True once the job is cancelled; ends a wait for a CPU helper.
 
         Returns:
             One plane's boxes per plane, each ``(left, top, right, bottom)`` in the plane's own pixels.
 
         Raises:
             TextDetUnavailableError: The CPU helper failed (the next call starts a new one).
+            TextDetCancelledError: The job was cancelled while the request waited for a CPU helper.
             TextDetShuttingDownError: The pool is closed.
         """
         key = device_key(gpu, gpu_device_path)
         self._raise_if_closed()
         if key != CPU_KEY:
-            # The verdict is read inside the device's lock: a second worker reading it while the first is still in
-            # the self-test would act on a stale "GPU allowed" and start a second, un-self-tested GPU helper.
+            # The device's state is read inside its lock: a second worker reading it while the first is still in the
+            # self-test would act on a stale "GPU allowed" and start a second, un-self-tested GPU helper.
             with self._locks.hold(key):
-                if self._gpu_allowed(key, gpu):
+                cpu_reason = self._gpu_refused(key, gpu)
+                if cpu_reason is None:
                     try:
-                        boxes = self._on_helper(key, planes, lambda: self._gpu_spec(key, gpu, gpu_device_path))
+                        boxes = self._on_helper(
+                            key,
+                            planes,
+                            lambda: self._gpu_spec(key, gpu, gpu_device_path),
+                            accept=lambda ready, spec: self._accept_gpu_helper(key, ready, spec.pci_bus_id),
+                        )
                     except HelperError as exc:
-                        self._raise_if_closed()
-                        self._use_cpu(key, f"its GPU helper failed: {exc}", warning=True)
+                        self._raise_if_closed()  # close_all killed it: the pool ending, not the GPU failing
+                        cpu_reason = self._gpu_failed(key, exc)
                     else:
                         if boxes is not None:
+                            self._gpu_worked(key)
                             return boxes
-        with self._locks.hold(CPU_KEY):
-            self._raise_if_closed()
-            try:
-                boxes = self._on_helper(CPU_KEY, planes, self._cpu_spec)
-            except HelperError as exc:
-                self._raise_if_closed()  # close_all killed it: the pool ending, not text detection failing
-                raise TextDetUnavailableError(f"Text detection failed: {exc}") from exc
-        if boxes is None:  # pragma: no cover - the CPU helper either serves or raises
-            raise TextDetUnavailableError("Text detection failed: the CPU helper didn't answer")
-        return boxes
+                        cpu_reason = self._cpu_reason(key)  # the helper just gave the device its CPU verdict
+            _report_cpu_fallback(on_cpu, cpu_reason)
+        return self._on_cpu(
+            planes, for_gpu_worker=key != CPU_KEY if gpu_worker is None else gpu_worker, cancel_check=cancel_check
+        )
 
     def backend_of(self, gpu: str | None, gpu_device_path: str | None) -> str | None:
-        """What a worker's text detection runs on: ``webgpu``, ``cpu``, or None before its first request.
+        """What a worker's text detection runs on now: ``webgpu``, ``cpu``, or None while its device has no verdict
+        and isn't waiting out a failure (its next request tries the GPU).
 
-        The app itself only logs the verdict (``_record``); this is how the lab scripts and the tests read it.
+        The app itself only logs it; this is how the lab scripts and the tests read it.
         """
         key = device_key(gpu, gpu_device_path)
         if key == CPU_KEY:
             return "cpu"
         with self._guard:
-            return self._backends.get(key)
+            state = self._gpus.get(key)
+            if state is None:
+                return None
+            if state.verdict == "cpu" or _monotonic() < state.retry_at:
+                return "cpu"
+            return state.verdict
+
+    def reconcile_cpu_helpers(self) -> None:
+        """Bring the CPU helpers to the saved CPU worker count now: idle ones beyond it stop at once, busy ones when
+        their request ends, and a higher count lets waiting requests start helpers (a settings save calls this; every
+        CPU request also reads the count)."""
+        self._stop_helpers(self._follow_cpu_limit())
 
     def close_all(self) -> None:
         """Stop every helper (killed after ``CLOSE_GRACE_S``); the pool serves nothing afterwards.
 
         A request still in flight is killed with its helper. It must not be read as that GPU failing — the device
-        would be demoted to the CPU on the way out — and a request that arrives afterwards (a worker thread still
-        running at ``atexit``) must not start a fresh process during interpreter shutdown.
+        would be sent to the CPU on the way out — and a request that arrives afterwards (a worker thread still
+        running at ``atexit``) must not start a fresh process during interpreter shutdown. A request waiting for a
+        CPU helper is woken and told the pool is shutting down.
         """
-        with self._guard:
+        with self._cpu_free:
             self._closed = True
             helpers, self._helpers = list(self._helpers.values()), {}
+            self._cpu_free.notify_all()
         for helper in helpers:
             helper.close(CLOSE_GRACE_S)
 
@@ -647,83 +760,32 @@ class TextDetectorPool:
         if closed:
             raise TextDetShuttingDownError("Text detection is shutting down")
 
-    def _gpu_allowed(self, key: str, gpu: str | None) -> bool:
+    # ---------------------------------------------------------------------------------------------------- GPU helpers
+
+    def _gpu_refused(self, key: str, gpu: str | None) -> str | None:
+        """Why this request can't try the device's GPU (its CPU verdict, or a start failure's cool-down); None: try it."""
         with self._guard:
-            known = self._backends.get(key)
-        if known is not None:
-            return known == "webgpu"
-        if gpu not in _WEBGPU_VENDORS:
-            self._use_cpu(key, f"{gpu} GPUs have no WebGPU path here")
-            return False
-        info = self._vulkan_info()
-        if info.device is None or info.is_software:
-            self._use_cpu(key, "Vulkan reports no hardware GPU")
-            return False
-        return True
+            state = self._gpus.setdefault(key, _GpuState())
+            verdict, retry_at = state.verdict, state.retry_at
+        if verdict == "cpu" or _monotonic() < retry_at:
+            return self._cpu_reason(key)
+        if verdict is None:
+            if gpu not in _WEBGPU_VENDORS:
+                self._use_cpu(key, f"{gpu} GPUs have no WebGPU path in this app")
+                return self._cpu_reason(key)
+            info = self._vulkan_info()
+            if info.device is None or info.is_software:
+                self._use_cpu(key, "Vulkan reports no hardware GPU")
+                return self._cpu_reason(key)
+        return None
 
-    def _on_helper(
-        self, key: str, planes: np.ndarray, spec_for: Callable[[], HelperSpec]
-    ) -> list[tuple[Box, ...]] | None:
-        for attempt in (1, 2):
-            helper = self._helper(key, spec_for)
-            if helper is None:
-                return None  # no GPU helper: its self-test chose the CPU, or the device already moved to the CPU
-            try:
-                return helper.request(planes)
-            except HelperError:
-                code = helper.wait_exit(EXIT_CODE_WAIT_S)
-                self._drop(key)
-                if code != IDLE_EXIT_CODE:
-                    raise
-                if attempt == 2:
-                    # Two idle exits in a row is not the idle timer: something ends the helper on every request.
-                    raise HelperError("the helper went idle twice in a row") from None
-        return None  # pragma: no cover - the loop always returns or raises
-
-    def _helper(self, key: str, spec_for: Callable[[], HelperSpec]) -> _Helper | None:
+    def _cpu_reason(self, key: str) -> str:
         with self._guard:
-            helper = self._helpers.get(key)
-        if helper is not None:
-            code = helper.exit_code()
-            if code is not None:
-                self._drop(key)
-                helper = None
-                # A CPU helper is started again whatever it exited with, so both of its codes take this same path.
-                if key != CPU_KEY and code != IDLE_EXIT_CODE:
-                    # Crashed between requests: the device moves to the CPU for the process lifetime (spec §6.4 item 7).
-                    self._use_cpu(key, f"its GPU helper exited {code} between requests", warning=True)
-                    return None
-            elif _monotonic() - helper.last_used > IDLE_EXIT_S - IDLE_RESTART_MARGIN_S:
-                self._drop(key)  # about to leave on its idle timer (T-R8): start a new one rather than race it
-                helper = None
-        if helper is None:
-            self._raise_if_closed()
-            spec = spec_for()
-            helper = _start(
-                spec,
-                command=self._command,
-                popen=self._popen,
-                start_timeout_s=self._start_timeout_s,
-                request_timeout_s=self._request_timeout_s,
-            )
-            with self._guard:
-                closed = self._closed
-                if not closed:
-                    self._helpers[key] = helper
-            if closed:
-                # close_all ran while this one started and won't see it: nothing else would ever stop it.
-                helper.kill()
-                helper.close(0)
-                self._raise_if_closed()
-            if key != CPU_KEY:
-                self._record(key, helper.ready, spec.pci_bus_id)
-                if helper.ready["backend"] != "webgpu":
-                    self._drop(key)
-                    return None
-        return helper
+            state = self._gpus.setdefault(key, _GpuState())
+            return state.cpu_reason or "its GPU can't run text detection"
 
-    def _record(self, key: str, ready: dict[str, Any], pci_bus_id: str | None) -> None:
-        """Log and remember which backend a device's helper came up on.
+    def _accept_gpu_helper(self, key: str, ready: dict[str, Any], pci_bus_id: str | None) -> bool:
+        """Whether a GPU helper that just came up serves this device; logs and keeps the device's verdict.
 
         Args:
             key: The device key.
@@ -731,51 +793,101 @@ class TextDetectorPool:
             pci_bus_id: The address the helper was told to pin to. Nothing can confirm from here that Dawn honoured
                 it, so it goes in the log: two devices reporting the same address is the symptom of a wrong-card
                 landing, and one grep finds it.
+
+        Returns:
+            True when it came up on the GPU; False when the GPU can't run text detection or finds other boxes than
+            the CPU (the device's text detection stays on the CPU for the process).
+
+        Raises:
+            HelperError: It came up on the CPU for a reason that isn't a verdict on the GPU: its WebGPU session failed,
+                or a device that has served from the GPU came back without it (a driver reset). That is a failure of
+                this attempt, and the GPU is tried again later.
         """
         backend = ready["backend"]
+        reason = ready.get("reason") or "no reason given"
         with self._guard:
-            before = self._backends.get(key)
-            self._backends[key] = backend
-        if before == backend:
-            return
-        if before is not None:
-            # A helper that restarted after an idle exit and came up on the CPU (the EP is gone, the driver was
-            # reset). It halves the device's throughput for the rest of the run, so it can't be silent. The other
-            # direction can't happen: once a device is on the CPU, _gpu_allowed never starts a GPU helper again.
-            logger.warning(
-                "Credit text detection on {} restarted on the CPU: {}",
-                key,
-                ready.get("reason") or "the helper came back on the other backend",
-            )
-            return
-        test = ready.get("selftest") or {}
+            state = self._gpus.setdefault(key, _GpuState())
+            before = state.verdict
+            if backend == "webgpu":
+                state.verdict = "webgpu"
         if backend == "webgpu":
-            logger.info(
-                "Credit text detection on {}: GPU (median {} ms per frame, CPU {} ms; GPU/CPU {} per round), "
-                "pinned to {}",
-                key,
-                test.get("gpu_ms"),
-                test.get("cpu_ms"),
-                test.get("ratio"),
-                pci_bus_id or "no address (unpinned)",  # fmt: skip
-            )
-        else:
-            logger.info(
-                "Credit text detection on {}: CPU ({})", key, ready.get("reason") or "the GPU self-test chose the CPU"
-            )
+            if before is None:
+                test = ready.get("selftest") or {}
+                logger.info(
+                    "Credit text detection on {}: GPU (median {} ms per frame, CPU {} ms; GPU/CPU {} per round), "
+                    "pinned to {}",
+                    key,
+                    test.get("gpu_ms"),
+                    test.get("cpu_ms"),
+                    test.get("ratio"),
+                    pci_bus_id or "no address (unpinned)",  # fmt: skip
+                )
+            return True
+        if ready.get("failed") or before == "webgpu":
+            raise HelperStartError(f"it came up on the CPU: {reason}")
+        # Only a self-test that found other boxes than the CPU's comes back with its results and the CPU.
+        self._use_cpu(key, reason, boxes_differ=ready.get("selftest") is not None)
+        return False
 
-    def _use_cpu(self, key: str, reason: str, *, warning: bool = False) -> None:
+    def _use_cpu(self, key: str, reason: str, *, boxes_differ: bool = False) -> None:
+        """Keep the device's text detection on the CPU for the process: its GPU can't run it, or answers differently."""
         with self._guard:
-            already = self._backends.get(key) == "cpu"
-            self._backends[key] = "cpu"
+            state = self._gpus.setdefault(key, _GpuState())
+            already = state.verdict == "cpu"
+            state.verdict = "cpu"
+            if not already:
+                state.cpu_reason = "this GPU finds other text boxes than the CPU" if boxes_differ else reason
         if already:
             return
-        if warning:
+        if boxes_differ:
             logger.warning(
-                "Credit text detection on {} moves to the CPU for the rest of this run of the app: {}", key, reason
+                "Credit text detection on {} runs on the CPU for the rest of this run of the app: {}. A credits answer "
+                "mustn't depend on which device read the file, so a GPU that finds other text boxes isn't used",
+                key,
+                reason,
             )
         else:
             logger.info("Credit text detection on {}: CPU ({})", key, reason)
+
+    def _gpu_failed(self, key: str, exc: HelperError) -> str:
+        """Count a failed attempt on the GPU (a start, a request, a timeout): this request goes to the CPU, and the GPU
+        is tried again after ``GPU_RETRY_BASE_S``, doubling with each failure in a row up to ``GPU_RETRY_MAX_S``. The
+        first failure of a run of them is a WARNING; the rest are DEBUG, and :meth:`_gpu_worked` says when the GPU
+        answers again.
+
+        Returns:
+            Why this request is read on the CPU.
+        """
+        what = "couldn't start" if isinstance(exc, HelperStartError) else "failed"
+        reason = f"its GPU helper {what} ({exc})"
+        with self._guard:
+            state = self._gpus.setdefault(key, _GpuState())
+            state.failures += 1
+            failures = state.failures
+            back_off = min(GPU_RETRY_BASE_S * 2 ** min(failures - 1, 32), GPU_RETRY_MAX_S)
+            state.retry_at = _monotonic() + back_off
+            state.cpu_reason = reason
+        log = logger.warning if failures == 1 else logger.debug
+        log(
+            "Credit text detection on {}: {}; this request is read on the CPU and the GPU is tried again in {:g} s",
+            key,
+            reason,
+            back_off,
+        )
+        return reason
+
+    def _gpu_worked(self, key: str) -> None:
+        with self._guard:
+            state = self._gpus.setdefault(key, _GpuState())
+            failed = state.failures
+            state.failures, state.retry_at = 0, 0.0
+        if failed:
+            logger.info(
+                "Credit text detection on {}: back on the GPU after {} failed request{}",
+                key,
+                failed,
+                "s" * (failed > 1),
+            )
 
     def _gpu_spec(self, key: str, gpu: str | None, gpu_device_path: str | None) -> HelperSpec:
         pci_bus_id = worker_pci_bus_id(gpu, gpu_device_path)
@@ -788,11 +900,235 @@ class TextDetectorPool:
         # worker's own card, so two GPU workers don't both land on GPU 0.
         env = pin_env_to_gpu(env, pci_bus_id)
         with self._guard:
-            known = key in self._backends
+            state = self._gpus.get(key)
+            known = state is not None and state.verdict is not None
         return HelperSpec(key, "webgpu", pci_bus_id, not known, env)
 
-    def _cpu_spec(self) -> HelperSpec:
-        return HelperSpec(CPU_KEY, "cpu", None, False, pin_env_to_gpu(os.environ, None))
+    # ---------------------------------------------------------------------------------------------------- CPU helpers
+
+    def _on_cpu(
+        self, planes: np.ndarray, *, for_gpu_worker: bool, cancel_check: Callable[[], bool] | None = None
+    ) -> list[tuple[Box, ...]]:
+        key = self._take_cpu_helper(for_gpu_worker, cancel_check)
+        try:
+            boxes = self._on_helper(key, planes, lambda: self._cpu_spec(key))
+        except HelperError as exc:
+            self._raise_if_closed()  # close_all killed it: the pool ending, not text detection failing
+            raise TextDetUnavailableError(f"Text detection failed: {exc}") from exc
+        finally:
+            self._return_cpu_helper(key, for_gpu_worker)
+        if boxes is None:  # pragma: no cover - a CPU helper either serves or raises
+            raise TextDetUnavailableError("Text detection failed: the CPU helper didn't answer")
+        return boxes
+
+    def _read_cpu_limit(self) -> int:
+        """The saved CPU worker count. Never read while _guard is held: the settings have a lock of their own."""
+        return max(0, int(self._cpu_limit()))
+
+    def _follow_cpu_limit(self) -> list[_Helper]:
+        """Read the saved CPU worker count and follow it if it changed.
+
+        Returns:
+            The processes of idle helpers the lower count leaves no room for, to stop once _guard is released (already
+            out of the pool).
+        """
+        with self._cpu_free:
+            self._cpu_limit_reads += 1
+            ticket = self._cpu_limit_reads
+        limit = self._read_cpu_limit()
+        with self._cpu_free:
+            # A read that began before one already applied may hold a value from before the last save.
+            if self._closed or ticket < self._cpu_limit_applied:
+                return []
+            self._cpu_limit_applied = ticket
+            if limit == self._cpu_limit_seen:
+                return []
+            self._cpu_limit_seen = limit
+            return self._resize_cpu_helpers()
+
+    def _cpu_worker_cap(self) -> int:
+        """How many CPU helpers CPU workers' requests may hold at once (_guard held)."""
+        return max(1, self._cpu_limit_seen or 0)
+
+    def _take_cpu_helper(self, for_gpu_worker: bool, cancel_check: Callable[[], bool] | None = None) -> str:
+        """A CPU helper's key for one request: an idle one, else a new one, when this kind of request has room; else
+        the next one freed. A GPU worker's request always has room.
+
+        Raises:
+            TextDetShuttingDownError: The pool closed (also while waiting).
+            TextDetCancelledError: The job was cancelled while waiting (asked outside the pool's lock).
+        """
+        while True:
+            if cancel_check is not None and cancel_check():
+                raise TextDetCancelledError("cancelled")
+            # Old helpers are stopped before a key is taken, so nothing can fail between taking one and using it.
+            self._stop_helpers(self._follow_cpu_limit())
+            with self._cpu_free:
+                if self._closed:
+                    raise TextDetShuttingDownError("Text detection is shutting down")
+                if for_gpu_worker or self._cpu_worker_holds < self._cpu_worker_cap():
+                    if self._cpu_idle:
+                        # The most recently used: the rest stay idle long enough to leave on their own idle timer.
+                        key = self._cpu_idle.pop()
+                    else:
+                        key = self._new_cpu_helper_key()
+                    if for_gpu_worker:
+                        self._gpu_worker_holds += 1
+                    else:
+                        self._cpu_worker_holds += 1
+                    return key
+                # Woken by a returned helper, a resize or close_all; the timeout reads the saved count again.
+                self._cpu_free.wait(CPU_WAIT_POLL_S)
+
+    def _new_cpu_helper_key(self) -> str:
+        """The first CPU helper key not in use, now in use (_guard held)."""
+        number = 1
+        while _cpu_helper_key(number) in self._cpu_helpers:
+            number += 1
+        key = _cpu_helper_key(number)
+        self._cpu_helpers.append(key)
+        return key
+
+    def _resize_cpu_helpers(self) -> list[_Helper]:
+        """Follow a changed saved count (_guard held): idle helpers beyond what CPU workers may hold now, plus the
+        ones GPU workers hold, leave the pool. Busy CPU workers' helpers beyond the count go when they are returned.
+        An unchanged count changes nothing, so helpers GPU workers use between two of their requests aren't stopped
+        and started again.
+
+        Returns:
+            The processes to stop once _guard is released (already out of the pool).
+        """
+        target = self._cpu_worker_cap() + self._gpu_worker_holds
+        stop: list[_Helper] = []
+        while len(self._cpu_helpers) > target and self._cpu_idle:
+            stop += self._retire_cpu_helper(self._cpu_idle.pop(0))  # the least recently used first
+        self._cpu_free.notify_all()  # a higher count lets waiting requests take helpers
+        return stop
+
+    def _retire_cpu_helper(self, key: str) -> list[_Helper]:
+        """Take a CPU helper out of the pool (_guard held), its process with it: a helper started later under the same
+        key is a new one, which stopping this one's process can't touch."""
+        self._cpu_helpers.remove(key)
+        helper = self._helpers.pop(key, None)
+        return [helper] if helper is not None else []
+
+    def _return_cpu_helper(self, key: str, for_gpu_worker: bool) -> None:
+        stop: list[_Helper] = []
+        with self._cpu_free:
+            if for_gpu_worker:
+                self._gpu_worker_holds -= 1
+                beyond_the_count = False
+            else:
+                self._cpu_worker_holds -= 1
+                # The others still hold as many as the count allows: this one is beyond a count that went down.
+                beyond_the_count = self._cpu_worker_holds >= self._cpu_worker_cap()
+            if beyond_the_count or self._closed:
+                stop = self._retire_cpu_helper(key)
+            else:
+                self._cpu_idle.append(key)
+            self._cpu_free.notify()
+        self._stop_helpers(stop)
+
+    def _cpu_spec(self, key: str) -> HelperSpec:
+        return HelperSpec(key, "cpu", None, False, pin_env_to_gpu(os.environ, None))
+
+    @staticmethod
+    def _stop_helpers(helpers: list[_Helper]) -> None:
+        for helper in helpers:
+            helper.kill()
+            helper.close(0)
+
+    # ------------------------------------------------------------------------------------------------- every helper
+
+    def _on_helper(
+        self,
+        key: str,
+        planes: np.ndarray,
+        spec_for: Callable[[], HelperSpec],
+        *,
+        accept: Callable[[dict[str, Any], HelperSpec], bool] | None = None,
+    ) -> list[tuple[Box, ...]] | None:
+        for attempt in (1, 2):
+            helper = self._helper(key, spec_for, accept)
+            if helper is None:
+                return None  # a GPU helper that came up on the CPU for good: the request goes to a CPU helper
+            try:
+                return helper.request(planes)
+            except HelperError:
+                code = helper.wait_exit(EXIT_CODE_WAIT_S)
+                self._drop(key)
+                if code != IDLE_EXIT_CODE:
+                    raise
+                if attempt == 2:
+                    # Two idle exits in a row is not the idle timer: something ends the helper on every request.
+                    raise HelperError("the helper went idle twice in a row") from None
+        return None  # pragma: no cover - the loop always returns or raises
+
+    def _helper(
+        self,
+        key: str,
+        spec_for: Callable[[], HelperSpec],
+        accept: Callable[[dict[str, Any], HelperSpec], bool] | None,
+    ) -> _Helper | None:
+        """The key's running helper, started (again) when there is none, it has exited, or it is about to leave on its
+        idle timer.
+
+        Args:
+            key: A GPU device key or a CPU helper key; the caller holds it alone (the device's lock, or a CPU helper
+                taken for this request).
+            spec_for: How to start it.
+            accept: For a GPU helper: whether one that just came up serves (``_accept_gpu_helper``).
+
+        Returns:
+            The helper, or None when a GPU helper came up on the CPU for good.
+
+        Raises:
+            HelperError: It couldn't be started, it came up on the CPU this time only, or a GPU helper exited between
+                requests (it crashed).
+        """
+        with self._guard:
+            helper = self._helpers.get(key)
+        if helper is not None:
+            code = helper.exit_code()
+            if code is not None:
+                self._drop(key)
+                helper = None
+                # A CPU helper is started again whatever it exited with, so both of its codes take this same path.
+                if not _is_cpu_helper_key(key) and code != IDLE_EXIT_CODE:
+                    raise HelperError(f"it exited {code} between requests")
+            elif _monotonic() - helper.last_used > IDLE_EXIT_S - IDLE_RESTART_MARGIN_S:
+                self._drop(key)  # about to leave on its idle timer (T-R8): start a new one rather than race it
+                helper = None
+        if helper is not None:
+            return helper
+        self._raise_if_closed()
+        spec = spec_for()
+        helper = _start(
+            spec,
+            command=self._command,
+            popen=self._popen,
+            start_timeout_s=self._start_timeout_s,
+            request_timeout_s=self._request_timeout_s,
+        )
+        with self._guard:
+            closed = self._closed
+            if not closed:
+                self._helpers[key] = helper
+        if closed:
+            # close_all ran while this one started and won't see it: nothing else would ever stop it.
+            helper.kill()
+            helper.close(0)
+            self._raise_if_closed()
+        if accept is not None:
+            try:
+                accepted = accept(helper.ready, spec)
+            except HelperError:
+                self._drop(key)
+                raise
+            if not accepted:
+                self._drop(key)
+                return None
+        return helper
 
     def _drop(self, key: str) -> None:
         with self._guard:
@@ -807,13 +1143,39 @@ _pool_lock = threading.Lock()
 
 
 def get_textdet_pool() -> TextDetectorPool:
-    """The process's helper pool (its helpers are stopped at exit)."""
+    """The process's helper pool: its CPU helpers follow the saved CPU worker count, and its helpers stop at exit."""
     global _pool
     with _pool_lock:
         if _pool is None:
-            _pool = TextDetectorPool()
+            _pool = TextDetectorPool(cpu_limit=_configured_cpu_workers)
             atexit.register(_pool.close_all)
         return _pool
+
+
+def reconcile_textdet_cpu_helpers() -> None:
+    """Bring the process pool's CPU helpers to the saved CPU worker count (a settings save calls this).
+
+    Starts no pool: before any text detection there are no helpers to resize.
+    """
+    with _pool_lock:
+        pool = _pool
+    if pool is not None:
+        pool.reconcile_cpu_helpers()
+
+
+def _configured_cpu_workers() -> int:
+    """The saved CPU worker count (Settings → Workers), or 1 when it can't be read.
+
+    Only the app's settings, never loaded here: a process that hasn't loaded them (the eval harness) gets 1.
+    """
+    try:
+        from ...web.settings_manager import peek_settings_manager
+
+        settings = peek_settings_manager()
+        return 1 if settings is None else max(0, int(settings.cpu_threads))
+    except Exception as exc:  # noqa: BLE001 - a helper count must never fail a request
+        logger.debug("Couldn't read the CPU worker count for text detection, so one CPU helper: {}", exc)
+        return 1
 
 
 # ----------------------------------------------------------------------------------------------- the helper process
@@ -827,8 +1189,103 @@ def _send_text(protocol: BinaryIO, text: str) -> None:
     protocol.write(text.encode() + b"\n")
 
 
+def _vulkan_adapters() -> list[tuple[str, int]] | None:
+    """Each Vulkan device this process's environment exposes, as ``(name, VkPhysicalDeviceType)``.
+
+    The helper's environment is what pins it to its GPU (``pin_env_to_gpu``: the device-select layer then reports only
+    that device), and Dawn takes an adapter from this same list, so this is what WebGPU can run on. Asked through the
+    Vulkan loader itself (the image has no Vulkan tools); a separate instance, gone before Dawn starts its own.
+
+    Returns:
+        The devices in the loader's order, or None when Vulkan can't be asked (no loader, no instance, or anything
+        else going wrong: the check is then skipped and the WebGPU session itself says whether there's an adapter).
+    """
+    try:
+        return _ask_vulkan_loader()
+    except Exception as exc:  # noqa: BLE001 - a broken check must never count as a GPU failure
+        logger.debug("Couldn't list the Vulkan devices: {}: {}", type(exc).__name__, exc)
+        return None
+
+
+def _ask_vulkan_loader() -> list[tuple[str, int]] | None:
+    import ctypes
+
+    class AppInfo(ctypes.Structure):
+        _fields_ = [("sType", ctypes.c_int), ("pNext", ctypes.c_void_p), ("pApplicationName", ctypes.c_char_p),
+                    ("applicationVersion", ctypes.c_uint32), ("pEngineName", ctypes.c_char_p),
+                    ("engineVersion", ctypes.c_uint32), ("apiVersion", ctypes.c_uint32)]  # fmt: skip
+
+    class InstanceInfo(ctypes.Structure):
+        _fields_ = [("sType", ctypes.c_int), ("pNext", ctypes.c_void_p), ("flags", ctypes.c_uint32),
+                    ("pApplicationInfo", ctypes.POINTER(AppInfo)), ("enabledLayerCount", ctypes.c_uint32),
+                    ("ppEnabledLayerNames", ctypes.c_void_p), ("enabledExtensionCount", ctypes.c_uint32),
+                    ("ppEnabledExtensionNames", ctypes.c_void_p)]  # fmt: skip
+
+    try:
+        vk = ctypes.CDLL("libvulkan.so.1")
+        vk.vkCreateInstance.argtypes = [ctypes.POINTER(InstanceInfo), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        vk.vkCreateInstance.restype = ctypes.c_int
+        vk.vkEnumeratePhysicalDevices.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
+        vk.vkEnumeratePhysicalDevices.restype = ctypes.c_int
+        vk.vkGetPhysicalDeviceProperties.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        vk.vkGetPhysicalDeviceProperties.restype = None
+        vk.vkDestroyInstance.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        vk.vkDestroyInstance.restype = None
+        # sType 0 and 1: VK_STRUCTURE_TYPE_APPLICATION_INFO and _INSTANCE_CREATE_INFO; Vulkan 1.1.
+        app = AppInfo(0, None, b"textdet", 0, None, 0, (1 << 22) | (1 << 12))
+        info = InstanceInfo(1, None, 0, ctypes.pointer(app), 0, None, 0, None)
+        instance = ctypes.c_void_p()
+        if vk.vkCreateInstance(ctypes.byref(info), None, ctypes.byref(instance)) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    try:
+        count = ctypes.c_uint32(0)
+        if vk.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), None) != 0:
+            return None
+        handles = (ctypes.c_void_p * count.value)()
+        if vk.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), handles) not in (0, 5):  # 5: VK_INCOMPLETE
+            return None
+        adapters = []
+        for handle in handles[: count.value]:
+            # VkPhysicalDeviceProperties: apiVersion, driverVersion, vendorID, deviceID (uint32 each), deviceType
+            # (a 4-byte enum) at byte 16, then deviceName[256]; the limits after it make the whole under 1 KB.
+            properties = ctypes.create_string_buffer(4096)
+            vk.vkGetPhysicalDeviceProperties(handle, properties)
+            raw = properties.raw
+            name = raw[20:276].split(b"\0", 1)[0].decode("utf-8", "replace")
+            adapters.append((name, int.from_bytes(raw[16:20], sys.byteorder)))
+        return adapters
+    finally:
+        vk.vkDestroyInstance(instance, None)
+
+
+def _software_adapter(adapters: list[tuple[str, int]] | None) -> str | None:
+    """The software renderer WebGPU would run on, or None when there is a GPU to run on (or nothing is known).
+
+    Dawn prefers any GPU adapter to a CPU one, so it lands on a software renderer only when that is all the helper's
+    environment leaves it: when a GPU's own Vulkan driver doesn't load in the container, say.
+
+    Args:
+        adapters: From :func:`_vulkan_adapters`.
+
+    Returns:
+        The software renderer's name, e.g. ``llvmpipe (LLVM 19.1.1, 256 bits)``.
+    """
+    if not adapters:
+        return None
+    for name, kind in adapters:
+        if kind != VK_CPU and not any(renderer in name.lower() for renderer in _SOFTWARE_RENDERERS):
+            return None
+    return adapters[0][0]
+
+
 def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
     """The detector this helper serves with, and the ready line saying which backend won and why.
+
+    A GPU helper serves from the GPU when its WebGPU session is on a hardware adapter and, on a device's first start,
+    the self-test finds the CPU's boxes. Otherwise the ready line says ``cpu`` with the reason, and ``failed`` when that
+    reason is a failure this time (a session or self-test that raised) rather than a verdict on the GPU.
 
     Raises:
         ModelError: The model file is missing or isn't the pinned one.
@@ -853,6 +1310,14 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
                 "selftest": None,
                 "reason": f"no WebGPU device is this GPU ({len(found)} found)",
             }
+        software = _software_adapter(_vulkan_adapters())
+        if software is not None:
+            # Not a GPU: it finds the CPU's boxes, so the self-test alone would keep it.
+            return cpu(), {
+                "backend": "cpu",
+                "selftest": None,
+                "reason": f"WebGPU would run on {software}, a software renderer, not on this GPU",
+            }
         gpu = textdet.TextDetector(textdet.webgpu_session(args.model, found[index], args.threads), backend="webgpu")
         if not args.selftest:
             return gpu, {"backend": "webgpu", "selftest": None, "reason": ""}
@@ -865,14 +1330,16 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
     except textdet.ModelError:
         raise
     except textdet.WebGpuSessionError as exc:
-        # Expected on a host whose Vulkan environment leaves Dawn no adapter (note N2); ONNX Runtime has already
-        # printed its own "falling back to CPUExecutionProvider" block to stderr above this.
+        # Expected on a host whose Vulkan environment leaves Dawn no adapter (note N2), or a GPU Dawn rejects: the GPU
+        # can't run text detection here. ONNX Runtime has already printed its own "falling back to
+        # CPUExecutionProvider" block to stderr above this.
         return cpu(), {"backend": "cpu", "selftest": None, "reason": f"this GPU has no usable WebGPU adapter: {exc}"}
-    except Exception as exc:  # noqa: BLE001 - any EP or driver failure means the CPU
+    except Exception as exc:  # noqa: BLE001 - any EP or driver failure means the CPU, this time
         return cpu(), {
             "backend": "cpu",
             "selftest": None,
             "reason": f"the WebGPU session failed: {type(exc).__name__}: {exc}",
+            "failed": True,
         }
     if result.use_gpu:
         return gpu, {"backend": "webgpu", "selftest": asdict(result), "reason": ""}

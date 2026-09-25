@@ -292,6 +292,50 @@ class TestSaveSettingsReconcilesCpuWorkers:
         assert resp.get_json()["cpu_workers_retiring"] == 2
 
 
+class TestSaveSettingsResizesTextDetectionHelpers:
+    """Credit text detection runs a CPU helper per CPU worker: a saved count resizes them as it does the workers."""
+
+    @pytest.fixture
+    def text_pool(self, monkeypatch):
+        from media_preview_generator.markers.credits import textdet_helper
+
+        seen: list[int] = []
+        # What the app's pool reads as its limit when told to resize: the saved count, not the request body.
+        pool = SimpleNamespace(reconcile_cpu_helpers=lambda: seen.append(textdet_helper._configured_cpu_workers()))
+        monkeypatch.setattr(textdet_helper, "_pool", pool)
+        return seen
+
+    def test_saving_cpu_threads_resizes_the_text_detection_cpu_helpers(self, app, text_pool):
+        _live_pool(app, cpu=2)
+
+        resp = _save(app, {"cpu_threads": 5})
+
+        assert resp.status_code == 200
+        assert text_pool == [5]
+
+    def test_a_save_without_cpu_threads_leaves_them_alone(self, app, text_pool):
+        _live_pool(app, cpu=2)
+
+        resp = _save(app, {"thumbnail_quality": 5})
+
+        assert resp.status_code == 200
+        assert text_pool == []
+
+    def test_a_failing_resize_still_saves_the_count(self, app, monkeypatch):
+        from media_preview_generator.markers.credits import textdet_helper
+
+        def broken():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(textdet_helper, "_pool", SimpleNamespace(reconcile_cpu_helpers=broken))
+        pool = _live_pool(app, cpu=2)
+
+        resp = _save(app, {"cpu_threads": 3})
+
+        assert resp.status_code == 200
+        assert _saved_cpu_threads(app) == 3 and len(_cpu_workers(pool)) == 3
+
+
 class TestJobStartReconcilesCpuWorkers:
     def test_preview_job_pool_sized_from_saved_cpu_threads_not_job_snapshot(self, app, tmp_path):
         # Saved while no pool existed, so the save had nothing to resize; the job's config snapshot still says 2.

@@ -298,14 +298,19 @@ class TestWithChapters:
         assert d.reason == "chapters contradicted by agreeing sources: credits_text, server_markers"
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (5_640_000, MOVIE_MS, ("chapters",))
 
-    def test_text_and_skipdb_agreeing_against_the_chapter_send_it_to_review(self):
+    def test_text_and_skipdb_agreeing_against_the_chapter_outvote_it_at_the_text_start(self):
+        # Rule 3 since 2026-09-25 (Somebody Somewhere S03: HMAX chapters 40-70 s late): the file's own frames and an
+        # independent answer outvote the chapter; the start is credit text's, not SkipDB's by source order.
         d = credits([chapter(5_640_000), text(5_700_000), skipdb(5_698_000)])[T.CREDITS]
         assert (d.status, d.reason) == (
-            DecisionStatus.NEEDS_REVIEW,
-            "chapters contradicted by agreeing sources: skipdb, credits_text",
+            DecisionStatus.DECIDED,
+            "credit text and agreeing sources contradict the chapters: skipdb, credits_text",
         )
-        assert d.marker is None
-        assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (5_640_000, MOVIE_MS, ("chapters",))
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
+            5_700_000,
+            MOVIE_MS,
+            ("skipdb", "credits_text"),
+        )
 
 
 class TestEndQ3:

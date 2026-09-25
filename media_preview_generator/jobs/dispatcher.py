@@ -96,6 +96,8 @@ class JobTracker:
         self.total_items = len(items)
         self.successful = 0
         self.failed = 0
+        # Which files failed, so a multi-path webhook retries those and not the first N (guarded by _counts_lock).
+        self.failed_paths: list[str] = []
         self.cancelled = False
         if handlers is not None:
             self.outcome_counts: dict[str, int] = {key: 0 for key in handlers.outcome_keys}
@@ -169,6 +171,7 @@ class JobTracker:
         success: bool,
         worker_display_name: str = "",
         title: str = "",
+        canonical_path: str = "",
     ) -> None:
         """Record a completed item and fire per-job callbacks.
 
@@ -176,6 +179,7 @@ class JobTracker:
             success: Whether the item succeeded.
             worker_display_name: Display name of the worker for logging.
             title: Media title for logging.
+            canonical_path: The item's file, recorded in ``failed_paths`` when it failed.
 
         """
         # Increment under the lock and capture the post-increment completion
@@ -185,6 +189,8 @@ class JobTracker:
                 self.successful += 1
             else:
                 self.failed += 1
+                if canonical_path:
+                    self.failed_paths.append(canonical_path)
             is_done = (self.successful + self.failed) >= self.total_items
             outcome_snapshot = dict(self.outcome_counts)
 
@@ -266,6 +272,7 @@ class JobTracker:
         self.cancelled = True
         with self._counts_lock:
             remaining = len(self.check_queue) + len(self.item_queue)
+            self.failed_paths.extend(item.canonical_path for item in (*self.check_queue, *self.item_queue))
             self.check_queue.clear()
             self.item_queue.clear()
             if remaining:
@@ -347,7 +354,7 @@ class JobTracker:
             logger.debug("Could not notify checked file result for {}: {}", item.canonical_path, exc)
 
         title = getattr(item, "title", "") or item.canonical_path
-        self.record_completion(success, CHECK_STAGE_WORKER_NAME, title)
+        self.record_completion(success, CHECK_STAGE_WORKER_NAME, title, canonical_path=item.canonical_path)
 
     def record_custom_check_result(self, item, outcome: ItemOutcome) -> None:
         """Record an item a kind's ``check_fn`` finished without a worker.
@@ -413,7 +420,7 @@ class JobTracker:
                 "Dispatcher: recording the {} result for {!r} failed: {}", self.kind, item.canonical_path, exc
             )
         finally:
-            self.record_completion(not valid.failed, label, title)
+            self.record_completion(not valid.failed, label, title, canonical_path=item.canonical_path)
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until all items are processed.
@@ -426,9 +433,12 @@ class JobTracker:
 
     def get_result(self) -> dict:
         """Return a result dict compatible with WorkerPool.process_items_headless."""
+        with self._counts_lock:
+            failed_paths = list(self.failed_paths)
         return {
             "completed": self.successful,
             "failed": self.failed,
+            "failed_paths": failed_paths,
             "total": self.total_items,
             "cancelled": self.cancelled,
             "outcome": dict(self.outcome_counts),
@@ -706,6 +716,8 @@ class JobDispatcher:
         """
         reaped = 0
         for worker in self.worker_pool._snapshot_workers():
+            # Read before check_completion frees the worker: once it's idle another assignment can replace it.
+            canonical_path = worker.media_file
             if not worker.check_completion():
                 continue
 
@@ -729,7 +741,7 @@ class JobDispatcher:
                         tracker.job_id[:8],
                     )
                 finally:
-                    tracker.record_completion(success, worker.display_name, title)
+                    tracker.record_completion(success, worker.display_name, title, canonical_path=canonical_path)
             else:
                 # No tracker for this item — just log
                 success = worker.last_task_succeeded()
@@ -893,7 +905,12 @@ class JobDispatcher:
         except Exception as notify_exc:
             logger.warning("Could not record the failed start of {}: {}", item.canonical_path, notify_exc)
         finally:
-            tracker.record_completion(False, worker.display_name, getattr(item, "title", "") or item.canonical_path)
+            tracker.record_completion(
+                False,
+                worker.display_name,
+                getattr(item, "title", "") or item.canonical_path,
+                canonical_path=item.canonical_path,
+            )
 
     def _get_next_check_item(self):
         """Pick the next item to CHECK, priority-aware, skipping paused jobs.

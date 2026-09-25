@@ -8,6 +8,7 @@ by the web layer (job_runner.py).
 import os
 import random
 import shutil
+from datetime import UTC, datetime
 
 from loguru import logger
 
@@ -566,6 +567,7 @@ def _dispatch_processable_items(
     worker_callback=None,
     on_dispatch_start=None,
     worker_pool_callback=None,
+    priority: int | None = None,
 ) -> dict:
     """Submit ``(server_config, ProcessableItem)`` pairs to the shared dispatcher.
 
@@ -670,7 +672,7 @@ def _dispatch_processable_items(
             "cancel_check": cancel_check,
             "pause_check": pause_check,
         },
-        priority=PRIORITY_NORMAL,
+        priority=priority if priority is not None else PRIORITY_NORMAL,
     )
     tracker.wait()
     logger.info("Multi-server {} complete: {} item(s) processed.", label, tracker.completed)
@@ -844,6 +846,7 @@ def _run_full_scan_multi_server(
     on_dispatch_start=None,
     worker_pool_callback=None,
     warnings_out: list[str] | None = None,
+    priority: int | None = None,
 ) -> dict:
     """Multi-server full-library scan via the per-vendor :class:`VendorProcessor`.
 
@@ -961,6 +964,7 @@ def _run_full_scan_multi_server(
         worker_callback=worker_callback,
         on_dispatch_start=on_dispatch_start,
         worker_pool_callback=worker_pool_callback,
+        priority=priority,
     )
 
 
@@ -979,6 +983,7 @@ def _run_recently_added_multi_server(
     on_dispatch_start=None,
     worker_pool_callback=None,
     warnings_out: list[str] | None = None,
+    priority: int | None = None,
 ) -> dict:
     """Recently-added scan for any vendor via :class:`VendorProcessor`.
 
@@ -1010,12 +1015,13 @@ def _run_recently_added_multi_server(
         )
         return counts
 
-    lookback_int = int(max(1, lookback_hours))
+    # At least an hour, as ever; not rounded, so a 1.5 h window (or one widened by a wait) keeps its last half hour.
+    lookback = max(1.0, float(lookback_hours))
     all_items, enumeration_errors = _enumerate_items_for_servers(
         candidates,
         enumerate_one=lambda processor, server_cfg: processor.scan_recently_added(
             server_cfg,
-            lookback_hours=lookback_int,
+            lookback_hours=lookback,
             library_ids=library_ids,
         ),
         cancel_check=cancel_check,
@@ -1049,6 +1055,11 @@ def _run_recently_added_multi_server(
         )
         return counts
 
+    if job_id and not (cancel_check and cancel_check()):
+        listed = [item for _cfg, item in all_items]
+        _remember_item_origins(job_id, listed, config, registry)
+        _queue_intro_credits_follow_ups(job_id, listed, server_id_filter)
+
     return _dispatch_processable_items(
         all_items,
         config=config,
@@ -1063,7 +1074,77 @@ def _run_recently_added_multi_server(
         worker_callback=worker_callback,
         on_dispatch_start=on_dispatch_start,
         worker_pool_callback=worker_pool_callback,
+        priority=priority,
     )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _remember_item_origins(job_id: str, items: list, config, registry) -> None:
+    """Keep the item ids of the files an unpinned Recently Added scan publishes to their own server only, in its job.
+
+    ``resolve_per_item_pin`` sends a file listed from Emby or Jellyfin to that server alone. A retry runs its files as
+    paths (``_spawn_retry_job``), which only keeps the job's ``webhook_item_id_hints`` for them: with the server the file
+    came from first, the retry's item has that server as its origin again (``_run_webhook_paths_phase``), as a vendor
+    webhook's does, instead of fanning out to every server. A pinned scan needs none: its retries keep the pin. Never
+    raises.
+
+    Args:
+        job_id: The Recently Added job.
+        items: The files it listed.
+        config: Its config.
+        registry: Its server registry.
+    """
+    from .worker import resolve_per_item_pin
+
+    pin = getattr(config, "server_id_filter", None)
+    if isinstance(pin, str) and pin:
+        return
+    hints: dict[str, dict[str, str]] = {}
+    for item in items:
+        origin = item.server_id
+        ids = dict(item.item_id_by_server or {})
+        if origin and ids.get(origin) and resolve_per_item_pin(config, item, registry) == origin:
+            hints[item.canonical_path] = {origin: ids.pop(origin), **ids}
+    if not hints:
+        return
+    try:
+        from ..web.jobs import get_job_manager
+
+        get_job_manager().merge_job_config(job_id, {"webhook_item_id_hints": hints})
+    except Exception as exc:
+        logger.warning(
+            "Couldn't keep which server {} file(s) of Recently Added scan {} came from ({}: {}); a retry of them "
+            "publishes to every server that has them",
+            len(hints),
+            job_id,
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _queue_intro_credits_follow_ups(job_id: str, items: list, pin: str | None) -> None:
+    """Queue the Intro & Credits jobs for a Recently Added scan's files, as a webhook's are queued (spec §6.4 item 9).
+
+    Each follows this preview job and publishes where the file's previews do (``markers.triggers.submit_follow_ups``).
+    Queued before the dispatch, like a webhook's: a job revived after a restart lists its files again, and files a
+    waiting follow-up already lists aren't queued twice. Never raises: a markers problem must not cost the scan its
+    previews.
+
+    Args:
+        job_id: The Recently Added preview job.
+        items: The files it listed, with the server each came from.
+        pin: The scan's server pin (``server_id_filter``); None when unpinned.
+    """
+    try:
+        from ..markers.job_runner import RECENTLY_ADDED_SOURCE
+        from ..markers.triggers import submit_follow_ups
+
+        submit_follow_ups(preview_job_id=job_id, items=list(items), source=RECENTLY_ADDED_SOURCE, pin=pin)
+    except Exception:
+        logger.exception("Could not queue the Intro & Credits jobs for the files Recently Added scan {} listed", job_id)
 
 
 def _resolve_pinned_server(sid_filter: str | None) -> tuple[dict | None, str]:
@@ -1334,6 +1415,11 @@ def _classify_processing_mode(config) -> str:
       in ``job.config``. The webhook-side fix closes the primary hole;
       this branch is defense in depth against any future code path that
       ships a webhook job without paths.
+    * ``"recently_added"`` — a scheduled "Recently added" scan
+      (``config.recently_added_since`` set): list each server's
+      new items and dispatch them (:func:`_run_recently_added_multi_server`).
+      Its source (``scheduled_recently_added``) is not a webhook's, so it
+      isn't refused; a retry of it carries ``webhook_paths`` and runs those.
     * ``"full_scan"`` — no webhook markers at all; legitimate scheduled
       or manual full-library scan.
 
@@ -1342,6 +1428,8 @@ def _classify_processing_mode(config) -> str:
     """
     if getattr(config, "webhook_paths", None):
         return "webhook_paths"
+    if isinstance(getattr(config, "recently_added_since", None), datetime):
+        return "recently_added"
     if getattr(config, "webhook_source", None):
         return "refuse_malformed_webhook"
     return "full_scan"
@@ -1536,14 +1624,8 @@ def _run_webhook_paths_phase(
         totals["cancelled"] = totals["cancelled"] or result["cancelled"]
         for k, v in (result.get("outcome") or {}).items():
             aggregate_outcome[k] = aggregate_outcome.get(k, 0) + v
-        # ``dispatch_items`` doesn't tell us WHICH paths failed — only
-        # the aggregate count. Single-path batch (the dominant vendor-
-        # webhook case) is unambiguous; multi-path batches mark exactly
-        # N (count is correct, identity is unknowable, retries on
-        # already-succeeded paths short-circuit cheaply via .meta).
-        # See audit H2.
-        failed_count = result.get("failed", 0)
-        if failed_count:
+        failed_canonical_paths = result.get("failed_paths") or []
+        if failed_canonical_paths:
             # Audit A3/A4 — surface the RAW webhook-input path in the
             # unresolved list so the retry job's
             # ``webhook_item_id_hints`` lookup (keyed by raw input)
@@ -1551,10 +1633,7 @@ def _run_webhook_paths_phase(
             # canonical_path; the retry job's webhook_paths matched,
             # but the hint dict (keyed by raw) didn't → retries paid
             # full reverse-lookup cost on every retry round.
-            failed_inputs = [
-                canonical_to_input.get(item.canonical_path, item.canonical_path)
-                for item in webhook_items[:failed_count]
-            ]
+            failed_inputs = [canonical_to_input.get(path, path) for path in failed_canonical_paths]
             unresolved.extend(failed_inputs)
             # Pass-1 audit #6: also build hints for FAILED items, not
             # only no_owners. A path that owners exist for but every
@@ -1703,6 +1782,30 @@ def run_processing(
         sid_filter = sid_filter if isinstance(sid_filter, str) and sid_filter else None
         _pinned_entry, pinned_type = _resolve_pinned_server(sid_filter)
 
+        if _classify_processing_mode(config) == "recently_added":
+            scan_warnings: list[str] = []
+            outcome_counts = _run_recently_added_multi_server(
+                config,
+                selected_gpus=selected_gpus,
+                server_id_filter=sid_filter,
+                library_ids=getattr(config, "recently_added_library_ids", None) or None,
+                # Measured now, after the job gate: a run that waited for a slot still lists from its window's start.
+                lookback_hours=max(0.0, (_utcnow() - config.recently_added_since).total_seconds() / 3600),
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+                job_id=job_id,
+                worker_callback=worker_callback,
+                on_dispatch_start=on_dispatch_start,
+                worker_pool_callback=worker_pool_callback,
+                warnings_out=scan_warnings,
+                priority=priority,
+            )
+            result: dict = {"outcome": outcome_counts}
+            if scan_warnings:
+                result["warning"] = " | ".join(scan_warnings)
+            return result
+
         # Defense in depth (BEFORE either full-scan branch): a job marked
         # as webhook-origin but missing webhook_paths is malformed —
         # likely an auto-requeue after restart where the path list got
@@ -1751,6 +1854,7 @@ def run_processing(
                 on_dispatch_start=on_dispatch_start,
                 worker_pool_callback=worker_pool_callback,
                 warnings_out=scan_warnings,
+                priority=priority,
             )
             result: dict = {"outcome": outcome_counts}
             if scan_warnings:
@@ -1920,14 +2024,14 @@ def run_processing(
                 )
 
         # ``_classify_processing_mode`` here picks between
-        # "webhook_paths" and "full_scan" — the "refuse_malformed_webhook"
-        # case was already short-circuited at the top of run_processing
-        # (before the multi-server fast path), so the third branch below
-        # is intentionally unreachable today. Keeping it as an explicit
-        # AssertionError instead of an open ``else`` makes the invariant
-        # load-bearing: if some future edit lifts the early refusal,
-        # this site will fail loudly instead of silently degrading
-        # malformed webhook jobs into a Plex full scan.
+        # "webhook_paths" and "full_scan": the "recently_added" and
+        # "refuse_malformed_webhook" modes both returned early at the top of
+        # run_processing (before the multi-server fast path), so the third
+        # branch below is intentionally unreachable today. Keeping it as an
+        # explicit AssertionError instead of an open ``else`` makes the
+        # invariant load-bearing: if some future edit lifts either early
+        # return, this site fails loudly instead of silently degrading a
+        # Recently Added scan or a malformed webhook job into a full scan.
         mode = _classify_processing_mode(config)
         if mode == "webhook_paths":
             webhook_resolution_payload = _run_webhook_paths_phase(
@@ -1956,8 +2060,8 @@ def run_processing(
                 return {"outcome": aggregate_outcome}
         else:
             raise AssertionError(
-                f"Unreachable: refuse_malformed_webhook should have been caught "
-                f"by the early refusal at the top of run_processing — got mode={mode!r}"
+                f"Unreachable: got mode={mode!r}; the Recently Added scan and the malformed webhook refusal both "
+                "return early at the top of run_processing"
             )
 
         summary = _format_outcome_summary(aggregate_outcome)

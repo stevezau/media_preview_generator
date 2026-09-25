@@ -5,28 +5,37 @@ A theme tune ends on the show's title card, the same picture in every episode. A
 open, repeats in the audio too, but it ends over whatever each episode shows at that point. The last 3 s of a
 candidate are decoded at 2 fps as 64×36 grey in this episode and in its two partners with the longest matching runs, at
 their aligned times. Two frames match when their correlation is above 0.6 (two flat frames: when their mean
-brightness is within 12); the candidate passes when, in the median partner, at least 75% of the frame pairs match.
-A partner with certainly no frames to compare (no video, or none at the instants) doesn't count, and a candidate with
+brightness is within 12); the candidate passes when, in the median partner, at least 75% of the frame pairs match, or
+the last 1.5 s all match on pictures whose inside isn't flat (the same end card after shots that differ: an opening
+re-cut in later episodes). A partner with certainly no frames to compare (no video, or none at the instants) doesn't count, and a candidate with
 none passes; a file ffprobe or ffmpeg couldn't read is never a pass (``ReadFailedError``).
 
-Decoded with the worker's GPU through the credit text decode (``credits.frames``: its hwaccel arguments, time limit,
-cancel and stall handling), 320×180 luma averaged down 5×5.
+Decoded with the worker's GPU through the credit text decode (``credits.frames``: its hwaccel arguments, its one
+nearest-pixel software scaler, time limit, cancel, pause and stall handling, and the worker's ``ffmpeg_threads``),
+320×180 luma averaged down 5×5. That scaler gives the same frames on every vendor (measured byte for byte on NVIDIA
+and the CPU for this check, on Intel for credit text; AMD untested), so partners decoded by different workers' GPUs can't change the answer. A stretch the
+GPU can't decode is decoded again on the CPU on the spot, shown on the worker's row as previews' CPU fallback is.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Sequence
 
 import numpy as np
 from loguru import logger
 
 from ..credits import frames
+from ..freeze import Freeze
 from ..probe import ProbeError, ProbeStalledError, StreamStarts, ffprobe_path_for, stream_starts
 from .matcher import Hit
 
-# Stored with every cached share: a change to how pictures are compared makes them compared again.
-CHECK_VERSION = 1
+# Stored with every cached share: a change to how pictures are compared makes them compared again. Season audio's
+# answers carry it too (``season.SEASON_AUDIO_ANSWER_VERSION``), so the answers resting on the shares are due again.
+# 2: one nearest-pixel scaler on every vendor (was scale_cuda, scale_vaapi, or swscale's bicubic on the CPU).
+# 3: the end card (the last 1.5 s matching on pictures that aren't flat passes the stretch).
+CHECK_VERSION = 3
 # Idents and music beds under a cold open start near the file's start; a candidate starting at or before this is
 # checked, a later one is taken as it is (the window the owner's rule was measured with).
 EARLY_START_S = 30.0
@@ -38,6 +47,14 @@ MIN_CORRELATION = 0.6
 # 64×36 frames whose grey levels vary by less than this are flat (a black or white card): compared by brightness.
 FLAT_STD = 4.0
 FLAT_MEAN_DIFF = 12.0
+# The end card: when the last 1.5 s (3 instants) all match on pictures whose inside isn't flat, the stretch ends on the
+# same picture whatever led into it (share 1.0). An anime opening re-cut in later episodes keeps its music and its last
+# card while the shots before it change (Tomb Raider King S01E12 against E02-E05: 3 of the 6 instants, all on the
+# card). The inside is the frame without a border of 4 rows and 7 columns (about 11 %): a shared fade to black is no
+# card, nor is black with a channel's logo in its corner.
+END_CARD_INSTANTS = 3
+_CARD_BORDER_ROWS = 4
+_CARD_BORDER_COLUMNS = 7
 FRAME_W = 64
 FRAME_H = 36
 DECODE_TIMEOUT_S = 120.0
@@ -48,6 +65,10 @@ _PAD_S = 1.0 / FPS
 _NEAREST_S = 0.5 / FPS + 0.05
 _BLOCK_W = frames.FRAME_W // FRAME_W
 _BLOCK_H = frames.FRAME_H // FRAME_H
+# The GPUs (type, device) whose CPU fallback in this check has been warned about: one warning per GPU for the process,
+# since the check decodes a few seconds of many files and a format the GPU can't decode would warn for each one.
+_WARNED_DEVICES: set[tuple[str, str | None]] = set()
+_WARNED_LOCK = threading.Lock()
 
 Frames = list[tuple[float, np.ndarray]]
 
@@ -107,6 +128,12 @@ def frames_alike(x: np.ndarray, y: np.ndarray) -> bool:
     return float(zx @ zy / (np.linalg.norm(zx) * np.linalg.norm(zy))) > MIN_CORRELATION
 
 
+def _card_picture(frame: np.ndarray) -> bool:
+    """Whether a frame's inside (``END_CARD_INSTANTS``' border cropped) isn't flat: a card, not black with a logo."""
+    inside = frame[_CARD_BORDER_ROWS:-_CARD_BORDER_ROWS, _CARD_BORDER_COLUMNS:-_CARD_BORDER_COLUMNS]
+    return float(inside.std()) >= FLAT_STD
+
+
 def _nearest(decoded: Frames, t: float) -> np.ndarray | None:
     best = min(decoded, key=lambda row: abs(row[0] - t), default=None)
     return best[1] if best is not None and abs(best[0] - t) <= _NEAREST_S else None
@@ -124,14 +151,26 @@ def share_alike(times: Sequence[float], target: Frames, target_shift_s: float, p
         partner_shift_s: Added to an instant for the partner's file time (the alignment plus its audio offset).
 
     Returns:
-        The share, or None when no instant has a frame in both.
+        The share, or None when no instant has a frame in both; 1.0 when the last ``END_CARD_INSTANTS`` instants all
+        have a frame in both that match, on a picture whose inside isn't flat (the same end card, whatever led into
+        it).
     """
-    verdicts = []
+    alike: list[bool | None] = []
+    card: list[bool] = []  # alike, on a picture that isn't flat
     for t in times:
         x, y = _nearest(target, t + target_shift_s), _nearest(partner, t + partner_shift_s)
-        if x is not None and y is not None:
-            verdicts.append(frames_alike(x, y))
-    return sum(verdicts) / len(verdicts) if verdicts else None
+        if x is None or y is None:
+            alike.append(None)
+            card.append(False)
+        else:
+            alike.append(frames_alike(x, y))
+            card.append(alike[-1] and _card_picture(x))
+    known = [verdict for verdict in alike if verdict is not None]
+    if not known:
+        return None
+    if len(card) >= END_CARD_INSTANTS and all(card[-END_CARD_INSTANTS:]):
+        return 1.0
+    return sum(known) / len(known)
 
 
 def passes(shares: Sequence[float | None]) -> bool:
@@ -157,8 +196,16 @@ def decode_frames(
     gpu_device_path: str | None,
     container_start_s: float,
     cancel_check: Callable[[], bool] | None = None,
+    download_format: str | None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
 ) -> Frames:
     """Decode a stretch at 2 fps, on the GPU when the worker has one and on the CPU when that fails.
+
+    A CPU fallback calls ``fallback_callback`` every time (the worker's row shows it, as it does previews' fallback)
+    and logs a warning once per GPU for the process (later ones at DEBUG). Only the stretch is decoded again, not the
+    whole file: the season step before it would otherwise run again.
 
     Args:
         path: The media file (read only).
@@ -169,6 +216,12 @@ def decode_frames(
         gpu_device_path: The worker's device.
         container_start_s: The container's first timestamp (``StreamStarts.container_s``).
         cancel_check: True once the job is cancelled.
+        download_format: The format the stream's decoded GPU surfaces are downloaded in (``frames.DOWNLOAD_FORMATS``
+            of its pixel format), or None: ffmpeg downloads each frame itself.
+        pause_check: True while everything is paused (``frames.run_decode``).
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` for the GPU decode (``frames.decode_command``); the
+            CPU fallback runs with ffmpeg's own thread count, as previews' does.
+        fallback_callback: Told why, when the GPU decode fell back to the CPU.
 
     Returns:
         (seconds from the start of the file, 64×36 grey frame) per decoded frame.
@@ -180,12 +233,39 @@ def decode_frames(
     """
     name = os.path.basename(path)
     try:
-        return _decode(path, start_s, length_s, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check)
+        return _decode(path, start_s, length_s, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check,
+                       download_format, pause_check, ffmpeg_threads)  # fmt: skip
     except frames.GpuDecodeError as exc:
         if gpu is None:
             raise
+        _note_cpu_fallback(gpu, gpu_device_path, name, exc, fallback_callback)
+    return _decode(path, start_s, length_s, ffmpeg, None, None, container_start_s, cancel_check, download_format,
+                   pause_check, None)  # fmt: skip
+
+
+def _note_cpu_fallback(
+    gpu: str,
+    gpu_device_path: str | None,
+    name: str,
+    exc: Exception,
+    fallback_callback: Callable[[str], None] | None,
+) -> None:
+    """Show a GPU decode's fallback to the CPU: on the worker's row every time, as a warning once per GPU."""
+    reason = f"The end-picture check couldn't decode {name} on the GPU ({exc}); decoded it on the CPU"
+    device = (gpu, gpu_device_path)
+    with _WARNED_LOCK:
+        first = device not in _WARNED_DEVICES
+        _WARNED_DEVICES.add(device)
+    if first:
+        logger.warning(
+            "The intro end-picture check couldn't decode {} on {} {} and decoded it on the CPU instead: {}. Later CPU "
+            "fallbacks of this check on this GPU are logged at DEBUG.",
+            name, gpu, gpu_device_path or "", exc,
+        )  # fmt: skip
+    else:
         logger.debug("The end-picture check decodes {} on the CPU: {}", name, exc)
-    return _decode(path, start_s, length_s, ffmpeg, None, None, container_start_s, cancel_check)
+    if fallback_callback is not None:
+        fallback_callback(reason)
 
 
 def _decode(
@@ -197,10 +277,13 @@ def _decode(
     gpu_device_path: str | None,
     container_start_s: float,
     cancel_check: Callable[[], bool] | None,
+    download_format: str | None,
+    pause_check: Callable[[], bool] | Freeze | None,
+    ffmpeg_threads: int | None,
 ) -> Frames:
     command, hw_active = frames.decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=False, fps=FPS, gpu=gpu,
-        gpu_device_path=gpu_device_path, vendor_scaler=True,
+        gpu_device_path=gpu_device_path, download_format=download_format, ffmpeg_threads=ffmpeg_threads,
     )  # fmt: skip
     planes: list[np.ndarray] = []
 
@@ -209,7 +292,8 @@ def _decode(
         return [()] * len(chunk)
 
     rows = frames.run_decode(command, hw_active=hw_active, detect_boxes=keep, pts_offset_s=container_start_s,
-                             cancel_check=cancel_check, timeout_s=DECODE_TIMEOUT_S, name=os.path.basename(path))  # fmt: skip
+                             cancel_check=cancel_check, pause_check=pause_check, timeout_s=DECODE_TIMEOUT_S,
+                             name=os.path.basename(path))  # fmt: skip
     decoded = np.concatenate(planes) if planes else np.zeros((0, FRAME_H, FRAME_W), dtype=np.float32)
     if len(rows) != len(decoded):
         raise frames.FrameDecodeError(f"ffmpeg gave {len(decoded) - len(rows)} frames of {path} no timestamp")
@@ -238,6 +322,9 @@ class Reader:
         gpu: str | None = None,
         gpu_device_path: str | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        pause_check: Callable[[], bool] | Freeze | None = None,
+        ffmpeg_threads: int | None = None,
+        fallback_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Set up the reader.
 
@@ -246,9 +333,14 @@ class Reader:
             gpu: The worker's GPU type, None on the CPU.
             gpu_device_path: The worker's device.
             cancel_check: True once the job is cancelled.
+            pause_check: True while everything is paused (:func:`decode_frames`).
+            ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (:func:`decode_frames`).
+            fallback_callback: Told why when a GPU decode fell back to the CPU (:func:`decode_frames`).
         """
         self._ffmpeg, self._gpu, self._gpu_device_path = ffmpeg, gpu, gpu_device_path
         self._cancel_check = cancel_check
+        self._worker = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
+                        "fallback_callback": fallback_callback}  # fmt: skip
         self._starts: dict[str, StreamStarts] = {}
         self._frames: dict[tuple[str, float, float], Frames] = {}
         self._failed: dict[str, ReadFailedError] = {}
@@ -312,6 +404,8 @@ class Reader:
                     gpu_device_path=self._gpu_device_path,
                     container_start_s=starts.container_s,
                     cancel_check=self._cancel_check,
+                    download_format=frames.DOWNLOAD_FORMATS.get(starts.pix_fmt or ""),
+                    **self._worker,
                 )
             except frames.DecodeCancelledError as exc:
                 raise CheckUnavailableError("cancelled") from exc

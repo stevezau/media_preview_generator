@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -665,9 +666,14 @@ def row_04_gpu_decode_failure() -> dict:
     return checks_result(4, "GPU decode failure reruns on the CPU", premise, checks, evidence)
 
 
+# textdet_helper.GPU_RETRY_S, plus a margin: after one GPU failure the device's next request waits this long for the GPU.
+GPU_RETRY_WAIT_S = 35
+
+
 @row(5)
 def row_05_helper_killed_in_a_request() -> dict:
-    """A helper killed while it holds a request: that device reads on the CPU for the rest of the run of the app."""
+    """A helper killed while it holds a request: that request reads on the CPU, and after the back-off the device's
+    next job is back on a new GPU helper (2026-09-25: one failure no longer parks the GPU for the run)."""
     since = now_iso()
     evidence: dict[str, Any] = {}
     killed: str | None = None
@@ -690,7 +696,13 @@ def row_05_helper_killed_in_a_request() -> dict:
                 killed_job = p1.wait_job(started["id"])
                 evidence["killed_job"] = {"job": killed_job["id"], "status": killed_job["status"],
                                           "rows": credits_evidence(MOVIE)}  # fmt: skip
-                evidence["warnings"] = app_log_lines(since, "moves to the CPU for the rest of this run of the app")
+                evidence["fallbacks"] = app_log_lines(
+                    since, "this request runs on the CPU because its GPU helper failed"
+                )
+                evidence["warnings"] = app_log_lines(since, "for the rest of this run of the app") + app_log_lines(
+                    since, "times in a row"
+                )
+                time.sleep(GPU_RETRY_WAIT_S)
                 again, _ = credits_job("row 5 after the kill", force=True)
                 evidence["after_job"] = {"job": again["id"], "status": again["status"],
                                          "rows": credits_evidence(MOVIE)}  # fmt: skip
@@ -699,22 +711,22 @@ def row_05_helper_killed_in_a_request() -> dict:
         if killed is not None:
             sh("docker", "exec", "mlab-app", "kill", "-CONT", killed, check=False)
             sh("docker", "exec", "mlab-app", "kill", "-KILL", killed, check=False)
-        # The device stays on the CPU for the app's lifetime, and rows 6-9 need the GPU helper again.
+        # A fresh app for rows 6-9, whatever state this row left the device's back-off in.
         recreate_app(gpu=True)
     premise = {
         "a webgpu helper was running": bool(evidence.get("webgpu_pids_before")),
         "the job was decoding when the helper died": bool(evidence.get("decode_seen")),
     }
+    before, after = evidence.get("webgpu_pids_before") or [], evidence.get("webgpu_pids_after") or []
     checks = {
-        "exactly one move-to-the-CPU warning": len(evidence.get("warnings", [])) == 1,
+        "exactly one this-request-on-the-CPU line": len(evidence.get("fallbacks", [])) == 1,
+        "no warning: one failure doesn't park the GPU": evidence.get("warnings") == [],
         "the job still completed": evidence.get("killed_job", {}).get("status") == "completed",
         "the answer still landed within 10 s of 540 s": near_truth(evidence.get("killed_job", {}).get("rows", [])),
-        "the next forced job started no new webgpu helper": evidence.get("webgpu_pids_after")
-        == evidence.get("webgpu_pids_before"),
-        # Without these two, "no new webgpu helper" would read the same whether the device fell back to the CPU or
-        # credit text stopped working altogether.
+        # The sampler keeps every helper it has seen, so a new one is a PID it didn't have before the kill.
+        "after the back-off the next forced job ran on a new webgpu helper": bool(set(after) - set(before)),
         "the next forced job still completed": evidence.get("after_job", {}).get("status") == "completed",
-        "the next forced job still answered on the CPU": near_truth(evidence.get("after_job", {}).get("rows", [])),
+        "the next forced job still answered right": near_truth(evidence.get("after_job", {}).get("rows", [])),
     }
     return checks_result(5, "A text detection helper killed during a request", premise, checks, evidence)
 

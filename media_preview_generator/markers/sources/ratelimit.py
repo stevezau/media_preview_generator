@@ -12,10 +12,11 @@ at most the number of in-flight requests (a few), which the reserve absorbs.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -36,8 +37,35 @@ RESET_TIME_LABEL = "00:00 UTC"
 DEFAULT_RESERVE_FRACTION = 0.2
 
 
+_caps = threading.local()
+
+
 def _utc_day() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+@contextlib.contextmanager
+def capped_waits(max_wait_s: float | None) -> Iterator[None]:
+    """Cap how long every :meth:`SourceLimiter.acquire` on this thread waits for a slot, for the block.
+
+    A job's worker holds a GPU or CPU worker while it looks a source up, so it takes a slot only when one is free
+    (almost) now; a later slot is refused at once as BLOCKED, which stores nothing, so the next job that runs the file
+    asks again. The checking stage holds no worker and keeps the caller's wait.
+
+    Args:
+        max_wait_s: The longest wait for a slot; None leaves the caller's ``max_wait_s``.
+    """
+    before = getattr(_caps, "max_wait_s", None)
+    _caps.max_wait_s = max_wait_s
+    try:
+        yield
+    finally:
+        _caps.max_wait_s = before
+
+
+def wait_cap() -> float | None:
+    """This thread's cap on slot waits (:func:`capped_waits`), or None when it has none."""
+    return getattr(_caps, "max_wait_s", None)
 
 
 class Acquire(str, Enum):
@@ -192,12 +220,16 @@ class SourceLimiter:
         Args:
             priority: Job priority (1 high .. 3 low); LOW may not spend the reserved share of the daily budget.
             cancel_check: Polled while waiting; True abandons the slot.
-            max_wait_s: Longest acceptable wait; a later slot returns BLOCKED at once.
+            max_wait_s: Longest acceptable wait; a later slot returns BLOCKED at once. This thread's
+                :func:`capped_waits` shortens it.
 
         Returns:
             ALLOWED when the caller may send one request now; otherwise why not.
         """
         self._local.ticket = None
+        cap = wait_cap()
+        if cap is not None:
+            max_wait_s = min(max_wait_s, cap)
         if cancel_check is not None and cancel_check():
             return Acquire.CANCELLED
         with self._lock:

@@ -200,7 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     text = sub.add_parser("credits-text", help="credit text (rule J) on the 80- and 205-file credits sets vs Plex")
     text.add_argument("--decode", choices=("gpu", "cpu"), default="gpu")
     text.add_argument("--gpu-device", default="cuda:0")
-    text.add_argument("--sets", default="80,205", help="comma-separated: 80, 205")
+    text.add_argument(
+        "--sets", default="80,205", help="comma-separated: 80, 205, and the regression sets accused, isurvived"
+    )
     text.add_argument("--online", action="store_true", help="also the 43 verified online cases")
     text.add_argument(
         "--sheets",

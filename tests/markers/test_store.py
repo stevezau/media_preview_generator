@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -953,6 +953,80 @@ def test_a_second_process_opening_the_same_schema_1_store_migrates_nothing(tmp_p
         assert "locked_at" in columns  # the winner's migration stands; the loser neither repeated nor undid it
     finally:
         loser.close()
+
+
+class TestAnOlderBuildOpenedItMeanwhile:
+    """A rollback to a build from before ``season_pair_runs`` (40311c3, 98bed80: schema 3 as well) opens markers.db
+    and works, but never reads or clears the tables this build added. That build recreates ``season_pairs``, which
+    this build drops on every open, so finding it means one ran since; what it can have left out of step is emptied."""
+
+    @staticmethod
+    def _touched_by_this_build(path):
+        store = MarkerStore(path)
+        a = store.upsert_file(FileIdentity("/m/a.mkv", 1, 1), duration_ms=1_300_000, season_key="/m", is_movie=False)
+        b = store.upsert_file(FileIdentity("/m/b.mkv", 1, 1), duration_ms=1_300_000, season_key="/m", is_movie=False)
+        intro = Marker(T.INTRO, 1_000, 30_000, ("chapters",))
+        store.save_decisions(b.id, {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.DECIDED, intro, None, "chapters")},
+                             settings_fingerprint="f")  # fmt: skip
+        b = store.upsert_file(FileIdentity("/m/b.mkv", 2, 2), duration_ms=1_300_000, season_key="/m", is_movie=False)
+        for rec in (a, b):
+            store.set_fingerprint(rec.id, points=b"\x01\x00\x00\x00", size=rec.size, mtime_ns=rec.mtime_ns,
+                                  window="intro", start_s=0.0, length_s=455.0, algorithm=1)  # fmt: skip
+        assert store.set_season_pair(a.id, b.id, 9, [(1.0, 2.0, 3.0, 4.0)], identity_a=(1, 1), identity_b=(2, 2))
+        store.record_version_reruns([("/m/a.mkv", "decide_rules", 1)])
+        credits = Marker(T.CREDITS, 1_200_000, 1_300_000, ("credits_text",))
+        store.save_decisions(
+            a.id,
+            {
+                T.INTRO: TypeDecision(T.INTRO, DecisionStatus.DECIDED, intro, None, "chapters"),
+                T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.DECIDED, credits, None, "credits_text"),
+            },
+            settings_fingerprint="f",
+        )
+        store.lock_marker(a.id, credits)  # the user's own
+        store.close()
+
+    @staticmethod
+    def _counts(path):
+        with closing(sqlite3.connect(path)) as raw:
+            tables = ("season_pair_runs", "replaced_decisions", "version_reruns", "files", "decisions", "fingerprints",
+                      "markers", "evidence_versions")  # fmt: skip
+            counts = {t: raw.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+            counts["locked"] = raw.execute("SELECT COUNT(*) FROM markers WHERE locked=1").fetchone()[0]
+            return counts
+
+    def test_what_it_couldnt_keep_in_step_is_emptied_on_the_next_open(self, tmp_path):
+        path = str(tmp_path / "markers.db")
+        self._touched_by_this_build(path)
+        with closing(sqlite3.connect(path)) as older_build:  # its _SCHEMA's CREATE TABLE IF NOT EXISTS
+            older_build.execute(
+                "CREATE TABLE season_pairs (file_a INTEGER NOT NULL, file_b INTEGER NOT NULL, "
+                "matcher_version INTEGER NOT NULL, runs_json TEXT NOT NULL, PRIMARY KEY (file_a, file_b))"
+            )
+            older_build.commit()
+
+        MarkerStore(path).close()
+
+        assert self._counts(path) == {
+            "season_pair_runs": 0,
+            "replaced_decisions": 0,
+            "version_reruns": 0,
+            "files": 2,
+            "decisions": 2,  # a's; b's went with its identity
+            "fingerprints": 2,
+            "markers": 2,
+            "evidence_versions": 0,
+            "locked": 1,
+        }
+
+    def test_without_one_in_between_everything_is_kept(self, tmp_path):
+        path = str(tmp_path / "markers.db")
+        self._touched_by_this_build(path)
+
+        MarkerStore(path).close()
+
+        counts = self._counts(path)
+        assert (counts["season_pair_runs"], counts["replaced_decisions"], counts["version_reruns"]) == (1, 1, 1)
 
 
 def test_losing_the_race_to_a_newer_build_is_still_refused(tmp_path):

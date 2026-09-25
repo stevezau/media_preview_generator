@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import threading
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from media_preview_generator.markers.decide import DecisionStatus
 from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import FileOutcome
+from media_preview_generator.markers.outcomes import FILE_BUSY, FileOutcome, ServerStatus
 from media_preview_generator.markers.pipeline import DetectorUnavailableError, LocalDetectorSpec
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.servers.base import ServerType
@@ -238,6 +240,81 @@ class TestWhereItRuns:
         worker.assert_not_called()
 
 
+class TestWhatTheWorkerHandsTheDetector:
+    """The worker stage hands a detector the worker's own ffmpeg threads and fallback flag, and the pause that freezes
+    running work: everything paused or the job's schedule's stop time (``PipelineContext.freeze_check``), never the
+    job's own pause, which lets the running file finish."""
+
+    def test_the_freeze_check_the_threads_and_the_fallback_flag_reach_the_detector(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[AUDIO_INTRO])
+        ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY)
+        ctx.freeze_check = MagicMock(return_value=False)
+        flag = MagicMock()
+        _run(ctx, media, _pubs(), stage="process", gpu="NVIDIA", gpu_device_path="cuda:0", ffmpeg_threads=3,
+             fallback_callback=flag, pause_check=MagicMock(return_value=True))  # fmt: skip
+        kwargs = detector.call_args.kwargs
+        assert kwargs["pause_check"] is ctx.freeze_check  # the job's own pause (True here) never reaches it
+        assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["ffmpeg_threads"]) == ("NVIDIA", "cuda:0", 3)
+        assert kwargs["fallback_callback"] is flag
+
+    def test_a_cpu_worker_hands_no_thread_cap(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[AUDIO_INTRO])
+        ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY)
+        _run(ctx, media, _pubs(), stage="process", gpu=None, gpu_device_path=None, ffmpeg_threads=None)
+        kwargs = detector.call_args.kwargs
+        assert (kwargs["gpu"], kwargs["ffmpeg_threads"], kwargs["pause_check"]) == (None, None, None)
+
+    def test_a_detector_on_the_checking_thread_is_never_frozen(self, store, media):
+        # A checking thread isn't a worker (no GPU, no threads to cap, no row), and its detector runs are the cheap ones
+        # (a season step from cached fingerprints): a job frozen by its schedule's stop time must not keep them, or its
+        # frozen checks would hold the kind's whole share of checking threads from every other job until the next
+        # start.
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[AUDIO_INTRO])
+        ctx = _ctx(store, reg, detectors=(_spec(detector, needs_worker=lambda _r, _c: False),), settings_raw=INTRO_ONLY)
+        ctx.freeze_check = MagicMock(return_value=True)  # the job's schedule's stop time has passed
+        started = time.monotonic()
+        out, _ = _run(ctx, media, _pubs())
+        assert time.monotonic() - started < 2 and out is not None
+        kwargs = detector.call_args.kwargs
+        assert (kwargs["gpu"], kwargs["ffmpeg_threads"], kwargs["fallback_callback"]) == (None, None, None)
+        assert kwargs["pause_check"] is None
+
+    # Only a worker waits: the checking stage hands a file another job runs to a worker at once
+    # (test_pipeline's test_the_checking_stage_hands_a_file_another_job_runs_to_a_worker_without_waiting).
+    @pytest.mark.parametrize("stage", ["process"])
+    def test_a_cancel_ends_the_wait_for_another_jobs_run_of_the_file(self, store, media, stage):
+        # Another job's run holds the file; one frozen by its schedule's stop time holds it until the next start.
+        from media_preview_generator.markers import pipeline
+
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[AUDIO_INTRO])
+        ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY)
+        holding, release, cancelled = threading.Event(), threading.Event(), threading.Event()
+
+        def other_job():
+            with pipeline._PATH_LOCKS.hold(media):
+                holding.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=other_job, daemon=True)
+        holder.start()
+        try:
+            assert holding.wait(5)
+            threading.Timer(0.2, cancelled.set).start()
+            started = time.monotonic()
+            out, _ = _run(ctx, media, _pubs(), stage=stage, cancel_check=cancelled.is_set)
+            assert time.monotonic() - started < 2
+        finally:
+            release.set()
+            holder.join(5)
+        assert (out.outcome_key, out.message) == (FileOutcome.FAILED.value, "cancelled by user")
+        detector.assert_not_called()
+        assert media not in pipeline._PATH_LOCKS._locks
+
+
 class TestForcedRefresh:
     def test_forced_run_reads_markers_on_servers_again_in_the_worker_stage(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -411,3 +488,156 @@ class TestRunMemo:
             thread.join()
             assert ctx.run_memo(media) is memo and seen_elsewhere == [{}]
         assert ctx.run_memo(media) == {}
+
+
+class TestAnotherJobsRunOfTheFile:
+    """A worker whose file another job's worker is running (the file run lock): how long it waits and how it gives the
+    file back. The holder is a real worker run whose detector blocks until the test lets it go."""
+
+    NEXT_RUN_ROW = "Another Intro & Credits job is running this file; trying again on the next run"
+    RETRY_ROW = "Another Intro & Credits job is running this file; this job tries again in a few minutes"
+
+    @pytest.fixture
+    def scene(self, store, media):
+        from media_preview_generator.markers import pipeline
+
+        reg = _registry(media, ServerType.PLEX)
+        entered, release = threading.Event(), threading.Event()
+        threads: list[threading.Thread] = []
+
+        def blocking_detector(rec, **kwargs):
+            entered.set()
+            release.wait(20)
+            return [AUDIO_INTRO]
+
+        def hold(*, frozen: bool) -> None:
+            holder = _ctx(store, reg, detectors=(_spec(blocking_detector),), settings_raw=INTRO_ONLY)
+            holder.freeze_check = lambda: frozen
+            thread = threading.Thread(
+                target=pipeline.process_item, args=(test_pipeline._item(media),), kwargs={"ctx": holder}, daemon=True
+            )
+            thread.start()
+            threads.append(thread)
+            assert entered.wait(5)
+
+        def wait_for_it(waiter, **kwargs) -> tuple[list, threading.Thread]:
+            out: list = []
+            thread = threading.Thread(
+                target=lambda: out.append(pipeline.process_item(test_pipeline._item(media), ctx=waiter, **kwargs)),
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
+            return out, thread
+
+        def waiting_now() -> bool:
+            entry = pipeline._PATH_LOCKS._locks.get(media)
+            return entry is not None and entry[1] >= 2  # the holder and the waiter
+
+        with (
+            patch.object(pipeline, "probe_media", return_value=test_pipeline._probe()),
+            patch.object(pipeline, "publisher_for", side_effect=lambda server, cfg, **kw: ready_publisher()),
+        ):
+            yield SimpleNamespace(reg=reg, hold=hold, wait_for_it=wait_for_it, release=release, waiting_now=waiting_now)
+            release.set()
+            for thread in threads:
+                thread.join(10)
+
+    def _waiter(self, store, scene, *, retries: bool, cap: int = 500):
+        waiter = _ctx(
+            store, scene.reg, detectors=(_spec(MagicMock(return_value=[AUDIO_INTRO])),), settings_raw=INTRO_ONLY
+        )
+        waiter.busy_writes_retried = retries
+        waiter.retry_file_cap = cap
+        waiter.freeze_check = lambda: False
+        return waiter
+
+    def _given_back(self, out, media, wording):
+        (outcome,) = out
+        assert outcome.outcome_key == FileOutcome.WAITING.value
+        (row,) = outcome.publisher_rows
+        assert (row["server_id"], row["status"], row["reason_code"]) == (
+            "plex-1",
+            ServerStatus.WAITING.value,
+            FILE_BUSY,
+        )
+        assert row["message"] == wording
+
+    def test_a_frozen_holder_with_no_retry_gets_the_file_back_at_once_for_the_next_run(self, store, media, scene):
+        scene.hold(frozen=True)  # frozen by its schedule's stop time: it holds the file until the next start
+        waiter = self._waiter(store, scene, retries=False)
+        started = time.monotonic()
+        out, thread = scene.wait_for_it(waiter)
+        thread.join(3)
+        assert not thread.is_alive() and time.monotonic() - started < 3
+        self._given_back(out, media, self.NEXT_RUN_ROW)
+        assert waiter.busy_promised() == set()
+
+    def test_a_running_holder_with_no_retry_is_waited_for_at_most_the_cap(self, store, media, scene, monkeypatch):
+        from media_preview_generator.markers import pipeline
+
+        monkeypatch.setattr(pipeline, "WORKER_FILE_WAIT_NO_RETRY_S", 0.6)
+        scene.hold(frozen=False)
+        waiter = self._waiter(store, scene, retries=False)
+        started = time.monotonic()
+        out, thread = scene.wait_for_it(waiter)
+        thread.join(5)
+        assert not thread.is_alive()
+        assert time.monotonic() - started >= 0.6
+        self._given_back(out, media, self.NEXT_RUN_ROW)
+
+    def test_a_frozen_holder_with_a_retry_gets_the_file_back_at_once_with_the_retry(self, store, media, scene):
+        scene.hold(frozen=True)
+        waiter = self._waiter(store, scene, retries=True)
+        out, thread = scene.wait_for_it(waiter)
+        thread.join(3)
+        assert not thread.is_alive()
+        self._given_back(out, media, self.RETRY_ROW)
+        assert waiter.busy_promised() == {media}
+
+    def test_the_checking_stage_hands_the_file_on_without_taking_a_retry_promise(self, store, media, scene):
+        # The check stage never waits and never gives a file back: a promise taken there would hold one of the job's
+        # retry places for a file its worker may still run.
+        from media_preview_generator.markers import pipeline
+
+        scene.hold(frozen=True)
+        waiter = self._waiter(store, scene, retries=True, cap=1)
+        assert pipeline.check_item(test_pipeline._item(media), ctx=waiter) is None
+        assert waiter.busy_promised() == set()
+        assert waiter.may_promise_busy_retry("/media/other.mkv")
+
+    def test_a_retry_promise_gone_by_the_give_back_keeps_the_worker_waiting(self, store, media, scene):
+        # The promise is taken when the file is given back, not when the wait starts: the job's last retry place went
+        # to another file meanwhile, so giving this one back would leave it with no retry at all.
+        scene.hold(frozen=False)
+        waiter = self._waiter(store, scene, retries=True, cap=1)
+        paused = threading.Event()
+        out, thread = scene.wait_for_it(waiter, pause_check=paused.is_set)
+        deadline = time.monotonic() + 5
+        while not scene.waiting_now() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert scene.waiting_now()
+        assert waiter.promise_busy_retry("/media/other.mkv")  # the only place left
+        paused.set()  # a paused job gives a file back at once when it can promise a retry
+        thread.join(1.5)
+        assert thread.is_alive(), "gave the file back with no retry to run it"
+        scene.release.set()
+        thread.join(10)
+        (outcome,) = out
+        # It ran the file once the holder let go (the holder had just sent the same markers).
+        assert outcome.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert waiter.busy_promised() == {"/media/other.mkv"}
+
+    def test_with_no_promise_left_the_wait_still_ends_at_the_cap(self, store, media, scene, monkeypatch):
+        from media_preview_generator.markers import pipeline
+
+        monkeypatch.setattr(pipeline, "WORKER_FILE_WAIT_NO_RETRY_S", 0.6)
+        monkeypatch.setattr(pipeline, "WORKER_FILE_WAIT_S", 0.2)
+        scene.hold(frozen=False)
+        waiter = self._waiter(store, scene, retries=True, cap=1)
+        assert waiter.promise_busy_retry("/media/other.mkv")
+        out, thread = scene.wait_for_it(waiter, pause_check=lambda: True)
+        thread.join(5)
+        assert not thread.is_alive()
+        self._given_back(out, media, self.NEXT_RUN_ROW)
+        assert waiter.busy_promised() == {"/media/other.mkv"}

@@ -2,7 +2,7 @@
 
 A plain "Intro" chapter next to a specific opening chapter ("OP", "Opening", "Opening
 Credits/Titles", "Title Sequence", "Main Title(s)", "Theme Song") is the cold open, not the theme
-song -- Mushoku Tensei S01E06 has "Intro" 0-274.7 s (the cold open) followed by "OP" 274.7-363.9 s
+song -- one anime episode has "Intro" 0-274.7 s (the cold open) followed by "OP" 274.7-363.9 s
 (the real theme); publishing the "Intro" chapter would skip 4.5 min of story. When a file has both,
 only the specific one becomes a candidate. "OP"/"ED" are two-letter
 genre abbreviations that collide with real words in any other case (a character named "Ed"), so
@@ -32,17 +32,34 @@ from ..probe import Chapter, MediaProbe
 # Bump whenever a change here -- or to `external_ids.ids_from_path`'s episode rule, which callers pass as
 # `is_episode` -- changes the candidates a file's chapters give, so files probed before are read again.
 # 2: "Ending" reads as credits on an episode (phase 4, Task 15).
-CHAPTER_RULES_VERSION = 2
+# 3: non-English intro/credits chapter names (portability pass).
+CHAPTER_RULES_VERSION = 3
 
 # "End" alone is a common final-scene name, so it is deliberately not credits anywhere; "Ending" is
 # credits on an episode only (`_EPISODE_PATTERNS`).
 # "OP"/"ED" are handled separately, case-sensitively -- see module docstring.
+# Non-English names (whole-title, case-insensitive, same as English): German (Vorspann/Abspann), French
+# (Générique/Générique de fin -- accent optional, some muxers drop it), Spanish (Cabecera/Créditos;
+# Spanish also reuses the English "Intro"/"Credits", already matched), Italian (Sigla/Titoli di coda),
+# Portuguese (Abertura/Créditos finais), Dutch (Aftiteling). Anime's romanised "OP"/"ED" are the
+# case-sensitive pair above, not here.
 _PATTERNS: tuple[tuple[MarkerType, re.Pattern[str]], ...] = (
     (
         MarkerType.INTRO,
-        re.compile(r"^(intro(duction)?|opening( credits| titles?)?|title sequence|main titles?|theme( song)?)$", re.I),
+        re.compile(
+            r"^(intro(duction)?|opening( credits| titles?)?|title sequence|main titles?|theme( song)?"
+            r"|vorspann|g[eé]n[eé]rique|cabecera|sigla|abertura)$",
+            re.I,
+        ),
     ),
-    (MarkerType.CREDITS, re.compile(r"^((end|ending|closing) credits|credits|end titles?|outro)$", re.I)),
+    (
+        MarkerType.CREDITS,
+        re.compile(
+            r"^((end|ending|closing) credits|credits|end titles?|outro"
+            r"|abspann|g[eé]n[eé]rique de fin|cr[eé]ditos( finais)?|titoli di coda|aftiteling)$",
+            re.I,
+        ),
+    ),
     (MarkerType.RECAP, re.compile(r"^(recap|previously( on\b.*)?|story so far)$", re.I)),
     (MarkerType.PREVIEW, re.compile(r"^(preview|next (episode|time)( preview)?( on\b.*)?)$", re.I)),
 )

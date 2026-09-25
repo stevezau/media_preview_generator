@@ -561,6 +561,41 @@ class TestRequeueInterruptedJobs:
         assert len(jm.get_all_jobs()) == 1
         assert jm.get_all_jobs()[0].id == job.id
 
+    @pytest.mark.parametrize(
+        ("due_in_hours", "started_hours_ago", "revived"),
+        [
+            (11, None, True),  # a TheIntroDB recheck due tomorrow, queued 13 h ago
+            (-0.1, None, True),  # a retry or version batch that fell due just before the restart
+            (-13, None, False),  # due 13 h ago: as old as any other job past the cap
+            (None, None, False),  # no due time: aged from created_at as before
+            ("not-a-date", None, False),
+            (11, 13, False),  # it started (after its due time); started_at wins
+        ],
+        ids=["due-later", "due-just-now", "due-long-ago", "no-due-time", "bad-due-time", "started"],
+    )
+    def test_a_delayed_job_is_aged_from_its_due_time(self, config_dir, due_in_hours, started_hours_ago, revived):
+        """A job waiting for a due time (Intro & Credits retries, verify jobs, TheIntroDB rechecks, version batches)
+        isn't old before it was due: the TheIntroDB recheck waits until the next UTC day, so aging it from created_at
+        failed it on any restart more than 12 h after it was queued."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        now = datetime.now(UTC)
+        config = {"kind": "intro_credits"}
+        if isinstance(due_in_hours, str):
+            config["retry_not_before"] = due_in_hours
+        elif due_in_hours is not None:
+            config["retry_not_before"] = (now + timedelta(hours=due_in_hours)).isoformat()
+        job = jm.create_job(library_name="TheIntroDB recheck", kind="intro_credits", config=config)
+        job.created_at = (now - timedelta(hours=13)).isoformat()
+        if started_hours_ago is not None:
+            job.started_at = (now - timedelta(hours=started_hours_ago)).isoformat()
+        jm._interrupted_jobs = [job]
+
+        result = jm.requeue_interrupted_jobs(max_age_minutes=720)
+
+        assert [j.id for j in result] == ([job.id] if revived else [])
+        assert [j.id for j in jm._interrupted_jobs] == ([] if revived else [job.id])
+
     def test_list_cleared_after_revive(self, config_dir):
         """Interrupted list is cleared after processing so it only runs once."""
         os.makedirs(config_dir, exist_ok=True)

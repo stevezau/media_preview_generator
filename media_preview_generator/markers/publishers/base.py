@@ -133,9 +133,11 @@ def agreed_across_versions(
     """The markers one Plex item shows for all its versions: the types every version decided alike.
 
     A type is kept only when the calling file has it and every other version is decided, has that type and agrees
-    within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless what this app already left on the item
-    (``prior``) agrees with every version too: then that stays, so versions whose times differ slightly don't rewrite
-    each other's markers on every run. **A locked type is the exception** -- the user's own times win however close
+    within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless there is another version and what this
+    app already left on the item (``prior``) agrees with every version too: then that stays, so versions whose times
+    differ slightly don't rewrite each other's markers on every run. With no other version there is nothing to agree
+    with, so the item shows exactly what was decided (observed: one-version items kept intros ending
+    at 113.0 s after the decision moved to 110.5-112.4 s). **A locked type is the exception** -- the user's own times win however close
     they are to what the item shows, because the whole difference an editor nudge makes is smaller than
     ``VERSION_AGREEMENT_MS``, so keeping ``prior`` would silently discard the edit. That exception stops once
     ``prior`` *is* a locked version's own times: the item can then show only one of two deliberate user choices that
@@ -170,7 +172,7 @@ def agreed_across_versions(
         # whether it is showing something close enough. Within the tolerance but belonging to nobody -- the detector's
         # times from before the locks, or an edit a later one superseded -- is exactly where a lock has to win.
         kept_is_a_locked_versions = any(same_times(kept, v) for v in locked_versions)
-        agrees = kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs)
+        agrees = bool(theirs) and kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs)
         if agrees and (not locked or kept_is_a_locked_versions):
             # The times stay what the item already shows, but the calling file's lock rides along: whether the type is
             # the user's own decides whether the server may keep its own markers of it (spec §5.5 rule 1), and what the

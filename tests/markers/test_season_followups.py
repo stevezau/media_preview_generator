@@ -449,8 +449,10 @@ def queue(tmp_path, monkeypatch):
     return manager
 
 
-def _finished_job(jm, *, priority=3, follows=None):
+def _finished_job(jm, *, priority=3, follows=None, pin=None):
     config = {"kind": JOB_KIND_INTRO_CREDITS, "file_paths": [ep(S1, 9)], "follows_job_id": follows, "source": "x"}
+    if pin:
+        config["server_id"] = pin
     job = jm.create_job(library_name="done", kind=JOB_KIND_INTRO_CREDITS, priority=priority, config=config)
     jm.start_job(job.id)
     jm.complete_job(job.id)
@@ -707,6 +709,85 @@ def _run_threads(threads):
         t.start()
     for t in threads:
         t.join(timeout=10)
+
+
+class TestSeasonJobsKeepThePin:
+    """A Season job publishes where the job that asked for it does, as its retries and verify jobs do."""
+
+    @pytest.mark.parametrize("pin", [None, "plex-1", "emby-1", "jf-1"], ids=["no-pin", "plex", "emby", "jellyfin"])
+    def test_a_season_job_carries_the_pin_of_the_job_that_queued_it(self, queue, pin):
+        job_runner._queue_season_followups(_finished_job(queue, pin=pin), [ep(S1, 1), ep(S1, 2)])
+        (season_job,) = _season_jobs(queue)
+        assert job_runner.server_pin(season_job.config) == pin
+        assert season_job.config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
+
+    def test_a_season_job_passing_on_late_requests_keeps_its_pin(self, queue):
+        job_runner._queue_season_followups(_finished_job(queue, pin="emby-1"), [ep(S1, 1)])
+        (season_job,) = _season_jobs(queue)
+        queue.start_job(season_job.id)
+        job_runner._seal_files(queue, season_job.id, season_job, season_job.config)
+        job_runner._queue_season_followups(_finished_job(queue, pin="emby-1"), [ep(S1, 2)])
+        _season_job_ends(queue, season_job, _runs(ep(S1, 1)))
+        (passed_on,) = [j for j in _season_jobs(queue) if j.id != season_job.id]
+        assert passed_on.config["file_paths"] == [ep(S1, 2)]
+        assert job_runner.server_pin(passed_on.config) == "emby-1"
+
+    @pytest.mark.parametrize(
+        ("waiting_pin", "request_pin", "covered", "joined"),
+        [
+            (None, None, True, True),
+            ("emby-1", "emby-1", True, True),
+            ("emby-1", None, False, False),  # the waiting job publishes to fewer servers than asked
+            ("emby-1", "plex-1", False, False),
+            (None, "emby-1", True, False),  # an unpinned job covers what it lists; new files keep their pin
+        ],
+        ids=["both-unpinned", "same-pin", "pinned-vs-unpinned", "other-pin", "unpinned-covers-pinned"],
+    )
+    def test_a_waiting_season_job_covers_and_takes_only_requests_it_publishes_for(
+        self, queue, waiting_pin, request_pin, covered, joined
+    ):
+        job_runner._queue_season_followups(_finished_job(queue, pin=waiting_pin), [ep(S1, 1)])
+        (waiting,) = _season_jobs(queue)
+        job_runner._queue_season_followups(_finished_job(queue, pin=request_pin), [ep(S1, 1), ep(S1, 2)])
+        others = [j for j in _season_jobs(queue) if j.id != waiting.id]
+        if joined:
+            assert others == [] and waiting.config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
+            return
+        assert waiting.config["file_paths"] == [ep(S1, 1)]
+        (new,) = others
+        assert new.config["file_paths"] == ([ep(S1, 2)] if covered else [ep(S1, 1), ep(S1, 2)])
+        assert job_runner.server_pin(new.config) == request_pin
+
+    @pytest.mark.parametrize(
+        ("running_pin", "request_pin", "taken"), [("emby-1", "emby-1", True), ("emby-1", None, False)]
+    )
+    def test_a_running_season_job_takes_a_request_only_for_its_own_servers(
+        self, starting_queue, running_pin, request_pin, taken
+    ):
+        job_runner._queue_season_followups(_finished_job(starting_queue, pin=running_pin), [ep(S1, 1)])
+        (running,) = _season_jobs(starting_queue)
+        job_runner._queue_season_followups(_finished_job(starting_queue, pin=request_pin), [ep(S1, 2)])
+        late = (starting_queue.get_job(running.id).config or {}).get(job_runner.LATE_REQUESTS) or {}
+        assert (ep(S1, 2) in late) is taken
+        others = [j for j in _season_jobs(starting_queue) if j.id != running.id]
+        assert [(j.config["file_paths"], job_runner.server_pin(j.config)) for j in others] == (
+            [] if taken else [([ep(S1, 2)], request_pin)]
+        )
+
+    @pytest.mark.parametrize(("follow_up_pin", "request_pin", "queued_again"), [
+        ("jf-1", "jf-1", False), ("jf-1", None, True), (None, "jf-1", False)
+    ])  # fmt: skip
+    def test_a_waiting_webhook_follow_up_covers_a_season_request_only_for_its_own_servers(
+        self, queue, settings, follow_up_pin, request_pin, queued_again
+    ):
+        settings["media_servers"] = [_server("jf-1", "jellyfin")]
+        config = {"kind": JOB_KIND_INTRO_CREDITS, "source": "sonarr", "file_paths": [ep(S1, 2)], "follows_job_id": "p"}
+        if follow_up_pin:
+            config["server_id"] = follow_up_pin
+        queue.create_job(library_name="E2", kind=JOB_KIND_INTRO_CREDITS, priority=2, config=config)
+        job_runner._queue_season_followups(_finished_job(queue, pin=request_pin), [ep(S1, 1), ep(S1, 2)])
+        (season_job,) = _season_jobs(queue)
+        assert season_job.config["file_paths"] == ([ep(S1, 1), ep(S1, 2)] if queued_again else [ep(S1, 1)])
 
 
 class TestWebhookSeasonGrouping:

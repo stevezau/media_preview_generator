@@ -117,6 +117,15 @@ class OutputAdapter(ABC):
         read it here.
         """
 
+    def sweep_stale_write_temps(self, folder: Path) -> list[Path]:
+        """Remove the temp files interrupted writes of this adapter left in ``folder``; return the ones removed.
+
+        Default removes nothing. An adapter that writes next to the media through a temp file (Emby's sidecar BIFs)
+        removes its own temps here, file by file, never through the generic orphan removal.
+        """
+        del folder
+        return []
+
     def list_orphans_in_folder(self, folder: Path, live_basenames: set[str]) -> list[Path]:
         """Return adapter-owned artifact paths in ``folder`` whose source
         media basename is no longer in ``live_basenames``.

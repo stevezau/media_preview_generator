@@ -60,6 +60,13 @@ HIGH_WRONG_PERCENT = 1
 CREDITS = frozenset({MarkerType.CREDITS})
 # The gate's sets: the 80 files (movies40 + tv40 together) and the 205 movies.
 GATE_SETS = {"80": ("movies40", "tv40"), "205": ("movie_credit_truth",)}
+# Regression sets, reported beside the gate's sets but outside Q4's gate: TV seasons whose small credit cards only the
+# 640x360 reading boxes, where production answers were found wrong. Each is a local-only truth file under the evidence
+# folder, ``{"<file>": the first credit card in seconds}`` by frame check (keys starting ``_`` are notes).
+REGRESSION_SETS = {
+    "accused": "credits/small-text-retry/accused_truth_all.json",
+    "isurvived": "credits/isurvived/isurvived_truth.json",
+}
 PACKAGE_ROOT = Path(credits_package.__file__).parents[2]
 # The credit text detector and the package code outside it that shapes its answers: the tail decode's arguments and
 # the probe. tests/markers_eval pins that every package module these files import is listed here or changes no answer.
@@ -72,6 +79,11 @@ SHEET_TIMEOUT_S = 300
 # Q5: every answer that moves by more than this against an earlier run is frame-checked.
 CHANGED_BY_S = 10.0
 HDR_PROBE_TIMEOUT_S = 60
+
+
+def on_disk(path: str) -> bool:
+    """Whether a set's file is still there: Sonarr and Radarr replace files between runs."""
+    return os.path.exists(path)
 
 
 class UnknownSetError(ValueError):
@@ -742,12 +754,13 @@ def run_credits_text(
     sheets_dir: Path | None,
     before: Mapping[str, list[dict]] | None = None,
 ) -> tuple[dict, dict, bool]:
-    """Every row for the chosen sets (``80`` = movies40 + tv40, ``205`` = the 205-movie set).
+    """Every row for the chosen sets (``80`` = movies40 + tv40, ``205`` = the 205-movie set, and the
+    :data:`REGRESSION_SETS`, which are reported but never gated).
 
     Args:
         decode: ``gpu`` or ``cpu``.
         gpu_device: The GPU worker's device (``cuda:0``).
-        sets: Which of ``80`` and ``205`` to run.
+        sets: Which of ``80``, ``205`` and the regression sets to run.
         online: Also the 43 verified online cases.
         cache_root: Where probes and credits text answers are cached (never under /data*).
         ffmpeg: ffmpeg binary.
@@ -766,9 +779,9 @@ def run_credits_text(
             that is silently skipped (``--sets "80, 205"`` splits to ``"80"`` and ``" 205"``) would report a clean gate
             for a set that was never run.
     """
-    unknown = sorted(set(sets) - set(GATE_SETS))
+    unknown = sorted(set(sets) - set(GATE_SETS) - set(REGRESSION_SETS))
     if unknown:
-        raise UnknownSetError(f"unknown set(s): {unknown}; choose from {sorted(GATE_SETS)}")
+        raise UnknownSetError(f"unknown set(s): {unknown}; choose from {sorted([*GATE_SETS, *REGRESSION_SETS])}")
     evidence = evidence_dir()
 
     def load(name: str) -> list | dict:
@@ -777,7 +790,7 @@ def run_credits_text(
     adjudicated = load("adjudicated")
     probes = ProbeCache(cache_root, ffprobe=ffprobe)
     baseline = load_baseline(baseline_path)
-    kinds_of = {"movies40": True, "tv40": False, "movie_credit_truth": True}
+    kinds_of = {"movies40": True, "tv40": False, "movie_credit_truth": True, **dict.fromkeys(REGRESSION_SETS, False)}
     details: dict = {}
     rule = RuleTally()
     kinds: dict[str, RuleTally] = {}
@@ -796,14 +809,44 @@ def run_credits_text(
         summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
                          "detector_digest": cache.detector_digest, "decode_digest": decodes.digest,
                          "text_detection": detection.backend(), "sets": {},
-                         "gate": {}, "sheets": []}  # fmt: skip
+                         "gate": {}, "sheets": [], "gone": []}  # fmt: skip
+
+        def read_set(name: str, listed: list[dict], truths: dict[str, dict]) -> tuple[TextRows, dict, list[dict]]:
+            is_movie = kinds_of[name]
+            # Sonarr and Radarr replace files between runs: a file gone from disk has nothing to read, and is left out
+            # of every row (named in ``gone``) rather than ending the run. Runs compared against each other must name
+            # the same files there.
+            files = [f for f in listed if on_disk(f["file"])]
+            summary["gone"] += [{"set": name, "name": _name(f["file"])} for f in listed if f not in files]
+            results = {f["file"]: cache.result(f["file"], is_episode=not is_movie) for f in files}
+            answers = {path: (r["start_s"], r["end_s"]) for path, r in results.items()}
+            rows = compare_text(
+                files, truths, answers=answers, probe=probes.probe, baseline=baseline, is_movie=is_movie
+            )
+            summary["sets"][name] = {"files": len(files), **_rows_summary(rows)}
+            details[name] = rows.files
+            for f in rows.files:
+                # Read without a guard on purpose: the answer cache's key carries detector_digest, which hashes every
+                # credits module, so an entry from before rows held positions can never be served here.
+                stored = results[f["file"]]
+                reasons = sheet_reasons(
+                    f,
+                    rows_from_json(stored["key"]),
+                    [tuple(box) for box in stored["overlays"]],
+                    rows_from_json(stored["runs"]),
+                )
+                if not reasons:
+                    continue
+                summary["sheets"].append(_sheet_entry(name, f, reasons))
+                # Against an earlier run, only the answers that moved need looking at again (below).
+                if sheets_dir is not None and before is None:
+                    _write_sheets(ffmpeg, sheets_dir, name, f)
+            return rows, answers, files
+
         for group in (g for g in ("80", "205") if g in sets):
             parts = []
             for name in GATE_SETS[group]:
-                is_movie = kinds_of[name]
-                files = load(name)
-                results = {f["file"]: cache.result(f["file"], is_episode=not is_movie) for f in files}
-                answers = {path: (r["start_s"], r["end_s"]) for path, r in results.items()}
+                rows, answers, files = read_set(name, load(name), adjudicated)
                 if group == "80":
                     for f in files:
                         truth = _truth(f, adjudicated)
@@ -811,33 +854,16 @@ def run_credits_text(
                         kinds.setdefault(hdr_kind(f["file"], ffprobe=ffprobe), RuleTally()).add(
                             answers[f["file"]][0], truth
                         )
-                rows = compare_text(
-                    files, adjudicated, answers=answers, probe=probes.probe, baseline=baseline, is_movie=is_movie
-                )
-                summary["sets"][name] = {"files": len(files), **_rows_summary(rows)}
-                details[name] = rows.files
                 parts.append(rows)
-                for f in rows.files:
-                    # Read without a guard on purpose: the answer cache's key carries detector_digest, which hashes
-                    # every credits module, so an entry from before rows held positions can never be served here.
-                    stored = results[f["file"]]
-                    reasons = sheet_reasons(
-                        f,
-                        rows_from_json(stored["key"]),
-                        [tuple(box) for box in stored["overlays"]],
-                        rows_from_json(stored["runs"]),
-                    )
-                    if not reasons:
-                        continue
-                    summary["sheets"].append(_sheet_entry(name, f, reasons))
-                    # Against an earlier run, only the answers that moved need looking at again (below).
-                    if sheets_dir is not None and before is None:
-                        _write_sheets(ffmpeg, sheets_dir, name, f)
             merged = merge_rows(parts)
             files_in_group = sum(len(r.files) for r in parts)
             checks = gate_checks(merged, files_in_group)
             summary["gate"][group] = {"files": files_in_group, **_rows_summary(merged), "checks": checks}
             passed = passed and all(checks.values())
+        for name in (n for n in REGRESSION_SETS if n in sets):
+            truth = json.loads((evidence / REGRESSION_SETS[name]).read_text())
+            files = [{"file": path, "credits_start": float(s)} for path, s in truth.items() if not path.startswith("_")]
+            read_set(name, files, {})
         if "80" in sets:
             summary["rule_j_80"] = {**rule.as_dict(), "meets_spec": rule.meets_spec()}
             summary["rule_j_80_by_kind"] = {k: v.as_dict() for k, v in sorted(kinds.items())}
@@ -865,15 +891,17 @@ def _online(evidence: Path, baseline: Mapping[str, list[PlexMarker]], cache: Cre
     servers = {key: server_candidates(baseline[path], MarkerType.CREDITS) for key, path in found.items() if path}
     texts = {}
     for key, path in found.items():
-        if path:
+        if path and on_disk(path):
             answer = cache.result(path, is_episode=True)
             texts[key] = text_candidates(answer["start_s"], answer["end_s"])
-    summary: dict = {"cases": len(results), "files_found": sum(1 for p in found.values() if p)}
+    # A case file gone from disk (replaced since the baseline was dumped) is read without credit text.
+    summary: dict = {"cases": len(results), "files_found": sum(1 for p in found.values() if p),
+                     "files_on_disk": len(texts)}  # fmt: skip
     details: dict = {}
     for label, order, level in SETTINGS:
         before = online_verdicts(results, dump, order=order, level=level, extra=servers)
         asked = undecided_credits(before)
-        extra = {key: servers[key] + (texts[key] if key in asked else []) for key in servers}
+        extra = {key: servers[key] + (texts.get(key, []) if key in asked else []) for key in servers}
         verdicts = online_verdicts(results, dump, order=order, level=level, extra=extra)
         summary[label] = {t: dict(sorted(c.items())) for t, c in tally(verdicts).items()}
         summary[label]["credits_text_asked"] = len(asked & texts.keys())

@@ -101,11 +101,11 @@ STORY_BEFORE_RUN_S = 30.0
 # ... and fewer than this share of those keyframes carry any text. The harness's 245 files reach 0.54 (a stand-up
 # special); the lab's Synth Audio test pattern with its running timecode, 1.00. The cost: a channel logo or ticker
 # boxed on this share of the story loses a real roll's answer too. On 51 broadcast recordings with channel logos (final
-# review) that was one answer (Live Rescue S02E01 on the GPU decode, 0.895), against five wrong ones this share and
+# review) that was one answer (one episode on the GPU decode, 0.895), against five wrong ones this share and
 # the 30 s above took away over both decode paths.
 TEXT_ALL_THROUGH_SHARE = 0.8
 # When the run is under STORY_BEFORE_RUN_S into the tail and only dark rows (luma under 30) come before it there, the
-# roll may have begun before the tail (the lab's Heeramandi episodes: 462 s rolls against a 450 s tail), so the
+# roll may have begun before the tail (one show's episodes: 462 s rolls against a 450 s tail), so the
 # keyframes of this much before the tail are read too, and the run is judged on both when it continues into them
 # (:func:`opens_on_the_run`, :func:`joined_before`). While the run then still starts under STORY_BEFORE_RUN_S after the
 # first row read (:func:`too_little_story`), the detector puts another step of this length in front
@@ -709,6 +709,74 @@ def coarse_start(
     )
 
 
+def start_on_dense_text(
+    rows: Sequence[Row],
+    coarse: Coarse,
+    raw: Sequence[Row],
+    shown: Sequence[Row],
+    *,
+    dense_boxes: int,
+    params: RuleParams = RULE_J,
+) -> Coarse:
+    """A roll read at 640x360 starts on dense text, or on the text it runs into without a break.
+
+    The larger frame boxes small print the smaller frame never does -- a news feed's date line, logo and caption, a
+    channel's fine print, a lower third's words -- and on lit story that makes credit frames of three to five boxes, on
+    and off with the shots, which the 24 s join puts in front of the roll (one true-crime episode: court
+    footage from 68 s before the roll). :func:`overlay_boxes` can't take them: they are on screen only in the stretch
+    the run itself opens on, not across the story before it, so they are never gathered. So the start moves to the
+    run's first dense frame -- a dark credit frame, or a lit one with ``dense_boxes`` boxes -- and from there steps
+    back over every keyframe that shows text, each no further from the next than the run's own cadence
+    (``ANCHOR_SPACING_FACTOR`` times the spacing of its credit frames as found, and never more than the 24 s join),
+    never before where the run started. Sparse text the roll runs into without a break stays its start (single-name
+    cards straight into columns of names); text cut off from it by a keyframe without any, or by a longer gap than the
+    roll keeps, is not.
+
+    Whether a keyframe shows text is read on ``shown``: as decoded, so a card of the roll the 320x180 reading boxed
+    whole -- nothing left of it where the runs are found -- doesn't stop the walk (Accused (2020): four starts 5-8 s
+    late read that way), and without the overlays, so a channel bug on every frame doesn't carry it back over story.
+
+    The start only ever moves later, and the run's end is read from the same last credit frame.
+
+    Args:
+        rows: The rows the rule read (``coarse_start``'s ``without``).
+        coarse: The coarse start found on them.
+        raw: The rows the runs were found on, indexed alike: the cadence is measured there.
+        shown: The rows as decoded without the overlays' boxes, indexed alike: the text the walk steps over.
+        dense_boxes: Boxes a lit frame needs to be dense.
+        params: Rule thresholds.
+
+    Returns:
+        ``coarse`` when it starts on dense text, or when its run holds none after its start; else the new start, which
+        is a row of the run itself (``run_index`` None).
+    """
+
+    def dense(row: Row) -> bool:
+        return is_credit(row, params) and (row[2] < params.dark or row[1] >= dense_boxes)
+
+    if dense(rows[coarse.index]):
+        return coarse
+    since = coarse.pts_s
+    first = coarse.index if coarse.run_index is None else coarse.run_index
+    run = sorted(range(first, coarse.end_index + 1), key=lambda i: rows[i][0])
+    start = next((i for i in run if rows[i][0] >= since and dense(rows[i])), None)
+    # A run with one credit frame left from its anchored start (the anchor stepped onto its last) has no cadence to
+    # walk at: its start stays where the band steps put it.
+    if start is None or _credit_bounds(raw, first, coarse.end_index, params) is None:
+        return coarse
+    limit = min(params.gap_s, ANCHOR_SPACING_FACTOR * _run_spacing(raw, first, coarse.end_index, params))
+    # Presentation order, as reach_back walks: the walk asks what comes before this frame.
+    order = sorted(range(len(rows)), key=lambda i: rows[i][0])
+    at = order.index(start)
+    while at > 0:
+        before = order[at - 1]
+        if rows[before][0] < since or shown[before][1] < 1 or rows[order[at]][0] - rows[before][0] > limit:
+            break
+        at -= 1
+    start = order[at]
+    return Coarse(index=start, end_index=coarse.end_index, pts_s=rows[start][0])
+
+
 def text_all_through(rows: Sequence[Row], coarse: Coarse) -> bool:
     """Whether the text a run was found in is on screen all through the tail rather than a roll after story.
 
@@ -951,7 +1019,7 @@ def end_keyframe_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RUL
     keyframe is scene text glued onto the roll.
 
     The start's anchor, mirrored (spec §13 item 13). The 24 s join lets a lit text frame in the scene after the roll
-    join the run, and the end then lands in that scene: Rick and Morty S01E04's roll ends on a card at 1183.0 s, and
+    join the run, and the end then lands in that scene: one episode's roll ends on a card at 1183.0 s, and
     swscale's frame of the scene at 1198.4 s reads 3 boxes, so the CPU decode's skip ran 11.5 s into the scene. The last
     credit keyframe is taken for glued on -- and the end steps back one credit keyframe, never more -- only when it's
     all of: a lit frame (a dark card is the roll's own), further from the credit keyframe before it than 1.5 x the

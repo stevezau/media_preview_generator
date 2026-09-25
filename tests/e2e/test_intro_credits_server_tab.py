@@ -18,6 +18,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 
 from ._mocks import mock_server_connection_probe, mock_server_previews_readiness, mock_servers_refresh_libraries
+from .conftest import expect_modal_shown, watch_modal_shown
 
 CONFIRMED_AT = "2026-09-01T10:00:00+00:00"
 PLEX_DB = "/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
@@ -175,8 +176,12 @@ def _open_tab(page: Page, app_url: str, server: dict, tab: str = "markers") -> N
     page.wait_for_load_state("domcontentloaded")
     edit_btn = page.locator(f".edit-server-btn[data-id='{server['id']}']")
     edit_btn.wait_for(state="visible", timeout=10000)
+    # Opened, not just visible: its focus trap starts when it has, and would take the focus from a dialog opened
+    # over it before then.
+    watch_modal_shown(page, "editServerModal")
     edit_btn.click()
     expect(page.locator("#editServerModal")).to_be_visible(timeout=5000)
+    expect_modal_shown(page, "editServerModal")
     _switch_tab(page, tab)
 
 
@@ -214,8 +219,17 @@ def _save_and_read_put(page: Page, server_id: str) -> dict:
 
 
 def _flip_switch_on(page: Page) -> None:
-    # The switch is a Bootstrap form-switch; click its label so the change event fires like a user's click.
+    # The switch is a Bootstrap form-switch; click its label so the change event fires like a user's click. A Plex
+    # confirmation it opens ignores Cancel, OK and Escape until it has opened (``_plex_confirmation_open``).
+    watch_modal_shown(page, "markersPlexConfirmModal")
     page.locator("label[for='markersEnabled']").click()
+
+
+def _plex_confirmation_open(page: Page):
+    modal = page.locator("#markersPlexConfirmModal")
+    expect(modal).to_be_visible(timeout=5000)
+    expect_modal_shown(page, "markersPlexConfirmModal")
+    return modal
 
 
 def _save_and_get_put(page: Page, captured: dict) -> dict:
@@ -374,8 +388,7 @@ class TestPlexTab:
         expect(authed_page.locator("#markersStatusBlock")).to_contain_text("✓ Active", timeout=5000)
 
         _flip_switch_on(authed_page)
-        modal = authed_page.locator("#markersPlexConfirmModal")
-        expect(modal).to_be_visible(timeout=5000)
+        modal = _plex_confirmation_open(authed_page)
         expect(modal).to_contain_text(
             "Plex has no way for apps to add intro or credits markers, so they are written straight into Plex's "
             "database — the same place Plex stores its own."
@@ -398,8 +411,7 @@ class TestPlexTab:
         )
         _open_tab(authed_page, app_url, server)
         _flip_switch_on(authed_page)
-        modal = authed_page.locator("#markersPlexConfirmModal")
-        expect(modal).to_be_visible(timeout=5000)
+        modal = _plex_confirmation_open(authed_page)
         # Keyboard focus lands in the confirmation, not in the Edit dialog behind it.
         expect(modal).to_contain_text("Enable for Plex")
         authed_page.wait_for_function(
@@ -423,7 +435,7 @@ class TestPlexTab:
         expect(authed_page.locator("#markersStatusBlock")).to_contain_text("✓ Active", timeout=5000)
 
         _flip_switch_on(authed_page)
-        expect(authed_page.locator("#markersPlexConfirmModal")).to_be_visible(timeout=5000)
+        _plex_confirmation_open(authed_page)
         authed_page.locator("#markersPlexConfirmOk").click()
         expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden(timeout=5000)
         expect(authed_page.locator("#markersEnabled")).to_be_checked()
@@ -450,8 +462,9 @@ class TestPlexTab:
         _open_tab(authed_page, app_url, server)
         # Ticked without a change event (e.g. the modal was dismissed some other way): Save must still ask.
         authed_page.evaluate("document.getElementById('markersEnabled').checked = true")
+        watch_modal_shown(authed_page, "markersPlexConfirmModal")
         authed_page.locator("#editServerSave").click()
-        expect(authed_page.locator("#markersPlexConfirmModal")).to_be_visible(timeout=5000)
+        _plex_confirmation_open(authed_page)
         authed_page.locator("#markersPlexConfirmCancel").click()
         expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden(timeout=5000)
         authed_page.wait_for_timeout(300)
@@ -767,6 +780,7 @@ class TestPlexTab:
         authed_page.goto(f"{app_url}/servers")
         edit_btn = authed_page.locator(".edit-server-btn[data-id='plex-1']")
         edit_btn.wait_for(state="visible", timeout=10000)
+        watch_modal_shown(authed_page, "editServerModal")  # its Cancel is ignored while it opens
         edit_btn.click()
         modal = authed_page.locator("#editServerModal")
         expect(modal).to_be_visible(timeout=5000)
@@ -774,6 +788,7 @@ class TestPlexTab:
         authed_page.wait_for_function("() => document.querySelector('#editServerSave').disabled")
         assert len(held) == 1
 
+        expect_modal_shown(authed_page, "editServerModal")
         modal.locator(".modal-footer [data-bs-dismiss='modal']").click()
         expect(modal).to_be_hidden(timeout=5000)
         edit_btn.click()
@@ -1211,8 +1226,7 @@ class TestLibrariesTabIntroCreditsColumn:
         _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
         _open_tab(authed_page, app_url, server)
         _flip_switch_on(authed_page)
-        modal = authed_page.locator("#markersPlexConfirmModal")
-        expect(modal).to_be_visible(timeout=5000)
+        modal = _plex_confirmation_open(authed_page)
         authed_page.locator("#markersPlexConfirmCancel").click()
         expect(modal).to_be_hidden(timeout=5000)
 

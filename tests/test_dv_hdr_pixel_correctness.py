@@ -69,6 +69,7 @@ All tests are gated on ``@pytest.mark.gpu`` and additionally
 
 from __future__ import annotations
 
+import functools
 import shutil
 import subprocess
 from pathlib import Path
@@ -202,22 +203,38 @@ def _have_nvidia() -> bool:
     return rc == 0
 
 
-def _have_render_node(node: str) -> bool:
-    """True if the named DRM render node exists (e.g. /dev/dri/renderD128)."""
-    return Path(node).exists()
+@functools.cache
+def _vaapi_node_for(vendor: str) -> str | None:
+    """A render node whose kernel driver is ``vendor``'s and whose VAAPI device FFmpeg can open and decode on.
 
+    Uses the app's own startup check (a real VAAPI decode of the bundled sample), so a node that exists but isn't
+    this vendor's (storage's NVIDIA renderD128), or one whose VA driver can't open it, skips the row instead of failing
+    it with "No VA display found".
 
-def _have_vaapi() -> bool:
-    """True if any DRM render node exists -- AMD or Intel VAAPI candidate."""
-    return any(_have_render_node(p) for p in ("/dev/dri/renderD128", "/dev/dri/renderD129"))
+    Args:
+        vendor: ``"AMD"`` or ``"INTEL"``.
+
+    Returns:
+        The render node, or None when this box has no usable one for that vendor.
+    """
+    from media_preview_generator.gpu.detect import _test_hwaccel_functionality
+    from media_preview_generator.gpu.enumeration import _get_gpu_devices, _get_gpu_vendor_from_driver
+
+    for _card, render_node, driver in _get_gpu_devices():
+        if _get_gpu_vendor_from_driver(driver) == vendor and _test_hwaccel_functionality("vaapi", render_node):
+            return render_node
+    return None
 
 
 # Vendor matrix.  Each row carries:
 #   * param_id            -- short label used in test reports
 #   * gpu                 -- value passed as ``gpu`` to generate_images
-#   * gpu_device_path     -- value passed as ``gpu_device_path``
+#   * gpu_device_path     -- value passed as ``gpu_device_path``, or a
+#                            callable finding it (AMD/Intel: the node
+#                            that vendor's VAAPI device opens on)
 #   * available_predicate -- callable returning False when the vendor's
-#                            hardware is missing in this runner
+#                            hardware is missing or can't be opened in
+#                            this runner
 #   * skip_reason         -- shown to the user when skipping
 #   * golden_filename     -- per-vendor checked-in golden under
 #                            tests/fixtures/golden/
@@ -242,18 +259,18 @@ VENDOR_MATRIX = [
     pytest.param(
         "amd",
         "AMD",
-        "/dev/dri/renderD128",
-        _have_vaapi,
-        "no DRM render node available for VAAPI",
+        lambda: _vaapi_node_for("AMD"),
+        lambda: _vaapi_node_for("AMD") is not None,
+        "no AMD render node whose VAAPI device FFmpeg can open",
         "hdr10_amd_vaapi_frame.jpg",
         id="amd_vaapi",
     ),
     pytest.param(
         "intel",
         "INTEL",
-        "/dev/dri/renderD128",
-        _have_vaapi,
-        "no DRM render node available for QSV/VAAPI",
+        lambda: _vaapi_node_for("INTEL"),
+        lambda: _vaapi_node_for("INTEL") is not None,
+        "no Intel render node whose VAAPI device FFmpeg can open",
         "hdr10_intel_qsv_frame.jpg",
         id="intel_qsv",
     ),
@@ -289,8 +306,8 @@ def test_vendor_path_pixel_correctness(vendor_id, gpu, device, available, skip_r
          fps-before-hwupload reorder.
 
     Skip semantics:
-      * Vendor hardware missing -> skip with the available_predicate's
-        skip_reason (no fail).
+      * Vendor hardware missing, or its device can't be opened -> skip
+        with the available_predicate's skip_reason (no fail).
       * generate_images returns success=False -- skip, not fail (this
         means the vendor driver is unusable in the runner, not that
         the code under test is broken).
@@ -301,6 +318,8 @@ def test_vendor_path_pixel_correctness(vendor_id, gpu, device, available, skip_r
     """
     if not available():
         pytest.skip(skip_reason)
+    if callable(device):
+        device = device()
 
     produced = _render_first_frame(gpu=gpu, gpu_device_path=device, tmp_path=tmp_path)
 
@@ -335,3 +354,43 @@ def test_vendor_path_pixel_correctness(vendor_id, gpu, device, available, skip_r
         "tone-map output drifted from the committed golden; "
         "if intentional, regenerate the golden and explain in the commit message."
     )
+
+
+@pytest.mark.parametrize(
+    ("devices", "opens", "vendor", "expected"),
+    [
+        ([("card0", "/dev/dri/renderD128", "nvidia")], {"/dev/dri/renderD128"}, "INTEL", None),
+        (
+            [("card0", "/dev/dri/renderD128", "nvidia"), ("card1", "/dev/dri/renderD129", "i915")],
+            {"/dev/dri/renderD129"},
+            "INTEL",
+            "/dev/dri/renderD129",
+        ),
+        ([("card1", "/dev/dri/renderD129", "i915")], set(), "INTEL", None),
+        ([("card0", "/dev/dri/renderD128", "amdgpu")], {"/dev/dri/renderD128"}, "AMD", "/dev/dri/renderD128"),
+        ([("card0", "/dev/dri/renderD128", "amdgpu")], {"/dev/dri/renderD128"}, "INTEL", None),
+    ],
+    ids=["nvidia-only", "intel-beside-nvidia", "intel-that-wont-open", "amd", "amd-is-not-intel"],
+)
+def test_a_vendor_row_runs_on_that_vendors_node_only_when_its_vaapi_device_opens(
+    monkeypatch, devices, opens, vendor, expected
+):
+    """The vendor rows run, on the right node, on a box that has the vendor; elsewhere they skip."""
+    import media_preview_generator.gpu.detect as detect
+    import media_preview_generator.gpu.enumeration as enumeration
+
+    tried: list[tuple[str, str]] = []
+
+    def fake_test(hwaccel, device_path=None, cuda_device_index=None):
+        tried.append((hwaccel, device_path))
+        return device_path in opens
+
+    monkeypatch.setattr(enumeration, "_get_gpu_devices", lambda: devices)
+    monkeypatch.setattr(detect, "_test_hwaccel_functionality", fake_test)
+    _vaapi_node_for.cache_clear()
+    try:
+        assert _vaapi_node_for(vendor) == expected
+    finally:
+        _vaapi_node_for.cache_clear()
+    vendors_nodes = [node for _card, node, driver in devices if enumeration.DRIVER_VENDOR_MAP.get(driver) == vendor]
+    assert tried == [("vaapi", node) for node in vendors_nodes], "only that vendor's nodes are opened"

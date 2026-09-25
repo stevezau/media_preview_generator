@@ -41,6 +41,26 @@ from .filter_chain import (
 )
 from .hwaccel import hwaccel_decode_args
 
+# Added to the stderr lines a run returns when the stall watchdog stopped it: the exit code (-9) alone reads like an OOM
+# kill, and the retry cascade words its CPU hand-off by the real cause (``generator._gpu_hand_off``).
+STALL_WATCHDOG_LINE = "[media_preview_generator] FFmpeg stopped making progress and was stopped by the stall watchdog"
+
+
+def _signal_name(returncode: int) -> str:
+    """The name of the signal an exit code reports, raw (-n) or as a shell's 128+n, e.g. ``SIGTERM``.
+
+    Args:
+        returncode: FFmpeg exit code of a signalled run.
+
+    Returns:
+        The signal's name, or ``signal <n>`` for a number this platform doesn't name.
+    """
+    number = -returncode if returncode < 0 else returncode - 128
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return f"signal {number}"
+
 
 def create_ffmpeg_runner(
     *,
@@ -76,7 +96,9 @@ def create_ffmpeg_runner(
     from .generator import (
         FFMPEG_STALL_TIMEOUT_SEC,
         CancellationError,
+        _crash_signal,
         _diagnose_ffmpeg_exit_code,
+        _io_cut_off,
         _is_signal_killed,
         _save_ffmpeg_failure_log,
         parse_ffmpeg_progress_line,
@@ -203,7 +225,7 @@ def create_ffmpeg_runner(
         # (issue #178, P7/8 now uses zscale on the HDR10 base layer so
         # the original reason no longer applies) and then re-validated
         # on 2026-04-12 against a CPU path that was still pinned to 2
-        # threads.  A 2026-04-16 bench on Intel UHD 770 (Raptor Lake-S)
+        # threads.  A 2026-04-16 bench on an Intel iGPU (Raptor Lake-S)
         # with the ``-threads:v 0`` fix in place compared:
         #   - software decode + libplacebo:  12.9x, ~10 cores saturated
         #   - VAAPI decode + drm→va@dr→vk@dr: 16.1x,  ~0 cores (1s CPU)
@@ -529,6 +551,7 @@ def create_ffmpeg_runner(
                     stalled = True
                     proc.kill()
                     proc.wait()
+                    ffmpeg_output_lines.append(STALL_WATCHDOG_LINE)
                     break
                 time.sleep(0.005)
 
@@ -572,22 +595,40 @@ def create_ffmpeg_runner(
 
             # Log last few stderr lines at WARNING level so users can diagnose
             # failures without needing DEBUG mode (especially for crashes/signals)
-            if _is_signal_killed(proc.returncode):
-                signal_detail = _diagnose_ffmpeg_exit_code(proc.returncode).split(":", 1)[1]
+            crash = _crash_signal(proc.returncode)
+            if crash is not None:
                 logger.warning(
-                    "FFmpeg was killed by the operating system (exit code {}, signal {}) while processing {}. "
-                    "Common causes: the system ran out of memory, the container was OOM-killed, "
-                    "or someone manually stopped the process. Check container memory limits and "
-                    "system free RAM. Other files in the queue will keep processing.",
+                    "FFmpeg crashed on {} ({}, exit code {}). A crash like this comes from the file itself (damaged "
+                    "data) or a bug in FFmpeg or the GPU driver, and happens at the same place on every try; the "
+                    "stderr lines below usually show where. Other files in the queue will keep processing.",
+                    video_file,
+                    crash.name,
                     proc.returncode,
-                    signal_detail,
+                )
+            elif _is_signal_killed(proc.returncode) and _signal_name(proc.returncode) == "SIGKILL":
+                logger.warning(
+                    "FFmpeg was killed with SIGKILL (exit code {}) while processing {}. This is usually the "
+                    "out-of-memory killer: the system or the container ran out of memory. Check container memory "
+                    "limits and free RAM; if nothing was short of memory, someone force-stopped the process. "
+                    "Other files in the queue will keep processing.",
+                    proc.returncode,
                     video_file,
                 )
-            elif exit_diagnosis == "io_error":
+            elif _is_signal_killed(proc.returncode):
                 logger.warning(
-                    "FFmpeg could not write temporary thumbnail files for {} (working folder: {}, exists: {}). "
-                    "This usually means the working folder is full, missing, or not writable. "
-                    "Free up disk space or change the working folder under Settings → Advanced. "
+                    "FFmpeg was stopped by {} (exit code {}) while processing {}: something outside this file "
+                    "stopped it, such as the container stopping or restarting, or someone ending the process. "
+                    "Other files in the queue will keep processing.",
+                    _signal_name(proc.returncode),
+                    proc.returncode,
+                    video_file,
+                )
+            elif _io_cut_off(proc.returncode, ffmpeg_output_lines):
+                # Exit 251 with a GPU error in the stderr is the GPU's, not a disk's: the stderr lines below say so.
+                logger.warning(
+                    "FFmpeg hit an I/O error on {}: reading the video from its disk or network share, or writing "
+                    "thumbnails to the working folder ({}, exists: {}), failed. Check that disk or share, and that "
+                    "the working folder isn't full and is writable (Settings → Advanced). "
                     "Other files in the queue will keep processing.",
                     video_file,
                     output_folder,

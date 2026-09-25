@@ -13,8 +13,7 @@ Jobs that can't acquire stay in ``JobStatus.PENDING`` with a visible
 ``current_item="Queued — waiting for active slot (X of Y busy)"`` until
 a peer finishes.
 
-Design choices (see /home/data/.claude/plans/piped-humming-flame.md for
-the full library-review):
+Design choices:
 
 * **threading.Condition + priority heap** over BoundedSemaphore (FIFO,
   uninterruptible, immutable cap), over ThreadPoolExecutor (no priority,
@@ -166,13 +165,13 @@ class JobGate:
                 reconsider.
             on_wait: Optional ``(active_count, cap, effective_cap)``
                 callback fired before each ``Condition.wait`` (including
-                the very first one) while the waiter is queued. Used by
-                ``job_runner`` to update the job's ``current_item`` so
-                the dashboard shows a live "Queued — X of Y busy"
-                message. ``effective_cap`` is below ``cap`` when the
-                high-priority reservation is what's blocking this
-                waiter, letting the message say so. Fires at most once
-                per wake tick.
+                the very first one) while the waiter is queued, with the
+                gate lock released. Used by ``job_runner`` to update the
+                job's ``current_item`` so the dashboard shows a live
+                "Queued — X of Y busy" message. ``effective_cap`` is below
+                ``cap`` when the high-priority reservation is what's
+                blocking this waiter, letting the message say so. Fires at
+                most once per wake tick.
 
         Returns:
             True if admitted (caller must eventually call ``release``
@@ -207,11 +206,22 @@ class JobGate:
                     # Fires BEFORE every wait (including the first) so
                     # the dashboard flips to "Queued — …" the moment a
                     # waiter realises it can't admit, instead of after
-                    # the first 1s poll tick. The callback may take
-                    # job_manager's lock; safe because we release
-                    # _cond during Condition.wait below. No cycle:
-                    # no job_manager codepath ever acquires _cond.
-                    on_wait(self._active, cap, self.effective_cap(priority, cap))
+                    # the first 1s poll tick. It runs with _cond
+                    # released: it writes the job's queued state (a
+                    # database upsert and a SocketIO emit), and every
+                    # other acquire and release would otherwise wait
+                    # behind that I/O.
+                    active, effective_cap = self._active, self.effective_cap(priority, cap)
+                    self._cond.release()
+                    try:
+                        on_wait(active, cap, effective_cap)
+                    finally:
+                        self._cond.acquire()
+                    # A release while the lock was down notified no one
+                    # (we weren't waiting yet): look again before
+                    # sleeping, so a freed slot isn't left for a poll.
+                    if self._heap and self._heap[0][2] is token and self._can_admit(priority, self._cap()):
+                        continue
                 # The 1s poll is our cancel-responsiveness budget.
                 # notify_all from release() wakes us sooner — this is
                 # the belt-and-braces path.

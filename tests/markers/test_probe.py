@@ -516,29 +516,53 @@ class TestVideoPackets:
 
 
 class TestStreamStarts:
-    """The container's and the first audio stream's start times, and whether there's a picture (season audio's
-    end-picture check)."""
+    """The container's and the first audio stream's start times, whether there's a picture, and the picture's pixel
+    format (season audio's end-picture check)."""
 
     @staticmethod
     def _payload(fmt_start, *streams):
         return {
             "streams": [
-                {"codec_type": kind, "start_time": start, "disposition": {"attached_pic": int(cover)}}
-                for kind, start, cover in streams
+                {"codec_type": kind, "start_time": start, "disposition": {"attached_pic": int(cover)}, **extra}
+                for kind, start, cover, *more in streams
+                for extra in [more[0] if more else {}]
             ],
             "format": {"start_time": fmt_start},
         }
 
     def test_reads_only_the_headers(self):
-        proc = _ok(self._payload("0.000000", ("video", "0.000000", False), ("audio", "0.976000", False)))
+        video = ("video", "0.000000", False, {"pix_fmt": "yuv420p"})
+        proc = _ok(self._payload("0.000000", video, ("audio", "0.976000", False)))
         with patch(RUN, return_value=proc) as run:
             starts = probe.stream_starts("/m/a.mkv", ffprobe="ffprobe", timeout_s=30.0)
         assert run.call_args.args[0] == [
             "ffprobe", "-v", "error", "-show_entries",
-            "format=start_time:stream=codec_type,start_time:stream_disposition=attached_pic", "-of", "json", "/m/a.mkv",
+            "format=start_time:stream=codec_type,start_time,pix_fmt:stream_disposition=attached_pic", "-of", "json",
+            "/m/a.mkv",
         ]  # fmt: skip
         assert proc.communicate.call_args.kwargs == {"timeout": 30.0}
-        assert starts == probe.StreamStarts(0.0, 0.976, True)
+        assert starts == probe.StreamStarts(0.0, 0.976, True, "yuv420p")
+
+    @pytest.mark.parametrize(
+        ("streams", "pix_fmt"),
+        [
+            ([("video", "0.0", False, {"pix_fmt": "yuv420p10le"})], "yuv420p10le"),
+            # Cover art first: the first stream that isn't one (ffprobe's V:0, the stream credit text probes too;
+            # ffmpeg's own pick is by resolution and may differ, which a GPU decode survives by its CPU rerun).
+            ([("video", "0.0", True, {"pix_fmt": "yuvj420p"}), ("video", "0.0", False, {"pix_fmt": "yuv420p"})],
+             "yuv420p"),
+            ([("video", "0.0", False, {"pix_fmt": "yuv420p"}), ("video", "0.0", False, {"pix_fmt": "yuv422p"})],
+             "yuv420p"),
+            ([("video", "0.0", False)], None),  # ffprobe named none
+            ([("video", "0.0", False, {"pix_fmt": ""})], None),
+            ([("video", "0.0", True, {"pix_fmt": "yuvj420p"}), ("audio", "0.0", False)], None),  # cover art only
+            ([("audio", "0.0", False)], None),
+        ],
+        ids=["10-bit", "after-cover-art", "first-picture", "unnamed", "empty", "cover-art-only", "audio-only"],
+    )  # fmt: skip
+    def test_the_pixel_format_is_the_first_pictures(self, streams, pix_fmt):
+        with patch(RUN, return_value=_ok(self._payload("0.0", *streams))):
+            assert probe.stream_starts("/m/a.mkv", ffprobe="ffprobe").pix_fmt == pix_fmt
 
     @pytest.mark.parametrize(
         ("container", "audio", "offset"),

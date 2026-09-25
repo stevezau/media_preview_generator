@@ -187,13 +187,11 @@ class TestPlexPublisher:
         assert unlocked.last_write_changed is False
 
         locked = _plex_publisher(tmp_path, folder, redetect="keep_plex")
-        # The user's times here are byte-for-byte the ones the item already shows, so they *are* a locked version's
-        # own times and the record stays as it is -- ``decided_by`` the record's, the lock the calling file's. Only
-        # the stale ``final`` flag is put right. A locked type that actually moves is
-        # ``TestAgreeingVersionsDoNotPingPong`` in test_plex_db_publisher.py.
-        assert _write_one(locked, [LOCKED_CREDITS], previous=[CREDITS_FINAL], path=PLEX_PATH) == [
-            replace(CREDITS_FINAL, locked=True)
-        ]
+        # The user's times here are byte-for-byte the ones the item already shows: only the stale ``final`` flag is
+        # put right. A one-version item records the calling file's own marker (there is no other version whose times
+        # it could be keeping); a locked type that actually moves is ``TestAgreeingVersionsDoNotPingPong`` in
+        # test_plex_db_publisher.py.
+        assert _write_one(locked, [LOCKED_CREDITS], previous=[CREDITS_FINAL], path=PLEX_PATH) == [LOCKED_CREDITS]
         assert _rows(db, "SELECT time_offset, end_time_offset, extra_data FROM taggings") == [
             (1_297_000, DUR, CREDITS_FINAL_ROW_EXTRA)
         ]

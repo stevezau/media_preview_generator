@@ -101,6 +101,47 @@ class TestShareAlike:
         assert ep.share_alike(times, target, 0.5, partner, 20.5) == 1.0
         assert ep.share_alike(times, target, 0.5, partner, 21.0) == 0.0
 
+    def test_the_same_end_card_after_a_re_cut_lead_in_is_the_same_end_picture(self):
+        # Tomb Raider King S01E12: the opening's last 1.5 s before its end card are re-cut (and ~0.4 s out of sync)
+        # against the earlier episodes'; the card it ends on is the same.
+        times = [86.0, 86.5, 87.0, 87.5, 88.0, 88.5]
+        card = _textured(50)
+        target = _frames_at(times, lambda t: card if t >= 87.5 else _textured(int(t * 10)))
+        partner = _frames_at(times, lambda t: card if t >= 87.5 else _textured(int(t * 10) + 1))
+        assert ep.share_alike(times, target, 0.0, partner, 0.0) == 1.0
+
+    @pytest.mark.parametrize(
+        ("same_from", "flat", "share"),
+        [
+            (88.0, False, 2 / 6),  # the last second only: no card held for 1.5 s
+            (87.5, True, 3 / 6),  # a shared fade to black is no card
+        ],
+        ids=["too-short", "black"],
+    )
+    def test_no_end_card_is_the_share_of_matching_instants(self, same_from, flat, share):
+        times = [86.0, 86.5, 87.0, 87.5, 88.0, 88.5]
+        card = np.full((ep.FRAME_H, ep.FRAME_W), 8.0, dtype=np.float32) if flat else _textured(51)
+        target = _frames_at(times, lambda t: card if t >= same_from else _textured(int(t * 10)))
+        partner = _frames_at(times, lambda t: card if t >= same_from else _textured(int(t * 10) + 1))
+        assert ep.share_alike(times, target, 0.0, partner, 0.0) == pytest.approx(share)
+
+    def test_black_with_a_channel_logo_in_the_corner_is_no_end_card(self):
+        # A TV recording's cold-open music bed ending on a black act break: the channel's logo alone isn't a card.
+        times = [86.0, 86.5, 87.0, 87.5, 88.0, 88.5]
+        black = np.full((ep.FRAME_H, ep.FRAME_W), 8.0, dtype=np.float32)
+        black[1:4, 57:63] = _textured(53)[1:4, 57:63]  # the logo, in the top right corner
+        assert float(black.std()) >= ep.FLAT_STD  # not flat as a whole frame
+        target = _frames_at(times, lambda t: black if t >= 87.5 else _textured(int(t * 10)))
+        partner = _frames_at(times, lambda t: black if t >= 87.5 else _textured(int(t * 10) + 1))
+        assert ep.share_alike(times, target, 0.0, partner, 0.0) == pytest.approx(3 / 6)
+
+    def test_an_end_card_needs_a_frame_at_each_of_its_instants(self):
+        times = [86.0, 86.5, 87.0, 87.5, 88.0, 88.5]
+        card = _textured(52)
+        target = _frames_at(times, lambda t: card if t >= 87.5 else _textured(int(t * 10)))
+        partner = [(t, card if t >= 87.5 else _textured(int(t * 10) + 1)) for t in times if t != 88.0]
+        assert ep.share_alike(times, target, 0.0, partner, 0.0) == pytest.approx(2 / 5)
+
     def test_an_instant_with_no_frame_within_a_quarter_second_is_left_out(self):
         picture = _textured(5)
         target = [(10.0, picture), (11.0, picture)]
@@ -116,9 +157,14 @@ class _Decoder:
     def __init__(self, seed_of=lambda path, t: int(round(t * 2))):
         self.seed_of = seed_of
         self.calls: list[tuple] = []
+        self.download_formats: dict[str, str | None] = {}
 
-    def __call__(self, path, start_s, length_s, *, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check):
+    def __call__(self, path, start_s, length_s, *, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check,
+                 download_format, pause_check=None, ffmpeg_threads=None, fallback_callback=None):  # fmt: skip
         self.calls.append((path, round(start_s, 3), round(length_s, 3), gpu, gpu_device_path, container_start_s))
+        self.download_formats[path] = download_format
+        self.worker = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
+                       "fallback_callback": fallback_callback}  # fmt: skip
         times = np.arange(np.ceil(start_s * 2) / 2, start_s + length_s, 0.5)
         return [(float(t), _textured(self.seed_of(path, float(t)))) for t in times]
 
@@ -156,6 +202,36 @@ class TestReader:
         reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, 0.0), decoder)
         with patched:
             assert reader.share("a", "b", 0.0, 36.0, 20.0) == 0.0
+
+    @pytest.mark.parametrize(
+        ("pix_fmt", "download_format"),
+        [("yuv420p", "nv12"), ("yuv420p10le", "p010le"), ("yuv422p10le", None), ("yuvj420p", None), (None, None)],
+        ids=["8-bit", "10-bit", "4:2:2", "mjpeg-full-range", "unnamed"],
+    )
+    def test_each_file_is_decoded_as_surfaces_of_its_own_pixel_format(self, pix_fmt, download_format):
+        # The credit text decode's own rule (frames.DOWNLOAD_FORMATS): a format the GPU's surfaces aren't known in is
+        # left to ffmpeg to download, since a wrong guess fails the GPU decode.
+        formats = {"a": "yuv420p", "b": pix_fmt}
+        decoder = _Decoder()
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None, True, formats[path]), decoder)
+        with patched:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert decoder.download_formats == {"a": "nv12", "b": download_format}
+
+    def test_the_workers_pause_threads_and_fallback_flag_reach_every_decode(self):
+        decoder = _Decoder()
+
+        def paused():
+            return False
+
+        def flag(_reason):
+            return None
+
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None), decoder, pause_check=paused,
+                                       ffmpeg_threads=3, fallback_callback=flag)  # fmt: skip
+        with patched:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert decoder.worker == {"pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag}
 
     def test_each_file_is_probed_once_and_each_window_decoded_once(self):
         decoder = _Decoder()
@@ -258,9 +334,10 @@ class TestDecodeFrames:
     def _run_decode(self, planes, pts, fail_on_gpu=False):
         calls = []
 
-        def run_decode(command, *, hw_active, detect_boxes, pts_offset_s, cancel_check, timeout_s, name):
+        def run_decode(command, *, hw_active, detect_boxes, pts_offset_s, cancel_check, timeout_s, name,
+                       pause_check=None):  # fmt: skip
             calls.append({"command": command, "hw_active": hw_active, "pts_offset_s": pts_offset_s,
-                          "timeout_s": timeout_s, "cancel_check": cancel_check})  # fmt: skip
+                          "timeout_s": timeout_s, "cancel_check": cancel_check, "pause_check": pause_check})  # fmt: skip
             if fail_on_gpu and hw_active:
                 raise frames.GpuDecodeError("the GPU decoded no frames")
             boxes = detect_boxes(planes)
@@ -275,7 +352,7 @@ class TestDecodeFrames:
         cancel = lambda: False  # noqa: E731
         with patch.object(frames, "run_decode", side_effect=run_decode):
             got = ep.decode_frames("/m/a.mkv", 33.476, 3.5, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path="cuda:0",
-                                   container_start_s=1.5, cancel_check=cancel)  # fmt: skip
+                                   container_start_s=1.5, cancel_check=cancel, download_format="nv12")  # fmt: skip
         assert [t for t, _ in got] == [33.5, 34.0]
         expected = planes[0].astype(np.float32).reshape(36, 5, 64, 5).mean(axis=(1, 3))
         assert got[0][1].shape == (36, 64) and np.allclose(got[0][1], expected)
@@ -286,23 +363,92 @@ class TestDecodeFrames:
         command = call["command"]
         assert command[command.index("-ss") + 1] == "33.476" and command[command.index("-t") + 1] == "3.500"
         assert "-skip_frame" not in command and "-copyts" in command
-        # Each vendor's own scaler, as season audio was measured on (not the credit text's one neighbor scaler).
-        assert (
-            command[command.index("-vf") + 1] == "fps=2,scale_cuda=320:180:format=nv12,hwdownload,format=nv12,showinfo"
-        )
-        assert command[command.index("-hwaccel") + 1 : command.index("-t")] == [
-            "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda", "-ss", "33.476",
+
+    CUDA = ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"]
+    VAAPI = ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi",
+             "-extra_hw_frames", "8"]  # fmt: skip
+    NEIGHBOR = "scale=320:180:flags=neighbor,format=nv12"
+
+    @pytest.mark.parametrize(
+        ("gpu", "device", "download_format", "hw_args", "video_filter"),
+        [
+            ("NVIDIA", "cuda:0", "nv12", CUDA, f"fps=2,hwdownload,format=nv12,{NEIGHBOR}"),
+            ("NVIDIA", "cuda:0", "p010le", CUDA, f"fps=2,hwdownload,format=p010le,{NEIGHBOR}"),
+            ("INTEL", "/dev/dri/renderD128", "nv12", VAAPI, f"fps=2,hwdownload,format=nv12,{NEIGHBOR}"),
+            ("AMD", "/dev/dri/renderD128", "p010le", VAAPI, f"fps=2,hwdownload,format=p010le,{NEIGHBOR}"),
+            # A pixel format the surfaces aren't known in: ffmpeg downloads each frame itself, the same scaler follows.
+            ("NVIDIA", "cuda:0", None, ["-hwaccel", "cuda", "-hwaccel_device", "0"], f"fps=2,{NEIGHBOR}"),
+            (None, None, "nv12", [], f"fps=2,{NEIGHBOR}"),
+        ],
+        ids=["cuda", "cuda-10-bit", "vaapi-intel", "vaapi-amd-10-bit", "cuda-unknown-format", "cpu"],
+    )  # fmt: skip
+    def test_every_vendor_ends_in_the_one_neighbor_scaler(self, gpu, device, download_format, hw_args, video_filter):
+        # The whole decoded frame, downloaded in the stream's own format, through the one software scaler the credit
+        # text decode uses (spec §5.3): the same frames on every vendor, so a partner decoded by another worker's GPU
+        # can't change the answer. scale_cuda, scale_vaapi and swscale's bicubic each blurred differently.
+        calls, run_decode = self._run_decode(_planes(1), [34.0])
+        with patch.object(frames, "run_decode", side_effect=run_decode):
+            ep.decode_frames("/m/a.mkv", 33.476, 3.5, ffmpeg="ffmpeg", gpu=gpu, gpu_device_path=device,
+                             container_start_s=0.0, download_format=download_format)  # fmt: skip
+        assert calls[0]["command"] == [
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args, "-ss", "33.476",
+            "-t", "3.500", "-copyts", "-i", "/m/a.mkv", "-an", "-sn", "-dn", "-fps_mode", "passthrough",
+            "-vf", f"{video_filter},showinfo", "-f", "rawvideo", "-",
         ]  # fmt: skip
+        assert calls[0]["hw_active"] is (gpu is not None)
 
     def test_a_failed_gpu_decode_is_run_again_on_the_cpu(self):
         calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
         with patch.object(frames, "run_decode", side_effect=run_decode):
             got = ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path="cuda:0",
-                                   container_start_s=0.0)  # fmt: skip
+                                   container_start_s=0.0, download_format="nv12")  # fmt: skip
         assert [call["hw_active"] for call in calls] == [True, False]
         assert "-hwaccel" not in calls[1]["command"] and len(got) == 1
         cpu = calls[1]["command"]
-        assert cpu[cpu.index("-vf") + 1] == "fps=2,scale=320:180,format=nv12,showinfo"
+        assert cpu[cpu.index("-vf") + 1] == f"fps=2,{self.NEIGHBOR},showinfo"
+
+    def test_a_gpu_workers_threads_cap_its_gpu_decode_and_the_pause_reaches_both_decodes(self):
+        # The CPU rerun is uncapped, as previews' CPU fallback on a GPU worker is.
+        calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
+
+        def paused():
+            return False
+
+        with patch.object(frames, "run_decode", side_effect=run_decode):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path="cuda:0",
+                             container_start_s=0.0, download_format="nv12", pause_check=paused,
+                             ffmpeg_threads=3)  # fmt: skip
+        gpu, cpu = (call["command"] for call in calls)
+        assert gpu[5:9] == ["-threads", "3", "-filter_threads", "3"]
+        assert "-threads" not in cpu and "-filter_threads" not in cpu
+        assert [call["pause_check"] for call in calls] == [paused, paused]
+
+    def test_a_cpu_fallback_flags_the_worker_every_time_and_warns_once_per_device(self, monkeypatch, loguru_caplog):
+        # Previews and the credits decode show a CPU fallback on the worker's row; the end-picture check does too. One
+        # warning per GPU for the process: this check decodes a few seconds of many files, so a GPU that can't decode a
+        # format would otherwise warn for every episode.
+        monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
+        flagged: list[str] = []
+        for device in ("cuda:0", "cuda:0", "cuda:1"):
+            _calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
+            with patch.object(frames, "run_decode", side_effect=run_decode):
+                ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path=device,
+                                 container_start_s=0.0, download_format="nv12",
+                                 fallback_callback=flagged.append)  # fmt: skip
+        assert len(flagged) == 3 and all("the GPU decoded no frames" in reason for reason in flagged)
+        warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 2
+        assert "cuda:0" in warnings[0] and "cuda:1" in warnings[1]
+        assert all("a.mkv" in w and "on the CPU" in w for w in warnings)
+
+    def test_a_cpu_worker_has_no_fallback_to_flag(self, monkeypatch):
+        monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
+        flagged: list[str] = []
+        _calls, run_decode = self._run_decode(_planes(1), [34.0], fail_on_gpu=True)
+        with patch.object(frames, "run_decode", side_effect=run_decode):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=None, gpu_device_path=None,
+                             container_start_s=0.0, download_format="nv12", fallback_callback=flagged.append)  # fmt: skip
+        assert flagged == []
 
     def test_a_frame_without_a_timestamp_fails_the_decode(self):
         _calls, run_decode = self._run_decode(_planes(3), [33.5, 34.0])  # one frame's timestamp was dropped
@@ -311,7 +457,7 @@ class TestDecodeFrames:
             pytest.raises(frames.FrameDecodeError, match="no timestamp"),
         ):
             ep.decode_frames("/m/a.mkv", 33.5, 1.5, ffmpeg="ffmpeg", gpu=None, gpu_device_path=None,
-                             container_start_s=0.0)  # fmt: skip
+                             container_start_s=0.0, download_format=None)  # fmt: skip
 
     def test_the_window_is_padded_half_a_second_and_never_before_the_file(self):
         assert ep.window([33.0, 35.5], 0.976) == pytest.approx((33.476, 3.5))

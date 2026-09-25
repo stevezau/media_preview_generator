@@ -225,17 +225,21 @@ def _video_frame_rate(streams: object) -> float | None:
 
 @dataclass(frozen=True)
 class StreamStarts:
-    """Where the container and its first audio stream start, and whether it has a picture to decode.
+    """Where the container and its first audio stream start, whether it has a picture to decode, and that picture's
+    pixel format.
 
     Attributes:
         container_s: The container's first timestamp (0.0 when it reports none).
         audio_s: The first audio stream's first timestamp, None when the file has no audio stream or reports none.
         has_video: Whether it has a video stream that isn't cover art.
+        pix_fmt: ffprobe's ``pix_fmt`` for the first video stream that isn't cover art (``yuv420p``,
+            ``yuv420p10le``), None when there is none or ffprobe names none.
     """
 
     container_s: float
     audio_s: float | None
     has_video: bool = True
+    pix_fmt: str | None = None
 
     @property
     def audio_offset_s(self) -> float:
@@ -245,8 +249,8 @@ class StreamStarts:
 
 
 def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> StreamStarts:
-    """The container's and the first audio stream's start times, and whether there is a video stream, from one ffprobe
-    that reads only the headers.
+    """The container's and the first audio stream's start times, and whether there is a video stream and its pixel
+    format, from one ffprobe that reads only the headers.
 
     Args:
         path: Media file.
@@ -254,7 +258,7 @@ def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> Stream
         timeout_s: Hard timeout, as for :func:`probe_media`.
 
     Returns:
-        Both start times.
+        Both start times, and the picture.
 
     Raises:
         ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
@@ -262,7 +266,8 @@ def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> Stream
         ProbeError: ffprobe missing, failed or returned something other than its JSON.
     """
     cmd = [ffprobe, "-v", "error", "-show_entries",
-           "format=start_time:stream=codec_type,start_time:stream_disposition=attached_pic", "-of", "json", path]  # fmt: skip
+           "format=start_time:stream=codec_type,start_time,pix_fmt:stream_disposition=attached_pic", "-of", "json",
+           path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
     try:
         data = json.loads(stdout or "")
@@ -276,12 +281,22 @@ def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> Stream
     streams = [stream for stream in streams if isinstance(stream, dict)]
     fmt = data.get("format") or {}
     audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
-    has_video = any(
-        stream.get("codec_type") == "video" and not (stream.get("disposition") or {}).get("attached_pic")
-        for stream in streams
+    picture = next(
+        (
+            stream
+            for stream in streams
+            if stream.get("codec_type") == "video" and not (stream.get("disposition") or {}).get("attached_pic")
+        ),
+        None,
     )
+    pix_fmt = picture.get("pix_fmt") if picture is not None else None
     container = _seconds(fmt.get("start_time") if isinstance(fmt, dict) else None)
-    return StreamStarts(container or 0.0, _seconds(audio.get("start_time")), has_video)
+    return StreamStarts(
+        container or 0.0,
+        _seconds(audio.get("start_time")),
+        picture is not None,
+        pix_fmt if isinstance(pix_fmt, str) and pix_fmt else None,
+    )
 
 
 @dataclass(frozen=True)

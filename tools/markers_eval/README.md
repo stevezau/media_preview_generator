@@ -202,6 +202,16 @@ per set — the 80 (movies40 + tv40 merged) and the 205 movies — and every che
 Exit 0 means every chosen set passed and `rule_j_80` met the spec (59 within 10 s, at most 1 early). A failing check is
 never tuned away: the numbers go to the owner as they are measured.
 
+**Regression sets** (`--sets accused,isurvived`, alone or beside `80,205`; `REGRESSION_SETS`): TV seasons whose small
+credit cards only the 640×360 reading boxes, where production answers were found wrong — Accused (2020), 57 files
+(`credits/small-text-retry/accused_truth_all.json`), and I Survived a Serial Killer S01, 16 files
+(`credits/isurvived/isurvived_truth.json`). Their truth is each file's first credit card by frame check, `{"<file>":
+seconds}` (keys starting `_` are notes), local-only like every truth set. They get the same rows per set and sheets,
+read with the episode tail, but are never gated: `summary["gate"]` and the exit code are the 80's and the 205's.
+
+A file of any set that is gone from disk (Sonarr or Radarr replaced it) is left out of every row and named in
+`summary["gone"]`, so runs compared with each other must name the same files there.
+
 ```bash
 cd /home/data/workspace/plex_generate_vid_previews
 export MEDIA_PREVIEW_TEXTDET_MODEL="$MARKERS_BENCH_DIR/textdet-model/ch_PP-OCRv4_det_infer.onnx"

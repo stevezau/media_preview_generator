@@ -484,9 +484,11 @@ def test_the_detector_digest_follows_every_source_file_it_names(tmp_path):
 
 # Package modules the hashed files import that change no credits text answer: data classes and locks, the job
 # plumbing the detector reports through, the Vulkan probe, which only picks the helper's device (the self-test
-# keeps a GPU whose box counts differ from the CPU's out), and the playback speeds decide reads online times by.
+# keeps a GPU whose boxes differ from the CPU's out), the settings, read only for how many CPU helpers may run, the
+# playback speeds decide reads online times by, and the pause that stops a running decode where it is (it moves time
+# limits, never what a decode gives).
 NOT_ANSWER_CODE = {"markers.models", "markers.locks", "markers.pipeline", "markers.store", "markers.speed",
-                   "processing.generator", "gpu.vulkan_probe"}  # fmt: skip
+                   "processing.generator", "gpu.vulkan_probe", "web.settings_manager", "markers.freeze"}  # fmt: skip
 
 
 def _package_imports(path, root):
@@ -711,7 +713,9 @@ class _GateRun:
     files, probes, Plex's markers, the app's credits text answers, HDR kinds and the helper pool. Every fake records
     the arguments ``run_credits_text`` hands it."""
 
-    def __init__(self, tmp_path, monkeypatch, *, missing=(), spec_within_10s=3, failing_path=None, cache_error=None):
+    def __init__(
+        self, tmp_path, monkeypatch, *, missing=(), spec_within_10s=3, failing_path=None, cache_error=None, gone=()
+    ):
         self.cache_calls, self.closed, self.seen = [], 0, {}
         evidence = tmp_path / "evidence"
         (evidence / "credits").mkdir(parents=True)
@@ -775,6 +779,7 @@ class _GateRun:
         monkeypatch.setattr(ct, "_detection_on", detection)
         monkeypatch.setattr(ct, "load_baseline", lambda path: run.seen.update(baseline=path) or {p: [PlexMarker("credits", int(s * 1000), DUR, True)] for p, s in GATE_PLEX.items()})  # fmt: skip
         monkeypatch.setattr(ct, "hdr_kind", hdr_kind)
+        monkeypatch.setattr(ct, "on_disk", lambda path: path not in gone)
         monkeypatch.setattr(ct, "SPEC_WITHIN_10S", spec_within_10s)
         self.tmp_path, self.detect_boxes = tmp_path, detect_boxes
 
@@ -934,6 +939,40 @@ def test_only_the_chosen_set_is_run_and_judged(tmp_path, monkeypatch):
     assert set(summary["gate"]) == {"205"} and "rule_j_80" not in summary
     assert {path for path, _ in run.cache_calls} == {"/m/X1 (2010)/X1.mkv", "/m/X2 (2011)/X2.mkv"}
     assert passed is True
+
+
+@pytest.mark.parametrize("name", sorted(ct.REGRESSION_SETS))
+def test_a_regression_set_is_read_from_its_truth_file_as_episodes_and_never_gated(tmp_path, monkeypatch, name):
+    # A frame-checked truth file of episodes ({"<file>": first card}, "_" keys are notes): each file is read with the
+    # episode tail, judged against its own truth like any set, and reported beside the gate but never in it -- one
+    # wrong answer here must not fail Q4's gate, and a set that isn't asked for isn't read.
+    run = _GateRun(tmp_path, monkeypatch)
+    right, early = "/tv/R (2021)/Season 01/R - S01E01.mkv", "/tv/R (2021)/Season 01/R - S01E02.mkv"
+    truth_file = tmp_path / "evidence" / ct.REGRESSION_SETS[name]
+    truth_file.parent.mkdir(parents=True, exist_ok=True)
+    truth_file.write_text(json.dumps({"_about": "frame checks", right: 5001.0, early: 5100.0}))
+    monkeypatch.setitem(GATE_ANSWERS, right, 5003.0)
+    monkeypatch.setitem(GATE_ANSWERS, early, 5070.0)  # 30 s before its first card
+    summary, details, passed = run(sets=(name,))
+    assert run.cache_calls == [(right, True), (early, True)]
+    assert summary["sets"][name]["files"] == 2 and summary["sets"][name]["text"] == {"useful": 1, "wrong": 1}
+    assert [(f["name"], f["truth"], f["text"]) for f in details[name]] == [
+        ("R (2021) Season 01", 5001.0, 5003.0), ("R (2021) Season 01", 5100.0, 5070.0)
+    ]  # fmt: skip
+    assert summary["gate"] == {} and "rule_j_80" not in summary and passed is True
+    assert set(details) == {name}
+
+
+def test_a_file_gone_from_disk_is_left_out_of_every_row_and_named(tmp_path, monkeypatch):
+    # Radarr replaced one of the 205 since its truth was taken: that file has nothing to read, so it leaves the set
+    # (its gate counts the files that are there) and is named, never read or allowed to end the run.
+    run = _GateRun(tmp_path, monkeypatch, gone=("/m/X2 (2011)/X2.mkv",))
+    summary, details, _ = run(sets=("205",))
+    assert [path for path, _ in run.cache_calls] == ["/m/X1 (2010)/X1.mkv"]
+    assert summary["gone"] == [{"set": "movie_credit_truth", "name": "X2 (2011)"}]
+    assert summary["gate"]["205"]["files"] == 1 and [f["file"] for f in details["movie_credit_truth"]] == [
+        "/m/X1 (2010)/X1.mkv"
+    ]
 
 
 def test_the_helpers_are_stopped_once_even_when_a_file_fails(tmp_path, monkeypatch):

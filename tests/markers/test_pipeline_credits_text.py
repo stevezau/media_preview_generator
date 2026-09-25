@@ -12,8 +12,8 @@ import pytest
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.credits import detector, frames
 from media_preview_generator.markers.credits.textdet_helper import TextDetState
-from media_preview_generator.markers.decide import DecisionStatus
-from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
+from media_preview_generator.markers.decide import TEXT_CHECKS_CHAPTER_REASON, DecisionStatus
+from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.probe import Chapter
 from media_preview_generator.markers.settings import load_global, validate_global
@@ -440,9 +440,9 @@ class TestCreditsWindow:
     def test_automatic_stores_the_answer_under_the_version_it_always_had(self, store, media):
         spec = detector.credits_text_spec()
         rec = store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False)
-        assert detector.CREDITS_TEXT_VERSION == 4
-        assert spec.answer_version(rec, ctx_for(store, media)) == 4
-        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 4
+        assert detector.CREDITS_TEXT_VERSION == 5
+        assert spec.answer_version(rec, ctx_for(store, media)) == 5
+        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 5
 
     def test_an_answer_read_on_another_window_is_read_again_and_stored_under_the_new_one(self, store, media, find):
         _run(ctx_for(store, media), media, pubs(), stage="process")
@@ -540,3 +540,156 @@ class TestTvWindowReachesTheDecision:
                 "item-plex-1",
                 [Marker(T.CREDITS, 820_000, DUR, ("credits_text",))],
             )
+
+
+class TestSkipDbAgainstACreditsChapter:
+    """Spec §5.5 rule 3 (2026-09-25 audit, Somebody Somewhere S03): a SkipDB answer against a credits chapter nothing
+    else agrees with has credit text read the file in the same run (SkipDB is asked before credit text); credit text
+    agreeing with SkipDB outvotes the chapter at its own start, agreeing with the chapter keeps it. Where credit text
+    can't run here and has stored nothing, the chapter decides as before: nothing would ever answer."""
+
+    CHAPTERS = (Chapter(0, 1_200_000, "Episode"), Chapter(1_200_000, None, "Credits"))
+    SKIPDB = LookupResult("ok", (Candidate(T.CREDITS, 1_140_000, DUR, Source.SKIPDB),))
+
+    def _run(self, store, media, ctx):
+        plex = ready_publisher()
+        out, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(self.CHAPTERS), stage="process")
+        return out, plex
+
+    @pytest.mark.parametrize(
+        ("text_s", "published"),
+        [
+            (1_141.0, Marker(T.CREDITS, 1_141_000, DUR, ("skipdb", "credits_text"))),
+            (1_201.0, Marker(T.CREDITS, 1_200_000, DUR, ("chapters",))),
+        ],
+        ids=["text-agrees-with-skipdb", "text-agrees-with-the-chapter"],
+    )
+    def test_credit_text_is_read_and_settles_it(self, store, media, find, text_s, published):
+        find.answer = text_s
+        out, plex = self._run(store, media, ctx_for(store, media, clients=_clients(skipdb=self.SKIPDB), skipdb=True))
+        assert len(find.calls) == 1
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args == ("item-plex-1", [published])
+
+    def test_credit_text_that_finds_no_roll_leaves_the_chapter_deciding(self, store, media, find):
+        # It answered and found nothing: nothing more will come, so the chapter isn't left waiting.
+        find.answer = None
+        out, plex = self._run(store, media, ctx_for(store, media, clients=_clients(skipdb=self.SKIPDB), skipdb=True))
+        assert len(find.calls) == 1
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args == ("item-plex-1", [Marker(T.CREDITS, 1_200_000, DUR, ("chapters",))])
+        again, _ = self._run(store, media, ctx_for(store, media, clients=_clients(skipdb=self.SKIPDB), skipdb=True))
+        assert len(find.calls) == 1 and again.outcome_key == FileOutcome.UP_TO_DATE.value
+
+    @pytest.mark.parametrize(
+        ("stored_version", "status", "reason"),
+        [
+            (detector.CREDITS_TEXT_VERSION, DecisionStatus.DECIDED, "chapters"),
+            (detector.CREDITS_TEXT_VERSION - 1, DecisionStatus.NEEDS_REVIEW, TEXT_CHECKS_CHAPTER_REASON),
+        ],
+        ids=["this-version", "older-version"],
+    )
+    def test_only_this_versions_answer_that_found_no_roll_leaves_the_chapter_deciding(
+        self, store, media, find, stored_version, status, reason
+    ):
+        # An older version's answer is read again (``pipeline._detector_pending``), so the chapter waits for it.
+        find.answer = None
+        ctx = ctx_for(store, media, clients=_clients(skipdb=self.SKIPDB), skipdb=True)
+        self._run(store, media, ctx)
+        rec = store.get_file(media)
+        store.replace_evidence(rec.id, Source.CREDITS_TEXT, [], version=stored_version)
+
+        decision = pipeline._decide(ctx, rec, frozenset({T.CREDITS}), None)[T.CREDITS]
+
+        assert (decision.status, decision.reason) == (status, reason)
+
+    CHAPTER = Marker(T.CREDITS, 1_200_000, DUR, ("chapters",))
+    WAITING = (DecisionStatus.NEEDS_REVIEW, TEXT_CHECKS_CHAPTER_REASON)
+    DECIDED_BY_THE_CHAPTER = (DecisionStatus.DECIDED, "chapters")
+
+    def _ctx(self, store, media):
+        return ctx_for(store, media, clients=_clients(skipdb=self.SKIPDB), skipdb=True)
+
+    def _credits(self, ctx, store, media):
+        decision = pipeline._decide(ctx, store.get_file(media), frozenset({T.CREDITS}), None)[T.CREDITS]
+        return decision.status, decision.reason
+
+    def _checked(self, store, media):
+        """The check stage stores the chapter and SkipDB's answer, and hands credit text to a worker."""
+        ctx = self._ctx(store, media)
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(self.CHAPTERS), stage="check")
+        assert out is None
+        return ctx
+
+    @pytest.mark.parametrize("failure", [None, "decode error", "timeout"])
+    def test_a_failure_recorded_for_the_file_as_it_is_ends_the_wait(self, store, media, find, failure):
+        # The owner's rule: decisions are automatic, never an open-ended wait in Needs review. Credit text that can't
+        # read this file won't answer the next run either, so the chapter decides as it did before rule 3.
+        ctx = self._checked(store, media)
+        rec = store.get_file(media)
+        if failure == "decode error":
+            store.set_detector_failure(rec.id, Source.CREDITS_TEXT, "ffmpeg exited 1")
+        elif failure == "timeout":
+            now = ctx.now()
+            store.record_credits_text_timeout(
+                FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns),
+                now,
+                forget_before=now - detector.TIMEOUT_RETRY,
+            )
+
+        assert self._credits(ctx, store, media) == (self.WAITING if failure is None else self.DECIDED_BY_THE_CHAPTER)
+
+    @pytest.mark.parametrize(
+        "error",
+        [frames.FrameDecodeError("ffmpeg exited 1"), frames.DecodeTimeoutError("decoding timed out after 600 s")],
+        ids=["decode-error", "timeout"],
+    )
+    def test_a_read_that_fails_lets_the_chapter_decide_on_the_same_run_and_a_new_file_waits_again(
+        self, store, media, find, error
+    ):
+        find.answer = error
+        out, plex = self._run(store, media, self._ctx(store, media))
+
+        assert len(find.calls) == 1
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args == ("item-plex-1", [self.CHAPTER])
+        rec = store.get_file(media)
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) is None  # still no answer of its own
+
+        with open(media, "ab") as fh:  # replaced: the failure was the old file's
+            fh.write(b"more")
+        ctx = self._checked(store, media)
+        assert self._credits(ctx, store, media) == self.WAITING
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (frames.FrameDecodeError("ffmpeg exited 1"), DECIDED_BY_THE_CHAPTER),
+            (detector.TextDetUnavailableError("helper gone"), WAITING),  # nothing about the file: read next run
+        ],
+        ids=["decode-error", "text-detection-down"],
+    )
+    def test_an_older_answer_read_again_without_an_answer(self, store, media, find, error, expected):
+        # An older version's "nothing" is no answer (it is read again), so it can't end the wait; a failure to read
+        # the file can.
+        find.answer = None
+        self._run(store, media, self._ctx(store, media))
+        rec = store.get_file(media)
+        store.replace_evidence(rec.id, Source.CREDITS_TEXT, [], version=detector.CREDITS_TEXT_VERSION - 1)
+        find.answer = error
+
+        self._run(store, media, self._ctx(store, media))
+
+        assert len(find.calls) == 2
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION - 1
+        decision = store.get_decisions(rec.id)[T.CREDITS]
+        assert (decision.status, decision.reason) == expected
+
+    def test_without_credit_text_here_the_chapter_decides(self, store, media, find):
+        ctx = _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(skipdb=True),
+                   clients=_clients(skipdb=self.SKIPDB), detectors=())  # fmt: skip
+        ctx.credits_text = TextDetState.ABSENT
+        out, plex = self._run(store, media, ctx)
+        assert find.calls == []
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args == ("item-plex-1", [Marker(T.CREDITS, 1_200_000, DUR, ("chapters",))])

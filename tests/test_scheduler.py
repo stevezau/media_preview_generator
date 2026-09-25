@@ -1291,6 +1291,8 @@ class TestExecuteScheduledIntroCreditsJob:
             source="schedule",
             libraries=[{"server_id": "plex-1", "library_id": "1"}, {"server_id": "plex-1", "library_id": "2"}],
             parent_schedule_id=schedule["id"],
+            # Pinned like a scheduled preview job for one server: its markers go to that server only.
+            server_id="plex-1",
         )
         assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
 
@@ -1304,6 +1306,7 @@ class TestExecuteScheduledIntroCreditsJob:
         assert kwargs["libraries"] == []
         assert kwargs["library_name"] == "Intro & Credits: all libraries"
         assert kwargs["priority"] == 3 and kwargs["parent_schedule_id"] == schedule["id"]
+        assert kwargs.get("server_id") is None  # every server with Intro & Credits on
 
     def test_server_pinned_schedule_without_libraries_takes_that_servers_marker_libraries(self, scheduler_manager, env):
         from media_preview_generator.web.scheduler import execute_scheduled_job
@@ -1325,6 +1328,7 @@ class TestExecuteScheduledIntroCreditsJob:
         execute_scheduled_job(schedule["id"], [], "Jellyfin", {"job_type": "intro_credits"}, None, "jf-1")
 
         assert env["create"].call_args.kwargs["libraries"] == [{"server_id": "jf-1", "library_id": "tv"}]
+        assert env["create"].call_args.kwargs["server_id"] == "jf-1"
 
     @pytest.mark.parametrize(
         "servers",

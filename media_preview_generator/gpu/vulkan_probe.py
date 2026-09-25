@@ -345,7 +345,7 @@ def _probe_vulkan_device() -> str | None:
     ``vk_icdGetInstanceProcAddr`` to return NULL for
     ``vkCreateInstance``. The env var forces GLVND to pick the NVIDIA
     vendor, and the ICD wakes up. Verified empirically on an NVIDIA
-    TITAN RTX + driver 590.48.01 + linuxserver/ffmpeg 8.0.1-cli-ls56.
+    GPU + driver 590.48.01 + linuxserver/ffmpeg 8.0.1-cli-ls56.
 
     **Strategy 2b** — if the EGL vendor JSON is not present but the
     NVIDIA ICD JSON is (or if Strategy 2 ran but did not fix things),

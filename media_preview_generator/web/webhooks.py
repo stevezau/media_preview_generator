@@ -19,6 +19,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 from loguru import logger
 
+from ..job_kinds import INTRO_CREDITS_FOLLOW_UP
 from ..processing.retry_queue import retry_policy
 from .auth import api_token_required, validate_token
 from .jobs import get_job_manager, incoming_job_priority
@@ -409,21 +410,6 @@ def _reported_by_import_file_event(source: str, server_id: str | None, download_
     return seen is not None and datetime.now(UTC).timestamp() - seen < _IMPORT_FILE_EVENT_TTL_SECONDS
 
 
-def _queue_intro_credits_follow_up(
-    preview_job_id: str, paths: list[str], source: str, *, item_id_hints: dict[str, dict[str, str]] | None = None
-) -> None:
-    """Queue the Intro & Credits job for a webhook's files after its preview job has started.
-
-    Never raises: a markers problem must not cost the batch its previews or its history entry.
-    """
-    try:
-        from ..markers.triggers import submit_webhook_follow_up
-
-        submit_webhook_follow_up(preview_job_id=preview_job_id, paths=paths, source=source, item_id_hints=item_id_hints)
-    except Exception:
-        logger.exception("Could not queue the Intro & Credits job that follows webhook job {}", preview_job_id)
-
-
 def create_vendor_webhook_job(
     source: str,
     canonical_path: str,
@@ -499,6 +485,8 @@ def create_vendor_webhook_job(
             "source": safe_source,
             "path_count": 1,
             "webhook_basenames": [basename],
+            # The preview runner queues the Intro & Credits job for this file when it starts the job.
+            INTRO_CREDITS_FOLLOW_UP: True,
         },
         server_id=b_sid,
         server_name=b_sname,
@@ -537,9 +525,6 @@ def create_vendor_webhook_job(
     from .routes import _start_job_async
 
     _start_job_async(job.id, overrides)
-    _queue_intro_credits_follow_up(
-        job.id, [canonical_path], safe_source, item_id_hints=overrides.get("webhook_item_id_hints") or None
-    )
     _add_history_entry(
         safe_source,
         "Webhook",
@@ -960,6 +945,13 @@ def _schedule_webhook_job(
                         # ISO timestamp the debounce timer will fire at;
                         # the dashboard's job-row countdown reads this.
                         "webhook_fire_at": fire_at_iso,
+                        # Like webhook_paths, persisted now so a job revived
+                        # after a restart during the debounce keeps what the
+                        # fire would have given it: its publish pin, and the
+                        # Intro & Credits job that follows it (queued by the
+                        # preview runner when it starts the job).
+                        **({"server_id": b_sid} if b_sid else {}),
+                        INTRO_CREDITS_FOLLOW_UP: True,
                     },
                     server_id=b_sid,
                     server_name=b_sname,
@@ -974,6 +966,8 @@ def _schedule_webhook_job(
                     "file_paths": set(),
                     "titles": [],
                     "server_id": server_id,
+                    # The configured server the webhook named (None when unknown): the job's publish pin.
+                    "server_id_pin": b_sid,
                     "deleted_paths": set(),
                     "job_id": job.id,
                     "opened_at": opened_at,
@@ -1017,6 +1011,10 @@ def _schedule_webhook_job(
                         # the row's countdown would tick into the past
                         # while Plex is still waiting.
                         "webhook_fire_at": fire_at_iso,
+                        # This call replaces the config: keep what batch-open
+                        # persisted for a revival (see the fresh-batch branch).
+                        **({"server_id": batch["server_id_pin"]} if batch.get("server_id_pin") else {}),
+                        INTRO_CREDITS_FOLLOW_UP: True,
                     },
                 )
                 # Flip single-title → "N files" once the batch grows past 1.
@@ -1207,6 +1205,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
                     "source": source,
                     "path_count": len(webhook_paths),
                     "webhook_basenames": basenames[:_HISTORY_FILES_PREVIEW_CAP],
+                    INTRO_CREDITS_FOLLOW_UP: True,
                 },
                 server_id=b_sid,
                 server_name=b_sname,
@@ -1221,6 +1220,8 @@ def _execute_webhook_job(debounce_key: str) -> None:
                     "source": source,
                     "path_count": len(webhook_paths),
                     "webhook_basenames": basenames[:_HISTORY_FILES_PREVIEW_CAP],
+                    # The preview runner queues the batch's Intro & Credits job when it starts the job below.
+                    INTRO_CREDITS_FOLLOW_UP: True,
                 },
             )
         settings = get_settings_manager()
@@ -1271,7 +1272,6 @@ def _execute_webhook_job(debounce_key: str) -> None:
         if webhook_deleted_paths:
             overrides["webhook_deleted_paths"] = webhook_deleted_paths
         _start_job_async(job.id, overrides)
-        _queue_intro_credits_follow_up(job.id, list(webhook_paths), source)
         _add_history_entry(
             source,
             "Download",

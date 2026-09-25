@@ -563,7 +563,9 @@ def marker_item_save():
         owning server with ``result`` (``written``, ``unchanged``, ``waiting``, ``failed``, ``not_enabled``,
         ``nothing_to_publish`` or ``needs_review``), its ``message``, what it ``can_show``, the saved types it
         ``cant_show``, per-field ``notes`` (Emby's credits end), and the types whose own markers the lock
-        ``replaced_own`` on a server set to keep its own (spec §5.5 rule 1). 400 for a body this can't be saved
+        ``replaced_own`` on a server set to keep its own (spec §5.5 rule 1), and ``queued_job_id``: the Intro &
+        Credits job that delivers the save to the servers whose row is ``waiting`` or ``failed`` (null when every
+        server took it). 400 for a body this can't be saved
         from, a path outside every server library, or a type no enabled owner can show; 404 for an unknown server
         or item; 409 when the server is off, no enabled owner has the file, or the file was never analysed or has
         changed since; 503 when the config directory isn't writable.
@@ -631,15 +633,43 @@ def marker_item_save():
         return jsonify(
             {"error": "This file changed on disk since it was analysed; re-detect it first.", "reason": "file_changed"}
         ), 409
+    server_rows = [
+        _editor_server_row(row, saved=saved, duration_ms=rec.duration_ms, enabled_ids=enabled_ids) for row in rows
+    ]
     payload = {
         "canonical_path": safe,
         "duration_ms": rec.duration_ms,
         "markers": _stored_markers(store, rec.id),
-        "servers": [
-            _editor_server_row(row, saved=saved, duration_ms=rec.duration_ms, enabled_ids=enabled_ids) for row in rows
-        ],
+        "servers": server_rows,
+        "queued_job_id": _queue_delivery(safe, server_rows),
     }
     return jsonify(_without_secrets(payload, registry))
+
+
+def _queue_delivery(path: str, rows: list[dict]) -> str | None:
+    """Queue the job that delivers the save to every server the editor shows waiting or failed (``submit_publish_retry``).
+
+    Decided from the editor's words, so every row the user sees as not delivered gets the job: a server with Intro &
+    Credits on that couldn't take the markers (down, plugin missing) reads "failed" too. Off, nothing to publish and
+    needs review are nothing a job can deliver. Never raises: the save is stored and its answer stands whatever happens
+    here.
+
+    Args:
+        path: The file's local path.
+        rows: The editor's server rows (``_editor_server_row``).
+
+    Returns:
+        The queued (or reused) job's id; None when every server took it, or the job couldn't be queued.
+    """
+    if not any(row.get("result") in ("waiting", "failed") for row in rows):
+        return None
+    try:
+        from ...markers.triggers import submit_publish_retry
+
+        return submit_publish_retry(path)
+    except Exception:
+        logger.exception("Could not queue the job that delivers the saved markers of {}", path)
+        return None
 
 
 @api.route("/markers/item/markers", methods=["DELETE"])

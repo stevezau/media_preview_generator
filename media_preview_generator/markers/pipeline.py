@@ -35,10 +35,13 @@ from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
+from .carry_over import carry_over, is_carried_over, previous_decisions
 from .credits.detector import credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
+    DECIDE_RULES,
+    DECIDE_RULES_VERSION,
     DecisionContext,
     DecisionStatus,
     FileLimits,
@@ -46,6 +49,8 @@ from .decide import (
     credits_limits_ms,
     decide,
     file_clock_may_matter,
+    keep_published,
+    kept_before_rule_change,
     unusable_server_marker,
 )
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, is_season_folder, merge_ids
@@ -68,7 +73,7 @@ from .job_log import (
 )
 from .locks import FILE_RUN_LOCKS
 from .locks import KeyedLocks as _KeyedLocks
-from .missing import mark_if_missing
+from .missing import gone_now, mark_if_missing
 from .models import (
     SERVER_SOURCES,
     STALE_SERVER_MARKERS_DETAIL,
@@ -81,6 +86,7 @@ from .models import (
 )
 from .outcomes import (
     EXTRAS_NOT_CHECKED,
+    FILE_BUSY,
     NOT_IN_LIBRARY,
     OUTCOME_KEYS,
     PLEX_DB_BUSY,
@@ -117,21 +123,22 @@ from .publishers.base import (
     PublishError,
     Shown,
     cancellable_waits,
+    same_times,
     wait_cancelled,
 )
 from .publishers.factory import publisher_for, supported_types_for
-from .publishers.plex_db import STALE_READ_WAIT_S, WAIT_SLICE_S
+from .publishers.plex_db import STALE_READ_WAIT_S, WAIT_CANCELLED, WAIT_SLICE_S, WORKER_BUSY_TIMEOUT_S
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
 from .source_counts import DecidedByTally, decided_groups
 from .sources import introdb, skipdb, theintrodb
 from .sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from .sources.introdb import IntroDbClient
 from .sources.online import LookupResult, is_budget_exhausted
-from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL
+from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL, capped_waits
 from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient, is_key_refusal
-from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
+from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, PreviousDecision, get_marker_store
 
 NO_DATA_RETRY = timedelta(days=14)
 # TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
@@ -180,6 +187,9 @@ UNUSABLE_SERVER_MARKERS_DETAIL = (
 # What an older reader stored from a Plex server that shows our markers now: it can't be read again (Plex can't tell
 # ours from its own), so it isn't checked for markers made for an earlier file either, and counts for nothing.
 OURS_SHOWN_DETAIL = "This server shows our markers now; what an older version read from it isn't used"
+# The same for a Plex item this file left nothing of ours on that may show ours all the same: another version's, or a
+# type kept as Plex's own that can hold a marker of ours (``MarkerStore.published_to_item``). The reader skips it too.
+OURS_ON_ITEM_DETAIL = "This server's item may show our markers now; what an older version read from it isn't used"
 _CANCELLED = "cancelled by user"
 # A ready Plex whose Plex Pass didn't answer (usually restarting): files within this long share the answer instead of
 # each running the whole check (lock probe, Plex's HTTP connect with its retries, schema and library scans).
@@ -214,6 +224,12 @@ PUBLISH_NOW_DB_WAIT_S = float(PUBLISH_NOW_SERVER_TIMEOUT_S)
 PUBLISH_NOW_DEADLINE_S = 25.0
 # How long it waits for a job that is running the same file. A run can take minutes, so it gives up almost at once.
 PUBLISH_NOW_LOCK_WAIT_S = 2.0
+# The longest a worker-stage online lookup waits for its source's next request slot (``ratelimit.capped_waits``): the
+# worker holds a GPU or CPU worker previews need, so a slot taken by another request's spacing (0.5 s at most) is waited
+# for, and a longer wait (a 429 block, a queue of requests) is refused: nothing is stored, so the next job that runs the
+# file asks again (the weekly online re-check only lists files a source answered "no entry" for). The checking stage,
+# which holds no worker, keeps the limiter's own wait.
+WORKER_LOOKUP_WAIT_S = 1.0
 PUBLISH_DEADLINE_MESSAGE = "Couldn't publish to this server in time; the next Intro & Credits run publishes it"
 # Not "that run publishes it": a job that already read the markers publishes the pre-save answer, and the run after
 # it puts the user's marker there (the file's publish basis no longer matches, so it is written again).
@@ -254,9 +270,13 @@ class LocalDetectorSpec:
     Attributes:
         source: The source whose place in the user's order the detector runs at.
         types: Marker types it can decide.
-        detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check)``: a list of
-            candidates, or a ``DetectorAnswer`` whose signature is stored as the answer's basis (``detector_runs``);
-            raises ``DetectorUnavailableError`` when it can't answer this time.
+        detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check, ffmpeg_threads,
+            fallback_callback, gpu_worker)``: a list of candidates, or a ``DetectorAnswer`` whose signature is stored as
+            the answer's basis (``detector_runs``); raises ``DetectorUnavailableError`` when it can't answer this time.
+            On a worker, ``pause_check`` is ``PipelineContext.freeze_check``, ``ffmpeg_threads`` the GPU worker's own
+            (None on a CPU worker), ``fallback_callback`` shows a CPU fallback inside the detector on the worker's row,
+            and ``gpu_worker`` says whether a GPU worker runs it (its CPU rerun after a failed GPU decode included,
+            where ``gpu`` is None); on the checking thread the first three are None and ``gpu_worker`` False.
         stores: Sources its candidates are stored under, each candidate under its own ``source``; empty = ``source``.
         version: Stored with its answer; an answer from another version is asked again, even for decided types.
         version_of: ``version_of(file, ctx)``: the version for this file when it depends on the file or the settings
@@ -268,6 +288,9 @@ class LocalDetectorSpec:
         followups: ``followups(file, ctx)``: other files whose answer is out of date and whose decision could change
             with it (season audio: siblings matched before this episode arrived). Every run of a file of a type the
             detector decides asks the job to run them again, before any worker handoff (None: none).
+        failed_here: ``failed_here(file, ctx)``: whether it failed to read the file as it is now (credit text: a decode
+            error or a timeout recorded for this identity), so a rule waiting for its answer stops waiting (None:
+            never).
     """
 
     source: Source
@@ -279,6 +302,7 @@ class LocalDetectorSpec:
     due: Callable[[FileRecord, PipelineContext], bool] | None = None
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
     followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
+    failed_here: Callable[[FileRecord, PipelineContext], bool] | None = None
 
     def answer_version(self, rec: FileRecord, ctx: PipelineContext) -> int:
         """The version a stored answer for ``rec`` must have to count."""
@@ -352,10 +376,14 @@ class PipelineContext:
             (``online_recheck_files``): only a file an online database now has an entry for, or whose decisions
             changed, logs lines of its own, and the job ends with one line for them all (``summary_lines``). It runs
             files as any job does.
-        busy_writes_retried: The job queues a retry for a file whose write gave up on a busy database, so its row says
-            this job tries again in a few minutes rather than on the next run (``job_runner``), for up to
-            ``retry_file_cap`` files (``promise_busy_retry``).
+        busy_writes_retried: The job queues a retry for a file whose write gave up on a busy database, or that another
+            job kept running past a worker's wait for it, so its row says this job tries again in a few minutes rather
+            than on the next run (``job_runner``), for up to ``retry_file_cap`` files (``promise_busy_retry``).
         retry_file_cap: The most files one retry job takes (``job_runner.MAX_RETRY_FILES``).
+        freeze_check: True while the job's running work must stop where it is, as previews' FFmpeg does: all
+            processing paused (Pause all, quiet hours) or this job paused by its schedule's stop time
+            (``job_runner``). A pause of this job by hand isn't one: it gives the job's slot back and lets the running
+            file finish. Handed to the detectors on a worker; None: never.
     """
 
     registry: Any
@@ -380,6 +408,7 @@ class PipelineContext:
     online_recheck: bool = False
     busy_writes_retried: bool = False
     retry_file_cap: int = 500
+    freeze_check: Callable[[], bool] | None = None
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -427,6 +456,10 @@ class PipelineContext:
     # Per file handed on before it finished, like ``_pending_skips``: what its earlier stages did with each source, so
     # the stage that finishes it logs a source the checking thread asked as asked by this job.
     _run_notes: dict[str, RunNotes] = field(default_factory=dict, repr=False)
+    # Per file of this job: its stored answers (``_answer_key``) when the job's first stage of it began, dropped with
+    # the file's outcome like ``_run_notes``: a rule-only re-decide tells a new or changed answer from one this job only
+    # stored again (``_keep_published_before_rule_change``).
+    _answers_before: dict[str, frozenset[tuple]] = field(default_factory=dict, repr=False)
     # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, per file a
     # decide-again job ran, whether its decisions changed and whether a type is still in review, and per file the weekly
     # online re-check ran, whether an online database now has an entry for it and whether its decisions changed.
@@ -561,6 +594,29 @@ class PipelineContext:
             self._busy_promised.add(canonical_path)
             return True
 
+    def may_promise_busy_retry(self, canonical_path: str) -> bool:
+        """Whether :meth:`promise_busy_retry` would promise this file a retry, without taking a promise.
+
+        Args:
+            canonical_path: The file.
+
+        Returns:
+            True when the job queues retries and the file has a promise already or one is left.
+        """
+        if not self.busy_writes_retried:
+            return False
+        with self._summary_lock:
+            return canonical_path in self._busy_promised or len(self._busy_promised) < self.retry_file_cap
+
+    def release_busy_retry(self, canonical_path: str) -> None:
+        """Give back a file's retry promise (``promise_busy_retry``) that no retry will use.
+
+        Args:
+            canonical_path: The file.
+        """
+        with self._summary_lock:
+            self._busy_promised.discard(canonical_path)
+
     def busy_promised(self) -> set[str]:
         """The files promised a retry (``promise_busy_retry``)."""
         with self._summary_lock:
@@ -653,6 +709,113 @@ class _Owning:
 
 # A job's whole run of one file (``locks.FILE_RUN_LOCKS``).
 _PATH_LOCKS = FILE_RUN_LOCKS
+# How long a worker waits for a file's run lock between asking whether to stop waiting.
+_PATH_LOCK_SLICE_S = 0.5
+# The longest a worker waits for a file another job is running when its own job retries the file a few minutes later:
+# the worker holds a GPU or CPU worker previews need, and the other run may take minutes (a season step) or be paused.
+WORKER_FILE_WAIT_S = 60.0
+# The longest it waits when no retry can be promised: long enough for any running file (a season step), but a worker
+# must never wait out another job paused for hours (the file goes to the next run instead).
+WORKER_FILE_WAIT_NO_RETRY_S = 900.0
+FILE_BUSY_MESSAGE = "Another Intro & Credits job is running this file"
+
+# The run lock holders' freeze checks (``PipelineContext.freeze_check`` of a worker's run), so a waiter can tell a
+# holder stopped where it is (Pause all, its schedule's stop time) from one still running.
+_FILE_RUN_HOLDERS: dict[str, Callable[[], bool]] = {}
+_FILE_RUN_HOLDERS_GUARD = threading.Lock()
+
+
+def _holder_frozen(path: str) -> bool:
+    """Whether the run holding ``path``'s lock is frozen: it keeps the file until its job resumes."""
+    with _FILE_RUN_HOLDERS_GUARD:
+        frozen = _FILE_RUN_HOLDERS.get(path)
+    try:
+        return bool(frozen is not None and frozen())
+    except Exception:  # noqa: BLE001 - another job's check failing must not end this job's run
+        return False
+
+
+@contextmanager
+def _file_run_lock(
+    path: str,
+    *,
+    wait_s: float | None,
+    stop: Callable[[float], bool],
+    frozen: Callable[[], bool] | None = None,
+) -> Iterator[bool]:
+    """Hold a file's run lock (``_PATH_LOCKS``) for the block; yields whether it is held.
+
+    Another job's worker can hold it for minutes. The checking stage doesn't wait for it (``wait_s`` 0): the file goes
+    to a worker, as a preview check hands on a file it can't finish, and the checking thread is free for the job's other
+    files. A worker waits for it in slices, until ``wait_s`` runs out or ``stop`` says so.
+
+    Args:
+        path: The file.
+        wait_s: The longest wait; 0 tries once, None waits until ``stop``.
+        stop: Asked between slices with the seconds waited so far; True gives up.
+        frozen: The holder's freeze check while it holds the lock (``_holder_frozen``); None: never frozen.
+
+    Yields:
+        True while holding the lock; False when it wasn't taken.
+    """
+    started = time.monotonic()
+    deadline = None if wait_s is None else started + wait_s
+    while True:
+        left = (
+            _PATH_LOCK_SLICE_S if deadline is None else max(0.0, min(_PATH_LOCK_SLICE_S, deadline - time.monotonic()))
+        )
+        with _PATH_LOCKS.try_hold(path, left) as held:
+            if not held and deadline is not None and time.monotonic() >= deadline:
+                # Out of time (the check stage tries once): nothing to ask ``stop``, which may take a retry promise.
+                yield False
+                return
+            if held:
+                if frozen is not None:
+                    with _FILE_RUN_HOLDERS_GUARD:
+                        _FILE_RUN_HOLDERS[path] = frozen
+                try:
+                    yield True
+                finally:
+                    if frozen is not None:
+                        with _FILE_RUN_HOLDERS_GUARD:
+                            _FILE_RUN_HOLDERS.pop(path, None)
+                return
+            if stop(time.monotonic() - started):
+                yield False
+                return
+
+
+def _run_by_another_job(item: ProcessableItem, ctx: PipelineContext, *, retried: bool) -> ItemOutcome:
+    """The outcome of a file a worker gave back because another job kept running it (``_run``): every server the job
+    publishes it to waits (``FILE_BUSY``), for the job's retry when it promised one, else for the next run. Nothing
+    about the file was read or stored.
+
+    Args:
+        item: The file.
+        ctx: The job's context.
+        retried: Whether the job promised the file a retry (``PipelineContext.promise_busy_retry``).
+
+    Returns:
+        The file's outcome.
+    """
+    path = item.canonical_path
+    owners = _publishing_owners(item, ctx)
+    if isinstance(owners, ItemOutcome):
+        return owners
+    message = f"{FILE_BUSY_MESSAGE}; {RETRY_SOON if retried else NEXT_RUN}"
+    logger.info("{}: {}", os.path.basename(path), message)
+    rows = [_row(owner.config, "", ServerStatus.WAITING, message, path, reason_code=FILE_BUSY) for owner in owners]
+    return ItemOutcome(FileOutcome.WAITING.value, message, rows)
+
+
+def _forget_run(ctx: PipelineContext, path: str) -> None:
+    """Drop what the job kept about a file's run between its stages, once the file has its outcome."""
+    ctx._refreshed.pop(path, None)
+    ctx._pending_skips.pop(path, None)
+    ctx._run_notes.pop(path, None)
+    ctx._answers_before.pop(path, None)
+
+
 # Versions of one Plex item run on different threads under different path locks. Each publish reads what is ours on
 # the item, writes, and records the result; another version's publish in between would leave that record wrong and
 # our markers on the item untracked.
@@ -838,6 +1001,37 @@ def default_local_detectors(
     return tuple(detectors)
 
 
+def run_detector_checks(
+    ffmpeg_path: str | None, settings: GlobalMarkersSettings | None = None
+) -> tuple[ChromaprintState, TextDetState]:
+    """The checks that decide which local detectors a job registers, for the sources turned on now.
+
+    Whether an ffmpeg with chromaprint exists (only while season audio is on) and whether credit text detection can run
+    here (only while credits and credit text are on). Each answer is kept for the process (one that didn't come is asked
+    again 10 minutes later), so only the first job pays for them; the job runner calls this before its job takes a gate
+    slot, and :func:`build_context` again after it.
+
+    Args:
+        ffmpeg_path: The configured ffmpeg (None: the candidates ``fingerprint.chromaprint_state`` looks at anyway).
+        settings: The detection settings (default: the saved ones).
+
+    Returns:
+        ``(chromaprint, credits_text)``; ABSENT for a source that is off.
+    """
+    settings = settings or get_global_settings()
+    chromaprint = (
+        chromaprint_state(ffmpeg_path)
+        if settings.source_enabled(Source.SEASON_AUDIO.value)
+        else ChromaprintState.ABSENT
+    )
+    credits_text = (
+        text_detection_state()
+        if settings.detect_credits and settings.source_enabled(Source.CREDITS_TEXT.value)
+        else TextDetState.ABSENT
+    )
+    return chromaprint, credits_text
+
+
 def build_context(
     *,
     registry: Any,
@@ -874,16 +1068,7 @@ def build_context(
     """
     settings = get_global_settings()
     ffmpeg_path = getattr(config, "ffmpeg_path", None)
-    chromaprint = (
-        chromaprint_state(ffmpeg_path)
-        if settings.source_enabled(Source.SEASON_AUDIO.value)
-        else ChromaprintState.ABSENT
-    )
-    credits_text = (
-        text_detection_state()
-        if settings.detect_credits and settings.source_enabled(Source.CREDITS_TEXT.value)
-        else TextDetState.ABSENT
-    )
+    chromaprint, credits_text = run_detector_checks(ffmpeg_path, settings)
     return PipelineContext(
         registry=registry,
         config=config,
@@ -928,9 +1113,46 @@ def _owning_servers(item: ProcessableItem, ctx: PipelineContext) -> list[_Owning
     ]
 
 
-def _marker_owners(owning: list[_Owning], canonical_path: str) -> list[_Owning]:
+def _marker_owners(owning: list[_Owning], canonical_path: str, pin: str | None = None) -> list[_Owning]:
     keep = marker_matches(canonical_path, [owner.config for owner in owning])
-    return [owner for owner in owning if owner.config.id in keep]
+    return [owner for owner in owning if owner.config.id in keep and pin in (None, owner.config.id)]
+
+
+def _job_pin(ctx: PipelineContext) -> str | None:
+    """The one server the job publishes to (``config.server_id_filter``, set from its pin by the job runner), as a
+    preview job's ``resolve_per_item_pin`` reads it; None for every server with Intro & Credits on."""
+    pin = getattr(ctx.config, "server_id_filter", None)
+    return pin if isinstance(pin, str) and pin else None
+
+
+def _publishing_owners(
+    item: ProcessableItem, ctx: PipelineContext, owning: list[_Owning] | None = None
+) -> list[_Owning] | ItemOutcome:
+    """The servers the job publishes this file's markers to (its pin's only, for a pinned job), or the file's
+    ``NO_OWNERS`` outcome when there are none.
+
+    Args:
+        item: The file.
+        ctx: The job's context.
+        owning: The file's owning servers when the caller has them (``_owning_servers``).
+
+    Returns:
+        The owners, or the outcome that says why there are none.
+    """
+    pin = _job_pin(ctx)
+    if owning is None:
+        owning = _owning_servers(item, ctx)
+    owners = _marker_owners(owning, item.canonical_path, pin)
+    if owners:
+        return owners
+    if pin:
+        pinned = ctx.registry.get_config(pin)
+        name = pinned.name if pinned is not None and pinned.name else pin
+        return ItemOutcome(
+            FileOutcome.NO_OWNERS.value,
+            f"This job publishes to {name} only, and {name} doesn't have Intro & Credits turned on for this file",
+        )
+    return ItemOutcome(FileOutcome.NO_OWNERS.value, "No server with Intro & Credits turned on has this file")
 
 
 def _resolve_kind(
@@ -1025,8 +1247,8 @@ def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, no
 
 
 def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
-    """Whether a file has a type undecided (True when the store knows no decisions for it) or one decided by season
-    audio alone (a locked marker never counts)."""
+    """Whether a file has a type undecided (True when the store knows no decisions for it), one decided by season
+    audio alone, or one carried over from a file it replaced (a locked marker never counts)."""
     rec = store.get_file(path)
     if rec is None:
         return False
@@ -1035,9 +1257,10 @@ def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
         return True
     if any(row.status in _UNDECIDED for row in decisions.values()):
         return True
-    # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``).
+    # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``). A marker carried over from a
+    # replaced file stands only until the file has evidence of its own.
     return any(
-        not marker.locked and set(marker.decided_by) <= _SEASON_AUDIO_AND_SERVERS
+        not marker.locked and (set(marker.decided_by) <= _SEASON_AUDIO_AND_SERVERS or is_carried_over(marker))
         for marker in store.get_markers(rec.id).values()
     )
 
@@ -1127,13 +1350,26 @@ def _decide(
         )
         return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
 
-    decisions = decide_from(order)
     registered = {source.value for spec in ctx.local_detectors for source in (spec.source, *spec.stored_sources)}
     unavailable = {source.value for source in _LOCAL_DETECTOR_SOURCES} - registered
     if ctx.chromaprint is ChromaprintState.UNKNOWN:
         unavailable -= {Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value}
     if ctx.credits_text is TextDetState.UNKNOWN:
         unavailable -= {Source.CREDITS_TEXT.value}
+    # A local detector with nothing stored stays in the order only while it may still answer this file: a rule waiting
+    # for its answer (credit text checking a credits chapter SkipDB contradicts, spec §5.5 rule 3) must not wait for
+    # a detector that can't run here, that found nothing at its version now, or that failed to read the file as it is
+    # (the owner's rule: decisions are automatic, never an open-ended wait in Needs review). An older version's
+    # "nothing" is read again (``_detector_pending``), so the rule waits for that.
+    answered = {c.source.value for c in evidence}
+    order = tuple(
+        source_id
+        for source_id in order
+        if source_id in answered
+        or Source(source_id) not in _LOCAL_DETECTOR_SOURCES
+        or (source_id not in unavailable and _may_still_answer(ctx, rec, Source(source_id)))
+    )
+    decisions = decide_from(order)
     if not any(c.source.value in unavailable and c.source.value in order for c in evidence):
         return decisions
     without = decide_from(tuple(source_id for source_id in order if source_id not in unavailable))
@@ -1141,6 +1377,134 @@ def _decide(
         mtype: without[mtype] if decision.status is DecisionStatus.DECIDED else decision
         for mtype, decision in decisions.items()
     }
+
+
+def _may_still_answer(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
+    """Whether a local detector registered here may still give an answer stored under ``source`` for this file: it
+    hasn't answered at its version now, and hasn't failed to read the file as it is (``LocalDetectorSpec.failed_here``).
+    """
+    if _answered_at_this_version(ctx, rec, source):
+        return False
+    return not any(
+        source in spec.stored_sources and spec.failed_here is not None and spec.failed_here(rec, ctx)
+        for spec in ctx.local_detectors
+    )
+
+
+def _answered_at_this_version(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
+    """Whether a local detector stored an answer under ``source`` for this file at its version now. A detector not
+    registered here can't say what its version is, so its stored answer counts as it is. Its ``due`` isn't asked: season
+    audio's reads the whole season, and credit text's is only ever true for an answer stored without
+    ``LOOK_BACK_BASIS``, which no answer of today's version is."""
+    if ctx.store.evidence_fetched_at(rec.id, source) is None:
+        return False
+    stored = ctx.store.evidence_version(rec.id, source)
+    return not any(
+        source in spec.stored_sources and stored != spec.answer_version(rec, ctx) for spec in ctx.local_detectors
+    )
+
+
+def _carry_over(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    servers: _ItemServers,
+    owners: list[_Owning],
+    decisions: dict[MarkerType, TypeDecision],
+) -> dict[MarkerType, TypeDecision]:
+    """The file's final decisions with the carry-over (spec §5.5 rule 15, ``carry_over``): a type no source answered
+    for keeps what the file it replaced had decided, at the same length. The servers' item ids are asked only when a
+    type has no evidence (publishing asks them next anyway); a server that can't name the item, or a replaced file's
+    disk that can't tell, leaves a marker carried before as it is."""
+
+    def previous(wanted: frozenset[MarkerType]) -> dict[MarkerType, PreviousDecision | None]:
+        item_ids = {owner.config.id: servers.item_id(owner) for owner in owners}
+        items = [(server_id, item_id) for server_id, item_id in item_ids.items() if item_id]
+        configs = list(ctx.registry.configs())
+        return previous_decisions(
+            ctx.store,
+            rec,
+            items,
+            wanted=wanted,
+            gone=lambda other: gone_now(other, configs),
+            items_known=len(items) == len(item_ids),
+        )
+
+    return carry_over(
+        decisions,
+        rec.duration_ms or 0,
+        previous,
+        kept=ctx.store.get_markers(rec.id),
+        enabled=_decision_order(ctx.settings),
+    )
+
+
+def _keep_published_before_rule_change(
+    ctx: PipelineContext, rec: FileRecord, decisions: dict[MarkerType, TypeDecision]
+) -> dict[MarkerType, TypeDecision]:
+    """The file's decisions with a marker published before the decision rules changed kept where today's rules leave
+    its type in Needs review or without a marker (``decide.keep_published``): a rule change alone never takes a marker
+    off the servers; new or changed evidence can.
+
+    A type is looked at when its stored decision is decided with a marker of ours, and either it was kept this way
+    before, or the file was last decided under older rules (``DECIDE_RULES`` in ``version_reruns``) and a server was
+    sent that marker (its type and start in a publish state). Only answers of the sources turned on count; the new or
+    changed ones are those not stored when the job's first stage of the file began (``_answers_before``), so an answer
+    only stored again (a forced run, a parser's new version) is no news. A locked type is always decided (``decide``),
+    and a marker carried over from a replaced file rests on no source, so neither is ever kept here.
+    """
+    undecided = [
+        t for t, d in decisions.items() if d.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE)
+    ]
+    if not undecided:
+        return decisions
+    stored = ctx.store.get_decisions(rec.id)
+    markers = ctx.store.get_markers(rec.id)
+    older_rules = ctx.store.version_rerun(rec.id, DECIDE_RULES) != DECIDE_RULES_VERSION
+    sent: set[tuple[MarkerType, int]] | None = None
+    answers: list[tuple[Candidate, tuple]] | None = None
+    known = ctx._answers_before.get(rec.canonical_path, frozenset())
+    out = dict(decisions)
+    for mtype in undecided:
+        row, marker = stored.get(mtype), markers.get(mtype)
+        if row is None or row.status is not DecisionStatus.DECIDED or marker is None:
+            continue
+        if not kept_before_rule_change(row.reason):
+            if not older_rules:
+                continue
+            if sent is None:
+                sent = {(m.type, m.start_ms) for state in ctx.store.publish_states(rec.id) for m in state.markers}
+            if (mtype, marker.start_ms) not in sent:
+                continue
+        if answers is None:
+            answers = _answers_now(ctx, rec)
+        of_type = [(c, key) for c, key in answers if c.type is mtype]
+        out[mtype] = keep_published(
+            decisions[mtype],
+            marker,
+            candidates=[c for c, _key in of_type],
+            changed=[c for c, key in of_type if key not in known],
+            duration_ms=rec.duration_ms or 0,
+        )
+    return out
+
+
+def _answer_key(row: EvidenceRow) -> tuple:
+    """What one stored answer says, whenever it was stored."""
+    return (row.source, row.origin, row.type, row.start_ms, row.end_ms)
+
+
+def _answers_now(ctx: PipelineContext, rec: FileRecord) -> list[tuple[Candidate, tuple]]:
+    """The file's stored answers from the sources turned on, each with its ``_answer_key``; a server's marker made for
+    an earlier file (``Candidate.stale``) left out, as ``decide`` leaves it out."""
+    enabled = set(_decision_order(ctx.settings))
+    return [
+        (Candidate(row.type, row.start_ms, row.end_ms, row.source), _answer_key(row))
+        for row in ctx.store.evidence_rows(rec.id)
+        if row.type is not None
+        and row.start_ms is not None
+        and row.source.value in enabled
+        and row.detail != STALE_SERVER_MARKERS_DETAIL
+    ]
 
 
 def _decisions_changed(
@@ -1177,12 +1541,13 @@ def _rests_only_on(decision: TypeDecision, sources: frozenset[str]) -> bool:
 
 def _decided_beyond_chapters(decision: TypeDecision) -> bool:
     """Decided, and not by chapters alone nor by season audio alone: two agreeing sources may still veto a chapter
-    (spec §5.5 rule 3), and one disagreeing source sends a season-audio intro to review (owner, 2026-09-24).
+    (spec §5.5 rule 3), and one disagreeing source sends a season-audio intro to review (owner, 2026-09-24). A marker
+    carried over from a replaced file (rule 15) stands only until the file has evidence of its own.
 
     A chapter or season audio answer that markers already on servers shortened or confirmed still stands alone: server
     markers never decide on their own (rule 7).
     """
-    if decision.status is not DecisionStatus.DECIDED:
+    if decision.status is not DecisionStatus.DECIDED or is_carried_over(decision.marker):
         return False
     return not (_rests_only_on(decision, _CHAPTERS_AND_SERVERS) or _rests_only_on(decision, _SEASON_AUDIO_AND_SERVERS))
 
@@ -1317,6 +1682,9 @@ def _run_detector(
     phase: Callable[[str], None],
     cancel_check: Callable[[], bool] | None,
     pause_check: Callable[[], bool] | None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
+    gpu_worker: bool = False,
 ) -> str | None:
     """Run one detector and store its answer under each of its sources with its version, and its basis when it gave one,
     in one transaction.
@@ -1335,6 +1703,9 @@ def _run_detector(
             phase_callback=phase,
             cancel_check=cancel_check,
             pause_check=pause_check,
+            ffmpeg_threads=ffmpeg_threads,
+            fallback_callback=fallback_callback,
+            gpu_worker=gpu_worker,
         )
         found = list(answer.candidates if isinstance(answer, DetectorAnswer) else answer)
     except DetectorUnavailableError as exc:
@@ -1438,16 +1809,34 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
 
 
 def _lookup(
-    client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check
+    client: Any,
+    source: Source,
+    ids: MediaIds,
+    rec: FileRecord,
+    ctx: PipelineContext,
+    cancel_check,
+    *,
+    max_wait_s: float | None = None,
 ) -> LookupResult | None:
     """Ask one online source and store what it found.
+
+    Args:
+        client: The source's client.
+        source: The source.
+        ids: The ids to look up.
+        rec: The file.
+        ctx: The job's context.
+        cancel_check: True once the job is cancelled.
+        max_wait_s: The longest the source's limiter may wait for a request slot (``ratelimit.capped_waits``); None
+            leaves the limiter's own wait.
 
     Returns:
         The source's answer (stored when ``ok`` or ``no_data``), or None when the client raised or answered with
         something that isn't a ``LookupResult``.
     """
     try:
-        result = client.lookup(ids, duration_ms=rec.duration_ms, priority=ctx.priority(), cancel_check=cancel_check)
+        with capped_waits(max_wait_s):
+            result = client.lookup(ids, duration_ms=rec.duration_ms, priority=ctx.priority(), cancel_check=cancel_check)
     except Exception as exc:
         logger.warning("{} lookup failed for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, type(exc).__name__)
         return None
@@ -1569,7 +1958,9 @@ def _read_server_markers(
             servers (``ctx.recheck_empty_server_markers``): then it is on its backoff
             (``MarkerStore.server_recheck_due``). A Plex answer stored while Plex couldn't tell whether its markers
             were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
-            is never read; an older reader's answer from a Plex one stops counting (``_drop_older_reader_answer``).
+            is never read, nor a Plex or Emby item that may show ours (another version's, or a type kept as the
+            server's own); an older reader's answer from such a Plex server or item stops counting
+            (``_drop_older_reader_answer``).
 
     Returns:
         The ids of the servers whose answer was stored.
@@ -1594,6 +1985,8 @@ def _read_server_markers(
             continue
         item_wide = cfg.type in _ITEM_WIDE_MARKERS
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
+            if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
+                read.add(cfg.id)
             continue
         found = servers.markers(owner, item_id, rec.duration_ms)
         if found is None:
@@ -1618,7 +2011,10 @@ def _read_server_markers(
                 ctx.store.count_failed_server_reread(rec.id, cfg.id)
             continue
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
-            continue  # another version of this item was published while the read was out: it may show ours
+            # Another version of this item was published while the read was out: it may show ours.
+            if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
+                read.add(cfg.id)
+            continue
         source, found, detail = _counted_as(ctx, owner, found)
         if found and cfg.type is ServerType.PLEX:
             stale = _plex_types_not_made_for_file(ctx, servers, owner, item_id)
@@ -1641,12 +2037,20 @@ def _read_server_markers(
     return read
 
 
-def _drop_older_reader_answer(ctx: PipelineContext, rec: FileRecord, server_id: str) -> bool:
-    """Stop counting a Plex answer an older reader stored, once the server shows our markers.
+def _drop_older_reader_answer(
+    ctx: PipelineContext, rec: FileRecord, server_id: str, detail: str = OURS_SHOWN_DETAIL
+) -> bool:
+    """Stop counting a Plex answer an older reader stored, once the server shows (or its item may show) our markers.
 
     Such an answer can't be read again to be checked for markers made for an earlier file (``READER_VERSION`` 5), so,
     as when the reader can't read the server (``_read_server_markers``), it goes: kept, a stale Plex marker would
     still confirm online times timed on another release.
+
+    Args:
+        ctx: The job's context.
+        rec: The file.
+        server_id: The Plex server.
+        detail: Why, as stored with the empty answer.
 
     Returns:
         Whether the stored answer was replaced.
@@ -1659,7 +2063,7 @@ def _drop_older_reader_answer(ctx: PipelineContext, rec: FileRecord, server_id: 
         Source.SERVER_MARKERS,
         [],
         origin=server_id,
-        detail=OURS_SHOWN_DETAIL,
+        detail=detail,
         version=READER_VERSION,
         also_replaces=SERVER_SOURCES - {Source.SERVER_MARKERS},
     )
@@ -1973,6 +2377,23 @@ def identity_changed(rec: FileRecord) -> bool:
     return (st.st_size, st.st_mtime_ns) != (rec.size, rec.mtime_ns)
 
 
+def _one_version_shows_other_times(cfg: ServerConfig, item_row: ItemPublishStateRow, wanted: list[Marker]) -> bool:
+    """Whether a one-version Plex item holds times of ours other than decided for a type both have.
+
+    Only another version can make a Plex item keep times other than the calling file's
+    (``publishers.base.agreed_across_versions``). Until 2026-09-25 a one-version item kept its earlier times too when a
+    decision moved by under ``VERSION_AGREEMENT_MS``; the decision hasn't changed since, so its publish basis still
+    matches and only this sends it again.
+    """
+    if cfg.type is not ServerType.PLEX or item_row.item_files is None or len(item_row.item_files) != 1:
+        return False
+    for mtype in {m.type for m in item_row.markers}:
+        decided = [m for m in wanted if m.type is mtype]
+        if decided and not same_times([m for m in item_row.markers if m.type is mtype], decided):
+            return True
+    return False
+
+
 def _previous_on_item(item_row: ItemPublishStateRow | None, publisher: MarkerPublisher) -> list[Marker] | None:
     """What this app last left on the server item, from any file (None = unknown).
 
@@ -2050,12 +2471,18 @@ def _publish_to(
     phase: Callable[[str], None],
     *,
     kept_own: frozenset[MarkerType] = frozenset(),
+    brief_db_wait: bool = False,
 ) -> dict:
     # in_review: why the file's types in Needs review are there (``review_message``), "" when none is. kept_own: types
     # left undecided while every server keeps its own and shows one. The row's wording names them, and the file is
     # recorded on its item even with nothing to send; what is sent is exactly what an undecided type sends.
+    # brief_db_wait: a worker whose job retries a busy write waits for Plex's database only
+    # ``plex_db.WORKER_BUSY_TIMEOUT_S`` (the retry comes a few minutes later), also for another thread's check of it.
     cfg = owner.config
     path = rec.canonical_path
+    db_timeout_s = ctx.db_timeout_s
+    if db_timeout_s is None and brief_db_wait:
+        db_timeout_s = WORKER_BUSY_TIMEOUT_S
     store = ctx.store
     last = store.get_publish_state(rec.id, cfg.id)
 
@@ -2091,16 +2518,25 @@ def _publish_to(
         sibling_markers=lambda p: markers_for_path(store, p),
         settings_provider=lambda: _live_markers_settings(ctx, cfg),
         ui_details=False,  # Plex's own detection settings are for the Edit dialog: one more Plex request per check
-        db_timeout_s=ctx.db_timeout_s,
+        db_timeout_s=db_timeout_s,
     )
     if publisher is None:
         return _not_written(ServerStatus.SKIPPED, "Not supported for this server type yet", name="")
+    # Another thread's check of the same Plex server can itself wait minutes for its busy database.
+    capability_wait_s = db_timeout_s if brief_db_wait and cfg.type is ServerType.PLEX else None
     try:
-        report = cached_capability(ctx, cfg, publisher)
+        report = _cached_capability(ctx, cfg, publisher, wait_s=capability_wait_s)
     except Exception as exc:
         logger.warning("Couldn't check whether {} can receive markers: {}", cfg.name, type(exc).__name__)
         message = f"Couldn't check this server: {type(exc).__name__}"
         return _not_written(ServerStatus.FAILED, message, name=publisher.name)
+    if report is None:
+        if wait_cancelled():
+            return _not_written(ServerStatus.FAILED, WAIT_CANCELLED, name=publisher.name)
+        message = _busy_wording(
+            ctx, f"Another Intro & Credits task is still checking this Plex server; {NEXT_RUN}", path
+        )
+        return _not_written(ServerStatus.FAILED, message, name=publisher.name, reason_code=PLEX_DB_BUSY)
     if report.details.get("db_busy"):
         # The check gave up on a busy database: the file fails as a busy write does, and the job retries it.
         return _not_written(
@@ -2186,6 +2622,8 @@ def _publish_to(
                 # Recorded before this app kept a Plex item's versions, so a version added since can't be seen: one
                 # write records them (it changes nothing, and takes no write lock, while the item is as recorded).
                 reason = "the item's versions aren't recorded yet"
+            elif _one_version_shows_other_times(cfg, item_row, wanted):
+                reason = "it shows other times than decided"
             else:
                 shown = _shown_on_server(
                     publisher, cfg, item_id, list(item_row.markers), item_row.kept_types, item_row.item_files
@@ -2523,6 +2961,9 @@ def _attempt(
     pause_check: Callable[[], bool] | None,
     skipped: dict[Source, str],
     notes: RunNotes,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
+    gpu_worker: bool = False,
 ) -> ItemOutcome | None:
     """One run of a file; ``skipped`` (updated in place) holds the sources it was checked without for the whole job's
     reason, carried over from the file's earlier stages (``_run`` counts them once the file has its outcome), and
@@ -2533,9 +2974,9 @@ def _attempt(
         return bool(cancel_check and cancel_check())
 
     owning = _owning_servers(item, ctx)
-    owners = _marker_owners(owning, path)
-    if not owners:
-        return ItemOutcome(FileOutcome.NO_OWNERS.value, "No server with Intro & Credits turned on has this file")
+    owners = _publishing_owners(item, ctx, owning)
+    if isinstance(owners, ItemOutcome):
+        return owners
     try:
         st = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
@@ -2553,6 +2994,10 @@ def _attempt(
     if existing is not None and existing.missing_since is not None:
         ctx.store.clear_missing(existing.id)  # on disk again, even if this run stops before storing it
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
+    if path not in ctx._answers_before:
+        ctx._answers_before[path] = (
+            frozenset(_answer_key(r) for r in ctx.store.evidence_rows(existing.id)) if unchanged else frozenset()
+        )
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
     if refresh_probe or not unchanged or not existing.duration_ms or stale_rules:
@@ -2618,8 +3063,19 @@ def _attempt(
     # no local detector reads the file for them. Asked once a detector would run or a type ends undecided, at most once
     # per run.
     kept_everywhere: frozenset[MarkerType] | None = None
-    for source_id in ctx.settings.ordered_enabled_sources():
-        source = Source(source_id)
+    # A source skipped as "not needed (already decided)", with the types it was skipped for: a later step can take away
+    # the evidence they were decided with (an older reader's Plex answer dropped, markers Plex now says were made for an
+    # earlier file), so each is asked once more at the end of this run while one of them is no longer decided.
+    skipped_decided: dict[Source, frozenset[MarkerType]] = {}
+
+    def sources_in_order() -> Iterator[Source]:
+        yield from (Source(source_id) for source_id in ctx.settings.ordered_enabled_sources())
+        for skipped_source, skipped_for in list(skipped_decided.items()):
+            if not _all_decided(decisions, skipped_for):
+                notes.not_asked.pop(skipped_source, None)
+                yield skipped_source
+
+    for source in sources_in_order():
         refresh = _refreshing(ctx, path, source)
         if (
             not gather_all
@@ -2629,11 +3085,12 @@ def _attempt(
             and not _decided_with_a_due_answer(ctx, rec, source, decisions, types)
         ):
             notes.not_asked[source] = "not needed (already decided)"
+            skipped_decided[source] = types
             continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
         if source in _ONLINE_LABELS:
-            client = ctx.clients.get(source_id)
+            client = ctx.clients.get(source.value)
             if (
                 source is Source.THEINTRODB
                 and not gather_all
@@ -2647,6 +3104,11 @@ def _attempt(
                 notes.not_asked[source] = "not asked (no server confirmed whether it's a movie or an episode)"
             elif client is None:
                 notes.not_asked[source] = "not asked (not set up)"
+            elif local and source in notes.unanswered:
+                # An earlier stage or attempt of this file's run asked it and got no answer to store (unavailable,
+                # blocked, paused for the show): asked again, it would hold this worker for the same answer. Its note
+                # stays, and the next job that runs the file asks.
+                pass
             elif _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 paused_until = _series_lookups_paused_until(ctx, source, lookup_ids, path)
@@ -2657,7 +3119,15 @@ def _attempt(
                     )
                 else:
                     phase(f"Looking up {_ONLINE_LABELS[source]}…")
-                    result = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
+                    result = _lookup(
+                        client,
+                        source,
+                        lookup_ids,
+                        rec,
+                        ctx,
+                        cancel_check,
+                        max_wait_s=WORKER_LOOKUP_WAIT_S if local else None,
+                    )
                     _note_series_answer(ctx, source, lookup_ids, path, result)
                     refusal = _job_wide_refusal(source, result)
                     if refusal is not None:
@@ -2682,6 +3152,9 @@ def _attempt(
                 notes.not_asked[source] = "doesn't apply to this file"
             elif not pending:
                 notes.not_asked[source] = "not needed (already decided)"
+                if not gather_all:
+                    answerable = frozenset(t for spec in here for t in spec.types & types)
+                    skipped_decided[source] = frozenset(t for t in answerable if _decided_beyond_chapters(decisions[t]))
             if pending and kept_everywhere is None:
                 kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, types)
             if pending and kept_everywhere:
@@ -2712,6 +3185,9 @@ def _attempt(
                     phase=phase,
                     cancel_check=cancel_check,
                     pause_check=pause_check,
+                    ffmpeg_threads=ffmpeg_threads,
+                    fallback_callback=fallback_callback,
+                    gpu_worker=gpu_worker,
                 )
                 if unanswered is None:
                     for stored in spec.stored_sources:
@@ -2742,11 +3218,16 @@ def _attempt(
             **decisions,
             **{t: TypeDecision(t, DecisionStatus.DISABLED, None, None, reason) for t in kept_own},
         }
+    decisions = _keep_published_before_rule_change(ctx, rec, decisions)
+    decisions = _carry_over(ctx, rec, servers, owners, decisions)
     fingerprint = ctx.settings.detection_fingerprint()
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
         ctx.note_answer_changed()
+    if ctx.store.version_rerun(rec.id, DECIDE_RULES) != DECIDE_RULES_VERSION:
+        # Decided under today's rules: only a start after they change lists it to be decided again (``markers.versions``).
+        ctx.store.record_version_reruns([(rec.canonical_path, DECIDE_RULES, DECIDE_RULES_VERSION)])
     if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)
@@ -2755,12 +3236,18 @@ def _attempt(
         raise _FileChangedError(path)
     replaced = existing is not None and not unchanged
     rows = []
+    # A worker holds a GPU or CPU worker previews need: when this job retries a write Plex's busy database refused, it
+    # waits for that database only briefly (the checking stage, holding no worker, waits as long as a job may).
+    brief_db_wait = local and ctx.may_promise_busy_retry(path)
     for owner in owners:
-        # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 120 s.
+        # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 120 s
+        # (``plex_db.WORKER_BUSY_TIMEOUT_S`` with brief_db_wait).
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
         with cancellable_waits(cancel_check):  # a cancelled job stops waiting for a busy database
-            row = _publish_to(owner, rec, markers, in_review, servers, ctx, phase, kept_own=kept_own)
+            row = _publish_to(
+                owner, rec, markers, in_review, servers, ctx, phase, kept_own=kept_own, brief_db_wait=brief_db_wait
+            )
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)
@@ -2776,7 +3263,7 @@ def _attempt(
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
     if is_budget_exhausted(skipped.get(Source.THEINTRODB, "")) and any(
-        decisions[t].status in _UNDECIDED for t in types
+        decisions[t].status in _UNDECIDED or is_carried_over(decisions[t].marker) for t in types
     ):
         with ctx._budget_lock:
             ctx._budget_rechecks.add(path)
@@ -2790,6 +3277,7 @@ _UNUSED_SERVER_MARKERS = {
     UNUSABLE_SERVER_MARKERS_DETAIL: "couldn't be used (unreadable, another cut, or its library hides a type in Plex)",
     PLUGINS_UNKNOWN_DETAIL: "not used (couldn't read its plugins)",
     OURS_SHOWN_DETAIL: "not used (read by an older version; it shows our markers now)",
+    OURS_ON_ITEM_DETAIL: "not used (read by an older version; its item may show our markers now)",
 }
 
 
@@ -2903,7 +3391,16 @@ def _run(
     phase_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
+    job_paused: Callable[[], bool] | None = None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
+    gpu_worker: bool = False,
 ) -> ItemOutcome | None:
+    """Run one stage of a file under its run lock (``check_item``, ``process_item``).
+
+    ``pause_check`` goes to the detectors (a worker's ``ctx.freeze_check``); ``job_paused`` is the dispatcher's pause
+    for the job, which only decides whether a worker waiting for another job's run of the file gives it back.
+    """
     if cancel_check and cancel_check():
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
     if is_extra(item.canonical_path):
@@ -2911,44 +3408,82 @@ def _run(
         # wait (and queue retries) for an item that never comes. Folder jobs and library listings both contain them.
         return ItemOutcome(FileOutcome.SKIPPED.value, EXTRAS_NOT_CHECKED)
     path = item.canonical_path
+    # A worker waiting for another job's run of the file gives it back with a retry (taken as it gives it back) after
+    # WORKER_FILE_WAIT_S, or at once while its own job is paused or frozen or the holder is frozen; with no retry left
+    # it waits on, for the next run, until the holder is frozen or WORKER_FILE_WAIT_NO_RETRY_S. A cancel ends any wait.
+    retried = False
+
+    def stop_waiting(waited_s: float) -> bool:
+        nonlocal retried
+        if cancel_check and cancel_check():
+            return True
+        if not local:
+            return False  # the check stage never waits (its ``wait_s`` is 0) and never takes a retry promise
+        holder_frozen = _holder_frozen(path)
+        paused = bool(job_paused and job_paused()) or bool(pause_check and pause_check())
+        if (waited_s >= WORKER_FILE_WAIT_S or paused or holder_frozen) and ctx.promise_busy_retry(path):
+            retried = True
+            return True
+        return holder_frozen or waited_s >= WORKER_FILE_WAIT_NO_RETRY_S
+
     for _ in range(MAX_ATTEMPTS):
         try:
-            with _PATH_LOCKS.hold(path), ctx._running(path):
-                skipped = ctx._pending_skips.pop(path, {})
-                notes = ctx._run_notes.pop(path, None) or RunNotes()
-                try:
-                    outcome = _attempt(
-                        item,
-                        ctx,
-                        local=local,
-                        gpu=gpu,
-                        gpu_device_path=gpu_device_path,
-                        phase=phase_callback or _no_phase,
-                        cancel_check=cancel_check,
-                        pause_check=pause_check,
-                        skipped=skipped,
-                        notes=notes,
-                    )
-                except BaseException:
-                    # A rerun goes on from here: the retry below after the file changed, or the worker's CPU rerun
-                    # after a GPU error; a forced run doesn't ask the sources it already asked again.
-                    if skipped:
-                        ctx._pending_skips[path] = skipped
-                    ctx._run_notes[path] = notes
-                    raise
-                if outcome is None:  # handed to a worker
-                    if skipped:
-                        ctx._pending_skips[path] = skipped
-                    ctx._run_notes[path] = notes
-                    return None
-                ctx._refreshed.pop(path, None)
-                _count_skipped(ctx, skipped)
-                return outcome
+            wait_s = None if local else 0.0
+            # The check stage is never frozen (``check_item``), so only a worker's run can hold a file frozen.
+            frozen = ctx.freeze_check if local else None
+            with _file_run_lock(path, wait_s=wait_s, stop=stop_waiting, frozen=frozen) as held:
+                if not held:
+                    if not local:
+                        logger.debug("{} is being run by another job; its worker stage runs it", path)
+                        return None
+                    _forget_run(ctx, path)
+                    if cancel_check and cancel_check():
+                        if retried:
+                            ctx.release_busy_retry(path)
+                        return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
+                    given_back = _run_by_another_job(item, ctx, retried=retried)
+                    if retried and given_back.outcome_key == FileOutcome.NO_OWNERS.value:
+                        ctx.release_busy_retry(path)  # nothing to publish for this job: no retry follows it
+                    return given_back
+                with ctx._running(path):
+                    skipped = ctx._pending_skips.pop(path, {})
+                    notes = ctx._run_notes.pop(path, None) or RunNotes()
+                    try:
+                        outcome = _attempt(
+                            item,
+                            ctx,
+                            local=local,
+                            gpu=gpu,
+                            gpu_device_path=gpu_device_path,
+                            phase=phase_callback or _no_phase,
+                            cancel_check=cancel_check,
+                            pause_check=pause_check,
+                            skipped=skipped,
+                            notes=notes,
+                            ffmpeg_threads=ffmpeg_threads,
+                            fallback_callback=fallback_callback,
+                            gpu_worker=gpu_worker,
+                        )
+                    except BaseException:
+                        # A rerun goes on from here: the retry below after the file changed, or the worker's CPU rerun
+                        # after a GPU error; a forced run doesn't ask the sources it already asked again.
+                        if skipped:
+                            ctx._pending_skips[path] = skipped
+                        ctx._run_notes[path] = notes
+                        raise
+                    if outcome is None:  # handed to a worker
+                        if skipped:
+                            ctx._pending_skips[path] = skipped
+                        ctx._run_notes[path] = notes
+                        return None
+                    ctx._refreshed.pop(path, None)
+                    ctx._answers_before.pop(path, None)
+                    _count_skipped(ctx, skipped)
+                    return outcome
         except _FileChangedError:
             logger.info("{} changed while its markers were detected; detecting again", path)
-    ctx._refreshed.pop(path, None)
-    ctx._pending_skips.pop(path, None)
-    ctx._run_notes.pop(path, None)
+            ctx._answers_before.pop(path, None)  # what the new file had stored is read again
+    _forget_run(ctx, path)
     return ItemOutcome(
         FileOutcome.FAILED.value, "The file kept changing while it was analysed; it will be tried again on the next run"
     )
@@ -2965,10 +3500,12 @@ def check_item(
         cancel_check: True once the job is cancelled.
 
     Returns:
-        The item's outcome, or None when a local detector that needs a worker has to run (send it to a worker). A
-        detector that doesn't need one runs here, unless another detector that has to run at the same source needs a
-        worker.
+        The item's outcome, or None when a local detector that needs a worker has to run, or another job is running the
+        file (send it to a worker, which waits for that run). A detector that doesn't need one runs here, unless
+        another detector that has to run at the same source needs a worker.
     """
+    # Never frozen here: the detectors that run on a checking thread are the cheap ones (a season step from cached
+    # fingerprints), and a job frozen by its schedule's stop time would otherwise keep checking threads other jobs need.
     return _run(item, ctx, local=False, cancel_check=cancel_check)
 
 
@@ -2982,10 +3519,18 @@ def process_item(
     phase_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
+    ffmpeg_threads: int | None = None,
+    fallback_callback: Callable[[str], None] | None = None,
+    gpu_worker: bool = False,
 ) -> ItemOutcome:
     """Worker stage: the same steps plus local detectors on the worker's GPU/CPU.
 
-    A paused job doesn't block here (that would hold a worker previews need); detectors receive ``pause_check``.
+    A job paused on its own doesn't block here: the running file finishes (holding a worker for it would keep previews
+    from it). Everything paused, or the job's schedule's stop time, freezes the detectors' running ffmpeg where it is,
+    as it freezes previews' (``ctx.freeze_check``). A file another job is running is waited for in slices a cancel
+    ends. It is given back for the job's retry (``FILE_BUSY``, the promise taken then) after ``WORKER_FILE_WAIT_S``, or
+    at once while this job is paused or frozen or the holder is frozen. With no retry to promise it is given back for
+    the next run at once when the holder is frozen, else after ``WORKER_FILE_WAIT_NO_RETRY_S``.
 
     Args:
         item: The file.
@@ -2995,7 +3540,13 @@ def process_item(
         progress_callback: Unused until detectors report progress.
         phase_callback: Shows the current step on the worker row.
         cancel_check: True once the job is cancelled.
-        pause_check: True while the job is paused.
+        pause_check: The dispatcher's pause for the job (its own pause included). Only a wait for another job's run of
+            the file uses it (``WORKER_FILE_WAIT_S``); the detectors get ``ctx.freeze_check`` instead.
+        ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (its GPU's ``gpu_config`` entry); None on a CPU worker
+            and for a GPU worker's CPU rerun, which leave ffmpeg its own thread count, as previews do.
+        fallback_callback: Shows on the worker's row that a step fell back from the GPU to the CPU inside a detector.
+        gpu_worker: Whether a GPU worker runs the file, its CPU rerun included (``gpu`` None): CPU text detection it
+            asks for then is its own, not one of the CPU workers' (``TextDetectorPool.detect_boxes``).
 
     Returns:
         The item's outcome.
@@ -3008,7 +3559,11 @@ def process_item(
         gpu_device_path=gpu_device_path,
         phase_callback=phase_callback,
         cancel_check=cancel_check,
-        pause_check=pause_check,
+        pause_check=ctx.freeze_check,
+        job_paused=pause_check,
+        ffmpeg_threads=ffmpeg_threads,
+        fallback_callback=fallback_callback,
+        gpu_worker=gpu_worker,
     )
 
 

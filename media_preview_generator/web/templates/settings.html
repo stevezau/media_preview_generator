@@ -162,7 +162,9 @@
                     </div>
                     <div class="form-text">
                         When the server restarts, automatically re-queue any jobs that were running or waiting.
-                        Only jobs created within the configured time window are requeued; older jobs are left as-is.
+                        Only jobs created within the configured time window are requeued; older ones are marked failed,
+                        unless processing is paused, when they wait for Resume. With this off, interrupted jobs are
+                        marked failed. Use Reprocess to run one again.
                     </div>
                 </div>
 
@@ -563,7 +565,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: SkipDB</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only answers matched to the length of your file are used. Intros 16 of 43 right on a verified set, so it mostly serves as a second opinion."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only answers matched to the length of your file are used. Intros 16 of 43 right on a verified set, so it only counts once another source agrees."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Free lookups · matched to your file's length</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -632,9 +634,9 @@
                             published once an independent source agrees with it: on-screen credits, season audio,
                             another database, or a server's own marker (IntroDB and TheIntroDB count as one). A single
                             answer decides alone only when it checks your own file: on-screen credit text for credits,
-                            season audio for intros (so a show no online database has still gets them), or SkipDB
-                            matched to your file's length for intros and recaps. If sources disagree, or the
-                            only answer can't decide alone, the file goes to Needs review so you can pick.
+                            or season audio for intros (so a show no online database has still gets them). If
+                            sources disagree, or the only answer can't decide alone, the file goes to Needs review so
+                            you can pick.
                         </p>
                     </div>
                 </div>
