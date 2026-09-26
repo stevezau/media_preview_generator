@@ -2084,6 +2084,26 @@ class TestChapterMarkers:
         assert server.get_chapter_markers("42") == [{"marker_type": "IntroEnd", "start_ms": 2, "name": "ok"}]
 
 
+class TestRuntime:
+    """``get_runtime_ms``: the Inspector's timeline scale for a file whose own length isn't stored yet."""
+
+    def test_ticks_become_milliseconds(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value={"RunTimeTicks": 13_220_004_999})
+        assert server.get_runtime_ms("42") == 1_322_000
+        server._fetch_item_fields.assert_called_once_with("42", "Path")
+
+    @pytest.mark.parametrize(
+        "item",
+        [None, {}, {"RunTimeTicks": None}, {"RunTimeTicks": 0}, {"RunTimeTicks": "123"}, {"RunTimeTicks": True}],
+        ids=["unfetched", "missing", "null", "zero", "text", "bool"],
+    )
+    def test_no_usable_length_is_none(self, make_server, item):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=item)
+        assert server.get_runtime_ms("42") is None
+
+
 def _json_resp(status, body=None, *, json_error=False):
     resp = MagicMock(status_code=status)
     if json_error:

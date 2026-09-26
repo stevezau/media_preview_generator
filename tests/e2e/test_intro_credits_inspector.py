@@ -205,6 +205,32 @@ def not_checked() -> dict:
     }
 
 
+_ACCUSED_LENGTH = 2_640_000  # 44:00, as Plex reports the item: no job has read the file's own length
+
+
+def _shown(mtype: str, start: int, end: int | None, *, ours: bool = False, stale: bool = False) -> dict:
+    return {"type": mtype, "start_ms": start, "end_ms": end, "ours": ours, "stale": stale}
+
+
+def not_checked_with_plex_markers(*, stale_credits: bool = False, keeps: bool = True) -> dict:
+    """The approved mockup: Accused S04E05, never checked, while Plex already shows its own intro and credits."""
+    payload = not_checked()
+    payload["servers"] = [
+        _server(
+            "plex-1",
+            "Plex",
+            "plex",
+            "nothing_to_publish",
+            [_shown("intro", 41_000, 72_000), _shown("credits", 2_508_000, 2_590_000, stale=stale_credits)],
+            duration_ms=_ACCUSED_LENGTH,
+            keeps_server_markers=keeps,
+            version_count=1,
+        ),
+        _server("jf-1", "Jellyfin", "jellyfin", "nothing_to_publish", [], duration_ms=None),
+    ]
+    return payload
+
+
 def every_plan() -> dict:
     payload = south_park()
     intro_now = [_marker("intro", 11_000, 37_000)]
@@ -710,9 +736,16 @@ class TestIntroCreditsTab:
         inspector.open_result()
         page = inspector.open_tab()
 
-        expect(page.locator("#markersInspectorBody")).to_contain_text("Not checked yet")
+        box = page.locator(".mk-not-checked")
+        expect(box.locator("strong")).to_have_text("Not checked by Intro & Credits yet")
+        expect(box.locator(".mk-already")).to_have_text(["No server shows intro or credits markers for this file yet"])
+        expect(box.locator(".mk-not-checked-next")).to_have_text("Re-detect checks it now.")
+        # Nothing shown anywhere: no length was read and there is nothing to draw.
         expect(page.locator(".mk-window")).to_have_count(0)
-        expect(_server_card(page, "plex-1").locator(".mk-plan")).to_have_text("Nothing to send yet")
+        expect(page.locator(".mk-shown-legend")).to_have_count(0)
+        plex = _server_card(page, "plex-1")
+        expect(plex.locator(".mk-plan")).to_have_text("Nothing to send yet")
+        expect(plex.locator(".mk-shows-now")).to_have_text("Shows now: nothing")
         button = page.locator("#markersRedetectBtn")
         expect(button).to_be_enabled()
 
@@ -756,6 +789,245 @@ class TestIntroCreditsTab:
         expect(_lane(page, "opening", "Unreadable now")).to_contain_text("Couldn't read what the server shows")
         expect(_lane(page, "opening", "Broken now")).to_contain_text("Couldn't read what the server shows")
         expect(_server_card(page, "s-broken").locator(".mk-error")).to_be_visible()
+
+
+_GREY = "rgb(154, 160, 166)"
+
+
+def _background(locator) -> tuple[str, str]:
+    return tuple(locator.evaluate("n => [getComputedStyle(n).backgroundColor, getComputedStyle(n).backgroundImage]"))
+
+
+@pytest.mark.e2e
+class TestWhatServersShowNow:
+    """What each server shows today, for a file no job has looked at, and on every card of a checked one."""
+
+    def test_unchecked_file_lists_plexs_markers_and_draws_them_grey(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, not_checked_with_plex_markers())
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        box = page.locator(".mk-not-checked")
+        expect(box.locator("strong")).to_have_text("Not checked by Intro & Credits yet")
+        # Jellyfin shows nothing, so the box has no line for it.
+        expect(box.locator(".mk-already")).to_have_text(["Plex already has: intro 0:41–1:12 · credits 41:48–43:10"])
+        expect(box.locator(".mk-not-checked-next")).to_have_text(
+            "Re-detect checks it now. With “Keep Plex's” on, Plex's markers stay as they are."
+        )
+        # Nothing labels them ours or stale, so no (i) is needed there.
+        expect(box.locator(".info-icon")).to_have_count(0)
+
+        # Scaled to the 44:00 Plex reports: the opening and the last three minutes.
+        windows = page.locator(".mk-window")
+        expect(windows).to_have_count(2)
+        expect(windows.nth(0).locator(".mk-window-title")).to_have_text("Opening · 0:00 – 3:00")
+        expect(windows.nth(1).locator(".mk-window-title")).to_have_text("Ending · 41:00 – 44:00 (end of file)")
+        # Nothing was decided, so there is no Decision lane to read the grey bars as ours.
+        expect(page.locator(".mk-lane-decision")).to_have_count(0)
+        intro = _lane(page, "opening", "Plex now").locator(".mk-bar")
+        expect(intro).to_have_count(1)
+        expect(intro).to_have_text("Intro 0:41–1:12")
+        expect(intro).to_have_attribute("title", "Plex shows today: Intro 0:41–1:12")
+        expect(intro).to_have_class(re.compile(r"\bmk-bar-server\b"))
+        style = intro.get_attribute("style") or ""
+        assert "left: 22.778%" in style and "width: 17.222%" in style, style
+        assert _background(intro) == (_GREY, "none")
+        credits = _lane(page, "ending", "Plex now").locator(".mk-bar")
+        expect(credits).to_have_text("Credits 41:48–43:10")
+        expect(credits).not_to_have_class(re.compile(r"\bmk-bar-stale\b"))
+        expect(_lane(page, "opening", "Jellyfin now")).to_contain_text("none yet")
+        expect(page.locator(".mk-shown-legend")).to_have_text(
+            re.compile(r"^Grey: what each server shows today, not a decision\.$")
+        )
+
+        expect(_server_card(page, "plex-1").locator(".mk-shows-now")).to_have_text(
+            "Shows now: intro 0:41–1:12 · credits 41:48–43:10"
+        )
+        expect(_server_card(page, "jf-1").locator(".mk-shows-now")).to_have_text("Shows now: nothing")
+        # The editor still needs the file's own length: Plex's is only for drawing what Plex shows.
+        expect(page.locator("#markersAdjustBtn")).to_have_attribute("aria-disabled", "true")
+
+    def test_a_plex_marker_made_for_an_earlier_file_is_labelled_and_hatched(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, not_checked_with_plex_markers(stale_credits=True))
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        box = page.locator(".mk-not-checked")
+        line = box.locator(".mk-already")
+        expect(line).to_have_text("Plex already has: intro 0:41–1:12 · credits 41:48–43:10 (made for an earlier file)")
+        assert "Plex keeps an item's markers when its file is replaced" in (_tooltip(line.locator(".info-icon")) or "")
+        # Keep Plex's keeps only the intro: the job reads the file for credits made for an earlier file.
+        expect(box.locator(".mk-not-checked-next")).to_have_text(
+            "Re-detect checks it now. With “Keep Plex's” on, Plex's intro marker stays as it is."
+        )
+
+        credits = _lane(page, "ending", "Plex now").locator(".mk-bar")
+        expect(credits).to_have_class(re.compile(r"\bmk-bar-stale\b"))
+        expect(credits).to_have_attribute("title", "Plex shows today: Credits 41:48–43:10 (made for an earlier file)")
+        color, image = _background(credits)
+        assert color == _GREY and image.startswith("repeating-linear-gradient"), (color, image)
+        expect(_lane(page, "opening", "Plex now").locator(".mk-bar")).not_to_have_class(re.compile(r"\bmk-bar-stale\b"))
+        expect(page.locator(".mk-shown-legend")).to_contain_text("Hatched: made for an earlier file.")
+
+        card_line = _server_card(page, "plex-1").locator(".mk-shows-now")
+        expect(card_line).to_have_text("Shows now: intro 0:41–1:12 · credits 41:48–43:10 (made for an earlier file)")
+        expect(card_line.locator(".info-icon")).to_have_count(1)
+
+    @pytest.mark.parametrize(
+        ("server", "already", "next_line"),
+        [
+            (
+                {"keeps_server_markers": False},
+                "Plex already has: intro 0:41–1:12 · credits 41:48–43:10",
+                "Re-detect checks it now.",
+            ),
+            (
+                # Intro & Credits off there: no job touches it, whatever the setting says.
+                {"markers_enabled": False, "plan": "not_enabled"},
+                "Plex already has: intro 0:41–1:12 · credits 41:48–43:10",
+                "Re-detect checks it now.",
+            ),
+            (
+                {
+                    "server_name": "Living room",
+                    "server_type": "emby",
+                    "current": [_shown("intro", 41_000, 72_000), _shown("credits", 2_508_000, None)],
+                },
+                "Living room already has: intro 0:41–1:12 · credits 41:48–end",
+                "Re-detect checks it now. With “Keep Emby's” on, Living room's markers stay as they are.",
+            ),
+            (
+                # Ours, sent for another version of the item: "Keep Plex's" never keeps ours.
+                {"current": [_shown("intro", 41_000, 72_000, ours=True)]},
+                "Plex shows our intro 0:41–1:12",
+                "Re-detect checks it now.",
+            ),
+        ],
+        ids=["plex-uses-ours", "plex-off", "emby-keeps", "ours"],
+    )
+    def test_the_box_names_the_server_whose_setting_keeps_its_markers(
+        self, authed_page: Page, app_url: str, server: dict, already: str, next_line: str
+    ) -> None:
+        payload = not_checked_with_plex_markers()
+        payload["servers"][0].update(server)
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        box = page.locator(".mk-not-checked")
+        expect(box.locator(".mk-already")).to_have_text([already])
+        expect(box.locator(".mk-not-checked-next")).to_have_text(next_line)
+
+    def test_our_marker_on_an_unchecked_file_says_so(self, authed_page: Page, app_url: str) -> None:
+        payload = not_checked_with_plex_markers()
+        payload["servers"][0]["current"] = [_shown("intro", 41_000, 72_000, ours=True)]
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        line = page.locator(".mk-not-checked .mk-already")
+        expect(line).to_have_text("Plex shows our intro 0:41–1:12")
+        assert "ones this app sent to the server earlier" in (_tooltip(line.locator(".info-icon")) or "")
+        expect(_lane(page, "opening", "Plex now").locator(".mk-bar")).to_have_attribute(
+            "title", "Plex shows today: Intro 0:41–1:12 · ours"
+        )
+        expect(_server_card(page, "plex-1").locator(".mk-shows-now")).to_have_text("Shows now: our intro 0:41–1:12")
+
+    def test_markers_without_a_length_anywhere_are_listed_without_a_timeline(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        payload = not_checked_with_plex_markers()
+        payload["servers"][0]["duration_ms"] = None
+        payload["servers"][0]["current"][1]["end_ms"] = None  # Plex's credits run out the file
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator(".mk-not-checked .mk-already")).to_have_text(
+            "Plex already has: intro 0:41–1:12 · credits 41:48–end"
+        )
+        expect(page.locator(".mk-window")).to_have_count(0)
+        expect(page.locator(".mk-shown-legend")).to_have_count(0)
+        expect(_server_card(page, "plex-1").locator(".mk-shows-now")).to_have_text(
+            "Shows now: intro 0:41–1:12 · credits 41:48–end"
+        )
+
+    def test_a_server_that_couldnt_be_read_doesnt_let_the_box_say_there_are_none(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        payload = not_checked()
+        payload["servers"] = [
+            _server("plex-1", "Plex", "plex", "unknown", None),
+            _server("jf-1", "Jellyfin", "jellyfin", "nothing_to_publish", []),
+        ]
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator(".mk-not-checked .mk-already")).to_have_count(0)
+        expect(page.locator(".mk-not-checked .mk-not-checked-next")).to_have_text("Re-detect checks it now.")
+        expect(_server_card(page, "plex-1").locator(".mk-shows-now")).to_have_text(
+            "Couldn't read what the server shows"
+        )
+        expect(_server_card(page, "jf-1").locator(".mk-shows-now")).to_have_text("Shows now: nothing")
+
+    def test_every_card_of_a_checked_file_says_what_it_shows_now(self, authed_page: Page, app_url: str) -> None:
+        payload = every_plan()
+        payload["servers"] += [
+            # The credits already match the decision, so only the intro has a "from → to" line.
+            _server(
+                "s-replace-more",
+                "Replaces more",
+                "plex",
+                "will_replace",
+                [_marker("intro", 76_508, 112_748), _marker("credits", 1_299_000, None)],
+            ),
+            _server(
+                "s-replace-stale",
+                "Stale",
+                "plex",
+                "will_replace",
+                [_shown("intro", 76_508, 112_748, stale=True)],
+            ),
+            _server(
+                "s-ours",
+                "Ours",
+                "jellyfin",
+                "up_to_date",
+                [_shown("intro", 11_000, 37_000, ours=True), _shown("credits", 1_299_000, _DURATION, ours=True)],
+            ),
+        ]
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expected = {
+            "s-add": "Shows now: nothing",
+            "s-keep": "Shows now: intro 0:11–0:37 · credits 20:50–21:20",
+            "s-remove": "Shows now: intro 0:11–0:37",
+            "s-same": "Shows now: intro 0:11–0:37 · credits 21:39–end",
+            "s-wait": "Shows now: nothing",
+            "s-unread": "Couldn't read what the server shows",
+            "s-off": "Shows now: nothing",
+            "s-nothing": "Shows now: nothing",
+            "s-failed": "Shows now: nothing",
+            "s-replace-more": "Shows now: intro 1:16–1:52 · credits 21:39–end",
+            "s-replace-stale": "Shows now: intro 1:16–1:52 (made for an earlier file)",
+            "s-ours": "Shows now: our intro 0:11–0:37 · our credits 21:39–end",
+        }
+        for server_id, text in expected.items():
+            expect(_server_card(page, server_id).locator(".mk-shows-now")).to_have_text(text)
+        # The "from → to" lines already say everything s-replace shows; a broken row says why in its error instead.
+        expect(_server_card(page, "s-replace").locator(".mk-shows-now")).to_have_count(0)
+        expect(_server_card(page, "s-replace").locator(".mk-line").first).to_have_text("Intro 1:16–1:52 → 0:11–0:37")
+        expect(_server_card(page, "s-broken").locator(".mk-shows-now")).to_have_count(0)
+        expect(_server_card(page, "s-replace-more")).to_contain_text("Intro 1:16–1:52 → 0:11–0:37")
+        # The checked file's own "now" lane hatches Plex's stale marker too.
+        stale_bar = _lane(page, "opening", "Stale now").locator(".mk-bar")
+        expect(stale_bar).to_have_class(re.compile(r"\bmk-bar-evidence\b.*\bmk-bar-stale\b"))
+        expect(stale_bar).to_have_attribute("title", "1:16–1:52 (made for an earlier file)")
 
 
 @pytest.mark.e2e

@@ -628,6 +628,22 @@ class EmbyApiClient(MediaServer):
         item = self._fetch_item_fields(item_id, "Chapters", raise_no_answer=raise_no_answer)
         return None if item is None else _chapter_rows(item)
 
+    def get_runtime_ms(self, item_id: str) -> int | None:
+        """The item's length, from the ``RunTimeTicks`` every item answer carries (100 ns ticks).
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            Milliseconds, or None when the item couldn't be fetched or has no length yet.
+        """
+        # "Path" only because both servers need a valid field to ask for; the length comes with any item answer.
+        item = self._fetch_item_fields(item_id, "Path")
+        ticks = item.get("RunTimeTicks") if item else None
+        if isinstance(ticks, bool) or not isinstance(ticks, int) or ticks <= 0:
+            return None
+        return ticks // 10_000
+
     def get_chapters_and_versions(
         self, item_id: str
     ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None]]] | None:

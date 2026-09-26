@@ -67,6 +67,13 @@
     const VENDOR_TILES = { plex: 'P', jellyfin: 'J', emby: 'E' };
     const VENDOR_NAMES = { plex: 'Plex', jellyfin: 'Jellyfin', emby: 'Emby' };
     const CANT_READ = 'Couldn\'t read what the server shows';
+    // A server's own markers are labelled for what they are (markers.inspect: each "current" marker's ours / stale).
+    const STALE_NOTE = '(made for an earlier file)';
+    const STALE_TIP = 'Plex keeps an item\'s markers when its file is replaced, so these were made for an earlier file '
+        + 'and may not fit this one. Re-detect checks the file itself.';
+    const OURS_TIP = '“Our” markers are ones this app sent to the server earlier.';
+    const GREY_TIP = 'Nothing has been decided for this file yet, so the timeline shows only the markers your servers '
+        + 'already have, read from them just now. They are not something this app found.';
 
     // --- editor constants -------------------------------------------------
     // Only these two types can be told to run to the end of the file; an intro or recap that does is a mis-detection.
@@ -188,6 +195,34 @@
         return toEnd(seg, duration) ? `${clock(seg.start_ms)}–end` : `${clock(seg.start_ms)}–${clock(segmentEnd(seg, duration))}`;
     }
 
+    // A server's marker with no end (Plex's credits that run out the file, every Emby credits) runs to the end,
+    // whether or not the file's length is known here.
+    function shownRange(seg, duration) {
+        if (seg.end_ms === null || seg.end_ms === undefined) return `${clock(seg.start_ms)}–end`;
+        return cardRange(seg, duration);
+    }
+
+    // "intro 0:41–1:12 · credits 41:48–end", with "our intro …" for one this app sent and "… (made for an earlier
+    // file)" for a Plex marker left from the file this one replaced.
+    function shownMarkers(markers, duration) {
+        return markers.slice().sort(function (a, b) { return a.start_ms - b.start_ms; }).map(function (m) {
+            const type = TYPE_WORDS[m.type] || m.type;
+            return `${m.ours ? 'our ' : ''}${type} ${shownRange(m, duration)}${m.stale ? ' ' + STALE_NOTE : ''}`;
+        }).join(' · ');
+    }
+
+    function serverName(server) {
+        return server.server_name || VENDOR_NAMES[String(server.server_type || '').toLowerCase()] || 'Server';
+    }
+
+    // The (i) for a line that calls markers ours or made for an earlier file; null when it calls them neither.
+    function labelTip(markers) {
+        const tips = [];
+        if (markers.some(function (m) { return m.stale; })) tips.push(STALE_TIP);
+        if (markers.some(function (m) { return m.ours; })) tips.push(OURS_TIP);
+        return tips.length ? infoIcon(tips.join(' ')) : null;
+    }
+
     function decidedMarker(payload, type) {
         const d = (payload.decisions || {})[type];
         return d && d.status === 'decided' && d.marker ? d.marker : null;
@@ -203,30 +238,34 @@
     // Two zoom windows: the first and last three minutes, widened to whole minutes when a decision reaches past them
     // (movie credits often start well before the last three minutes). Movies have no opening window.
     function windowsFor(payload) {
-        const duration = payload.duration_ms;
+        return zoomWindows(payload.duration_ms, payload.is_movie, function (type) {
+            const d = (payload.decisions || {})[type] || {};
+            const seg = d.marker || (d.status === 'needs_review' ? d.proposed : null);
+            return seg ? [seg] : [];
+        });
+    }
+
+    // The windows over `duration`, widened for every segment `segmentsFor(type)` gives of the types each one shows.
+    function zoomWindows(duration, isMovie, segmentsFor) {
         if (!duration) return [];
         const windows = [];
-        const segmentFor = function (type) {
-            const d = (payload.decisions || {})[type] || {};
-            return d.marker || (d.status === 'needs_review' ? d.proposed : null);
-        };
-        if (!payload.is_movie) {
+        if (!isMovie) {
             let end = Math.min(duration, WINDOW_MS);
             START_SEGMENTS.forEach(function (type) {
-                const seg = segmentFor(type);
-                if (seg) {
+                segmentsFor(type).forEach(function (seg) {
                     const widened = Math.ceil((segmentEnd(seg, duration) + LEAD_MS) / MINUTE_MS) * MINUTE_MS;
                     end = Math.max(end, Math.min(duration, widened));
-                }
+                });
             });
             windows.push({ id: 'opening', title: 'Opening', start: 0, end: end, types: START_SEGMENTS, endOfFile: false });
         }
         let start = Math.max(0, duration - WINDOW_MS);
         ['credits', 'preview'].forEach(function (type) {
-            const seg = segmentFor(type);
-            if (seg && seg.start_ms - LEAD_MS < start) {
-                start = Math.max(0, Math.floor((seg.start_ms - LEAD_MS) / MINUTE_MS) * MINUTE_MS);
-            }
+            segmentsFor(type).forEach(function (seg) {
+                if (seg.start_ms - LEAD_MS < start) {
+                    start = Math.max(0, Math.floor((seg.start_ms - LEAD_MS) / MINUTE_MS) * MINUTE_MS);
+                }
+            });
         });
         windows.push({ id: 'ending', title: 'Ending', start: start, end: duration, types: ['credits', 'preview'], endOfFile: true });
         return windows;
@@ -271,19 +310,27 @@
     }
 
     // One evidence or "now" lane: bars inside the window, a note for segments outside it, ✕ when a segment of a
-    // decided type isn't within tolerance of the decision.
-    function segmentLane(name, segments, win, payload, emptyText) {
-        const duration = payload.duration_ms;
+    // decided type isn't within tolerance of the decision. `look` draws a server's markers on a file nothing was
+    // decided for: {duration: the length the server reports, owner: the server's name}, as grey bars named by type.
+    function segmentLane(name, segments, win, payload, emptyText, look) {
+        const duration = (look && look.duration) || payload.duration_ms;
         const l = lane(name);
         const outside = [];
         let disagree = false;
         segments.forEach(function (seg) {
             const marker = decidedMarker(payload, seg.type);
             if (marker && !agrees(seg, marker, duration)) disagree = true;
-            const label = laneRange(seg, duration) + (COUNTED_SOURCES.indexOf(seg.source) !== -1 && seg.label ? ' · ' + seg.label : '');
-            const node = bar(seg, win, duration, 'mk-bar-evidence', label);
-            if (node) l.track.appendChild(node);
-            else outside.push(label);
+            const typed = look ? `${TYPE_LABELS[seg.type] || seg.type} ` : '';
+            const label = typed + laneRange(seg, duration) + (COUNTED_SOURCES.indexOf(seg.source) !== -1 && seg.label ? ' · ' + seg.label : '');
+            const className = (look ? 'mk-bar-server' : 'mk-bar-evidence') + (seg.stale ? ' mk-bar-stale' : '');
+            const node = bar(seg, win, duration, className, label);
+            if (node) {
+                const said = (seg.ours ? ' · ours' : '') + (seg.stale ? ' ' + STALE_NOTE : '');
+                node.title = (look ? `${look.owner} shows today: ` : '') + node.title + said;
+                l.track.appendChild(node);
+            } else {
+                outside.push(label + (seg.stale ? ' ' + STALE_NOTE : ''));
+            }
         });
         if (!segments.length) note(l.track, emptyText);
         if (outside.length) note(l.track, outside.join(', ') + ' · outside this view');
@@ -362,7 +409,8 @@
         return wrap;
     }
 
-    function renderWindow(win, payload) {
+    // A zoom window's card, header and time axis; the caller fills `zoom` with its lanes.
+    function windowFrame(win) {
         const card = el('div', 'card mk-window');
         card.dataset.window = win.id;
         const header = el('div', 'card-header py-2 d-flex align-items-center');
@@ -377,7 +425,28 @@
             tick.style.left = (i * 100 / 3).toFixed(3) + '%';
             axis.appendChild(tick);
         }
-        zoom.append(axis, decisionLane(win, payload));
+        zoom.appendChild(axis);
+        scroll.appendChild(zoom);
+        card.append(header, scroll);
+        return { card: card, zoom: zoom };
+    }
+
+    // One server's "now" lane: what it shows in this window, or that it couldn't be read.
+    function nowLane(server, win, payload, look) {
+        const name = `${server.server_name || server.server_type || 'Server'} now`;
+        if (!Array.isArray(server.current)) {
+            const l = lane(name);
+            note(l.track, CANT_READ);
+            return l.row;
+        }
+        const segments = server.current.filter(function (c) { return win.types.indexOf(c.type) !== -1; });
+        return segmentLane(name, segments, win, payload, 'none yet', look);
+    }
+
+    function renderWindow(win, payload) {
+        const frame = windowFrame(win);
+        const zoom = frame.zoom;
+        zoom.appendChild(decisionLane(win, payload));
         if (editing) {
             const adds = win.types.filter(function (type) { return !editing.model[type]; });
             if (adds.length) zoom.appendChild(addButtons(adds, payload));
@@ -403,15 +472,7 @@
         });
 
         (payload.servers || []).forEach(function (server) {
-            const name = `${server.server_name || server.server_type || 'Server'} now`;
-            if (!Array.isArray(server.current)) {
-                const l = lane(name);
-                note(l.track, CANT_READ);
-                zoom.appendChild(l.row);
-                return;
-            }
-            const segments = server.current.filter(function (c) { return win.types.indexOf(c.type) !== -1; });
-            zoom.appendChild(segmentLane(name, segments, win, payload, 'none yet'));
+            zoom.appendChild(nowLane(server, win, payload));
         });
 
         (win.types).forEach(function (type) {
@@ -433,9 +494,91 @@
                 zoom.appendChild(line);
             });
         }
-        scroll.appendChild(zoom);
-        card.append(header, scroll);
-        return card;
+        return frame.card;
+    }
+
+    // The length an unchecked file's timeline is drawn to: the longest its servers report, so every marker fits. No
+    // job has read the file's own yet, and a server reports one only when it shows markers to draw.
+    function reportedDuration(payload) {
+        return (payload.servers || []).reduce(function (longest, s) { return Math.max(longest, s.duration_ms || 0); }, 0) || null;
+    }
+
+    // A file no job has looked at: the same two zoom windows, holding only what each server shows today, as grey
+    // read-only bars. No length anywhere means no timeline; the box above still lists the markers.
+    function shownTimeline(payload) {
+        const duration = reportedDuration(payload);
+        const servers = payload.servers || [];
+        const shownOf = function (type) {
+            const out = [];
+            servers.forEach(function (s) {
+                (Array.isArray(s.current) ? s.current : []).forEach(function (c) { if (c.type === type) out.push(c); });
+            });
+            return out;
+        };
+        const parts = zoomWindows(duration, false, shownOf).map(function (win) {
+            const frame = windowFrame(win);
+            frame.card.classList.add('mk-window-shown');
+            servers.forEach(function (server) {
+                frame.zoom.appendChild(nowLane(server, win, payload, { duration: duration, owner: serverName(server) }));
+            });
+            return frame.card;
+        });
+        if (!parts.length) return parts;
+        const legend = el('div', 'small text-muted mb-3 d-flex align-items-center flex-wrap gap-1 mk-shown-legend');
+        legend.appendChild(el('span', 'mk-swatch mk-bar-server'));
+        legend.appendChild(el('span', 'me-2', 'Grey: what each server shows today, not a decision.'));
+        const stale = servers.some(function (s) {
+            return Array.isArray(s.current) && s.current.some(function (c) { return c.stale; });
+        });
+        if (stale) {
+            legend.appendChild(el('span', 'mk-swatch mk-bar-server mk-bar-stale'));
+            legend.appendChild(el('span', '', 'Hatched: made for an earlier file.'));
+        }
+        legend.appendChild(infoIcon(GREY_TIP));
+        parts.push(legend);
+        return parts;
+    }
+
+    // "Keep Plex's" / "Keep Emby's" leaves a server's own markers where they are, said only of a server with Intro &
+    // Credits on (one that's off is never touched) and of markers that setting keeps: not ours, and not ones made for
+    // an earlier file, which the job reads the file for instead.
+    function keepNote(server) {
+        if (!server.keeps_server_markers || !server.markers_enabled) return '';
+        const own = server.current.filter(function (m) { return !m.ours; });
+        const kept = own.filter(function (m) { return !m.stale; });
+        if (!kept.length) return '';
+        const vendor = VENDOR_NAMES[String(server.server_type || '').toLowerCase()] || serverName(server);
+        const lead = `With “Keep ${vendor}'s” on, ${serverName(server)}'s`;
+        if (kept.length === own.length) return `${lead} markers stay as they are.`;
+        const types = kept.map(function (m) { return TYPE_WORDS[m.type] || m.type; })
+            .filter(function (t, i, all) { return all.indexOf(t) === i; });
+        return `${lead} ${joinWith(types, 'and')} ${kept.length === 1 ? 'marker stays as it is' : 'markers stay as they are'}.`;
+    }
+
+    // A file no job has looked at still has whatever its servers show: one line per server that shows markers, so
+    // "not checked" never reads as "nothing there".
+    function notCheckedBox(payload) {
+        const box = el('div', 'alert alert-secondary py-2 mk-not-checked');
+        box.appendChild(el('strong', '', 'Not checked by Intro & Credits yet'));
+        const servers = payload.servers || [];
+        const showing = servers.filter(function (s) { return Array.isArray(s.current) && s.current.length; });
+        showing.forEach(function (server) {
+            const own = server.current.some(function (m) { return !m.ours; });
+            const line = el('div', 'small mk-already');
+            line.dataset.serverId = server.server_id || '';
+            const says = `${serverName(server)} ${own ? 'already has:' : 'shows'} ${shownMarkers(server.current, server.duration_ms)}`;
+            line.appendChild(el('span', '', says));
+            const tip = labelTip(server.current);
+            if (tip) line.appendChild(tip);
+            box.appendChild(line);
+        });
+        // Only when every server was read: one that couldn't be may have markers (its card says so).
+        if (!showing.length && servers.every(function (s) { return Array.isArray(s.current); })) {
+            box.appendChild(el('div', 'small mk-already', 'No server shows intro or credits markers for this file yet'));
+        }
+        const next = ['Re-detect checks it now.'].concat(showing.map(keepNote).filter(Boolean));
+        box.appendChild(el('div', 'small mk-not-checked-next', next.join(' ')));
+        return box;
     }
 
     function renderChips(payload) {
@@ -469,35 +612,71 @@
         return chips;
     }
 
-    function serverLines(server, payload) {
-        const duration = payload.duration_ms;
+    function wantedOn(server, payload) {
         const canShow = server.can_show || [];
-        const wanted = TYPES.map(function (type) { return decidedMarker(payload, type); })
+        return TYPES.map(function (type) { return decidedMarker(payload, type); })
             .filter(function (m) { return m && canShow.indexOf(m.type) !== -1; })
             .sort(function (a, b) { return a.start_ms - b.start_ms; });
+    }
+
+    // Will replace: "Intro 1:16–1:52 → 0:11–0:37" per decided type the server shows differently, and the markers
+    // those lines name as the "from" (`stated`), so the card needn't list them again.
+    function replacements(server, payload) {
+        const duration = payload.duration_ms;
+        const current = Array.isArray(server.current) ? server.current : [];
+        const lines = [];
+        const stated = [];
+        wantedOn(server, payload).forEach(function (m) {
+            const now = current.filter(function (c) { return c.type === m.type; });
+            const same = now.length === 1 && Math.abs(now[0].start_ms - m.start_ms) <= 1000
+                && Math.abs(segmentEnd(now[0], duration) - segmentEnd(m, duration)) <= 1000;
+            if (same) return;
+            let from = '(none)';
+            if (now.length === 1) {
+                from = cardRange(now[0], duration);
+                stated.push(now[0]);
+            } else if (now.length > 1) {
+                from = `(${now.length} markers)`;
+            }
+            lines.push(`${TYPE_LABELS[m.type]} ${from} → ${cardRange(m, duration)}`);
+        });
+        return { lines: lines, stated: stated };
+    }
+
+    // "Shows now: …" on every card, whatever the plan: what the server shows viewers today. Left out only where the
+    // Will replace lines already name every marker it shows, with nothing to label. A server that couldn't be read
+    // says so instead (or its row's error does).
+    function showsNowLine(server, payload) {
         const current = Array.isArray(server.current) ? server.current : null;
+        if (current === null) return server.error ? null : el('div', 'small text-muted mk-line mk-shows-now', CANT_READ);
+        if (server.plan === 'will_replace' && current.length) {
+            const stated = replacements(server, payload).stated;
+            const said = current.every(function (c) { return stated.indexOf(c) !== -1 && !c.ours && !c.stale; });
+            if (said) return null;
+        }
+        const line = el('div', 'small text-muted mk-line mk-shows-now');
+        const duration = payload.duration_ms || server.duration_ms;
+        line.appendChild(el('span', '', `Shows now: ${current.length ? shownMarkers(current, duration) : 'nothing'}`));
+        const tip = labelTip(current);
+        if (tip) line.appendChild(tip);
+        return line;
+    }
+
+    function serverLines(server, payload) {
+        const duration = payload.duration_ms;
+        const wanted = wantedOn(server, payload);
         const lines = [];
         const listed = function (markers) {
             return markers.map(function (m) { return `${TYPE_LABELS[m.type] || m.type} ${cardRange(m, duration)}`; }).join(' · ');
         };
         if (server.plan === 'will_replace') {
-            wanted.forEach(function (m) {
-                const now = (current || []).filter(function (c) { return c.type === m.type; });
-                const same = now.length === 1 && Math.abs(now[0].start_ms - m.start_ms) <= 1000
-                    && Math.abs(segmentEnd(now[0], duration) - segmentEnd(m, duration)) <= 1000;
-                if (same) return;
-                let from = '(none)';
-                if (now.length === 1) from = cardRange(now[0], duration);
-                else if (now.length > 1) from = `(${now.length} markers)`;
-                lines.push(`${TYPE_LABELS[m.type]} ${from} → ${cardRange(m, duration)}`);
-            });
+            replacements(server, payload).lines.forEach(function (line) { lines.push(line); });
         } else if ((server.plan === 'will_add' || server.plan === 'up_to_date') && wanted.length) {
             lines.push(listed(wanted));
         } else if (server.plan === 'will_remove') {
             lines.push((server.published || []).length ? `Removes ${listed(server.published)}` : 'Removes the markers this app sent');
         }
         if (server.plan_reason) lines.push(server.plan_reason);
-        if (current === null && !server.error) lines.push(CANT_READ);
         // Owner decision R1: Emby always gets the decided credits start, even one that ends before the file does —
         // never hidden here. Whether that credits marker runs to the true end (and what that means for viewers) is
         // the backend's call (markers.inspect._plan / publishers.emby.credits_note), carried in plan_reason above;
@@ -556,6 +735,8 @@
             }
             const plan = PLANS[server.plan] || [server.plan || 'Unknown', 'text-bg-secondary'];
             top.appendChild(el('span', 'badge mk-plan ' + plan[1], plan[0]));
+            const now = showsNowLine(server, payload);
+            if (now) box.appendChild(now);
             serverLines(server, payload).forEach(function (line) {
                 box.appendChild(el('div', 'small text-muted mk-line', line));
             });
@@ -1418,6 +1599,8 @@
                     type: type,
                     start_ms: marker.start_ms,
                     end_ms: type === 'credits' && startOnly ? null : marker.end_ms,
+                    ours: true,
+                    stale: false,
                 });
             });
             server.current = rest.sort(function (a, b) { return a.start_ms - b.start_ms; });
@@ -1689,10 +1872,8 @@
             parts.push(editBanner(payload));
         }
         if (!payload.known) {
-            const box = el('div', 'alert alert-secondary py-2 mk-not-checked');
-            box.appendChild(el('strong', '', 'Not checked yet'));
-            box.appendChild(el('div', 'small', 'No Intro & Credits job has looked at this file. Re-detect checks it now.'));
-            parts.push(box);
+            parts.push(notCheckedBox(payload));
+            shownTimeline(payload).forEach(function (part) { parts.push(part); });
         } else {
             parts.push(renderChips(payload));
             if (!payload.duration_ms) {
