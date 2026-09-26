@@ -518,3 +518,61 @@ class TestJobModalFilesTabStickiness:
         expect(page.locator("#filesTabPane")).to_have_class(re.compile(r"\bactive\b"))
         expect(page.locator("#fileResultsBody")).not_to_contain_text(self._PLACEHOLDER, timeout=2000)
         expect(page.locator("#fileResultsBody")).to_contain_text("B.mkv", timeout=2000)
+
+
+@pytest.mark.e2e
+class TestJobLogsPanelShowsIntroCreditsBlocks:
+    """An Intro & Credits file's lines are separate log records, each with its own time and level; the detail lines
+    start with two spaces after the level. The Logs panel shows every record as its own line and keeps that indent."""
+
+    _LINES = [
+        "[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits",
+        "[09:13:05] INFO -   Chapters: none",
+        "[09:13:05] INFO -   IntroDB: intro 0:41–1:12",
+        "[09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree)",
+        "[09:13:05] INFO -   Sent to Plex: intro 0:41–1:12",
+        "[09:13:05] INFO - Accused S04E05: done in 25 s on GPU Worker 2",
+        "[09:13:07] WARNING -   Sent to Emby: failed (Emby didn't answer)",
+    ]
+
+    def test_each_record_is_its_own_line_and_keeps_its_indent(self, dashboard_page: Page) -> None:
+        page = dashboard_page
+        page.route(
+            "**/api/jobs/*/logs**",
+            lambda r: _fulfill_json(r, {"logs": self._LINES, "total_lines": len(self._LINES)}),
+        )
+        page.evaluate(
+            """() => {
+                window.jobs = [{id: 'job-ic', library_name: 'Intro & Credits · Accused', status: 'completed',
+                                kind: 'intro_credits', config: {}, publishers: []}];
+            }"""
+        )
+        page.evaluate("() => showLogsModal('job-ic')")
+        expect(page.locator("#logsModal")).to_be_visible(timeout=2000)
+        lines = page.locator("#logsContent .log-line")
+        expect(lines).to_have_count(len(self._LINES), timeout=2000)
+
+        assert lines.all_text_contents() == self._LINES
+        # The panel lays text out with its spaces kept, so the two-space indent shows: the detail line is wider than
+        # the same line with a single space.
+        white_space = page.evaluate("() => getComputedStyle(document.getElementById('logsContent')).whiteSpace")
+        assert white_space in ("pre", "pre-wrap", "break-spaces"), white_space
+        widths = lines.nth(1).evaluate(
+            """el => {
+                const probe = document.createElement('span');
+                probe.style.display = 'inline';
+                probe.textContent = el.textContent;
+                const single = document.createElement('span');
+                single.style.display = 'inline';
+                single.textContent = el.textContent.replace('INFO -   ', 'INFO - ');
+                el.parentElement.append(probe, single);
+                const measured = [probe.getBoundingClientRect().width, single.getBoundingClientRect().width];
+                probe.remove();
+                single.remove();
+                return measured;
+            }"""
+        )
+        assert widths[0] > widths[1], widths
+        # A failed file's lines are warnings, coloured as such.
+        expect(lines.nth(6)).to_have_class(re.compile(r"\blog-level-warning\b"))
+        expect(lines.nth(1)).to_have_class(re.compile(r"\blog-level-info\b"))

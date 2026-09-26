@@ -445,7 +445,8 @@ class EmbyMarkerPublisher(MarkerPublisher):
             raise PublishError("Emby stored the markers but its chapters don't show them; check the Emby log")
         newly_kept = kept - kept_before
         if newly_kept:
-            logger.info(
+            # The file's "Sent to" job log line says so.
+            logger.debug(
                 "Emby {}: item {} shows Emby's own {} instead of ours; keeping them (Keep Emby's)",
                 self._config.name,
                 item_id,
@@ -453,7 +454,8 @@ class EmbyMarkerPublisher(MarkerPublisher):
             )
         self.last_kept_types = kept
         ours = [m for m in wanted if m.type not in kept]
-        logger.info("Emby {}: item {} now shows {} marker(s) of ours", self._config.name, item_id, len(ours))
+        # The file's "Sent to" job log line says so.
+        logger.debug("Emby {}: item {} now shows {} marker(s) of ours", self._config.name, item_id, len(ours))
         return ours
 
     def item_missing(self, item_id: str) -> bool | None:

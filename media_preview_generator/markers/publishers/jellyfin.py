@@ -208,7 +208,8 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             ) from exc
         self.last_write_changed = True
         self._confirm_shown(item_id, segments)
-        logger.info("Jellyfin {}: stored {} marker(s) for item {}", self._config.name, len(wanted), item_id)
+        # The file's "Sent to" job log line says so.
+        logger.debug("Jellyfin {}: stored {} marker(s) for item {}", self._config.name, len(wanted), item_id)
         return wanted
 
     def _plugin_holds_this_file(self, item_id: str, canonical_path: str) -> bool:

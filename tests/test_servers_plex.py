@@ -1661,10 +1661,11 @@ class TestGetExternalIds:
 
     def test_movie(self, plex_server_under_test):
         movie = self._xml(
-            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="imdb://tt0114709"/>'
-            "</Video></MediaContainer>"
+            '<MediaContainer><Video type="movie" title="Toy Story" year="1995"><Guid id="tmdb://862"/>'
+            '<Guid id="imdb://tt0114709"/></Video></MediaContainer>'
         )
         plex_server_under_test._connect.return_value.query.return_value = movie
+        # The movie's own title and year come with its ids (the Intro & Credits job log names it by them).
         assert plex_server_under_test.get_external_ids("862") == {
             "kind": "movie",
             "tmdb": "862",
@@ -1672,6 +1673,8 @@ class TestGetExternalIds:
             "tvdb": None,
             "season": None,
             "episode": None,
+            "title": "Toy Story",
+            "year": "1995",
         }
 
     def test_query_failure_returns_none(self, plex_server_under_test):

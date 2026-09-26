@@ -153,7 +153,9 @@ def _registry(media, *server_types):
 
 
 def _item(path, hints=None):
-    return ProcessableItem(canonical_path=path, server_id="plex-1", item_id_by_server=hints or {}, title="R&M S01E01")
+    return ProcessableItem(
+        canonical_path=path, server_id="plex-1", item_id_by_server=hints or {}, title=os.path.basename(path)
+    )
 
 
 def _run(ctx, media, publishers, probe=None, stage="check", probe_effect=None, hints=None, **kwargs):
@@ -926,8 +928,11 @@ class TestKind:
         jf = ready_publisher("jellyfin_bridge")
         _run(_ctx(store, reg, clients=clients), ambiguous, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_OPENING))
         calls_after_first = [len(c.calls) for c in clients.values()]
+        # The server now answers another kind: a run that took the kind from it again would change what it asks.
+        server.get_external_ids.return_value = MOVIE_IDS if cached == "unknown" else UNKNOWN_IDS
         out, _ = _run(_ctx(store, reg, clients=clients), ambiguous, {"jellyfin-1": jf})
-        assert server.get_external_ids.call_count == 1
+        # Asked once more, after deciding, only for the job log's title of a file that isn't an episode.
+        assert server.get_external_ids.call_count == 2
         assert store.get_file(ambiguous).is_movie is (cached == "movie")
         assert [len(c.calls) for c in clients.values()] == calls_after_first
         assert out.outcome_key == FileOutcome.UP_TO_DATE.value

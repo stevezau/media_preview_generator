@@ -1370,6 +1370,27 @@ Show a mockup and confirm wording before building each screen.
    refused, version mismatch, beside a different Plex). Built (phase 4): a `markers` section of the previews-readiness
    envelope, only for a server with Intro & Credits on (one "off" row otherwise, emitted `recommended` + `ok: true`
    because `servers.js _partitionChecks` drops `info` rows); documented in `docs/guides/previews-readiness.md`.
+7. **Job log** (`markers/job_log.py`, owner-approved layout 2026-09-27). Every line is its own log record with its own
+   time and level; nothing continues a record on a second line. A job opens with one line, `start_line`: "Intro &
+   Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)" (the trigger in words,
+   `job_runner.trigger_words`; the job manager's "Started job" and the dispatcher's "submitted N items" lines stay in
+   the app log only). A worker opens a file with "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking
+   intro and credits" (`KindHandlers.pickup_fn`; previews keep their own pickup line). When the file finishes, its
+   block is written as consecutive records under one lock (`write_lines`), so another worker's lines never land inside
+   it: the first line when no worker picked it up, then one "  Source: …" line per enabled source (the ones that
+   answered, then the ones not asked, each group in a fixed order: chapters, online sources, season audio, credit
+   text, each server's own markers; a film leaves out IntroDB and season audio), "  Decided: …" with each type's
+   reason, one "  Sent to <server>: …" line per server, and "<title>: done in 25 s on GPU Worker 2" (or "…, no worker
+   needed"). Detail lines carry their two-space indent in the message. A file that failed gets its block at WARNING
+   with the reason. A file whose answer didn't change and whose servers are up to date gets one line ("Accused S04E05:
+   unchanged, Plex already has our intro and credits"), as do the Season, decide-again and online re-check summaries
+   and the totals line, so a 100-file re-check logs about 100 lines. A movie's title is its server's: the external ids
+   answer the run already has (it carries the title and year), else the title a library listing gave the item (the
+   year from the file name), else one lookup for a file a sender or the store named; the file name without tags and
+   release group when no server answers. Episodes stay "Show SxxEyy". Credit text says where it read and how long ("read on the GPU in
+   13 s", with a step's CPU fallback reason); season audio says how many of the episodes compared share the theme. The
+   end-picture check has no line of its own: it only gates season audio's answer and stores nothing. The publishers'
+   "now shows N marker(s) of ours" lines moved to DEBUG, since "Sent to" says it.
 
 ## 8. Settings and migration
 
@@ -3260,3 +3281,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     error quotes that line whole too. Every GPU failure is still read again on the CPU. Reproduced with the image's
     jellyfin-ffmpeg 8.1.2 on storage's P5000 (Pascal, no AV1 decode either): exit 69 with "Your platform doesn't
     support hardware accelerated AV1 decoding", then 72 rows from the CPU.
+- 2026-09-27 · **Job log: one record per line, and it says what was done and how** (owner-approved layout; §7 item 7).
+  The owner's complaint: a file's two lines didn't explain what was done or how, and "sources:" continued one record
+  with no time of its own. Each file now logs a block of records written together under one lock ("Chapters: …",
+  "Decided: …" with each type's reason, "Sent to Plex: …" per server, "done in 25 s on GPU Worker 2"), a worker's
+  pickup line opens a file it reads, and one start line replaces three. Plumbed for it: the worker's name and the
+  stage's time (`process_item(worker_name=…)`, `PipelineContext.monotonic`), where and how long credit text read
+  (`RunNotes.reads`), and a movie's server title and year (`get_external_ids` now returns them). The block of the film
+  and the worker's episode in §7 are asserted line for line in `tests/markers/test_job_log.py`.

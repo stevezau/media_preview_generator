@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import Any
 
 JOB_KIND_PREVIEWS = "previews"
 JOB_KIND_INTRO_CREDITS = "intro_credits"
@@ -95,3 +96,6 @@ class KindHandlers:
     # Largest fraction of the dispatcher's checking threads this kind may hold at once (floor 1). A kind whose
     # check_fn can block (rate-limited online lookups) sets < 1 so it can't starve preview checks.
     check_share: float = 1.0
+    # ``pickup_fn(item, worker_display_name)`` logs the kind's own line when a worker starts an item; None: the worker
+    # logs its generic "picked up" line.
+    pickup_fn: Callable[[Any, str], None] | None = None

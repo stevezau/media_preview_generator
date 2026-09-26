@@ -746,7 +746,7 @@ class EmbyApiClient(MediaServer):
         (season/episode are still reported) — the episode's own (per-episode) ProviderIds are
         never used as a stand-in for the series', since a wrong id would route another show's
         markers to this file. Movies never report a ``tvdb`` id (different id space to
-        tmdb/imdb). Unrecognised item types report no ids at all.
+        tmdb/imdb). Unrecognised item types report no ids at all. A movie also reports its ``title`` and ``year``.
         """
         item = self._fetch_item_fields(item_id, "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
         if item is None:
@@ -778,6 +778,9 @@ class EmbyApiClient(MediaServer):
         else:
             providers_source = item
             allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+            # A movie's own title, for the Intro & Credits job log (an episode is named by its path there).
+            out["title"] = item.get("Name") or None
+            out["year"] = item.get("ProductionYear") or None
 
         providers = {str(k).lower(): str(v) for k, v in (providers_source.get("ProviderIds") or {}).items() if v}
         for scheme in allowed_schemes:

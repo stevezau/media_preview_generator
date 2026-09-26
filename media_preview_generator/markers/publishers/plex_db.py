@@ -2017,7 +2017,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         self.last_replaced_stale_types = result.replaced_stale
         newly_kept = result.kept_types - kept_before
         if newly_kept:
-            logger.info(
+            # The file's "Sent to" job log line says so.
+            logger.debug(
                 "Plex {}: item {} shows Plex's own {} instead of ours; keeping them (Keep Plex's)",
                 self._config.name,
                 rating_key,
@@ -2032,7 +2033,8 @@ class PlexMarkerPublisher(MarkerPublisher):
                 " and ".join(t.value for t in MarkerType if t in result.replaced_own),
             )
         if result.changed:
-            logger.info(
+            # The file's "Sent to" job log line says so.
+            logger.debug(
                 "Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(result.ours)
             )
         self.last_write_changed = result.changed

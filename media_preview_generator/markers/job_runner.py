@@ -47,7 +47,7 @@ from .carry_over import is_carried_over
 from .credits import decode_check
 from .decide import DecisionStatus
 from .external_ids import is_season_folder
-from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL
+from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL, season_of, start_line
 from .missing import MISSING_LINE, mark_missing_files
 from .models import Source
 from .outcomes import (
@@ -473,6 +473,74 @@ def _season_job_name(paths: list[str]) -> str:
     if is_season_folder(name):
         return f"Season: {os.path.basename(os.path.dirname(folders[0]))} · {name}"
     return f"Season: {name}"
+
+
+# What started the preview job a follow-up follows (its ``source``), in words.
+_SENDER_WORDS = {
+    "radarr": "Radarr import",
+    "sonarr": "Sonarr import",
+    "tdarr": "Tdarr",
+    "plex": "Plex webhook",
+    "emby": "Emby webhook",
+    "jellyfin": "Jellyfin webhook",
+    "webhook": "webhook",
+    RECENTLY_ADDED_SOURCE: "Recently Added scan",
+    "manual": "manual run",
+    "schedule": "schedule",
+}
+
+
+def _season_words(paths: list[str]) -> str:
+    seasons = sorted({season_of(str(path))[0] for path in paths})
+    if len(seasons) == 1:
+        return f"Season job for {seasons[0]}"
+    return f"Season job for {len(seasons)} seasons" if seasons else "Season job"
+
+
+def trigger_words(job, cfg: dict) -> str:
+    """What started an Intro & Credits job, in plain words, for its first log line (``job_log.start_line``).
+
+    Args:
+        job: The job.
+        cfg: Its config.
+
+    Returns:
+        E.g. ``follow-up to preview job c7ca6327 (Radarr import)``, ``Season job for Accused (2023) S04``,
+        ``re-checking files after an update``, ``scheduled "Nightly"`` or ``manual Re-detect``.
+    """
+    source = str(cfg.get("source") or "")
+    if cfg.get("retry_attempt"):
+        attempt, most = int(cfg["retry_attempt"]), int(cfg.get("max_retries") or 0)
+        head = str(cfg.get("parent_job_id") or "")[:8]
+        text = f"retry {attempt} of {most}" if most else f"retry {attempt}"
+        return f"{text} for job {head}" if head else text
+    if cfg.get("verify"):
+        return "checking again files published just after they were replaced"
+    if cfg.get("reconcile"):
+        return "Check servers"
+    if cfg.get(DECIDE_AGAIN):
+        return "deciding files again after the update"
+    if cfg.get(ONLINE_RECHECK):
+        return "weekly online re-check"
+    if cfg.get(VERSION_RERUN):
+        return "re-checking files after an update"
+    if source == SEASON_SOURCE:
+        return _season_words(list(cfg.get("file_paths") or []))
+    if source == BUDGET_RECHECK_SOURCE:
+        return "checking files again after TheIntroDB's daily limit reset"
+    if cfg.get("follows_job_id"):
+        sender = _SENDER_WORDS.get(source, source or "webhook")
+        return f"follow-up to preview job {str(cfg['follows_job_id'])[:8]} ({sender})"
+    if source == "schedule":
+        from ..web.scheduler import schedule_name
+
+        name = schedule_name(str(getattr(job, "parent_schedule_id", "") or ""))
+        return f'scheduled "{name}"' if name else "scheduled"
+    if source == "inspector":
+        return "manual Re-detect" if cfg.get("force") else "publishing your saved markers"
+    if source == "inspector_season":
+        return "Publish from the Season view"
+    return _SENDER_WORDS.get(source, source or "manual run")
 
 
 def _is_season_job_taking_files(job) -> bool:
@@ -1349,6 +1417,7 @@ def _log_missing(ctx: PipelineContext) -> None:
 def _log_summary(jm, job_id: str, outcome: dict[str, int], ctx: PipelineContext) -> None:
     """End the job's log with a Season job's one line per season and the totals line. Never raises."""
     try:
+        logger.complete()  # the files' lines, still queued for the job's log, come before these
         for line in ctx.summary_lines(outcome):
             jm.add_log(job_id, f"INFO - {line}")
     except Exception as exc:
@@ -1645,7 +1714,9 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.cancel_job(job_id)
                     return
                 slot["held"] = True
-                jm.start_job(job_id)
+                # The job's own start line (start_line) follows once its files are listed.
+                with logger.contextualize(**{JOB_LOG_SKIP: True}):
+                    jm.start_job(job_id)
                 # A retry in a chain shows its run on the chain head's row, and records its files there (below).
                 chain_head = cfg.get("parent_job_id")
                 if chain_head:
@@ -1656,7 +1727,6 @@ def run_intro_credits_job(job_id: str) -> None:
                         max_attempts=int(cfg.get("max_retries") or 0),
                         outcome="running",
                     )
-                jm.add_log(job_id, "INFO - Intro & Credits job started")
 
                 def progress_callback(current, total, message, percent_override=None):
                     if percent_override is not None:
@@ -1768,6 +1838,14 @@ def run_intro_credits_job(job_id: str) -> None:
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
+                try:
+                    trigger = trigger_words(job, cfg)
+                except Exception as exc:
+                    # A line describing the job mustn't end it.
+                    logger.debug("Couldn't describe what started job {}: {}", job_id, type(exc).__name__)
+                    trigger = ""
+                logger.info("{}", start_line(job_id, len(items), trigger))
+                logger.complete()  # the lines added straight to the job's log below come after it
                 if not items:
                     if listing is not None:
                         jm.add_log(job_id, "INFO - Every server checked still shows what this app published")

@@ -1657,3 +1657,20 @@ def get_schedule_manager(config_dir: str | None = None, run_job_callback: Callab
         elif run_job_callback and _schedule_manager.run_job_callback is None:
             _schedule_manager.set_run_job_callback(run_job_callback)
         return _schedule_manager
+
+
+def schedule_name(schedule_id: str) -> str | None:
+    """A schedule's name from the running schedule manager, without creating one.
+
+    Args:
+        schedule_id: The schedule's id.
+
+    Returns:
+        Its name; None when no manager is running or it has no such schedule.
+    """
+    manager = _schedule_manager
+    if manager is None or not schedule_id:
+        return None
+    with manager._lock:
+        schedule = manager._schedules.get(schedule_id)
+    return str(schedule.get("name") or "") or None if schedule else None

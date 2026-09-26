@@ -1868,8 +1868,14 @@ class TestGetExternalIdsEdgeCases:
 
     def test_movie_uses_own_provider_ids_with_single_fetch(self, make_server):
         server = make_server()
-        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "862", "Imdb": "tt0114709"}}
+        movie = {
+            "Type": "Movie",
+            "Name": "Toy Story",
+            "ProductionYear": 1995,
+            "ProviderIds": {"Tmdb": "862", "Imdb": "tt0114709"},
+        }
         server._fetch_item_fields = MagicMock(return_value=movie)
+        # The movie's own title and year come with its ids (the Intro & Credits job log names it by them).
         assert server.get_external_ids("m-1") == {
             "kind": "movie",
             "tmdb": "862",
@@ -1877,6 +1883,8 @@ class TestGetExternalIdsEdgeCases:
             "tvdb": None,
             "season": None,
             "episode": None,
+            "title": "Toy Story",
+            "year": 1995,
         }
         server._fetch_item_fields.assert_called_once_with("m-1", "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
 

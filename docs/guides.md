@@ -1112,31 +1112,57 @@ next time an episode of that season is checked.
 
 ### Reading an Intro & Credits job's log
 
-Each file gets two lines in the job's log: what was sent to each server and what was decided per marker type, then
-what every source you turned on answered, in your source order. For example:
+A job starts with one line saying how many files it checks and why it ran: a follow-up to a preview job, a Season job,
+a re-check after an update, a schedule, or a Re-detect you asked for. Then each file gets a short block, one line per
+step, each with its own time. A film the job finished without a GPU or CPU worker:
 
 ```
-[10:14:03] INFO - Brave New World S01E05: nothing sent to Plex · intro not found · credits 47:36–48:38 found by credit text → needs review (sources don't agree yet; at Publish when: High one source isn't enough)
-  sources: chapters none · TheIntroDB skipped (daily limit reached, resets 00:00 UTC) · credit text credits from 47:36 · Plex's own none
-[10:14:09] INFO - The Fall (2013) S03E05: sent intro to Plex; Plex keeps its own credits ("Keep Plex's") · intro 1:02–1:33 (from chapters) · credits: kept Plex's own marker
-  sources: chapters intro 1:02–1:33 · TheIntroDB no entry · credit text not read (every server keeps its own credits) · Plex's own credits from 58:23
+[07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
+[07:37:13] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
+[07:37:13] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39
+[07:37:13] INFO -   SkipDB: no entry
+[07:37:13] INFO -   Plex's own markers: none
+[07:37:13] INFO -   Credit text: not read (a chapter named Credits is used as-is)
+[07:37:13] INFO -   Decided: credits 2:00:11–2:03:39, from the "Credits" chapter
+[07:37:13] INFO -   Sent to Plex: credits 2:00:11–2:03:39
+[07:37:13] INFO - 32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed
+[07:37:13] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
 ```
 
-- A decided marker names the sources it came from: "(from chapters)", or "(TheIntroDB + credit text agree)". A marker
-  in review names who found it, the proposed times and why it wasn't sent. Times are `m:ss`, or `h:mm:ss` past an hour.
-- Per server: "sent intro and credits to Plex", "Plex already has our intro", "nothing sent to Plex", "waiting for Plex
-  to add the file to its library" (the job tries it again), and the types that server keeps as its own.
-- Per source: its answer ("no entry", "none", "credits from 47:36"), or why it wasn't asked: "not needed (already
-  decided)", "skipped (daily limit reached, …)", "skipped (no data for this show; asked again after \<date\>)", "not
-  read (every server keeps its own credits)". **(saved earlier)**
-  means the answer was stored before (by an earlier run, or while the job checked another episode of the season) and
-  was used without asking again.
+A TV episode a worker read starts with the worker's line, written when it picks the file up:
 
-A **Season: …** job logs these lines only for episodes whose result changed, and one line per season for the rest:
-"Season re-check, Brave New World S01 (3 episodes): no change, E01/E03/E04 still need review (credits from credit
-text only)". A **TheIntroDB recheck** job does the same for its episodes ("TheIntroDB recheck, Brave New World S01
-(3 episodes): no change"), and logs each movie on its own. Every job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found
-· TheIntroDB skipped for 3 files".
+```
+[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits
+[09:13:05] INFO -   Chapters: none
+[09:13:05] INFO -   IntroDB: intro 0:41–1:12
+[09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes)
+[09:13:05] INFO -   Credit text: credits start at 41:48 (read on the GPU in 13 s)
+[09:13:05] INFO -   Plex's own markers: none
+[09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
+[09:13:05] INFO -   Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10
+[09:13:05] INFO - Accused S04E05: done in 25 s on GPU Worker 2
+```
+
+- A movie is named by its title on your media server, an episode by its show and `SxxEyy`.
+- One line per source you turned on: what it answered, or why it wasn't asked ("not read (already decided)", "skipped
+  (daily limit reached, resets 00:00 UTC)", "skipped (no data for this show; asked again after \<date\>)", "not read
+  (every server keeps its own credits)"). The sources that answered come first, then the ones that weren't asked. A
+  film leaves out IntroDB and season audio, which describe TV episodes only. **(saved earlier)** means the answer was
+  stored before (by an earlier run, or while the job checked another episode of the season) and was used without
+  asking again. Times are `m:ss`, or `h:mm:ss` past an hour.
+- **Decided** gives each type and why: the chapter it came from, the sources that agree, "kept Plex's own", or "needs
+  review" / "nothing found" with the reason.
+- One **Sent to** line per server: what was sent, "already up to date", "kept Plex's own credits", "failed (…)", or
+  "not in Plex's library yet" (the job tries it again).
+- A file that failed has its lines as warnings, with the reason.
+
+A file whose result didn't change and whose servers are up to date gets one line instead, e.g. "Accused S04E05:
+unchanged, Plex already has our intro and credits". A **Season: …** job logs blocks only for episodes whose result
+changed, and one line per season for the rest: "Season re-check, Brave New World S01 (3 episodes): no change,
+E01/E03/E04 still need review (credits from credit text only)". A **TheIntroDB recheck** job does the same for its
+episodes ("TheIntroDB recheck, Brave New World S01 (3 episodes): no change"), and logs each movie on its own. Every
+job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found · TheIntroDB
+skipped for 3 files".
 
 Job log times are the container's local time (its `TZ`, or the `/etc/localtime` you mounted), the same clock as the
 app's own log.

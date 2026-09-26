@@ -256,7 +256,9 @@ class TestWhatTheWorkerHandsTheDetector:
         kwargs = detector.call_args.kwargs
         assert kwargs["pause_check"] is ctx.freeze_check  # the job's own pause (True here) never reaches it
         assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["ffmpeg_threads"]) == ("NVIDIA", "cuda:0", 3)
-        assert kwargs["fallback_callback"] is flag
+        # The pipeline keeps the reason for the file's job log line, and the worker row still hears of it.
+        kwargs["fallback_callback"]("decoded a.mkv on the CPU: the GPU decoded no frames")
+        flag.assert_called_once_with("decoded a.mkv on the CPU: the GPU decoded no frames")
 
     def test_a_cpu_worker_hands_no_thread_cap(self, store, media):
         reg = _registry(media, ServerType.PLEX)

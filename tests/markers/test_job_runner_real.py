@@ -893,6 +893,46 @@ class TestCreditTextOnTheWorkers:
         assert row["worker"] == "GPU Worker 1 (Test GPU)"
         assert self._released(engine)
 
+    @pytest.mark.parametrize("rerun", [False, True], ids=["on-the-gpu", "cpu-rerun"])
+    def test_the_job_log_gives_every_line_its_own_record_in_order(self, engine, setup, rerun):
+        import re
+
+        from media_preview_generator.markers.credits import frames
+
+        if rerun:
+            setup.effects["gpu"] = frames.GpuDecodeError("the GPU decoded no frames from S01E01.mkv")
+        job = self._run(engine, setup)
+        logs = engine.jm.get_logs(job.id)
+        # Every entry is one record: its own time and level, then its message (a detail line keeps its indent).
+        stamped = [re.fullmatch(r"\[\d\d:\d\d:\d\d\] (INFO|WARNING|ERROR) - (.*)", line) for line in logs]
+        assert all(stamped), logs
+        messages = [match.group(2) for match in stamped]
+        episode = "Rick and Morty (2013) S01E01"
+        worker = "GPU Worker 1 (Test GPU)"
+        # One start line replaces the runner's, the job manager's and the dispatcher's.
+        assert messages[0] == f"Intro & Credits job {job.id[:8]} started: 1 file, manual run"
+        assert not [m for m in messages if m.startswith(("Started job", "Dispatcher: submitted"))]
+        start = messages.index(f"{worker} picked up {episode}: checking credits")
+        end = next(n for n, m in enumerate(messages) if m.startswith(f"{episode}: done in "))
+        read_on = "the CPU" if rerun else "the GPU"
+        # The file's lines are written together as it finishes; the worker's own GPU fallback warning comes before.
+        block = messages[end - 3 : end]
+        assert [line.split(":", 1)[0] for line in block] == ["  Credit text", "  Decided", "  Sent to PLEX-1"]
+        assert re.fullmatch(rf"  Credit text: none found \(read on {read_on} in [\d.]+ s\)", block[0]), block
+        assert block[1:] == ["  Decided: credits nothing found", "  Sent to PLEX-1: nothing to send"]
+        assert start < end - 3
+        assert re.fullmatch(
+            rf"{re.escape(episode)}: done in [\d.]+ s on GPU Worker 1" + (", rerun on the CPU" if rerun else ""),
+            messages[end],
+        )
+        # The totals come after the file's lines, however the job log's queue was drained; the job manager's own
+        # completion line stays last.
+        assert messages[-2:] == [
+            "Done: 1 file · 0 sent to PLEX-1 · 0 need review · 1 nothing found",
+            f"Job {job.id} completed successfully",
+        ]
+        assert end < len(messages) - 2
+
     def test_text_detection_read_on_the_cpu_on_a_gpu_worker_shows_on_the_worker_row(self, engine, setup):
         # The GPU helper failed this request: the pool reads it on the CPU and says so through the worker's callback.
         def on_the_cpu(planes, **kwargs):
