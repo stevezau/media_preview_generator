@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -43,6 +45,9 @@ class _PublisherFactory:
         self.calls = []
         self.reports = reports or {}
         self.raises = raises
+        # What ``types_not_made_for_file`` answers (an exception is raised): Plex can't tell, unless a test says.
+        self.stale = None
+        self.built = []  # (server id, publisher_for kwargs, publisher)
 
     def __call__(self, server, config, **kwargs):
         self.calls.append({"server": server, "config": config, **kwargs})
@@ -53,7 +58,20 @@ class _PublisherFactory:
             pub.capability.side_effect = self.raises
         else:
             pub.capability.return_value = self.reports.get(config.type, CapabilityReport(Capability.READY, "ok"))
+        if isinstance(self.stale, Exception):
+            pub.types_not_made_for_file.side_effect = self.stale
+        else:
+            pub.types_not_made_for_file.return_value = self.stale
+        self.built.append((config.id, kwargs, pub))
         return pub
+
+    def stale_asks(self):
+        """Every stale check made: (server id, publisher_for kwargs, item ids ``types_not_made_for_file`` was asked)."""
+        return [
+            (sid, kwargs, [c.args for c in pub.types_not_made_for_file.call_args_list])
+            for sid, kwargs, pub in self.built
+            if pub.types_not_made_for_file.called
+        ]
 
 
 @pytest.fixture
@@ -812,6 +830,9 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "capability_state": "ready",
             "can_show": ["intro", "credits"],
             "current": [],
+            # Nothing shown, so there is nothing to draw and the item's length isn't read.
+            "duration_ms": None,
+            "keeps_server_markers": False,
             "published": [],
             "publish_status": None,
             "publish_message": "",
@@ -829,6 +850,8 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "capability_state": "disabled",
             "can_show": ["intro", "credits", "recap", "preview"],
             "current": [],
+            "duration_ms": None,
+            "keeps_server_markers": False,
             "published": [],
             "publish_status": None,
             "publish_message": "",
@@ -1059,9 +1082,10 @@ def test_plex_up_to_date_when_current_equals_published_equals_decided(store, fac
 
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
 
+    # Both are ours: Plex's open-ended credits are the ones we sent to the end of the file.
     assert row["current"] == [
-        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000},
-        {"type": "credits", "start_ms": 1_290_000, "end_ms": None},
+        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000, "ours": True, "stale": False},
+        {"type": "credits", "start_ms": 1_290_000, "end_ms": None, "ours": True, "stale": False},
     ]
     assert row["published"] == [
         {"type": "intro", "start_ms": 11_000, "end_ms": 37_000},
@@ -1071,6 +1095,8 @@ def test_plex_up_to_date_when_current_equals_published_equals_decided(store, fac
     # The file's publish state already knows the item: no lookup by path.
     registry.get("plex").resolve_remote_path_to_item_id.assert_not_called()
     registry.get("plex").get_markers.assert_called_once_with("rk-1", unknown_if_hidden=False)
+    # Everything shown is ours, so Plex's database isn't asked which markers were made for an earlier file.
+    assert factory.stale_asks() == []
 
 
 def test_plex_will_replace_when_plex_shows_its_own_intro(store, factory):
@@ -1080,7 +1106,7 @@ def test_plex_will_replace_when_plex_shows_its_own_intro(store, factory):
     plex_intro = Marker(T.INTRO, 76_500, 112_700, ("plex",))
     registry.get("plex").get_markers.return_value = _plex_rows(plex_intro)
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
-    assert row["current"] == [{"type": "intro", "start_ms": 76_500, "end_ms": 112_700}]
+    assert row["current"] == [{"type": "intro", "start_ms": 76_500, "end_ms": 112_700, "ours": False, "stale": False}]
     assert row["plan"] == "will_replace"
     assert row["published"] == [] and row["publish_status"] is None
 
@@ -1103,7 +1129,7 @@ def test_plex_a_locked_nudge_inside_the_version_tolerance_reads_as_will_replace(
     assert row["plan"] == "will_replace"
     # ... and the times it will replace with are the user's, not the ones the item already shows.
     assert payload["decisions"]["credits"]["marker"]["start_ms"] == 1_291_500
-    assert row["current"] == [{"type": "credits", "start_ms": 1_290_000, "end_ms": None}]
+    assert row["current"] == [{"type": "credits", "start_ms": 1_290_000, "end_ms": None, "ours": True, "stale": False}]
 
 
 @pytest.mark.parametrize(
@@ -1187,8 +1213,8 @@ def test_jellyfin_current_includes_our_own_served_segments(store, factory):
     ]
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), "jf")
     assert row["current"] == [
-        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000},
-        {"type": "credits", "start_ms": 1_290_000, "end_ms": DURATION},
+        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000, "ours": True, "stale": False},
+        {"type": "credits", "start_ms": 1_290_000, "end_ms": DURATION, "ours": True, "stale": False},
     ]
     assert row["plan"] == "up_to_date"
     server.get_media_segments.assert_called_once_with("jf-item")
@@ -1220,9 +1246,10 @@ def test_emby_row_reads_chapter_markers_and_needs_its_plugin(store, factory):
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), "emby")
     assert row["capability_state"] == "needs_plugin"
     assert row["can_show"] == ["intro", "credits"]
+    # Emby's own (nothing published there): never asked about an earlier file, which only Plex can tell.
     assert row["current"] == [
-        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000},
-        {"type": "credits", "start_ms": 1_290_000, "end_ms": None},
+        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000, "ours": False, "stale": False},
+        {"type": "credits", "start_ms": 1_290_000, "end_ms": None, "ours": False, "stale": False},
     ]
     assert row["plan"] == "up_to_date"
 
@@ -1704,6 +1731,8 @@ def test_one_failing_server_gives_a_degraded_row(store, factory, monkeypatch, fa
         "capability_state": "unknown",
         "can_show": ["intro", "credits"],
         "current": None,
+        "duration_ms": None,
+        "keeps_server_markers": False,
         "published": [],
         "publish_status": None,
         "publish_message": "",
@@ -1716,6 +1745,234 @@ def test_one_failing_server_gives_a_degraded_row(store, factory, monkeypatch, fa
     jf = _row(payload, "jf")
     assert (jf["plan"], jf["capability_state"], jf["error"]) == ("up_to_date", "ready", None)
     assert [r["server_id"] for r in payload["servers"]] == ["plex", "jf"]
+
+
+# --------------------------------------------------------------------------- what a server shows, for any file
+
+PLEX_OWN_INTRO = Marker(T.INTRO, 41_000, 72_000, ())
+PLEX_OWN_CREDITS = Marker(T.CREDITS, 2_508_000, 2_590_000, ())
+
+
+def _shows(registry, sid, stype, *markers):
+    server = registry.get(sid)
+    if stype is ServerType.PLEX:
+        server.get_markers.return_value = _plex_rows(*markers, final_credits=False)
+    elif stype is ServerType.JELLYFIN:
+        server.get_media_segments.return_value = _jf_rows(*markers)
+    else:
+        server.get_chapter_markers.return_value = _emby_rows(*markers)
+    return server
+
+
+@pytest.mark.parametrize(
+    ("stype", "answer", "expected"),
+    [
+        (ServerType.PLEX, [2_640_000], 2_640_000),
+        (ServerType.PLEX, [2_640_000, 2_641_500], 2_641_500),  # two versions of one cut: the longer
+        (ServerType.PLEX, [2_640_000, 3_900_000], None),  # different cuts: which one is this file isn't known
+        (ServerType.PLEX, [None], None),
+        (ServerType.PLEX, [], None),
+        (ServerType.PLEX, None, None),  # Plex didn't answer
+        (ServerType.PLEX, RuntimeError("down"), None),
+        (ServerType.JELLYFIN, 2_640_000, 2_640_000),
+        (ServerType.JELLYFIN, None, None),
+        (ServerType.EMBY, 2_640_000, 2_640_000),
+        (ServerType.EMBY, RuntimeError("down"), None),
+    ],
+    ids=[
+        "plex-one",
+        "plex-same-cut",
+        "plex-other-cut",
+        "plex-part-without-length",
+        "plex-no-parts",
+        "plex-unanswered",
+        "plex-raises",
+        "jellyfin",
+        "jellyfin-unanswered",
+        "emby",
+        "emby-raises",
+    ],
+)
+def test_unchecked_file_reads_the_servers_length_for_its_markers(store, factory, stype, answer, expected):
+    sid = stype.value
+    registry = _registry(server_config(sid, stype))
+    server = _shows(registry, sid, stype, PLEX_OWN_INTRO)
+    reader = server.get_part_durations if stype is ServerType.PLEX else server.get_runtime_ms
+    if isinstance(answer, Exception):
+        reader.side_effect = answer
+    else:
+        reader.return_value = answer
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+
+    assert row["duration_ms"] == expected
+    reader.assert_called_once_with(f"item-{sid}")
+    # Still shown, whatever the length read said.
+    assert [(c["type"], c["start_ms"]) for c in row["current"]] == [("intro", 41_000)]
+
+
+@pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
+@pytest.mark.parametrize("case", ["checked-file-has-its-own-length", "server-shows-nothing", "server-unreadable"])
+def test_the_servers_length_is_read_only_to_draw_an_unchecked_files_markers(store, factory, stype, case):
+    sid = stype.value
+    registry = _registry(server_config(sid, stype))
+    server = registry.get(sid)
+    if case == "checked-file-has-its-own-length":
+        _known_file(store)
+        _shows(registry, sid, stype, PLEX_OWN_INTRO)
+    elif case == "server-unreadable":
+        server.get_markers.return_value = None
+        server.get_media_segments.return_value = None
+        server.get_chapter_markers.return_value = None
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+
+    assert row["duration_ms"] is None
+    server.get_part_durations.assert_not_called()
+    server.get_runtime_ms.assert_not_called()
+
+
+def test_unchecked_plex_file_flags_markers_made_for_an_earlier_file(store, factory):
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    server = _shows(registry, "plex", ServerType.PLEX, PLEX_OWN_INTRO, PLEX_OWN_CREDITS)
+    server.get_part_durations.return_value = [2_640_000]
+    factory.stale = frozenset({T.CREDITS})
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+
+    assert row["current"] == [
+        {"type": "intro", "start_ms": 41_000, "end_ms": 72_000, "ours": False, "stale": False},
+        {"type": "credits", "start_ms": 2_508_000, "end_ms": 2_590_000, "ours": False, "stale": True},
+    ]
+    assert row["duration_ms"] == 2_640_000
+    # Asked once, of the item shown, through a publisher that waits briefly and skips the Edit tab's extra request.
+    assert factory.stale_asks() == [
+        ("plex", {"ui_details": False, "db_timeout_s": inspect.UI_STALE_WAIT_S}, [("item-plex",)])
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [None, frozenset(), RuntimeError("database is locked")],
+    ids=["cant-tell", "none-stale", "raises"],
+)
+def test_a_stale_check_that_cant_tell_shows_the_markers_unflagged(store, factory, answer):
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    _shows(registry, "plex", ServerType.PLEX, PLEX_OWN_INTRO, PLEX_OWN_CREDITS)
+    factory.stale = answer
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+
+    assert [(c["type"], c["stale"]) for c in row["current"]] == [("intro", False), ("credits", False)]
+    assert row["plan"] == "nothing_to_publish"
+    assert len(factory.stale_asks()) == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "stype"),
+    [
+        (Capability.NEEDS_CONFIRMATION, ServerType.PLEX),  # its database may not be read at all yet
+        (Capability.UNREACHABLE, ServerType.PLEX),  # would only fail, and slowly
+        (Capability.READY, ServerType.JELLYFIN),  # only Plex keeps an item's markers across a file replacement
+        (Capability.READY, ServerType.EMBY),
+    ],
+    ids=["plex-unconfirmed", "plex-unreachable", "jellyfin", "emby"],
+)
+def test_only_a_ready_plex_is_asked_which_markers_were_made_for_an_earlier_file(store, factory, state, stype):
+    sid = stype.value
+    registry = _registry(server_config(sid, stype))
+    _shows(registry, sid, stype, PLEX_OWN_INTRO)
+    factory.reports[stype] = CapabilityReport(state, "")
+    factory.stale = frozenset({T.INTRO})
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+
+    assert [(c["type"], c["ours"], c["stale"]) for c in row["current"]] == [("intro", False, False)]
+    assert factory.stale_asks() == []
+
+
+def test_a_file_whose_library_is_off_is_never_asked_about(store, factory):
+    # A job never reads Plex's database for a file in a library Intro & Credits is off for; the page doesn't either.
+    markers = {"enabled": True, "library_ids": ["99"], "plex": {"db_write_confirmed_at": CONFIRMED}}
+    registry = _registry(server_config("plex", ServerType.PLEX, markers=markers))
+    _shows(registry, "plex", ServerType.PLEX, PLEX_OWN_INTRO)
+    factory.stale = frozenset({T.INTRO})
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+
+    assert row["plan"] == "not_enabled"
+    assert [(c["type"], c["stale"]) for c in row["current"]] == [("intro", False)]
+    assert factory.stale_asks() == []
+
+
+def test_a_stale_check_that_hangs_costs_the_page_only_its_wait(store, factory, monkeypatch):
+    # A Plex marker agent that accepts the request and never answers: the page gives up at UI_STALE_WAIT_S.
+    monkeypatch.setattr(inspect, "UI_STALE_WAIT_S", 0.2)
+    release = threading.Event()
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    _shows(registry, "plex", ServerType.PLEX, PLEX_OWN_INTRO)
+
+    def hangs(item_id):
+        release.wait(10)
+        return frozenset({T.INTRO})
+
+    factory.stale = frozenset({T.INTRO})
+    real_call = factory.__call__
+
+    def with_hanging_read(server, config, **kwargs):
+        pub = real_call(server, config, **kwargs)
+        pub.types_not_made_for_file.side_effect = hangs
+        return pub
+
+    monkeypatch.setattr(inspect, "publisher_for", with_hanging_read)
+    start = time.monotonic()
+    try:
+        row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+
+    assert elapsed < 1.5, elapsed
+    assert [(c["type"], c["stale"]) for c in row["current"]] == [("intro", False)]
+
+
+def test_unchecked_file_labels_ours_left_on_its_item_by_another_version(store, factory):
+    # Plex shows one set per item: another version's file published our intro to this item before this file was seen.
+    store.set_item_publish_state("plex", "item-plex", [INTRO], "written")
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    _shows(registry, "plex", ServerType.PLEX, INTRO, PLEX_OWN_CREDITS)
+    factory.stale = frozenset({T.INTRO, T.CREDITS})
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+
+    # Ours is never called stale: the label is about Plex's own markers. Plex's own credits are asked about.
+    assert row["current"] == [
+        {"type": "intro", "start_ms": 11_000, "end_ms": 37_000, "ours": True, "stale": False},
+        {"type": "credits", "start_ms": 2_508_000, "end_ms": 2_590_000, "ours": False, "stale": True},
+    ]
+    assert row["published"] == [{"type": "intro", "start_ms": 11_000, "end_ms": 37_000}]
+
+
+@pytest.mark.parametrize(
+    ("stype", "markers", "keeps"),
+    [
+        (ServerType.PLEX, {"enabled": True, "plex": {"db_write_confirmed_at": CONFIRMED}}, False),
+        (
+            ServerType.PLEX,
+            {"enabled": True, "plex": {"db_write_confirmed_at": CONFIRMED, "on_plex_redetect": "keep_plex"}},
+            True,
+        ),
+        (ServerType.EMBY, {"enabled": True, "emby": {"on_emby_redetect": "restore"}}, False),
+        (ServerType.EMBY, {"enabled": True, "emby": {"on_emby_redetect": "keep_emby"}}, True),
+        (ServerType.JELLYFIN, {"enabled": True}, False),  # Jellyfin has no such setting
+    ],
+    ids=["plex-use-ours", "plex-keep", "emby-use-ours", "emby-keep", "jellyfin"],
+)
+def test_row_says_whether_the_server_keeps_its_own_markers(store, factory, stype, markers, keeps):
+    sid = stype.value
+    registry = _registry(server_config(sid, stype, markers={"library_ids": None, **markers}))
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+    assert row["keeps_server_markers"] is keeps
 
 
 # --------------------------------------------------------------------------- capability cache

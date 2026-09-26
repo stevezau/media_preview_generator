@@ -1010,6 +1010,19 @@ written. Another Jellyfin provider's segments next to ours don't count as a diff
 this item share one set of markers" appears only on a Plex item with more than one version (a stacked file or a Plex
 optimized copy isn't a version).
 
+Every server card also says what that server shows viewers right now, e.g. **"Shows now: intro 0:41–1:12 · credits
+41:48–end"** or **"Shows now: nothing"**, unless its **Will replace** lines already say it. Markers this app sent
+earlier read **"our intro …"**. A Plex marker made for an earlier file at the same path (Plex keeps an item's markers
+when its file is replaced) is labelled **"(made for an earlier file)"**. Only Plex's database can tell, so it is asked
+briefly and read-only; when it doesn't answer in time the label is left off.
+
+A file no Intro & Credits job has looked at yet says **"Not checked by Intro & Credits yet"** and lists what each
+server already has ("Plex already has: intro 0:41–1:12 · credits 41:48–43:10"), or "No server shows intro or credits
+markers for this file yet". When a server with Intro & Credits on is set to **Keep Plex's** or **Keep Emby's**, the
+box says those markers stay as they are. The timeline shows them as grey, read-only bars (hatched when made for an
+earlier file), drawn to the length the server reports. With no length anywhere there is no timeline, only the list.
+**Re-detect** checks the file.
+
 ### Check servers
 
 The checks above only run for files a job looks at. To check everything this app has published, run **Intro &
