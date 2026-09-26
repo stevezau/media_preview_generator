@@ -359,6 +359,39 @@ class TestRefine:
         assert coarse == Coarse(index=3, end_index=6, pts_s=100.0)
         assert rule_j.refine_start(rows, coarse, [bright(10)]) == 100.0
 
+    def test_the_walk_steps_back_over_the_rolls_first_cards_that_read_under_three_boxes_on_a_lit_frame(self):
+        # Version 6. Accused (2020) S05E08: the first card sits over the closing interview and reads 2 boxes, lit, in the
+        # roll's band; the walk used to stop at the first dense card behind it, 7 s late.
+        coarse = rule_j.coarse_start(self.ROWS)
+        fine = [bright(90), bright(91, 3), *[bright(t, 2) for t in range(92, 97)], dark(97, 1), dark(98, 1),
+                dark(99, 1), dark(100, 1), dark(101, 1)]  # fmt: skip
+        assert rule_j.refine_start(self.ROWS, coarse, fine) == 91.0
+
+    def test_lit_text_outside_the_rolls_band_stops_the_walk(self):
+        # A caption at the frame's left edge is not the roll's (``in_band``): the walk stays on the roll.
+        coarse = rule_j.coarse_start(self.ROWS)
+        caption = ((10, 150, 60, 160),)
+        fine = [bright(95), (96.0, 1, 120.0, caption), (97.0, 1, 120.0, caption), *[dark(t, 1) for t in (98, 99, 100)]]
+        assert rule_j.refine_start(self.ROWS, coarse, fine) == 98.0
+
+    def test_the_walk_never_starts_from_a_caption_cut_off_from_the_coarse_start(self):
+        # Version 6. Homicide Hunter S06E13: a dense caption on the closing mugshot 14 s before the roll was the latest
+        # credit frame in the window and the start, 13 s early. The roll's own frames near the coarse start win.
+        rows = [bright(0), bright(60), bright(100, 1), *[bright(t, 3) for t in range(104, 124, 4)]]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse.pts_s == 100.0
+        fine = [bright(85, 3), bright(86, 2), bright(87), *[bright(t) for t in range(88, 99)], bright(99, 1),
+                bright(100, 1)]  # fmt: skip
+        assert rule_j.refine_start(rows, coarse, fine) == 99.0
+
+    def test_with_no_roll_frame_near_the_coarse_start_the_walk_starts_from_the_latest_credit_frame(self):
+        # A card that falls between two 1 fps samples: nothing near the coarse start shows the roll, so the walk starts
+        # where every version before 6 started it.
+        coarse = rule_j.coarse_start(self.ROWS)
+        fine = [bright(90), dark(92, 1), dark(93, 1), dark(94, 1), bright(95), bright(96), bright(97), bright(98),
+                bright(99), bright(100), bright(101)]  # fmt: skip
+        assert rule_j.refine_start(self.ROWS, coarse, fine) == 92.0
+
     def test_the_anchor_compares_rows_in_ffmpegs_output_order(self):
         # Pinned as measured (Q5): the anchor's distance is read in decode order, so a swapped pair at the run's
         # start reads as a negative gap and the first emitted credit row (102 s) is the start, not the earlier 100 s
@@ -368,6 +401,85 @@ class TestRefine:
         body = [bright(t) for t in range(0, 100, 2)]
         rows = [*body, dark(102, 1), dark(100, 1), *[dark(t, 1) for t in range(104, 132, 2)]]
         assert rule_j.coarse_start(rows) == Coarse(index=50, end_index=65, pts_s=102.0)
+
+
+class TestMovesChapter:
+    """Version 6: whether the frames show a credits chapter off the roll rule J found (``rule_j.moves_chapter``)."""
+
+    @staticmethod
+    def texted(times: range | list[float]) -> list[rule_j.Row]:
+        return [bright(t, 2) for t in times]
+
+    @pytest.mark.parametrize("start_s", [990.0, 1010.0, 1000.0])
+    def test_a_start_within_10_s_agrees_with_the_chapter(self, start_s):
+        rows = [bright(t) for t in range(900, 1100, 4)]
+        assert rule_j.moves_chapter(rows, start_s, 1000.0) is False
+
+    def test_a_chapter_inside_the_roll_moves_back_to_the_rolls_start(self):
+        # Text on every keyframe from the roll's start to the chapter: the chapter sits mid-roll (La Brea S01E02 on its
+        # studio logos 35 s after the first card).
+        rows = [bright(t) for t in range(900, 960, 4)] + self.texted(range(960, 1100, 4))
+        assert rule_j.moves_chapter(rows, 961.0, 1000.0) is True
+
+    @pytest.mark.parametrize(("gap_s", "moved"), [(8.0, True), (8.1, False)])
+    def test_a_stretch_without_text_over_8_s_between_them_keeps_the_chapter(self, gap_s, moved):
+        # A caption or a dedication split off by story or black is no part of the roll the chapter opens.
+        rows = self.texted([960.0, 968.0, *(968.0 + gap_s + 8.0 * k for k in range(4))])
+        assert rule_j.moves_chapter(rows, 960.0, 968.0 + gap_s + 24.0) is moved
+
+    def test_the_stretch_counts_from_the_rolls_start_and_up_to_the_chapter(self):
+        # No text keyframe at all between them: the stretch is the whole distance.
+        rows = [bright(t) for t in range(900, 1100, 4)]
+        assert rule_j.moves_chapter(rows, 985.0, 1000.0) is False
+
+    @pytest.mark.parametrize(("start_s", "moved"), [(760.0, True), (759.9, False)])
+    def test_it_moves_back_at_most_240_s(self, start_s, moved):
+        rows = self.texted([start_s, *range(764, 1004, 4)])
+        assert rule_j.moves_chapter(rows, start_s, 1000.0) is moved
+
+    def test_a_chapter_on_the_last_shot_moves_forward_to_the_roll(self):
+        # No text from the chapter to the roll: the chapter is on the story (A Christmas Carol (1984): 13 s early).
+        rows = [bright(t) for t in range(900, 1016, 4)] + self.texted(range(1016, 1100, 4))
+        assert rule_j.moves_chapter(rows, 1015.0, 1000.0) is True
+
+    def test_text_between_the_chapter_and_a_later_roll_keeps_the_chapter(self):
+        # The roll rule J found later isn't the first card when text is already on the screen after the chapter.
+        rows = [bright(t) for t in range(900, 1000, 4)] + [bright(1004, 1)] + self.texted(range(1030, 1100, 4))
+        assert rule_j.moves_chapter(rows, 1030.0, 1000.0) is False
+
+    @pytest.mark.parametrize(("start_s", "moved"), [(1060.0, True), (1060.1, False)])
+    def test_it_moves_forward_at_most_60_s(self, start_s, moved):
+        rows = [bright(t) for t in range(900, 1060, 4)] + self.texted([start_s, start_s + 4])
+        assert rule_j.moves_chapter(rows, start_s, 1000.0) is moved
+
+    @pytest.mark.parametrize(("blank_s", "moved"), [(962.0, True), (962.1, False), (990.0, False)])
+    def test_lit_footage_without_text_after_the_starts_fade_keeps_the_chapter(self, blank_s, moved):
+        # Text, then a shot of plain footage, then text: the first text was the story's (a T-shirt, a poster, a screen
+        # in the scene; one release's chapter moved 17 s onto a T-shirt). The one fine sample the start was refined to
+        # may be the fade into the first card.
+        rows = sorted([*self.texted([t for t in range(961, 1000, 2) if abs(t - blank_s) > 1]), bright(blank_s)])
+        assert rule_j.moves_chapter(rows, 961.0, 1000.0) is moved
+
+    def test_black_without_text_between_cards_still_moves_the_chapter(self):
+        # A dark keyframe between two cards is the cut between them, not the story.
+        rows = sorted([*self.texted([t for t in range(961, 1000, 2) if t != 981]), dark(981.0)])
+        assert rule_j.moves_chapter(rows, 961.0, 1000.0) is True
+
+    @pytest.mark.parametrize(
+        ("between", "moved"),
+        [
+            pytest.param([bright(t) for t in range(1000, 1020, 4)], True, id="footage"),
+            pytest.param([dark(t) for t in range(1000, 1020, 4)], False, id="black: cards too small to read"),
+            pytest.param([bright(1000.0), dark(1004.0), bright(1008.0)], False, id="black in the middle"),
+            pytest.param([bright(t) for t in range(1000, 1018, 4)] + [dark(1018.0)], True, id="the fade into the roll"),
+            pytest.param([], False, id="no keyframe to show it"),
+        ],
+    )
+    def test_a_chapter_moves_forward_only_from_footage(self, between, moved):
+        # A chapter on black before the first text rule J read may sit on cards too small to read at 320 px (two
+        # releases: 22 and 30 s of such cards); only a chapter on lit footage is on the story.
+        rows = [*between, *self.texted(range(1020, 1100, 4))]
+        assert rule_j.moves_chapter(rows, 1020.0, 1000.0) is moved
 
 
 class TestEpilogueCards:

@@ -146,6 +146,27 @@ BAND_TOLERANCE_PX = 32.0
 # carry a box, lit or dark. Half, and 0.4 gives the same rows; at 0.6 a measured roll is lost again and at 0.3 two
 # early answers come back.
 ROLL_TEXT_SHARE = 0.5
+# Version 6: a file's credits chapter, read against the frames (:func:`moves_chapter`). The roll's start agrees with
+# the chapter within the credits agreement tolerance (``decide.CREDITS_START_TOLERANCE_MS``: an end title card or a
+# show's closing logo a few seconds before the first card is the chapter's to include) ...
+CHAPTER_AGREES_S = 10.0
+# ... moves the chapter earlier only while text stays on the screen from the roll's start to it: no stretch of
+# keyframes without a box longer than this. On the audit's tuning files 6 and 8 s moved the same chapters; 10 s moved
+# one onto a caption 10 s of story before the roll, 12 s another onto a dedication before it.
+CHAPTER_TEXT_GAP_S = 8.0
+# ... and while no keyframe of lit footage without text sits between them, apart from the one fine sample the start
+# was refined to (the fade into the first card). Credits over footage keep a card on the screen; a lit keyframe without
+# one is the story, and the text before it was the story's: a T-shirt, a poster, a screen, an epilogue caption (2026-09-27
+# replay of one library: 5 chapters moved earlier onto the story, every one with such a keyframe; none of the moves
+# frame-checked right, one to three per show, had one).
+CHAPTER_START_FADE_S = 1.0
+# ... and never further than these: a roll further away is another one (or a scene with text), not the chapter's.
+CHAPTER_EARLIER_MAX_S = 240.0
+CHAPTER_LATER_MAX_S = 60.0
+# A chapter moves later only from footage: every keyframe from it to this long before the roll's start is lit. Dark
+# keyframes there may hold credit text too small to read at 320 px (two releases' chapters sat on such cards, 22 and
+# 30 s before the first text rule J read); the last seconds before the start are the fade into the roll.
+CHAPTER_LATER_FADE_S = 2.5
 
 
 @dataclass(frozen=True)
@@ -929,6 +950,17 @@ def refine_start(
 ) -> float:
     """Refine the coarse start with the 1 fps rows decoded just before it.
 
+    The walk starts from the roll at the coarse start and steps back over the roll's frames no more than
+    ``REFINE_GAP_S`` apart, then back over the fade. A roll's frame is a credit frame, or (rule J version 6) a frame
+    whose text sits in the roll's band (:func:`in_band`, the band of the run the start came from): a roll's first card
+    over the closing footage or an interview reads one or two boxes on a lit frame, under the three a lit credit frame
+    needs, and the walk stopped at the first dense card behind it (2026-09-27 audit: Accused, Killer Cases and Homicide
+    Hunter episodes 6-8 s late). The walk starts from the latest roll frame within ``REFINE_GAP_S`` of the coarse start,
+    not from the latest credit frame anywhere in the window: a caption on the closing footage 14 s before the roll is
+    no step of it (one Homicide Hunter episode answered 13 s early that way). Only when no 1 fps frame near the coarse
+    start shows the roll (its card fell between two samples) does the walk start from the latest credit frame in the
+    window, as before version 6.
+
     Args:
         rows: The keyframe rows the coarse start came from.
         coarse: The coarse start.
@@ -944,12 +976,17 @@ def refine_start(
     window = [j for j, row in enumerate(fine_rows) if floor_s <= row[0] <= t + REFINE_AFTER_S]
     if not window:
         return fade_back(rows, coarse.index, -1.0)
-    credit = [j for j in window if is_credit(fine_rows[j], params)]
-    if not credit:
+    band = band_of(rows, coarse.index if coarse.run_index is None else coarse.run_index, coarse.end_index, params)
+    roll = [j for j in window if is_credit(fine_rows[j], params) or (band is not None and in_band(fine_rows[j], band))]
+    # A coarse start whose text the 1 fps frames don't show (a card between two samples) walks from the latest credit
+    # frame in the window, as every version before 6 did.
+    near = [j for j in roll if fine_rows[j][0] >= t - REFINE_GAP_S]
+    walk_from = near or [j for j in window if is_credit(fine_rows[j], params)]
+    if not walk_from:
         return t
-    j = credit[-1]
+    j = walk_from[-1]
     while True:
-        earlier = [k for k in credit if k < j and fine_rows[j][0] - fine_rows[k][0] <= REFINE_GAP_S]
+        earlier = [k for k in roll if k < j and fine_rows[j][0] - fine_rows[k][0] <= REFINE_GAP_S]
         if not earlier:
             break
         j = earlier[0]
@@ -1140,3 +1177,51 @@ def credits_end(
     if not keeps_a_scene_after(_walk_forward(fine_rows, latest, latest + REFINE_END_AFTER_S, params), duration_s):
         return None
     return refine_end(rows, coarse, fine_rows, params=params)
+
+
+def moves_chapter(rows: Sequence[Row], start_s: float, chapter_s: float) -> bool:
+    """Whether the frames show a file's "Credits" chapter off the roll that starts at ``start_s`` (rule J version 6,
+    spec §5.4), so the roll's start should replace the chapter's.
+
+    A release's credits chapter is often off the first card: early on the last shot or on epilogue text, or late in
+    the roll, on its closing logos, or where a montage after the first cards ends (2026-09-27 audit: 6 of 21 movie
+    credits chapters and 4 of 20 TV ones more than 5 s off). The frames show it off only in two shapes:
+
+    * **Inside the roll**: the roll starts more than ``CHAPTER_AGREES_S`` and no more than ``CHAPTER_EARLIER_MAX_S``
+      before the chapter, and text is on the screen all the way from it to the chapter -- no stretch of keyframes
+      without any box longer than ``CHAPTER_TEXT_GAP_S``, and no lit keyframe without one after the start's own
+      ``CHAPTER_START_FADE_S``. Text that stops between the two (a caption, a dedication split off by black) leaves
+      the chapter, and so does text between shots of plain footage: it was the story's (a T-shirt, a poster, a screen).
+    * **On the story**: the roll starts more than ``CHAPTER_AGREES_S`` and no more than ``CHAPTER_LATER_MAX_S`` after
+      the chapter, no keyframe from the chapter to it holds any text, and those up to ``CHAPTER_LATER_FADE_S`` before
+      it are all lit, at least one: the chapter sits on footage, not on black cards too small to read.
+
+    A roll starting within ``CHAPTER_AGREES_S`` of the chapter agrees with it (an end title card or a show's closing
+    logo a few seconds before the first card is the chapter's to include), and a roll further away than either bound
+    is another one, or a scene with text.
+
+    Args:
+        rows: The tail's keyframe rows the start was found on, without the text that never moves
+            (:func:`without_overlays`): a channel bug would put text on every keyframe.
+        start_s: Rule J's refined start.
+        chapter_s: The start of the file's credits chapter.
+
+    Returns:
+        True when the roll's start should replace the chapter's.
+    """
+    if abs(start_s - chapter_s) <= CHAPTER_AGREES_S:
+        return False
+    dark = RULE_J.dark
+    if start_s < chapter_s:
+        if chapter_s - start_s > CHAPTER_EARLIER_MAX_S:
+            return False
+        between = [row for row in rows if start_s < row[0] < chapter_s]
+        if any(row[1] == 0 and row[2] >= dark and row[0] > start_s + CHAPTER_START_FADE_S for row in between):
+            return False
+        stops = [start_s, *sorted(row[0] for row in between if row[1] >= 1), chapter_s]
+        return max(b - a for a, b in zip(stops, stops[1:], strict=False)) <= CHAPTER_TEXT_GAP_S
+    if start_s - chapter_s > CHAPTER_LATER_MAX_S:
+        return False
+    between = [row for row in rows if chapter_s <= row[0] < start_s]
+    footage = [row for row in between if row[0] < start_s - CHAPTER_LATER_FADE_S]
+    return not any(row[1] >= 1 for row in between) and bool(footage) and all(row[2] >= dark for row in footage)

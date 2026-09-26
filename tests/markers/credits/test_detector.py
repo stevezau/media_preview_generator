@@ -16,6 +16,7 @@ from media_preview_generator.markers.credits.textdet_helper import (
     TextDetShuttingDownError,
     TextDetUnavailableError,
 )
+from media_preview_generator.markers.decide import chapter_hint
 from media_preview_generator.markers.freeze import Freeze
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
 from media_preview_generator.markers.pipeline import DetectorAnswer, DetectorUnavailableError
@@ -1613,6 +1614,13 @@ def pool(monkeypatch):
 NOW = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
 
 
+class _Settings(SimpleNamespace):
+    """The detection settings the detector reads: the credits windows and which sources are on (``off``)."""
+
+    def source_enabled(self, source_id: str) -> bool:
+        return source_id not in self.off
+
+
 @pytest.fixture
 def ctx(tmp_path):
     store = MarkerStore(str(tmp_path / "markers.db"))
@@ -1620,7 +1628,7 @@ def ctx(tmp_path):
     # run_memo as PipelineContext answers outside a run of the file: a fresh dict every call, nothing kept.
     yield SimpleNamespace(config=SimpleNamespace(ffmpeg_path="/usr/lib/jellyfin-ffmpeg/ffmpeg"), force=False, store=store,
                           now=lambda: clock.now, clock=clock, run_memo=lambda path: {},
-                          settings=SimpleNamespace(credits_tv_s=None, credits_movie_s=None))  # fmt: skip
+                          settings=_Settings(credits_tv_s=None, credits_movie_s=None, off=set()))  # fmt: skip
     store.close()
 
 
@@ -2017,6 +2025,76 @@ class TestDetect:
             detector.detect_credits_text(rec, ctx=ctx)
         assert ctx.store.credits_text_timed_out_at(identity) is None
         assert detector.credits_text_failed_here(rec, ctx) is False
+
+    @staticmethod
+    def _with_chapter(ctx, chapter_ms):
+        identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        rec = ctx.store.upsert_file(identity, duration_ms=MOVIE.duration_ms, season_key=None, is_movie=True)
+        chapters = [Candidate(MarkerType.CREDITS, chapter_ms, None, Source.CHAPTERS, 1.0, "End Credits")]
+        ctx.store.replace_evidence(rec.id, Source.CHAPTERS, chapters, version=1)
+        return rec
+
+    @pytest.mark.parametrize(
+        ("rows", "moves"),
+        [
+            # Text on every keyframe from the roll's start to the chapter: the chapter sits inside the roll.
+            (tuple((float(t), 2, 120.0, ((40, 20, 280, 44),) * 2) for t in range(5_580, 5_652, 4)), True),
+            # Nothing on screen between the two: the roll rule J found is no part of the chapter's.
+            ((), False),
+        ],
+        ids=["inside-the-roll", "cut-off"],
+    )
+    def test_a_file_with_a_credits_chapter_is_read_against_it(self, monkeypatch, pool, ctx, rows, moves):
+        rec = self._with_chapter(ctx, 5_650_000)
+
+        def find(path, **kwargs):
+            return detector.CreditsTextResult(5_580.0, None, rows, (), ())
+
+        monkeypatch.setattr(detector, "find_credits", find)
+        answer = detector.detect_credits_text(rec, ctx=ctx)
+        assert answer == DetectorAnswer(
+            (
+                Candidate(
+                    MarkerType.CREDITS, 5_580_000, None, Source.CREDITS_TEXT, 1.0, chapter_hint(5_650_000, moves=moves)
+                ),
+            ),  # fmt: skip
+            "steps back to the earliest kept start; credits chapter at 5650000 ms",
+        )
+
+    def test_with_chapters_off_the_answer_is_read_without_one(self, monkeypatch, pool, ctx):
+        rec = self._with_chapter(ctx, 5_650_000)
+        ctx.settings.off = {"chapters"}
+        monkeypatch.setattr(
+            detector, "find_credits", lambda path, **kwargs: detector.CreditsTextResult(5580.0, None, (), (), ())
+        )
+        assert detector.detect_credits_text(rec, ctx=ctx) == DetectorAnswer(
+            (Candidate(MarkerType.CREDITS, 5_580_000, None, Source.CREDITS_TEXT),),
+            "steps back to the earliest kept start",
+        )
+
+    @pytest.mark.parametrize(
+        ("stored_basis", "chapters_off", "due"),
+        [
+            ("steps back to the earliest kept start; credits chapter at 5650000 ms", False, False),
+            ("steps back to the earliest kept start; credits chapter at 5600000 ms", False, True),  # another chapter
+            ("steps back to the earliest kept start", False, True),  # read before the chapter was there
+            ("steps back to the earliest kept start; credits chapter at 5650000 ms", True, True),  # chapters off now
+            ("steps back to the earliest kept start", True, False),
+        ],
+        ids=["same-chapter", "other-chapter", "no-chapter-then", "chapters-off", "off-and-read-without"],
+    )
+    def test_a_found_start_is_due_again_when_the_chapter_it_was_read_against_changes(
+        self, ctx, stored_basis, chapters_off, due
+    ):
+        rec = self._with_chapter(ctx, 5_650_000)
+        ctx.settings.off = {"chapters"} if chapters_off else set()
+        ctx.store.replace_detector_answer(
+            rec.id,
+            {Source.CREDITS_TEXT: [Candidate(MarkerType.CREDITS, 5_580_000, None, Source.CREDITS_TEXT)]},
+            version=detector.CREDITS_TEXT_VERSION,
+            run=(Source.CREDITS_TEXT, stored_basis),
+        )
+        assert detector.credits_text_due(rec, ctx) is due
 
     def test_an_unknown_duration_is_no_answer(self, pool, ctx):
         rec = FileRecord(9, "/m/x.mkv", 1, 1, None, None, True)

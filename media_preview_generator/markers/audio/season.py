@@ -1715,4 +1715,20 @@ def season_audio_spec(ffmpeg_path: str | None) -> LocalDetectorSpec | None:
         due=season_audio_due,
         needs_worker=season_audio_needs_worker,
         followups=season_audio_followups,
+        failed_here=season_audio_failed_here,
     )
+
+
+def season_audio_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:
+    """Whether this episode's own file couldn't be fingerprinted as it is now (``detector_failures``, dropped when the
+    file's identity changes), so a rule waiting for its season audio answer (an intro chapter an online answer
+    contradicts, spec §5.5 rule 3) stops waiting.
+
+    Args:
+        rec: The episode.
+        ctx: The job's context.
+
+    Returns:
+        True when a fingerprint failure is recorded for this file.
+    """
+    return ctx.store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is not None

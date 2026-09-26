@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from loguru import logger
 
-from ..decide import credits_limits_ms, earliest_credits_start_ms
+from ..decide import chapter_hint, credits_chapter_start_ms, credits_limits_ms, earliest_credits_start_ms
 from ..freeze import Freeze
 from ..models import Candidate, FileIdentity, MarkerType, Source
 from . import frames, rule_j
@@ -54,7 +54,11 @@ if TYPE_CHECKING:
 # holds text only that frame boxes (a roll the 320x180 reading half boxed), and a roll read at 640x360 starts on dense
 # text or the text it runs into without a break (``rule_j.start_on_dense_text``: small print on story before it is not
 # its start). Answers read at 640x360 can move; one found at 320x180 that runs to the end of the file can't.
-CREDITS_TEXT_VERSION = 5
+# 6: the 1 fps refine walks back over a roll's first cards that read one or two boxes on a lit frame, in the roll's
+# band, and never starts from a caption cut off from the coarse start (``rule_j.refine_start``); and a file with a
+# credits chapter is read against it, its answer moving the chapter only where the frames show the chapter off the
+# roll (``rule_j.moves_chapter``, ``decide.chapter_hint``). Found starts can move; "nothing found" can't.
+CREDITS_TEXT_VERSION = 6
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
 # (300 s) gives 300,005, so a chosen window's version never equals Automatic's, and another window's answer is asked
@@ -719,9 +723,46 @@ def detect_credits_text(
     if result.start_s is None:
         logger.debug("No credit roll in the end of {}", os.path.basename(rec.canonical_path))
         return DetectorAnswer((), LOOK_BACK_BASIS)
+    chapter_ms = credits_chapter_hint_ms(rec, ctx)
+    origin = ""
+    if chapter_ms is not None:
+        rows = rule_j.without_overlays(result.key_rows, result.overlays)
+        origin = chapter_hint(chapter_ms, moves=rule_j.moves_chapter(rows, result.start_s, chapter_ms / 1000.0))
     end_ms = None if result.end_s is None else int(round(result.end_s * 1000))
-    found = Candidate(MarkerType.CREDITS, int(round(result.start_s * 1000)), end_ms, Source.CREDITS_TEXT)
-    return DetectorAnswer((found,), LOOK_BACK_BASIS)
+    found = Candidate(MarkerType.CREDITS, int(round(result.start_s * 1000)), end_ms, Source.CREDITS_TEXT, origin=origin)
+    return DetectorAnswer((found,), _basis(chapter_ms))
+
+
+def _basis(chapter_ms: int | None) -> str:
+    """What an answer is based on (``detector_runs``): the look-back, and the credits chapter it was read against."""
+    return LOOK_BACK_BASIS if chapter_ms is None else f"{LOOK_BACK_BASIS}; credits chapter at {chapter_ms} ms"
+
+
+def credits_chapter_hint_ms(rec: FileRecord, ctx: PipelineContext) -> int | None:
+    """The start of the credits chapter the decision rules would decide this file's credits from, when chapters are
+    among the sources turned on: the detector reads the frames against it (``rule_j.moves_chapter``).
+
+    Args:
+        rec: The file.
+        ctx: The job's context.
+
+    Returns:
+        The chapter's start in ms, or None (no sane credits chapter, or chapters are off).
+    """
+    if not rec.duration_ms or not ctx.settings.source_enabled(Source.CHAPTERS.value):
+        return None
+    window_ms, movie_cap_ms = credits_limits_ms(
+        is_episode=rec.season_key is not None,
+        tv_window_s=ctx.settings.credits_tv_s,
+        movie_window_s=ctx.settings.credits_movie_s,
+    )
+    return credits_chapter_start_ms(
+        ctx.store.get_evidence(rec.id),
+        duration_ms=rec.duration_ms,
+        is_movie=rec.is_movie,
+        credits_window_ms=window_ms,
+        movie_credits_max_from_end_ms=movie_cap_ms,
+    )
 
 
 def _tail_s(rec: FileRecord, ctx: PipelineContext) -> float:
@@ -760,8 +801,10 @@ def credits_answer_version(rec: FileRecord, ctx: PipelineContext) -> int:
 
 
 def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
-    """Whether a stored answer of this version is asked again anyway: a "nothing found" read when the look-back
-    stopped after one step, on a file where a step after the first can be read now.
+    """Whether a stored answer of this version is asked again anyway: a found start read against another credits
+    chapter than the one the rules would decide from now (or against one when chapters are off now, or none when there
+    is one: :func:`credits_chapter_hint_ms`), or a "nothing found" read when the look-back stopped after one step, on a
+    file where a step after the first can be read now.
 
     Nothing else can differ. A found start had story before it within the one step, so the steps after it are never
     read and it is the same answer; and where no step of 30 s or more fits between the first step and 30 s before the
@@ -776,10 +819,14 @@ def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
     Returns:
         True when the detector should read the file again.
     """
-    if not rec.duration_ms or ctx.store.get_detector_run(rec.id, Source.CREDITS_TEXT) == LOOK_BACK_BASIS:
+    if not rec.duration_ms:
         return False
+    run = ctx.store.get_detector_run(rec.id, Source.CREDITS_TEXT)
     stored = [row for row in ctx.store.evidence_rows(rec.id) if row.source is Source.CREDITS_TEXT]
-    if not stored or any(row.type is not None for row in stored):
+    found = any(row.type is not None for row in stored)
+    if found and run is not None and run.startswith(LOOK_BACK_BASIS):
+        return run != _basis(credits_chapter_hint_ms(rec, ctx))
+    if run == LOOK_BACK_BASIS or not stored or found:
         return False
     tail_start = frames.tail_start_s(rec.duration_ms, tail_s=_tail_s(rec, ctx))
     first_step_s = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
@@ -788,7 +835,8 @@ def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
 
 def credits_text_spec() -> LocalDetectorSpec:
     """The detector as the pipeline registers it: credits only, on a worker whenever it decodes, answers kept per file
-    identity.
+    identity. It reads files whose credits a chapter decided too (``checks_chapters``): a release's "Credits" chapter
+    is often off the first card, and the decision rules move its start to the roll the frames show (spec §5.5 rule 3).
 
     Returns:
         Its spec.
@@ -804,4 +852,5 @@ def credits_text_spec() -> LocalDetectorSpec:
         due=credits_text_due,
         needs_worker=credits_text_needs_worker,
         failed_here=credits_text_failed_here,
+        checks_chapters=True,
     )

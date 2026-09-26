@@ -4458,6 +4458,44 @@ class TestDecideRulesVersion:
         assert self._run(store, reg, plex, clients).outcome_key == FileOutcome.UP_TO_DATE.value
         assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
 
+    @pytest.mark.parametrize(("audio", "kept"), [([], False), ([(128_000, 157_000)], True)], ids=["nothing", "agrees"])
+    def test_a_lone_skipdb_intro_goes_once_season_audio_read_the_file_without_agreeing(
+        self, store, media, monkeypatch, audio, kept
+    ):
+        # 2026-09-27 audit (Somebody Somewhere S03E07, 9 s into the story): the keep is for installs with nothing that
+        # reads the file to check a lone online answer. Where season audio read it and found nothing to agree, it goes.
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
+        reads = []
+
+        def season_audio(file, **kwargs):
+            reads.append(file.canonical_path)
+            return [Candidate(T.INTRO, s, e, Source.SEASON_AUDIO) for s, e in audio]
+
+        spec = pipeline.LocalDetectorSpec(
+            source=Source.SEASON_AUDIO,
+            types=frozenset({T.INTRO}),
+            detect=season_audio,
+            stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}),
+            needs_worker=lambda file, ctx: False,
+        )
+        with_audio = {**self.SKIPDB_ONLY, "sources": [{"id": "skipdb", "enabled": True},
+                                                      {"id": "season_audio", "enabled": True}]}  # fmt: skip
+        ctx = _ctx(store, reg, clients=clients, settings_raw=with_audio, detectors=(spec,))
+        _run(ctx, media, {"plex-1": plex})
+
+        assert reads == [media]
+        decision = store.get_decisions(rec.id)[T.INTRO]
+        if kept:
+            # Agreeing, season audio makes SkipDB's intro a decision of today's rules: no keep needed.
+            assert (decision.status, decision.reason) == (DecisionStatus.DECIDED, "sources agree: skipdb, season_audio")
+            assert store.get_markers(rec.id)[T.INTRO] == Marker(T.INTRO, 128_000, 156_824, ("skipdb", "season_audio"))
+        else:
+            assert decision.status is DecisionStatus.NEEDS_REVIEW
+            assert store.get_markers(rec.id) == {}
+            assert plex.write.call_args.args == ("item-plex-1", [])
+
     @pytest.mark.parametrize("arrives", ["with-the-rule-change", "on-a-later-run"])
     def test_new_evidence_that_contradicts_the_kept_intro_replaces_it(self, store, media, monkeypatch, arrives):
         plex = ready_publisher()

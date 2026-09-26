@@ -12,7 +12,7 @@ import pytest
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.credits import detector, frames
 from media_preview_generator.markers.credits.textdet_helper import TextDetState
-from media_preview_generator.markers.decide import TEXT_CHECKS_CHAPTER_REASON, DecisionStatus
+from media_preview_generator.markers.decide import TEXT_CHECKS_CHAPTER_REASON, DecisionStatus, chapter_hint
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.probe import Chapter
@@ -163,11 +163,28 @@ class TestWorkerHandOff:
         assert out is not None and out.outcome_key == FileOutcome.PUBLISHED.value
         assert find.calls == []
 
-    def test_credits_a_chapter_decided_never_take_a_worker(self, store, media, find):
-        # Local detectors run only for undecided types or answers they supplied (``_detector_pending``); online sources
-        # still confirm or veto the chapter (rule 3) without a worker.
+    def test_credits_a_chapter_decided_are_read_on_a_worker_against_the_chapter(self, store, media, find):
+        # Since 2026-09-27 credit text reads a file whose credits a chapter decided alone (``checks_chapters``): a
+        # release's "Credits" chapter is often off the first card, and the frames move its start when they show it.
         chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
         out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert out is None and find.calls == []
+        out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="process")
+        assert out is not None and out.outcome_key == FileOutcome.PUBLISHED.value
+        (call,) = find.calls
+        assert call["path"] == media
+        rec = store.get_file(media)
+        # The fake roll starts 0.25 s after the chapter: it agrees, the frames keep the chapter.
+        assert [c.origin for c in store.get_evidence(rec.id) if c.source is Source.CREDITS_TEXT] == [
+            chapter_hint(1_290_000, moves=False)
+        ]
+        assert store.get_markers(rec.id)[T.CREDITS] == Marker(T.CREDITS, 1_290_000, DUR, ("chapters",))
+        again, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert again is not None and len(find.calls) == 1  # answered at this version against this chapter: not again
+
+    def test_credits_a_chapter_decided_take_no_worker_with_credit_text_off(self, store, media, find):
+        chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
+        out, _ = _run(ctx_for(store, media, credits_text=False), media, pubs(), probe=chapters, stage="check")
         assert out is not None and out.outcome_key == FileOutcome.PUBLISHED.value
         assert find.calls == []
 
@@ -440,9 +457,9 @@ class TestCreditsWindow:
     def test_automatic_stores_the_answer_under_the_version_it_always_had(self, store, media):
         spec = detector.credits_text_spec()
         rec = store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False)
-        assert detector.CREDITS_TEXT_VERSION == 5
-        assert spec.answer_version(rec, ctx_for(store, media)) == 5
-        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 5
+        assert detector.CREDITS_TEXT_VERSION == 6
+        assert spec.answer_version(rec, ctx_for(store, media)) == 6
+        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 6
 
     def test_an_answer_read_on_another_window_is_read_again_and_stored_under_the_new_one(self, store, media, find):
         _run(ctx_for(store, media), media, pubs(), stage="process")

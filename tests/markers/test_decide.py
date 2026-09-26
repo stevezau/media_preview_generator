@@ -917,16 +917,26 @@ class TestAgreement:
         assert d.status is DecisionStatus.DECIDED
         assert d.marker == Marker(T.INTRO, 30_000, 114_105, ("introdb", "server_markers", "server_markers_imported"))
 
-    def test_plex_and_an_imported_copy_agreeing_against_a_chapter_send_it_to_review(self):
+    @pytest.mark.parametrize(
+        ("order", "reason"),
+        [
+            (tuple(s for s in ORDER if s != "season_audio"), "agreeing sources contradict the result: "
+             "introdb/theintrodb, server_markers"),
+            # The imported copy ends inside the chapter: season audio, among the sources, checks it first (rule 3).
+            (ORDER, "chapters contradicted by an online answer; waiting for season audio to check them"),
+        ],
+        ids=["no-season-audio", "season-audio"],
+    )  # fmt: skip
+    def test_plex_and_an_imported_copy_agreeing_against_a_chapter_send_it_to_review(self, order, reason):
         cands = [
             intro(S.CHAPTERS, 105_272, 194_986),
             intro(S.SERVER_MARKERS, 24_500, 113_900, "plex-1"),
             intro(S.SERVER_MARKERS_IMPORTED, 24_046, 114_105, "jellyfin-1"),
         ]
-        d = decide(cands, ctx(), {})[T.INTRO]
+        d = decide(cands, ctx(order=order), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.proposed == Marker(T.INTRO, 105_272, 194_986, ("chapters",))
-        assert d.reason == "agreeing sources contradict the result: introdb/theintrodb, server_markers"
+        assert d.reason == reason
 
 
 class TestSingleSource:
@@ -1835,6 +1845,9 @@ _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
 _REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SKIPDB, S.SEASON_AUDIO_PREVIOUS)
 _REF_TEXT_WAITS = "chapters contradicted by skipdb; waiting for credit text to check them"
 _REF_TEXT_WINS = "credit text and agreeing sources contradict the chapters"
+_REF_AUDIO_WINS = "season audio and agreeing sources contradict the chapters"
+_REF_AUDIO_WAITS = "chapters contradicted by an online answer; waiting for season audio to check them"
+_REF_TEXT_MOVES = "chapters, the start moved to the credit roll the frames show"
 _REF_LONG_INTRO_CHAPTER = "Intro chapter is much longer than the rest of the season's"
 _REF_AUDIO = (S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
 _REF_AUDIO_WITH_SERVER = (
@@ -2014,9 +2027,28 @@ def _ref_compose(members, mtype, x, text_start=False):
             _ref_rank(c, x),
         ),
     )
+    # Credits: credit text starts the skip whenever the winner starts more than 5 s from it (2026-09-27).
+    texts = [c for c in suppliers if c.source is S.CREDITS_TEXT]
+    if mtype is T.CREDITS and texts:
+        text = min(texts, key=lambda c: _ref_rank(c, x))
+        if abs(text.start_ms - winner.start_ms) > 5_000:
+            winner = text
     if mtype in _REF_START_TYPES:
-        start, end = max(c.start_ms for c in confirmed), _ref_end(winner, d)
-        edge = [c for c in confirmed if c.start_ms == start]
+        # Season audio one other episode supports doesn't set the start when an agreeing non-server answer of another
+        # group starts more than 15 s before it: it may be only part of the opening (2026-09-27).
+        partial = [
+            c
+            for c in confirmed
+            if c.source is S.SEASON_AUDIO
+            and c.origin.split("/")[0] == "1"
+            and any(
+                o.source not in _REF_SERVER and _ref_group(o) != _ref_group(c) and c.start_ms - o.start_ms > 15_000
+                for o in confirmed
+            )
+        ]
+        pool = [c for c in confirmed if c not in partial] or confirmed
+        start, end = max(c.start_ms for c in pool), _ref_end(winner, d)
+        edge = [c for c in pool if c.start_ms == start]
     else:
         start, end = winner.start_ms, min(_ref_end(c, d) for c in confirmed)
         edge = [c for c in confirmed if _ref_end(c, d) == end]
@@ -2087,6 +2119,22 @@ def _ref_decide_type(mtype, cands, x):
                 agreed = not any(abs(a - b) > tol for a, b in itertools.combinations(values, 2))
                 if agreed and _ref_times_sane(Candidate(mtype, won.start_ms, won.end_ms, winner.source), x):
                     result, reason, overruled = won, f"{_REF_TEXT_WINS}: " + ", ".join(won.decided_by), True
+            # Rule 3 for intros (2026-09-27): sets that each hold this season's audio and a non-server source of another
+            # group decide, as rule 4 would decide them, when the intro they compose ends inside the chapter.
+            audio_paired = mtype is T.INTRO and all(
+                any(c.source is S.SEASON_AUDIO for c in members)
+                and any(c.source not in _REF_SERVER and _ref_group(c) != "season_audio" for c in members)
+                for members, _ in against
+            )
+            if audio_paired:
+                composed = [_ref_compose(members, mtype, x) for members, _ in against]
+                values = [_ref_marker_value(marker) for marker, _ in composed]
+                merged = list({id(c): c for members, _ in against for c in members}.values())
+                won, winner = _ref_compose(merged, mtype, x)
+                agreed = not any(abs(a - b) > tol for a, b in itertools.combinations(values, 2))
+                inside = result.start_ms < won.end_ms < result.end_ms
+                if agreed and inside and _ref_times_sane(Candidate(mtype, won.start_ms, won.end_ms, winner.source), x):
+                    result, reason, overruled = won, f"{_REF_AUDIO_WINS}: " + ", ".join(won.decided_by), True
             if not overruled:
                 names = ", ".join(against[0][1].decided_by)
                 return review(result, "chapters contradicted by agreeing sources: " + names)
@@ -2098,6 +2146,38 @@ def _ref_decide_type(mtype, cands, x):
         )
         if not overruled and text_can_check and any(_ref_group(c) == "skipdb" for c in others):
             return review(result, _REF_TEXT_WAITS)
+        # An online intro ending inside the chapter has season audio read the file first (2026-09-27).
+        online = (S.INTRODB, S.THEINTRODB, S.SKIPDB, S.SERVER_MARKERS_IMPORTED)
+        audio_can_check = (
+            mtype is T.INTRO
+            and not overruled
+            and "season_audio" in x.source_order
+            and not any(c.source in _REF_AUDIO for c in others)
+            and not any(abs(_ref_end(c, d) - result.end_ms) <= tol for c in others)
+            and any(c.source in online and result.start_ms < _ref_end(c, d) < result.end_ms - tol for c in others)
+        )
+        if audio_can_check:
+            return review(result, _REF_AUDIO_WAITS)
+        # Credit text read with this chapter as its hint moves its start to the roll, unless another source agrees with
+        # the chapter (2026-09-27).
+        hinted = [
+            c
+            for c in others
+            if c.source is S.CREDITS_TEXT and c.origin == f"the frames move the credits chapter at {chosen.start_ms} ms"
+        ]
+        if (
+            credits_chapter
+            and not overruled
+            and len(hinted) == 1
+            and abs(hinted[0].start_ms - result.start_ms) > tol
+            and not any(c.source is not S.CREDITS_TEXT and abs(c.start_ms - result.start_ms) <= tol for c in others)
+        ):
+            both = sorted((S.CHAPTERS, S.CREDITS_TEXT), key=lambda s: _ref_source_rank(s, x))
+            moved = Marker(
+                mtype, hinted[0].start_ms, min(result.end_ms, _ref_end(hinted[0], d)), tuple(s.value for s in both)
+            )
+            if _ref_times_sane(Candidate(mtype, moved.start_ms, moved.end_ms, S.CHAPTERS), x):
+                result, reason, overruled = moved, _REF_TEXT_MOVES, True
         backing = [c for c in others if abs(_ref_value(c, d) - _ref_marker_value(result)) <= tol]
         # Finding F1: an intro chapter far longer than the season's other intro chapters needs one agreeing source.
         limit = x.intro_chapter_limit_ms
@@ -2276,6 +2356,9 @@ _EVERY_REASON = (
     _REF_AUDIO_WITH_SERVER,
     _REF_TEXT_WAITS,
     _REF_TEXT_WINS,
+    _REF_AUDIO_WINS,
+    _REF_AUDIO_WAITS,
+    _REF_TEXT_MOVES,
 )
 
 
@@ -2383,7 +2466,52 @@ def _random_file(rng):
                 start = rng.choice((0, 1_999, 2_000))
                 moved[id(c)] = replace(c, start_ms=start, end_ms=start + rng.choice((7_000, 9_999, 10_000, 12_000)))
         cands = [moved.get(id(c), c) for c in cands]
-    return _draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor)
+    return _draws_of_2026_09_27(*_draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor))
+
+
+def _draws_of_2026_09_27(cands, x, locked):
+    """The shapes the 2026-09-27 rules need, from a generator seeded by the file itself, as the 2026-09-25 draws are.
+
+    A fifth of the files with a credits chapter get credit text read with it as the hint, on both sides of the 10 s
+    agreement tolerance, sometimes read with another chapter's start, sometimes beside another source agreeing with the
+    chapter (rule 3's move). A fifth of the files with an intro chapter get an online intro ending inside it, 5-5.001 s
+    or more before its end, and half of those season audio agreeing with that answer or with the chapter (rule 3's
+    season audio check).
+    """
+    rng = random.Random(repr(("2026-09-27", cands, x.duration_ms, x.publish_when, x.source_order)))
+    credits_chapters = [c for c in cands if c.type is T.CREDITS and c.source is S.CHAPTERS]
+    if credits_chapters and rng.random() < 0.2:
+        chosen = max(credits_chapters, key=lambda c: c.start_ms)
+        hint_ms = chosen.start_ms if rng.random() < 0.8 else chosen.start_ms + 5_000
+        offset = rng.choice((-60_000, -10_001, -10_000, 10_000, 10_001, 30_000))
+        cands = [c for c in cands if c.source is not S.CREDITS_TEXT or c.type is not T.CREDITS]
+        verdict = rng.choice(("move", "move", "keep"))
+        cands.append(Candidate(T.CREDITS, chosen.start_ms + offset, None, S.CREDITS_TEXT, 1.0,
+                               f"the frames {verdict} the credits chapter at {hint_ms} ms"))  # fmt: skip
+        if rng.random() < 0.3:
+            cands.append(Candidate(T.CREDITS, chosen.start_ms + 2_000, None, rng.choice((S.SKIPDB, S.SERVER_MARKERS)),
+                                   origin="server-1"))  # fmt: skip
+    intro_chapters = [c for c in cands if c.type is T.INTRO and c.source is S.CHAPTERS and c.end_ms is not None]
+    if intro_chapters and rng.random() < 0.3:
+        chosen = min(intro_chapters, key=lambda c: c.start_ms)
+        # The online answer ends 5-5.001 s before the chapter or half-way through it.
+        end = chosen.end_ms - rng.choice((5_000, 5_001, max(5_001, (chosen.end_ms - chosen.start_ms) // 2)))
+        crowd = rng.choice((S.INTRODB, S.SKIPDB, S.SERVER_MARKERS_IMPORTED))
+        cands.append(Candidate(T.INTRO, chosen.start_ms, end, crowd, 1.0, "jellyfin-1"))
+        if rng.random() < 0.6:
+            cands = [c for c in cands if c.source not in _REF_AUDIO]
+            audio_end = rng.choice((end + 2_000, end - 1_000, chosen.end_ms - 1_000))
+            cands.append(Candidate(T.INTRO, chosen.start_ms + 1_000, audio_end, S.SEASON_AUDIO, 1.0, "4/5"))
+    # A tenth of the files get season audio one other episode supports, starting 15-15.001 s or more after an online
+    # intro that agrees on the end (rule 4: a partial match doesn't set the start).
+    online = [c for c in cands if c.type is T.INTRO and c.source in (S.INTRODB, S.SKIPDB) and c.end_ms is not None]
+    if online and rng.random() < 0.1:
+        o = rng.choice(online)
+        shift = rng.choice((15_000, 15_001, 40_000))
+        cands = [c for c in cands if not (c.type is T.INTRO and c.source in _REF_AUDIO)]
+        cands.append(Candidate(T.INTRO, o.start_ms + shift, o.end_ms + rng.choice((-1_000, 2_000)), S.SEASON_AUDIO,
+                               1.0, rng.choice(("1/1", "1/2", "2/2"))))  # fmt: skip
+    return cands, x, locked
 
 
 def _draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor):
@@ -4082,3 +4210,143 @@ class TestKeepPublishedThroughARuleChange:
     def test_a_marker_carried_over_from_a_replaced_file_rests_on_no_source_and_isnt_kept(self):
         carried = Marker(T.INTRO, 60_000, 90_000, ("carried_over",))
         assert self._keep(self.REVIEW, carried, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)]) is self.REVIEW
+
+    # 2026-09-27: a lone online answer was kept for installs with nothing that reads the file to check it.
+    @pytest.mark.parametrize(
+        ("read_by", "candidates", "kept"),
+        [
+            ((), [], True),  # nothing read the file: kept, as before
+            ((S.SEASON_AUDIO,), [], False),  # season audio read it and found nothing (Somebody Somewhere S03E07)
+            ((S.SEASON_AUDIO,), [Candidate(T.INTRO, 61_000, 91_000, S.SEASON_AUDIO)], True),  # and agrees
+            ((S.SEASON_AUDIO,), [Candidate(T.INTRO, 61_000, 91_000, S.SEASON_AUDIO_PREVIOUS)], True),  # its hint agrees
+            ((S.SEASON_AUDIO,), [Candidate(T.INTRO, 5_000, 36_000, S.SEASON_AUDIO)], False),  # and disagrees
+            ((), [Candidate(T.INTRO, 5_000, 36_000, S.SEASON_AUDIO)], False),  # a disagreeing answer, stored before
+            ((), [Candidate(T.INTRO, 5_000, 36_000, S.CHAPTERS)], False),  # a chapter that disagrees
+            ((), [Candidate(T.INTRO, 5_000, 36_000, S.THEINTRODB)], True),  # an online answer is no check of the file
+        ],
+        ids=[
+            "unread",
+            "read-nothing",
+            "read-agrees",
+            "hint-agrees",
+            "read-disagrees",
+            "stored-disagrees",
+            "chapter-disagrees",
+            "online-disagrees",
+        ],  # fmt: skip
+    )
+    def test_a_lone_online_answer_goes_once_the_file_is_read_without_agreeing(self, read_by, candidates, kept):
+        own = Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)
+        out = decide_module.keep_published(
+            self.REVIEW, self.INTRO, candidates=[own, *candidates], changed=(), duration_ms=DUR, read_by=read_by
+        )
+        assert (out.status is DecisionStatus.DECIDED) is kept
+
+    def test_a_marker_a_source_that_reads_the_file_decided_is_kept_whatever_the_detectors_read(self):
+        # Only markers resting on sources that never decide alone lose the keep this way.
+        published = Marker(T.INTRO, 60_000, 90_000, ("chapters",))
+        out = decide_module.keep_published(
+            self.REVIEW,
+            published,
+            candidates=[Candidate(T.INTRO, 60_000, 90_000, S.CHAPTERS)],
+            changed=(),
+            duration_ms=DUR,
+            read_by=(S.SEASON_AUDIO,),
+        )
+        assert out.status is DecisionStatus.DECIDED
+
+
+class TestSeasonAudioChecksAnIntroChapter:
+    """Rule 3 since 2026-09-27 (Spring of the Blade S01E14: an "Intro" chapter 0-134 s, IntroDB 0-103 s, the opening
+    ending at 106 s): an online answer ending inside an intro chapter has season audio read the file, and season audio
+    agreeing with it ends the intro there."""
+
+    CHAPTER = intro(S.CHAPTERS, 0, 134_000, "Intro")
+
+    def test_an_online_answer_ending_inside_the_chapter_waits_for_season_audio(self):
+        d = decide([self.CHAPTER, intro(S.INTRODB, 0, 103_000)], ctx("medium"), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, decide_module.AUDIO_CHECKS_CHAPTER_REASON)
+        assert d.proposed == Marker(T.INTRO, 0, 134_000, ("chapters",))
+
+    def test_without_season_audio_to_ask_the_chapter_decides_as_before(self):
+        # The pipeline leaves season audio out of the order once it has read the file and found nothing, can't run
+        # here, or failed to read the file (``LocalDetectorSpec.failed_here``); one source never overrides a chapter.
+        order = tuple(s for s in ORDER if s != "season_audio")
+        d = decide([self.CHAPTER, intro(S.INTRODB, 0, 103_000)], ctx("medium", order=order), {})[T.INTRO]
+        assert (d.status, d.marker) == (DecisionStatus.DECIDED, Marker(T.INTRO, 0, 134_000, ("chapters",)))
+
+    @pytest.mark.parametrize(
+        ("online", "waits"),
+        [
+            (intro(S.INTRODB, 0, 129_000), False),  # agrees with the chapter's end (5 s)
+            (intro(S.INTRODB, 0, 128_999), True),
+            (intro(S.INTRODB, 0, 150_000), False),  # ends after the chapter: it can only show more intro
+            (intro(S.SKIPDB, 0, 103_000), True),
+            (intro(S.SERVER_MARKERS_IMPORTED, 0, 103_000, "jellyfin-1"), True),  # an importer's copy of one
+            (intro(S.SERVER_MARKERS, 0, 103_000, "plex-1"), False),  # a server's own detection is no online answer
+        ],
+        ids=["agrees", "just-inside", "after", "skipdb", "imported", "server"],
+    )
+    def test_which_answers_have_season_audio_check_the_chapter(self, online, waits):
+        d = decide([self.CHAPTER, online], ctx("medium"), {})[T.INTRO]
+        assert (d.reason == decide_module.AUDIO_CHECKS_CHAPTER_REASON) is waits
+
+    def test_an_online_answer_ending_before_the_chapter_starts_is_another_segment(self):
+        chapter = intro(S.CHAPTERS, 159_500, 196_500, "Intro")
+        d = decide([chapter, intro(S.INTRODB, 0, 15_000)], ctx("medium"), {})[T.INTRO]
+        assert (d.status, d.marker.start_ms) == (DecisionStatus.DECIDED, 159_500)
+
+    def test_season_audio_agreeing_with_the_online_answer_ends_the_intro_there(self):
+        cands = [self.CHAPTER, intro(S.INTRODB, 0, 103_000), intro(S.SEASON_AUDIO, 0, 104_211)]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker == Marker(T.INTRO, 0, 104_211, ("introdb", "season_audio"))
+        assert d.reason == decide_module.AUDIO_OVER_CHAPTER_REASON + "introdb, season_audio"
+
+    def test_season_audio_agreeing_with_the_chapter_keeps_it(self):
+        cands = [self.CHAPTER, intro(S.INTRODB, 0, 103_000), intro(S.SEASON_AUDIO, 5_000, 132_000)]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert (d.status, d.marker.end_ms) == (DecisionStatus.DECIDED, 134_000)
+
+    def test_a_chapter_ending_before_season_audio_and_the_online_answer_stays_in_review(self):
+        # Family Guy S14 on the library chapter set: a 15 s title card chapter, season audio and SkipDB running 15 s on
+        # into the episode. The chapter was right; the shorter skip is never overruled this way.
+        cands = [intro(S.CHAPTERS, 0, 15_200, "Intro"), intro(S.SKIPDB, 0, 31_000), intro(S.SEASON_AUDIO, 0, 29_226)]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "chapters contradicted by agreeing sources: skipdb, season_audio",
+        )
+
+
+class TestAPartialSeasonMatchDoesntSetTheStart:
+    """Rule 4 since 2026-09-27 (Game of Thrones S03E04/E09: the season split over three disks, two episodes matched
+    with each other alone at 63-112 s of a 5-112 s title sequence IntroDB had right)."""
+
+    @pytest.mark.parametrize(
+        ("label", "audio_start", "start", "decided_by"),
+        [
+            ("1/1", 63_406, 6_000, ("introdb", "season_audio")),
+            ("1/2", 63_406, 6_000, ("introdb", "season_audio")),
+            ("2/4", 63_406, 63_406, ("introdb", "season_audio")),  # more episodes share it: the opening's start
+            ("1/1", 21_000, 21_000, ("introdb", "season_audio")),  # 15 s after: an ordinary disagreement on the start
+            ("1/1", 21_001, 6_000, ("introdb", "season_audio")),
+        ],
+        ids=["one-of-one", "one-of-two", "two-of-four", "15-s", "15.001-s"],
+    )
+    def test_season_audio_one_other_episode_supports_leaves_an_earlier_agreeing_start(
+        self, label, audio_start, start, decided_by
+    ):
+        cands = [intro(S.INTRODB, 6_000, 113_000), intro(S.SEASON_AUDIO, audio_start, 112_075, label)]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker == Marker(T.INTRO, start, 112_075, decided_by)
+
+    def test_a_servers_marker_starting_earlier_never_moves_it(self):
+        cands = [
+            intro(S.SKIPDB, 60_000, 113_000),
+            intro(S.SEASON_AUDIO, 63_406, 112_075, "1/1"),
+            intro(S.SERVER_MARKERS, 6_000, 112_500, "plex-1"),
+        ]
+        d = decide(cands, ctx("medium"), {})[T.INTRO]
+        assert d.marker.start_ms == 63_406  # SkipDB starts only 3.4 s earlier; the server's marker never counts

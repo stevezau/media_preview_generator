@@ -21,9 +21,12 @@ from .speed import online_time_scale
 # older rules is decided again from what it has stored (``markers.versions``; each run records the version a file was
 # decided under in ``version_reruns``, under ``DECIDE_RULES``). 1: the 2026-09-25 rules (SkipDB never decides alone,
 # credit text checks a credits chapter SkipDB disagrees with, online credits may end up to 5 s past the file, another
-# release's intro beside season audio; spec §5.5 rules 2, 3, 6 and 14).
+# release's intro beside season audio; spec §5.5 rules 2, 3, 6 and 14). 2: the 2026-09-27 rules (credit text moves a
+# credits chapter's start to the roll it reads, and wins a credits start from an online answer more than 5 s from it;
+# season audio checks an intro chapter an online answer ends inside; a lone online answer kept through a rule change
+# goes once a detector reading the file has found nothing to agree with it; spec §5.5 rules 3, 4 and 16).
 DECIDE_RULES = "decide_rules"
-DECIDE_RULES_VERSION = 1
+DECIDE_RULES_VERSION = 2
 # A decided type whose published marker today's rules would put in Needs review or leave without one keeps it, until new
 # or changed evidence contradicts it (``keep_published``); the reason starts with this.
 KEPT_BEFORE_RULE_CHANGE = "kept: published before a rule change"
@@ -45,6 +48,17 @@ LONG_INTRO_CHAPTER_REASON = "Intro chapter is much longer than the rest of the s
 # agrees with has credit text read the file's frames; credit text with an independent source outvotes the chapter.
 TEXT_CHECKS_CHAPTER_REASON = "chapters contradicted by skipdb; waiting for credit text to check them"
 TEXT_OVER_CHAPTER_REASON = "credit text and agreeing sources contradict the chapters: "
+TEXT_MOVES_CHAPTER_REASON = "chapters, the start moved to the credit roll the frames show"
+# The same for an intro chapter (2026-09-27 audit: a streaming release's "Intro" chapter ran 28 s into the episode, where
+# IntroDB ended at the title card): an online answer ending before it has season audio read the file, and season audio
+# with an independent source outvotes the chapter.
+AUDIO_CHECKS_CHAPTER_REASON = "chapters contradicted by an online answer; waiting for season audio to check them"
+AUDIO_OVER_CHAPTER_REASON = "season audio and agreeing sources contradict the chapters: "
+# Credit text reads this file's own frames; an online credits start was timed on whichever release its users had. In a
+# cluster of agreeing credits answers, credit text supplies the start whenever the source-order winner starts further
+# than this from it (2026-09-27 audit: one show's IntroDB, read on this file's clock, 6-7 s into the roll where credit
+# text had its first card).
+TEXT_OVER_ONLINE_MS = 5_000
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
 # independence group -- never two votes, whether or not they agree with each other.
 _INTRODB_GROUP = "introdb/theintrodb"
@@ -99,6 +113,7 @@ _SOURCE_LABELS = {
     Source.SERVER_MARKERS_IMPORTED: "a server's imported marker",
 }
 _READS_THE_FILE = frozenset({Source.CHAPTERS, Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS, Source.CREDITS_TEXT})
+_ONLINE_SOURCES = frozenset({Source.INTRODB, Source.THEINTRODB, Source.SKIPDB})
 _NEEDS_ANOTHER_SOURCE = "it needs another source to agree"
 _ONLINE_ALONE = "an online answer needs a check against the file"
 _SERVER_ALONE = "a server's marker needs another source to agree"
@@ -140,6 +155,9 @@ OTHER_RELEASE_MIN_SHIFT_MS = 15_000
 # Both must be at least this long: a short card matches a stretch of another length by chance (one episode,
 # a 16 s title card beside a 15 s season audio answer elsewhere).
 OTHER_RELEASE_MIN_LENGTH_MS = 30_000
+# A season audio intro only one other episode supports that starts more than this after an agreeing answer of another
+# source is part of the opening those two files share, not its start (rule 4, :func:`_partial_season_match`).
+PARTIAL_MATCH_MIN_SHIFT_MS = 15_000
 SHORTENED_NOTE = "shortened to the server's own marker"
 # The reason of a type no source gave a candidate of (not even one failing sanity): nothing to go on.
 NO_EVIDENCE_REASON = "no evidence"
@@ -556,7 +574,10 @@ def _compose_cluster(
     :func:`timed_on_any_release` doesn't supply it, whatever the order -- its times come from another release (South
     Park S01: IntroDB's 30.0 s and season audio's 33.6 s agree, the theme ends at 35.5 s). Credits keep the order, except
     with ``text_start`` (a cluster weighed against a credits chapter, rule 3): a confirming credit text answer then
-    supplies the start, which it reads from this file's frames.
+    supplies the start, which it reads from this file's frames. A confirming credit text answer also supplies the start
+    whenever the source-order winner starts more than ``TEXT_OVER_ONLINE_MS`` from it: the online answers were timed on
+    whichever release their users had (one show's episodes: IntroDB, read on this file's clock, 6-7 s into the roll
+    where credit text had its first card).
     """
     confirmed = [c for c in cluster if any(_group(o) != _group(c) and _agree(c, o, ctx.duration_ms) for o in cluster)]
     confirmed_non_server = [c for c in confirmed if c.source not in SERVER_SOURCES]
@@ -567,10 +588,32 @@ def _compose_cluster(
         return file_edge and timed_on_any_release(c), text_start and c.source is not Source.CREDITS_TEXT, rank(c)
 
     winner = min(confirmed_non_server, key=winner_key)
-    other_edge, edge_suppliers = _safer_other_edge(mtype, confirmed, ctx)
+    if mtype is MarkerType.CREDITS:
+        text = min((c for c in confirmed_non_server if c.source is Source.CREDITS_TEXT), key=rank, default=None)
+        if text is not None and abs(text.start_ms - winner.start_ms) > TEXT_OVER_ONLINE_MS:
+            winner = text
+    edge_pool = [c for c in confirmed if not _partial_season_match(c, confirmed)] if mtype in _START_SEGMENTS else []
+    other_edge, edge_suppliers = _safer_other_edge(mtype, edge_pool or confirmed, ctx)
     agreeing_with_winner = [c for c in confirmed if _agree(winner, c, ctx.duration_ms)]
     sources = {c.source for c in [winner, *edge_suppliers, *agreeing_with_winner]}
     return _composed_marker(mtype, _agree_value(winner, ctx.duration_ms), other_edge, sources, ctx), winner
+
+
+def _partial_season_match(candidate: Candidate, confirmed: list[Candidate]) -> bool:
+    """Whether a season audio intro may be only part of the opening, so it doesn't set an agreed intro's start (rule 4):
+    one other episode supports it (its label ``support/others``), and an agreeing answer of another source that isn't a
+    server's marker starts more than ``PARTIAL_MATCH_MIN_SHIFT_MS`` before it. Two files can share only part of their
+    opening (2026-09-27 audit: a season split over three disks left two episodes matched with each other alone, at
+    63-112 s of a 5-112 s title sequence IntroDB had right), where a stretch more episodes share is the opening itself.
+    """
+    if candidate.source is not Source.SEASON_AUDIO or candidate.origin.split("/")[0] != "1":
+        return False
+    return any(
+        c.source not in SERVER_SOURCES
+        and _group(c) != _group(candidate)
+        and candidate.start_ms - c.start_ms > PARTIAL_MATCH_MIN_SHIFT_MS
+        for c in confirmed
+    )
 
 
 def _contradicting_groups(marker: Marker, pool: list[Candidate], ctx: DecisionContext) -> list[str]:
@@ -662,14 +705,22 @@ def _decide_from_chapters(
         if abs(_checked_value(mtype, other_marker) - chapter_value) > tol:
             contradicting.append((cluster, other_marker))
     if contradicting:
+        clusters = [cluster for cluster, _ in contradicting]
+        overruled = None
         if text_start:
-            overruled = _text_over_chapter([cluster for cluster, _ in contradicting], mtype, ctx)
-            if overruled is not None:
-                return overruled
+            overruled = _text_over_chapter(clusters, mtype, ctx)
+        elif mtype is MarkerType.INTRO:
+            overruled = _audio_over_chapter(clusters, chapter_marker, ctx)
+        if overruled is not None:
+            return overruled
         names = ", ".join(contradicting[0][1].decided_by)
         return _review(mtype, chapter_marker, f"chapters contradicted by agreeing sources: {names}")
     if text_start and _text_should_check_chapter(chapter_value, others, ctx):
         return _review(mtype, chapter_marker, TEXT_CHECKS_CHAPTER_REASON)
+    if mtype is MarkerType.INTRO and _audio_should_check_chapter(chapter_marker, others, ctx):
+        return _review(mtype, chapter_marker, AUDIO_CHECKS_CHAPTER_REASON)
+    if text_start and (moved := _text_moves_chapter(chosen, chapter_marker, others, ctx)) is not None:
+        return moved
 
     marker = chapter_marker
     agreeing = [c for c in others if abs(_agree_value(c, ctx.duration_ms) - chapter_value) <= tol]
@@ -715,6 +766,138 @@ def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: 
     if decision.status is not DecisionStatus.DECIDED:
         return None
     return replace(decision, reason=TEXT_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
+
+
+def chapter_hint(chapter_start_ms: int, *, moves: bool) -> str:
+    """The label a credit text answer read against a credits chapter carries (``Candidate.origin``): which chapter it
+    read the frames against, and whether they show that chapter off the roll the answer starts
+    (``credits.rule_j.moves_chapter``), so the rules move only the chapter it was read for (:func:`_text_moves_chapter`).
+
+    Args:
+        chapter_start_ms: The chapter's start.
+        moves: The frames show the chapter off the roll.
+
+    Returns:
+        The label.
+    """
+    verdict = "the frames move" if moves else "the frames keep"
+    return f"{verdict} the credits chapter at {chapter_start_ms} ms"
+
+
+def credits_chapter_start_ms(
+    candidates: Iterable[Candidate],
+    *,
+    duration_ms: int,
+    is_movie: bool,
+    credits_window_ms: int = 0,
+    movie_credits_max_from_end_ms: int = MOVIE_CREDITS_MAX_FROM_END_MS,
+) -> int | None:
+    """The start of the credits chapter the rules decide from (rule 3: the last sane credits chapter, on a tied start
+    the one with the earlier end), which the credit text detector reads the file against.
+
+    Args:
+        candidates: The file's evidence.
+        duration_ms: The file's duration.
+        is_movie: The file is a movie.
+        credits_window_ms: The credits window the user chose for the file's kind, 0 for Automatic.
+        movie_credits_max_from_end_ms: How far before the end a movie's credits may start.
+
+    Returns:
+        The chapter's start, or None when the file has no sane credits chapter.
+    """
+    ctx = DecisionContext(
+        duration_ms,
+        is_movie,
+        APP_PUBLISH_WHEN,
+        frozenset({MarkerType.CREDITS}),
+        (),
+        movie_credits_max_from_end_ms=movie_credits_max_from_end_ms,
+        credits_window_ms=credits_window_ms,
+    )
+    chapters = [
+        c
+        for c in candidates
+        if c.source is Source.CHAPTERS and c.type is MarkerType.CREDITS and sanity_problem(c, ctx) is None
+    ]
+    if not chapters:
+        return None
+    return min(chapters, key=lambda c: _chapter_choice_key(c, duration_ms)).start_ms
+
+
+def _text_moves_chapter(
+    chosen: Candidate, chapter: Marker, others: list[Candidate], ctx: DecisionContext
+) -> TypeDecision | None:
+    """Credits whose start credit text moved off the chapter (rule 3, 2026-09-27): the detector read the frames against
+    this chapter and found it off the roll its answer starts (:func:`chapter_hint` with ``moves``,
+    ``credits.rule_j.moves_chapter``: inside the roll, or on the last shot before it). The chapter gives the window and
+    its end; credit text the start (a release's "Credits" chapter was more than 5 s off the first card on 10 of 41
+    frame-checked files, 3 of them on the story). Nothing else may agree with the chapter's start: a source that does
+    keeps it, as one source never overrides a chapter another confirms.
+
+    Returns:
+        The decision, or None when there is no such answer, another source agrees with the chapter, or the moved marker
+        fails sanity.
+    """
+    tol = _tolerance_ms(MarkerType.CREDITS)
+    hint = chapter_hint(chosen.start_ms, moves=True)
+    text = [c for c in others if c.source is Source.CREDITS_TEXT and c.origin == hint]
+    if len(text) != 1 or abs(text[0].start_ms - chapter.start_ms) <= tol:
+        return None
+    if any(c.source is not Source.CREDITS_TEXT and abs(c.start_ms - chapter.start_ms) <= tol for c in others):
+        return None
+    end = min(chapter.end_ms, resolve_end_ms(text[0], ctx.duration_ms))
+    marker = _composed_marker(MarkerType.CREDITS, text[0].start_ms, end, {Source.CHAPTERS, Source.CREDITS_TEXT}, ctx)
+    if not _marker_is_sane(marker, ctx):
+        return None
+    return TypeDecision(MarkerType.CREDITS, DecisionStatus.DECIDED, marker, None, TEXT_MOVES_CHAPTER_REASON)
+
+
+def _audio_over_chapter(clusters: list[list[Candidate]], chapter: Marker, ctx: DecisionContext) -> TypeDecision | None:
+    """An intro decided by the agreeing clusters that contradict an intro chapter, when each holds this season's audio
+    answer and a source of another group that isn't a server's marker, and they end the intro inside the chapter (rule
+    3): the chapter then runs past the intro the file's own audio and an independent answer both end, into the episode
+    (2026-09-27 audit: a streaming release's "Intro" chapter ran 28 s into the episode). Composed as rule 4 composes, so
+    season audio supplies the end (rule 13). A chapter that ends *before* them stays in Needs review, as before: on the
+    library chapter set the chapter was the right one every time (Family Guy S14, a 15 s title card where season audio
+    and SkipDB ran on 15 s into the episode).
+
+    Returns:
+        The decision, or None when a cluster lacks such a pair, the clusters disagree with each other, the composed
+        marker doesn't end inside the chapter or fails sanity: the chapter then goes to Needs review as before.
+    """
+    for cluster in clusters:
+        if not any(c.source is Source.SEASON_AUDIO for c in cluster):
+            return None
+        if not any(c.source not in SERVER_SOURCES and _group(c) != Source.SEASON_AUDIO.value for c in cluster):
+            return None
+    decision = _decide_from_cliques(MarkerType.INTRO, clusters, ctx)
+    if decision.status is not DecisionStatus.DECIDED:
+        return None
+    if not chapter.start_ms < decision.marker.end_ms < chapter.end_ms:
+        return None
+    return replace(decision, reason=AUDIO_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
+
+
+def _audio_should_check_chapter(chapter: Marker, others: list[Candidate], ctx: DecisionContext) -> bool:
+    """Whether an intro chapter waits for season audio (rule 3): an online answer (IntroDB, TheIntroDB, SkipDB or an
+    importer plugin's copy of one) ends inside the chapter, more than the tolerance before its end, nothing else agrees
+    with the chapter's end, and season audio is among the sources and hasn't answered. Only an end inside the chapter
+    asks: the chapter may then run on into the episode, where a later end would only show more of the intro. One source
+    still never overrides a chapter; season audio agreeing with the online answer does (:func:`_audio_over_chapter`)."""
+    if Source.SEASON_AUDIO.value not in ctx.source_order:
+        return False
+    if any(c.source in (Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS) for c in others):
+        return False
+    tol = _tolerance_ms(MarkerType.INTRO)
+    ends = [(c, resolve_end_ms(c, ctx.duration_ms)) for c in others]
+    if any(abs(end - chapter.end_ms) <= tol for _c, end in ends):
+        return False
+    return any(_is_online(c) and chapter.start_ms < end < chapter.end_ms - tol for c, end in ends)
+
+
+def _is_online(candidate: Candidate) -> bool:
+    """An answer of IntroDB, TheIntroDB or SkipDB, or an importer plugin's copy of one."""
+    return candidate.source in _ONLINE_SOURCES or candidate.source is Source.SERVER_MARKERS_IMPORTED
 
 
 def _text_should_check_chapter(chapter_value: int, others: list[Candidate], ctx: DecisionContext) -> bool:
@@ -1068,6 +1251,7 @@ def keep_published(
     candidates: Iterable[Candidate],
     changed: Iterable[Candidate],
     duration_ms: int,
+    read_by: Iterable[Source] = (),
 ) -> TypeDecision:
     """Today's decision for a type, or the marker published before the rules changed, kept in its place.
 
@@ -1079,6 +1263,12 @@ def keep_published(
     within 10 s for credits or a preview. Today's rules deciding the type, whatever the answer, replace it; a marker
     carried over from a replaced file rests on no source and isn't kept.
 
+    A marker resting only on sources that never decide alone (an online answer, rule 6) was kept for installs with
+    nothing that reads the file to check it. Where something did read the file, the check has been made: it isn't kept
+    when a source that reads the file answers the type and disagrees, or when a detector that reads the file for the
+    type (``read_by``) read it at its version now and gave no agreeing answer (2026-09-27 audit: a lone SkipDB intro
+    season audio found nothing to match, 9 s into the story).
+
     Args:
         decision: Today's decision for the type.
         published: The marker decided and published before.
@@ -1086,6 +1276,7 @@ def keep_published(
             left out).
         changed: Those of them that are new or changed since the file's run began.
         duration_ms: The file's length.
+        read_by: The local detectors that read this file for the type at their version now, found anything or not.
 
     Returns:
         ``decision``, or the kept marker decided with the reason :data:`KEPT_BEFORE_RULE_CHANGE` and today's.
@@ -1093,6 +1284,7 @@ def keep_published(
     if decision.status not in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE):
         return decision
     checked = _checked_value(published.type, published)
+    candidates = list(candidates)
 
     def agrees(candidate: Candidate) -> bool:
         return abs(_agree_value(candidate, duration_ms) - checked) <= _tolerance_ms(published.type)
@@ -1100,12 +1292,35 @@ def keep_published(
     supported = any(c.source.value in published.decided_by and agrees(c) for c in candidates)
     if not supported or not all(agrees(c) for c in changed):
         return decision
+    if _rests_on_answers_that_never_decide_alone(published) and not _unchecked_by_the_file(candidates, read_by, agrees):
+        return decision
     return TypeDecision(
         published.type,
         DecisionStatus.DECIDED,
         published,
         None,
         f"{KEPT_BEFORE_RULE_CHANGE}; today's rules: {decision.reason}",
+    )
+
+
+def _rests_on_answers_that_never_decide_alone(marker: Marker) -> bool:
+    """Whether every source a marker was decided by is one that never decides alone (rule 6: online answers, a server's
+    markers, the previous season's hint); a user's or a carried-over marker names no such source."""
+    agreement_only = {source.value for source in _AGREEMENT_ONLY}
+    return bool(marker.decided_by) and set(marker.decided_by) <= agreement_only
+
+
+def _unchecked_by_the_file(
+    candidates: list[Candidate], read_by: Iterable[Source], agrees: Callable[[Candidate], bool]
+) -> bool:
+    """Whether nothing that reads the file speaks against a kept marker: no answer of a source that reads the file
+    disagrees with it, and every detector that read the file for its type (``read_by``) gave an agreeing answer (its
+    own source's or, for season audio, its previous-season hint's: one group, rule 8)."""
+    if any(c.source in _READS_THE_FILE and not agrees(c) for c in candidates):
+        return False
+    return all(
+        any(_group(c) == _INDEPENDENCE_GROUP.get(source, source.value) and agrees(c) for c in candidates)
+        for source in read_by
     )
 
 

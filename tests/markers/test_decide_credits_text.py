@@ -9,7 +9,14 @@ from itertools import permutations
 
 import pytest
 
-from media_preview_generator.markers.decide import DecisionContext, DecisionStatus, decide
+from media_preview_generator.markers.decide import (
+    TEXT_MOVES_CHAPTER_REASON,
+    DecisionContext,
+    DecisionStatus,
+    chapter_hint,
+    credits_chapter_start_ms,
+    decide,
+)
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
 
 T = MarkerType
@@ -118,12 +125,13 @@ class TestWithSkipDb:
 
     @pytest.mark.parametrize("offset_ms", [-10_000, 10_000, -10_001, 10_001])
     def test_the_10_s_start_tolerance_is_inclusive(self, offset_ms):
+        # Agreeing 10 s apart, credit text supplies the start: over 5 s from it, SkipDB's loses (TEXT_OVER_ONLINE_MS).
         start = 5_700_000 + offset_ms
         d = credits([text(5_700_000), skipdb(start, 5_990_000)])[T.CREDITS]
         if abs(offset_ms) <= 10_000:
             assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: skipdb, credits_text")
             assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
-                start,
+                5_700_000,
                 5_990_000,
                 ("skipdb", "credits_text"),
             )
@@ -154,12 +162,14 @@ class TestWithSkipDb:
 class TestWithIntroDb:
     """IntroDB is on by default and ranks above credits text in the default order."""
 
+    @pytest.mark.parametrize(("introdb_ms", "start_ms"), [(5_704_000, 5_704_000), (5_708_000, 5_700_000)])
     @pytest.mark.parametrize("level", ["high", "medium"])
-    def test_agreeing_publishes_introdbs_start_with_the_texts_end(self, level):
-        d = credits([introdb(5_708_000), text(5_700_000, 5_900_000)], level=level)[T.CREDITS]
+    def test_agreeing_publishes_introdbs_start_with_the_texts_end(self, level, introdb_ms, start_ms):
+        # By source order within 5 s of the text's start; over 5 s the text's own (TEXT_OVER_ONLINE_MS).
+        d = credits([introdb(introdb_ms), text(5_700_000, 5_900_000)], level=level)[T.CREDITS]
         assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, credits_text")
         assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
-            5_708_000,
+            start_ms,
             5_900_000,
             ("introdb", "credits_text"),
         )
@@ -311,6 +321,99 @@ class TestWithChapters:
             MOVIE_MS,
             ("skipdb", "credits_text"),
         )
+
+
+class TestTextOverAnOnlineStart:
+    """Rule 4 since 2026-09-27: credit text supplies an agreed credits start when the source-order winner starts more
+    than 5 s from it (Stargate Atlantis S01E06/E07: IntroDB, read at 25/23.976, 6-7 s into the roll)."""
+
+    @pytest.mark.parametrize("online", [skipdb, introdb], ids=["skipdb", "introdb"])
+    @pytest.mark.parametrize(
+        ("offset_ms", "start_from"),
+        [(5_000, "online"), (-5_000, "online"), (5_001, "text"), (-5_001, "text"), (9_000, "text")],
+    )
+    def test_text_wins_a_start_more_than_5_s_from_the_online_one(self, online, offset_ms, start_from):
+        d = credits([text(5_700_000), online(5_700_000 + offset_ms, 5_990_000)])[T.CREDITS]
+        assert d.status is DecisionStatus.DECIDED
+        expected = 5_700_000 if start_from == "text" else 5_700_000 + offset_ms
+        assert (d.marker.start_ms, d.marker.end_ms) == (expected, 5_990_000)
+        assert d.marker.decided_by == (online(0).source.value, "credits_text")
+
+    def test_the_text_start_is_the_one_confirming_answer_it_supplies(self):
+        # With a third source agreeing with the online answer, the start is still the file's own frames'.
+        d = credits([text(5_700_000), introdb(5_707_000), skipdb(5_708_000)])[T.CREDITS]
+        assert (d.status, d.marker.start_ms) == (DecisionStatus.DECIDED, 5_700_000)
+
+    def test_a_servers_marker_never_supplies_the_start_either_way(self):
+        d = credits([text(5_700_000), plex(5_708_000)], level="medium")[T.CREDITS]
+        assert (d.status, d.marker.start_ms) == (DecisionStatus.DECIDED, 5_700_000)
+
+
+def hinted(start_ms: int, chapter_ms: int, end_ms: int | None = None, *, moves: bool = True) -> Candidate:
+    """A credit text answer read against the credits chapter at ``chapter_ms``, the frames moving it or not."""
+    return Candidate(T.CREDITS, start_ms, end_ms, Source.CREDITS_TEXT, 1.0, chapter_hint(chapter_ms, moves=moves))
+
+
+class TestTextMovesAChaptersStart:
+    """Rule 3 since 2026-09-27: credit text read against the credits chapter moves the chapter's start to the roll when
+    the frames show the chapter off it (``rule_j.moves_chapter``)."""
+
+    @pytest.mark.parametrize("start_ms", [5_580_000, 5_720_000])
+    @pytest.mark.parametrize("level", ["high", "medium"])
+    def test_a_hinted_answer_over_10_s_off_the_chapter_moves_its_start(self, start_ms, level):
+        d = credits([chapter(5_650_000), hinted(start_ms, 5_650_000)], level=level)[T.CREDITS]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, TEXT_MOVES_CHAPTER_REASON)
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
+            start_ms,
+            MOVIE_MS,
+            ("chapters", "credits_text"),
+        )
+
+    @pytest.mark.parametrize("start_ms", [5_640_000, 5_660_000])
+    def test_a_hinted_answer_within_10_s_keeps_the_chapter(self, start_ms):
+        d = credits([chapter(5_650_000), hinted(start_ms, 5_650_000)])[T.CREDITS]
+        assert (d.status, d.reason, d.marker.start_ms, d.marker.decided_by) == (
+            DecisionStatus.DECIDED,
+            "chapters",
+            5_650_000,
+            ("chapters",),
+        )
+
+    @pytest.mark.parametrize(
+        "answer",
+        [text(5_580_000), hinted(5_580_000, 5_600_000), hinted(5_580_000, 5_650_000, moves=False)],
+        ids=["read-without-a-chapter", "read-with-another-chapter", "frames-keep-the-chapter"],
+    )
+    def test_an_answer_not_moving_this_chapter_never_moves_it(self, answer):
+        # An answer from before version 6, read against a chapter the rules no longer choose, or whose frames don't show
+        # the chapter off the roll.
+        d = credits([chapter(5_650_000), answer])[T.CREDITS]
+        assert (d.status, d.reason, d.marker.start_ms) == (DecisionStatus.DECIDED, "chapters", 5_650_000)
+
+    @pytest.mark.parametrize(
+        "second", [skipdb(5_655_000), plex(5_655_000), introdb(5_645_000)], ids=["skipdb", "plex", "introdb"]
+    )
+    def test_another_source_agreeing_with_the_chapter_keeps_it(self, second):
+        d = credits([chapter(5_650_000), hinted(5_580_000, 5_650_000), second], level="medium")[T.CREDITS]
+        assert d.marker is not None or d.proposed is not None
+        kept = d.marker or d.proposed
+        assert kept.start_ms == 5_650_000
+
+    def test_the_skip_ends_at_the_earlier_of_the_chapters_and_the_rolls_end(self):
+        d = credits([Candidate(T.CREDITS, 5_650_000, 5_950_000, Source.CHAPTERS, 1.0, "Credits"),
+                     hinted(5_580_000, 5_650_000, 5_900_000)])[T.CREDITS]  # fmt: skip
+        assert (d.marker.start_ms, d.marker.end_ms) == (5_580_000, 5_900_000)
+
+    def test_a_moved_start_that_fails_sanity_keeps_the_chapter(self):
+        # A movie's credits may start at most 900 s before its end.
+        d = credits([chapter(5_150_000), hinted(5_090_000, 5_150_000)])[T.CREDITS]
+        assert (d.status, d.reason, d.marker.start_ms) == (DecisionStatus.DECIDED, "chapters", 5_150_000)
+
+    def test_the_chapter_hint_names_the_chapter_start_the_rules_choose(self):
+        # The last sane credits chapter (rule 3): the hint the detector reads the frames against.
+        found = [chapter(5_500_000), chapter(5_650_000), Candidate(T.CREDITS, 100_000, None, Source.CHAPTERS)]
+        assert credits_chapter_start_ms(found, duration_ms=MOVIE_MS, is_movie=True) == 5_650_000
+        assert credits_chapter_start_ms([text(5_650_000)], duration_ms=MOVIE_MS, is_movie=True) is None
 
 
 class TestEndQ3:

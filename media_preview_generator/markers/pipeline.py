@@ -298,6 +298,9 @@ class LocalDetectorSpec:
         failed_here: ``failed_here(file, ctx)``: whether it failed to read the file as it is now (credit text: a decode
             error or a timeout recorded for this identity), so a rule waiting for its answer stops waiting (None:
             never).
+        checks_chapters: It reads the file even for a type chapters decided alone, so the decision rules can check the
+            chapter against the file itself (credit text: a release's "Credits" chapter is often seconds to minutes
+            off the first card, spec §5.5 rule 3).
     """
 
     source: Source
@@ -310,6 +313,7 @@ class LocalDetectorSpec:
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
     followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
     failed_here: Callable[[FileRecord, PipelineContext], bool] | None = None
+    checks_chapters: bool = False
 
     def answer_version(self, rec: FileRecord, ctx: PipelineContext) -> int:
         """The version a stored answer for ``rec`` must have to count."""
@@ -1401,8 +1405,9 @@ def _may_still_answer(ctx: PipelineContext, rec: FileRecord, source: Source) -> 
 def _answered_at_this_version(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
     """Whether a local detector stored an answer under ``source`` for this file at its version now. A detector not
     registered here can't say what its version is, so its stored answer counts as it is. Its ``due`` isn't asked: season
-    audio's reads the whole season, and credit text's is only ever true for an answer stored without
-    ``LOOK_BACK_BASIS``, which no answer of today's version is."""
+    audio's reads the whole season, and credit text's is true for an answer stored without ``LOOK_BACK_BASIS`` (no
+    answer of today's version is) or read against another credits chapter than the rules choose now, which a rule
+    waiting for credit text still counts as an answer: its start is the file's own reading either way."""
     if ctx.store.evidence_fetched_at(rec.id, source) is None:
         return False
     stored = ctx.store.evidence_version(rec.id, source)
@@ -1457,7 +1462,9 @@ def _keep_published_before_rule_change(
     sent that marker (its type and start in a publish state). Only answers of the sources turned on count; the new or
     changed ones are those not stored when the job's first stage of the file began (``_answers_before``), so an answer
     only stored again (a forced run, a parser's new version) is no news. A locked type is always decided (``decide``),
-    and a marker carried over from a replaced file rests on no source, so neither is ever kept here.
+    and a marker carried over from a replaced file rests on no source, so neither is ever kept here. The local detectors
+    of the type that read the file at their version now go with it (``read_by``): a lone online answer isn't kept once
+    one of them read the file without an answer agreeing with it.
     """
     undecided = [
         t for t, d in decisions.items() if d.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE)
@@ -1491,6 +1498,11 @@ def _keep_published_before_rule_change(
             candidates=[c for c, _key in of_type],
             changed=[c for c, key in of_type if key not in known],
             duration_ms=rec.duration_ms or 0,
+            read_by=[
+                spec.source
+                for spec in ctx.local_detectors
+                if mtype in spec.types and _answered_at_this_version(ctx, rec, spec.source)
+            ],
         )
     return out
 
@@ -1644,7 +1656,8 @@ def _detector_pending(
     A forced run runs it once per file, and again (on the worker after the checking thread ran it) only when its answer
     is due. A normal run runs it when its stored answer is from another version, even for decided types (like an older
     parser's answer), or when its answer is due and a type it can decide is still undecided or was decided with that
-    answer. A type decided by other sources doesn't ask whether the answer is due.
+    answer, or (``checks_chapters``) by chapters alone. A type decided by other sources doesn't ask whether the answer
+    is due.
     """
     wanted = spec.types & types
     if not wanted:
@@ -1655,8 +1668,16 @@ def _detector_pending(
         ctx.force
         or any(decisions[t].status is not DecisionStatus.DECIDED for t in wanted)
         or _rests_on_detector(spec, decisions, wanted)
+        or (spec.checks_chapters and any(_decided_by_chapters_alone(decisions[t]) for t in wanted))
     )
     return asks and _detector_due(ctx, rec, spec)
+
+
+def _decided_by_chapters_alone(decision: TypeDecision) -> bool:
+    """Decided by chapters (markers already on servers may have confirmed or shortened it), not locked."""
+    return (
+        decision.marker is not None and not decision.marker.locked and _rests_only_on(decision, _CHAPTERS_AND_SERVERS)
+    )
 
 
 def _decided_with_a_due_answer(

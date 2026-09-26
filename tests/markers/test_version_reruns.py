@@ -244,10 +244,13 @@ class TestDecideRules:
         )
         return rec
 
-    def test_the_2026_09_25_rules_are_version_1(self):
-        # SkipDB never decides alone, credit text checks a credits chapter SkipDB disagrees with, online credits may
-        # end up to 5 s past the file, and another release's intro beside season audio (spec §5.5 rules 2, 3, 6, 14).
-        assert (DECIDE_RULES, DECIDE_RULES_VERSION) == ("decide_rules", 1)
+    def test_the_2026_09_27_rules_are_version_2(self):
+        # Version 1 (2026-09-25): SkipDB never decides alone, credit text checks a credits chapter SkipDB disagrees
+        # with, online credits may end up to 5 s past the file, another release's intro beside season audio. Version 2
+        # (2026-09-27): credit text moves a credits chapter's start and wins an online start over 5 s from it, season
+        # audio checks an intro chapter an online answer ends inside, and a lone online answer kept through a rule change
+        # goes once a detector reading the file found nothing to agree (spec §5.5 rules 3, 4, 16).
+        assert (DECIDE_RULES, DECIDE_RULES_VERSION) == ("decide_rules", 2)
 
     @pytest.mark.parametrize(
         ("status", "reason", "locked", "listed"),
