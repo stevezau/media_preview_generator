@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -1887,6 +1889,51 @@ def test_only_a_ready_plex_is_asked_which_markers_were_made_for_an_earlier_file(
 
     assert [(c["type"], c["ours"], c["stale"]) for c in row["current"]] == [("intro", False, False)]
     assert factory.stale_asks() == []
+
+
+def test_a_file_whose_library_is_off_is_never_asked_about(store, factory):
+    # A job never reads Plex's database for a file in a library Intro & Credits is off for; the page doesn't either.
+    markers = {"enabled": True, "library_ids": ["99"], "plex": {"db_write_confirmed_at": CONFIRMED}}
+    registry = _registry(server_config("plex", ServerType.PLEX, markers=markers))
+    _shows(registry, "plex", ServerType.PLEX, PLEX_OWN_INTRO)
+    factory.stale = frozenset({T.INTRO})
+
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+
+    assert row["plan"] == "not_enabled"
+    assert [(c["type"], c["stale"]) for c in row["current"]] == [("intro", False)]
+    assert factory.stale_asks() == []
+
+
+def test_a_stale_check_that_hangs_costs_the_page_only_its_wait(store, factory, monkeypatch):
+    # A Plex marker agent that accepts the request and never answers: the page gives up at UI_STALE_WAIT_S.
+    monkeypatch.setattr(inspect, "UI_STALE_WAIT_S", 0.2)
+    release = threading.Event()
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    _shows(registry, "plex", ServerType.PLEX, PLEX_OWN_INTRO)
+
+    def hangs(item_id):
+        release.wait(10)
+        return frozenset({T.INTRO})
+
+    factory.stale = frozenset({T.INTRO})
+    real_call = factory.__call__
+
+    def with_hanging_read(server, config, **kwargs):
+        pub = real_call(server, config, **kwargs)
+        pub.types_not_made_for_file.side_effect = hangs
+        return pub
+
+    monkeypatch.setattr(inspect, "publisher_for", with_hanging_read)
+    start = time.monotonic()
+    try:
+        row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+
+    assert elapsed < 1.5, elapsed
+    assert [(c["type"], c["stale"]) for c in row["current"]] == [("intro", False)]
 
 
 def test_unchecked_file_labels_ours_left_on_its_item_by_another_version(store, factory):

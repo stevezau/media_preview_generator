@@ -11,6 +11,8 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from loguru import logger
@@ -60,10 +62,14 @@ NOT_READY_TTL_S = 5.0
 # job's budget and ``capability()`` spends it twice, so an unhealthy Plex would cost a Servers-page load minutes — and,
 # through an agent that accepts but never answers, the same again. A job keeps the full wait; a page must answer.
 UI_DB_WAIT_S = 5.0
-# How long the Inspector waits for Plex's database to say which of its markers were made for an earlier file. Only a
-# label hangs on the answer, so a busy database (or a slow Plex marker agent) costs a page load this much at most and
-# the markers are shown without it.
+# How long a page load waits for Plex's database to say which of its markers were made for an earlier file. Only a
+# label hangs on the answer, so a busy database or a slow Plex marker agent costs the page this much at most and the
+# markers are shown without it.
 UI_STALE_WAIT_S = 2.0
+# Where that read runs. Its own deadline bounds only the database's lock waits; through the Plex marker agent each of
+# its two requests also gets a connect and an answer allowance, so the page waits on the future instead, and a read
+# that outlives the page finishes (or gives up) here. Two threads: at most two slow reads are ever in hand.
+_STALE_CHECKS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inspector-stale")
 # How long a caller waits for a check already in flight before it is served the answer that check is refreshing.
 # Without it the readiness probes of 8 gunicorn threads queue behind one slow server (wrapper.sh:53).
 CACHE_LOCK_WAIT_S = 1.0
@@ -493,11 +499,23 @@ def _server_duration(server: Any, cfg: ServerConfig, item_id: str | None) -> int
 
 def _stale_types(server: Any, cfg: ServerConfig, item_id: str) -> frozenset[MarkerType]:
     """The types whose Plex markers were made for an earlier file at this path, by the pipeline's rule
-    (``types_not_made_for_file``): read-only from Plex's database, waiting at most ``UI_STALE_WAIT_S``.
+    (``types_not_made_for_file``): read-only from Plex's database, and the page waits at most ``UI_STALE_WAIT_S``.
 
     Empty whenever Plex can't tell in time or the check fails: the markers are then shown without the label.
     """
+    future = _STALE_CHECKS.submit(_read_stale_types, server, cfg, item_id)
     try:
+        return future.result(timeout=UI_STALE_WAIT_S)
+    except FutureTimeoutError:
+        # Still queued behind slower reads: it never starts.
+        future.cancel()
+        logger.debug("{} didn't say in time which markers were made for an earlier file", cfg.name)
+        return frozenset()
+
+
+def _read_stale_types(server: Any, cfg: ServerConfig, item_id: str) -> frozenset[MarkerType]:
+    try:
+        # Its lock waits end with the page's wait, so a busy database frees this thread as soon as the page gives up.
         publisher = publisher_for(server, cfg, ui_details=False, db_timeout_s=UI_STALE_WAIT_S)
         stale = publisher.types_not_made_for_file(item_id) if publisher is not None else None
     except Exception as exc:
@@ -772,8 +790,9 @@ def _server_row(
     server_duration = _server_duration(server, cfg, item_id) if current and not stored_duration else None
     shown = _labelled(current, ours, stored_duration or server_duration or 0, cfg.type)
     # Only Plex's database can tell a marker made for an earlier file, and only markers that aren't ours are asked
-    # about. A Plex that isn't ready would only fail, and slowly.
-    if cfg.type is ServerType.PLEX and capability_state == Capability.READY.value and item_id:
+    # about. A Plex that isn't ready would only fail, and slowly; a file Intro & Credits is off for there is never
+    # read from its database by a job either.
+    if cfg.type is ServerType.PLEX and capability_state == Capability.READY.value and item_id and not off_reason:
         own = [m for m in shown or [] if not m["ours"]]
         stale = _stale_types(server, cfg, item_id) if own else frozenset()
         for marker in own:
@@ -881,7 +900,8 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         ``{"servers": [names]}`` when the servers' own markers shortened a decided credits/preview start, else None), ``evidence`` rows (empty
         lookups have ``type`` None) and one row per owning server with what it shows now (``current``, read live;
         None when that failed; each marker with ``ours``: this app sent it there, and ``stale``: a Plex marker made for
-        an earlier file at this path, which only a ready Plex's database can tell, within ``UI_STALE_WAIT_S``), the
+        an earlier file at this path, which only a ready Plex's database can tell; the page waits at most
+        ``UI_STALE_WAIT_S`` for it), the
         item's length as that server has it (``duration_ms``: read only for a file with no stored length whose server
         shows markers, else None), whether it keeps its own markers (``keeps_server_markers``: "Keep Plex's" / "Keep
         Emby's"), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
