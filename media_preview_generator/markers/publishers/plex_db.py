@@ -2046,8 +2046,9 @@ class PlexMarkerPublisher(MarkerPublisher):
         See ``_types_not_made_for_file`` for the rule.
 
         Read from Plex's database with the same lock proof and read-only connection as a write, locally or through the
-        Plex marker agent, waiting at most :data:`STALE_READ_WAIT_S` for its locks (and less once the job is cancelled,
-        ``base.cancellable_waits``).
+        Plex marker agent, waiting at most :data:`STALE_READ_WAIT_S` for its locks, or this publisher's
+        ``db_timeout_s`` when that is shorter (the Inspector's), and less once the job is cancelled
+        (``base.cancellable_waits``).
 
         Args:
             item_id: Plex rating key.
@@ -2057,7 +2058,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         """
         try:
             rating_key = _rating_key(item_id)
-            deadline = time.monotonic() + STALE_READ_WAIT_S
+            deadline = time.monotonic() + min(STALE_READ_WAIT_S, self._db_timeout())
             if not self._local_checks(deadline=deadline).ready:
                 return None
             stale = self._db.read_item(rating_key, deadline=deadline).stale_types
