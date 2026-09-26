@@ -928,11 +928,9 @@ class TestKind:
         jf = ready_publisher("jellyfin_bridge")
         _run(_ctx(store, reg, clients=clients), ambiguous, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_OPENING))
         calls_after_first = [len(c.calls) for c in clients.values()]
-        # The server now answers another kind: a run that took the kind from it again would change what it asks.
-        server.get_external_ids.return_value = MOVIE_IDS if cached == "unknown" else UNKNOWN_IDS
         out, _ = _run(_ctx(store, reg, clients=clients), ambiguous, {"jellyfin-1": jf})
-        # Asked once more, after deciding, only for the job log's title of a file that isn't an episode.
-        assert server.get_external_ids.call_count == 2
+        # Not even for the job log's title: the first run's answer is the file's one lookup this process.
+        assert server.get_external_ids.call_count == 1
         assert store.get_file(ambiguous).is_movie is (cached == "movie")
         assert [len(c.calls) for c in clients.values()] == calls_after_first
         assert out.outcome_key == FileOutcome.UP_TO_DATE.value

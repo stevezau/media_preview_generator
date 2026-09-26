@@ -157,6 +157,8 @@ from .sources.server_markers import (
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient, is_key_refusal
 from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, PreviousDecision, get_marker_store
+from .titles import NO_TITLE, TITLE_CACHE, title_of
+from .titles import look_up as look_up_title
 
 NO_DATA_RETRY = timedelta(days=14)
 # TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
@@ -861,7 +863,7 @@ class _ItemServers:
         self._item_ids: dict[str, str | None] = {}
         self._asked_ids = False
         self._server_ids: MediaIds | None = None
-        self._title: tuple[str | None, object] = (None, None)
+        self._title: tuple[str | None, object] = NO_TITLE
         self._markers: dict[str, list[Candidate] | None] = {}
         self._parts: dict[str, dict[str, list[int | None] | None]] = {}
         self._stale: dict[str, frozenset[MarkerType] | None] = {}
@@ -901,16 +903,28 @@ class _ItemServers:
                     continue
                 if isinstance(raw, dict):
                     self._server_ids = ids_from_server_dict(raw)
-                    self._title = (raw.get("title"), raw.get("year"))
+                    self._title = title_of(raw)
                     break
         return self._server_ids
 
-    def title(self, *, ask: bool = True) -> tuple[str | None, object]:
-        """The title and year the first owning server that answers gives the file's item, from the external ids answer
-        (asked once per run); ``(None, None)`` when none could, or, with ``ask`` False, when the run hasn't asked."""
-        if ask:
-            self.server_ids()
-        return self._title
+    def answered_title(self) -> tuple[str | None, object] | None:
+        """The title and year in the external ids answer this run already has, without asking.
+
+        Returns:
+            ``(title, year)``; ``titles.NO_TITLE`` when the run asked and no server gave a title; None when the run
+            didn't ask.
+        """
+        return self._title if self._asked_ids else None
+
+    def title_asks(self) -> list[Callable[[], object]]:
+        """Per owning server whose item id for the file this run already knows (a hint, or looked up for another step),
+        a call for its external ids answer; a server whose id isn't known yet isn't asked for it."""
+        asks = []
+        for owner in self.owning:
+            item_id = self._item_ids.get(owner.config.id) or self._hints.get(owner.config.id)
+            if item_id:
+                asks.append(lambda server=owner.server, item_id=str(item_id): server.get_external_ids(item_id))
+        return asks
 
     def markers(self, owner: _Owning, item_id: str, duration_ms: int | None) -> list[Candidate] | None:
         """The server's markers for this file (``read_server_markers``), read at most once per run.
@@ -3399,19 +3413,36 @@ def _listed_title(item: ProcessableItem) -> str:
 
 
 def _note_title(notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: _ItemServers) -> str:
-    """The file's title for its job log lines, found once per job (``job_log.file_title``): an episode's from its path;
-    anything else's from its server's item: the answer this run already has, the title its library listing gave (the
-    year from its file name), or one lookup; else its file name."""
-    if not notes.title:
-        path = item.canonical_path
+    """The file's title for its job log lines, found once per job (``job_log.file_title``). Never raises.
+
+    An episode is named from its path, with no lookup. Anything else by its server's title: from the answer this run
+    already has, then the title this process kept (``titles.TITLE_CACHE``), then the title its library listing gave
+    (the year from its file name); only when the file's server was never asked this process, one lookup of at most
+    ``titles.LOOKUP_TIMEOUT_S``. Without a title, its file name. Called once the run's decisions are made (its log
+    lines, or its hand-off to a worker), outside any publisher's or Plex database's lock.
+    """
+    if notes.title:
+        return notes.title
+    path = item.canonical_path
+    try:
         if ids.is_episode or ids_from_path(path).is_episode:
             notes.title = display_name(path)
-        elif (answer := servers.title(ask=False))[0]:
-            notes.title = file_title(path, *answer)
+            return notes.title
+        answer = servers.answered_title()
+        if answer is not None:
+            TITLE_CACHE.put(path, answer)  # the run's own ask counts as the file's one lookup
+        found = answer if answer is not None and answer[0] else TITLE_CACHE.get(path)
+        if found is not None and found[0]:
+            notes.title = file_title(path, *found)
         elif listed := _listed_title(item):
             notes.title = file_title(path, listed, path_year(path))
+        elif found is None:
+            notes.title = file_title(path, *look_up_title(path, servers.title_asks()))
         else:
-            notes.title = file_title(path, *servers.title())
+            notes.title = display_name(path)
+    except Exception as exc:
+        logger.debug("Couldn't name {} for the job log: {}", path, type(exc).__name__)
+        notes.title = display_name(path)
     return notes.title
 
 

@@ -15,6 +15,16 @@ def _no_background_fingerprint_sweep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_title_cache():
+    """Each test starts in a process that has named no film yet (``titles.TITLE_CACHE``)."""
+    from media_preview_generator.markers.titles import TITLE_CACHE
+
+    TITLE_CACHE.clear()
+    yield
+    TITLE_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_gpu_decode_checks(monkeypatch):
     """Each test starts with the process's GPU decode checks unrun, on a fake decoder instead of ffmpeg where every
     device decodes like the CPU (the check only logs; it moves nothing). Tests of the check install their own

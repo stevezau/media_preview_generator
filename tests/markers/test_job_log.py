@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from loguru import logger
 
-from media_preview_generator.markers import job_runner, pipeline
+from media_preview_generator.markers import job_runner, pipeline, titles
 from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.job_log import (
     ALREADY_DECIDED,
@@ -40,7 +40,14 @@ from media_preview_generator.markers.job_log import (
     type_phrase,
     write_lines,
 )
-from media_preview_generator.markers.models import STALE_SERVER_MARKERS_DETAIL, Candidate, Marker, MarkerType, Source
+from media_preview_generator.markers.models import (
+    STALE_SERVER_MARKERS_DETAIL,
+    Candidate,
+    FileIdentity,
+    Marker,
+    MarkerType,
+    Source,
+)
 from media_preview_generator.markers.outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FileOutcome, ServerStatus
 from media_preview_generator.markers.pipeline import DetectorUnavailableError, LocalDetectorSpec
 from media_preview_generator.markers.probe import Chapter, ProbeError
@@ -1146,64 +1153,198 @@ class TestTitles:
     def test_file_title(self, path, title, year, expected):
         assert file_title(path, title, year) == expected
 
-    def test_a_movies_title_comes_from_its_server_with_one_lookup(self, store, movie, job_log):
+    @staticmethod
+    def _quiet_job(store, reg):
+        """A job with no online source, so nothing but the job log's title could ask the server for ids."""
+        raw = {
+            "detect": {"intro": True, "credits": True, "recap": False},
+            "sources": [{"id": source, "enabled": source in ("chapters", "credits_text", "server_markers")} for source
+                        in ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "credits_text",
+                            "server_markers")],
+        }  # fmt: skip
+        ctx = _ctx(store, reg, settings_raw=raw, clients=_clients(), detectors=(_credit_text(),))
+        ctx.monotonic = FakeClock()
+        return ctx
+
+    @staticmethod
+    def _known_movie(store, path):
+        """A film whose kind an earlier process stored: this process has no server answer for it."""
+        st = os.stat(path)
+        rec = store.upsert_file(
+            FileIdentity(path, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=True
+        )
+        store.set_server_kind(rec.id, "movie")
+
+    @staticmethod
+    def _check(ctx, item, publisher=None):
+        with (
+            patch.object(pipeline, "probe_media", return_value=_probe((Chapter(1_295_324, None, "Credits"),))),
+            patch.object(pipeline, "publisher_for", return_value=publisher or ready_publisher()),
+            patch.object(pipeline, "look_up_title", wraps=titles.look_up) as lookups,
+        ):
+            return pipeline.check_item(item, ctx=ctx), lookups
+
+    def test_an_episode_never_looks_anything_up(self, store, media, job_log):
+        reg = _plex(media)
+        server = reg.get("plex-1")
+        server.get_external_ids.return_value = {**MOVIE_IDS, "kind": "episode", "title": "Pilot"}
+        out, lookups = self._check(self._quiet_job(store, reg), ProcessableItem(canonical_path=media, server_id=""))
+
+        assert _messages(job_log)[0] == HEAD
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        lookups.assert_not_called()
+        server.get_external_ids.assert_not_called()
+
+    def test_a_film_is_named_from_the_runs_own_answer_without_a_lookup(self, store, movie, job_log):
         reg = _plex(movie)
         server = reg.get("plex-1")
         server.get_external_ids.return_value = {**MOVIE_IDS, "title": "Heat", "year": "1995"}
-        ctx = _job(store, movie, reg)
-        _run(ctx, movie, {"plex-1": ready_publisher()}, probe=_probe((Chapter(1_295_324, None, "Credits"),)))
+        _, lookups = self._check(self._quiet_job(store, reg), ProcessableItem(canonical_path=movie, server_id=""))
 
         assert _messages(job_log)[0] == "Heat (1995): checking credits (films get credits only)"
-        # The run asked for the kind already; its title came with that answer.
+        # One ask, for the film's kind; its title came with that answer.
         assert server.get_external_ids.call_count == 1
+        lookups.assert_not_called()
 
-    def test_an_episode_keeps_its_show_and_episode_whatever_its_server_calls_it(self, store, media, job_log):
-        reg = _plex(media)
-        reg.get("plex-1").get_external_ids.return_value = {
-            "kind": "episode", "tvdb": "275274", "imdb": "tt2861424", "season": 1, "episode": 1, "title": "Pilot",
-        }  # fmt: skip
-        ctx = _job(store, media, reg)
-        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+    def test_a_film_without_an_answer_is_looked_up_once_per_process(self, store, movie, job_log):
+        self._known_movie(store, movie)
+        reg = _plex(movie)
+        server = reg.get("plex-1")
+        server.get_external_ids.return_value = {**MOVIE_IDS, "title": "Heat", "year": "1995"}
+        item = ProcessableItem(canonical_path=movie, server_id="")
 
-        assert _messages(job_log)[0] == HEAD
+        first, lookups = self._check(self._quiet_job(store, reg), item)
+        assert first.outcome_key == FileOutcome.PUBLISHED.value
+        assert _messages(job_log)[0] == "Heat (1995): checking credits (films get credits only)"
+        assert lookups.call_count == 1
+        assert server.get_external_ids.call_args.args == ("item-plex-1",)
+        job_log.clear()
 
-    @staticmethod
-    def _check(ctx, item):
-        with (
-            patch.object(pipeline, "probe_media", return_value=_probe((Chapter(1_295_324, None, "Credits"),))),
-            patch.object(pipeline, "publisher_for", return_value=ready_publisher()),
-        ):
-            return pipeline.check_item(item, ctx=ctx)
+        # A later job over the same film (decide again, a version re-run, a Season job) asks nothing.
+        second, lookups = self._check(self._quiet_job(store, reg), item)
+        assert second.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert _messages(job_log) == ["Heat (1995): unchanged, Plex already has our credits"]
+        lookups.assert_not_called()
+        assert server.get_external_ids.call_count == 1
 
     @pytest.mark.parametrize(
         ("item_title", "expected", "lookups"),
         [
             # A library listing names the item: its title, the year from the file name, and no lookup.
             ("Heat", "Heat (1995)", 0),
-            # A sender or the store named the file: one lookup for the server's title and year.
+            # A sender or the store named the file by its file name: one lookup for the server's title and year.
             ("Heat (1995).mkv", "Heat: The Director's Cut (1995)", 1),
-            # A listing without a title of its own names the item by its path.
+            # A listing without a title of its own names the item by its path: one lookup too.
             ("/data/movies/Heat (1995).mkv", "Heat: The Director's Cut (1995)", 1),
         ],
         ids=["listing", "sender", "listing-without-a-title"],
     )
-    def test_a_movie_whose_kind_is_known_is_named_without_asking_twice(
-        self, store, movie, job_log, item_title, expected, lookups
-    ):
+    def test_a_listings_own_title_needs_no_lookup(self, store, movie, job_log, item_title, expected, lookups):
+        self._known_movie(store, movie)
         reg = _plex(movie)
         server = reg.get("plex-1")
         server.get_external_ids.return_value = {**MOVIE_IDS, "title": "Heat: The Director's Cut", "year": "1995"}
-        self._check(_job(store, movie, reg), ProcessableItem(canonical_path=movie, server_id="plex-1"))
-        assert server.get_external_ids.call_count == 1  # the first run asked for the kind
+        item = ProcessableItem(canonical_path=movie, server_id="plex-1", title=item_title)
+
+        _, looked_up = self._check(self._quiet_job(store, reg), item)
+
+        assert _messages(job_log)[0] == f"{expected}: checking credits (films get credits only)"
+        assert looked_up.call_count == lookups
+        assert server.get_external_ids.call_count == lookups
+
+    @pytest.mark.parametrize("failure", ["times-out", "raises", "no-title"])
+    def test_a_lookup_that_fails_never_holds_or_fails_the_file(self, store, movie, job_log, monkeypatch, failure):
+        self._known_movie(store, movie)
+        reg = _plex(movie)
+        server = reg.get("plex-1")
+        release = threading.Event()
+        answered = threading.Event()
+
+        def hangs(item_id):
+            release.wait(10)
+            answered.set()
+            return {**MOVIE_IDS, "title": "Heat", "year": "1995"}
+
+        if failure == "times-out":
+            server.get_external_ids.side_effect = hangs
+        elif failure == "raises":
+            server.get_external_ids.side_effect = RuntimeError("Plex refused the connection")
+        else:
+            server.get_external_ids.return_value = {k: v for k, v in MOVIE_IDS.items() if k not in ("title", "year")}
+        monkeypatch.setattr(titles, "LOOKUP_TIMEOUT_S", 0.2)
+        publisher = ready_publisher()
+        item = ProcessableItem(canonical_path=movie, server_id="")
+        try:
+            started = time.monotonic()
+            out, _ = self._check(self._quiet_job(store, reg), item, publisher)
+            took = time.monotonic() - started
+
+            assert out.outcome_key == FileOutcome.PUBLISHED.value
+            assert publisher.write.call_count == 1
+            # Named by its cleaned file name; the file waited no longer than the lookup's timeout.
+            assert _messages(job_log)[0] == "Heat (1995): checking credits (films get credits only)"
+            assert took < 0.2 + 1.0, took
+            assert server.get_external_ids.call_count == 1
+        finally:
+            release.set()
+        if failure == "times-out":
+            # The answer that came after the wait is kept: a later job names the film by it, without asking.
+            assert answered.wait(5)
+            assert _wait_for(lambda: titles.TITLE_CACHE.get(movie) == ("Heat", "1995"))
         job_log.clear()
+        self._check(self._quiet_job(store, reg), item)
+        assert server.get_external_ids.call_count == 1
+        name = "Heat (1995)"
+        assert _messages(job_log) == [f"{name}: unchanged, Plex already has our credits"]
 
-        self._check(
-            _job(store, movie, reg), ProcessableItem(canonical_path=movie, server_id="plex-1", title=item_title)
-        )
 
-        assert _messages(job_log) == [f"{expected}: unchanged, Plex already has our credits"]
-        assert server.get_external_ids.call_count == 1 + lookups
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
+
+class TestTitleCache:
+    def test_it_keeps_the_most_recently_used_files_up_to_its_bound(self):
+        cache = titles.TitleCache(max_entries=2)
+        cache.put("/a.mkv", ("A", 2001))
+        cache.put("/b.mkv", ("B", 2002))
+        assert cache.get("/a.mkv") == ("A", 2001)  # /a.mkv is now the most recently used
+        cache.put("/c.mkv", titles.NO_TITLE)
+
+        assert (cache.get("/a.mkv"), cache.get("/b.mkv"), cache.get("/c.mkv")) == (("A", 2001), None, titles.NO_TITLE)
+        assert len(cache) == 2
+
+    def test_a_lookup_with_no_server_to_ask_asks_nothing_and_keeps_nothing(self):
+        assert titles.look_up("/m/x.mkv", []) == titles.NO_TITLE
+        assert titles.TITLE_CACHE.get("/m/x.mkv") is None
+
+    def test_while_every_lookup_slot_is_held_a_file_skips_its_lookup_at_once(self, monkeypatch):
+        monkeypatch.setattr(titles, "_IN_FLIGHT", threading.BoundedSemaphore(1))
+        titles._IN_FLIGHT.acquire()
+        try:
+            ask = MagicMock(return_value={"title": "X"})
+            started = time.monotonic()
+            assert titles.look_up("/m/x.mkv", [ask], timeout_s=5) == titles.NO_TITLE
+            assert time.monotonic() - started < 1
+            ask.assert_not_called()
+            # Not asked, so not counted: a later job may still ask once.
+            assert titles.TITLE_CACHE.get("/m/x.mkv") is None
+        finally:
+            titles._IN_FLIGHT.release()
+
+    def test_the_first_server_with_a_title_names_the_film(self):
+        asks = [MagicMock(side_effect=RuntimeError("down")), MagicMock(return_value=None),
+                MagicMock(return_value={"title": " Heat ", "year": 1995}), MagicMock()]  # fmt: skip
+        assert titles.look_up("/m/heat.mkv", asks, timeout_s=5) == ("Heat", 1995)
+        asks[3].assert_not_called()
+        assert titles.TITLE_CACHE.get("/m/heat.mkv") == ("Heat", 1995)
+
+
+class TestLineWords:
     @pytest.mark.parametrize(
         ("seconds", "expected"),
         [(0, "0 s"), (0.46, "0.5 s"), (3.0, "3 s"), (9.94, "9.9 s"), (13.4, "13 s"), (60, "1 min"), (125, "2 min 5 s"),
