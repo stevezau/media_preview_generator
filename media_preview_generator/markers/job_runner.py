@@ -254,7 +254,12 @@ def _upsert_chain(
 # File outcomes whose markers a run doesn't count in "Decided by" (``pipeline`` counts a file unless it failed; no
 # owner or no file means nothing was decided).
 _NOT_DECIDED_OUTCOMES = frozenset(
-    {FileOutcome.FAILED.value, FileOutcome.NO_OWNERS.value, FileOutcome.FILE_NOT_FOUND.value}
+    {
+        FileOutcome.FAILED.value,
+        FileOutcome.NO_OWNERS.value,
+        FileOutcome.FILE_NOT_FOUND.value,
+        FileOutcome.SOURCE_GONE.value,
+    }
 )
 
 

@@ -1738,9 +1738,207 @@ class TestDetect:
         assert seen[0]["pause_check"] is paused and seen[0]["ffmpeg_threads"] == 3
 
     def test_a_gpu_decode_failure_is_a_codec_error_for_the_workers_cpu_rerun(self, monkeypatch, pool, ctx):
-        self._find(monkeypatch, frames.GpuDecodeError("the GPU decoded no frames from Movie (2020).mkv"))
-        with pytest.raises(CodecNotSupportedError, match="no frames"):
+        self._find(monkeypatch, frames.GpuDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the GPU"))
+        with pytest.raises(CodecNotSupportedError, match="exited 1"):
             detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
+
+    # GPU decode read no frames of the tail (exit 0): the CPU reads the same file to tell a GPU that missed them from a
+    # file that has none there. Production, 2026-09-26: 14 of 19 GPU->CPU fallbacks were files cut short (Legends of
+    # Tomorrow S03E01: 104,856,928 bytes of a 42-minute remux), blamed on the GPU, and the CPU found nothing either.
+    READ = detector.CreditsTextResult(5690.5, None, ((5100.0, 0, 120.0, ()), (5690.0, 2, 12.0, CARDS)), (), ())
+    READ_NOTHING = detector.CreditsTextResult(None, None, (), (), ())
+
+    @staticmethod
+    def _gpu_reads_nothing(monkeypatch, cpu_answer, gpu_answer=None):
+        """find_credits that reads no frames on the GPU (or ``gpu_answer``), and ``cpu_answer`` on the CPU."""
+        seen: list[dict] = []
+
+        def find(path, **kwargs):
+            seen.append({"path": path, **kwargs})
+            if kwargs["gpu"] is None:
+                return cpu_answer
+            if gpu_answer is not None:
+                return gpu_answer
+            raise frames.GpuReadNothingError()
+
+        monkeypatch.setattr(detector, "find_credits", find)
+        return seen
+
+    @staticmethod
+    def _readable(monkeypatch, seconds):
+        """How far the file's video can be read, as ``frames.readable_video_s`` answers it (None: can't tell)."""
+        calls: list[dict] = []
+
+        def readable(path, ffmpeg, **kwargs):
+            calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
+            return seconds
+
+        monkeypatch.setattr(detector.frames, "readable_video_s", readable)
+        return calls
+
+    @staticmethod
+    def _stored(ctx, rec=MOVIE):
+        return ctx.store.upsert_file(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns),
+                                     duration_ms=rec.duration_ms, season_key=rec.season_key,
+                                     is_movie=rec.is_movie)  # fmt: skip
+
+    def test_a_file_cut_short_is_recorded_as_that_not_as_a_gpu_failure(self, monkeypatch, pool, ctx, loguru_caplog):
+        rec = self._stored(ctx)
+        seen = self._gpu_reads_nothing(monkeypatch, self.READ_NOTHING)
+        readable = self._readable(monkeypatch, 1630.4)
+        flagged: list[str] = []
+        cancel = lambda: False  # noqa: E731 — identity is asserted
+        with pytest.raises(DetectorUnavailableError) as caught:
+            detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", ffmpeg_threads=3,
+                                         cancel_check=cancel, fallback_callback=flagged.append,
+                                         gpu_worker=True)  # fmt: skip
+        cut_short = "the file ends before its stated length (27:10 of 1:40:00 readable)"
+        assert str(caught.value) == cut_short
+        # The GPU's reading, then the CPU's of the same file, at ffmpeg's own thread count as any CPU work.
+        assert [(c["gpu"], c["gpu_device_path"], c["ffmpeg_threads"]) for c in seen] == [
+            ("NVIDIA", "cuda:0", 3),
+            (None, None, None),
+        ]
+        # Still a GPU worker's request with no GPU: its CPU text detection gets a helper of its own.
+        seen[1]["detect_boxes"](frames.np.zeros((1, 180, 320), frames.np.uint8))
+        assert (pool.calls[-1], pool.gpu_workers[-1]) == ((None, None), True)
+        # Measured from the tail the decodes read, with the job's cancel.
+        assert readable == [{"path": rec.canonical_path, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+                             "from_s": 5100.0, "cancel_check": cancel}]  # fmt: skip
+        # Not the GPU's fault: the worker's row shows no CPU fallback, and nothing reruns the file on the CPU.
+        assert flagged == []
+        assert ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) == cut_short
+        assert detector.credits_text_failed_here(rec, ctx) is True  # rule 3 stops waiting for its credit text
+        assert (
+            "Movie (2020).mkv: the GPU read no frames in that part of the file; checking on CPU" in loguru_caplog.text
+        )
+        assert "couldn't" not in loguru_caplog.text.lower()
+        assert f"Credit text can't be read for Movie (2020).mkv: {cut_short}" in loguru_caplog.text
+
+    def test_a_file_cut_short_is_not_read_again_until_it_changes_or_is_forced(self, monkeypatch, pool, ctx):
+        rec = self._stored(ctx)
+        seen = self._gpu_reads_nothing(monkeypatch, self.READ_NOTHING)
+        self._readable(monkeypatch, 1630.4)
+        with pytest.raises(DetectorUnavailableError):
+            detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
+        assert len(seen) == 2
+
+        # Every later scan: no worker, no decode, the same reason.
+        assert detector.credits_text_needs_worker(rec, ctx) is False
+        with pytest.raises(DetectorUnavailableError, match=r"^the file ends before its stated length \(27:10 of"):
+            detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
+        assert len(seen) == 2
+
+        # A new download of the file is read.
+        replaced = ctx.store.upsert_file(
+            FileIdentity(rec.canonical_path, rec.size + 1, rec.mtime_ns), duration_ms=rec.duration_ms,
+            season_key=None, is_movie=True,
+        )  # fmt: skip
+        assert detector.credits_text_needs_worker(replaced, ctx) is True
+        # So is the same file on a forced re-detect.
+        ctx.force = True
+        assert detector.credits_text_needs_worker(rec, ctx) is True
+
+    def test_a_gpu_that_missed_frames_the_cpu_reads_is_a_gpu_fallback_on_the_workers_row(
+        self, monkeypatch, pool, ctx, loguru_caplog
+    ):
+        rec = self._stored(ctx)
+        seen = self._gpu_reads_nothing(monkeypatch, self.READ)
+        readable = self._readable(monkeypatch, 1630.4)
+        flagged: list[str] = []
+        answer = detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0",
+                                              fallback_callback=flagged.append)  # fmt: skip
+        assert answer == DetectorAnswer(
+            (Candidate(MarkerType.CREDITS, 5_690_500, None, Source.CREDITS_TEXT),), detector.LOOK_BACK_BASIS
+        )
+        assert [c["gpu"] for c in seen] == ["NVIDIA", None]
+        assert readable == []  # the file has frames there: nothing to measure
+        assert flagged == [
+            "The GPU read no frames in the end of Movie (2020).mkv, but the CPU did; its credits were read on the CPU"
+        ]
+        assert ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) is None
+        assert (
+            "Movie (2020).mkv: the GPU read no frames in that part of the file; checking on CPU" in loguru_caplog.text
+        )
+
+    def test_a_gpu_that_reads_the_tail_needs_no_cpu_check(self, monkeypatch, pool, ctx):
+        rec = self._stored(ctx)
+        seen = self._gpu_reads_nothing(monkeypatch, self.READ_NOTHING, gpu_answer=self.READ)
+        readable = self._readable(monkeypatch, 1630.4)
+        flagged: list[str] = []
+        answer = detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0",
+                                              fallback_callback=flagged.append)  # fmt: skip
+        assert answer.candidates == (Candidate(MarkerType.CREDITS, 5_690_500, None, Source.CREDITS_TEXT),)
+        assert [c["gpu"] for c in seen] == ["NVIDIA"]
+        assert (readable, flagged) == ([], [])
+
+    @pytest.mark.parametrize(
+        ("error", "timed_out", "failure"),
+        [
+            (frames.DecodeTimeoutError("decoding Movie (2020).mkv timed out after 600 s"), True, None),
+            (frames.FrameDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the CPU"), False, "exited 1"),
+            (frames.DecodeCancelledError("cancelled while decoding"), False, None),
+        ],
+        ids=["timeout", "decode-error", "cancel"],
+    )
+    def test_the_cpu_check_failing_is_that_failure_not_a_gpu_one(
+        self, monkeypatch, pool, ctx, error, timed_out, failure
+    ):
+        # The CPU's reading after the GPU read nothing is any CPU reading: its timeout holds the file back a day, its
+        # decode error is the file's own, a cancel is nothing; none is the GPU's, and nothing reruns the file.
+        rec = self._stored(ctx)
+        self._gpu_reads_nothing(monkeypatch, self.READ_NOTHING)
+        monkeypatch.setattr(detector, "find_credits", self._raising_on_the_cpu(detector.find_credits, error))
+        readable = self._readable(monkeypatch, 1630.4)
+        flagged: list[str] = []
+        with pytest.raises(DetectorUnavailableError):
+            detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0",
+                                         fallback_callback=flagged.append)  # fmt: skip
+        identity = FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)
+        assert (ctx.store.credits_text_timed_out_at(identity) is not None) is timed_out
+        recorded = ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT)
+        assert recorded is None if failure is None else failure in recorded
+        assert (readable, flagged) == ([], [])
+
+    @staticmethod
+    def _raising_on_the_cpu(find, error):
+        def wrapped(path, **kwargs):
+            if kwargs["gpu"] is None:
+                raise error
+            return find(path, **kwargs)
+
+        return wrapped
+
+    def test_a_cpu_worker_reading_a_file_cut_short_records_it_the_same_way(self, monkeypatch, pool, ctx):
+        rec = self._stored(ctx, EPISODE)
+        seen = self._gpu_reads_nothing(monkeypatch, self.READ_NOTHING)
+        readable = self._readable(monkeypatch, 700.0)
+        with pytest.raises(DetectorUnavailableError) as caught:
+            detector.detect_credits_text(rec, ctx=ctx, gpu=None, gpu_device_path=None)
+        assert [c["gpu"] for c in seen] == [None]  # nothing more to read it on
+        assert readable[0]["from_s"] == 870.0  # a 22-minute episode's 450 s tail
+        assert str(caught.value) == "the file ends before its stated length (11:40 of 22:00 readable)"
+        assert ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) == str(caught.value)
+
+    @pytest.mark.parametrize(
+        "readable_s",
+        [None, 5_990.0, 5_970.1],
+        ids=["can't-tell", "reads-to-the-end", "under-the-margin"],
+    )
+    def test_a_tail_without_frames_in_a_file_that_isnt_cut_short_is_nothing_found_as_before(
+        self, monkeypatch, pool, ctx, readable_s
+    ):
+        # A VP9 tail whose container flags no keyframe gives no frames on either decoder, and so does a probe that
+        # can't answer: "nothing found" is stored, as it always was, and the file isn't read again.
+        rec = self._stored(ctx)
+        self._gpu_reads_nothing(monkeypatch, self.READ_NOTHING)
+        self._readable(monkeypatch, readable_s)
+        flagged: list[str] = []
+        answer = detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0",
+                                              fallback_callback=flagged.append)  # fmt: skip
+        assert answer == DetectorAnswer((), detector.LOOK_BACK_BASIS)
+        assert flagged == []
+        assert ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) is None
 
     @staticmethod
     def _checks(monkeypatch, *, matches=True, error=None):

@@ -339,7 +339,7 @@ class TestDecodeFrames:
             calls.append({"command": command, "hw_active": hw_active, "pts_offset_s": pts_offset_s,
                           "timeout_s": timeout_s, "cancel_check": cancel_check, "pause_check": pause_check})  # fmt: skip
             if fail_on_gpu and hw_active:
-                raise frames.GpuDecodeError("the GPU decoded no frames")
+                raise frames.GpuDecodeError("the GPU read no frames in that part of the file")
             boxes = detect_boxes(planes)
             assert boxes == [()] * len(planes)
             return [(t, 0, 0.0, ()) for t in pts]
@@ -435,7 +435,9 @@ class TestDecodeFrames:
                 ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path=device,
                                  container_start_s=0.0, download_format="nv12",
                                  fallback_callback=flagged.append)  # fmt: skip
-        assert len(flagged) == 3 and all("the GPU decoded no frames" in reason for reason in flagged)
+        assert len(flagged) == 3 and all(
+            "the GPU read no frames in that part of the file" in reason for reason in flagged
+        )
         warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 2
         assert "cuda:0" in warnings[0] and "cuda:1" in warnings[1]

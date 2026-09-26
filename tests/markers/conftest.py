@@ -27,6 +27,16 @@ def _fresh_gpu_decode_checks(monkeypatch):
     monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=like_the_cpu))
 
 
+@pytest.fixture(autouse=True)
+def _readable_video_unknown(monkeypatch):
+    """A credits tail that gave no frame isn't measured with a real ffprobe (``frames.readable_video_s`` can't tell),
+    since faked decodes give no frames for "nothing found". Tests of files cut short install their own answer, and the
+    tests of the function itself import it before this runs."""
+    from media_preview_generator.markers.credits import frames
+
+    monkeypatch.setattr(frames, "readable_video_s", lambda *args, **kwargs: None)
+
+
 @pytest.fixture
 def app(tmp_path):
     """Same app fixture as tests/test_routes.py (setup complete, fixed API token)."""

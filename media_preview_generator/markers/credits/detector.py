@@ -23,6 +23,7 @@ from loguru import logger
 
 from ..decide import credits_limits_ms, earliest_credits_start_ms
 from ..freeze import Freeze
+from ..job_log import clock
 from ..models import Candidate, FileIdentity, MarkerType, Source
 from . import frames, rule_j
 from .textdet_helper import TextDetCancelledError, TextDetShuttingDownError, TextDetUnavailableError, get_textdet_pool
@@ -94,6 +95,12 @@ REFINING_END_PHASE = "Finding where the credits end…"
 # A file whose decode timed out isn't decoded again for this long unless it changes or the run is forced (I1).
 TIMEOUT_RETRY = timedelta(days=1)
 _GIVES_UP = "credits_text_gives_up"
+# Why a file's credit text can't be read when its tail gave no frame on the CPU because its video stops before the tail
+# (a download or copy cut short: Legends of Tomorrow S03E01, 105 MB of a 42-minute remux). Kept as the file's detector
+# failure: it isn't read again until it changes (a new download) or a forced re-detect (:func:`_gives_up`).
+CUT_SHORT = "the file ends before its stated length"
+# ... when its video stops at least this long before its stated length; less is the container's own slack.
+CUT_SHORT_MIN_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -228,9 +235,10 @@ def find_credits(
         The start, the end, and the rows they came from, with the scale they were read at.
 
     Raises:
-        frames.GpuDecodeError: The GPU decode failed or gave no frames. A keyframe pass gives none only when no
-            keyframe follows its start anywhere in the file (a VP9 tail whose container flags none): a window without
-            one gives the first keyframe after it instead.
+        frames.GpuReadNothingError: A GPU decode gave no frames. A keyframe pass gives none only when no keyframe
+            follows its start anywhere in the file (a VP9 tail whose container flags none, or a file cut short before
+            it): a window without one gives the first keyframe after it instead.
+        frames.GpuDecodeError: A GPU decode failed.
         frames.DecodeTimeoutError: A decode, or the start time or video packet probe before them, ran past its time
             limit.
         frames.FrameDecodeError: ffprobe couldn't read the start time, either probe wasn't started (earlier ffprobes
@@ -263,8 +271,9 @@ def find_credits(
     try:
         larger = read(scale=RETRY_SCALE, seen=seen, decoded=None, **after)
     except (frames.GpuDecodeError, TextDetShuttingDownError):
-        # The worker's CPU rerun reads both sizes again; the app stopping mid-read (worker threads are daemons, so the
-        # pool closes under them) is no answer, as it is at 320x180, not a "nothing found" kept for good.
+        # The CPU reads both sizes again (the detector's own reading after one that read no frames, the worker's rerun
+        # after any other failure); the app stopping mid-read (worker threads are daemons, so the pool closes under
+        # them) is no answer, as it is at 320x180, not a "nothing found" kept for good.
         raise
     except (frames.FrameDecodeError, TextDetUnavailableError) as exc:
         if found.start_s is not None:
@@ -568,7 +577,8 @@ def _timed_out_lately(rec: FileRecord, ctx: PipelineContext) -> bool:
 
 
 def _gives_up(rec: FileRecord, ctx: PipelineContext) -> str | None:
-    """Why the detector won't decode this file now, or None.
+    """Why the detector won't decode this file now (its duration is unknown, it timed out lately, or it was found cut
+    short as it is now), or None.
 
     Read once per run of the file (``ctx.run_memo``), so the check stage's hand-off and the detector itself can't
     disagree: the day after a timeout could otherwise end between the two reads and put a full decode on the checking
@@ -581,8 +591,38 @@ def _gives_up(rec: FileRecord, ctx: PipelineContext) -> str | None:
         elif _timed_out_lately(rec, ctx):
             memo[_GIVES_UP] = "reading the file timed out less than a day ago; a forced re-detect tries now"
         else:
-            memo[_GIVES_UP] = None
+            memo[_GIVES_UP] = _cut_short_before(rec, ctx)
     return memo[_GIVES_UP]
+
+
+def _cut_short_before(rec: FileRecord, ctx: PipelineContext) -> str | None:
+    """The recorded reason (``CUT_SHORT``) when an earlier run found this file as it is now cut short, else None; a
+    forced run reads it again."""
+    if ctx.force:
+        return None
+    failure = ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT)
+    return failure if failure is not None and failure.startswith(CUT_SHORT) else None
+
+
+def _cut_short(
+    rec: FileRecord, ctx: PipelineContext, ffmpeg: str, cancel_check: Callable[[], bool] | None
+) -> str | None:
+    """Why a file whose tail gave no frame on the CPU has none there: ``CUT_SHORT`` with how much of it can be read,
+    when its video stops ``CUT_SHORT_MIN_S`` or more before its stated length; None when it doesn't, or that can't be
+    told (its tail is then "nothing found", as a VP9 tail whose container flags no keyframe always was)."""
+    tail_start = frames.tail_start_s(rec.duration_ms, tail_s=_tail_s(rec, ctx))
+    readable_s = frames.readable_video_s(rec.canonical_path, ffmpeg, from_s=tail_start, cancel_check=cancel_check)
+    if readable_s is None or readable_s > rec.duration_ms / 1000.0 - CUT_SHORT_MIN_S:
+        return None
+    return f"{CUT_SHORT} ({clock(int(readable_s * 1000))} of {clock(rec.duration_ms)} readable)"
+
+
+def _gpu_missed(name: str, fallback_callback: Callable[[str], None] | None) -> None:
+    """Show that the GPU read no frames where the CPU did: a GPU fallback, on the worker's row and in the log."""
+    reason = f"The GPU read no frames in the end of {name}, but the CPU did; its credits were read on the CPU"
+    logger.warning(reason)
+    if fallback_callback is not None:
+        fallback_callback(reason)
 
 
 def credits_text_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:
@@ -608,8 +648,9 @@ def credits_text_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:
 def credits_text_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
     """Whether reading a file's credit text needs a worker: only when it is going to be decoded.
 
-    A file with no known duration, or one that timed out lately, makes :func:`detect_credits_text` give up at once, so
-    that happens on the checking thread instead of holding a worker (one by default) every run for the day.
+    A file with no known duration, one that timed out lately, or one found cut short as it is now makes
+    :func:`detect_credits_text` give up at once, so that happens on the checking thread instead of holding a worker
+    (one by default) every run.
 
     Args:
         rec: The file.
@@ -642,6 +683,12 @@ def detect_credits_text(
     The file is decoded on the worker's GPU, whatever its codec, with the worker's own ``ffmpeg_threads``. Text
     detection runs on the worker's GPU as its own self-test decides.
 
+    A GPU decode that exits cleanly without a frame (``frames.GpuReadNothingError``) isn't taken as the GPU's failure:
+    the same file is read again here on the CPU, as the worker's CPU rerun would read it. Frames there make it a GPU
+    fallback (on the worker's row, and a warning); none there either, with the file's video stopping before its tail,
+    is a file cut short (``CUT_SHORT``), recorded and not read again until it changes. A CPU worker's reading, or a
+    CPU rerun's, that finds no frame of the tail is measured the same way.
+
     Args:
         rec: The file (its identity matches the disk: the pipeline just checked).
         ctx: The job's context (``config.ffmpeg_path``, ``store``, ``now``, ``force``).
@@ -652,8 +699,9 @@ def detect_credits_text(
         pause_check: True while everything is paused (:func:`find_credits`); None never pauses.
         ffmpeg_threads: The GPU worker's own ``ffmpeg_threads``; None on a CPU worker and for the CPU rerun.
         fallback_callback: Shows on the worker's row that text detection was read on the CPU although the worker has
-            a GPU (``TextDetectorPool.detect_boxes``'s ``on_cpu``). A failed GPU decode reruns the whole file on the CPU
-            through the worker instead, which shows that on its row itself.
+            a GPU (``TextDetectorPool.detect_boxes``'s ``on_cpu``), or that the GPU read no frames where the CPU did. A
+            GPU decode that failed otherwise reruns the whole file on the CPU through the worker instead, which shows
+            that on its row itself.
         gpu_worker: Whether a GPU worker runs the file. On its CPU rerun (``gpu`` None) text detection gets a CPU
             helper of its own instead of one of the CPU workers' (``TextDetectorPool.detect_boxes``).
 
@@ -662,11 +710,13 @@ def detect_credits_text(
         credit roll ("nothing found"); either way based on :data:`LOOK_BACK_BASIS`.
 
     Raises:
-        CodecNotSupportedError: The GPU decode failed; the worker reruns the file on the CPU.
+        CodecNotSupportedError: The GPU decode failed (not by reading no frames); the worker reruns the file on the
+            CPU.
         DetectorUnavailableError: No answer this time (duration unknown, decode failed, timed out now or in the last
-            day, cancelled, text detection failed); nothing is stored. A failure of the 640x360 reading alone that
-            doesn't raise (:func:`find_credits`: not on the GPU, a cancel, the app stopping, or a timeout of a tail
-            without an answer) is not one: that stores the 320x180 answer or "nothing found".
+            day, the file cut short now or before, cancelled, text detection failed); no answer is stored (a decode
+            error or a file cut short is recorded as the file's detector failure). A failure of the 640x360 reading
+            alone that doesn't raise (:func:`find_credits`: not on the GPU, a cancel, the app stopping, or a timeout
+            of a tail without an answer) is not one: that stores the 320x180 answer or "nothing found".
     """
     from ...processing.generator import CodecNotSupportedError
     from ..pipeline import DetectorAnswer, DetectorUnavailableError
@@ -676,29 +726,50 @@ def detect_credits_text(
         raise DetectorUnavailableError(reason)
     # The process's one pool (spec §6.4 item 7): never closed here, since closing it ends it for every later file.
     pool = get_textdet_pool()
-    try:
-        result = find_credits(
+    name = os.path.basename(rec.canonical_path)
+    ffmpeg = getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg"
+
+    def read(device: str | None, device_path: str | None, threads: int | None) -> CreditsTextResult:
+        return find_credits(
             rec.canonical_path,
             duration_ms=rec.duration_ms,
             is_episode=rec.season_key is not None,
             tail_s=_tail_s(rec, ctx),
-            ffmpeg=getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg",
+            ffmpeg=ffmpeg,
             detect_boxes=lambda planes: pool.detect_boxes(
                 planes,
-                gpu=gpu,
-                gpu_device_path=gpu_device_path,
+                gpu=device,
+                gpu_device_path=device_path,
                 gpu_worker=gpu_worker or gpu is not None,
                 on_cpu=fallback_callback,
                 cancel_check=cancel_check,
             ),
-            gpu=gpu,
-            gpu_device_path=gpu_device_path,
+            gpu=device,
+            gpu_device_path=device_path,
             cancel_check=cancel_check,
             phase=phase_callback,
             earliest_start_s=_earliest_start_s(rec, ctx),
             pause_check=pause_check,
-            ffmpeg_threads=ffmpeg_threads,
+            ffmpeg_threads=threads,
         )
+
+    try:
+        try:
+            result = read(gpu, gpu_device_path, ffmpeg_threads)
+        except frames.GpuReadNothingError as exc:
+            # A GPU that silently misses frames and a file cut short look the same here: the CPU (the worker model's
+            # fallback, as a failed decode's rerun) reads the file again, and only frames there make it the GPU's miss.
+            logger.info("{}: {}; checking on CPU", name, exc)
+            result = read(None, None, None)
+            if result.key_rows:
+                _gpu_missed(name, fallback_callback)
+        if not result.key_rows:
+            cut_short = _cut_short(rec, ctx, ffmpeg, cancel_check)
+            if cut_short is not None:
+                # Kept for this file as it is (a new identity drops it): not read again, and rule 3 stops waiting.
+                ctx.store.set_detector_failure(rec.id, Source.CREDITS_TEXT, cut_short)
+                logger.warning("Credit text can't be read for {}: {}", name, cut_short)
+                raise DetectorUnavailableError(cut_short)
     except frames.GpuDecodeError as exc:
         raise CodecNotSupportedError(str(exc)) from exc
     except (frames.DecodeCancelledError, TextDetCancelledError) as exc:

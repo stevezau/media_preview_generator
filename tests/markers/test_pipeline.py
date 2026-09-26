@@ -1830,7 +1830,7 @@ class TestJobWideRefusalsAcrossStages:
     @pytest.mark.parametrize("force", [False, True], ids=["normal", "forced"])
     def test_a_file_rerun_on_the_cpu_after_a_gpu_error(self, store, media, refused, force):
         ctx, client, detector = self._job(store, media, refused, force=force)
-        detector.side_effect = [CodecNotSupportedError("the GPU decoded no frames"), []]
+        detector.side_effect = [CodecNotSupportedError("the GPU read no frames in that part of the file"), []]
         assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
         with pytest.raises(CodecNotSupportedError):
             _run(ctx, media, {"plex-1": ready_publisher()}, stage="process", gpu="NVIDIA", gpu_device_path="cuda:0")
@@ -6053,6 +6053,7 @@ def test_outcome_keys_are_every_file_outcome_in_order():
         "markers_none",
         "markers_no_owners",
         "skipped_file_not_found",
+        "skipped_source_gone",
         "failed",
     )
 

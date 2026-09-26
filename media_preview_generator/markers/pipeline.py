@@ -28,6 +28,7 @@ from loguru import logger
 
 from ..config.paths import is_path_excluded
 from ..job_kinds import ItemOutcome, KindHandlers
+from ..processing.multi_server import source_replaced_reason
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch
@@ -255,8 +256,9 @@ def _no_phase(_text: str) -> None:
 
 
 class DetectorUnavailableError(Exception):
-    """A local detector couldn't answer this time (its tool failed, the job was cancelled). Nothing is stored for it,
-    so the next run asks it again."""
+    """A local detector couldn't answer this time (its tool failed, the job was cancelled). No answer is stored for it,
+    so the next run asks it again, unless the detector itself gives up at once there (credit text on a file that timed
+    out lately or was found cut short)."""
 
 
 @dataclass(frozen=True)
@@ -2965,6 +2967,22 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
         ctx.request_followups(stale)
 
 
+def _not_on_disk(path: str, ctx: PipelineContext) -> ItemOutcome:
+    """The outcome of a file not on disk, by previews' rule (``source_replaced_reason``): one a newer file replaced in
+    its folder is gone from disk for good, and its job queues no retry (the newer file is run on its own); any other is
+    not found, and a webhook's job tries it again (it may still be copying in)."""
+    replaced = source_replaced_reason(path, ctx.registry)
+    if replaced is None:
+        return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
+    logger.info(
+        "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); skipping without "
+        "a retry. The newer file gets its own Intro & Credits run from its own webhook or the next scan.",
+        path,
+        replaced.removeprefix("Skipped: "),
+    )
+    return ItemOutcome(FileOutcome.SOURCE_GONE.value, replaced)
+
+
 def _attempt(
     item: ProcessableItem,
     ctx: PipelineContext,
@@ -2999,7 +3017,7 @@ def _attempt(
         # Held under the file's run lock; the row is read before its disk is checked.
         if mark_if_missing(ctx.store, ctx.store.get_file(path), list(ctx.registry.configs())):
             ctx.note_missing()
-        return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
+        return _not_on_disk(path, ctx)
     except OSError as exc:
         return ItemOutcome(FileOutcome.FAILED.value, f"Couldn't read the file: {type(exc).__name__}")
     if not stat.S_ISREG(st.st_mode):

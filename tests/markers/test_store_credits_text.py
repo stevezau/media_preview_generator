@@ -58,6 +58,27 @@ def test_a_stored_credit_text_answer_forgets_the_files_timeout(store, answers, f
     assert store.credits_text_timed_out_at(other) == AT
 
 
+@pytest.mark.parametrize(
+    ("answers", "forgotten"),
+    [
+        ({Source.CREDITS_TEXT: [Candidate(MarkerType.CREDITS, 5_000_000, None, Source.CREDITS_TEXT)]}, True),
+        ({Source.CREDITS_TEXT: []}, True),
+        ({Source.SEASON_AUDIO: []}, False),
+    ],
+    ids=["credits-found", "no-credits", "other-detector"],
+)
+def test_a_stored_credit_text_answer_forgets_the_files_recorded_failure(store, answers, forgotten):
+    # A file recorded cut short that a forced re-detect then read: kept, the record would make every later run give up
+    # on it (``detector._gives_up``) and rule 3 stop waiting for an answer it has. Season audio's own record stays.
+    rec = store.upsert_file(FileIdentity("/m/Movie.mkv", 100, 1), duration_ms=6_000_000, season_key=None, is_movie=True)
+    cut_short = "the file ends before its stated length (27:10 of 1:40:00 readable)"
+    store.set_detector_failure(rec.id, Source.CREDITS_TEXT, cut_short)
+    store.set_detector_failure(rec.id, Source.SEASON_AUDIO, "season-signature")
+    store.replace_detector_answer(rec.id, answers, version=1)
+    assert store.get_detector_failure(rec.id, Source.CREDITS_TEXT) == (None if forgotten else cut_short)
+    assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) == "season-signature"
+
+
 def test_recording_a_timeout_forgets_entries_that_stopped_counting_for_any_path(store):
     gone = FileIdentity("/m/gone/Movie.mkv", 100, 1)
     recent = FileIdentity("/m/Other.mkv", 100, 1)

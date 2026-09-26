@@ -702,6 +702,149 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
         assert publishers["jf-1"].write.call_count == 1
 
 
+class TestGoneFromDiskThroughThePipeline:
+    """A file missing from disk, on the real runner and pipeline, as previews treat it (``source_replaced_reason``).
+
+    Production, 2026-09-26: Sonarr replaced Blood Legacy (2024) S01E05 with a new release. The preview job counted the
+    old path "Gone from disk"; the Intro & Credits follow-up ran three retries over 16 minutes and ended in two red jobs
+    and an ERROR. A file a newer one replaced in its folder now ends "Gone from disk" with no retry and the job green;
+    one with no replacement keeps today's retry (a webhook's file may still be copying) or today's "not found" (a scan).
+    """
+
+    setup = TestRetryThroughThePipeline.setup
+    _run_pipeline = TestRetryThroughThePipeline._run_pipeline
+    _retries = TestRetryThroughThePipeline._retries
+    _run_retry = TestRetryThroughThePipeline._run_retry
+
+    STALE_NAME = "Rick and Morty (2013) - S01E01 - Pilot-CAKES.mkv"
+
+    def _job(self, engine, monkeypatch, path, source):
+        """Queue and run a webhook job naming ``path``, or a library scan whose listing returns it."""
+        if source == "sonarr":
+            job_id = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="sonarr", file_paths=[path]
+            ).id
+        else:
+            from media_preview_generator.jobs import orchestrator
+
+            listed = MagicMock(
+                side_effect=lambda candidates, **kw: ([(candidates[0], ProcessableItem(path, "plex-1"))], [])
+            )
+            monkeypatch.setattr(orchestrator, "_enumerate_items_for_servers", listed)
+            job_id = triggers.create_intro_credits_job(
+                library_name="TV Shows",
+                priority=3,
+                source="schedule",
+                libraries=[{"server_id": "plex-1", "library_id": "1"}],
+            ).id
+        job_runner.run_intro_credits_job(job_id)
+        return job_id
+
+    @pytest.mark.parametrize("source", ["sonarr", "schedule"], ids=["webhook", "scan"])
+    def test_a_file_a_newer_file_replaced_ends_gone_from_disk_with_no_retry_and_the_job_green(
+        self, engine, setup, monkeypatch, source
+    ):
+        _, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        # The newer release (setup.path) sits in the folder; the path the job names is the old one Sonarr deleted.
+        stale = os.path.join(os.path.dirname(setup.path), self.STALE_NAME)
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            job_id = self._job(engine, monkeypatch, stale, source)
+
+        assert _outcome(engine.jm, job_id) == {"skipped_source_gone": 1}
+        [row] = engine.jm.get_file_results(job_id)
+        assert (row["file"], row["outcome"], row["reason"]) == (
+            stale,
+            "skipped_source_gone",
+            "Skipped: replaced by a newer file (Rick and Morty (2013) - S01E01 - Pilot.mkv)",
+        )
+        assert self._retries(engine.jm) == []
+        job = engine.jm.get_job(job_id)
+        assert (job.status, job.error) == (JobStatus.COMPLETED, None)
+        assert job.config.get("last_outcome") is None  # no retry chain was ever started
+        publishers["plex-1"].write.assert_not_called()
+        logs = engine.jm.get_logs(job_id)
+        assert any("INFO - Done: 1 file" in line and "1 gone from disk" in line for line in logs), logs
+        assert not any("ERROR" in line or "not on disk" in line for line in logs), logs
+
+    def test_a_webhook_file_missing_that_appears_later_is_published_by_the_retry(self, engine, setup, monkeypatch):
+        _, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        copying = setup.path + ".partial"  # not a video: no replacement, so the file may still be copying in
+        os.rename(setup.path, copying)
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = self._job(engine, monkeypatch, setup.path, "sonarr")
+            assert _outcome(engine.jm, first) == {"skipped_file_not_found": 1}
+            (retry,) = self._retries(engine.jm)
+            assert (retry.config["file_paths"], retry.config["retry_attempt"]) == ([setup.path], 1)
+            os.rename(copying, setup.path)
+            self._run_retry(monkeypatch, retry)
+
+        head = engine.jm.get_job(first)
+        assert (head.status, head.error, head.config["last_outcome"]) == (JobStatus.COMPLETED, None, "completed")
+        assert _outcome(engine.jm, first) == {"markers_published": 1}
+        assert publishers["plex-1"].write.call_count == 1
+
+    def test_a_webhook_file_a_newer_file_replaces_while_it_waits_ends_the_chain_green(self, engine, setup, monkeypatch):
+        _, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        newer = setup.path + ".partial"  # the newer release is still copying in under a temporary name
+        os.rename(setup.path, newer)
+        stale = os.path.join(os.path.dirname(setup.path), self.STALE_NAME)
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = self._job(engine, monkeypatch, stale, "sonarr")
+            (retry,) = self._retries(engine.jm)
+            os.rename(newer, setup.path)  # the import finished: the old file's place is taken
+            self._run_retry(monkeypatch, retry)
+
+        assert [r.id for r in self._retries(engine.jm)] == [retry.id]  # no second retry
+        head = engine.jm.get_job(first)
+        assert (head.status, head.error, head.config["last_outcome"]) == (JobStatus.COMPLETED, None, "completed")
+        assert _outcome(engine.jm, first) == {"skipped_source_gone": 1}
+        publishers["plex-1"].write.assert_not_called()
+
+    def test_a_webhook_file_missing_for_good_still_retries_until_the_retries_run_out(self, engine, setup, monkeypatch):
+        engine.settings["webhook_retry_count"] = 1
+        _, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        os.remove(setup.path)  # nothing took its place: it may still be copying, so it is waited for
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = self._job(engine, monkeypatch, setup.path, "sonarr")
+            (retry,) = self._retries(engine.jm)
+            self._run_retry(monkeypatch, retry)
+
+        head = engine.jm.get_job(first)
+        assert (head.status, head.config["last_outcome"]) == (JobStatus.FAILED, "exhausted")
+        assert head.error == "1 file(s) still not on disk after 1 retry. Check the Files panel for the affected paths."
+        assert _outcome(engine.jm, first) == {"skipped_file_not_found": 1}
+        publishers["plex-1"].write.assert_not_called()
+
+    def test_a_scan_file_missing_gets_no_retry_and_the_next_scan_publishes_it_once_it_is_back(
+        self, engine, setup, monkeypatch
+    ):
+        _, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        away = setup.path + ".away"
+        os.rename(setup.path, away)
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = self._job(engine, monkeypatch, setup.path, "schedule")
+            # A listing only names files the server already has: waiting won't bring one back, the next scan does.
+            assert self._retries(engine.jm) == []
+            job = engine.jm.get_job(first)
+            assert _outcome(engine.jm, first) == {"skipped_file_not_found": 1}
+            assert (job.status, job.error) == (
+                JobStatus.FAILED,
+                "All 1 file(s) weren't found on disk — check the path mappings",
+            )
+            os.rename(away, setup.path)
+            second = self._job(engine, monkeypatch, setup.path, "schedule")
+
+        assert _outcome(engine.jm, second) == {"markers_published": 1}
+        assert engine.jm.get_job(second).status is JobStatus.COMPLETED
+        assert self._retries(engine.jm) == []
+        assert publishers["plex-1"].write.call_count == 1
+
+
 @pytest.mark.real_job_async
 class TestRealJobThread:
     def test_paused_job_hands_its_slot_to_a_high_job_then_finishes(self, engine, monkeypatch):
@@ -828,7 +971,8 @@ class TestCreditTextOnTheWorkers:
             elif isinstance(effect, BaseException):
                 raise effect
             detect_boxes(np.zeros((1, frames.FRAME_H, frames.FRAME_W), np.uint8))
-            return []  # no credit roll in the tail: "nothing found"
+            # No credit roll in the tail ("nothing found"), unless a test hands this decoder frames of its own.
+            return effects.get("gpu rows" if gpu else "cpu rows", [])
 
         pool = MagicMock()
         pool.detect_boxes.return_value = [()]
@@ -877,20 +1021,69 @@ class TestCreditTextOnTheWorkers:
         from media_preview_generator.markers.credits import detector, frames
         from media_preview_generator.markers.models import Source
 
-        setup.effects["gpu"] = frames.GpuDecodeError("the GPU decoded no frames from S01E01.mkv")
+        setup.effects["gpu"] = frames.GpuDecodeError("ffmpeg exited 1 decoding S01E01.mkv on the GPU")
         job = self._run(engine, setup)
         assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
         # Still a GPU worker's request with no GPU: its CPU text detection gets a helper of its own, not a CPU worker's.
         kwargs = setup.pool.detect_boxes.call_args.kwargs
         assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["gpu_worker"]) == (None, None, True)
         worker = self._worker()
-        assert worker.fallback_active is True and "GPU decoded no frames" in worker.fallback_reason
+        assert worker.fallback_active is True and "exited 1" in worker.fallback_reason
         rec = setup.store.get_file(setup.path)
         assert setup.store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
         # Counted once, as the CPU rerun ended.
         assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         [row] = engine.jm.get_file_results(job.id)
         assert row["worker"] == "GPU Worker 1 (Test GPU)"
+        assert self._released(engine)
+
+    def test_a_file_cut_short_is_no_gpu_fallback_and_is_not_read_again(self, engine, setup, monkeypatch):
+        # Production, 2026-09-26: 14 of 19 GPU->CPU fallbacks were files cut short, the GPU blamed for each.
+        from media_preview_generator.markers.credits import detector, frames
+        from media_preview_generator.markers.models import Source
+
+        setup.effects["gpu"] = frames.GpuReadNothingError()
+        measured = []
+        monkeypatch.setattr(frames, "readable_video_s", lambda *a, **kw: measured.append(kw["from_s"]) or 600.0)
+        job = self._run(engine, setup)
+        # The GPU's reading, then the CPU's check of the same file in the same worker: no rerun of the whole file.
+        assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
+        assert measured == [DURATION / 1000 - frames.EPISODE_TAIL_S]
+        worker = self._worker()
+        assert (worker.fallback_active, worker.fallback_reason) == (False, None)
+        rec = setup.store.get_file(setup.path)
+        cut_short = "the file ends before its stated length (10:00 of 22:01 readable)"
+        assert setup.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) == cut_short
+        assert job.status is JobStatus.COMPLETED and job.error is None
+        assert _outcome(engine.jm, job.id) == {"markers_none": 1}
+        assert self._released(engine)
+
+        # The next scan of the same file: no worker, no decode.
+        again = self._run(engine, setup)
+        assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
+        assert measured == [DURATION / 1000 - frames.EPISODE_TAIL_S]
+        assert again.status is JobStatus.COMPLETED and _outcome(engine.jm, again.id) == {"markers_none": 1}
+        assert any(cut_short in line for line in engine.jm.get_logs(again.id))
+        assert detector.credits_text_failed_here(rec, SimpleNamespace(store=setup.store)) is True
+
+    def test_a_gpu_that_misses_frames_the_cpu_reads_is_a_gpu_fallback(self, engine, setup, monkeypatch):
+        from media_preview_generator.markers.credits import frames
+
+        setup.effects["gpu"] = frames.GpuReadNothingError()
+        setup.effects["cpu rows"] = [(1000.0 + 2 * i, 0, 120.0, ()) for i in range(10)]  # frames, no credit roll
+        measured = []
+        monkeypatch.setattr(frames, "readable_video_s", lambda *a, **kw: measured.append(kw) or 600.0)
+        job = self._run(engine, setup)
+        assert setup.decodes[:2] == [("NVIDIA", "cuda:0"), (None, None)]
+        assert all(device == (None, None) for device in setup.decodes[1:])  # the rest of it read on the CPU too
+        assert measured == []
+        worker = self._worker()
+        assert worker.fallback_active is True
+        assert worker.fallback_reason == (
+            "The GPU read no frames in the end of Rick and Morty (2013) - S01E01 - Pilot.mkv, but the CPU did; its "
+            "credits were read on the CPU"
+        )
+        assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         assert self._released(engine)
 
     def test_text_detection_read_on_the_cpu_on_a_gpu_worker_shows_on_the_worker_row(self, engine, setup):

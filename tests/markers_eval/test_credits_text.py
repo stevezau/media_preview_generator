@@ -485,10 +485,11 @@ def test_the_detector_digest_follows_every_source_file_it_names(tmp_path):
 # Package modules the hashed files import that change no credits text answer: data classes and locks, the job
 # plumbing the detector reports through, the Vulkan probe, which only picks the helper's device (the self-test
 # keeps a GPU whose boxes differ from the CPU's out), the settings, read only for how many CPU helpers may run, the
-# playback speeds decide reads online times by, and the pause that stops a running decode where it is (it moves time
-# limits, never what a decode gives).
+# playback speeds decide reads online times by, the pause that stops a running decode where it is (it moves time
+# limits, never what a decode gives), and the job log's clock, which only words a file cut short.
 NOT_ANSWER_CODE = {"markers.models", "markers.locks", "markers.pipeline", "markers.store", "markers.speed",
-                   "processing.generator", "gpu.vulkan_probe", "web.settings_manager", "markers.freeze"}  # fmt: skip
+                   "processing.generator", "gpu.vulkan_probe", "web.settings_manager", "markers.freeze",
+                   "markers.job_log"}  # fmt: skip
 
 
 def _package_imports(path, root):

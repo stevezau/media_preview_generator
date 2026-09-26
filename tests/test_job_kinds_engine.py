@@ -540,12 +540,15 @@ def test_a_cpu_fallback_inside_a_kinds_step_shows_on_the_worker_row(caplog):
     from media_preview_generator.jobs.worker import Worker
 
     def process(item, **kwargs):
-        kwargs["fallback_callback"]("decoded a.mkv on the CPU: the GPU decoded no frames")
+        kwargs["fallback_callback"]("decoded a.mkv on the CPU: the GPU read no frames in that part of the file")
         return ItemOutcome("markers_published")
 
     w = Worker(1, "GPU", gpu="NVIDIA", gpu_device="cuda:0", ffmpeg_threads=2)
     _run_custom(w, process)
-    assert w.fallback_active is True and w.fallback_reason == "decoded a.mkv on the CPU: the GPU decoded no frames"
+    assert (
+        w.fallback_active is True
+        and w.fallback_reason == "decoded a.mkv on the CPU: the GPU read no frames in that part of the file"
+    )
     assert w.completed == 1
     _run_custom(w, lambda item, **kwargs: ItemOutcome("markers_published"))
     assert w.fallback_active is False and w.fallback_reason is None

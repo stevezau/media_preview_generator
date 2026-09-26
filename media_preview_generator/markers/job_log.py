@@ -550,6 +550,7 @@ _OTHER_OUTCOMES = (
     (FileOutcome.SKIPPED, "skipped"),
     (FileOutcome.NO_OWNERS, "on no server with Intro & Credits on"),
     (FileOutcome.FILE_NOT_FOUND, "not on disk"),
+    (FileOutcome.SOURCE_GONE, "gone from disk"),
     (FileOutcome.FAILED, "failed"),
 )
 

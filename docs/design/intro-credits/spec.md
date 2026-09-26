@@ -415,8 +415,10 @@ follows the chosen run's last credit keyframe, a second 1 fps decode over the 21
 refine the end (Q3); otherwise the skip runs to the end of the file with no end. Measured cost on storage (P5000
 NVDEC): 8–13 s per movie incl. text detection; CPU keyframe decode of a 15-min tail 26.5 s. Per-frame exact seeks
 (150–270 s) and full-rate decode of the tail are never used. Decode uses the app's existing per-GPU ffmpeg hwaccel
-selection (NVIDIA / Intel / AMD, same as previews) with CPU fallback; a decode that exits non-zero or yields no
-frames is a GPU failure (worker CPU rerun), while a decode that times out (600 s) is "no answer" and isn't decoded
+selection (NVIDIA / Intel / AMD, same as previews) with CPU fallback; a decode that exits non-zero is a GPU failure
+(worker CPU rerun), and one that exits cleanly with no frames is read again on the CPU by the detector itself: frames
+there make it a GPU fallback, none there with the file's video stopping 30 s or more before its stated length is a
+file cut short (§14 2026-09-27), while a decode that times out (600 s) is "no answer" and isn't decoded
 again for a day unless the file changes or the run is forced (T-R7). **Intra-only streams** (every frame a keyframe:
 ProRes, DNxHD, MJPEG, all-I H.264/HEVC) make `-skip_frame nokey` skip nothing, so the keyframe pass would decode and
 text-check every frame of the tail and time out. `frames.keyframe_thinning` reads the first 24 video packet flags
@@ -427,7 +429,7 @@ the spacing rule J was measured at. Packets are dropped before the decoder, so t
 thinned but the whole tail is still read from disk. **VP9** (the same ffprobe's `codec_name`) skips nothing either:
 FFmpeg's VP9 decoder never reads `-skip_frame`, and every hwaccel decodes inside it, so its keyframe pass drops the
 packets not flagged as keyframes instead (`noise=drop=not(key)`, or `not(key)+mod(n\,N)` for an all-key VP9); a VP9
-tail with no flagged keyframe gives no frames, a GPU failure whose CPU rerun finds no roll. The two 1 fps refine
+tail with no flagged keyframe gives no frames on either decoder, and its CPU reading finds no roll. The two 1 fps refine
 decodes are unchanged. Any other stream (every other decoder honors `-skip_frame`, measured per codec in
 `evidence/eval/phase3-harness.md`), or a probe that errors, gets the command above unchanged. A probe that times out
 (30 s) is "no answer" for a day, like a decode timeout (T-R7); one that isn't started because earlier ffprobes are
@@ -966,7 +968,9 @@ Inside a worker, markers work follows the worker model as previews' FFmpeg does 
   recorded against either.
 - **Fallback.** A GPU failure in the credits decode reruns the file on the worker's CPU; the end-picture check decodes
   its few seconds again on the CPU on the spot. Both show on the worker's row (`fallback_active`); the end picture's
-  also warns once per GPU for the process.
+  also warns once per GPU for the process. A credits decode that reads no frames on the GPU is read again on the CPU
+  in the detector ("the GPU read no frames in that part of the file; checking on CPU"), and shows as a fallback only
+  when the CPU reads frames there: a file cut short is no GPU fault.
 
 ### 5.7 Portability
 This app runs against libraries in any language, so two lookup tables are deliberately language-aware:
@@ -1012,7 +1016,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    and the preview runner queues it whenever it starts the job — fired, or revived after a restart during the
    debounce — then takes the request off, so it is queued once. A scheduled "Recently added" scan queues the same
    follow-up (source `recently_added`) for the files it lists, before dispatching them; its files are a server
-   listing, so a file missing from disk gets no retry and a replaced one no later verify. Backfill: "Start job →
+   listing, so a file missing from disk gets no retry and a replaced one no later verify. Any job's file missing
+   from disk that a newer file replaced in its folder ends "Gone from disk" with no retry, by previews' own rule
+   (`processing.multi_server.source_replaced_reason`). Backfill: "Start job →
    Intro & Credits" for chosen libraries, or a schedule, at LOW. Schedules are independent from preview schedules;
    each skips files already done.
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
@@ -3260,3 +3266,38 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     error quotes that line whole too. Every GPU failure is still read again on the CPU. Reproduced with the image's
     jellyfin-ffmpeg 8.1.2 on storage's P5000 (Pascal, no AV1 decode either): exit 69 with "Your platform doesn't
     support hardware accelerated AV1 decoding", then 72 rows from the CPU.
+- 2026-09-27 · **Log audit of sflix: a replaced file retried, files cut short blamed on the GPU, and intros resent
+  unchanged** (fixes on `fix/markers-log-audit`).
+  - **A file a newer one replaced ends "Gone from disk", as in previews** (§6.2 step 1). Sonarr replaced Blood Legacy
+    (2024) S01E05; the preview job counted the old path `skipped_source_gone`, while the Intro & Credits follow-up
+    retried it three times over 16 min and ended in two red jobs and an ERROR ("check the path mappings"). The pipeline
+    now asks previews' rule (`source_replaced_reason`, public for both) before "not found": a replacement in the file's
+    own folder while its disk is plainly mounted gives `FileOutcome.SOURCE_GONE` (`skipped_source_gone`, "Skipped:
+    replaced by a newer file (<name>)"), which queues no retry and keeps the job green. A file with no replacement keeps
+    the webhook retry, and a scan's keeps its "not found". The Files panel's "Gone from disk" filter is shared.
+  - **A GPU decode that reads no frames is checked on the CPU before anyone is blamed** (§5.4, §5.6). 14 of the 19
+    GPU→CPU fallbacks were files cut short (Legends of Tomorrow S03E01: 104,856,928 bytes of a 42-minute remux; How to
+    Get Away with Murder, Mayans M.C., Stargate Atlantis): the header states the whole length, the tail's keyframe pass
+    reads nothing and exits 0 on either decoder, and the worker flagged a GPU fallback each time. `run_decode` now
+    raises `GpuReadNothingError` for that case, and `detect_credits_text` reads the file on the CPU itself (the worker
+    model's fallback, at ffmpeg's own thread count, as the worker's rerun). Frames there: a real GPU miss, flagged on
+    the worker's row and warned. None there, or a CPU worker's reading with none: the file's last video packet is read
+    (`frames.readable_video_s`, ffprobe from the tail's start, then from the file's start for an MP4 whose index points
+    past its end), and a video stopping 30 s or more before the stated length is recorded as the credit text's
+    detector failure, "the file ends before its stated length (27:10 of 44:02 readable)", logged as a warning. That
+    record stops rule 3 waiting (§5.5) and makes the detector give up at once on later runs (`_gives_up`, no worker, no
+    decode) until the file changes or a forced re-detect; it is no GPU fault and nothing is flagged. Any credit text
+    answer stored later forgets the record, as it forgets a timeout. The probe seeks on the stream's own times (the
+    container's start time added, for a recording that starts 30000 s in). A probe that can't tell stores "nothing
+    found", as before. Proven on real ffmpeg with a Matroska file and a fast-start MP4 each cut
+    to 40 % of their bytes (`test_frames_integration.py`).
+  - **A season re-check no longer resends an intro that moved by milliseconds** (§6.3). A Different World S04E07 was
+    sent to the same Plex item 8 times in 4 hours, always showing 1:09–2:12 (142 such sends across 59 files): each
+    episode that joined the season matched it again and moved its season audio answer a few ms, a new decision every
+    time. §6.3's "a run reuses stored answers" doesn't hold for season audio, whose answer is due whenever the season
+    changes. The fix is at the answer, not at publishing: a new season audio answer (this version, same source) within
+    0.5 s of the stored one at both ends keeps the stored times (`season.KEEP_STORED_TIMES_MS`), with the new match's
+    support and signature. The decision doesn't change, so nothing is saved, sent or read back as "shows other times",
+    and a one-version item still shows exactly what was decided (2026-09-25). A move of 0.5 s or more is stored and
+    published as before; a lock or the user's own edit, however small, is never subject to it. The cost: an answer
+    built up week by week can stay up to 0.5 s from the one all its episodes at once would give.

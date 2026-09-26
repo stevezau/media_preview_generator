@@ -1,5 +1,6 @@
 """ffprobe wrapper for duration, chapters, the container's and first audio stream's first timestamps, the main video
-stream's codec and first packet headers, and the bounded kill it shares with the fingerprint ffmpeg.
+stream's codec, first packet headers and last readable timestamp, and the bounded kill it shares with the fingerprint
+ffmpeg.
 
 A process stuck in an uninterruptible read on a stalled network mount can't die until that read returns, and it holds
 its pipes until then. Collecting it with a plain ``wait()`` or ``communicate()`` -- what ``subprocess.run`` does after
@@ -370,6 +371,48 @@ def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 6
         tuple(VideoPacket(_seconds(packet.get("pts_time")), "K" in str(packet.get("flags", ""))) for packet in raw),
         pix_fmt if isinstance(pix_fmt, str) and pix_fmt else None,
     )
+
+
+def last_video_time_s(path: str, *, ffprobe: str, from_s: float | None, timeout_s: float = 60.0) -> float | None:
+    """How far into the file its main video stream can be read: the latest timestamp among its packets from ``from_s``
+    to the end of the file (from the start when None), with the container's own start time taken off.
+
+    A file cut short keeps the duration its header states, so only its packets show where it really ends. Nothing is
+    decoded, but every packet from ``from_s`` on is read. A seek past the end of a Matroska file that lost its index
+    lands on its last keyframe; one into an MP4 whose index points past the end reads nothing (read it from the start).
+
+    Args:
+        path: Media file.
+        ffprobe: ffprobe binary.
+        from_s: Where to start reading, in the stream's own times; None reads the whole file.
+        timeout_s: Hard timeout, as for :func:`probe_media`.
+
+    Returns:
+        Seconds from the start of the file; None when no packet with a time was read.
+
+    Raises:
+        ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
+        ProbeTimeoutError: ffprobe ran past ``timeout_s``.
+        ProbeError: ffprobe missing, failed or returned something other than its JSON packet list.
+    """
+    cmd = [ffprobe, "-v", "error", "-select_streams", "V:0"]
+    if from_s is not None:
+        cmd += ["-read_intervals", f"{from_s:.3f}%"]
+    cmd += ["-show_entries", "packet=pts_time:format=start_time", "-of", "json=compact=1", path]
+    stdout = _run_ffprobe(cmd, path, timeout_s)
+    try:
+        data = json.loads(stdout or "")
+    except ValueError as exc:
+        raise ProbeError(f"ffprobe returned invalid JSON for {path}") from exc
+    raw = data.get("packets", []) if isinstance(data, dict) else None
+    if not isinstance(raw, list) or not all(isinstance(packet, dict) for packet in raw):
+        raise ProbeError(f"ffprobe returned an unexpected packet list for {path}")
+    times = [seconds for packet in raw if (seconds := _seconds(packet.get("pts_time"))) is not None]
+    if not times:
+        return None
+    container = data.get("format")
+    start_s = _seconds(container.get("start_time")) if isinstance(container, dict) else None
+    return max(times) - (start_s or 0.0)
 
 
 def _run_ffprobe(cmd: list[str], path: str, timeout_s: float) -> str:
