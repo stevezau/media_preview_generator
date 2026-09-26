@@ -473,6 +473,85 @@ class TestPrefetchedBundleMetadata:
         )
 
 
+_UFC = "/data/Sports/UFC/Season 2026/UFC Fight Night 273 (2026-04-18) E12"
+_BOXING = "/data/Sports/Boxing/Season 2026/Garcia vs Benn (2026-09-12) E94"
+
+# Shapes and hashes taken from a live Plex library DB (media_parts rows).
+# Stacked: one media item, one part per file, each part its own hash, and
+# Plex marks each part ``mi:indexes=sd`` — one index per part.
+_STACKED_PARTS = [
+    ("18fb60bf8e1b57b468adb39094dc196964d4ca17", f"{_UFC}/UFC - S2026E12 - pt1 - Fight Night 273.mp4"),
+    ("3cc93c9d5895af050a5bbef9fa7ff7fc5aaef42d", f"{_UFC}/UFC - S2026E12 - pt2 - Fight Night 273.mp4"),
+]
+# Copies: one item, two versions whose files are byte-identical. Plex's part
+# hash is taken from the content, so both parts carry the same hash and share
+# one bundle (and one index-sd.bif) in Plex itself.
+_COPY_PARTS = [
+    ("7bd4b8cfed7b096007252de23fe3b71150b1c3af", f"{_BOXING}/Boxing - S2026E94 - pt2 - Garcia vs Benn.mkv"),
+    ("7bd4b8cfed7b096007252de23fe3b71150b1c3af", f"{_BOXING}/Boxing - S2026E94 - Garcia vs Benn.mkv"),
+    ("6ebd8bebd35bf3d999c6235a509f8c8526eb7ee5", f"{_BOXING}/Boxing - S2026E94 - pt4 - Garcia vs Benn HDTV.mkv"),
+]
+
+
+class TestOutputPathPerPart:
+    """The exact BIF path for each file of single-part, stacked and copied items."""
+
+    @pytest.mark.parametrize(
+        ("parts", "canonical_path", "expected"),
+        [
+            pytest.param(
+                [_STACKED_PARTS[0]],
+                _STACKED_PARTS[0][1],
+                "/cfg/Media/localhost/1/8fb60bf8e1b57b468adb39094dc196964d4ca17.bundle/Contents/Indexes/index-sd.bif",
+                id="single-part",
+            ),
+            pytest.param(
+                _STACKED_PARTS,
+                _STACKED_PARTS[0][1],
+                "/cfg/Media/localhost/1/8fb60bf8e1b57b468adb39094dc196964d4ca17.bundle/Contents/Indexes/index-sd.bif",
+                id="stacked-pt1",
+            ),
+            pytest.param(
+                _STACKED_PARTS,
+                _STACKED_PARTS[1][1],
+                "/cfg/Media/localhost/3/cc93c9d5895af050a5bbef9fa7ff7fc5aaef42d.bundle/Contents/Indexes/index-sd.bif",
+                id="stacked-pt2",
+            ),
+            pytest.param(
+                _COPY_PARTS,
+                _COPY_PARTS[0][1],
+                "/cfg/Media/localhost/7/bd4b8cfed7b096007252de23fe3b71150b1c3af.bundle/Contents/Indexes/index-sd.bif",
+                id="copy-pt2",
+            ),
+            pytest.param(
+                _COPY_PARTS,
+                _COPY_PARTS[1][1],
+                "/cfg/Media/localhost/7/bd4b8cfed7b096007252de23fe3b71150b1c3af.bundle/Contents/Indexes/index-sd.bif",
+                id="copy-original",
+            ),
+            pytest.param(
+                _COPY_PARTS,
+                _COPY_PARTS[2][1],
+                "/cfg/Media/localhost/6/ebd8bebd35bf3d999c6235a509f8c8526eb7ee5.bundle/Contents/Indexes/index-sd.bif",
+                id="different-version-of-copied-item",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("source", ["tree", "prefetched"])
+    def test_output_path_is_the_parts_own_bundle(self, tmp_path, mock_config, parts, canonical_path, expected, source):
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+        server = PlexServer(mock_config)
+        if source == "tree":
+            _wire_plex_query(server, parts=parts)
+            bundle = _make_bundle(canonical_path, tmp_path)
+        else:
+            server._plex = MagicMock()
+            server._plex.query.side_effect = AssertionError("must not call /tree")
+            bundle = _make_bundle(canonical_path, tmp_path, prefetched_bundle_metadata=tuple(parts))
+
+        assert adapter.compute_output_paths(bundle, server, item_id="689756") == [Path(expected)]
+
+
 class TestPublish:
     def test_creates_parent_dirs_and_writes_bif(self, tmp_path):
         # Arrange: a frame dir with three small JPGs.
