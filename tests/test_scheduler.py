@@ -875,6 +875,52 @@ class TestNextRunAfterAFire:
         )
         assert datetime.fromisoformat(scheduler_manager.get_schedule(sid)["next_run"]) == live
 
+    def _dispatch(self, manager, code: int, job_id: str) -> None:
+        from datetime import datetime
+
+        from apscheduler.events import JobSubmissionEvent
+
+        manager.scheduler._dispatch_event(JobSubmissionEvent(code, job_id, "default", [datetime.now(UTC)]))
+
+    def test_stored_next_run_moves_on_when_a_fire_is_skipped_because_the_last_run_is_still_going(
+        self, scheduler_manager
+    ):
+        """With ``max_instances=1`` APScheduler still advances the job past a
+        skipped fire, and reports it with EVENT_JOB_MAX_INSTANCES instead."""
+        import json
+        from datetime import datetime, timedelta
+
+        from apscheduler.events import EVENT_JOB_MAX_INSTANCES
+
+        schedule = scheduler_manager.create_schedule(name="Every 15", library_id="2", interval_minutes=15)
+        sid = schedule["id"]
+        moved_on = datetime.now(UTC) + timedelta(minutes=30)
+        scheduler_manager.scheduler.modify_job(sid, next_run_time=moved_on)
+
+        self._dispatch(scheduler_manager, EVENT_JOB_MAX_INSTANCES, sid)
+
+        with open(scheduler_manager.schedules_file) as fh:
+            assert datetime.fromisoformat(json.load(fh)["schedules"][sid]["next_run"]) == moved_on
+
+    def test_does_not_save_when_the_job_is_not_a_schedule(self, scheduler_manager):
+        from apscheduler.events import EVENT_JOB_SUBMITTED
+
+        with patch.object(scheduler_manager, "_save_schedules") as save:
+            self._dispatch(scheduler_manager, EVENT_JOB_SUBMITTED, "quiet_hours_pause_0")
+
+        save.assert_not_called()
+
+    def test_does_not_save_when_next_run_is_unchanged(self, scheduler_manager):
+        """Each save rotates a backup; a no-op save would push real restore points out."""
+        from apscheduler.events import EVENT_JOB_SUBMITTED
+
+        schedule = scheduler_manager.create_schedule(name="TV", library_id="2", cron_expression="0 2 * * *")
+
+        with patch.object(scheduler_manager, "_save_schedules") as save:
+            self._dispatch(scheduler_manager, EVENT_JOB_SUBMITTED, schedule["id"])
+
+        save.assert_not_called()
+
 
 # ========================================================================
 # Persistence

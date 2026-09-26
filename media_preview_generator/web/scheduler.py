@@ -1190,6 +1190,9 @@ class ScheduleManager:
         reads, so a save during the run (``_update_last_run``) stored the run
         that had just fired. APScheduler dispatches this event after it has
         stored the new ``next_run_time``.
+
+        Saves only when the value changed: every save rotates a backup, and
+        the restore list keeps only the last few.
         """
         with self._lock:
             schedule = self._schedules.get(event.job_id)
@@ -1200,7 +1203,10 @@ class ScheduleManager:
             except Exception:
                 logger.debug("Could not fetch next_run for schedule {}", event.job_id, exc_info=True)
                 return
-            schedule["next_run"] = job.next_run_time.isoformat() if job and job.next_run_time else None
+            next_run = job.next_run_time.isoformat() if job and job.next_run_time else None
+            if schedule.get("next_run") == next_run:
+                return
+            schedule["next_run"] = next_run
             self._save_schedules()
 
     def _on_job_executed(self, event) -> None:

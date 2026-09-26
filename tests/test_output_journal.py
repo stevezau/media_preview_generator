@@ -414,6 +414,56 @@ class TestOutputSharedByCopies:
         assert outputs_fresh_for_source([bif], str(original)) is True
         assert outputs_fresh_for_source([bif], str(copy)) is True
 
+    def test_keeps_both_copies_when_they_publish_at_the_same_moment(self, tmp_path):
+        """Each writer must merge into what the other wrote, not into what it read before."""
+        import threading
+        from unittest.mock import patch
+
+        from media_preview_generator.output import journal
+
+        original = tmp_path / "a.mkv"
+        original.write_bytes(b"x" * 500)
+        os.utime(original, (1_000_000, 1_000_000))
+        copy = _copy_of(original, tmp_path / "b.mkv", mtime=2_000_000)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        both_read = threading.Barrier(2, timeout=0.5)
+        real_read = journal._read_sources
+
+        def read_then_wait(meta_path):
+            sources = real_read(meta_path)
+            try:
+                both_read.wait()  # without the lock, both reads see no sources
+            except threading.BrokenBarrierError:
+                pass  # the lock keeps the other writer out; carry on alone
+            return sources
+
+        with patch.object(journal, "_read_sources", side_effect=read_then_wait):
+            writers = [threading.Thread(target=write_meta, args=([bif], str(p))) for p in (original, copy)]
+            for w in writers:
+                w.start()
+            for w in writers:
+                w.join()
+
+        sources = json.loads(_meta_path_for(bif).read_text())["sources"]
+        assert sorted(s["path"] for s in sources) == [str(original), str(copy)]
+
+    def test_does_not_raise_when_the_existing_meta_cannot_be_read(self, tmp_path):
+        from unittest.mock import patch
+
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x")
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        with patch(
+            "media_preview_generator.output.journal._read_sources", side_effect=PermissionError("stale NFS handle")
+        ):
+            write_meta([bif], str(source))  # must not raise
+
+        assert not _meta_path_for(bif).exists()
+
     def test_leaves_no_temp_files_behind_when_written(self, tmp_path):
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x")

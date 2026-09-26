@@ -34,10 +34,9 @@ the other's stamp every night and rebuilt the shared BIF.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import tempfile
+import threading
 from pathlib import Path
 
 from loguru import logger
@@ -45,6 +44,11 @@ from loguru import logger
 #: Bumped whenever the on-disk schema changes. Older schemas are treated
 #: as a miss (forces regen, then writes the new schema). Cheap to bump.
 JOURNAL_SCHEMA_VERSION = 1
+
+#: Serialises the read-merge-write of ``.meta`` files. Copies sharing an output
+#: can publish at the same moment from different workers; without this, both
+#: read the old sources and the last write drops the other's entry.
+_WRITE_LOCK = threading.Lock()
 
 
 def _meta_path_for(output: Path) -> Path:
@@ -126,37 +130,30 @@ def write_meta(output_paths: list[Path], canonical_path: str, *, publisher: str 
 
     for output in output_paths:
         meta_path = _meta_path_for(output)
-        copies = []
-        for source in _read_sources(meta_path) or []:
-            fingerprint = _fingerprint(source)
-            if source.get("path") != canonical_path and fingerprint and fingerprint[1] == this_source["size"]:
-                copies.append(source)
-        payload = {
-            "schema": JOURNAL_SCHEMA_VERSION,
-            "source_path": canonical_path,
-            "source_mtime": this_source["mtime"],
-            "source_size": this_source["size"],
-            "publisher": publisher or "",
-            "sources": [*copies, this_source],
-        }
         try:
-            # Atomic write: a crash mid-write would otherwise leave a
-            # truncated .meta that outputs_fresh_for_source() falls back
-            # on the legacy "no .meta = fresh" branch — which would treat
-            # stale outputs as fresh on the next dispatch. The temp name
-            # is unique per writer because copies sharing an output can
-            # publish at the same moment from different workers.
-            fd, tmp_name = tempfile.mkstemp(dir=meta_path.parent, prefix=f".{meta_path.name}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(json.dumps(payload, separators=(",", ":")))
-                os.replace(tmp_name, meta_path)
-            except OSError:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp_name)
-                raise
+            with _WRITE_LOCK:
+                copies = []
+                for source in _read_sources(meta_path) or []:
+                    fingerprint = _fingerprint(source)
+                    if source.get("path") != canonical_path and fingerprint and fingerprint[1] == this_source["size"]:
+                        copies.append(source)
+                payload = {
+                    "schema": JOURNAL_SCHEMA_VERSION,
+                    "source_path": canonical_path,
+                    "source_mtime": this_source["mtime"],
+                    "source_size": this_source["size"],
+                    "publisher": publisher or "",
+                    "sources": [*copies, this_source],
+                }
+                # Atomic write: a crash mid-write would otherwise leave a
+                # truncated .meta that outputs_fresh_for_source() falls back
+                # on the legacy "no .meta = fresh" branch — which would treat
+                # stale outputs as fresh on the next dispatch.
+                tmp_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
+                tmp_path.write_text(json.dumps(payload, separators=(",", ":")))
+                os.replace(tmp_path, meta_path)
         except OSError as exc:
-            # Don't let a write failure here mask a successful publish.
+            # Don't let a read or write failure here mask a successful publish.
             logger.debug("Could not write journal meta for {}: {}", output, exc)
 
 

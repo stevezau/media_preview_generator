@@ -1024,6 +1024,12 @@ def _expected_frame_count(media_info, interval: float) -> float | None:
     return duration_s / interval
 
 
+#: The end-of-file probe only picks which warning to log, so it gets far less
+#: time than the keyframe probe: a stalled read falls back to the generic
+#: warning instead of holding a worker. Measured cost is 0.3-5 s.
+END_PROBE_TIMEOUT_S = 30
+
+
 def _probe_video_end_seconds(video_file: str, stated_duration_s: float) -> float | None:
     """Return where the file's video really ends, in seconds from its start.
 
@@ -1057,9 +1063,9 @@ def _probe_video_end_seconds(video_file: str, stated_duration_s: float) -> float
         video_file,
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=END_PROBE_TIMEOUT_S, check=False)
     except subprocess.TimeoutExpired:
-        logger.debug("end-probe: timed out after 120s for '{}'", video_file)
+        logger.debug("end-probe: timed out after {}s for '{}'", END_PROBE_TIMEOUT_S, video_file)
         return None
     except (subprocess.SubprocessError, OSError) as exc:
         logger.debug("end-probe: ffprobe could not run for '{}': {}", video_file, exc)

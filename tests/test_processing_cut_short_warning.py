@@ -118,7 +118,7 @@ class TestProbeVideoEnd:
         assert cmd[cmd.index("-read_intervals") + 1] == "2539%"
         assert cmd[cmd.index("-show_entries") + 1] == "packet=pts_time:format=start_time"
         assert cmd[-1] == VIDEO
-        assert run.call_args.kwargs["timeout"] == 120
+        assert run.call_args.kwargs["timeout"] == 30
 
     def test_subtracts_the_container_start_time(self):
         """MPEG-TS timestamps rarely start at zero; the runtime is measured from the first one."""
@@ -153,7 +153,7 @@ class TestProbeVideoEnd:
 
     @pytest.mark.parametrize(
         "error",
-        [subprocess.TimeoutExpired(cmd="ffprobe", timeout=120), FileNotFoundError("ffprobe")],
+        [subprocess.TimeoutExpired(cmd="ffprobe", timeout=30), FileNotFoundError("ffprobe")],
         ids=["timeout", "ffprobe-missing"],
     )
     def test_returns_none_when_ffprobe_does_not_finish(self, error):
