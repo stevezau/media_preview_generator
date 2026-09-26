@@ -3439,3 +3439,142 @@ def test_weekly_arrivals_end_with_the_all_at_once_decisions(tmp_path, mode, chun
         if got != want:
             mismatches.append((inputs, order, reruns, {e: (want[e], got[e]) for e in want if want[e] != got[e]}))
     assert mismatches == []
+
+
+class TestAnswersThatBarelyMove:
+    """A season re-check that moves an episode's season audio answer by less than ``KEEP_STORED_TIMES_MS`` at both ends
+    keeps the answer's stored times: the decision doesn't change, and nothing is sent to the servers.
+
+    Production, 2026-09-26: A Different World S04E07 was sent to the same Plex item 8 times in 4 hours, always showing
+    1:09–2:12. Every episode that joined the season matched it again and moved its answer by a few milliseconds, and
+    each move was a new decision (142 such sends across 59 files).
+    """
+
+    def _published(self, store, show):
+        e1, _, _ = show(1, 3)
+        pub = ready_publisher()
+        with _Audio():
+            out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": pub}, stage="process")
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        (first,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert first.origin == "2/2"
+        return e1, first
+
+    def _season_grows(self, store, show, e1, *, start_ms, end_ms):
+        """E04 arrives, so E01's answer is due; its season step now answers ``start_ms``/``end_ms`` later."""
+        show(1, 4)
+        real_intro = season._intro
+
+        def moved(ctx, target, *args, **kwargs):
+            segment = real_intro(ctx, target, *args, **kwargs)
+            if segment is None or target != e1:
+                return segment
+            return segment._replace(start_s=segment.start_s + start_ms / 1000, end_s=segment.end_s + end_ms / 1000)
+
+        pub = ready_publisher()
+        with _Audio(), patch.object(season, "_intro", side_effect=moved):
+            out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": pub}, stage="process")
+        return out, pub
+
+    @pytest.mark.parametrize(("start_ms", "end_ms"), [(3, 5), (-7, 2), (499, -499), (0, 0)])
+    def test_an_answer_that_moved_under_half_a_second_keeps_its_times_and_sends_nothing(
+        self, store, show, start_ms, end_ms
+    ):
+        e1, first = self._published(store, show)
+        rec = store.get_file(e1)
+        decided_at = store.get_decisions(rec.id)[MarkerType.INTRO].decided_at
+
+        out, pub = self._season_grows(store, show, e1, start_ms=start_ms, end_ms=end_ms)
+
+        (kept,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert (kept.start_ms, kept.end_ms) == (first.start_ms, first.end_ms)
+        assert kept.origin == "3/3"  # the new match's support: the season was read again
+        # Current with the season on disk: not due again on the next scan.
+        assert not season.season_audio_due(store.get_file(e1), _season_ctx(store, e1))
+        assert store.get_markers(rec.id)[MarkerType.INTRO] == Marker(
+            MarkerType.INTRO, first.start_ms, first.end_ms, ("season_audio",)
+        )
+        assert store.get_decisions(rec.id)[MarkerType.INTRO].decided_at == decided_at
+        pub.write.assert_not_called()
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+
+    @pytest.mark.parametrize(
+        ("start_ms", "end_ms"),
+        [(500, 0), (0, 500), (-600, -600), (2_000, 2_000)],
+        ids=["start", "end", "earlier", "2s"],
+    )
+    def test_an_answer_that_moved_half_a_second_or_more_is_published(self, store, show, start_ms, end_ms):
+        e1, first = self._published(store, show)
+        out, pub = self._season_grows(store, show, e1, start_ms=start_ms, end_ms=end_ms)
+
+        (moved,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert (moved.start_ms, moved.end_ms) == (first.start_ms + start_ms, first.end_ms + end_ms)
+        marker = Marker(MarkerType.INTRO, moved.start_ms, moved.end_ms, ("season_audio",))
+        assert store.get_markers(store.get_file(e1).id)[MarkerType.INTRO] == marker
+        assert pub.write.call_args.args[1] == [marker]
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+    @pytest.mark.parametrize("start_ms", [5, 900], ids=["under", "over"])
+    def test_a_locked_intro_stays_as_the_user_set_it_whatever_season_audio_does(self, store, show, start_ms):
+        e1, first = self._published(store, show)
+        rec = store.get_file(e1)
+        mine = Marker(MarkerType.INTRO, first.start_ms + 1_000, first.end_ms + 1_000, ("user",), locked=True)
+        store.lock_marker(rec.id, mine)
+
+        _, pub = self._season_grows(store, show, e1, start_ms=start_ms, end_ms=start_ms)
+
+        assert store.get_markers(rec.id)[MarkerType.INTRO] == mine
+        # Whatever the run sends is the user's own intro; season audio never moves it.
+        assert all(call.args[1] == [mine] for call in pub.write.call_args_list)
+
+    def test_an_answer_of_an_older_version_takes_the_new_times_however_little_they_moved(self, store, show):
+        # A version bump is how a precision fix reaches users: its answers are stored as found, even 100 ms apart.
+        e1, first = self._published(store, show)
+        rec = store.get_file(e1)
+        store.restamp_evidence_version(rec.id, Source.SEASON_AUDIO, "", season.SEASON_AUDIO_ANSWER_VERSION - 1)
+
+        out, pub = self._season_grows(store, show, e1, start_ms=100, end_ms=100)
+
+        (moved,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert (moved.start_ms, moved.end_ms) == (first.start_ms + 100, first.end_ms + 100)
+        assert pub.write.call_args.args[1] == [
+            Marker(MarkerType.INTRO, moved.start_ms, moved.end_ms, ("season_audio",))
+        ]
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+    @pytest.mark.parametrize(
+        ("stored_source", "kept"),
+        [(Source.SEASON_AUDIO, True), (Source.SEASON_AUDIO_PREVIOUS, False)],
+        ids=["same-source", "previous-seasons-hint"],
+    )
+    def test_only_an_answer_from_the_same_source_keeps_its_times(self, store, show, stored_source, kept):
+        # A match with this season replacing the previous season's hint is another answer, not the same one moved.
+        e1, _, _ = show(1, 3)
+        rec = store.upsert_file(
+            FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=os.path.dirname(e1), is_movie=False
+        )
+        stored = Candidate(MarkerType.INTRO, 37_000, 66_000, stored_source, origin="1/1")
+        store.replace_detector_answer(
+            rec.id,
+            {source: [stored] if source is stored_source else [] for source in (Source.SEASON_AUDIO,
+                                                                                  Source.SEASON_AUDIO_PREVIOUS)},
+            version=season.SEASON_AUDIO_ANSWER_VERSION,
+        )  # fmt: skip
+        found = Candidate(MarkerType.INTRO, 37_100, 65_900, Source.SEASON_AUDIO, confidence=1.0, origin="2/2")
+
+        answer = season._with_stored_times(SimpleNamespace(store=store), rec, found)
+
+        stored_times = Candidate(MarkerType.INTRO, 37_000, 66_000, Source.SEASON_AUDIO, confidence=1.0, origin="2/2")
+        assert answer == (stored_times if kept else found)
+
+    def test_a_user_edit_under_half_a_second_is_still_published(self, store, show):
+        # The tolerance is on season audio's own answer, not on what is published: a small edit of the user's is sent.
+        e1, first = self._published(store, show)
+        rec = store.get_file(e1)
+        mine = Marker(MarkerType.INTRO, first.start_ms + 200, first.end_ms - 200, ("user",), locked=True)
+        store.save_user_markers(rec.id, [mine], settings_fingerprint="old")
+        pub = ready_publisher()
+        with _Audio():
+            out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": pub}, stage="process")
+        assert pub.write.call_args.args[1] == [mine]
+        assert out.outcome_key == FileOutcome.PUBLISHED.value

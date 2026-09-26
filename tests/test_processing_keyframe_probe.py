@@ -1211,7 +1211,9 @@ def test_integration_known_duration_samples_instead_of_scanning(
     with loguru_caplog.at_level("WARNING"):
         generate_images("/test/long_movie.mkv", str(tmp_path), None, None, cfg)
 
-    probe_argv = mock_run.call_args[0][0]
+    # The one-frame run below is short of the runtime, so the drift warning's
+    # end-of-file probe runs ffprobe too; pick the keyframe probe out by its entries.
+    probe_argv = next(c.args[0] for c in mock_run.call_args_list if "packet=pts_time,flags" in c.args[0])
     assert "-read_intervals" in probe_argv, "known duration must produce a sampled probe, not a full scan"
     intervals = probe_argv[probe_argv.index("-read_intervals") + 1].split(",")
     assert len(intervals) == KEYFRAME_PROBE_WINDOWS

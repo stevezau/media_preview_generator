@@ -577,6 +577,50 @@ class TestFileBlocks:
         assert "  Credit text: credits start at 21:31 (read on the CPU in 6 s)" in _messages(job_log)
         assert _messages(job_log)[-1] == f"{EPISODE}: done in 10 s on GPU Worker 1, rerun on the CPU"
 
+    def test_a_file_a_newer_file_replaced_gets_one_line(self, store, media, job_log):
+        stale = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E01 - Pilot-CAKES.mkv")
+        ctx = _job(store, media, _plex(media))
+        out, _ = _run(ctx, stale, {"plex-1": ready_publisher()}, probe=_probe())
+
+        assert out.outcome_key == FileOutcome.SOURCE_GONE.value
+        assert job_log == [
+            ("INFO", f"{EPISODE}: Skipped: replaced by a newer file (Rick and Morty (2013) - S01E01 - Pilot.mkv)")
+        ]
+
+    def test_a_file_cut_short_says_how_much_of_it_can_be_read(self, store, media, job_log):
+        ctx = _job(store, media, _plex(media), on_worker=True)
+        cut_short = "the file ends before its stated length (10:00 of 22:01 readable)"
+        ctx.local_detectors[0].detect.side_effect = DetectorUnavailableError(cut_short)
+        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(), stage="process", gpu="nvidia",
+             gpu_worker=True, worker_name="GPU Worker 1")  # fmt: skip
+
+        assert f"  Credit text: {cut_short}" in _messages(job_log)
+
+    def test_a_tail_the_gpu_read_nothing_from_says_it_was_read_on_the_cpu(self, store, media, job_log):
+        from media_preview_generator.markers.credits.detector import CPU_RECHECK_PHASE
+
+        ctx = _job(store, media, _plex(media), on_worker=True)
+
+        def detect(*args, phase_callback=None, fallback_callback=None, **kwargs):
+            ctx.monotonic.advance(5)
+            phase_callback(CPU_RECHECK_PHASE)  # "the GPU read no frames in that part of the file; checking on CPU"
+            ctx.monotonic.advance(15)
+            fallback_callback(
+                "The GPU read no frames in the end of a.mkv, but the CPU did; its credits were read on the CPU"
+            )
+            return [TEXT_CREDITS]
+
+        ctx.local_detectors[0].detect.side_effect = detect
+        shown = []
+        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(), stage="process", gpu="nvidia", gpu_worker=True,
+             worker_name="GPU Worker 1", phase_callback=shown.append, fallback_callback=shown.append)  # fmt: skip
+
+        assert (
+            "  Credit text: credits start at 21:31 (read on the CPU after the GPU read nothing (20 s in all))"
+        ) in _messages(job_log)
+        # The worker row still shows the step.
+        assert CPU_RECHECK_PHASE in shown
+
     def test_a_step_that_fell_back_to_the_cpu_says_why(self, store, media, job_log):
         ctx = _job(store, media, _plex(media), on_worker=True)
 
@@ -862,8 +906,14 @@ class TestSourceLines:
                 read_phrase(True, 95, "Credit text detection on the CPU: no GPU memory"),
                 "read on the GPU in 1 min 35 s; credit text detection on the CPU: no GPU memory",
             ),
+            (
+                read_phrase(
+                    True, 40, "The GPU read no frames in the end of a.mkv, but the CPU did", gpu_read_nothing=True
+                ),
+                "read on the CPU after the GPU read nothing (40 s in all)",
+            ),
         ],
-        ids=["gpu", "cpu", "fallback"],
+        ids=["gpu", "cpu", "fallback", "gpu-read-nothing"],
     )
     def test_credit_text_read_this_job_says_where_and_how_long(self, read, expected):
         notes = _asked(Source.CREDITS_TEXT)

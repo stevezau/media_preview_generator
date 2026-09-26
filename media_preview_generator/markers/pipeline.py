@@ -28,6 +28,8 @@ from loguru import logger
 
 from ..config.paths import is_path_excluded
 from ..job_kinds import ItemOutcome, KindHandlers
+from ..jobs.worker import JOB_LOG_SKIP
+from ..processing.multi_server import source_replaced_reason
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch
@@ -36,7 +38,7 @@ from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
 from .carry_over import carry_over, is_carried_over, previous_decisions
-from .credits.detector import credits_text_spec
+from .credits.detector import CPU_RECHECK_PHASE, CUT_SHORT, credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
@@ -269,8 +271,9 @@ def _no_phase(_text: str) -> None:
 
 
 class DetectorUnavailableError(Exception):
-    """A local detector couldn't answer this time (its tool failed, the job was cancelled). Nothing is stored for it,
-    so the next run asks it again."""
+    """A local detector couldn't answer this time (its tool failed, the job was cancelled). No answer is stored for it,
+    so the next run asks it again, unless the detector itself gives up at once there (credit text on a file that timed
+    out lately or was found cut short)."""
 
 
 @dataclass(frozen=True)
@@ -3002,6 +3005,23 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
         ctx.request_followups(stale)
 
 
+def _not_on_disk(path: str, ctx: PipelineContext) -> ItemOutcome:
+    """The outcome of a file not on disk, by previews' rule (``source_replaced_reason``): one a newer file replaced in
+    its folder is gone from disk for good, and its job queues no retry (the newer file is run on its own); any other is
+    not found, and a webhook's job tries it again (it may still be copying in)."""
+    replaced = source_replaced_reason(path, ctx.registry)
+    if replaced is None:
+        return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
+    # The app log's account; the job's log gets the file's one line (``_log_gone``).
+    logger.bind(**{JOB_LOG_SKIP: True}).info(
+        "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); skipping without "
+        "a retry. The newer file gets its own Intro & Credits run from its own webhook or the next scan.",
+        path,
+        replaced.removeprefix("Skipped: "),
+    )
+    return ItemOutcome(FileOutcome.SOURCE_GONE.value, replaced)
+
+
 def _attempt(
     item: ProcessableItem,
     ctx: PipelineContext,
@@ -3036,7 +3056,7 @@ def _attempt(
         # Held under the file's run lock; the row is read before its disk is checked.
         if mark_if_missing(ctx.store, ctx.store.get_file(path), list(ctx.registry.configs())):
             ctx.note_missing()
-        return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
+        return _not_on_disk(path, ctx)
     except OSError as exc:
         return ItemOutcome(FileOutcome.FAILED.value, f"Couldn't read the file: {type(exc).__name__}")
     if not stat.S_ISREG(st.st_mode):
@@ -3232,6 +3252,7 @@ def _attempt(
                 return None  # sources already refreshed stay marked; the worker refreshes the rest
             for spec in pending:
                 fell_back: list[str] = []
+                phases: list[str] = []
                 read_started = ctx.monotonic()
                 unanswered = _run_detector(
                     ctx,
@@ -3239,21 +3260,24 @@ def _attempt(
                     spec,
                     gpu=gpu,
                     gpu_device_path=gpu_device_path,
-                    phase=phase,
+                    phase=_noting(phases, phase),
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                     ffmpeg_threads=ffmpeg_threads,
-                    fallback_callback=_noting_fallback(fell_back, fallback_callback),
+                    fallback_callback=_noting(fell_back, fallback_callback),
                     gpu_worker=gpu_worker,
                 )
                 notes.reads[spec.source] = read_phrase(
-                    gpu is not None, ctx.monotonic() - read_started, fell_back[0] if fell_back else ""
+                    gpu is not None,
+                    ctx.monotonic() - read_started,
+                    fell_back[0] if fell_back else "",
+                    gpu_read_nothing=CPU_RECHECK_PHASE in phases,
                 )
                 if unanswered is None:
                     for stored in spec.stored_sources:
                         notes.answered(stored)
                 else:
-                    notes.unanswered[spec.source] = f"no answer this time ({unanswered})"
+                    notes.unanswered[spec.source] = _detector_unanswered(unanswered)
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
         _mark_refreshed(ctx, path, source)
@@ -3446,16 +3470,23 @@ def _note_title(notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: 
     return notes.title
 
 
-def _noting_fallback(noted: list[str], callback: Callable[[str], None] | None) -> Callable[[str], None] | None:
-    """A detector's ``fallback_callback`` that also keeps why it fell back to the CPU, for its job log line."""
+def _noting(noted: list[str], callback: Callable[[str], None] | None) -> Callable[[str], None] | None:
+    """A detector's ``fallback_callback`` or ``phase_callback`` that also keeps what it was told (why a step fell back
+    to the CPU, the steps it went through), for the detector's job log line."""
     if callback is None:
         return None
 
-    def fell_back(reason: str) -> None:
-        noted.append(reason)
-        callback(reason)
+    def told(text: str) -> None:
+        noted.append(text)
+        callback(text)
 
-    return fell_back
+    return told
+
+
+def _detector_unanswered(reason: str) -> str:
+    """How a detector's line says it had no answer: a file found cut short says so plainly (it isn't read again until it
+    changes); anything else had no answer this time."""
+    return reason if reason.startswith(CUT_SHORT) else f"no answer this time ({reason})"
 
 
 def _start_stage(notes: RunNotes, started: float, *, worker: str, cpu_rerun: bool) -> None:
@@ -3557,6 +3588,15 @@ def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str)
         notes.logged = True
     except Exception as exc:
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
+
+
+def _log_gone(path: str, notes: RunNotes, message: str) -> None:
+    """Log the one line of a file a newer file replaced (``_not_on_disk``). Never raises."""
+    try:
+        write_lines([f"{notes.title or display_name(path)}: {message}"])
+        notes.logged = True
+    except Exception as exc:
+        logger.warning("Couldn't write the job log line for {}: {}", path, type(exc).__name__)
 
 
 def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> None:
@@ -3691,6 +3731,8 @@ def _run(
                         and outcome.message != _CANCELLED
                     ):
                         _log_failure(ctx, path, notes, outcome.message)
+                    elif not notes.logged and outcome.outcome_key == FileOutcome.SOURCE_GONE.value:
+                        _log_gone(path, notes, outcome.message)
                     return outcome
         except _FileChangedError:
             logger.info("{} changed while its markers were detected; detecting again", path)

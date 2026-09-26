@@ -26,6 +26,7 @@ import contextlib
 import contextvars
 import glob
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -1023,6 +1024,75 @@ def _expected_frame_count(media_info, interval: float) -> float | None:
     return duration_s / interval
 
 
+#: The end-of-file probe only picks which warning to log, so it gets far less
+#: time than the keyframe probe: a stalled read falls back to the generic
+#: warning instead of holding a worker. Measured cost is 0.3-5 s.
+END_PROBE_TIMEOUT_S = 30
+
+
+def _probe_video_end_seconds(video_file: str, stated_duration_s: float) -> float | None:
+    """Return where the file's video really ends, in seconds from its start.
+
+    Seeks to just before the runtime the file states and reads on to the end
+    of the file. A complete file answers with packets up to that runtime. A
+    file cut short — an interrupted download or copy keeps the header, and
+    with it the full runtime — has nothing past the cut, so the read returns
+    the last packets before it (measured on a 42 min remux cut at 1.2 GB:
+    packets end at 10.5 min, 2.4 s to probe).
+
+    Args:
+        video_file: Path to the media file.
+        stated_duration_s: The runtime the file claims, in seconds.
+
+    Returns:
+        Seconds from the start of the file to its last video packet, or
+        ``None`` when ffprobe gives no usable answer.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-read_intervals",
+        f"{max(0.0, stated_duration_s - 10):.0f}%",
+        "-show_entries",
+        "packet=pts_time:format=start_time",
+        "-of",
+        "json",
+        video_file,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=END_PROBE_TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired:
+        logger.debug("end-probe: timed out after {}s for '{}'", END_PROBE_TIMEOUT_S, video_file)
+        return None
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.debug("end-probe: ffprobe could not run for '{}': {}", video_file, exc)
+        return None
+    if proc.returncode != 0:
+        logger.debug("end-probe: ffprobe exited {} for '{}'", proc.returncode, video_file)
+        return None
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return None
+
+    times: list[float] = []
+    for packet in data.get("packets") or []:
+        try:
+            times.append(float(packet["pts_time"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not times:
+        return None
+    try:
+        start_s = float((data.get("format") or {}).get("start_time") or 0)
+    except (TypeError, ValueError):
+        start_s = 0.0
+    return max(times) - start_s
+
+
 def _warn_if_frame_count_disagrees_with_duration(
     video_file: str,
     output_folder: str,
@@ -1043,6 +1113,11 @@ def _warn_if_frame_count_disagrees_with_duration(
     truncated extraction — would otherwise ship a wrong-length BIF with
     nothing in the logs to show for it.
 
+    Too few thumbnails from a file whose video stops where the thumbnails do,
+    well before its stated runtime, is the file's fault, not ours: the file
+    was cut short, and the warning says so and suggests re-downloading it.
+    Every other mismatch is unexplained and asks to be reported.
+
     Logs only; a slightly-off count is never worth failing an otherwise good
     preview over.
     """
@@ -1055,6 +1130,19 @@ def _warn_if_frame_count_disagrees_with_duration(
     # Two intervals of slack absorbs the usual rounding (fps=…:round=up emits
     # a final frame at the tail) without hiding a real mismatch.
     if expected > 0 and abs(image_count - expected) > 2:
+        span_s = image_count * interval
+        slack_s = 2 * interval
+        video_end_s = _probe_video_end_seconds(video_file, duration_s) if image_count < expected else None
+        if video_end_s is not None and video_end_s < duration_s - slack_s and span_s >= video_end_s - slack_s:
+            logger.warning(
+                "'{}' looks cut short: it says it runs {:.0f} min, but its video stops at {:.0f} min, so its "
+                "preview thumbnails stop there too. The download or copy was probably interrupted — "
+                "re-download the file and its previews will be rebuilt.",
+                os.path.basename(video_file),
+                duration_s / 60,
+                video_end_s / 60,
+            )
+            return
         logger.warning(
             "Preview thumbnails for '{}' span {:.0f} min but the video runs {:.0f} min "
             "({} thumbnails x {}s). Plex scrubbing would be out of sync. This is unexpected — "

@@ -10,7 +10,13 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+    EVENT_JOB_SUBMITTED,
+)
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -753,6 +759,7 @@ class ScheduleManager:
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
         self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
+        self.scheduler.add_listener(self._on_job_fired, EVENT_JOB_SUBMITTED | EVENT_JOB_MAX_INSTANCES)
 
         # Load schedule metadata
         self._load_schedules()
@@ -1174,6 +1181,33 @@ class ScheduleManager:
                 type(e).__name__,
                 e,
             )
+
+    def _on_job_fired(self, event) -> None:
+        """Store a schedule's next run as soon as APScheduler moves on to it.
+
+        APScheduler advances the job's ``next_run_time`` when it fires, but
+        the ``next_run`` kept in ``schedules.json`` was refreshed only by page
+        reads, so a save during the run (``_update_last_run``) stored the run
+        that had just fired. APScheduler dispatches this event after it has
+        stored the new ``next_run_time``.
+
+        Saves only when the value changed: every save rotates a backup, and
+        the restore list keeps only the last few.
+        """
+        with self._lock:
+            schedule = self._schedules.get(event.job_id)
+            if schedule is None:
+                return
+            try:
+                job = self.scheduler.get_job(event.job_id)
+            except Exception:
+                logger.debug("Could not fetch next_run for schedule {}", event.job_id, exc_info=True)
+                return
+            next_run = job.next_run_time.isoformat() if job and job.next_run_time else None
+            if schedule.get("next_run") == next_run:
+                return
+            schedule["next_run"] = next_run
+            self._save_schedules()
 
     def _on_job_executed(self, event) -> None:
         """Handle successful job execution."""

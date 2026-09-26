@@ -293,7 +293,7 @@ class TestStoredAnswers:
         assert out is None and find.calls == []  # None: handed to a worker to decode
 
     def test_a_gpu_decode_failure_reaches_the_workers_cpu_rerun(self, store, media, find):
-        find.answer = frames.GpuDecodeError("the GPU decoded no frames")
+        find.answer = frames.GpuDecodeError("ffmpeg exited 1 decoding the file on the GPU")
         with pytest.raises(CodecNotSupportedError):
             _run(ctx_for(store, media), media, pubs(), stage="process", gpu="NVIDIA", gpu_device_path="cuda:0")
         find.answer = START_S

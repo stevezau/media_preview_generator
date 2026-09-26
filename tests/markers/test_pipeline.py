@@ -1833,7 +1833,7 @@ class TestJobWideRefusalsAcrossStages:
     @pytest.mark.parametrize("force", [False, True], ids=["normal", "forced"])
     def test_a_file_rerun_on_the_cpu_after_a_gpu_error(self, store, media, refused, force):
         ctx, client, detector = self._job(store, media, refused, force=force)
-        detector.side_effect = [CodecNotSupportedError("the GPU decoded no frames"), []]
+        detector.side_effect = [CodecNotSupportedError("the GPU read no frames in that part of the file"), []]
         assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
         with pytest.raises(CodecNotSupportedError):
             _run(ctx, media, {"plex-1": ready_publisher()}, stage="process", gpu="NVIDIA", gpu_device_path="cuda:0")
@@ -4682,7 +4682,10 @@ class TestStages:
         (rec,), kwargs = detector.call_args
         assert rec.canonical_path == media and rec.duration_ms == DUR
         assert kwargs["ctx"] is ctx and kwargs["gpu"] == "NVIDIA" and kwargs["gpu_device_path"] == "cuda:0"
-        assert kwargs["cancel_check"] is cancel and kwargs["phase_callback"] is phase
+        assert kwargs["cancel_check"] is cancel
+        # The phase reaches the worker row; the pipeline also keeps it for the detector's job log line.
+        kwargs["phase_callback"]("Reading the credits…")
+        phase.assert_called_with("Reading the credits…")
         # The job's own pause lets the running file finish; what freezes its ffmpeg is the job's freeze check.
         assert kwargs["pause_check"] is ctx.freeze_check and kwargs["pause_check"] is not pause
         assert clients["theintrodb"].calls[0]["cancel_check"] is cancel
@@ -6056,6 +6059,7 @@ def test_outcome_keys_are_every_file_outcome_in_order():
         "markers_none",
         "markers_no_owners",
         "skipped_file_not_found",
+        "skipped_source_gone",
         "failed",
     )
 

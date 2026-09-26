@@ -229,17 +229,22 @@ def duration(seconds: float) -> str:
     return f"{hours} h {minutes} min" if minutes else f"{hours} h"
 
 
-def read_phrase(on_gpu: bool, seconds: float, fallback: str = "") -> str:
+def read_phrase(on_gpu: bool, seconds: float, fallback: str = "", *, gpu_read_nothing: bool = False) -> str:
     """Where and how long a local detector read the file.
 
     Args:
         on_gpu: Whether it read on the worker's GPU.
         seconds: How long it took.
         fallback: What a step of it fell back to the CPU for, as the detector reported it; "" when none did.
+        gpu_read_nothing: Whether the GPU read no frames and the detector read the file again on the CPU.
 
     Returns:
-        E.g. ``read on the GPU in 13 s`` or ``read on the GPU in 20 s; credit text detection on the CPU: …``.
+        E.g. ``read on the GPU in 13 s``, ``read on the GPU in 20 s; credit text detection on the CPU: …`` or ``read on
+        the CPU after the GPU read nothing (40 s in all)``.
     """
+    if gpu_read_nothing:
+        # Whatever the CPU found, this says it: a GPU fallback's own reason would only repeat it.
+        return f"read on the CPU after the GPU read nothing ({duration(seconds)} in all)"
     text = f"read on the {'GPU' if on_gpu else 'CPU'} in {duration(seconds)}"
     return f"{text}; {_lower_first(fallback)}" if fallback else text
 
@@ -990,6 +995,7 @@ _OTHER_OUTCOMES = (
     (FileOutcome.SKIPPED, "skipped"),
     (FileOutcome.NO_OWNERS, "on no server with Intro & Credits on"),
     (FileOutcome.FILE_NOT_FOUND, "not on disk"),
+    (FileOutcome.SOURCE_GONE, "gone from disk"),
     (FileOutcome.FAILED, "failed"),
 )
 

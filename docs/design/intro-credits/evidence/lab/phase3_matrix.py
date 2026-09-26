@@ -300,7 +300,7 @@ def helper_threads(pid: str) -> str:
 
 
 def container_path(host_path: str) -> str | None:
-    """Where the app sees a real file the scale mounts expose (``scale_mounts.sh`` ``-v host:container:ro`` lines).
+    """Where the app sees a real file the scale mounts expose (``scale_mounts.sh`` ``--mount type=bind,src=host,dst=container,readonly`` lines).
 
     Args:
         host_path: The file's path on storage.
@@ -309,7 +309,7 @@ def container_path(host_path: str) -> str | None:
         Its path inside mlab-app, or None when no mount holds it.
     """
     for line in (p1.LAB / "scale_mounts.sh").read_text().splitlines():
-        match = re.search(r'-v "([^"]+):([^":]+):ro"', line)
+        match = re.search(r'--mount "type=bind,src=([^,]+),dst=([^,]+),readonly"', line)
         if match and (host_path == match.group(1) or host_path.startswith(match.group(1).rstrip("/") + "/")):
             return match.group(2) + host_path[len(match.group(1)) :]
     return None

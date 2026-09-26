@@ -157,6 +157,26 @@ html[data-bs-theme="light"] .mk-lane-decision .mk-lane-label {
     color: #fff;
 }
 
+/* A server's markers on a file nothing was decided for: read-only, so neither a decision's nor a source's colour. */
+.mk-bar-server {
+    background: #9aa0a6;
+    color: #101118;
+}
+
+/* A Plex marker made for an earlier file at this path: hatched and dimmed, whatever colour its lane gives it. */
+.mk-bar-stale,
+.lane-disagree .mk-bar-stale {
+    background-image: repeating-linear-gradient(135deg, rgba(16, 17, 24, 0.22) 0 3px, transparent 3px 8px);
+    opacity: 0.8;
+}
+
+.mk-swatch {
+    display: inline-block;
+    width: 22px;
+    height: 10px;
+    border-radius: 2px;
+}
+
 /* A label wider than its bar sits beside it, in the page's text colour. */
 .mk-bar-out-right .mk-bar-text,
 .mk-bar-out-left .mk-bar-text {
