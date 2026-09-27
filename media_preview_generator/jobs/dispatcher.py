@@ -864,7 +864,7 @@ class JobDispatcher:
                 # The next tick tries again: while threads can't start (a process limit, usually brief), one tick
                 # would otherwise fail every queued item.
                 break
-            logger.info(
+            logger.debug(
                 "Dispatch: assigned canonical item {!r} (job {}) to {}",
                 item.canonical_path,
                 job_id[:8],

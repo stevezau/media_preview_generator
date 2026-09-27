@@ -1346,7 +1346,7 @@ class WorkerPool:
             cancel_check=cancel_check,
             pause_check=pause_check,
         )
-        logger.info(
+        logger.debug(
             "Dispatch: assigned canonical item to {} (path={!r})",
             worker.display_name,
             item.canonical_path,

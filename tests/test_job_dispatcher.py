@@ -5,11 +5,13 @@ Verifies that multiple jobs can share workers, idle workers pick up items
 from the next job, and per-job pause/cancel work independently.
 """
 
+import logging
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from loguru import logger
 
 from media_preview_generator.jobs.dispatcher import (
     JobDispatcher,
@@ -21,6 +23,23 @@ from media_preview_generator.processing import (
     CodecNotSupportedError,
 )
 from tests.conftest import _ms, _pi, _pi_list_or_passthrough  # noqa: F401
+
+
+@pytest.fixture
+def loguru_caplog(caplog):
+    """Forward loguru records into pytest's caplog: loguru doesn't feed stdlib ``logging`` by default."""
+
+    class _PropagateHandler(logging.Handler):
+        def emit(self, record):  # pragma: no cover - handler glue
+            logging.getLogger(record.name).handle(record)
+
+    handler_id = logger.add(_PropagateHandler(), level="DEBUG", format="{message}")
+    caplog.set_level(logging.DEBUG)
+    try:
+        yield caplog
+    finally:
+        logger.remove(handler_id)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,6 +203,26 @@ class TestJobDispatcher:
         assert result["completed"] == 3
         assert result["failed"] == 0
         dispatcher.shutdown()
+
+    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
+    def test_assigned_item_line_is_debug_not_info(self, mock_process, loguru_caplog):
+        # The pickup line (preview or Intro & Credits) already names the file; this line would only duplicate it.
+        mock_process.side_effect = _fake_process_item
+
+        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
+        dispatcher = JobDispatcher(pool)
+
+        tracker = dispatcher.submit_items(
+            job_id="job-1",
+            items=_pi_list_or_passthrough([("/key/1", "Movie 1", "movie")]),
+            config=_make_config(),
+            registry=MagicMock(),
+        )
+        assert tracker.wait(timeout=10)
+        dispatcher.shutdown()
+
+        assigned = [r for r in loguru_caplog.records if "assigned canonical item" in r.message]
+        assert assigned and all(r.levelname == "DEBUG" for r in assigned)
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
     def test_two_jobs_share_workers(self, mock_process):

@@ -36,6 +36,7 @@ from media_preview_generator.markers.job_log import (
     done_line,
     duration,
     file_title,
+    head_line,
     online_recheck_line,
     pickup_line,
     read_phrase,
@@ -302,8 +303,8 @@ class TestApprovedLayouts:
         log = [first, *_messages(job_log), *ctx.summary_lines({out.outcome_key: 1})]
         assert log == [
             "Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)",
-            "GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026): checking credits "
-            "(films get credits only)",
+            "GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)",
+            "32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)",
             '  Chapters: "Credits" chapter at 2:00:11–2:03:39',
             "  SkipDB: no entry",
             '  Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; '
@@ -337,7 +338,8 @@ class TestApprovedLayouts:
         )  # fmt: skip
 
         assert _messages(job_log) == [
-            "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits",
+            "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05",
+            "Accused S04E05: checking intro and credits",
             "  Chapters: none",
             "  IntroDB: intro 0:41–1:12",
             "  Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes)",
@@ -549,7 +551,8 @@ class TestFileBlocks:
         _run(ctx, media, publishers, probe=_probe(), stage="process", worker_name="CPU Worker 1")
 
         assert _messages(job_log) == [
-            f"CPU Worker 1 picked up {EPISODE}: checking intro and credits",
+            f"CPU Worker 1 picked up {EPISODE}",
+            f"{EPISODE}: checking intro and credits",
             "  Chapters: none",
             "  TheIntroDB: no entry",
             "  Credit text: credits start at 21:31 (read on the CPU in 0 s)",
@@ -759,16 +762,18 @@ class TestConcurrentWorkers:
             logger.remove(handler)
 
         assert errors == []
-        assert len(records) == 2 * 7
+        assert len(records) == 2 * 8
         for name in ("Accused S04E01", "Accused S04E02"):
-            at = [n for n, line in enumerate(records) if line.startswith(f"{name}: ")]
-            assert len(at) == 1
-            end = at[0]
-            # Its detail lines are the 6 records right before its "done" line, with no other file's line between.
-            block = records[end - 6 : end + 1]
-            assert all(line.startswith("  ") for line in block[:-1]), records
+            done_at = [n for n, line in enumerate(records) if line.startswith(f"{name}: done in")]
+            assert len(done_at) == 1
+            end = done_at[0]
+            # Its header and detail lines are the 7 records right before its "done" line, with no other file's line
+            # between: the block stays contiguous, and starts with its own header naming the file.
+            block = records[end - 7 : end + 1]
+            assert block[0] == f"{name}: checking intro and credits", records
+            assert all(line.startswith("  ") for line in block[1:-1]), records
             assert block[-1].startswith(f"{name}: done in"), records
-        assert records[6].startswith("Accused S04E0") and records[13].startswith("Accused S04E0")
+        assert records[7].startswith("Accused S04E0") and records[15].startswith("Accused S04E0")
 
     def test_write_lines_keeps_each_callers_lines_together(self):
         records: list[str] = []
@@ -1061,13 +1066,21 @@ class TestSourceLines:
                 f"  Plex's own markers: {UNUSABLE['unusable']}",
             ),
             (
+                # A reason and "(saved earlier)" join inside the reason's own bracket, not stack a second one.
+                [_row(Source.SERVER_MARKERS, origin="plex-1", detail="unusable")],
+                False,
+                "  Plex's own markers: couldn't be used (unreadable, another cut, or its library hides a type in "
+                "Plex; saved earlier)",
+            ),
+            (
                 [_row(Source.SERVER_MARKERS_IMPORTED, T.INTRO, 41_000, 72_000, origin="plex-1")],
                 True,
                 "  Plex's imported markers: intro 0:41–1:12",
             ),
             ([_row(Source.SERVER_MARKERS, origin="plex-1")], False, "  Plex's own markers: none (saved earlier)"),
         ],
-        ids=["none", "answer", "made-for-an-earlier-file", "unusable", "imported", "saved-earlier"],
+        ids=["none", "answer", "made-for-an-earlier-file", "unusable", "unusable-saved-earlier", "imported",
+             "saved-earlier"],
     )  # fmt: skip
     def test_each_servers_own_markers(self, rows, asked, expected):
         notes = _asked(Source.SERVER_MARKERS, server="plex-1") if asked else RunNotes()
@@ -1533,13 +1546,16 @@ class TestLineWords:
         ],
         ids=["episode", "three-types", "film", "nothing"],
     )
-    def test_pickup_line(self, types, is_episode, expected):
-        assert pickup_line("CPU Worker 1", "X", types, is_episode=is_episode) == f"CPU Worker 1 picked up X: {expected}"
+    def test_head_line(self, types, is_episode, expected):
+        assert head_line("X", types, is_episode=is_episode) == f"X: {expected}"
+
+    def test_pickup_line(self):
+        assert pickup_line("CPU Worker 1", "X") == "CPU Worker 1 picked up X"
 
     def test_a_worker_that_finds_no_checking_stage_notes_names_the_file_from_its_path(self, store, media, job_log):
         ctx = _job(store, media, _plex(media))
         pipeline.log_pickup(ProcessableItem(canonical_path=media, server_id="plex-1"), "CPU Worker 3", ctx=ctx)
-        assert _messages(job_log) == [f"CPU Worker 3 picked up {EPISODE}: checking intro and credits"]
+        assert _messages(job_log) == [f"CPU Worker 3 picked up {EPISODE}"]
 
 
 class TestStartLine:

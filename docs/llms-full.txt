@@ -2518,13 +2518,16 @@ next time an episode of that season is checked.
 ### Reading an Intro & Credits job's log
 
 A job starts with one line saying how many files it checks and why it ran: a follow-up to a preview job, a Season job,
-a re-check after an update, a schedule, or a Re-detect you asked for. Then each file gets a short block, one line per
-step, each with its own time. A file a GPU or CPU worker read starts with the worker's line, written when it picks
-the file up. A film whose "Credits" chapter credit text checked:
+a re-check after an update, a schedule, or a Re-detect you asked for. Then each file gets a short block: a header
+naming it and what it's checked for, one line per step, each with its own time. A file a GPU or CPU worker read is
+announced first by the worker's own line, written when it picks the file up — its block still opens with its own
+header once the worker finishes it, so another file's pickup line or block can never land inside it. A film whose
+"Credits" chapter credit text checked:
 
 ```
 [07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
-[07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
+[07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)
+[07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
 [07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39
 [07:37:23] INFO -   SkipDB: no entry
 [07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU in 9 s)
@@ -2538,7 +2541,8 @@ the file up. A film whose "Credits" chapter credit text checked:
 A TV episode:
 
 ```
-[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits
+[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05
+[09:13:05] INFO - Accused S04E05: checking intro and credits
 [09:13:05] INFO -   Chapters: none
 [09:13:05] INFO -   IntroDB: intro 0:41–1:12
 [09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes)

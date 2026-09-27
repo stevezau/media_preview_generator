@@ -3590,8 +3590,7 @@ def _log_file(
         return
     evidence = ctx.store.evidence_rows(rec.id)
     is_episode = bool(notes.is_episode)
-    # A worker's pickup line opened the file's lines; a file the checking thread finished opens them here.
-    lines = [] if notes.worker else [head_line(name, types, is_episode=is_episode)]
+    lines = [head_line(name, types, is_episode=is_episode)]
     lines += source_lines(
         ctx.settings.ordered_enabled_sources(),
         evidence,
@@ -3620,7 +3619,7 @@ def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str)
         path_ids = ids_from_path(path)
         types = notes.types if notes.types is not None else _enabled_types(ctx.settings, path_ids)
         is_episode = notes.is_episode if notes.is_episode is not None else path_ids.is_episode
-        lines = [] if notes.worker else [head_line(title, types, is_episode=is_episode)]
+        lines = [head_line(title, types, is_episode=is_episode)]
         lines.append(f"  Failed: {message}")
         lines.append(
             done_line(title, _stage_seconds(ctx, notes), worker=notes.worker, cpu_rerun=notes.cpu_rerun, failed=True)
@@ -3641,8 +3640,9 @@ def _log_gone(path: str, notes: RunNotes, message: str) -> None:
 
 
 def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> None:
-    """Log that a worker started a file (``KindHandlers.pickup_fn``): its title and what it is checked for, as the
-    file's checking stage found them (from its path when no checking stage ran it).
+    """Log that a worker started a file (``KindHandlers.pickup_fn``): its title, as the file's checking stage found it
+    (from its path when no checking stage ran it). What it's checked for is named on its block's own header once the
+    worker finishes it.
 
     Args:
         item: The file.
@@ -3651,11 +3651,8 @@ def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> N
     """
     path = item.canonical_path
     notes = ctx._run_notes.get(path)
-    path_ids = ids_from_path(path)
     title = (notes.title if notes is not None else "") or display_name(path)
-    types = notes.types if notes is not None and notes.types is not None else _enabled_types(ctx.settings, path_ids)
-    is_episode = notes.is_episode if notes is not None and notes.is_episode is not None else path_ids.is_episode
-    write_lines([pickup_line(worker, title, types, is_episode=is_episode)])
+    write_lines([pickup_line(worker, title)])
 
 
 def _run(

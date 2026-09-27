@@ -1455,21 +1455,26 @@ Show a mockup and confirm wording before building each screen.
    refused, version mismatch, beside a different Plex). Built (phase 4): a `markers` section of the previews-readiness
    envelope, only for a server with Intro & Credits on (one "off" row otherwise, emitted `recommended` + `ok: true`
    because `servers.js _partitionChecks` drops `info` rows); documented in `docs/guides/previews-readiness.md`.
-7. **Job log** (`markers/job_log.py`, owner-approved layout 2026-09-27). Every line is its own log record with its own
-   time and level; nothing continues a record on a second line. A job opens with one line, `start_line`: "Intro &
-   Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)" (the trigger in words,
-   `job_runner.trigger_words`; the job manager's "Started job" and the dispatcher's "submitted N items" lines stay in
-   the app log only). A worker opens a file with "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking
-   intro and credits" (`KindHandlers.pickup_fn`; previews keep their own pickup line). When the file finishes, its
-   block is written as consecutive records under one lock (`write_lines`), so another worker's lines never land inside
-   it: the first line when no worker picked it up, then one "  Source: …" line per enabled source (the ones that
-   answered, then the ones not asked, each group in a fixed order: chapters, online sources, season audio, credit
-   text, each server's own markers; a film leaves out IntroDB and season audio), "  Decided: …" with each type's
-   reason, one "  Sent to <server>: …" line per server, and "<title>: done in 25 s on GPU Worker 2" (or "…, no worker
-   needed"). Detail lines carry their two-space indent in the message. A file that failed gets its block at WARNING
-   with the reason. A file whose answer didn't change and whose servers are up to date gets one line ("Accused S04E05:
-   unchanged, Plex already has our intro and credits"), as do the Season, decide-again and online re-check summaries
-   and the totals line, so a 100-file re-check logs about 100 lines. An episode is named "Show SxxEyy" from its path
+7. **Job log** (`markers/job_log.py`, owner-approved layout 2026-09-27, header fix 2026-09-27). Every line is its own
+   log record with its own time and level; nothing continues a record on a second line. A job opens with one line,
+   `start_line`: "Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)"
+   (the trigger in words, `job_runner.trigger_words`; the job manager's "Started job" and the dispatcher's "submitted
+   N items" lines stay in the app log only). A worker announces a file with "GPU Worker 2 (Intel UHD 770) picked up
+   Accused S04E05" (`KindHandlers.pickup_fn`, `pickup_line`; previews keep their own pickup line; the dispatcher's
+   "Dispatch: assigned canonical item …" line — which would only repeat this — logs at DEBUG). When the file
+   finishes, its block is written as consecutive records under one lock (`write_lines`), so another worker's lines, or
+   another file's pickup line, never land inside it: a header naming the file and what it's checked for (`head_line`,
+   always the block's first line, whether or not a worker ran the file — the worker's own pickup line doesn't
+   substitute for it, so a block can never be split across another file's records), then one "  Source: …" line per
+   enabled source (the ones that answered, then the ones not asked, each group in a fixed order: chapters, online
+   sources, season audio, credit text, each server's own markers; a film leaves out IntroDB and season audio), "
+   Decided: …" with each type's reason, one "  Sent to <server>: …" line per server, and "<title>: done in 25 s on GPU
+   Worker 2" (or "…, no worker needed"). Detail lines carry their two-space indent in the message; a line with both a
+   reason and "(saved earlier)" joins them inside one bracket (`_with_notes`) rather than stacking two. A file that
+   failed gets its block at WARNING with the reason. A file whose answer didn't change and whose servers are up to
+   date gets one line ("Accused S04E05: unchanged, Plex already has our intro and credits"), as do the Season,
+   decide-again and online re-check summaries and the totals line, so a 100-file re-check logs about 100 lines. An
+   episode is named "Show SxxEyy" from its path
    and never looks anything up. A film is named by its server's title: from the external ids answer the run already
    has (it carries the title and year), else the title this process kept (`titles.TITLE_CACHE`, an LRU of 20,000
    paths), else the title a library listing gave the item (the year from the file name). Only a film its server was

@@ -546,8 +546,8 @@ def test_a_kinds_process_fn_gets_the_workers_own_ffmpeg_threads_on_its_gpu_only(
 
 @pytest.mark.parametrize("pickup", ["own", "none", "raises"])
 def test_a_kinds_own_pickup_line_replaces_the_generic_one(pickup):
-    # Intro & Credits logs "GPU Worker 1 (…) picked up <title>: checking …" itself; a kind without one, or whose line
-    # fails, gets the generic line, and the item runs either way.
+    # Intro & Credits logs "GPU Worker 1 (…) picked up <title>" itself; a kind without one, or whose line fails, gets
+    # the generic line, and the item runs either way.
     from loguru import logger
 
     from media_preview_generator.jobs.worker import Worker

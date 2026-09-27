@@ -526,7 +526,8 @@ class TestJobLogsPanelShowsIntroCreditsBlocks:
     start with two spaces after the level. The Logs panel shows every record as its own line and keeps that indent."""
 
     _LINES = [
-        "[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits",
+        "[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05",
+        "[09:13:05] INFO - Accused S04E05: checking intro and credits",
         "[09:13:05] INFO -   Chapters: none",
         "[09:13:05] INFO -   IntroDB: intro 0:41–1:12",
         "[09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree)",
@@ -557,7 +558,7 @@ class TestJobLogsPanelShowsIntroCreditsBlocks:
         # the same line with a single space.
         white_space = page.evaluate("() => getComputedStyle(document.getElementById('logsContent')).whiteSpace")
         assert white_space in ("pre", "pre-wrap", "break-spaces"), white_space
-        widths = lines.nth(1).evaluate(
+        widths = lines.nth(2).evaluate(
             """el => {
                 const probe = document.createElement('span');
                 probe.style.display = 'inline';
@@ -574,5 +575,5 @@ class TestJobLogsPanelShowsIntroCreditsBlocks:
         )
         assert widths[0] > widths[1], widths
         # A failed file's lines are warnings, coloured as such.
-        expect(lines.nth(6)).to_have_class(re.compile(r"\blog-level-warning\b"))
-        expect(lines.nth(1)).to_have_class(re.compile(r"\blog-level-info\b"))
+        expect(lines.nth(7)).to_have_class(re.compile(r"\blog-level-warning\b"))
+        expect(lines.nth(2)).to_have_class(re.compile(r"\blog-level-info\b"))

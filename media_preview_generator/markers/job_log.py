@@ -1,8 +1,9 @@
 """Plain-words job log lines for Intro & Credits: what each source answered, what was decided and what was sent where.
 
-Every line is its own log record, with its own time and level. A file's run ends in a block: one line per source, what
-was decided, one line per server and how long it took, written together so another file's block or a worker's pickup
-line can't land inside it (``write_lines``)::
+Every line is its own log record, with its own time and level. A file's run ends in a block: a header naming the file
+and what it's checked for, one line per source, what was decided, one line per server and how long it took, then a
+done line — written together so another file's block or a worker's pickup line can't land inside it
+(``write_lines``)::
 
     32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
       Chapters: "Credits" chapter at 2:00:11–2:03:39
@@ -13,13 +14,14 @@ line can't land inside it (``write_lines``)::
       Sent to Plex: credits 2:00:11–2:03:39
     32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed
 
-A file a GPU or CPU worker runs starts with the worker's line instead, logged when the worker starts it
-(``pickup_line``): "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits". A file whose
-answer didn't change and whose servers are up to date logs one line (``compact_line``). A Season job logs one line per
-season instead of one per unchanged episode (``season_line``), a job deciding files again after the update one line
-instead of one per unchanged file (``decide_again_line``), the weekly online re-check one line instead of one per file
-nothing new was found for (``online_recheck_line``); every job starts with ``start_line`` and ends with a totals line
-(``totals_line``).
+A file a GPU or CPU worker runs is announced first by the worker's own line (``pickup_line``), logged when the worker
+starts it: "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05". Its block still opens with its own header once the
+worker finishes it, so another file's pickup line or block landing between the two can never split one file's lines. A
+file whose answer didn't change and whose servers are up to date logs one line (``compact_line``). A Season job logs
+one line per season instead of one per unchanged episode (``season_line``), a job deciding files again after the update
+one line instead of one per unchanged file (``decide_again_line``), the weekly online re-check one line instead of one
+per file nothing new was found for (``online_recheck_line``); every job starts with ``start_line`` and ends with a
+totals line (``totals_line``).
 """
 
 from __future__ import annotations
@@ -385,23 +387,22 @@ def checking_phrase(types: Collection[MarkerType], *, is_episode: bool) -> str:
     return f"checking {_types(types)}" + ("" if is_episode else " (films get credits only)")
 
 
-def pickup_line(worker: str, title: str, types: Collection[MarkerType], *, is_episode: bool) -> str:
-    """The line a worker logs when it starts a file.
+def pickup_line(worker: str, title: str) -> str:
+    """The line a worker logs when it starts a file, before its block: what it's checked for is named on the block's
+    own header once the worker finishes it, so this line doesn't repeat it.
 
     Args:
         worker: The worker's display name.
         title: The file's title (``file_title``).
-        types: The types the file is checked for.
-        is_episode: Whether it is checked as a TV episode.
 
     Returns:
-        E.g. ``GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits``.
+        E.g. ``GPU Worker 2 (Intel UHD 770) picked up Accused S04E05``.
     """
-    return f"{worker} picked up {title}: {checking_phrase(types, is_episode=is_episode)}"
+    return f"{worker} picked up {title}"
 
 
 def head_line(title: str, types: Collection[MarkerType], *, is_episode: bool) -> str:
-    """The first line of a block a checking thread finished (no worker picked the file up).
+    """The first line of a file's block, naming it and what it's checked for.
 
     Args:
         title: The file's title (``file_title``).
@@ -793,7 +794,7 @@ def _server_line(server_id: str, name: str, view: _SourceView, server_details: M
     extras = [] if (Source.SERVER_MARKERS, server_id) in view.notes.asked else [SAVED]
     unusable = next((server_details[r.detail] for r in own if r.detail in server_details), None)
     if unusable:
-        return f"{INDENT}{label}: {unusable}" + (f" ({'; '.join(extras)})" if extras else ""), True
+        return f"{INDENT}{label}: {_with_notes(unusable, extras)}", True
     return f"{INDENT}{label}: {_answer(own, 'none', extras)}", True
 
 

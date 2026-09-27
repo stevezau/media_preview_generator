@@ -1063,15 +1063,17 @@ class TestCreditTextOnTheWorkers:
         # One start line replaces the runner's, the job manager's and the dispatcher's.
         assert messages[0] == f"Intro & Credits job {job.id[:8]} started: 1 file, manual run"
         assert not [m for m in messages if m.startswith(("Started job", "Dispatcher: submitted"))]
-        start = messages.index(f"{worker} picked up {episode}: checking credits")
+        start = messages.index(f"{worker} picked up {episode}")
         end = next(n for n, m in enumerate(messages) if m.startswith(f"{episode}: done in "))
         read_on = "the CPU" if rerun else "the GPU"
-        # The file's lines are written together as it finishes; the worker's own GPU fallback warning comes before.
-        block = messages[end - 3 : end]
-        assert [line.split(":", 1)[0] for line in block] == ["  Credit text", "  Decided", "  Sent to PLEX-1"]
-        assert re.fullmatch(rf"  Credit text: none found \(read on {read_on} in [\d.]+ s\)", block[0]), block
-        assert block[1:] == ["  Decided: credits nothing found", "  Sent to PLEX-1: nothing to send"]
-        assert start < end - 3
+        # The file's lines (its own header first) are written together as it finishes; the worker's own GPU fallback
+        # warning comes before.
+        block = messages[end - 4 : end]
+        assert block[0] == f"{episode}: checking credits"
+        assert [line.split(":", 1)[0] for line in block[1:]] == ["  Credit text", "  Decided", "  Sent to PLEX-1"]
+        assert re.fullmatch(rf"  Credit text: none found \(read on {read_on} in [\d.]+ s\)", block[1]), block
+        assert block[2:] == ["  Decided: credits nothing found", "  Sent to PLEX-1: nothing to send"]
+        assert start < end - 4
         assert re.fullmatch(
             rf"{re.escape(episode)}: done in [\d.]+ s on GPU Worker 1" + (", rerun on the CPU" if rerun else ""),
             messages[end],
