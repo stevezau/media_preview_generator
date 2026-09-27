@@ -84,14 +84,13 @@ if TYPE_CHECKING:
 # against idents and music beds with where a stretch needs no dense core, matching a season of 25 fps and film-rate
 # releases at one speed, v8 with the end-picture check's move to one scaler for every vendor, v9 a file retimed only
 # when its audio says so, and v10 a season's folders on every disk of the library, the quorum of a second opening, a
-# bumper at the file start giving way to the title sequence and a stretch cut by the fingerprint window passed over; v11
-# a fingerprint of the first half of the episode, up to 20 minutes, and runs up to the longest intro the decision
-# publishes): stored with its answers, so a change to any of them is decided again.
-SEASON_AUDIO_VERSION = 11
+# bumper at the file start giving way to the title sequence and a stretch cut by the fingerprint window passed over):
+# stored with its answers, so a change to any of them is decided again.
+SEASON_AUDIO_VERSION = 10
 # What a pair's cached runs are versioned by (with the speeds, below): the runs themselves (``season_pair_runs``) last
-# changed with season audio v11 (longer fingerprints, and the provable skip's bound follows the longer run kept). Bump it
-# with any change to what a pair's runs are.
-PAIR_RUNS_VERSION = 10
+# changed with season audio v9, so the pairs matched since stay cached through v10's new picking rules. Bump it with any
+# change to what a pair's runs are.
+PAIR_RUNS_VERSION = 9
 # What an answer is stored under: this version, and the end-picture check's (the guard's ``end_picture.CHECK_VERSION``)
 # past its first, so a new check makes every stored answer older too, for its next run and for the re-run of answers
 # from an older version (``markers.versions``): a change to the check alone needs only the check's version. The check's
@@ -137,7 +136,7 @@ SILENCE_POINT = 0x256DF977
 # The 91 useful intros of the 118-episode eval hold at most 17.5 % (tools/markers_eval; task 7 report).
 MAX_INTRO_SILENCE = 0.5
 # A pair whose shift search expands more point pairs than this (about 60 ms) is matched on a worker rather than a
-# checking thread. Two silent 1,200 s openings are 94 million (about 2 s); the most any same-season pair of the
+# checking thread. Two silent 900 s openings are 53 million (about 1.2 s); the most any same-season pair of the
 # 118-episode eval has is 3,893.
 MAX_INLINE_PAIR_MATCHES = 2_000_000
 # Pairs a checking thread matches for one episode's pick: one episode's worth (its own 39 at most, and a few more). The
@@ -149,9 +148,8 @@ MAX_INLINE_NEW_PAIRS = MAX_GROUP_EPISODES
 _VALUE_SPREAD = 2
 _POPCOUNT8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 _GAP_PTS = int(MAX_GAP_S / POINT_S)
-# holds_no_intro's bounds: a run of 2,423 points lasts more than MAX_INTRO_S (300 s), and a run that starts and ends
-# within a gap's reach of an overlap's edges is at least the overlap minus 55 points long, so an overlap of 2,478 points
-# only holds longer ones.
+# holds_no_intro's bounds: a run of 969 points lasts more than 120 s, and a run that starts and ends within a gap's reach
+# of an overlap's edges is at least the overlap minus 55 points long, so an overlap of 1024 points only holds longer ones.
 _TOO_LONG_RUN_PTS = math.floor(MAX_INTRO_S / POINT_S) + 1
 _TOO_LONG_OVERLAP_PTS = _TOO_LONG_RUN_PTS + 2 * (_GAP_PTS - 1) + 1
 _SEASON_AUDIO_SOURCES = frozenset({Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value})
@@ -522,19 +520,19 @@ def _longest_stretch(outside: np.ndarray, width: int) -> int:
 
 
 def holds_no_intro(a: np.ndarray, b: np.ndarray) -> bool:
-    """Whether the v3 matcher provably finds no run of ``MAX_INTRO_S`` or less between two openings (a pair it can skip).
+    """Whether the v3 matcher provably finds no run of 120 s or less between two openings (a pair it can skip).
 
     True for two openings of one constant value with at most short interruptions (a silent or muted file): matching
-    them costs up to 2 s and can only find runs longer than any intro, which ``file_hits`` drops.
+    them costs up to 1.2 s and can only find runs longer than any intro, which ``file_hits`` drops.
 
     Proof. Let v be the most common value of ``a``, K the points of ``a`` and ``b`` that aren't v, w the most non-v
     points any 28 consecutive points of ``a`` hold plus the same for ``b``, and m the shorter length. With w <= 27,
     every 28 aligned positions hold one where both are v (an exact match), so at any shift the matches have no gap of
     28 points, where the matcher breaks a run, and form one run from within the first 28 to within the last 28 aligned
     positions: at least the overlap minus 55 points. The 40 shifts closest to full overlap each overlap by at least
-    m - 39 points and so count at least m - 39 - K value matches, while a shift overlapping by 2477 points or fewer
-    counts at most 2477. With K <= m - 2517 the matcher's 40 best shifts all overlap by at least 2478 points, so every
-    run it finds is at least 2423 points (just over 300 s) long.
+    m - 39 points and so count at least m - 39 - K value matches, while a shift overlapping by 1023 points or fewer
+    counts at most 1023. With K <= m - 1063 the matcher's 40 best shifts all overlap by at least 1024 points, so every
+    run it finds is at least 969 points (just over 120 s) long.
 
     Args:
         a: The first episode's points.

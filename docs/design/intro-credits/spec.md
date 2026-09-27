@@ -79,8 +79,8 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 - **Plex-host checks before release** (the plex host was down): the text helper's 640×360 self-test on the TITAN RTX
   and the Intel iGPU, a 4K VAAPI tail's timing, and the Intel answers with this code
   (`evidence/credits/small-text-retry.md` "Before release").
-- ~~The Alias S02E09 miss~~: done in season audio v11 (§5.3 "Half the episode"): the fingerprint covers half the
-  episode, up to 20 minutes.
+- ~~The Alias S02E09 miss~~: the title sequence runs past the 900 s fingerprint window; v10 passes over a stretch the
+  window cuts, so it gets no season audio intro instead of a short one (§5.3). Answering it needs a longer fingerprint.
 - **A replaced file with no evidence drops an intro that worked** (owner's call; §14 2026-09-25, RuPaul's Drag Race
   UK S08E04): and season audio's "no match" for that episode.
 - **After the 2026-09-25 decision rules** (§14 "Decision rules", `evidence/decide-rules/README.md`): the decision
@@ -117,15 +117,13 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 - **Spring of the Blade S01E14's intro** now ends at the title card but starts on the licence cards 11 s before the
   title sequence (the chapter's start and IntroDB's).
 
-**Open after the card read and intro window** (§14 2026-09-27 "Card read and intro window";
-`evidence/card-read/README.md`):
-- **Evil S04's late title sequences are found in part**: the 20-minute window reaches them (1,050–1,135 s), but their
-  music is re-cut to each episode's guest list, so 4 episodes get the half every episode shares (inside the sequence
-  by frame check, no story skipped) where they had nothing.
-- **Glass Heart S01E03 lost its 13 s title card**: a 16 s stretch one other episode shares 1,149 s in, past the old
-  window, now ranks first, and a best-ranked stretch without the quorum still means no intro (§5.3, "as today").
+**Open after the card read** (§14 2026-09-27 "The card the credits start on"; `evidence/card-read/README.md`):
 - **Two epilogues still stop the move early**: To Dye For's letter-spaced third card reads as 2.1 words to a line
   (21 s early, from 41), Trainwreck's last statement has no full stop (12 s early, from 50).
+- **The intro window and cap are held** on branch `fix/intro-window-cap` (the Alias S02E09 miss above stays open):
+  half the episode up to 20 minutes and intros up to 300 s bring Alias S02E09/E10 right, but on the library chapter set
+  Evil S04 ×4 become partial (their title music is re-cut per episode) and Glass Heart S01E03 loses its 13 s title
+  card; the two general rules tried against them lost more (that branch's `evidence/card-read/README.md`).
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -297,23 +295,21 @@ featurettes, `Extras/` folders…), get no ids. TheIntroDB is queried with `dura
 
 ### 5.3 TV intros — season audio matching
 **Fingerprint** (per file, cached): `ffmpeg -ss 0 -t <W> -i <file> -vn -ac 2 -f chromaprint -algorithm 1
--fp_format raw -` → uint32 LE, **0.1238 s/point** (measured). `W = min(1200 s, 50% of duration)` (v11; until then
-`min(900 s, 35%)`). The app image's
+-fp_format raw -` → uint32 LE, **0.1238 s/point** (measured). `W = min(900 s, 35% of duration)`. The app image's
 `/usr/lib/jellyfin-ffmpeg/ffmpeg` has chromaprint; `/usr/local/bin/ffmpeg` does not, and the arm64 image has no
 jellyfin-ffmpeg, so there season audio is unavailable with a message (Settings "Not available",
-`GET /api/markers/sources/local`). CPU only (no GPU chromaprint): 6.2 s of CPU for a 45-minute episode, 2.9 s for a
-24-minute one (4.7 and 2.4 s at v10's window); as many at once as workers run them, with the worker's threads and the
-pause of §5.6.
+`GET /api/markers/sources/local`). CPU only (no GPU chromaprint), ~2 s per episode; as many at once as workers run
+them, with the worker's threads and the pause of §5.6.
 
 **Matcher (v3)** for every episode pair: inverted index (±2 value shift); per shift, runs where
-`popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, length 8–300 s (v11; 120 s until then); keep all non-overlapping runs. Per episode: cluster candidates
+`popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, length 8–120 s; keep all non-overlapping runs. Per episode: cluster candidates
 (start, end) within ±4 s; rank by (length ≥ 15 s, number of supporting episodes, length); require support from
 ≥ 50% of the other episodes in the group (≥ 1 when only one other). Group = the video files of the episode's season
 with the same parsed season number, at most the 40 nearest by episode number (a flat folder can hold hundreds;
 server-agnostic); the season is the episode's folder and, in a library spread over several disks, the same show's
 folders for that season on the others (v10, below); mixed releases in one season work (Rick and Morty S01). An intro
 whose points are more than half chromaprint's silence value (±2, or ≤ 6 bits apart) is dropped, and a pair that
-provably can't hold a run of 300 s or less is skipped (two silent openings); neither changes the 118-episode numbers
+provably can't hold a run of 120 s or less is skipped (two silent openings); neither changes the 118-episode numbers
 (`evidence/eval/phase2-harness.md`, Task 7).
 
 **Guards against idents and music beds** (season audio v5; the dense-core exemptions v7; §14 2026-09-24). A network
@@ -422,9 +418,9 @@ landed (sflix: 8,058 of 10,555 seasons in more than one folder), and each part w
   after a cold open of varying length, and support ranks first (Star Trek: Strange New Worlds S04's "Star Trek 60",
   0–28 s, 9 of 9, against the title sequence's 7 of 9).
 - **The fingerprint window's end** (`season.cut_by_window`, a guard): a stretch ending within the 3.5 s gap bridge of
-  the episode's last fingerprint point may go on past the window, so it is passed over. Alias S02E09's title sequence
-  runs 881–906 s; v10's window (`min(900 s, 35 %)`) ended it at 897.5 s, 8.4 s early (frames checked). v11's longer
-  window answers it (below).
+  the episode's last fingerprint point may go on past the window (`min(900 s, 35 %)`), so it is passed over. Alias
+  S02E09's title sequence runs 881–906 s; the window ended it at 897.5 s, 8.4 s early (frames checked). No other file
+  of the four sets reaches the window's end. Answering it would need a second, longer fingerprint of that file.
 Pairs keep their cached runs (`PAIR_RUNS_VERSION` stays 9: v10 changes what is picked from the runs, not the runs), so
 the version bump re-picks from cache; only pairs of files in different folders and members never fingerprinted are
 new. Measured before (`dev` `cab4ccf`, own folder) and after, season step only, useful / wrong / missed:
@@ -438,22 +434,6 @@ new. Measured before (`dev` `cab4ccf`, own folder) and after, season step only, 
 | split sample, 42 episodes of 14 seasons (frame-checked: correct / wrong) | 20 / 0 | 24 / 0 |
 | SPY x FAMILY S01, 25 episodes (answered, each at its opening) | 16 | 18 |
 | Star Trek: Strange New Worlds S04, 10 episodes (frame-checked: correct / wrong) | 6 / 4 | 8 / 2 |
-
-**Half the episode, and intros up to 300 s** (season audio v11, §14 2026-09-27; `evidence/card-read/`). The window
-is half the file up to 20 minutes (`fingerprint.WINDOW_FRACTION`, `MAX_WINDOW_S`), where Plex looks for an intro too:
-the latest title sequence in the truth sets ends 1,084 s in (Alias S02E10), and 900 s cut Alias S02E09's (881–906 s).
-A run is an intro up to 300 s (`matcher.MAX_INTRO_S`, the decision's own `MAX_INTRO_MS`), no longer 120 s: Intro
-Skipper dropped a clean 126 s opening at its 120 s (its #1008), while whole-episode matches stay out (The Simpsons'
-repeated 475–680 s runs). 120 s, 300 s and no cap gave the same verdicts on every set. The provable skip follows the
-cap (`holds_no_intro`: a run of 2,423 points is over 300 s, so at most the shorter opening's length minus 2,517 other
-points). Every fingerprint is taken again once (its stored `length_s` no longer matches) and `PAIR_RUNS_VERSION` 10
-matches every pair again; `SEASON_AUDIO_VERSION` 11 makes the answers due. Measured before (v10) and after, the season
-step on its own, useful / wrong / missed: lab 118 86 / 8 / 20 unchanged; held-out 175 142 / 4 / 29 → 144 / 4 / 27
-(Alias S02E09 and S02E10); Accused 3 / 0 / 53 unchanged; the split sample unchanged (3 The Chosen S04 answers within
-0.4 s); library chapter set 113 / 54 / 57 → 112 / 58 / 54: Evil S04E02/E12/E13/E14 go from missed to part of their
-title sequence (§0) and Glass Heart S01E03 loses its 13 s title card (§0); the audit's answer key, its 51 intros
-through each tree's season step and replayed: 6 wrong before and after (tuning 5 of 35, held out 1 of 16), none
-skipping story. A pair's matching stays about 10 ms.
 
 **Measured** on 118 episodes with studio-chapter truth ("useful" = end within 5 s and start within 15 s)
 (`evidence/eval/`):
@@ -3666,20 +3646,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   across disks): 308 members to fingerprint (CPU, 2–14 s each), 3,419 new pairs (6.3 ms each, under a CPU-minute) and
   a re-pick of every answer from cached pairs; the whole library's split seasons hold 374,539 cross-folder pairs
   (about 0.7 CPU-hours). A group lookup lists each library folder once (about 16 ms for sflix's four).
-- 2026-09-27 · **Card read and intro window** (credit text v8, season audio v11; §5.3, §5.4; `evidence/card-read/`).
-  Three fixes the owner approved from the prior-art research (Intro Skipper, Plex's own windows, PP-OCR), each on the
-  worker's own device with the existing fallback:
-  - **The card at the credits start is read**: PP-OCRv5's Latin recognition model reads the card rule J's start lands
-    on when it is on black, and the start moves past prose cards to the first that isn't, never past a card on screen
-    for a single second (a crawl) or the answer's end. Four rules each carry their evidence (§5.4 "Version 8"): a
-    sentence needs 3 words to a line (Fightland S01E08's cast list ends in "JR.", Paris, Texas' crawl in dot leaders);
-    lines under 0.9 confidence are left out (another script); the first card is read however short (#SKYKING's fade-in);
-    a one-second card after it ends the walk (the owner's "never past where the roll clearly continues").
-  - **Half the episode is fingerprinted, up to 20 minutes** (Plex's own window; Alias S02E09 and S02E10 come right).
-  - **Intro runs up to 300 s**, the decision's own intro limit, instead of 120 s (Intro Skipper #1008); no set changed.
-  Measured on the answer key (seed 20260927 split), the 118 and held-out 175 intro sets, the 80 and 205 credit sets,
-  Accused, I Survived and the split-season sample (numbers in §5.3 and §5.4): no new story skip; credits skipping story
-  1 → 0 on both audit sets; the answer key's intros 6 of 51 wrong before and after. New wrong verdicts: the library chapter set's Evil S04 ×4, from missed to part of the title
-  sequence, and Glass Heart S01E03's lost title card (§0). Costs: fingerprint CPU +1.5 s per 45-minute episode; reading
-  the card +8–18 s CPU on 1080p (+55 s on 4K HEVC) where the start is on black, +42–71 s where it is prose, on a CPU
-  worker.
+- 2026-09-27 · **The card the credits start on** (credit text v8, §5.4; `evidence/card-read/`). From the prior-art
+  research, approved by the owner: PP-OCRv5's Latin recognition model reads the card rule J's start lands on when it is
+  on black, on the worker's own device with the existing fallback, and the start moves past prose cards to the first
+  that isn't, never past a card on screen for a single second (a crawl) or the answer's end. Four rules carry their
+  evidence (§5.4 "Version 8"): a sentence needs 3 words to a line (Fightland S01E08's cast list ends in "JR.", Paris,
+  Texas' crawl in dot leaders); lines under 0.9 confidence are left out (another script); the first card is read
+  however short (#SKYKING's fade-in); a one-second card after it ends the walk (the owner's "never past where the roll
+  clearly continues"). Measured on the answer key (seed 20260927 split), the 80 and 205 credit sets, Accused and I
+  Survived (numbers in §5.4): no new wrong answer, credits skipping story 1 → 0 on both audit sets, intros unchanged.
+  Cost on a CPU worker: +8–18 s CPU on 1080p (+55 s on 4K HEVC) where the start is on black, +42–71 s where it is
+  prose. The approved intro window (half the episode, up to 20 minutes) and cap (300 s) are held on
+  `fix/intro-window-cap`: they add new wrong answers on the library chapter set (§0).

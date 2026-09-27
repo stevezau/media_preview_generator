@@ -67,11 +67,9 @@ def test_point_duration_is_the_measured_value():
 
 
 @pytest.mark.parametrize(
-    ("duration_ms", "expected"),
-    [(1_321_472, 660.736), (2_400_000, 1200.0), (2_605_906, 1200.0), (3_000_000, 1200.0), (120_000, 60.0)],
+    ("duration_ms", "expected"), [(1_321_472, 462.5152), (2_400_000, 840.0), (3_000_000, 900.0), (120_000, 42.0)]
 )
-def test_window_is_half_the_episode_capped_at_20_minutes(duration_ms, expected):
-    # Alias S02E09 (2,605.9 s): its title sequence ends at 905.9 s, past the 900 s the window used to stop at.
+def test_window_is_35_percent_capped_at_900_s(duration_ms, expected):
     assert fpmod.window_s(duration_ms) == pytest.approx(expected)
 
 
@@ -536,7 +534,7 @@ def test_ensure_computes_once_then_reads_the_cache(store, tmp_path):
         retime=None,
     )
     stored = store.get_fingerprint(rec.id, "intro")
-    assert (stored.start_s, stored.length_s, stored.algorithm) == (0.0, 150.0, 1)
+    assert (stored.start_s, stored.length_s, stored.algorithm) == (0.0, 105.0, 1)
 
 
 def test_a_retimed_fingerprint_is_computed_and_cached_beside_the_files_own(store, tmp_path):
@@ -556,7 +554,7 @@ def test_a_retimed_fingerprint_is_computed_and_cached_beside_the_files_own(store
     stored = store.get_fingerprint(rec.id, "intro@0.959041")
     assert (stored.start_s, stored.length_s, stored.algorithm, stored.points) == (
         0.0,
-        150.0,
+        105.0,
         1,
         bytes(np.array([7, 8], dtype="<u4")),
     )
@@ -777,7 +775,7 @@ class TestStalledFfmpegs:
         raw = np.array([7, 8], dtype="<u4").tobytes()
         with patch.object(fpmod.subprocess, "Popen", return_value=_proc(stdout=raw)) as popen:
             assert fpmod.ensure_fingerprint(store, third, ffmpeg="ffmpeg").tolist() == [7, 8]
-        assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", third.canonical_path, 150.0)
+        assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", third.canonical_path, 105.0)
 
     def test_other_files_stalled_ffmpegs_refuse_a_caller_at_once(self, store, tmp_path, stuck):
         rec = _record(store, tmp_path, "S01E01.mkv")

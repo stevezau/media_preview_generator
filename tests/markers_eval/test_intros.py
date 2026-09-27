@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 
 from media_preview_generator.markers.audio import POINT_S
-from media_preview_generator.markers.audio.matcher import MAX_INTRO_S
 from media_preview_generator.markers.speed import FILM_FPS, PAL_FPS
 from tools.markers_eval import fp3_reference
 from tools.markers_eval.data import EvalEpisode
@@ -47,7 +46,7 @@ def _fps(seed: int, episodes: int = 3):
 
 def _episodes(fps, *, stored_shift_s: float = 0.0):
     files = sorted(fps)
-    ref = fp3_reference.analyse_points(fps, files, max_len=MAX_INTRO_S)
+    ref = fp3_reference.analyse_points(fps, files)
     eps = []
     for f in files:
         seg = ref[f]["segment"]

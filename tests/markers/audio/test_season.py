@@ -401,10 +401,10 @@ class TestSeasonAudio:
     def test_the_detector_is_registered_with_the_season_audio_source_and_version(self):
         spec = _spec()
         assert (spec.source, spec.types) == (Source.SEASON_AUDIO, frozenset({MarkerType.INTRO}))
-        # An answer is stored under the step's version and the end-picture check's past its first (11 + 2 × 1000).
-        assert (season.SEASON_AUDIO_VERSION, season.end_picture.CHECK_VERSION, spec.version) == (11, 3, 2011)
-        # v11's longer fingerprints and longer kept runs are other runs: every pair is matched again.
-        assert season.PAIR_RUNS_VERSION == 10
+        # An answer is stored under the step's version and the end-picture check's past its first (10 + 2 × 1000).
+        assert (season.SEASON_AUDIO_VERSION, season.end_picture.CHECK_VERSION, spec.version) == (10, 3, 2010)
+        # Pairs keep the runs version they were matched under: v10 changed how the runs are picked from, not the runs.
+        assert season.PAIR_RUNS_VERSION == 9
         assert spec.stored_sources == {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
         assert (spec.due, spec.needs_worker) == (season.season_audio_due, season.season_audio_needs_worker)
 
@@ -2068,17 +2068,16 @@ class TestDegenerateInput:
         assert runs == matcher.pair_runs(a, b)
         assert any(r.a_end_s - r.a_start_s <= matcher.MAX_INTRO_S for r in runs)
 
-    @pytest.mark.parametrize(("b_count", "proven"), [(114, True), (115, False)])
-    def test_the_proof_allows_at_most_the_shorter_length_minus_2517_other_points(self, b_count, proven):
-        # 2517 = the 39 shifts beside full overlap + an overlap of 2478 points (a run of 2423 points is over 300 s).
-        a = _sparse(2_700, SIL, every=14, count=69)
-        b = _sparse(2_700, SIL, every=14, count=b_count, start=5)
-        assert 69 + b_count - (2_700 - 2_517) == (0 if proven else 1)
+    @pytest.mark.parametrize(("b_count", "proven"), [(68, True), (69, False)])
+    def test_the_proof_allows_at_most_the_shorter_length_minus_1063_other_points(self, b_count, proven):
+        a = _sparse(1_200, SIL, every=14, count=69)
+        b = _sparse(1_200, SIL, every=14, count=b_count, start=5)
+        assert 69 + b_count - (1_200 - 1_063) == (0 if proven else 1)
         assert season.holds_no_intro(a, b) is proven
 
     @pytest.mark.parametrize(("b_stretch", "proven"), [(13, True), (14, False)])
     def test_the_proof_needs_every_28_points_to_hold_an_exact_match(self, b_stretch, proven):
-        a, b = _silent(3_000), _silent(3_000)
+        a, b = _silent(1_500), _silent(1_500)
         a[400:414] = noise(1, 14)
         b[900 : 900 + b_stretch] = noise(2, b_stretch)
         assert season.holds_no_intro(a, b) is proven
@@ -2090,7 +2089,7 @@ class TestDegenerateInput:
             value = SIL if case % 2 else int(rng.integers(0, 2**32))
             pair = []
             for side in range(2):
-                size = int(rng.integers(2_518, 2_900))
+                size = int(rng.integers(1_064, 1_400))
                 body = np.full(size, value, dtype="<u4")
                 for _ in range(int(rng.integers(0, 10))):
                     at, length = int(rng.integers(0, size)), int(rng.integers(1, 14))

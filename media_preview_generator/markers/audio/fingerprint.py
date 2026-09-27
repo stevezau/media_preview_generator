@@ -41,13 +41,11 @@ ALGORITHM = 1
 RETIME_BASE_RATE = 48_000
 # Retime factors outside this range are no PAL speed-up (a bug, not a file): ffmpeg is never started with one.
 MIN_RETIME, MAX_RETIME = 0.5, 2.0
-# Half the episode, where Plex looks for an intro too, up to 20 minutes: the latest title sequence in the truth sets
-# ends 1,084 s in (Alias S02E10); 900 s and 35 % cut Alias S02E09's (881-906 s) and missed S02E10's.
-MAX_WINDOW_S = 1200.0
-WINDOW_FRACTION = 0.5
+MAX_WINDOW_S = 900.0
+WINDOW_FRACTION = 0.35
 # Killed fingerprint ffmpegs still stuck reading their files (a stalled mount) at which no new one starts.
 STALLED_LIMIT = 2
-# Fingerprinted files one cache sweep looks for on disk (up to about 38 KiB of markers.db each once gone): a 100k-episode
+# Fingerprinted files one cache sweep looks for on disk (about 28 KiB of markers.db each once gone): a 100k-episode
 # library is gone through every 50 sweeps, at a few seconds of file stats each on a network mount.
 MAX_SWEEP_CHECKS = 2_000
 # Sweeps run on their own thread, one at a time and at most one start an hour. One still running after 10 minutes is
@@ -115,7 +113,7 @@ class FingerprintSkippedError(Exception):
 
 
 def window_s(duration_ms: int) -> float:
-    """Seconds fingerprinted from the start: half the file, at most 1200 s (spec §5.3)."""
+    """Seconds fingerprinted from the start: 35% of the file, at most 900 s (spec §5.3)."""
     return min(MAX_WINDOW_S, WINDOW_FRACTION * duration_ms / 1000.0)
 
 

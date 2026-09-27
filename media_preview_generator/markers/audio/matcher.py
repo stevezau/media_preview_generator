@@ -1,8 +1,7 @@
 """Season intro matcher v3 (spec §5.3): a vectorised port of evidence/detect/fp3.py.
 
 For every pair of episodes: the 40 best alignment shifts (inverted index, values within ±2), runs of points whose
-fingerprints differ in ≤ 6 bits with gaps ≤ 3.5 s, at least 8 s long, all non-overlapping runs kept (runs longer than any
-intro the decision publishes, 300 s, are dropped per episode). Per episode: cluster
+fingerprints differ in ≤ 6 bits with gaps ≤ 3.5 s, at least 8 s long, all non-overlapping runs kept (runs over 120 s are dropped per episode). Per episode: cluster
 its runs within ±4 s, rank by (≥ 15 s, supporting episodes, length), and require support from half of the other
 episodes (at least one). Orders that break ties are the reference's (tools/markers_eval/fp3_reference.py); the tests
 compare the two run for run.
@@ -15,17 +14,13 @@ from typing import NamedTuple
 
 import numpy as np
 
-from ..decide import MAX_INTRO_MS
 from . import POINT_S
 
 MATCHER_VERSION = 3
 MAX_BIT_DIFF = 6
 MAX_GAP_S = 3.5
 MIN_RUN_S = 8.0
-# The longest run kept: the longest intro the decision publishes (§5.5 rule 2). It was 120 s, which dropped a real
-# opening longer than that whole (Intro Skipper #1008: a clean 126 s one). On the sets no run was 120-300 s long and the
-# only longer ones matched two whole episodes' openings (The Simpsons S03E23/E24: 475 and 680 s), which stay out.
-MAX_INTRO_S = MAX_INTRO_MS / 1000.0
+MAX_INTRO_S = 120.0
 PREFERRED_MIN_S = 15.0
 CLUSTER_TOLERANCE_S = 4.0
 QUORUM = 0.5
@@ -162,7 +157,7 @@ def file_hits(target: str, files: Sequence[str], runs_between: Callable[[str, st
         runs_between: Runs for ``(earlier, later)``; asked only in that order.
 
     Returns:
-        Each run on the target's side with its partner and the partner's start, runs over ``MAX_INTRO_S`` left out.
+        Each run on the target's side with its partner and the partner's start, runs over 120 s left out.
     """
     k = list(files).index(target)
     hits: list[Hit] = []

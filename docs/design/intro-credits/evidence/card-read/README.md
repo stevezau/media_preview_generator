@@ -1,13 +1,16 @@
-# Card read and intro window (2026-09-27)
+# The card the credits start on (2026-09-27)
 
-Three fixes the owner approved from the prior-art research: read the card the credits start lands on (credit text v8),
-fingerprint half the episode up to 20 minutes (season audio v11), and let an intro run up to 300 s. Spec: §5.3 "Half
-the episode, and intros up to 300 s", §5.4 "Version 8, prose cards", §14 2026-09-27 "Card read and intro window".
+Credit text v8, from the prior-art research the owner approved: read the card the credits start lands on, and move
+the start past prose cards. Spec: §5.4 "Version 8, prose cards", §14 2026-09-27 "The card the credits start on".
+
+The two intro fixes approved with it (fingerprint half the episode up to 20 minutes, intros up to 300 s) are held on
+branch `fix/intro-window-cap`, whose copy of this README has their scripts, numbers and the two rules tried against
+their new wrong answers (Evil S04 ×4 partial, Glass Heart S01E03's title card lost, on the library chapter set).
 
 Local-only (gitignored): `local/` holds the base tree (`local/base`, `git archive 95c222c`), the models
-(`python3 scripts/fetch_textdet_model.py --out local/models`) and the season step's pair caches; each script writes
-its answers, replays and logs beside itself (they hold library paths). The scripts ran from one scratch folder, the
-season and reading ones at its top and the credits ones in its `ct/`, which is the layout their relative paths expect.
+(`python3 scripts/fetch_textdet_model.py --out local/models`); each script writes its answers, replays and logs
+beside itself (they hold library paths). The scripts ran from one scratch folder, the reading ones at its top and the
+credits ones in its `ct/`, which is the layout their relative paths expect.
 
 ## Method
 
@@ -21,16 +24,12 @@ season and reading ones at its top and the credits ones in its `ct/`, which is t
   prints each moved file's card reads. The answer key: `credits/replay.py` (the audit's `markers.db` copy, with the
   tree's credit text and `prose_start_s` for `chapter_origin`), then `../credits-accuracy/metrics.py` (seed 20260927
   split, held-out reported apart).
-- **Season**: `season/sruns.py` (via `season/srun.sh`) runs one tree's season step on the lab 118, the held-out 175,
-  the library chapter set, Accused and the split-season sample, with `FAILFAST` against the base. `CAP` patches the
-  matcher's intro cap for the 120 / 300 / none comparison. `season/audit_audio.sh` runs the answer key's 51 intro items
-  through both trees for the replay's `--audio`. `season/cand_debug.py` prints one episode's ranked clusters.
 - **Reading**: `reading/m2_again.py` read the research's M2 cards (11 epilogue, 41 first credit cards, 31 others)
   through the app's own decode at 1280×720 and 1920×1080 (the same calls; 0.72 against 1.59 s of CPU a card, median),
   `reading/prose_eval.py` compares prose rules on M2 and on every card a run read, `credits/confidences.py` prints
   per-line confidence, `credits/probe_offsets.py` what the frame at the start itself reads.
-- **Costs**: `season/cost_fp.py` (fingerprint CPU at both windows, one pair's matching), `credits/cost_cards.py`
-  (`find_credits` on a CPU worker without and with the reader, in-process models, no caches).
+- **Costs**: `credits/cost_cards.py` (`find_credits` on a CPU worker without and with the reader, in-process
+  models, no caches).
 
 ## Rules, and the file that set each
 
@@ -49,8 +48,6 @@ season and reading ones at its top and the credits ones in its `ct/`, which is t
 | A one-second card after the first ends the walk | The owner's "never past where the roll clearly continues"; a crawl moves every second |
 | The first card is read however short | #SKYKING's disclaimer fades in over one second |
 | 90 s window; all prose there keeps the start | Twice Gandhari's 46 s of epilogue |
-| Window half the file, at most 1,200 s | Plex's own; Alias S02E10's title sequence ends 1,084 s in |
-| Intro runs up to 300 s | The decision's own intro limit; Intro Skipper #1008 (a 126 s opening dropped at 120 s) |
 
 ## Results
 
@@ -66,21 +63,8 @@ Credit text alone (start within 5 s of the truth or inside a frame check's range
 
 The answer key, replayed decisions: credits wrong 8 → 7 of 88 (tuning 4 → 4 of 61, held out 4 → 3 of 27), skipping
 story 1 → 0; the Plex comparison 7 → 6 of 81 (5 with #SKYKING's frame check), skipping story 1 → 0 (Plex's own 8 of 80).
-Intros, each tree's season step for the 51 intro items (`season/audit_audio.sh`, the replay's `--audio`): 6 of 51
-wrong before and after (tuning 5 of 35, held out 1 of 16), none skipping story; one answer moved (Homicide Hunter
-S06E12's start 1.5 s earlier, right both ways).
-
-Season step on its own, useful / wrong / missed, v10 → v11 (300 s cap):
-
-| Set | v10 | v11 |
-|---|---|---|
-| Lab 118 (114 on disk) | 86 / 8 / 20 | 86 / 8 / 20 |
-| Held-out 175 | 142 / 4 / 29 | 144 / 4 / 27 |
-| Accused | 3 / 0 / 53 | 3 / 0 / 53 |
-| Library chapter set (224) | 113 / 54 / 57 | 112 / 58 / 54 |
-| Split sample (42) | unchanged | 3 The Chosen S04 answers within 0.4 s |
-
-The 120 s, 300 s and uncapped runs gave the same verdicts on every set.
+Intros are untouched (the season step doesn't change): 4 of 51 wrong before and after on the replay, none skipping
+story, and no intro moved.
 
 ## Frame checks (this lane)
 
@@ -91,14 +75,9 @@ The 120 s, 300 s and uncapped runs gave the same verdicts on every set.
   dissolving), "written and directed by" 4,926; Gandhari epilogue to 6,518, a last shot 6,520–6,530, the title 6,531,
   first card 6,544 (base 6,485 skipped the shot); Paris, Texas dedication 8,665–8,669, cast crawl 8,671; 13 Minutes
   dedication 6,258–6,266, crawl 6,270; Habeas Corpus S01E06 help-line notice 3,410–3,416, first credit 3,417.5.
-- **Season**: Evil S04E02 title sequence 1,050–1,132 (answer 1,091–1,134), S04E12 862–938 (answer 862.5–889.9; its
-  chapter 901–941 starts halfway): inside the sequence, no story skipped. Glass Heart S01E03's cluster walk (work):
-  571.8–587.7 s with 1 partner (S01E07 at 1,148.9 s) ranks above the 13 s title card's 378.5–391.7 with 5.
 
 ## Costs
 
-- Fingerprint CPU per episode, v10 → v11: 4.7 → 6.2 s (45 minutes, Alias S02E09/E10), 2.4 → 2.9 s (24 minutes,
-  Mushoku Tensei); a pair's matching about 10 ms at either window.
 - Reading the card, CPU worker, without → with: a dark start whose card isn't prose +7.8 / +9.8 / +18.0 s CPU on three
   1080p files (+1.5 to 3.5 s wall), +54.5 s on Avengers 4K HEVC (+5.8 s wall), almost all of it the 30 s 1 fps
   decode (reading a card is 1–3 s of CPU); a prose start +42.3 s (Accused S03E09) and +71.2 s (Breach, 5 cards read).
@@ -114,7 +93,5 @@ untested (no hardware), as for detection.
 
 ## Not fixed
 
-- Evil S04's re-cut title music (4 partial intros where there were none), Glass Heart S01E03 (the walk ends at a
-  best-ranked cluster without the quorum, a deliberate rule), To Dye For's letter-spaced card and Trainwreck's
-  statement without a full stop (both still early, less than before). The Wargame's "Inspired by …" card reads as prose
-  (7+ words, most lower-case) and moves its start 1–2 s.
+- To Dye For's letter-spaced card and Trainwreck's statement without a full stop (both still early, less than
+  before). The Wargame's "Inspired by …" card reads as prose (7+ words, most lower-case) and moves its start 1–2 s.

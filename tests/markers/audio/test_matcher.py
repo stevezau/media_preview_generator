@@ -48,12 +48,10 @@ def test_pair_runs_equal_the_reference(seed):
 
 
 @pytest.mark.parametrize(("seed", "episodes"), [(s, n) for s in range(6) for n in (2, 3, 5)])
-@pytest.mark.parametrize("intro_s", [25, 126], ids=["short", "over-120-s"])
-def test_season_intros_equal_the_reference(seed, episodes, intro_s):
-    # The reference runs with the matcher's cap: at 126 s (over the old 120 s) both keep the opening.
-    fps, _ = _season(100 + seed, episodes=episodes, length=1400, intro_len=int(intro_s / POINT_S))
+def test_season_intros_equal_the_reference(seed, episodes):
+    fps, _ = _season(100 + seed, episodes=episodes)
     files = sorted(fps)
-    expected = {f: row["segment"] for f, row in ref.analyse_points(fps, files, max_len=m.MAX_INTRO_S).items()}
+    expected = {f: row["segment"] for f, row in ref.analyse_points(fps, files).items()}
     got = {f: (tuple(seg) if seg else None) for f, seg in m.season_intros(fps).items()}
     assert got == expected
 
@@ -80,18 +78,9 @@ def test_one_other_episode_is_enough():
     assert all(seg is not None and seg.support == 1 for seg in m.season_intros(fps).values())
 
 
-def test_runs_longer_than_the_longest_intro_the_decision_publishes_are_not_intros():
-    assert m.MAX_INTRO_S == 300.0
-    fps, _ = _season(9, episodes=3, intro_len=int(301 / POINT_S) + 2, length=int(360 / POINT_S), silence=0)
+def test_runs_longer_than_120_s_are_not_intros():
+    fps, _ = _season(9, episodes=3, intro_len=int(121 / POINT_S) + 2, length=1400, silence=0)
     assert all(seg is None for seg in m.season_intros(fps).values())
-
-
-def test_an_opening_longer_than_120_s_is_found_whole():
-    # Intro Skipper #1008: a clean 126 s shared run was dropped by a 120 s cap, as ours used to be.
-    fps, offsets = _season(9, episodes=3, intro_len=int(126 / POINT_S), length=1400, silence=0)
-    for key, seg in m.season_intros(fps).items():
-        assert seg is not None and seg.end_s - seg.start_s == pytest.approx(126, abs=1)
-        assert seg.start_s == pytest.approx(offsets[key] * POINT_S, abs=1)
 
 
 def test_runs_shorter_than_8_s_are_ignored():
@@ -127,10 +116,9 @@ def test_file_hits_order_is_the_pair_loop_order():
     assert calls == [("a", "b"), ("b", "c"), ("b", "d")]
 
 
-def test_runs_over_300_s_are_dropped_from_hits():
-    runs = [m.Run(0.0, 301.0, 0.0, 301.0), m.Run(400.0, 526.0, 405.0, 531.0), m.Run(0.0, 30.0, 5.0, 35.0)]
-    hits = m.file_hits("a", ["a", "b"], lambda x, y: runs)
-    assert hits == [m.Hit(400.0, 526.0, "b", 405.0), m.Hit(0.0, 30.0, "b", 5.0)]
+def test_runs_over_120_s_are_dropped_from_hits():
+    hits = m.file_hits("a", ["a", "b"], lambda x, y: [m.Run(0.0, 121.0, 0.0, 121.0), m.Run(0.0, 30.0, 5.0, 35.0)])
+    assert hits == [m.Hit(0.0, 30.0, "b", 5.0)]
 
 
 def _random_points(rng: np.random.Generator, n: int) -> np.ndarray:
@@ -220,7 +208,7 @@ def test_quorum_is_half_of_the_other_episodes_and_at_least_one(support, others, 
 def test_hard_seasons_equal_the_reference(seed):
     fps = _hard_season(seed, episodes=2 + seed % 5)
     files = sorted(fps)
-    expected = {f: row["segment"] for f, row in ref.analyse_points(fps, files, max_len=m.MAX_INTRO_S).items()}
+    expected = {f: row["segment"] for f, row in ref.analyse_points(fps, files).items()}
     got = {f: (tuple(seg) if seg else None) for f, seg in m.season_intros(fps).items()}
     assert got == expected
     for x in files:
@@ -388,9 +376,7 @@ _CRAFTED_RUNS = {
 @pytest.mark.parametrize(("files", "runs"), list(_CRAFTED_RUNS.values()), ids=list(_CRAFTED_RUNS))
 def test_hit_ranking_equals_the_reference_on_crafted_runs(monkeypatch, files, runs):
     monkeypatch.setattr(ref, "runs", lambda a, b, min_pts: runs.get((a, b), []))
-    expected = {
-        f: row["segment"] for f, row in ref.analyse_points({f: f for f in files}, files, max_len=m.MAX_INTRO_S).items()
-    }
+    expected = {f: row["segment"] for f, row in ref.analyse_points({f: f for f in files}, files).items()}
 
     def runs_between(x, y):
         return [m.Run(*r) for r in runs.get((x, y), [])]

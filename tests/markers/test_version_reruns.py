@@ -93,9 +93,9 @@ class TestTheDetectors:
         # The check is part of season audio's answer (§5.3 guards): its first version adds nothing, so today's answers
         # stay current, and a new check makes every season audio answer older.
         assert SEASON_AUDIO_ANSWER_VERSION == SEASON_AUDIO_VERSION + (end_picture.CHECK_VERSION - 1) * 1_000
-        # Season audio v11 (v10 a season on every disk, v11 half the episode fingerprinted and intros up to 300 s, §14
-        # 2026-09-27) with check 3 (2 the one scaler, 3 the end card), spec §14 2026-09-25.
-        assert (SEASON_AUDIO_VERSION, end_picture.CHECK_VERSION, SEASON_AUDIO_ANSWER_VERSION) == (11, 3, 2011)
+        # Season audio v10 (v9 speed by ear, v10 a season on every disk and the picking rules of §14 2026-09-27) with
+        # check 3 (2 the one scaler, 3 the end card), spec §14 2026-09-25.
+        assert (SEASON_AUDIO_VERSION, end_picture.CHECK_VERSION, SEASON_AUDIO_ANSWER_VERSION) == (10, 3, 2010)
 
 
 class TestFilesToReadAgain:
@@ -168,8 +168,8 @@ class TestFilesToReadAgain:
             "/movies/B/b.mkv": {"chapters": CHAPTER_RULES_VERSION},
         }
 
-    # Production's season audio versions (audit copy, 2026-09-25), and v9's and v10's answers under check 3.
-    @pytest.mark.parametrize("stored", [4, 5, 7, 2009, 2010])
+    # Production's season audio versions (audit copy, 2026-09-25), and v9's answers under check 3.
+    @pytest.mark.parametrize("stored", [4, 5, 7, 2009])
     @pytest.mark.parametrize("decided", [True, False], ids=["decided-by-season-audio", "needs-review"])
     def test_a_season_audio_answer_from_before_todays_check_is_listed(self, store, stored, decided):
         # Its end pictures were compared on each vendor's scaler without the end card (check 1): the re-run makes the
@@ -181,7 +181,7 @@ class TestFilesToReadAgain:
         else:
             _undecided(store, rec, T.INTRO, DecisionStatus.NEEDS_REVIEW)
 
-        assert versions.files_to_read_again(store, _settings()) == {"/tv/A/S01/e1.mkv": {"season_audio": 2011}}
+        assert versions.files_to_read_again(store, _settings()) == {"/tv/A/S01/e1.mkv": {"season_audio": 2010}}
 
     def test_a_file_resting_on_two_older_answers_is_listed_once_for_both(self, store):
         rec = _credits_text_file(store, "/tv/A/S01/e1.mkv", decided_by=("credits_text", "server_markers"))
