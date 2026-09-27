@@ -940,14 +940,21 @@ class _ItemServers:
         """
         return self._title if self._asked_ids else None
 
-    def title_asks(self) -> list[Callable[[], object]]:
-        """Per owning server whose item id for the file this run already knows (a hint, or looked up for another step),
-        a call for its external ids answer; a server whose id isn't known yet isn't asked for it."""
+    def title_asks(self, owners: Iterable[_Owning] | None = None) -> list[Callable[[], object]]:
+        """Per publishing owner (``owners``; every owning server when not given), a call for its external ids answer.
+
+        The item id is resolved inside the call itself, not here: ``resolve_remote_path_to_item_id`` is a real
+        network search with its own retries, so it must run on the title lookup's own bounded background thread
+        (``titles.look_up``), never on the file's own thread before that lookup even starts.
+        """
         asks = []
-        for owner in self.owning:
-            item_id = self._item_ids.get(owner.config.id) or self._hints.get(owner.config.id)
-            if item_id:
-                asks.append(lambda server=owner.server, item_id=str(item_id): server.get_external_ids(item_id))
+        for owner in owners if owners is not None else self.owning:
+
+            def ask(owner: _Owning = owner) -> object | None:
+                item_id = self.item_id(owner)
+                return owner.server.get_external_ids(item_id) if item_id else None
+
+            asks.append(ask)
         return asks
 
     def markers(self, owner: _Owning, item_id: str, duration_ms: int | None) -> list[Candidate] | None:
@@ -2600,8 +2607,8 @@ def _publish_to(
     # recorded on its item even with nothing to send; what is sent is exactly what an undecided type sends.
     # brief_db_wait: a worker whose job retries a busy write waits for Plex's database only
     # ``plex_db.WORKER_BUSY_TIMEOUT_S`` (the retry comes a few minutes later), also for another thread's check of it.
-    # notes: so the job log's "Sent to" line can say "our last sent" -- what we published there before this run's
-    # write, since it's about to be overwritten (None: unknown, the manual "publish now" path logs nothing).
+    # notes: so the job log's "Sent to" line can say "our last sent" (see the ``sent_before`` assignment below) --
+    # None: unknown, the manual "publish now" path logs nothing.
     cfg = owner.config
     path = rec.canonical_path
     db_timeout_s = ctx.db_timeout_s
@@ -2610,7 +2617,11 @@ def _publish_to(
     store = ctx.store
     last = store.get_publish_state(rec.id, cfg.id)
     if notes is not None:
-        notes.sent_before[cfg.id] = tuple(last.markers) if last is not None else None
+        # A row's own ``markers`` field keeps whatever an older WRITTEN attempt stored even once a later attempt
+        # only got as far as WAITING or FAILED (``_finish``, below: "rows that don't know the item keep the last
+        # one"). Only a WRITTEN row's markers are really what we last sent; anything else falls back to the
+        # server's own evidence (``_prior_markers``), rather than being read as this run's "our last sent".
+        notes.sent_before[cfg.id] = tuple(last.markers) if last is not None and last.status == "written" else None
 
     def _finish(
         status: ServerStatus,
@@ -3092,6 +3103,49 @@ def _not_on_disk(path: str, ctx: PipelineContext) -> ItemOutcome:
     return ItemOutcome(FileOutcome.SOURCE_GONE.value, replaced)
 
 
+def _built_line(build: Callable[[], str]) -> str | None:
+    """``build()``, or None (logged at debug) when building it raised."""
+    try:
+        return build()
+    except Exception as exc:
+        logger.debug("Couldn't write a job log line: {}", type(exc).__name__)
+        return None
+
+
+def _log_live(build: Callable[[], str], level: str = "INFO") -> None:
+    """Log one line as the file's work happens, live. Never raises: a bug building it (an unexpected shape in a
+    step's own data) mustn't fail the file or hold up another owner's write -- the same guard ``_log_file`` gives
+    the file's last lines, for every line logged before them.
+
+    Args:
+        build: Builds the line's text; logged only when it doesn't raise.
+        level: The line's level.
+    """
+    line = _built_line(build)
+    if line is not None:
+        write_line(line, level)
+
+
+def _log_source(notes: RunNotes, key: tuple[Source, str], build: Callable[[], str]) -> None:
+    """A source's (or a server's own markers') line, guarded like ``_log_live`` -- but logged at most once per run
+    for the same ``key`` (a source, or a server's id for its own markers): a worker picking up where the checking
+    thread left off, with nothing new to say about it, doesn't repeat the line. A source actually re-read this
+    stage (a fresh answer) is never routed through here, so a genuine change is never held back by it.
+
+    Args:
+        notes: The run's notes (``logged_sources`` remembers each key, across stages).
+        key: The source, and a server's id for its own markers' line (else "").
+        build: Builds the line's text; logged only when it doesn't raise and this key hasn't logged yet this run.
+    """
+    if key in notes.logged_sources:
+        return
+    line = _built_line(build)
+    if line is None:
+        return
+    notes.logged_sources.add(key)
+    write_line(line)
+
+
 def _attempt(
     item: ProcessableItem,
     ctx: PipelineContext,
@@ -3159,12 +3213,12 @@ def _attempt(
     ids, lookups_allowed, confirmed_kind = _resolve_kind(path_ids, servers, known_kind)
     types = _enabled_types(ctx.settings, ids)
     notes.types, notes.is_episode = types, ids.is_episode
-    title = _note_title(notes, item, ids, servers)
+    title = _note_title(notes, item, ids, servers, owners)
     if not notes.worker and not notes.start_logged:
         # A worker's own pickup line already named this (``log_pickup``); the checking thread names itself here,
         # live, rather than waiting for the file to finish.
         notes.start_logged = True
-        write_line(file_start_line(title, types, is_episode=ids.is_episode))
+        _log_live(lambda: file_start_line(title, types, is_episode=ids.is_episode))
     rec = ctx.store.upsert_file(
         FileIdentity(path, st.st_size, st.st_mtime_ns),
         duration_ms=probe.duration_ms if probe else None,
@@ -3189,13 +3243,17 @@ def _attempt(
         )
         notes.answered(Source.CHAPTERS)
         chapters_view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, {}, frozenset())
-        write_line(titled(title, source_line(Source.CHAPTERS, chapters_view)))
-    elif ctx.settings.source_enabled(Source.CHAPTERS.value) and (Source.CHAPTERS, "") not in notes.asked:
+        _log_source(
+            notes, (Source.CHAPTERS, ""), lambda v=chapters_view: titled(title, source_line(Source.CHAPTERS, v))
+        )
+    elif ctx.settings.source_enabled(Source.CHAPTERS.value):
         # Not reread this run (the file's unchanged): its line still comes from what's already stored, same as
-        # every other reused source, rather than being left out of the file's block. ``notes.asked`` already has it
-        # when an earlier stage of this same run (the checking thread) logged it: no second line for that.
+        # every other reused source, rather than being left out of the file's block (``_log_source`` skips it when
+        # an earlier stage of this same run -- the checking thread -- already logged it: no second line for that).
         chapters_view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, {}, frozenset())
-        write_line(titled(title, source_line(Source.CHAPTERS, chapters_view)))
+        _log_source(
+            notes, (Source.CHAPTERS, ""), lambda v=chapters_view: titled(title, source_line(Source.CHAPTERS, v))
+        )
     _mark_refreshed(ctx, path, Source.CHAPTERS)
     if not rec.duration_ms:
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
@@ -3246,7 +3304,7 @@ def _attempt(
             skipped_decided[source] = types
             if source is not Source.CHAPTERS and not (source in EPISODE_ONLY_SOURCES and not notes.is_episode):
                 view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
-                write_line(titled(title, source_line(source, view)))
+                _log_source(notes, (source, ""), lambda s=source, v=view: titled(title, source_line(s, v)))
             continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
@@ -3261,6 +3319,9 @@ def _attempt(
             ):
                 # the only daily-budgeted source is kept for files it could still decide
                 notes.not_asked[source] = "not asked (daily lookups kept for files it could still decide)"
+                if not (source in EPISODE_ONLY_SOURCES and not notes.is_episode):
+                    view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
+                    _log_source(notes, (source, ""), lambda s=source, v=view: titled(title, source_line(s, v)))
                 continue
             if not lookups_allowed:
                 notes.not_asked[source] = "not asked (no server confirmed whether it's a movie or an episode)"
@@ -3338,14 +3399,14 @@ def _attempt(
                     notes.not_asked[source] = f"not read (every server keeps its own {kept_names})"
                 pending = reading
             if not local and any(_needs_worker(ctx, rec, spec) for spec in pending):
-                _note_title(notes, item, ids, servers)  # the worker's pickup line names the file
+                _note_title(notes, item, ids, servers, owners)  # the worker's pickup line names the file
                 return None  # sources already refreshed stay marked; the worker refreshes the rest
             for spec in pending:
                 fell_back: list[str] = []
                 phases: list[str] = []
                 on_gpu = gpu is not None
                 device = worker_device(notes.worker) if on_gpu else ""
-                write_line(titled(title, reading_line(source, on_gpu=on_gpu, device=device)))
+                _log_live(lambda s=source, g=on_gpu, d=device: titled(title, reading_line(s, on_gpu=g, device=d)))
                 read_started = ctx.monotonic()
                 unanswered = _run_detector(
                     ctx,
@@ -3367,22 +3428,28 @@ def _attempt(
                     notes.unanswered[spec.source] = _detector_unanswered(unanswered)
                 evidence_now = ctx.store.evidence_rows(rec.id)
                 own_rows = [r for r in evidence_now if r.source is source and r.origin == ""]
-                write_line(
-                    titled(
+                seconds = ctx.monotonic() - read_started
+                fallback = fell_back[0] if fell_back else ""
+                gpu_read_nothing = CPU_RECHECK_PHASE in phases
+                _log_live(
+                    lambda s=source, r=own_rows, e=evidence_now, sec=seconds, fb=fallback, gn=gpu_read_nothing: titled(
                         title,
                         read_result_line(
-                            source,
-                            notes.unanswered.get(spec.source),
-                            own_rows,
-                            chapter_names(evidence_now),
-                            seconds=ctx.monotonic() - read_started,
-                            fallback=fell_back[0] if fell_back else "",
-                            gpu_read_nothing=CPU_RECHECK_PHASE in phases,
-                        ),
+                            s,
+                            notes.unanswered.get(s),
+                            r,
+                            chapter_names(e),
+                            seconds=sec,
+                            fallback=fb,
+                            gpu_read_nothing=gn,
+                        ),  # fmt: skip
                     )
                 )
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
+                # Its Reading/result lines already said this: a later stage's "already decided" render of the same
+                # source (``_log_source`` below) doesn't repeat it.
+                notes.logged_sources.add((source, ""))
         _mark_refreshed(ctx, path, source)
         if not gather_all:
             decisions = _decide(ctx, rec, types, intro_limit)
@@ -3390,20 +3457,22 @@ def _attempt(
         if source is Source.SERVER_MARKERS:
             view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
             for owner in owning:
-                write_line(
-                    titled(
-                        title,
-                        server_source_line(owner.config.id, owner.config.name, view, _UNUSED_SERVER_MARKERS),
-                    )
+                cfg = owner.config
+                _log_source(
+                    notes,
+                    (Source.SERVER_MARKERS, cfg.id),
+                    lambda i=cfg.id, n=cfg.name, v=view: titled(
+                        title, server_source_line(i, n, v, _UNUSED_SERVER_MARKERS)
+                    ),
                 )
         elif source is not Source.CHAPTERS and not hidden and not pending:
             view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
-            write_line(titled(title, source_line(source, view)))
+            _log_source(notes, (source, ""), lambda s=source, v=view: titled(title, source_line(s, v)))
         elif source is Source.SEASON_AUDIO and pending and not hidden:
             view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
             extra = last_seasons_audio_line(view)
             if extra:
-                write_line(titled(title, extra))
+                _log_live(lambda e=extra: titled(title, e))
 
     if cancelled():  # a detector stopped part way decides nothing: the file is left as it was for the next run
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
@@ -3427,7 +3496,7 @@ def _attempt(
         }
     decisions = _keep_published_before_rule_change(ctx, rec, decisions)
     decisions = _carry_over(ctx, rec, servers, owners, decisions)
-    write_line(titled(title, decided_line(decisions, types, ctx.store.evidence_rows(rec.id))))
+    _log_live(lambda: titled(title, decided_line(decisions, types, ctx.store.evidence_rows(rec.id))))
     fingerprint = ctx.settings.detection_fingerprint()
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
@@ -3468,7 +3537,8 @@ def _attempt(
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)
-        write_line(titled(title, server_result_line(_server_result(ctx, rec, row, decisions, notes))))
+        # A bug describing what a server got mustn't stop the next owner's write: each row is already stored above.
+        _log_live(lambda r=row: titled(title, server_result_line(_server_result(ctx, rec, r, decisions, notes))))
     waiting_to_retry = any(
         r["status"] == ServerStatus.WAITING.value and r.get("reason_code") in RETRY_REASON_CODES for r in rows
     )
@@ -3509,17 +3579,26 @@ def _unstored_lookup(source: Source, result: LookupResult | None) -> str:
     return f"unavailable ({detail})" if detail else "unavailable"
 
 
-def _prior_markers(notes: RunNotes | None, evidence: list, server_id: str) -> tuple[Marker, ...] | None:
-    """What a server held before this run's write: our own last-published record (``notes.sent_before``) when we've
-    published there before, else the server's own markers as its evidence (read this run or saved) says, else None
-    when neither is known."""
+def _prior_markers(notes: RunNotes | None, evidence: list, server_id: str) -> tuple[tuple[Marker, ...] | None, bool]:
+    """What a server held before this run's write, and whether that's ours to call a removal if a type is missing.
+
+    Returns:
+        ``(markers, is_ours)``: our own last-published record (``notes.sent_before``) when we've published there
+        before -- ``is_ours`` True, so a type missing from it now really was removed; else the server's own markers
+        as its evidence (read this run or saved) says -- ``is_ours`` False, since a type only there was never ours
+        to send in the first place, so never ours to call removed either; else ``(None, False)`` when neither is
+        known.
+    """
     sent_before = notes.sent_before.get(server_id) if notes is not None else None
     if sent_before is not None:
-        return sent_before
+        return sent_before, True
     own = [r for r in evidence if r.source in SERVER_SOURCES and r.origin == server_id]
     if not own:
-        return None
-    return tuple(Marker(r.type, r.start_ms, r.end_ms, ()) for r in own if r.type is not None and r.start_ms is not None)
+        return None, False
+    markers = tuple(
+        Marker(r.type, r.start_ms, r.end_ms, ()) for r in own if r.type is not None and r.start_ms is not None
+    )
+    return markers, False
 
 
 def _server_result(
@@ -3544,12 +3623,12 @@ def _server_result(
             item_kept = item_row.kept_types if item_row is not None else frozenset()
     kept = kept_types(decisions, item_kept)
     withheld = frozenset(t for t in kept if decisions[t].status is DecisionStatus.DECIDED)
-    had = (
+    had, had_is_ours = (
         _prior_markers(notes, ctx.store.evidence_rows(rec.id), row["server_id"])
         if row["status"] == (ServerStatus.WRITTEN.value)
-        else None
+        else (None, False)
     )
-    return ServerResult(row, ours, kept, withheld, had)
+    return ServerResult(row, ours, kept, withheld, had, had_is_ours)
 
 
 def _found_online(ctx: PipelineContext, rec: FileRecord, notes: RunNotes) -> bool:
@@ -3581,14 +3660,18 @@ def _listed_title(item: ProcessableItem) -> str:
     return "" if title == os.path.basename(item.canonical_path) else title
 
 
-def _note_title(notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: _ItemServers) -> str:
+def _note_title(
+    notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: _ItemServers, owners: list[_Owning]
+) -> str:
     """The file's title for its job log lines, found once per job (``job_log.file_title``). Never raises.
 
     An episode is named from its path, with no lookup. Anything else by its server's title: from the answer this run
     already has, then the title this process kept (``titles.TITLE_CACHE``), then the title its library listing gave
     (the year from its file name); only when the file's server was never asked this process, one lookup of at most
-    ``titles.LOOKUP_TIMEOUT_S``. Without a title, its file name. Called once the run's decisions are made (its log
-    lines, or its hand-off to a worker), outside any publisher's or Plex database's lock.
+    ``titles.LOOKUP_TIMEOUT_S`` (a publishing owner's item id, if not already known, is resolved on the lookup's own
+    background thread, not here: that's a real, unbounded network search). Without a title, its file name. Called
+    once the run's decisions are made (its log lines, or its hand-off to a worker), outside any publisher's or Plex
+    database's lock.
     """
     if notes.title:
         return notes.title
@@ -3606,11 +3689,7 @@ def _note_title(notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: 
         elif listed := _listed_title(item):
             notes.title = file_title(path, listed, path_year(path))
         elif found is None:
-            # Named live, right after pickup: no other step has resolved an owner's item id for us to reuse yet
-            # (that used to happen incidentally, later in the run), so it's resolved here for the lookup to use.
-            for owner in servers.owning:
-                servers.item_id(owner)
-            notes.title = file_title(path, *look_up_title(path, servers.title_asks()))
+            notes.title = file_title(path, *look_up_title(path, servers.title_asks(owners)))
         else:
             notes.title = display_name(path)
     except Exception as exc:
@@ -3767,8 +3846,11 @@ def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> N
     path = item.canonical_path
     notes = ctx._run_notes.get(path)
     title = (notes.title if notes is not None else "") or display_name(path)
-    types = notes.types if notes is not None and notes.types is not None else frozenset()
-    is_episode = notes.is_episode if notes is not None and notes.is_episode is not None else False
+    path_ids = ids_from_path(path)
+    is_episode = notes.is_episode if notes is not None and notes.is_episode is not None else path_ids.is_episode
+    # No checking stage ran first to work out the file's real ids (a server's own kind, an online id lookup): its
+    # settings alone still say what it's checked for, rather than wrongly saying every type it could have is off.
+    types = notes.types if notes is not None and notes.types is not None else _enabled_types(ctx.settings, path_ids)
     if notes is not None:
         notes.start_logged = True
     write_line(file_start_line(title, types, is_episode=is_episode, worker=worker))

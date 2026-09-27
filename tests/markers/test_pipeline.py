@@ -16,6 +16,7 @@ from media_preview_generator.job_kinds import ItemOutcome
 from media_preview_generator.markers import decide, pipeline, versions
 from media_preview_generator.markers.audio.fingerprint import ChromaprintState
 from media_preview_generator.markers.decide import DECIDE_RULES, DECIDE_RULES_VERSION, DecisionStatus, FileLimits
+from media_preview_generator.markers.job_log import RunNotes
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from media_preview_generator.markers.outcomes import (
     FILE_BUSY,
@@ -39,7 +40,7 @@ from media_preview_generator.markers.publishers.base import (
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.sources import ratelimit
 from media_preview_generator.markers.sources.online import LookupResult
-from media_preview_generator.markers.store import MarkerStore
+from media_preview_generator.markers.store import EvidenceRow, MarkerStore
 from media_preview_generator.processing.generator import CodecNotSupportedError
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library, ServerType
@@ -3177,6 +3178,38 @@ class TestRulesVersions:
             (Source.SERVER_MARKERS, None, pipeline.UNUSABLE_SERVER_MARKERS_DETAIL)
         ]
         server.get_emby_marker_state.assert_called_once_with("item-emby-1", missing_route_is_empty=True)
+
+
+class TestPriorMarkers:
+    """``_prior_markers``: our own last-published record (``notes.sent_before``) first, else the server's own
+    evidence, else neither known -- and, per case, whether the answer is ours to call a removal."""
+
+    INTRO = Marker(MarkerType.INTRO, 41_000, 72_000, ())
+    NO_EVIDENCE: list = []
+    TYPED_EVIDENCE = [EvidenceRow(Source.SERVER_MARKERS, "plex-1", T.CREDITS, 1_290_000, DUR, None, "", "")]
+
+    @pytest.mark.parametrize(
+        ("sent_before", "evidence", "expected_markers", "expected_is_ours"),
+        [
+            (None, [], None, False),
+            (None, TYPED_EVIDENCE, (Marker(T.CREDITS, 1_290_000, DUR, ()),), False),
+            ((), [], (), True),
+            ((), TYPED_EVIDENCE, (), True),
+            ((INTRO,), [], (INTRO,), True),
+            ((INTRO,), TYPED_EVIDENCE, (INTRO,), True),
+        ],
+        ids=["none-no-evidence", "none-typed-evidence", "empty-no-evidence", "empty-typed-evidence",
+             "markers-no-evidence", "markers-typed-evidence"],
+    )  # fmt: skip
+    def test_the_matrix(self, sent_before, evidence, expected_markers, expected_is_ours):
+        notes = RunNotes(sent_before={"plex-1": sent_before})
+        assert pipeline._prior_markers(notes, evidence, "plex-1") == (expected_markers, expected_is_ours)
+
+    def test_no_notes_falls_back_to_evidence(self):
+        assert pipeline._prior_markers(None, self.TYPED_EVIDENCE, "plex-1") == (
+            (Marker(T.CREDITS, 1_290_000, DUR, ()),),
+            False,
+        )
 
 
 class TestPublishFanOut:

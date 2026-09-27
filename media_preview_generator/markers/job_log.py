@@ -160,6 +160,11 @@ class RunNotes:
             published there at all, so a written status falls back to what the server's own evidence says it had).
         start_logged: Whether the file's own start line (no worker) was already written this attempt, so a retry on
             the same checking thread doesn't announce it twice.
+        logged_sources: Each ``(source, origin)`` (origin: a server's id for its own markers, else "") a line was
+            already logged for this run, whether its own line or its read (``reading_line``/``read_result_line``): a
+            worker picking up where the checking thread left off, with nothing new to say about a source, doesn't
+            repeat its line (a source actually re-read this stage marks the key itself, live, so a genuine change is
+            never held back by it -- it's simply never checked against this set in the first place).
         logged: Whether the file's lines were written.
     """
 
@@ -175,6 +180,7 @@ class RunNotes:
     cpu_rerun: bool = False
     sent_before: dict[str, tuple[Marker, ...] | None] = field(default_factory=dict)
     start_logged: bool = False
+    logged_sources: set[tuple[Source, str]] = field(default_factory=set)
     logged: bool = False
 
     def answered(self, source: Source, origin: str = "") -> None:
@@ -192,13 +198,20 @@ class RunNotes:
 @dataclass(frozen=True)
 class ServerResult:
     """One server's row for one file, with our markers it shows now, which types it keeps as its own, which of those
-    this file decided (so ours of that type wasn't written there), and what it held before this run's write."""
+    this file decided (so ours of that type wasn't written there), and what it held before this run's write.
+
+    Attributes:
+        had_is_ours: Whether ``had`` is our own last-published record (``notes.sent_before``), so a type missing
+            from it now really was removed; False when it's a fallback (the server's own evidence, read this run or
+            saved), which was never ours to call removed in the first place -- a type only there is simply left out.
+    """
 
     row: Mapping
     ours: tuple[Marker, ...] = ()
     kept: frozenset[MarkerType] = frozenset()
     withheld: frozenset[MarkerType] = frozenset()
     had: tuple[Marker, ...] | None = None
+    had_is_ours: bool = True
 
 
 def write_line(text: str, level: str = "INFO") -> None:
@@ -655,10 +668,13 @@ def _by_type(markers: tuple[Marker, ...] | None) -> dict[MarkerType, Marker] | N
 
 
 def _written_phrase(result: ServerResult, name: str) -> str:
-    """What a written status says: added, replaced (old → new) or removed, per type, grouped by which it was.
+    """What a written status says: added, replaced (old → new), unchanged or removed, per type, grouped by which it
+    was.
 
-    ``result.had`` is the server's prior value: ``result.sent_before`` when we've published there before, else the
-    server's own markers as its evidence read this run or saved says, else None when neither is known.
+    ``result.had`` is the server's prior value: our own last-published record (``RunNotes.sent_before``) when we've
+    published there before -- ``result.had_is_ours`` True, so a type it's missing now really was removed -- else the
+    server's own markers as its evidence read this run or saved says (a type it shows that we never sent isn't ours
+    to call removed, so it's simply left out), else None when neither is known.
     """
     new_by_type = {m.type: m for m in result.ours}
     if not new_by_type and not result.kept:
@@ -670,25 +686,28 @@ def _written_phrase(result: ServerResult, name: str) -> str:
         had_by_type = {t: m for t, m in had_by_type.items() if t not in result.kept}
     order = list(MarkerType)
     all_types = sorted({*new_by_type, *(had_by_type or {})}, key=order.index)
-    added, replaced, removed, unread = [], [], [], []
+    added, replaced, unchanged, removed, unread = [], [], [], [], []
     for mtype in all_types:
         new = new_by_type.get(mtype)
         had = (had_by_type or {}).get(mtype)
         if new is not None and had is not None:
             if (had.start_ms, had.end_ms) == (new.start_ms, new.end_ms):
-                added.append(f"{mtype.value} {_span(new.start_ms, new.end_ms)}")
+                unchanged.append(f"{mtype.value} {_span(new.start_ms, new.end_ms)}")
             else:
                 replaced.append(f"{mtype.value} {_span(had.start_ms, had.end_ms)} → {_span(new.start_ms, new.end_ms)}")
         elif new is not None:
             entry = f"{mtype.value} {_span(new.start_ms, new.end_ms)}"
             (unread if had_by_type is None else added).append(entry)
-        else:
+        elif result.had_is_ours:
             removed.append(mtype.value)
+        # else: only the server's own evidence shows this type -- never ours to send, so never ours to call removed
     parts = []
     if added:
         parts.append(f"added {_and(added)}")
     if replaced:
         parts.append(f"replaced {_and(replaced)}")
+    if unchanged:
+        parts.append(f"unchanged {_and(unchanged)}")
     if removed:
         holds = "it no longer holds" if len(removed) == 1 else "they no longer hold"
         parts.append(f"removed {_and(removed)} ({holds})")
@@ -997,15 +1016,19 @@ def server_source_line(server_id: str, name: str, view: _SourceView, server_deta
 
 
 def nothing_was_sent(rows: Iterable[Mapping]) -> bool:
-    """Whether none of a file's server rows say markers were written this run (the done line then says so).
+    """Whether every one of a file's server rows already had nothing new to send (the done line then says so).
+
+    A waiting, failed or skipped row is something unsettled, not simply "nothing new": this is only true when
+    every row is ``ServerStatus.UP_TO_DATE`` or ``ServerStatus.NONE`` (including no rows at all).
 
     Args:
         rows: The file's server rows.
 
     Returns:
-        True when no row is ``ServerStatus.WRITTEN``.
+        True when every row is ``ServerStatus.UP_TO_DATE`` or ``ServerStatus.NONE``.
     """
-    return not any(row.get("status") == ServerStatus.WRITTEN.value for row in rows)
+    settled = (ServerStatus.UP_TO_DATE.value, ServerStatus.NONE.value)
+    return all(row.get("status") in settled for row in rows)
 
 
 def kept_types(decisions: Mapping[MarkerType, TypeDecision], item_kept: Iterable[MarkerType]) -> frozenset[MarkerType]:
