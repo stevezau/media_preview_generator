@@ -527,8 +527,8 @@ def _past_prose(
     :func:`cards.cards`) and is read once at full size (``cards.READ_SCALE``) on the worker's device. When it reads as
     prose, the rest of ``cards.CARD_WINDOW_S`` after it is decoded at 1 fps at both sizes, the 640x360 frames without
     the tall boxes 320x180 didn't box (:func:`_small_text`: small credit cards count, dark footage doesn't), and each
-    card there is read in turn: the start moves to the first that isn't prose. It never moves to or past the answer's
-    end, and the end never moves.
+    card there is read in turn: the start moves to the first that isn't prose. Both windows stop at the answer's end
+    when it has one (a scene follows the roll). The start never moves to or past that end, and the end never moves.
 
     Args:
         path: The media file.
@@ -559,8 +559,13 @@ def _past_prose(
         logger.debug("{}: the card at {:.1f} s reads {}", name, card.read_s, lines)
         return lines
 
+    def window_end(length_s: float) -> float:
+        # Never past the roll's end: there only the scene after it plays, and no card there could be the new start. The
+        # end is the roll's last credit frame, and a -t window leaves its own last second out, so it runs 1 s beyond.
+        return start + length_s if found.end_s is None else min(start + length_s, found.end_s + 1.0)
+
     show(READING_CARD_PHASE)
-    near = rule_j.without_overlays(one_fps(start, start + cards.FIRST_CARD_WINDOW_S), found.overlays)
+    near = rule_j.without_overlays(one_fps(start, window_end(cards.FIRST_CARD_WINDOW_S)), found.overlays)
     first = next(iter(cards.cards(near, start)), None)
     if first is None or first.first_s > text_at_start[0] + LANDS_ON_S:
         # 320x180 first sees text later than the start's own: the start is on text only a 640x360 reading boxed (small
@@ -568,14 +573,18 @@ def _past_prose(
         return found
 
     def rest() -> list[cards.Card]:
-        end_s = start + cards.CARD_WINDOW_S
+        end_s = window_end(cards.CARD_WINDOW_S)
+        if end_s <= first.last_s + 1.0:  # the first card runs to the roll's end: no second card to find
+            return []
+        cut_by_the_window = found.end_s is None or end_s < found.end_s + 1.0
         seen = {row[0]: rule_j.boxes_of(row) for row in one_fps(first.last_s, end_s)}
         larger = rule_j.without_overlays(_small_text(one_fps(first.last_s, end_s, RETRY_SCALE), seen), found.overlays)
-        # A card still on screen in the window's last second is cut short there (it would read as a one-second card).
+        # A card still on screen in the window's last second is cut short there (it would read as a one-second card);
+        # one at the roll's own end just ends with the roll.
         return [
             card
             for card in cards.cards(larger, first.last_s)
-            if first.last_s < card.first_s and card.last_s + 1.0 < end_s
+            if first.last_s < card.first_s and not (cut_by_the_window and card.last_s + 1.0 >= end_s)
         ]
 
     moved = cards.past_prose(first, rest, read)

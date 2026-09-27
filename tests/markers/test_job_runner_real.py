@@ -1322,12 +1322,17 @@ class TestACancelStopsTheFileWheneverItLands:
             held_at("text detection")
             return [()] * len(planes)
 
+        def read_text(planes, **_kwargs):
+            held_at("card read")
+            return [["The investigation is now closed."]] * len(planes)
+
         def frozen():
             held_at("decode poll")
             return False
 
         pool = MagicMock()
         pool.detect_boxes.side_effect = detect_boxes
+        pool.read_text.side_effect = read_text
         monkeypatch.setattr(job_runner, "load_config", lambda: config)
         monkeypatch.setattr(
             job_runner, "_build_selected_gpus", lambda s, **kw: [("NVIDIA", "cuda:0", {"name": "Test GPU"})]
@@ -1374,9 +1379,10 @@ class TestACancelStopsTheFileWheneverItLands:
         store.close()
 
     @staticmethod
-    def _cancel_while_held(engine, lab, paths, *, hold_at, arm_on=None, before_cancel=None):
+    def _cancel_while_held(engine, lab, paths, *, hold_at, arm_on=None, before_cancel=None, before_release=None):
         """Run a job on its own thread, hold the file at ``hold_at``, land the cancel, and let the file go on once the
-        job's thread has ended. Returns the job and the markers database as it was when the cancel landed."""
+        job's thread has ended (``before_release`` runs just before, with the file still held). Returns the job and the
+        markers database as it was when the cancel landed."""
         lab.hold_at = hold_at
         if arm_on is None:
             lab.hold.armed.set()
@@ -1398,6 +1404,8 @@ class TestACancelStopsTheFileWheneverItLands:
         assert not runner.is_alive(), "the job's thread didn't end after the cancel"
         # The teardown cleared the job's cancel flag: from here on the file sees only what the dispatcher kept.
         assert engine.jm.is_cancellation_requested(job.id) is False
+        if before_release is not None:
+            before_release()
         lab.hold.released.set()
         return engine.jm.get_job(job.id), stored
 
@@ -1438,12 +1446,42 @@ class TestACancelStopsTheFileWheneverItLands:
         assert lab.picked_up == []
         assert lab.store.get_file(lab.episodes[0]) is None
 
+    @staticmethod
+    def _decode_ends_while_held(lab):
+        # The request is still busy (a helper starting takes 10-14 s): the decode must already be gone, not wait for it.
+        def check():
+            assert _wait_for(lambda: not [pid for pid, _argv in lab.started() if _running(pid)], timeout=3), (
+                "the decode ran on while text detection was busy"
+            )
+
+        return check
+
     def test_a_cancel_while_a_fresh_apps_text_detection_helper_starts_stops_the_credit_text_decode(self, engine, lab):
-        # The first text detection request of a fresh app waits for its helper to start and self-test (seconds): the
-        # lab row's cancel lands there, just after the decode appears.
-        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="text detection")
+        # The first text detection request of a fresh app waits for its helper to start and self-test (10-14 s): the
+        # lab row's cancel lands there, just after the decode appears, and ffmpeg stops then, not after the request.
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="text detection",
+                                              before_release=self._decode_ends_while_held(lab))  # fmt: skip
         self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)
         assert "rawvideo" in lab.started()[0][1]
+
+    def test_a_cancel_during_the_card_read_stops_its_decode_and_stores_nothing(self, engine, lab, monkeypatch):
+        # Credit text v8 reads the card the credits start lands on: a full-size one-second decode whose frame goes to
+        # the helper's reader. The roll's own readings are stood in for (a start on a dark card, and the card's 1 fps
+        # rows), so the file's first decode is the card read, held in the reader when the cancel lands.
+        from media_preview_generator.markers.credits import detector, frames
+
+        start_s = DURATION / 1000 - 100
+        card = ((30, 70, 290, 80),)
+        found = detector.CreditsTextResult(start_s, None, ((start_s, 1, 12.0, card),), (), (), ())
+        monkeypatch.setattr(detector, "_the_roll", lambda path, read: found)
+        monkeypatch.setattr(frames, "decode_rows", lambda path, **kwargs: [
+            (start_s + t, 1, 12.0, card) for t in range(5)
+        ])  # fmt: skip
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="card read",
+                                              before_release=self._decode_ends_while_held(lab))  # fmt: skip
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)
+        (read,) = [argv for _pid, argv in lab.started()]
+        assert f"-ss {start_s + 2:.3f} -t 1.000" in read and "scale=1280:720" in read  # the card's read, full size
 
     def test_a_cancel_during_the_season_audio_fingerprint_stops_it(self, engine, lab):
         lab.source = "season_audio"

@@ -658,9 +658,12 @@ rest of the 90 s after the start (`cards.CARD_WINDOW_S`, twice Gandhari's 46 s o
 in turn, and the start moves to the first card that isn't prose or is on screen for a single second (text on the move:
 a crawl, where the roll clearly continues). The first card is read however long it stays: the start's second can be
 its fade-in alone (#SKYKING). Prose to the window's end, or a card at or past the answer's end, keeps the start; the
-end never moves. The answer keeps the old start (`prose_start_s`), and a credits chapter from 10 s before it to the
+end never moves. Both windows stop at the answer's end when a scene follows the roll: nothing past the credits is
+decoded. The answer keeps the old start (`prose_start_s`), and a credits chapter from 10 s before it to the
 new start is read as moving (`chapter_origin`). A card that can't be read (a slow or stalled decode, a helper that
-died) keeps the start the roll gave; a GPU failure is the worker's CPU rerun, as at 640×360. `CREDITS_TEXT_VERSION` 8
+died) keeps the start the roll gave; a GPU failure is the worker's CPU rerun, as at 640×360. A cancel kills every credits
+decode's ffmpeg within 0.1 s (`frames.run_decode`'s watcher), even while a text detection or reading request is in
+flight: a fresh app's first request waits 10–14 s for its helper to start and self-test (lab phase 3 row 6). `CREDITS_TEXT_VERSION` 8
 reads every stored answer again once.
 Measured on the same decodes as v7 (frame checks in the README): the 14 named files 1 → 12 right (Accused ×7, Breach,
 #SKYKING, A Beautiful Imperfection, Gandhari's closing title after its last shot; Avengers kept; To Dye For 41 → 21 s

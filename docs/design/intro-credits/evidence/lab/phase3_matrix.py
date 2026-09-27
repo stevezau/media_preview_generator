@@ -1052,6 +1052,11 @@ def row_16_roll_to_the_end() -> dict:
     decodes = file_decodes(evidence.get("decodes", []))
     refines = [a for a in decodes if " -t 21.000 " in f" {a} "]
     past_start = [a for a in decodes if start_ms is not None and (decode_start_s(a) or 0) >= start_ms / 1000]
+    # The end window is a 1 fps -t 21 window from 1 s before the roll's last credit keyframe, so after the start. Since
+    # credit text v8 the card the start lands on is decoded too (-t 30 from the start, and -t 1 at 1280x720 to read it),
+    # inside the roll: those start at or after the start as well, and aren't a window past the credits.
+    end_windows = [a for a in past_start if " -t 21.000 " in f" {a} "]
+    card_step = [a for a in past_start if a not in end_windows]
     marker = (evidence.get("decision") or {}).get("marker") or {}
 
     def published(sid: str) -> dict | None:
@@ -1076,14 +1081,19 @@ def row_16_roll_to_the_end() -> dict:
         **{f"{sid} says nothing about skipping to the end": "Emby skips to the end of the file"
            not in ((evidence.get("servers", {}).get(sid) or {}).get("publish_message") or "")
            for sid in p2.EMBY_SERVERS},
-        "no window past the credits was seen decoding": not past_start,
+        "no window past the credits was seen decoding": not end_windows,
+        # The card step stays inside the roll, which here runs to the end of the file.
+        "the card step's decodes stay inside the roll": all(
+            (decode_start_s(a) or 0) < OPEN_MOVIE_MS / 1000 for a in card_step
+        ),
     }  # fmt: skip
     # The stored end being None is decisive for what was stored. It implies no end window was decoded only because
     # this fixture's coarse end sits inside the 30 s bound (rule_j.KEEP_AFTER_CREDITS_S): in general credits_end can
     # also return None after decoding the window, when the refined end fails that same check. A sampler can still
     # miss a 21 s window's decode (under a second on the P5000), so the process check above corroborates, it doesn't
     # stand on its own.
-    notes = [f"decodes seen: {len(decodes)} ({len(refines)} refine window(s)) in {sampler.samples} process samples"]
+    notes = [f"decodes seen: {len(decodes)} ({len(refines)} refine window(s), {len(card_step)} of the card step) in "
+             f"{sampler.samples} process samples"]  # fmt: skip
     return checks_result(16, "A roll that runs to the end of the file", premise, checks, evidence, notes)
 
 

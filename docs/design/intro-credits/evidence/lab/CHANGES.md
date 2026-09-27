@@ -51,3 +51,9 @@ it wasn't run here.
 - `phase4_matrix.set_settings` no longer sets the removed "Publish when".
 - `phase3_matrix.ProcessSampler` (rows 3, 4, 5, 7, 9, 16) runs one `ps` loop inside the app container every 0.05 s for
   the whole block, instead of a new `docker exec` every 0.5 s, and stops it through a stop file when the block ends.
+
+## Credit text v8 (#327, 2026-09-28)
+
+| Phase / row | Old expectation | New expectation | Why (cite) |
+|---|---|---|---|
+| 3 / 16 | No decode starts at or after the stored start ("no window past the credits") | No end window (a 1 fps `-t 21` window after the start) is decoded, and the card step's decodes (`-t 30` from the start, `-t 1` at 1280×720 to read the card) start inside the roll, which runs to the end of the file | Credit text v8 reads the card the start lands on when it is dark (spec §5.4 "Version 8, prose cards"): its windows start at the start and stop at the roll's end (`detector._past_prose`). Row 16's synthetic roll starts on a dark card, so its first run on #327 saw `-ss 541 -t 30` and `-ss 541 -t 1`, both inside the 541–660 s roll |

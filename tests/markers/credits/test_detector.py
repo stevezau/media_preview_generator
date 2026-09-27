@@ -2799,6 +2799,56 @@ class TestProseCards:
         moved = detector._past_prose(MOVIE.canonical_path, later_end, decode=decode, read_text=read_text, show=print)
         assert (moved.start_s, moved.end_s, moved.prose_start_s) == (5701.0, 5702.0, 5690.0)
 
+    @pytest.mark.parametrize(
+        ("end_s", "first_window", "rest_window"),
+        [(None, 30.0, 86.0), (5702.0, 13.0, 9.0), (5800.0, 30.0, 86.0)],
+        ids=["roll-to-the-end", "roll-ends-inside-the-windows", "roll-ends-after-them"],
+    )
+    def test_the_card_windows_stop_at_the_rolls_end(self, monkeypatch, probes, end_s, first_window, rest_window):
+        # A roll that ends before the file (a scene follows) is read no further than its end: past it there is no card
+        # the start could move to, only the scene. A roll that runs to the end of the file is inside the file's end.
+        calls = []
+
+        def decodes(path, **kwargs):  # the rows of each window only, as a decode gives them
+            calls.append(kwargs)
+            lo, hi = kwargs["start_s"], kwargs["start_s"] + kwargs["length_s"]
+            return [row for row in AFTER_START if lo <= row[0] < hi]  # -t: the window's last second is out
+
+        reads = Reads((5690, 5699, PROSE), (5701, 5704, CREDIT))
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        monkeypatch.setattr(detector.frames, "read_text_at", reads)
+        found = detector.CreditsTextResult(5690.0, end_s, tuple(STORY + ROLL), tuple(FINE), ())
+        decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
+                  "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
+                  "ffmpeg_threads": None}  # fmt: skip
+        result = detector._past_prose(MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=print)
+        windows = [(call["start_s"], call["length_s"], call["scale"]) for call in calls]
+        assert windows == [(5690.0, first_window, 1), (5694.0, rest_window, 1), (5694.0, rest_window, 2)]
+        if end_s is not None:
+            assert all(call["at_s"] <= end_s for call in reads.calls)
+        # The credit card's two seconds are read whole, the roll's last credit frame (its end) included, and the start
+        # moves to it.
+        assert (5702.0 if end_s == 5702.0 else 5703.0) in [call["at_s"] for call in reads.calls]
+        assert (result.start_s, result.prose_start_s) == (5701.0, 5690.0)
+
+    def test_a_last_prose_card_at_the_rolls_end_is_read_and_keeps_the_start(self, monkeypatch, probes):
+        # The last card runs to the roll's end (5701-5702) and is prose too: read whole, not taken for a crawl for
+        # missing its last second, so the start stays (prose to the end of what there is).
+        def decodes(path, **kwargs):
+            lo, hi = kwargs["start_s"], kwargs["start_s"] + kwargs["length_s"]
+            return [row for row in AFTER_START if lo <= row[0] < hi]
+
+        reads = Reads((5690, 5704, PROSE))
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        monkeypatch.setattr(detector.frames, "read_text_at", reads)
+        found = detector.CreditsTextResult(5690.0, 5702.0, tuple(STORY + ROLL), tuple(FINE), ())
+        decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
+                  "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
+                  "ffmpeg_threads": None}  # fmt: skip
+        result = detector._past_prose(MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=print)
+        assert result is found
+        assert [call["at_s"] for call in reads.calls] == [5692.0, 5698.0, 5702.0]
+
     def test_without_a_reader_no_card_is_read(self, monkeypatch, probes):
         decodes = Decodes(STORY + ROLL, FINE)
         result, _ = self._find(monkeypatch, decodes, Reads(), text=None)
