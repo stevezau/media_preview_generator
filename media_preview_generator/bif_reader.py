@@ -5,17 +5,26 @@ preview thumbnails.  The write side lives in media_processing.generate_bif().
 """
 
 import os
+import statistics
 import struct
 from dataclasses import dataclass, field
 
 BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
 _HEADER_SIZE = 64
 _SENTINEL_TIMESTAMP = 0xFFFFFFFF
+# Roku's spec: a timestamp multiplier of 0 in the header means 1000 ms.
+_DEFAULT_MULTIPLIER_MS = 1000
 
 
 @dataclass(frozen=True)
 class BifMetadata:
-    """Parsed BIF file header and index information."""
+    """Parsed BIF file header and index information.
+
+    ``frame_interval_ms`` is the time between frames: the header's timestamp multiplier times the step between the
+    index's timestamps (:func:`interval_from_index`). ``header_interval_ms`` is the header's own field as written:
+    the frame-reuse check compares that, because a BIF this app wrote states its interval there, and one another
+    writer made (width and quality unknown) must never pass for ours.
+    """
 
     path: str
     version: int
@@ -25,6 +34,29 @@ class BifMetadata:
     created_at: float
     frame_offsets: list[int] = field(repr=False)
     frame_sizes: list[int] = field(repr=False)
+    header_interval_ms: int = 0
+
+
+def interval_from_index(multiplier_ms: int, timestamps: list[int]) -> int:
+    """The time between a BIF's frames, from its header multiplier and index timestamps.
+
+    Each index entry's timestamp counts in units of the header's multiplier (Roku's BIF spec), and a multiplier of 0
+    means 1000 ms. This app writes the interval as the multiplier and 0, 1, 2… as timestamps; other writers leave the
+    multiplier at 0 and count seconds (0, 2, 4…). Reading the header field alone made the second kind "0 s apart".
+
+    Args:
+        multiplier_ms: The header's timestamp multiplier (bytes 16-19).
+        timestamps: The index table's timestamps, in order.
+
+    Returns:
+        Milliseconds between frames (the median step, so one odd entry doesn't skew it). With no two timestamps apart
+        (a one-frame file) there is no step to read and the header's own field is the answer, 0 included.
+    """
+    unit = multiplier_ms or _DEFAULT_MULTIPLIER_MS
+    steps = [b - a for a, b in zip(timestamps, timestamps[1:], strict=False) if b > a]
+    if not steps:
+        return multiplier_ms
+    return int(round(statistics.median(steps) * unit))
 
 
 def read_bif_metadata(path: str) -> BifMetadata:
@@ -51,13 +83,14 @@ def read_bif_metadata(path: str) -> BifMetadata:
 
         version = struct.unpack("<I", f.read(4))[0]
         frame_count = struct.unpack("<I", f.read(4))[0]
-        frame_interval_ms = struct.unpack("<I", f.read(4))[0]
+        multiplier_ms = struct.unpack("<I", f.read(4))[0]
 
         f.seek(_HEADER_SIZE)
 
         offsets: list[int] = []
+        timestamps: list[int] = []
         for _ in range(frame_count):
-            f.read(4)  # skip timestamp (sequential counter, unused)
+            timestamps.append(struct.unpack("<I", f.read(4))[0])
             offset = struct.unpack("<I", f.read(4))[0]
             offsets.append(offset)
 
@@ -73,11 +106,12 @@ def read_bif_metadata(path: str) -> BifMetadata:
         path=path,
         version=version,
         frame_count=frame_count,
-        frame_interval_ms=frame_interval_ms,
+        frame_interval_ms=interval_from_index(multiplier_ms, timestamps),
         file_size=file_size,
         created_at=created_at,
         frame_offsets=offsets,
         frame_sizes=sizes,
+        header_interval_ms=multiplier_ms,
     )
 
 

@@ -292,8 +292,12 @@ function _updateOperatorActions(job) {
     if (isActiveChain) cancelBtn.classList.remove('d-none');
 
     const bif = _firstBifPathFromJob(job);
+    const onlyFile = (cfg.webhook_paths || []).length === 1 ? cfg.webhook_paths[0] : '';
     if (bif) {
-        openBifBtn.href = '/bif-viewer?bif=' + encodeURIComponent(bif);
+        // The job's one file opens the whole Inspector; a bare preview path opens just its frames.
+        openBifBtn.href = onlyFile
+            ? '/inspector?path=' + encodeURIComponent(onlyFile)
+            : '/inspector?bif=' + encodeURIComponent(bif);
         openBifBtn.classList.remove('d-none');
     } else {
         openBifBtn.removeAttribute('href');
@@ -1573,38 +1577,23 @@ function renderFileResultsTable(files) {
         // landed on. For single-server installs it's one pill; for
         // multi-server fan-out it's one per target.
         var serversHtml = _renderFileServerPills(f.servers || [], showServerStatus);
-        // D11 \u2014 for files that have a BIF on disk (generated this run
-        // OR already existed), show a shortcut to /bif-viewer pre-loaded
-        // with this file. Skipped/failed-with-no-output files don't get
-        // the shortcut \u2014 there'd be nothing to preview.
+        // Every row whose file is a full path opens the Inspector on that file: its preview frames and its intro
+        // & credits on one page, so a preview job's rows and an Intro & Credits job's rows (the Needs review filter
+        // included) both link there. A row without a full path but with a BIF opens just that preview's frames.
         //
-        // Bug fix: the button used to live inside the same `text-truncate`
-        // td as the filename, so a long path would push it off-screen
-        // (Bootstrap text-truncate sets white-space:nowrap + overflow:
-        // hidden). Wrap in a flex row with `flex-shrink-0` on the button
-        // so the filename truncates around it instead of swallowing it.
+        // The button sits in a flex row with `flex-shrink-0` so a long file name truncates around it instead of
+        // pushing it off-screen (Bootstrap text-truncate sets white-space:nowrap + overflow: hidden).
         var inspectorBtn = '';
-        if (fileName && (f.outcome === 'generated' || f.outcome === 'skipped_bif_exists' || f.outcome === 'skipped_output_exists' || f.outcome === 'published')) {
-            // D34 — when the per-file row carries the absolute BIF path
-            // (recorded by Worker._capture_publishers from the publisher
-            // result), deep-link straight to it so the viewer skips the
-            // Plex title-search heuristic. The title-search path was
-            // mis-resolving episodes whose release-group suffix happened
-            // to look like a season/episode tag (e.g. "Fire Country" hit
-            // "Fire Country (2022)E17 - …-NTb" which the SxxExx regex
-            // fixed but the underlying search is still a guess).
-            // Falling back to ?file=<source_path> when no bif_path is
-            // present keeps older job histories functional.
-            var bifPath = f.bif_path || '';
-            var inspectorHref;
-            if (bifPath) {
-                inspectorHref = '/bif-viewer?bif=' + encodeURIComponent(bifPath);
-            } else {
-                inspectorHref = '/bif-viewer?file=' + encodeURIComponent(fileName);
-            }
+        var inspectorHref = '';
+        if (fileName.charAt(0) === '/') {
+            inspectorHref = '/inspector?path=' + encodeURIComponent(fileName);
+        } else if (f.bif_path) {
+            inspectorHref = '/inspector?bif=' + encodeURIComponent(f.bif_path);
+        }
+        if (inspectorHref) {
             inspectorBtn = '<a href="' + inspectorHref
                 + '" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-2 flex-shrink-0"'
-                + ' title="Open in Preview Inspector"><i class="bi bi-eye"></i></a>';
+                + ' title="Open in the Inspector" aria-label="Open in the Inspector"><i class="bi bi-eye"></i></a>';
         }
 
         var serverNotes = _renderFileServerNotes(f.servers || [], showServerStatus);

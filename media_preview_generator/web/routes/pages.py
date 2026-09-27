@@ -1,5 +1,7 @@
 """Page routes for the web interface (main blueprint)."""
 
+from urllib.parse import urlencode
+
 from flask import redirect, render_template, request, session, url_for
 from loguru import logger
 
@@ -120,16 +122,27 @@ def schedules_page():
     )
 
 
+@main.route("/inspector")
+@login_required
+def inspector():
+    """Inspector: find a film or episode, then see its preview frames and its intro and credits on one page.
+
+    ``?path=<local media path>`` opens that file; ``?q=`` starts a search; ``?bif=`` opens a bare preview file.
+    """
+    return render_template("inspector.html")
+
+
 @main.route("/bif-viewer")
 @login_required
 def bif_viewer():
-    """Preview Inspector: BIF thumbnails, and the Intro & Credits tab.
+    """The old Preview Inspector address: the Inspector, with the link's query kept (``?file=``, ``?bif=``).
 
-    ``?tab=markers`` (the Tools menu's "Intro & Credits" entry) opens the page on the Intro & Credits tab.
+    ``?tab=markers`` (the old Intro & Credits entry) has nothing to choose any more and is dropped.
     """
-    return render_template(
-        "bif_viewer.html", initial_tab="markers" if request.args.get("tab") == "markers" else "frames"
-    )
+    # Encoded here, not passed to url_for: a query key such as "_external" or "endpoint" would steer url_for itself.
+    params = [(k, v) for k, v in request.args.items(multi=True) if k != "tab"]
+    query = urlencode(params)
+    return redirect(url_for("main.inspector") + (f"?{query}" if query else ""), code=302)
 
 
 @main.route("/servers")

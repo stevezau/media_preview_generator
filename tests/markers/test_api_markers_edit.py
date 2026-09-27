@@ -515,10 +515,10 @@ class TestUnlock:
 # Adding a marker by hand (phase 4, built 2026-09-21 to the answers relayed with the go-ahead)
 # ---------------------------------------------------------------------------
 
-# The starting times markers_inspector.addSeed() puts on the timeline, in this route's body shape. ``end_ms: None``
-# is how "runs to the end of the file" is sent, which is what the credits and preview seeds turn the switch on for.
-# These are a copy, not the source: ``TestAddSeedBounds`` in tests/e2e/test_intro_credits_inspector.py drives the
-# shipped ``window.markersEditor.addSeed`` itself, so change both files together.
+# The starting times the Inspector's Adjust puts down for a marker it adds (``inspector.js`` ``addCard``), in this
+# route's body shape. ``end_ms: None`` is how "runs to the end of the file" is sent, which is what the credits seed
+# turns the switch on for. These are a copy, not the source: ``TestAdjust`` in tests/e2e/test_inspector.py adds one
+# through the page, so change both files together.
 ADD_HEAD_MS = 30_000
 ADD_TAIL_MS = {"credits": 60_000, "preview": 30_000}
 

@@ -1,18 +1,17 @@
-"""Backend-real E2E: BIF viewer renders REAL JPEG frames from a REAL BIF file.
+"""Backend-real E2E: the Inspector renders REAL JPEG frames from a REAL BIF file.
 
-The audit called this out: every existing ``test_preview_inspector.*`` test
-stubs ``/api/bif/info`` to return ``{"frames": []}`` so no frame is ever
-rendered. The whole *value* of the inspector is rendering frames; until
-this file existed, no e2e test verified a single byte of preview output.
+The other Inspector tests mock every API call, frames included, so none of
+them verifies a single byte of preview output. The whole *value* of the
+Inspector is rendering frames; this file checks the real route end to end.
 
 Strategy:
     * Generate a tiny real BIF on disk inside the seeded ``plex_config_folder``
       so the backend's allow-list accepts it (``_validate_bif_path`` requires
       paths under ``plex_config_folder`` OR a server's media root).
-    * Hit /bif-viewer with the path tab, paste the BIF path, click Load.
-    * Assert <img id="previewFrame"> actually loads JPEG bytes
+    * Open /inspector?bif=<path>, which shows the preview's All frames view.
+    * Assert the big frame <img> actually loads JPEG bytes
       (naturalWidth > 0 from a successful image decode).
-    * Drag the slider to a different frame index, assert the src changes.
+    * Pick another frame from the grid, assert the src changes.
 """
 
 from __future__ import annotations
@@ -151,8 +150,8 @@ def backend_real_app_with_bif(tmp_path_factory, real_bif_setup):
 
 
 @pytest.mark.e2e
-class TestBifViewerWithRealFrames:
-    def test_load_path_renders_real_frame_then_scrub_loads_different_frame(
+class TestInspectorWithRealFrames:
+    def test_bif_link_renders_real_frames_then_picking_one_loads_it(
         self,
         page: Page,
         context,
@@ -180,64 +179,48 @@ class TestBifViewerWithRealFrames:
         info = info_resp.json()
         assert info["frame_count"] == 5, f"BIF metadata wrong: {info}"
 
-        # Now drive the UI.
-        page.goto(f"{app_url}/bif-viewer")
+        # Now drive the UI: the Inspector opens a bare preview file on its All frames view.
+        page.goto(f"{app_url}/inspector?bif={bif_path}")
         page.wait_for_load_state("domcontentloaded")
 
-        # Switch to the path tab.
-        page.locator('button[data-bs-target="#tabPath"]').click()
-        page.locator("#pathInput").fill(bif_path)
-        page.locator("#loadPathBtn").click()
+        expect(page.locator("#inspAllFrames")).to_be_visible(timeout=5000)
+        expect(page.locator("#inspAllFrames .insp-allframes button")).to_have_count(5, timeout=3000)
+        expect(page.locator("#inspAllFramesLabel")).to_have_text("Frame 0 of 4 · 0:00")
 
-        # Viewer panel should reveal — JS does this in showViewer() once
-        # /api/bif/info returns successfully.
-        expect(page.locator("#viewerPanel")).to_be_visible(timeout=5000)
-        expect(page.locator("#totalFrames")).to_have_text("4", timeout=3000)
-
-        # The first frame's <img> src should point at the real /api/bif/frame
-        # endpoint with index 0.
-        preview = page.locator("#previewFrame")
+        preview = page.locator("#inspAllFramesBig")
         first_src = preview.get_attribute("src")
         assert first_src and "/api/bif/frame" in first_src and "index=0" in first_src, (
-            f"#previewFrame src not pointing at backend frame endpoint: {first_src!r}"
+            f"#inspAllFramesBig src not pointing at backend frame endpoint: {first_src!r}"
         )
 
         # The browser must actually decode the JPEG (not error). naturalWidth>0
         # is the canonical "image loaded" signal — without this the test would
         # pass even if the backend served an empty body or a broken JPEG.
         page.wait_for_function(
-            "() => { const img = document.getElementById('previewFrame');"
+            "() => { const img = document.getElementById('inspAllFramesBig');"
             "        return img && img.complete && img.naturalWidth > 0; }",
             timeout=5000,
         )
 
-        # Drag the slider to frame index 3 and assert the src changes.
-        # The change handler updates src to ?index=3.
-        page.evaluate(
-            """() => {
-                const slider = document.getElementById('frameSlider');
-                slider.value = 3;
-                slider.dispatchEvent(new Event('input', { bubbles: true }));
-            }"""
-        )
-        # The setFrame() handler updates the src synchronously.
+        # Pick frame 3 from the grid and assert the big frame follows.
+        page.locator("#inspAllFrames .insp-allframes button[data-index='3']").click()
         page.wait_for_function(
-            "() => { const img = document.getElementById('previewFrame');"
+            "() => { const img = document.getElementById('inspAllFramesBig');"
             "        return img && img.src.includes('index=3'); }",
             timeout=2000,
         )
         new_src = preview.get_attribute("src")
-        assert new_src != first_src, (
-            f"Scrubber drag did not change preview src — still {first_src!r}. "
-            "The frame slider's input handler may be broken."
-        )
-
-        # And the new frame must also load successfully (caches were primed
-        # by the adjacent-frame preloader, so this should be near-instant).
+        assert new_src != first_src, f"Picking a frame did not change the big frame — still {first_src!r}."
         page.wait_for_function(
-            "() => { const img = document.getElementById('previewFrame');"
+            "() => { const img = document.getElementById('inspAllFramesBig');"
             "        return img && img.complete && img.naturalWidth > 0; }",
             timeout=3000,
+        )
+        # Every grid thumbnail is a real decoded frame too.
+        page.wait_for_function(
+            "() => Array.from(document.querySelectorAll('#inspAllFrames .insp-allframes img'))"
+            "        .every(img => img.complete && img.naturalWidth > 0)",
+            timeout=5000,
         )
 
     def test_real_backend_serves_jpeg_bytes_for_each_frame(

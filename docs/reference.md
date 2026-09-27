@@ -536,7 +536,7 @@ per type (the rest add up under "other").
 | POST | `/api/markers/jobs` | Start an Intro & Credits job |
 | GET | `/api/markers/servers/{server_id}/status` | This server's Intro & Credits status (Edit tab) |
 | GET | `/api/markers/sources/usage` | Today's online-lookup usage per source |
-| GET | `/api/markers/item` | Inspector data for one file |
+| GET | `/api/markers/item` | Inspector data for one file (see also [Inspector Endpoints](#inspector-endpoints)) |
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
 | POST | `/api/markers/item/markers` | Save your own markers for one file, lock them and publish to every owning server |
 | DELETE | `/api/markers/item/markers` | Unlock one or more marker types of one file |
@@ -586,7 +586,7 @@ reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
 #### GET /api/markers/item
 
 **Query:** either `path` (a file inside a server library), or `server_id` + `item_id`, optionally with
-`version_file`: the version's file as the Preview Inspector's search row gave it (needed for Plex, where every version
+`version_file`: the version's file as a server's search result gave it (needed for Plex, where every version
 of an item shares its id). By id, the version asked for is the one `version_file` names, else the one whose own id is
 `item_id` (a Jellyfin version, a merged Jellyfin item's primary version, or an Emby item, whose media sources list
 its other versions too), else the item's only version; another version is never opened in its place. A Plex
@@ -1291,9 +1291,95 @@ For full design and per-vendor details see [Multi-Media-Server](multi-server.md)
 | POST | `/api/servers/<id>/plex-library-markers` | Plex only. Setup Health's **Turn on** for a library whose own *Intro markers* / *Credits markers* setting is off (Plex then hides every skip marker of that type there, ours included). Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them on with `PUT /library/sections/{id}/prefs` for that library only. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's **Set server-wide to Never**. Body `{"types": ["intro", "credits"]}` (one or both); sends `PUT /:/prefs?GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never` for the types given, which stops Plex's own detection without hiding any marker. 400 for any other type, a non-Plex server, or a server with Intro & Credits off. Returns `{ok, types}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
-| GET | `/api/bif/servers/<id>/search?q=<query>` | Multi-server BIF Viewer search; returns `preview_kind` (`bif` or `trickplay`) per result so the viewer renders the right format |
+| GET | `/api/bif/servers/<id>/search?q=<query>` | One server's preview search; returns `preview_kind` (`bif` or `trickplay`) per result. The Inspector searches every server through `GET /api/media/search` instead |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + report sheet metadata |
 | GET | `/api/bif/trickplay/frame?server_id=...&sheets_dir=...&index=N&tile_width=10&tile_height=10` | Slice and serve a single thumbnail JPEG from a trickplay tile sheet |
+
+### Inspector Endpoints
+
+The Inspector page (`/inspector`, [guide](guides.md#inspector)) searches with `GET /api/media/search`, reads a file's
+Intro & Credits with `GET /api/markers/item`, and draws preview frames with `GET /api/bif/frame` and
+`GET /api/bif/trickplay/frame`. These routes add what it needs beyond them. All take the usual API token or a signed-in
+session (the `POST` routes also the page's CSRF token from a browser).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/inspector/status` | Preview and Intro & Credits state for search rows |
+| POST | `/api/inspector/show` | A show's seasons and episodes, each with its Intro & Credits state |
+| GET | `/api/inspector/file?path=...` | Where each server keeps one file's preview, what it holds, a job working on the file, other versions |
+| GET | `/api/inspector/frames?path=...&start_ms=...&count=...&width=...` | Exact frames one second apart, read from the video |
+
+#### POST /api/inspector/status
+
+**Request:** `{"paths": ["/media/…/file.mkv", …]}`, at most 30 local file paths (a search row's `paths[0]`).
+Limited to 120 requests a minute.
+
+**Response:** `{"items": {"<path>": {…}}}`. A path that isn't a file inside a server library is `{"in_library": false}`.
+Every other one:
+
+```json
+{
+  "in_library": true,
+  "exists": true,
+  "kind": "movie",
+  "quality": "2160p Dolby Vision",
+  "servers": ["Plex"],
+  "preview": {"state": "ready", "frames": 4089, "servers": ["Plex"]},
+  "markers": {"state": "not_checked", "label": "Not checked yet"}
+}
+```
+
+`quality` comes from the file's name. `preview.state` is `ready`, `missing`, or `unknown` (a server couldn't be
+asked); `frames` is the BIF's frame count (null for trickplay). `markers.state` is `not_checked`, `needs_review`,
+`both` ("Intro + credits"), `credits` ("Credits set" for a film, "Credits only" for an episode), `intro` or `none`
+("Nothing found"), from markers.db only. A file that took longer than 12 seconds to check has `error` instead.
+`400` for a body that isn't `{"paths": [...]}` or has more than 30.
+
+#### POST /api/inspector/show
+
+**Request:** `{"paths": ["/media/tv/Show (2024)", …]}`: a show's folders (a search row's `paths`), at most 10.
+
+**Response:** `{"seasons": [{"season": 1, "label": "Season 1", "episodes": [{"path", "code": "E01", "episode": 1,
+"markers": {"state", "label"}}]}]}`, seasons in order with Specials last, read from the folders on disk. `400` when
+no path is a folder inside a server library.
+
+#### GET /api/inspector/file
+
+**Query:** `path`, the file's local path.
+
+**Response:** `canonical_path`; `exists` (`false`: gone from disk; `null` for a path that is neither in a library nor in
+markers.db, which isn't looked at); `in_library`; `known` (markers.db has it); `title` (from its folders, e.g. "Blood
+Legacy (2024) · S01E01"); `kind`; `quality`; and, for a file that is there and in a library:
+
+- `duration_ms`: markers.db's, else the preview's frames × interval.
+- `previews`: one row per server holding the file — `server_id`, `server_name`, `server_type`, `kind` (`bif` or
+  `trickplay`), `path` (Plex's bundle BIF, Emby's BIF next to the video, Jellyfin's sheet folder), `exists`, `note`
+  (why there is no path, e.g. "Plex hasn't analysed this file yet"), `error` (e.g. "Couldn't reach Jellyfin"),
+  `versions`, and when it exists `frame_count`, `interval_ms`, `file_size`, `created_at` (plus `tile_width`,
+  `tile_height`, `sheets_dir` for trickplay). Each server is waited for at most 8 seconds.
+- `preview`: the row the frames are drawn from (the first BIF that is there, else trickplay), with `interval_ms`
+  checked against the file's length: a BIF header that leaves the interval out, or disagrees with length ÷ frames by
+  more than a quarter, gets length ÷ frames.
+- `versions`: `[{path, label, current}]` when the server keeps several versions of the item on this disk.
+- `job`: the queued or running job for this file (`id`, `kind`, `status`, `name`, `percent`), or null.
+
+`400` when `path` isn't an absolute path inside the media folder.
+
+#### GET /api/inspector/frames
+
+**Query:** `path` (required), `start_ms` (default 0), `count` (1-14, default 7), `width` (160, 240, 320 or 480;
+default 320). Limited to 120 requests a minute.
+
+**Response:** `{"path", "start_ms", "step_ms": 1000, "frames": [{"t_ms": 5557000, "src": "data:image/jpeg;base64,…"}]}`
+— fewer frames when the video ends first. Works for a file with no preview.
+
+Only a file the app already knows is read: it has to be a video inside a server library and the media folder
+(normalised, no `..`), and either markers.db has it or a server holding it lists it (remembered for 10 minutes).
+ffmpeg seeks (`-ss` before the input) and reads one frame a second on the CPU at low priority (`nice`), HDR10 and
+HLG tone-mapped with the previews' tone-map setting; at most two reads run at a time, and one still running after
+30 seconds is killed. Answers are cached in a private 64 MB folder under the system temp folder; nothing is written
+next to the media. `400` for a bad query or a path that isn't a video in a library; `404` for a file the app doesn't
+know; `502` when ffmpeg can't read the frames; `503` when both reads were busy for 2 seconds (the page asks again).
 
 ### Webhook Endpoints
 
@@ -1639,6 +1725,8 @@ unless noted.
 |----------|-------|
 | `POST /login` | 5 per minute |
 | `POST /api/auth/login` | 10 per minute |
+| `POST /api/inspector/status`, `GET /api/inspector/frames` | 120 per minute |
+| `POST /api/inspector/show` | 60 per minute |
 | Default | 200 per day, 50 per hour |
 
 Rate limit headers are included in responses:

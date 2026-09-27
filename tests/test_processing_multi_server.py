@@ -885,8 +885,12 @@ class TestCrossServerBifReuse:
     """
 
     @staticmethod
-    def _write_real_bif(path: Path, frames: list[bytes], *, interval_ms: int) -> None:
-        """Write a minimally valid BIF that round-trips through unpack_bif_to_jpegs."""
+    def _write_real_bif(path: Path, frames: list[bytes], *, interval_ms: int, timestamp_step: int = 1) -> None:
+        """Write a minimally valid BIF that round-trips through unpack_bif_to_jpegs.
+
+        ``timestamp_step`` 1 numbers the index 0, 1, 2… as this app does; another writer leaves ``interval_ms`` at 0
+        and counts seconds (``timestamp_step`` 5 for a frame every 5 s).
+        """
         import array
         import struct
 
@@ -901,7 +905,7 @@ class TestCrossServerBifReuse:
             table_size = 8 + (8 * count)
             image_offset = 64 + table_size
             for i, frame in enumerate(frames):
-                f.write(struct.pack("<I", i))
+                f.write(struct.pack("<I", i * timestamp_step))
                 f.write(struct.pack("<I", image_offset))
                 image_offset += len(frame)
             f.write(struct.pack("<I", 0xFFFFFFFF))
@@ -1031,7 +1035,14 @@ class TestCrossServerBifReuse:
     _DURATION_S = 100
 
     def _dispatch_plex_bif_to_emby_at_5s(
-        self, mock_config, tmp_path: Path, *, plex_bif_interval_ms: int, truncate_plex_bif_to: int | None = None
+        self,
+        mock_config,
+        tmp_path: Path,
+        *,
+        plex_bif_interval_ms: int,
+        truncate_plex_bif_to: int | None = None,
+        header_interval_ms: int | None = None,
+        timestamp_step: int = 1,
     ):
         """Plex already has an ``index-sd.bif`` made at ``plex_bif_interval_ms``; Emby at 5 s has no output yet.
 
@@ -1054,7 +1065,12 @@ class TestCrossServerBifReuse:
         plex_bif = tmp_path / "plexcfg" / "index-sd.bif"
         plex_bif.parent.mkdir(parents=True)
         frames_in_plex_bif = self._DURATION_S * 1000 // plex_bif_interval_ms
-        self._write_real_bif(plex_bif, [buf.getvalue()] * frames_in_plex_bif, interval_ms=plex_bif_interval_ms)
+        self._write_real_bif(
+            plex_bif,
+            [buf.getvalue()] * frames_in_plex_bif,
+            interval_ms=plex_bif_interval_ms if header_interval_ms is None else header_interval_ms,
+            timestamp_step=timestamp_step,
+        )
         if truncate_plex_bif_to is not None:
             plex_bif.write_bytes(plex_bif.read_bytes()[:truncate_plex_bif_to])
 
@@ -1134,6 +1150,20 @@ class TestCrossServerBifReuse:
         assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000), (
             f"Emby's 5 s BIF holds {meta.frame_count} frames; 10 means the 10 s Plex BIF was unpacked into it"
         )
+
+    def test_sibling_bif_another_writer_made_is_never_reused(self, mock_config_for_processing, tmp_path):
+        """A BIF with 0 in its header and seconds in its index (another writer, width and quality unknown) is read as
+        a frame every 5 s by the Inspector, but frame reuse goes by the header field this app writes, so it's skipped."""
+        result, emby_bif, calls = self._dispatch_plex_bif_to_emby_at_5s(
+            mock_config_for_processing, tmp_path, plex_bif_interval_ms=5000, header_interval_ms=0, timestamp_step=5
+        )
+
+        plex_bif = tmp_path / "plexcfg" / "index-sd.bif"
+        assert read_bif_metadata(str(plex_bif)).frame_interval_ms == 5000
+        canonical_path = str(tmp_path / "data" / "movies" / "Test (2024)" / "Test (2024).mkv")
+        assert calls == [{"video_file": canonical_path, "interval": 5}]
+        sources = {p.server_id: p.frame_source for p in result.publishers}
+        assert sources["emby-1"] == "extracted"
 
     def test_sibling_bif_is_skipped_when_header_unreadable(self, mock_config_for_processing, tmp_path):
         """A Plex BIF cut off inside its header can't prove its interval, so Emby gets freshly extracted frames."""
