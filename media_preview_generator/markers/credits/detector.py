@@ -60,9 +60,10 @@ if TYPE_CHECKING:
 # credits chapter is read against it, its answer moving the chapter only where the frames show the chapter off the
 # roll (``rule_j.chapter_moves_to``, ``decide.chapter_hint``). Found starts can move; "nothing found" can't.
 # 7: the anchor keeps a card on black that only black separates from the next card (``rule_j._anchored``), a 1 fps walk
-# that reaches its window's floor reads one 24 s join further back (``rule_j.refine_reaches_floor``), and a credits
-# chapter on the story moves to the first text after it (``rule_j.chapter_moves_to``, the label naming where). Any
-# stored answer can move: a start kept earlier can also bring a roll a tail opened on into its join.
+# over the roll's own frames that reaches its window's floor reads one 24 s join further back
+# (``rule_j.refine_reaches_floor``), and a credits chapter on the story moves to the first text after it
+# (``rule_j.chapter_moves_to``, the label naming where). Any stored answer can move: a start kept earlier can also bring
+# a roll a tail opened on into its join.
 CREDITS_TEXT_VERSION = 7
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window

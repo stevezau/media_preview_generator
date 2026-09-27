@@ -1003,8 +1003,9 @@ def refine_start(
 def _refine_walk(
     rows: Sequence[Row], coarse: Coarse, fine_rows: Sequence[Row], before_s: float, params: RuleParams
 ) -> tuple[list[int], int | None, bool]:
-    """:func:`refine_start`'s walk: the window's 1 fps rows, the row the walk ends on before the fade (None when nothing
-    in the window is a credit frame), and whether it walked from the roll near the coarse start."""
+    """:func:`refine_start`'s walk: the window's 1 fps rows, the row the walk ends on before the fade (None when no roll
+    frame is near the coarse start and no credit frame is in the window), and whether it walked from the roll near the
+    coarse start."""
     t = coarse.pts_s
     window = [j for j, row in enumerate(fine_rows) if t - before_s <= row[0] <= t + REFINE_AFTER_S]
     if not window:
@@ -1034,12 +1035,12 @@ def refine_reaches_floor(
     before_s: float = REFINE_BEFORE_S,
     params: RuleParams = RULE_J,
 ) -> bool:
-    """Whether :func:`refine_start`'s walk over the roll ran to the first 1 fps row of its window (version 7), so the
-    roll may begin before it. The coarse start can sit up to one 24 s join after the roll's first frame -- the anchor's
-    one step over a frame, or a decode order that puts a later keyframe first in the run -- and the window reaches only
-    ``before_s`` back (2026-09-27 audit: 3 Women, 12 s late on that floor). Only the roll's own frames count: a fade
-    over black down to the floor, or a walk from a lone credit frame when nothing near the coarse start shows the roll,
-    is no reason to read further.
+    """Whether :func:`refine_start`'s walk over the roll ended within one of its steps (``REFINE_GAP_S``) of the first
+    1 fps row of its window (version 7), so a roll frame before that row would have carried it on. The coarse start can
+    sit up to one 24 s join after the roll's first frame -- the anchor's one step over a frame, or a decode order that
+    puts a later keyframe first in the run -- and the window reaches only ``before_s`` back (2026-09-27 audit: 3 Women,
+    12 s late on that floor). Only the roll's own frames count: a fade over black down to the floor, or a walk from a
+    lone credit frame when nothing near the coarse start shows the roll, is no reason to read further.
 
     Args:
         rows: The keyframe rows the coarse start came from.
@@ -1049,10 +1050,10 @@ def refine_reaches_floor(
         params: Rule thresholds.
 
     Returns:
-        True when the walk from the roll ends on the window's first row.
+        True when the walk from the roll ends less than one step after the window's first row.
     """
     window, j, from_roll = _refine_walk(rows, coarse, fine_rows, before_s, params)
-    return from_roll and j is not None and fine_rows[j][0] <= min(fine_rows[k][0] for k in window)
+    return from_roll and j is not None and fine_rows[j][0] - min(fine_rows[k][0] for k in window) < REFINE_GAP_S
 
 
 def credits_start(

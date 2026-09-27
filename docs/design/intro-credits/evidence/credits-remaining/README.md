@@ -83,7 +83,10 @@ Three rules, no new constant; each one's own moves were measured with the other 
   (subtitles on a dark scene) can't carry the walk far. Its own moves: 3 Women +12.2 → +4.2, and on the 205 Hellraiser,
   Croupier, Hard to Kill, Scream, Panic Room, Forrest Gump into 5 s, several others 15–24 s nearer, Animal onto its
   crawl's first lines, Marvel's Daredevil S03E09 onto its first card. 3 Days to Kill and Ace Ventura are fixed by
-  either rule.
+  either rule. It asks only when the walk over the roll's own frames ends less than one of its 2.5 s steps after the
+  window's first row: a roll frame before that row would have carried the walk on (a black or lit sample on the floor
+  between two cards included). A fade over black down to the floor, or a walk from a lone credit frame, reads nothing
+  more. Both came from the architecture review; neither moved an answer on any set.
 
 ## Results
 
@@ -148,7 +151,7 @@ Bargatze Hello World, To Dye For) off their first card. Stargate Atlantis' first
 
 ## Cost
 
-A file whose 1 fps walk reaches its window's floor decodes one more 24 s window at 1 fps (7 of 428 answers on the
-verdict, Plex and chapter files, 13 of 308 on the harness sets; about 1–2 s each on storage's P5000). The anchor and
+A file whose 1 fps walk reaches its window's floor decodes one more 24 s window at 1 fps (9 of 428 answers on the
+verdict, Plex and chapter files, 16 of 308 on the harness sets; about 1–2 s each on storage's P5000). The anchor and
 the chapter move cost nothing. `CREDITS_TEXT_VERSION` 7 reads every stored credit text answer again once: 912 files on
 sflix's disks, about 7 s each on its GPUs.

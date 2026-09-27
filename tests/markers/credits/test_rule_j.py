@@ -360,7 +360,16 @@ class TestRefine:
         ("fine", "reaches"),
         [
             pytest.param([dark(t, 1, 20.0) for t in range(80, 102)], True, id="roll to the window's first second"),
-            pytest.param([bright(80), *[dark(t, 1, 20.0) for t in range(81, 102)]], False, id="story at the floor"),
+            # The walk steps over a frame between cards (up to 2.5 s), so a card at 79 s would carry it past a lit 80 s.
+            pytest.param([bright(80), *[dark(t, 1, 20.0) for t in range(81, 102)]], True, id="story at the floor"),
+            pytest.param(
+                [dark(80, 0, 5.0), *[dark(t, 1, 20.0) for t in range(81, 102)]], True, id="black gap at the floor"
+            ),
+            pytest.param(
+                [bright(t) for t in range(80, 83)] + [dark(t, 1, 20.0) for t in range(83, 102)],
+                False,
+                id="a walk step clear of the floor",
+            ),  # fmt: skip
             pytest.param([dark(t, 1, 20.0) for t in range(84, 102)], True, id="window decoded from later on"),
             pytest.param([bright(t) for t in range(80, 102)], False, id="no roll frame in the window"),
             pytest.param([], False, id="no 1 fps rows"),
