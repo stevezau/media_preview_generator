@@ -208,6 +208,41 @@ class TestFindCredits:
         )
         assert (result.start_s, result.end_s, result.scale) == (858.0, None, 2)
 
+    def test_a_chapter_is_never_read_against_an_answer_that_found_nothing(self):
+        # detect_credits_text reads the chapter only after a found start; a caller that didn't check gets told so.
+        with pytest.raises(ValueError, match="found start"):
+            detector.chapter_origin(detector.CreditsTextResult(None, None, (), (), ()), 5_000_000)
+
+    @pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
+    def test_only_the_320x180_reading_keeps_a_card_on_black(self, monkeypatch, probes, scale):
+        # Version 7's anchor reads dark keyframes after a card as its black ground. The 640x360 reading's rows leave out
+        # the text 320x180 boxed, so there the rest of an epilogue card reads the same way (Accused (2020) S05E01: kept,
+        # 27.5 s early). Every call that finds a start, the join before the tail included, reads at its decode's size.
+        tail = [(870.0 + 2 * i, 3, 10.0) for i in range(225)]
+        before = [(750.0 + 2 * i, 0, 120.0) for i in range(54)] + [(858.0 + 2 * i, 3, 10.0) for i in range(7)]
+        fine = [(float(t), 0, 120.0) for t in range(838, 858)] + [(float(t), 3, 10.0) for t in range(858, 860)]
+        unboxed_tail = [(pts, 0, luma) for pts, _, luma in tail]
+        decodes = Decodes(tail, before, fine) if scale == 1 else Decodes(unboxed_tail, tail, before, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        calls: list[tuple[str, bool, int]] = []
+
+        def spy(name):
+            real = getattr(rule_j, name)
+
+            def recorded(*args, **kwargs):
+                calls.append((name, kwargs["black_reads"], decodes.calls[-1]["scale"]))
+                return real(*args, **kwargs)
+
+            return recorded
+
+        for name in ("coarse_start", "joined_before"):
+            monkeypatch.setattr(rule_j, name, spy(name))
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.scale) == (858.0, scale)
+        assert {name for name, _, read_at in calls if read_at == scale} == {"coarse_start", "joined_before"}
+        assert all(black is (read_at == 1) for _, black, read_at in calls)
+
     @pytest.mark.parametrize(
         "error",
         [frames.GpuDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the GPU"),
@@ -937,8 +972,46 @@ class TestFindCredits:
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
                                        detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         coarse = rule_j.coarse_start(STORY + ROLL + SCENE)
-        assert result.start_s == coarse.pts_s - rule_j.REFINE_BEFORE_S
+        # The start's walk runs to its window's floor, so one more window, one 24 s join long, is read before it --
+        # once (version 7).
+        assert result.start_s == coarse.pts_s - rule_j.REFINE_BEFORE_S - rule_j.RULE_J.gap_s
         assert result.end_s == rule_j.coarse_end_s(STORY + ROLL + SCENE, coarse) + rule_j.REFINE_END_AFTER_S
+
+    @pytest.mark.parametrize(
+        ("roll_from", "start", "windows"),
+        [
+            pytest.param(5690.0, 5690.0, 1, id="the roll starts inside the window: nothing more is read"),
+            pytest.param(5662.0, 5662.0, 2, id="the roll reaches the floor: 24 s more are read"),
+            pytest.param(5600.0, 5656.0, 2, id="more roll than that: the second window's floor, never a third"),
+        ],
+    )
+    def test_a_walk_that_reaches_its_windows_floor_reads_one_join_further_back(
+        self, monkeypatch, probes, roll_from, start, windows
+    ):
+        # 3 Women (1977): decode order put a keyframe 21 s into the roll first in its run, and the 1 fps walk ran to the
+        # window's floor, 12 s after the first card. The one extra window covers the 24 s join rule J's start can sit
+        # after the roll's first frame.
+        fine_calls = []
+
+        def decode(path, *, start_s, length_s, keyframes_only, **kwargs):
+            if keyframes_only:
+                return STORY + ROLL + SCENE
+            fine_calls.append((start_s, length_s))
+            return [
+                (float(t), 2, 20.0) if t >= roll_from else (float(t), 0, 120.0)
+                for t in range(math.ceil(start_s), math.floor(start_s + length_s) + 1)
+                if t <= 5701
+            ]
+
+        monkeypatch.setattr(detector.frames, "decode_rows", decode)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert result.start_s == start
+        refine = [call for call in fine_calls if call[0] < 5700.0]
+        assert refine[:windows] == [(5680.0, 21.0), (5656.0, 24.0)][:windows]
+        assert len(refine) == windows
+        seconds = [row[0] for row in result.fine_rows]
+        assert seconds == sorted(set(seconds))  # the two windows share 5680 s: read once, in order
 
     @pytest.mark.parametrize(
         ("keep_every", "drop_non_key"), [(48, False), (None, True), (48, True)], ids=["intra-only", "vp9", "vp9-intra-only"]
@@ -1222,7 +1295,7 @@ class TestFindCredits:
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
                                        detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         joined = [*(row for row in before if row[0] < 862.0), *tail]
-        assert rule_j.coarse_start(joined).pts_s == 800.0  # reading the joined rows as they were decoded
+        assert rule_j.coarse_start(joined).pts_s == 792.0  # reading the joined rows as they were decoded
         assert result.start_s == 858.0
         assert result.overlays == (bug,)  # the tail's own, carried onto the joined rows
 
@@ -2258,6 +2331,26 @@ class TestDetect:
             ),  # fmt: skip
             "steps back to the earliest kept start; credits chapter at 5650000 ms",
         )
+
+    def test_a_chapter_on_the_story_is_moved_to_the_first_text_after_it(self, monkeypatch, pool, ctx):
+        # Version 7: lit footage without text after the chapter, then text rule J reads only in pieces before its own
+        # start (10 Things I Hate About You's crawl over the rooftop band). The answer keeps rule J's start; the label
+        # says where the chapter moves.
+        rec = self._with_chapter(ctx, 5_650_000)
+        story = tuple((float(t), 0, 120.0, ()) for t in range(5_650, 5_692, 4))
+        crawl = tuple((float(t), 1, 120.0, ((200, 150, 270, 160),)) for t in range(5_694, 5_780, 8))
+        monkeypatch.setattr(
+            detector,
+            "find_credits",
+            lambda path, **kwargs: detector.CreditsTextResult(5_780.0, None, story + crawl, (), ()),
+        )
+        answer = detector.detect_credits_text(rec, ctx=ctx)
+        assert answer.candidates == (
+            Candidate(
+                MarkerType.CREDITS, 5_780_000, None, Source.CREDITS_TEXT, 1.0,
+                chapter_hint(5_650_000, moves=True, to_ms=5_694_000),
+            ),
+        )  # fmt: skip
 
     def test_with_chapters_off_the_answer_is_read_without_one(self, monkeypatch, pool, ctx):
         rec = self._with_chapter(ctx, 5_650_000)

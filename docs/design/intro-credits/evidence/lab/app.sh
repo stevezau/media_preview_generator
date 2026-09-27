@@ -12,6 +12,8 @@
 #
 # MLAB_DIR sets the lab folder that holds env and synth/ (default: this script's folder); see up.sh.
 # MLAB_APP_GPU=nvidia gives the app the NVIDIA runtime and /dev/dri.
+# MLAB_APP_CONFIG_VOLUME names the app's config volume (default mlab_app_config): a fresh app on an empty volume of
+# its own leaves the one other runs use in place.
 # MLAB_APP_EXTRA_ENV=NAME=value passes one extra environment variable (phase 3 row 8). It lands in the docker argv,
 # which `ps` shows to every user on the host: never a token, only harmless values like a model path.
 set -euo pipefail
@@ -20,6 +22,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LAB_DIR="${MLAB_DIR:-$SCRIPT_DIR}"
 readonly IMAGE="${MLAB_APP_IMAGE:-media_preview_generator:intro-credits}"
 readonly ENV_FILE="${LAB_DIR}/env"
+readonly CONFIG_VOLUME="${MLAB_APP_CONFIG_VOLUME:-mlab_app_config}"
 
 export MLAB_MOUNTS_ONLY=1
 # shellcheck source=up.sh
@@ -42,8 +45,8 @@ docker network create mlab >/dev/null 2>&1 || true
 if ! docker container inspect mlab-app >/dev/null 2>&1; then
     # The app runs as PUID:PGID and the image doesn't chown /config. `nocopy`: an empty volume would otherwise take
     # the image's root-owned /config again on every new container.
-    docker volume create mlab_app_config >/dev/null
-    docker run --rm -v mlab_app_config:/config alpine chown 1000:1000 /config
+    docker volume create "$CONFIG_VOLUME" >/dev/null
+    docker run --rm -v "${CONFIG_VOLUME}:/config" alpine chown 1000:1000 /config
     GPU_ARGS=()
     if [[ "${MLAB_APP_GPU:-}" == "nvidia" ]]; then
         GPU_ARGS=(--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all --device /dev/dri:/dev/dri)
@@ -54,7 +57,7 @@ if ! docker container inspect mlab-app >/dev/null 2>&1; then
     fi
     docker run -d --name mlab-app --network mlab -p 127.0.0.1:18080:8080 \
         -e PUID=1000 -e PGID=1000 -e TZ=UTC -e WEB_AUTH_TOKEN="$MLAB_APP_TOKEN" \
-        -v mlab_app_config:/config:nocopy -v mlab_plex_config:/plexcfg \
+        -v "${CONFIG_VOLUME}:/config:nocopy" -v mlab_plex_config:/plexcfg \
         "${GPU_ARGS[@]}" "${EXTRA_ENV[@]}" "${MV[@]}" "${MV_SCALE[@]}" "$IMAGE" >/dev/null
 fi
 

@@ -242,7 +242,7 @@ def epilogue_like(
     runs = list(run_rows) if run_rows else list(key_rows)
     found = rule_j.overlay_boxes(key_rows) if overlays is None else tuple(overlays)
     rows = rule_j.without_overlays(runs, found)
-    coarse = rule_j.coarse_start(runs, without=rows)
+    coarse = rule_j.coarse_start(runs, without=rows, black_reads=not run_rows)
     if coarse is None or start_s is None:
         return False
     run = list(rule_j._run_rows(rows, coarse))

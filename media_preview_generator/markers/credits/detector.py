@@ -58,12 +58,17 @@ if TYPE_CHECKING:
 # 6: the 1 fps refine walks back over a roll's first cards that read one or two boxes on a lit frame, in the roll's
 # band, and never starts from a caption cut off from the coarse start (``rule_j.refine_start``); and a file with a
 # credits chapter is read against it, its answer moving the chapter only where the frames show the chapter off the
-# roll (``rule_j.moves_chapter``, ``decide.chapter_hint``). Found starts can move; "nothing found" can't.
-CREDITS_TEXT_VERSION = 6
+# roll (``rule_j.chapter_moves_to``, ``decide.chapter_hint``). Found starts can move; "nothing found" can't.
+# 7: the anchor keeps a card on black that only black separates from the next card (``rule_j._anchored``), a 1 fps walk
+# over the roll's own frames that reaches its window's floor reads one 24 s join further back
+# (``rule_j.refine_reaches_floor``), and a credits chapter on the story moves to the first text after it
+# (``rule_j.chapter_moves_to``, the label naming where). Any stored answer can move: a start kept earlier can also bring
+# a roll a tail opened on into its join.
+CREDITS_TEXT_VERSION = 7
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
-# (300 s) gives 300,005, so a chosen window's version never equals Automatic's, and another window's answer is asked
-# again.
+# (300 s) gives 300,000 plus the version, so a chosen window's version never equals Automatic's, and another window's
+# answer is asked again.
 _WINDOW_VERSION_STEP = 1000
 # Stored with every answer as what it was based on (``detector_runs``). An answer without it was read when the look-back
 # stopped after one step (:func:`credits_text_due`).
@@ -394,7 +399,9 @@ def _read_credits(
         return rule_j.without_overlays(new_text(rows), overlays)
 
     rule_rows = own_text(key_rows)
-    coarse = rule_j.coarse_start(new_text(key_rows), without=rule_rows)
+    # At 640x360 a keyframe blank in new_text may hold text the 320x180 reading boxed: no black to read there.
+    black_reads = scale == 1
+    coarse = rule_j.coarse_start(new_text(key_rows), without=rule_rows, black_reads=black_reads)
     # Everything that reads the *runs* rather than one run's frames reads the rows the runs were found on:
     # opens_on_the_run and joined_before both find the runs again, and they have to find the run coarse came from. The tail's overlays carry over to the
     # joined rows and are not gathered again from them: a roll that began before the tail is exactly the shape that
@@ -411,12 +418,15 @@ def _read_credits(
         # into none -- ones the decision refuses anyway, but answers that were found (spec §14 2026-09-23).
         before_start = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
         before_rows = keyframes(before_start, tail_start - before_start)
-        joins = rule_j.joined_before(new_text(before_rows), new_text(key_rows), overlays=overlays) is not None
+        joins = (
+            rule_j.joined_before(new_text(before_rows), new_text(key_rows), overlays=overlays, black_reads=black_reads)
+            is not None
+        )
         joined = rule_j.rows_before(before_rows, key_rows) if joins else None
         while joined is not None:
             key_rows = joined
             rule_rows = own_text(key_rows)
-            coarse = rule_j.coarse_start(new_text(key_rows), without=rule_rows)
+            coarse = rule_j.coarse_start(new_text(key_rows), without=rule_rows, black_reads=black_reads)
             # Stopping with too little story before the run leaves it to text_all_through, which answers nothing.
             if coarse is None or not rule_j.too_little_story(key_rows, coarse):
                 break
@@ -439,7 +449,18 @@ def _read_credits(
     fine_start = max(0.0, coarse.pts_s - rule_j.REFINE_BEFORE_S)
     fine_length = coarse.pts_s + rule_j.REFINE_AFTER_S - fine_start
     fine_rows = decode_rows(start_s=fine_start, length_s=fine_length, keyframes_only=False, fps=1)
-    start_s = rule_j.refine_start(rule_rows, coarse, rule_j.without_overlays(fine_rows, overlays))
+    own_fine = rule_j.without_overlays(fine_rows, overlays)
+    start_s = rule_j.refine_start(rule_rows, coarse, own_fine)
+    if fine_start > 0 and rule_j.refine_reaches_floor(rule_rows, coarse, own_fine):
+        # The walk over the roll's own frames ran to the window's first second: read once more, one 24 s join further
+        # back, the most rule J's coarse start can sit after the roll's first frame (rule_j.refine_reaches_floor).
+        more_start = max(0.0, fine_start - rule_j.RULE_J.gap_s)
+        first_s = min(row[0] for row in fine_rows)
+        more = decode_rows(start_s=more_start, length_s=fine_start - more_start, keyframes_only=False, fps=1)
+        fine_rows = [*(row for row in more if row[0] < first_s), *fine_rows]
+        start_s = rule_j.refine_start(
+            rule_rows, coarse, rule_j.without_overlays(fine_rows, overlays), before_s=coarse.pts_s - more_start
+        )
     duration_s = duration_ms / 1000.0
     last_keyframe = rule_j.coarse_end_s(rule_rows, coarse)
     if not rule_j.keeps_a_scene_after(last_keyframe, duration_s):
@@ -799,13 +820,35 @@ def detect_credits_text(
         logger.debug("No credit roll in the end of {}", os.path.basename(rec.canonical_path))
         return DetectorAnswer((), LOOK_BACK_BASIS)
     chapter_ms = credits_chapter_hint_ms(rec, ctx)
-    origin = ""
-    if chapter_ms is not None:
-        rows = rule_j.without_overlays(result.key_rows, result.overlays)
-        origin = chapter_hint(chapter_ms, moves=rule_j.moves_chapter(rows, result.start_s, chapter_ms / 1000.0))
+    origin = "" if chapter_ms is None else chapter_origin(result, chapter_ms)
     end_ms = None if result.end_s is None else int(round(result.end_s * 1000))
     found = Candidate(MarkerType.CREDITS, int(round(result.start_s * 1000)), end_ms, Source.CREDITS_TEXT, origin=origin)
     return DetectorAnswer((found,), _basis(chapter_ms))
+
+
+def chapter_origin(result: CreditsTextResult, chapter_ms: int) -> str:
+    """The label an answer read against a credits chapter carries (``decide.chapter_hint``): whether the frames keep
+    the chapter or move it, and where to when that isn't the answer's own start (``rule_j.chapter_moves_to``).
+
+    Args:
+        result: The answer, found (``start_s`` not None).
+        chapter_ms: The start of the credits chapter the rules decide from.
+
+    Returns:
+        The label.
+
+    Raises:
+        ValueError: The answer found nothing: there is no start to read the chapter against.
+    """
+    start_s = result.start_s
+    if start_s is None:
+        raise ValueError("a credits chapter is only read against a found start")
+    rows = rule_j.without_overlays(result.key_rows, result.overlays)
+    moved_s = rule_j.chapter_moves_to(rows, start_s, chapter_ms / 1000.0)
+    if moved_s is None:
+        return chapter_hint(chapter_ms, moves=False)
+    to_ms = int(round(moved_s * 1000))
+    return chapter_hint(chapter_ms, moves=True, to_ms=None if to_ms == int(round(start_s * 1000)) else to_ms)
 
 
 def _basis(chapter_ms: int | None) -> str:
@@ -815,7 +858,7 @@ def _basis(chapter_ms: int | None) -> str:
 
 def credits_chapter_hint_ms(rec: FileRecord, ctx: PipelineContext) -> int | None:
     """The start of the credits chapter the decision rules would decide this file's credits from, when chapters are
-    among the sources turned on: the detector reads the frames against it (``rule_j.moves_chapter``).
+    among the sources turned on: the detector reads the frames against it (``rule_j.chapter_moves_to``).
 
     Args:
         rec: The file.

@@ -91,15 +91,16 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
   win such a pair was wrong on In Treatment S02 ×4 and Family Guy S14E01. Westworld S03E07 stays there too (lengths
   5.03 s apart), and the rule 4 composition gap the property test found (predates these rules) is unfixed.
 
-**Open after the 2026-09-27 credits accuracy fixes** (§14 2026-09-27 "Credits accuracy",
-`evidence/credits-accuracy/README.md`):
-- **Late rule J starts** are most of what is left wrong: first cards over footage it reads after the roll starts
-  (17 Again 82 s, '71 120 s with SkipDB agreeing, 21 Jump Street 102 s, #SKYKING 24 s, several 6–12 s). On the
-  audit's Plex comparison ours is 12 of 81 wrong against Plex's 8 of 80, though ours skips story on 1 and Plex's on 8.
-- **Two early chapters credit text can't correct**: 10 Things I Hate About You (rule J's own start 166 s late) and A
-  Beautiful Imperfection (rule J starts on the same epilogue text as the chapter).
-- **The Accused epilogue-card gap** gains a file: version 6's refine walks back over credits over the footage onto an
-  epilogue card on black that touches them (5.5 s early; it was 7.5 s late).
+**Open after the 2026-09-27 credits fixes** (§14 2026-09-27 "Credits accuracy" and "The credits errors left after
+#320", `evidence/credits-accuracy/README.md`, `evidence/credits-remaining/README.md`):
+- **Late starts the detector can't see**: names over bright footage or a collage (17 Again 82 s, '71 120 s with SkipDB
+  agreeing, 21 Jump Street 102 s, 14 Peaks 42 s with its chapter), cards 320×180 boxes nothing on (#SKYKING 24 s), and
+  one late chapter the inside-the-roll check keeps (A Trip to Infinity, credit text right). On the audit's Plex
+  comparison ours is 7 of 81 wrong against Plex's 8 of 80, skipping story on 1 against Plex's 8.
+- **Epilogue text on black glued to the roll**: A Beautiful Imperfection (chapter and rule J on the epilogue, as
+  Plex's own start) and Accused's 4 episodes 11.5–40.5 s early. No box-level signal (line width, lines, time on
+  screen) separates a prose card from a credit card on the sets: every threshold that catches them moves right
+  answers too (`evidence/credits-remaining/README.md`).
 - **The lab matrices have drifted from the app** (found by this lane's row-13 run; details in
   `evidence/credits-accuracy/README.md` "Lab regression"): phase 2 and 3 rows that set the removed `publish_when`
   stop on a `KeyError`, and phase 2 rows 6 and 18 and phase 3 rows 3, 5 and 9 check behaviour that changed on purpose
@@ -530,11 +531,12 @@ caption cut off from it (Homicide Hunter S06E13: a mugshot caption 14 s before t
 frame near the coarse start shows the roll does it start from the latest credit frame in the window, as before.
 *A file with a credits chapter is read against it* (`decide.credits_chapter_start_ms`: the chapter rule 3 decides
 from, when chapters are on). The answer keeps rule J's own start and carries `decide.chapter_hint`: whether the frames
-show that chapter off the roll (`rule_j.moves_chapter`). Off it means one of two shapes. *Inside the roll*: the roll
-starts more than 10 s before the chapter and text stays on the screen all the way (no stretch of keyframes without a
-box over 8 s, and no lit keyframe without one after the start's own 1 s, the fade into the first card). *On the
-story*: the roll starts more than 10 s after the chapter and every keyframe between them, at least one, is lit and
-holds no text. How far a chapter moves is bounded only by the moved marker's sanity checks (rule 2; distance caps of
+show that chapter off the roll (`rule_j.chapter_moves_to`, `moves_chapter` until version 7). Off it means one of two
+shapes. *Inside the roll*: the roll starts more than 10 s before the chapter and text stays on the screen all the way
+(no stretch of keyframes without a box over 8 s, and no lit keyframe without one after the start's own 1 s, the fade
+into the first card). *On the story*: the roll starts more than 10 s after the chapter and every keyframe between them,
+at least one, is lit and holds no text (version 7: up to the first text after the chapter, which is where the chapter
+then moves). How far a chapter moves is bounded only by the moved marker's sanity checks (rule 2; distance caps of
 240 and 60 s changed nothing on the verdict set or the replay). The lit-keyframe checks came from sflix's replay: 5 chapters the frames moved earlier onto
 story text (a T-shirt, a poster, a screen, an epilogue caption; every one with a lit keyframe without text between) and
 2 moved later off black cards 320×180 reads nothing on (The Half of It, Dark Matter S02E05). An answer read against
@@ -548,6 +550,18 @@ Offenders' cast roll over the last shot, 1 s earlier than version 5); Accused 50
 starts moved, 26 nearer the first card (16 now within 1 s of it) and 2 further, one of them from 7.5 s late to 5.5 s
 early onto an epilogue card touching the roll (the gap §0 lists); I Survived unchanged; the 43 online cases' credits
 useful 33 → 35.
+**Version 7** (2026-09-27 in §14, `evidence/credits-remaining/`). Three rules, each with measured wins of its own:
+*the anchor keeps a card on black* whose next credit frame follows only keyframes no brighter than its own frame
+(step 6); *a 1 fps walk that reaches its window's floor reads one 24 s join further back*, once (step 9); and *a
+credits chapter on the story moves to the first text after it* (`rule_j.chapter_moves_to`: lit keyframes without
+text after the chapter, then text more than 10 s after it, never later than rule J's start; the answer keeps rule J's
+start and its label names the chapter's new one, `decide.chapter_hint(..., to_ms=)`). Harness, GPU decode, version 6 →
+7 on the same decodes: rule J alone on the 80 (78 on disk) 66 → 66 within 10 s by the set's truth (67 with Marvel's
+Daredevil S03E09 frame-checked: its answer moved 10 s onto the first card, 13.5 s before the chapter on the cast
+list), early 2 → 2; the 80's gate 5 of 5 by the frame check (High wrong 1 → 2 by the chapter); the 205 Medium useful
+101 → 106, wrong 18 → 18, High useful 97 → 102, wrong 17 → 17, and every answer that moved earlier than the set's
+truth is on credits by frame check (Louis C.K. Ridiculous, A Little Prayer, Animal); Accused 50 / 4 / 3, I Survived and
+the online cases unchanged.
 An intra-only file's thinned keyframe pass counts its stride from the seek, so its rest of the file is decoded from the
 tail's own start and the rows before the end dropped: the frames after the end are then the ones the 320×180 reading
 read (the cost: its whole tail again, thinned; 450 frames for a movie). At 640×360 each text detection request carries 16 frames, the pixels of 64 at 320×180, so the helper's
@@ -680,6 +694,14 @@ and its answer is version 2's (`rule_j.boxes_of`).
    was joined by dark frames alone, so every keyframe between is dark, and it is kept as the start, lit or dark (WILL's
    first card on black; on the sets 3 of the 9 such first frames are lit, all on the roll by frame check; rule J
    version 2). The cost is lit scene text followed by more than 24 s of dark keyframes before the roll (§13 item 14).
+   **Version 7:** a dark first frame (a card on black) whose next credit frame follows at least one keyframe, every one
+   of them no brighter than the card's own frame (its black ground, cards too small to box, a card decode order
+   emitted late), is kept at any distance: the dark bridge joined it, not the 24 s join over story (CIA S01E02's
+   "Executive Producer" card, Doc S02E14's first cast card, 5 to 7's first card: 6–12 s late when stepped over). A
+   lit first frame, or anything brighter between (story, or an epilogue's photo card: Facing El Chapo), steps as before.
+   The 640×360 reading doesn't keep it (`black_reads`): its rows leave out the text 320×180 boxed, so the rest of an
+   epilogue card reads there as blank dark keyframes (Accused S05E01: 27.5 s early when kept). The cost is the same
+   shape on story: a dark text frame with only its black ground before a dark text run.
 7. **Reach back** (rule J version 3, §13 item 14): step the start back over earlier keyframes whose text is in the
    roll's band and which keep the roll's own cadence — no further from the frame the walk is on than 1.5 × the spacing
    of the run's credit frames (the anchor's yardstick), and never more than the 24 s join. That spacing is the
@@ -744,7 +766,12 @@ and its answer is version 2's (`rule_j.boxes_of`).
    would take those answers away.
 9. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
    then back over the fade (luma < 12, steps ≤ 4 s). The 1 fps rows are read without step 4's overlays too, so the
-   walk can't step back over a bug the keyframes already dropped.
+   walk can't step back over a bug the keyframes already dropped. **Version 7:** a walk over the roll's own frames
+   that ends less than one of its steps (2.5 s) after the window's first second (`rule_j.refine_reaches_floor`) reads
+   one more window, 24 s (the join) before it, once: the coarse start can sit up to one join after the roll's first
+   frame, by the anchor's step or by a decode order that puts a later keyframe first in the run (3 Women (1977): 21 s,
+   answered 12 s late on the window's floor). A fade over black down to the floor, or a walk from a lone credit frame
+   when nothing near the coarse start shows the roll, reads nothing more.
 
 **Measured** on 80 files with chapter truth (40 movies, 40 TV; 3 movie truths corrected by frame checks,
 `evidence/credits/adjudicated.json`, sheets in `evidence/credits/framechecks/`):
@@ -856,7 +883,8 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    the type rests on chapters and server markers only, unlocked, and not again after it failed to read the file as
    it is, `failed_here`). When its answer's `chapter_hint` says the frames move this
    chapter (§5.4 version 6), the answer starts more than 10 s from it and no other source agrees with the chapter's
-   start, the chapter keeps the window and credit text supplies the start: end the earlier of the chapter's and the
+   start, the chapter keeps the window and credit text supplies the start (the hint's own start when it names one: a
+   chapter on the story moves to the first text after it, §5.4 version 7): end the earlier of the chapter's and the
    text's, `decided_by` chapters + credit text, reason `decide.TEXT_MOVES_CHAPTER_REASON`; a moved marker failing sanity
    leaves the chapter. A release's "Credits" chapter was more than 5 s off the first card on 10 of 41 frame-checked
    chapter files of the 2026-09-27 audit, 3 of them on the story (A Christmas Carol 1984, 13 s before the roll). **An
@@ -3464,3 +3492,24 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   for credit text lost its delayed verify job, because the checking stage stores the new file before handing it on;
   the job keeps "replaced" from its first stage to the worker's (phase 1 16 of 16 after). The run's other failures are
   the matrices' own drift and fail the same way on `dev` (§0).
+- 2026-09-27 · **The credits errors left after #320** (§5.4 version 7, steps 6 and 9; §5.5 rule 3;
+  `evidence/credits-remaining/`). Why each was wrong, from sflix's own rows and the frames:
+  - **10 Things I Hate About You** was read on sflix (GPU Worker 4, 13:10:44–56): rule J started 166 s late, because
+    320×180 boxes its crawl over the rooftop band only on some keyframes, and the "on the story" shape needed no text
+    between the chapter (on the final kiss) and rule J's start. A chapter on the story now moves to the first text after
+    it (5573.6 s, the crawl's first line) — never before the chapter, never after rule J's start; the answer keeps rule
+    J's start and the label names the chapter's new one, so a source agreeing with rule J still outvotes the chapter.
+  - **A Beautiful Imperfection** was read too (GPU Worker 3): rule J starts on the epilogue text, within 10 s of the
+    chapter, as Plex does. Not fixed: no box-level signal tells a prose card from a credit card (§0; the README).
+  - **Late starts**: the anchor stepped over the roll's first card on black (CIA S01E02, Doc S02E14, 5 to 7), and the
+    1 fps walk ran into its window's floor (3 Women; 3 Days to Kill and Ace Ventura both ways). The anchor keeps a card
+    on black followed only by keyframes no brighter than its own frame; the walk reads one 24 s join further back when
+    it reaches its floor. The rest are rolls the detector doesn't see (§0).
+  Measured against `dev` `cab4ccf` on the same decodes, the audit's truths plus four frame checks (the README):
+  verdict set credits wrong 10 → 8 of 88 (tuning 6 → 4 of 61, held out 4 → 4 of 27), skipping story 2 → 1; intros 4 of 51
+  wrong before and after, no intro moved in the replay; the Plex comparison 12 → 7 of 81 wrong (Plex's own 8 of 80),
+  skipping story 2 → 1 (Plex's 8). The replay of sflix's copy moved 7 credits starts more than 5 s, each onto the first
+  card or the show's end logo. Harness: §5.4 version 7. `CREDITS_TEXT_VERSION` 7: every stored credit text answer is
+  read again once (912 files on sflix's disks), which also re-reads 10 Things against its chapter. Lab: phase 1 16 of
+  16, no row worse than #320's run; phase 3 row 6 (a cancel at pickup) fails on `dev` too, 4 of 6 traced trials there
+  (the README).

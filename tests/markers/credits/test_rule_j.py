@@ -175,9 +175,10 @@ class TestAnchorSpacing:
     def test_the_run_gap_is_measured_in_presentation_order_not_decode_order(self):
         # Six of the 80 files emit the roll's keyframes in swapped pairs. Consecutive differences then run -2 / +6 for
         # a 2 s roll, and the median of those is 6 s -- a 9 s limit that would keep a lone frame 8 s before the roll.
+        # The lone frame is lit: a dark one with only the roll's dark keyframes between is kept since version 7.
         body = [bright(t) for t in range(0, 494, 2)]
         pairs = [row for t in range(500, 564, 4) for row in (dark(t + 2, 2), dark(t, 2))]
-        rows = [*body, dark(494, 1), *pairs]
+        rows = [*body, bright(494, 3), *pairs]
         first, last = rule_j.credit_runs(rows)[-1]
         assert rows[first][0] == 494.0
         assert rule_j._typical_spacing(rows[first : last + 1]) == 6.0
@@ -212,23 +213,67 @@ class TestAnchorSpacing:
         assert coarse is not None and coarse.pts_s == 412.0  # one step only; unbounded this reached 424.0
 
     @pytest.mark.parametrize(
-        ("gap_s", "start"),
+        ("gap_s", "lit_start", "dark_start"),
         [
-            (3.0, 400.0),   # 1.5 x the 2 s credit spacing: the first card's neighbour, no step
-            (24.0, 424.0),  # as far as the 24 s join reaches: possibly glued on by it, one step
-            (24.1, 400.0),  # only the dark bridge joins that far: the roll's own first card, no step
+            (3.0, 400.0, 400.0),   # 1.5 x the 2 s credit spacing: the first card's neighbour, no step
+            (24.0, 424.0, 400.0),  # as far as the 24 s join reaches: a lit frame may be glued on by it, one step
+            (24.1, 400.0, 400.0),  # only the dark bridge joins that far: the roll's own first frame, no step
         ],
     )  # fmt: skip
-    def test_the_anchor_steps_only_over_a_gap_the_24_s_join_can_bridge(self, gap_s, start):
+    def test_the_anchor_steps_only_over_a_gap_the_24_s_join_can_bridge(self, gap_s, lit_start, dark_start):
         # WILL: the roll's first card, then 65 s of dark empty keyframes before the next card text detection sees. Only
         # credit_runs' dark bridge joins across more than 24 s, so every keyframe between is dark: the 24 s join didn't
-        # glue the first frame on, and stepping over it put the start 72 s late.
+        # glue the first frame on, and stepping over it put the start 72 s late. Version 7: a card on black with only
+        # dark keyframes between it and the next card is that shape at any distance (CIA S01E02, Doc S02E14).
         body = [bright(t) for t in range(0, 400, 2)]
         empties = [dark(400 + t) for t in range(2, int(gap_s), 2)]
-        rows = [*body, dark(400, 1), *empties, *[dark(400 + gap_s + t, 2) for t in range(0, 60, 2)]]
-        assert rule_j.credit_runs(rows) == [(200, len(rows) - 1)]
+        roll = [dark(400 + gap_s + t, 2) for t in range(0, 60, 2)]
+        for first, start in ((bright(400, 3, 40.0), lit_start), (dark(400, 1), dark_start)):
+            rows = [*body, first, *empties, *roll]
+            assert rule_j.credit_runs(rows) == [(200, len(rows) - 1)]
+            coarse = rule_j.coarse_start(rows)
+            assert coarse is not None and coarse.pts_s == start
+
+    @pytest.mark.parametrize(
+        ("between", "start"),
+        [
+            pytest.param([dark(t) for t in range(402, 412, 2)], 400.0, id="black: the roll's first card"),
+            pytest.param([bright(t) for t in range(402, 412, 2)], 412.0, id="story: glued on by the 24 s join"),
+            pytest.param([dark(402.0), bright(406.0), dark(410.0)], 412.0, id="a lit keyframe among the black"),
+            # Facing El Chapo: an epilogue card, then its photo card (dark, no box, brighter than the card) before the
+            # next one: the photo is something on the screen, not the card's black ground.
+            pytest.param([dark(402.0), dark(406.0, 0, 22.0)], 412.0, id="a keyframe brighter than the card"),
+            pytest.param([], 412.0, id="no keyframe between to show black"),
+        ],
+    )
+    def test_a_card_on_black_bridged_to_the_roll_by_black_is_kept(self, between, start):
+        # Version 7 (2026-09-27 audit): the first card, then black or cards too small to box, then the rest of the roll
+        # (CIA S01E02: 6.4 s late, Doc S02E14: 12 s late when stepped over). Story between them is what the anchor is
+        # for (Undisputed).
+        body = [bright(t) for t in range(0, 400, 2)]
+        rows = [*body, dark(400, 1), *between, *[dark(t, 2) for t in range(412, 470, 2)]]
         coarse = rule_j.coarse_start(rows)
         assert coarse is not None and coarse.pts_s == start
+
+    def test_a_card_decode_order_emitted_late_is_dark_too(self):
+        # Decode order can emit a credit frame after the next one it times before (Marvel's Daredevil S03E09, 5 to 7):
+        # the anchor compares the next one emitted, and the card between is more of the roll, not story.
+        body = [bright(t) for t in range(0, 400, 2)]
+        rows = [*body, dark(400, 1), dark(412, 2), dark(406, 2), *[dark(t, 2) for t in range(414, 470, 2)]]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 400.0
+
+    def test_the_640x360_reading_has_no_black_to_read(self):
+        # Its rows leave out the text the 320x180 reading boxed, so the rest of an epilogue card reads as blank dark
+        # keyframes (Accused (2020) S05E01: its one new line kept as the start, 27.5 s early). The anchor steps there.
+        body = [bright(t) for t in range(0, 400, 2)]
+        rows = [*body, dark(400, 1), dark(402), dark(404), *[dark(t, 2) for t in range(412, 470, 2)]]
+        assert rule_j.coarse_start(rows).pts_s == 400.0
+        assert rule_j.coarse_start(rows, black_reads=False).pts_s == 412.0
+        before = [bright(t) for t in range(280, 400, 2)]
+        tail = [dark(t, 2) for t in range(412, 470, 2)]
+        assert rule_j.joined_before([*before, dark(400, 1), dark(402), dark(404)], tail) is not None
+        assert rule_j.joined_before([*before, dark(400, 1), dark(402), dark(404)], tail, black_reads=False) is None
 
     @pytest.mark.parametrize("first", [dark(400, 1), bright(400, 3)], ids=["dark-card", "lit-frame"])
     def test_a_first_frame_the_dark_bridge_joined_is_kept_lit_or_dark(self, first):
@@ -240,9 +285,10 @@ class TestAnchorSpacing:
         rows = [*body, first, *[dark(t) for t in range(402, 430, 2)], *[dark(t, 2) for t in range(430, 490, 2)]]
         coarse = rule_j.coarse_start(rows)
         assert coarse is not None and coarse.pts_s == 400.0
+        # Within 24 s a lit frame is stepped over as before; a card on black is kept (version 7).
         near = [*body, first, *[dark(t) for t in range(402, 424, 2)], *[dark(t, 2) for t in range(424, 490, 2)]]
         coarse = rule_j.coarse_start(near)
-        assert coarse is not None and coarse.pts_s == 424.0
+        assert coarse is not None and coarse.pts_s == (424.0 if first[2] >= rule_j.RULE_J.dark else 400.0)
 
     def test_a_scene_keyed_after_the_roll_cannot_reach_the_yardstick(self):
         # The Q3 shape: a post-credits scene 30 s past the roll's last credit frame. The slice stops at the run's
@@ -309,6 +355,42 @@ class TestRefine:
         fine = [bright(85), dark(86, 0, 5.0), dark(87, 0, 8.0), dark(88, 1), dark(90, 1), dark(92, 2), dark(95, 1),
                 dark(98, 1), dark(100, 1), dark(101, 1)]  # fmt: skip
         assert rule_j.refine_start(self.ROWS, coarse, fine) == 86.0
+
+    @pytest.mark.parametrize(
+        ("fine", "reaches"),
+        [
+            pytest.param([dark(t, 1, 20.0) for t in range(80, 102)], True, id="roll to the window's first second"),
+            # The walk steps over a frame between cards (up to 2.5 s), so a card at 79 s would carry it past a lit 80 s.
+            pytest.param([bright(80), *[dark(t, 1, 20.0) for t in range(81, 102)]], True, id="story at the floor"),
+            pytest.param(
+                [dark(80, 0, 5.0), *[dark(t, 1, 20.0) for t in range(81, 102)]], True, id="black gap at the floor"
+            ),
+            pytest.param(
+                [bright(t) for t in range(80, 83)] + [dark(t, 1, 20.0) for t in range(83, 102)],
+                False,
+                id="a walk step clear of the floor",
+            ),  # fmt: skip
+            pytest.param([dark(t, 1, 20.0) for t in range(84, 102)], True, id="window decoded from later on"),
+            pytest.param([bright(t) for t in range(80, 102)], False, id="no roll frame in the window"),
+            pytest.param([], False, id="no 1 fps rows"),
+            # The fade walks black down to the floor, but the roll's own frames stop at 100 s: nothing more to read.
+            pytest.param(
+                [*[dark(t, 0, 5.0) for t in range(80, 100)], dark(100, 1, 20.0), dark(101, 1, 20.0)],
+                False,
+                id="black to the floor",
+            ),
+            # Nothing near the coarse start shows the roll, and the walk starts from a lone credit frame at the floor.
+            pytest.param(
+                [dark(80, 1, 20.0), *[bright(t) for t in range(81, 102)]], False, id="a lone card at the floor"
+            ),
+        ],
+    )
+    def test_the_walk_reaching_the_windows_floor_asks_for_more(self, fine, reaches):
+        # Version 7: the coarse start can sit up to one 24 s join after the roll's first frame (the anchor's step, or a
+        # decode order that puts a later keyframe first: 3 Women, 21 s), so a walk over the roll that runs to the
+        # window's first second may have more roll before it.
+        coarse = rule_j.coarse_start(self.ROWS)
+        assert rule_j.refine_reaches_floor(self.ROWS, coarse, fine) is reaches
 
     def test_fade_back_steps_over_dark_frames_up_to_4_s_apart(self):
         coarse = rule_j.coarse_start(self.ROWS)
@@ -403,8 +485,9 @@ class TestRefine:
         assert rule_j.coarse_start(rows) == Coarse(index=50, end_index=65, pts_s=102.0)
 
 
-class TestMovesChapter:
-    """Version 6: whether the frames show a credits chapter off the roll rule J found (``rule_j.moves_chapter``)."""
+class TestChapterMovesTo:
+    """Versions 6 and 7: where the frames put a credits chapter off the roll rule J found (``rule_j.chapter_moves_to``),
+    or None when they keep it."""
 
     @staticmethod
     def texted(times: range | list[float]) -> list[rule_j.Row]:
@@ -413,39 +496,49 @@ class TestMovesChapter:
     @pytest.mark.parametrize("start_s", [990.0, 1010.0, 1000.0])
     def test_a_start_within_10_s_agrees_with_the_chapter(self, start_s):
         rows = [bright(t) for t in range(900, 1100, 4)]
-        assert rule_j.moves_chapter(rows, start_s, 1000.0) is False
+        assert rule_j.chapter_moves_to(rows, start_s, 1000.0) is None
 
     def test_a_chapter_inside_the_roll_moves_back_to_the_rolls_start(self):
         # Text on every keyframe from the roll's start to the chapter: the chapter sits mid-roll (La Brea S01E02 on its
         # studio logos 35 s after the first card).
         rows = [bright(t) for t in range(900, 960, 4)] + self.texted(range(960, 1100, 4))
-        assert rule_j.moves_chapter(rows, 961.0, 1000.0) is True
+        assert rule_j.chapter_moves_to(rows, 961.0, 1000.0) == 961.0
 
     @pytest.mark.parametrize(("gap_s", "moved"), [(8.0, True), (8.1, False)])
     def test_a_stretch_without_text_over_8_s_between_them_keeps_the_chapter(self, gap_s, moved):
         # A caption or a dedication split off by story or black is no part of the roll the chapter opens.
         rows = self.texted([960.0, 968.0, *(968.0 + gap_s + 8.0 * k for k in range(4))])
-        assert rule_j.moves_chapter(rows, 960.0, 968.0 + gap_s + 24.0) is moved
+        assert rule_j.chapter_moves_to(rows, 960.0, 968.0 + gap_s + 24.0) == (960.0 if moved else None)
 
     def test_the_stretch_counts_from_the_rolls_start_and_up_to_the_chapter(self):
         # No text keyframe at all between them: the stretch is the whole distance.
         rows = [bright(t) for t in range(900, 1100, 4)]
-        assert rule_j.moves_chapter(rows, 985.0, 1000.0) is False
+        assert rule_j.chapter_moves_to(rows, 985.0, 1000.0) is None
 
     def test_how_far_back_is_bounded_only_by_text_on_screen(self):
         # 300 s of roll before the chapter: the decision's sanity checks bound the moved marker, not rule J.
         rows = self.texted(range(700, 1004, 4))
-        assert rule_j.moves_chapter(rows, 700.0, 1000.0) is True
+        assert rule_j.chapter_moves_to(rows, 700.0, 1000.0) == 700.0
 
     def test_a_chapter_on_the_last_shot_moves_forward_to_the_roll(self):
         # No text from the chapter to the roll: the chapter is on the story (A Christmas Carol (1984): 13 s early).
         rows = [bright(t) for t in range(900, 1016, 4)] + self.texted(range(1016, 1100, 4))
-        assert rule_j.moves_chapter(rows, 1015.0, 1000.0) is True
+        assert rule_j.chapter_moves_to(rows, 1015.0, 1000.0) == 1015.0
 
-    def test_text_between_the_chapter_and_a_later_roll_keeps_the_chapter(self):
-        # The roll rule J found later isn't the first card when text is already on the screen after the chapter.
+    def test_text_within_10_s_of_the_chapter_keeps_it(self):
+        # Text on the screen right after the chapter: the chapter may open on it (an end title card, a closing logo).
         rows = [bright(t) for t in range(900, 1000, 4)] + [bright(1004, 1)] + self.texted(range(1030, 1100, 4))
-        assert rule_j.moves_chapter(rows, 1030.0, 1000.0) is False
+        assert rule_j.chapter_moves_to(rows, 1030.0, 1000.0) is None
+
+    @pytest.mark.parametrize(("text_s", "moved"), [(1010.0, None), (1012.0, 1012.0), (1028.0, 1028.0)])
+    def test_a_chapter_on_the_story_moves_to_the_first_text_after_it(self, text_s, moved):
+        # Version 7: a crawl over footage rule J reads only in pieces (10 Things I Hate About You: its first lines 43 s
+        # after the chapter on the final kiss, rule J's run 166 s later still). The chapter moves to the first text
+        # after its story, which is never before the chapter and never after rule J's start; within 10 s it agrees.
+        story = [bright(t) for t in range(1000, int(text_s), 2)]
+        rows = [*story, bright(text_s, 1), *[bright(t) for t in range(int(text_s) + 2, 1060, 2)],
+                *self.texted(range(1060, 1100, 2))]  # fmt: skip
+        assert rule_j.chapter_moves_to(rows, 1060.0, 1000.0) == moved
 
     @pytest.mark.parametrize(("blank_s", "moved"), [(962.0, True), (962.1, False), (990.0, False)])
     def test_lit_footage_without_text_after_the_starts_fade_keeps_the_chapter(self, blank_s, moved):
@@ -453,12 +546,12 @@ class TestMovesChapter:
         # in the scene; one release's chapter moved 17 s onto a T-shirt). The one fine sample the start was refined to
         # may be the fade into the first card.
         rows = sorted([*self.texted([t for t in range(961, 1000, 2) if abs(t - blank_s) > 1]), bright(blank_s)])
-        assert rule_j.moves_chapter(rows, 961.0, 1000.0) is moved
+        assert rule_j.chapter_moves_to(rows, 961.0, 1000.0) == (961.0 if moved else None)
 
     def test_black_without_text_between_cards_still_moves_the_chapter(self):
         # A dark keyframe between two cards is the cut between them, not the story.
         rows = sorted([*self.texted([t for t in range(961, 1000, 2) if t != 981]), dark(981.0)])
-        assert rule_j.moves_chapter(rows, 961.0, 1000.0) is True
+        assert rule_j.chapter_moves_to(rows, 961.0, 1000.0) == 961.0
 
     @pytest.mark.parametrize(
         ("between", "moved"),
@@ -476,7 +569,12 @@ class TestMovesChapter:
         # A chapter on black before the first text rule J read may sit on cards too small to read at 320 px (two
         # releases: 22 and 30 s of such cards); only a chapter on lit footage is on the story.
         rows = [*between, *self.texted(range(1020, 1100, 4))]
-        assert rule_j.moves_chapter(rows, 1020.0, 1000.0) is moved
+        assert rule_j.chapter_moves_to(rows, 1020.0, 1000.0) == (1020.0 if moved else None)
+
+    def test_a_dark_keyframe_before_the_first_text_keeps_the_chapter(self):
+        # The first text after the chapter must follow footage only: black before it may hold cards too small to box.
+        rows = [bright(1000.0), bright(1004.0), dark(1008.0), bright(1014.0, 1), *self.texted(range(1060, 1100, 4))]
+        assert rule_j.chapter_moves_to(rows, 1060.0, 1000.0) is None
 
 
 class TestEpilogueCards:
@@ -882,19 +980,20 @@ class TestARollThatBeganBeforeTheTail:
         assert coarse is not None and coarse.pts_s == roll_from
         assert rule_j.credits_start(joined, []) == start
 
-    def test_a_roll_whose_one_card_before_the_tail_the_anchor_steps_over_gets_no_answer(self):
-        # Pinned as a known cost: the roll's first card at 996 s, then its ground (luma 18) from the tail at 1000 s and
-        # cards every 6 s from 1006 s. The anchor steps over the 996 s card (10 s to the next, over 1.5 x 6 s), so the
-        # joined run's start is inside the tail and the join is dropped: no answer, where one longer tail answers
-        # 1006 s. Keeping the join on the run's first row instead would also keep a lone dark subtitle frame before the
-        # tail, and a night scene's captions after it, as a roll.
-        before = [bright(880 + 2 * i) for i in range(58)] + [dark(996, 3), dark(998, 0, 18.4)]
+    def test_a_roll_whose_one_card_before_the_tail_sits_on_black_is_joined_on_it(self):
+        # The roll's first card at 996 s, then its ground (luma 18) from the tail at 1000 s and cards every 6 s from
+        # 1006 s. Until version 7 the anchor stepped over the 996 s card (10 s to the next, over 1.5 x 6 s), so the
+        # joined run's start was inside the tail and the join was dropped: no answer. A card on black followed by nothing
+        # brighter than itself before the next card is the roll's own now (the anchor), so the join keeps it and the
+        # answer is that card. The cost: a lone dark subtitle frame before the tail with only its black ground before a
+        # night scene's captions reads the same way.
+        before = [bright(880 + 2 * i) for i in range(58)] + [dark(996, 3, 18.6), dark(998, 0, 18.4)]
         tail = [dark(1000, 0, 18.4), dark(1003, 0, 18.4)] + [dark(1006 + 6 * i, 3, 18.4) for i in range(30)]
         coarse = rule_j.coarse_start(tail)
         assert coarse is not None and coarse.pts_s == 1006.0 and rule_j.opens_on_the_run(tail, coarse)
-        assert rule_j.joined_before(before, tail) is None
+        assert rule_j.joined_before(before, tail) == [*before, *tail]
         assert rule_j.credits_start(tail, []) is None
-        assert rule_j.credits_start([*before, *tail], []) == 1006.0
+        assert rule_j.credits_start([*before, *tail], []) == 996.0
 
     @pytest.mark.parametrize(
         "before",
@@ -992,6 +1091,11 @@ PORT_DIVERGENCES = {
     "tv-09": (21.125, 0.125),  # 3.670 s roll under a 2.336 s tail median: another collapse onto the run's last frame
     "tv-22": (19.866, 16.866),  # 16 rows, 6 credit frames: 1.919 s keyframes against a 6.256 s credit cadence
     "tv-31": (13.0, 4.0),  # 42 rows, 16 credit frames: 2.002 s keyframes against a 4.004 s credit cadence
+    # Version 7: a card on black followed by nothing brighter than its own frame is no longer stepped over.
+    "movie-28": (
+        10.354,
+        8.354,
+    ),  # the first card, then its black ground, 10 s before the next card text detection boxes
 }
 
 # Files where the anchor still walks off the run's first row, and where it lands. The refine window absorbs most of
@@ -1004,7 +1108,6 @@ ANCHOR_WALKS_TO = {
     "movie-12": 1727.014,
     "movie-13": 1859.000,
     "movie-27": 1859.720,
-    "movie-28": 1714.681,
     "movie-29": 1512.850,
     "movie-34": 1548.699,
     "tv-04": 1373.548,
@@ -1022,6 +1125,7 @@ class TestEightyFiles:
         # longer collapses onto the end of its run, 21.1 -> 0.1), movie-12, tv-07, tv-31 and movie-03 (WILL, 71.7 ->
         # 5.6: the anchor no longer steps past the 24 s join, CREDITS_TEXT_VERSION 2). movie-25, movie-29, movie-38 and
         # tv-22 improve without changing bucket, and nothing else moves at all. §5.4's table was measured at 10 s.
+        # Version 7's anchor keeps movie-28's first card on black (10.4 -> 8.4): 65 within 10 s.
         tally = Counter()
         for item in _fixture()["items"]:
             start = rule_j.credits_start(_rows(item["key"]), _rows(item["fine"]))
@@ -1033,7 +1137,7 @@ class TestEightyFiles:
             if abs(error) > 30:
                 tally["early" if error < 0 else "late"] += 1
         assert len(_fixture()["items"]) == 80
-        assert (tally["within_10s"], tally["early"], tally["late"], tally["none"]) == (64, 1, 7, 4)
+        assert (tally["within_10s"], tally["early"], tally["late"], tally["none"]) == (65, 1, 7, 4)
 
     def test_every_divergence_from_the_prototype_is_closer_to_the_truth(self):
         # The one property that separates this from tuning against a fixture: no file was traded away for another.

@@ -109,6 +109,11 @@ for it in plex:
             continue
         d = it["plex_s"] - it["truth"]["start"] if it["plex_v"] != "right" or not it["truth"].get("approx") else 0.0
         v = it["plex_v"]
+        if it["id"] in checks and it.get("plex_s") is not None:
+            # A frame check made after the audit judges Plex's own start the way it judges ours.
+            v = "right" if judge(it, (it["plex_s"], None), checks[it["id"]]) == "right" else "wrong"
+            lo = checks[it["id"]].get("lo", checks[it["id"]]["start"])
+            d = it["plex_s"] - lo
         pc[(part, "wrong" if v == "wrong" else ("right" if v == "right" else "unclear"))] += 1
         pc[(part, "harm")] += int(v == "wrong" and d < -TOL)
 for part in ("tune", "held", "all"):

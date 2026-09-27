@@ -146,7 +146,7 @@ BAND_TOLERANCE_PX = 32.0
 # carry a box, lit or dark. Half, and 0.4 gives the same rows; at 0.6 a measured roll is lost again and at 0.3 two
 # early answers come back.
 ROLL_TEXT_SHARE = 0.5
-# Version 6: a file's credits chapter, read against the frames (:func:`moves_chapter`). The roll's start agrees with
+# Version 6: a file's credits chapter, read against the frames (:func:`chapter_moves_to`). The roll's start agrees with
 # the chapter within the credits agreement tolerance (``decide.CREDITS_START_TOLERANCE_MS``: an end title card or a
 # show's closing logo a few seconds before the first card is the chapter's to include) ...
 CHAPTER_AGREES_S = 10.0
@@ -426,7 +426,7 @@ def _credit_bounds(rows: Sequence[Row], first: int, last: int, params: RuleParam
     return (credit[0], credit[-1]) if len(credit) >= 2 else None
 
 
-def _anchored(rows: Sequence[Row], first: int, last: int, params: RuleParams) -> int:
+def _anchored(rows: Sequence[Row], first: int, last: int, params: RuleParams, *, black_reads: bool = True) -> int:
     """One run's anchored start row, read from ``rows``: the rule's rows with the overlays' boxes dropped.
 
     Start only where two credit samples sit next to each other: the 24 s join lets one story-scene text frame glue
@@ -435,6 +435,11 @@ def _anchored(rows: Sequence[Row], first: int, last: int, params: RuleParams) ->
     frames are what the yardstick measures, so a row outside the run is out of scope whatever it is -- including the
     rare case where it's itself a credit frame (a trailing run under ``run_s`` gets dropped by :func:`credit_runs`, so
     ``runs[-1]`` can leave one sitting right past ``last`` when decode order is non-monotonic).
+
+    ``black_reads`` says whether ``rows`` show every keyframe's text, so that the dark keyframes after a card read as
+    what they are. The 640x360 reading's rows leave out the text the 320x180 reading boxed: the rest of an epilogue card
+    reads there as blank dark keyframes after its one new line (Accused (2020) S05E01: kept, it was 27.5 s early), so
+    version 7's card on black isn't kept there.
     """
     spacing = _run_spacing(rows, first, last, params)
     steps = 0
@@ -449,6 +454,15 @@ def _anchored(rows: Sequence[Row], first: int, last: int, params: RuleParams) ->
         # starts on the roll or inside it by frame check. The cost: a lit scene-text frame followed by more than 24 s of
         # dark keyframes before the roll is kept as the start too, that far early (spec §13 item 14).
         if gap <= ANCHOR_SPACING_FACTOR * spacing or gap > params.gap_s:
+            break
+        # Version 7: a card on black followed by keyframes no brighter than its own frame -- its black ground, cards too
+        # small to box, or a card decode order emitted late -- up to the next credit frame is the same shape at any
+        # distance: the dark bridge joined it, not the 24 s join over story, so it is kept too (6-12 s late when stepped
+        # over, 2026-09-27 audit). A brighter keyframe between is something else on the screen (an epilogue's photo
+        # card: Facing El Chapo), and the anchor steps as before.
+        between = [row for row in rows if rows[first][0] < row[0] < rows[following][0]]
+        black_after = black_reads and bool(between) and all(row[2] <= rows[first][2] for row in between)
+        if rows[first][2] < params.dark and black_after:
             break
         first = following
         steps += 1
@@ -663,7 +677,11 @@ def reach_back(
 
 
 def coarse_start(
-    rows: Sequence[Row], params: RuleParams = RULE_J, *, without: Sequence[Row] | None = None
+    rows: Sequence[Row],
+    params: RuleParams = RULE_J,
+    *,
+    without: Sequence[Row] | None = None,
+    black_reads: bool = True,
 ) -> Coarse | None:
     """The last credit run's start, reached back over the rest of its own roll, or None when the rows hold no run.
 
@@ -683,6 +701,8 @@ def coarse_start(
         rows: Keyframe rows of the tail, in decode order.
         params: Rule thresholds.
         without: The same rows, same order, with the overlays' boxes dropped.
+        black_reads: These rows show every keyframe's text (False for the 640x360 reading's, which leave out the
+            text the 320x180 reading boxed: :func:`_anchored`).
 
     Returns:
         The coarse start, or None.
@@ -700,7 +720,7 @@ def coarse_start(
     chosen = _credit_bounds(read, *runs[-1], params)
     if chosen is None:
         return None
-    anchored = _anchored(read, *chosen, params)
+    anchored = _anchored(read, *chosen, params, black_reads=black_reads)
     keep = same_roll(read, runs, params)
     walk_run, walk_from, start = runs[-1], chosen, anchored
     if keep != len(runs) - 1:
@@ -709,7 +729,7 @@ def coarse_start(
         bounds = _credit_bounds(read, *runs[keep], params)
         if bounds is not None:
             walk_run, walk_from = runs[keep], bounds
-            start = _anchored(read, *walk_from, params)
+            start = _anchored(read, *walk_from, params, black_reads=black_reads)
     # The rows the walk may not step *onto* are the whole run it starts from as it was decoded, overlay rows included:
     # the anchor has already ruled on them, and a row the overlay emptied is no more the walk's to take. ``rows``
     # goes in as well, and only to cap the walk's cadence: without it, thinning the run could lend the walk reach the
@@ -860,7 +880,12 @@ def opens_on_the_run(rows: Sequence[Row], coarse: Coarse, params: RuleParams = R
 
 
 def joined_before(
-    before: Sequence[Row], rows: Sequence[Row], params: RuleParams = RULE_J, *, overlays: Sequence[Box] = ()
+    before: Sequence[Row],
+    rows: Sequence[Row],
+    params: RuleParams = RULE_J,
+    *,
+    overlays: Sequence[Box] = (),
+    black_reads: bool = True,
 ) -> list[Row] | None:
     """The rows read before the tail put ahead of the tail's own, when the tail's run continues into them.
 
@@ -870,11 +895,12 @@ def joined_before(
     before it, which is another way the same test is met.
     A run that stays inside the tail (dark story before a caption run, then lit story in the rows before) is judged on
     the tail alone, as before, and has no answer. So is a roll whose one card before the tail the anchor steps over
-    (more than 1.5 x the roll's spacing from the next card, and within 24 s of it): no answer, where the same rows read
-    as one longer tail would answer on the next card. The run's first row instead of its anchored start would keep that
-    roll, but also a lone dark subtitle frame before the tail, followed by dark rows and a caption run on a night scene
-    in it, which is story. The run must still start 30 s after the first row read (:func:`text_all_through`); when it
-    doesn't, the detector reads the steps before these rows (``detector.find_credits``).
+    (more than 1.5 x the roll's spacing from the next card, within 24 s of it, and something brighter than the card
+    between): no answer, where the same rows read as one longer tail would answer on the next card. A card on black
+    followed by nothing brighter than itself is kept (version 7, :func:`_anchored`), and so is a lone dark subtitle
+    frame in that shape before a caption run on a night scene in the tail, which is story. The run must still start
+    30 s after the first row read (:func:`text_all_through`); when it doesn't, the detector reads the steps before these
+    rows (``detector.find_credits``).
 
     This test is for the tail's edge only. Once it has passed, the run is known to cross the tail's start, and each
     later step is put in front with :func:`rows_before` whether the run carries on into it or it is story: that story
@@ -887,12 +913,14 @@ def joined_before(
         overlays: The tail's own overlays (:func:`overlay_boxes`), which the joined rows are read without. They are
             not gathered again from the joined rows: a roll that began before the tail is exactly the shape that must
             not be read as its own overlay. Empty reads the joined rows as they are.
+        black_reads: As :func:`coarse_start`'s.
 
     Returns:
         The joined rows as decoded, or None when the tail is to be judged alone.
     """
     joined = rows_before(before, rows)
-    coarse = coarse_start(joined, params, without=without_overlays(joined, overlays) if overlays else None)
+    without = without_overlays(joined, overlays) if overlays else None
+    coarse = coarse_start(joined, params, without=without, black_reads=black_reads)
     return joined if coarse is not None and coarse.pts_s < min(row[0] for row in rows) else None
 
 
@@ -964,11 +992,24 @@ def refine_start(
     Returns:
         The refined start in seconds.
     """
-    t = coarse.pts_s
-    floor_s = t - before_s
-    window = [j for j, row in enumerate(fine_rows) if floor_s <= row[0] <= t + REFINE_AFTER_S]
+    window, j, _ = _refine_walk(rows, coarse, fine_rows, before_s, params)
     if not window:
         return fade_back(rows, coarse.index, -1.0)
+    if j is None:
+        return coarse.pts_s
+    return fade_back(fine_rows, j, coarse.pts_s - before_s)
+
+
+def _refine_walk(
+    rows: Sequence[Row], coarse: Coarse, fine_rows: Sequence[Row], before_s: float, params: RuleParams
+) -> tuple[list[int], int | None, bool]:
+    """:func:`refine_start`'s walk: the window's 1 fps rows, the row the walk ends on before the fade (None when no roll
+    frame is near the coarse start and no credit frame is in the window), and whether it walked from the roll near the
+    coarse start."""
+    t = coarse.pts_s
+    window = [j for j, row in enumerate(fine_rows) if t - before_s <= row[0] <= t + REFINE_AFTER_S]
+    if not window:
+        return window, None, False
     band = band_of(rows, coarse.index if coarse.run_index is None else coarse.run_index, coarse.end_index, params)
     roll = [j for j in window if is_credit(fine_rows[j], params) or (band is not None and in_band(fine_rows[j], band))]
     # A coarse start whose text the 1 fps frames don't show (a card between two samples) walks from the latest credit
@@ -976,14 +1017,43 @@ def refine_start(
     near = [j for j in roll if fine_rows[j][0] >= t - REFINE_GAP_S]
     walk_from = near or [j for j in window if is_credit(fine_rows[j], params)]
     if not walk_from:
-        return t
+        return window, None, False
     j = walk_from[-1]
     while True:
         earlier = [k for k in roll if k < j and fine_rows[j][0] - fine_rows[k][0] <= REFINE_GAP_S]
         if not earlier:
             break
         j = earlier[0]
-    return fade_back(fine_rows, j, floor_s)
+    return window, j, bool(near)
+
+
+def refine_reaches_floor(
+    rows: Sequence[Row],
+    coarse: Coarse,
+    fine_rows: Sequence[Row],
+    *,
+    before_s: float = REFINE_BEFORE_S,
+    params: RuleParams = RULE_J,
+) -> bool:
+    """Whether :func:`refine_start`'s walk over the roll ended within one of its steps (``REFINE_GAP_S``) of the first
+    1 fps row of its window (version 7), so a roll frame before that row would have carried it on. The coarse start can
+    sit up to one 24 s join after the roll's first frame -- the anchor's one step over a frame, or a decode order that
+    puts a later keyframe first in the run -- and the window reaches only ``before_s`` back (2026-09-27 audit: 3 Women,
+    12 s late on that floor). Only the roll's own frames count: a fade over black down to the floor, or a walk from a
+    lone credit frame when nothing near the coarse start shows the roll, is no reason to read further.
+
+    Args:
+        rows: The keyframe rows the coarse start came from.
+        coarse: The coarse start the walk refined.
+        fine_rows: The 1 fps rows it walked.
+        before_s: The window it read, back from the coarse start.
+        params: Rule thresholds.
+
+    Returns:
+        True when the walk from the roll ends less than one step after the window's first row.
+    """
+    window, j, from_roll = _refine_walk(rows, coarse, fine_rows, before_s, params)
+    return from_roll and j is not None and fine_rows[j][0] - min(fine_rows[k][0] for k in window) < REFINE_GAP_S
 
 
 def credits_start(
@@ -1172,9 +1242,9 @@ def credits_end(
     return refine_end(rows, coarse, fine_rows, params=params)
 
 
-def moves_chapter(rows: Sequence[Row], start_s: float, chapter_s: float) -> bool:
-    """Whether the frames show a file's "Credits" chapter off the roll that starts at ``start_s`` (rule J version 6,
-    spec §5.4), so the roll's start should replace the chapter's.
+def chapter_moves_to(rows: Sequence[Row], start_s: float, chapter_s: float) -> float | None:
+    """Where the frames put a file's "Credits" chapter when they show it off the roll that starts at ``start_s`` (rule
+    J version 6, spec §5.4), or None when they keep it.
 
     A release's credits chapter is often off the first card: early on the last shot or on epilogue text, or late in
     the roll, on its closing logos, or where a montage after the first cards ends (2026-09-27 audit: 6 of 21 movie
@@ -1184,10 +1254,13 @@ def moves_chapter(rows: Sequence[Row], start_s: float, chapter_s: float) -> bool
       screen all the way from it to the chapter -- no stretch of keyframes without any box longer than
       ``CHAPTER_TEXT_GAP_S``, and no lit keyframe without one after the start's own ``CHAPTER_START_FADE_S``. Text that
       stops between the two (a caption, a dedication split off by black) leaves the chapter, and so does text between
-      shots of plain footage: it was the story's (a T-shirt, a poster, a screen).
-    * **On the story**: the roll starts more than ``CHAPTER_AGREES_S`` after the chapter, and every keyframe from the
-      chapter to it, at least one, is lit and holds no text: the chapter sits on footage, not on black cards too small
-      to read at 320 px (two releases' chapters sat on such cards, 22 and 30 s before the first text rule J read).
+      shots of plain footage: it was the story's (a T-shirt, a poster, a screen). The chapter moves to ``start_s``.
+    * **On the story**: the chapter is followed by lit keyframes without text, at least one, and the first keyframe
+      with text after it -- or the roll's start, when none comes first -- is more than ``CHAPTER_AGREES_S`` after
+      the chapter: the chapter sits on footage, not on black cards too small to read at 320 px (two releases' chapters
+      sat on such cards, 22 and 30 s before the first text rule J read). The chapter moves to that first text, which
+      is never before the chapter and never after ``start_s`` (version 7: a crawl over footage rule J reads only in
+      pieces had its first lines 166 s before rule J's start, and the chapter 43 s before them on the final kiss).
 
     A roll starting within ``CHAPTER_AGREES_S`` of the chapter agrees with it (an end title card or a show's closing
     logo a few seconds before the first card is the chapter's to include). How far a chapter may move is bounded by the
@@ -1200,16 +1273,20 @@ def moves_chapter(rows: Sequence[Row], start_s: float, chapter_s: float) -> bool
         chapter_s: The start of the file's credits chapter.
 
     Returns:
-        True when the roll's start should replace the chapter's.
+        The start the chapter moves to, or None when it stays.
     """
     if abs(start_s - chapter_s) <= CHAPTER_AGREES_S:
-        return False
+        return None
     dark = RULE_J.dark
     if start_s < chapter_s:
         between = [row for row in rows if start_s < row[0] < chapter_s]
         if any(row[1] == 0 and row[2] >= dark and row[0] > start_s + CHAPTER_START_FADE_S for row in between):
-            return False
+            return None
         stops = [start_s, *sorted(row[0] for row in between if row[1] >= 1), chapter_s]
-        return max(b - a for a, b in zip(stops, stops[1:], strict=False)) <= CHAPTER_TEXT_GAP_S
-    between = [row for row in rows if chapter_s <= row[0] < start_s]
-    return bool(between) and all(row[1] == 0 and row[2] >= dark for row in between)
+        return start_s if max(b - a for a, b in zip(stops, stops[1:], strict=False)) <= CHAPTER_TEXT_GAP_S else None
+    after = sorted((row for row in rows if chapter_s <= row[0] < start_s), key=lambda row: row[0])
+    first_text = next((row[0] for row in after if row[1] >= 1), start_s)
+    story = [row for row in after if row[0] < first_text]
+    if first_text - chapter_s <= CHAPTER_AGREES_S or not story or any(row[2] < dark for row in story):
+        return None
+    return first_text

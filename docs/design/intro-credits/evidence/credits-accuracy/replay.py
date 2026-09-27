@@ -8,6 +8,8 @@ reads credit text on (base: files whose credits aren't decided by chapters alone
 also chapter-decided ones). Season audio: stored, or with --audio <answers.json> {path: [s, e] | null} for files whose
 intro waits for season audio.
 
+The base tree is $CREDFIX_BASE (default ./base), the work tree $CREDFIX_WORK (default this repo).
+
 Usage: replay.py <base|work> <out.json> [--text vtext.json] [--audio answers.json]
 """
 
@@ -19,7 +21,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TREES = {
-    "base": str(HERE / "base"),
+    "base": os.environ.get("CREDFIX_BASE", str(HERE / "base")),
     "work": os.environ.get("CREDFIX_WORK", str(HERE.parents[4])),
 }
 which = sys.argv[1]
@@ -30,6 +32,8 @@ from media_preview_generator.markers.models import Candidate, MarkerType, Source
 from media_preview_generator.markers.store import MarkerStore  # noqa: E402
 
 assert D.__file__.startswith(tree), D.__file__
+# A tree whose credit text reads chapter files too (version 6 on): the work tree of #320, and every tree since.
+READS_CHAPTERS = hasattr(D, "chapter_hint")
 ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
          "server_markers", "server_markers_imported")  # fmt: skip
 LOCAL = {"season_audio", "season_audio_previous", "credits_text"}
@@ -60,16 +64,30 @@ def text_candidates(path, ev, rec):
     if not r or "error" in r or r.get("start_s") is None:
         return []
     start_ms, origin = round(r["start_s"] * 1000), ""
-    if which == "work":
+    if READS_CHAPTERS:
         from media_preview_generator.markers.credits import rule_j
         from tools.markers_eval.decode_cache import rows_from_json
 
         window, cap = D.credits_limits_ms(is_episode=rec.season_key is not None, tv_window_s=None, movie_window_s=None)
-        chapter_ms = D.credits_chapter_start_ms(ev, duration_ms=rec.duration_ms, is_movie=rec.is_movie,
-                                                credits_window_ms=window, movie_credits_max_from_end_ms=cap)
+        chapter_ms = D.credits_chapter_start_ms(
+            ev,
+            duration_ms=rec.duration_ms,
+            is_movie=rec.is_movie,
+            credits_window_ms=window,
+            movie_credits_max_from_end_ms=cap,
+        )
         if chapter_ms is not None:
-            rows = rule_j.without_overlays(rows_from_json(r["key"]), [tuple(b) for b in r["overlays"]])
-            origin = D.chapter_hint(chapter_ms, moves=rule_j.moves_chapter(rows, r["start_s"], chapter_ms / 1000))
+            from media_preview_generator.markers.credits import detector
+
+            overlays = tuple(tuple(b) for b in r["overlays"])
+            if hasattr(detector, "chapter_origin"):
+                # The tree's own label, exactly as the detector builds it.
+                found = detector.CreditsTextResult(r["start_s"], r["end_s"], tuple(rows_from_json(r["key"])), (), (),
+                                                   overlays)  # fmt: skip
+                origin = detector.chapter_origin(found, chapter_ms)
+            else:
+                rows = rule_j.without_overlays(rows_from_json(r["key"]), overlays)
+                origin = D.chapter_hint(chapter_ms, moves=rule_j.moves_chapter(rows, r["start_s"], chapter_ms / 1000))
     end = None if r["end_s"] is None else round(r["end_s"] * 1000)
     return [Candidate(MarkerType.CREDITS, start_ms, end, Source.CREDITS_TEXT, origin=origin)]
 
@@ -103,7 +121,7 @@ for fid, path in conn.execute("select id, canonical_path from files where missin
             else set()
         )
         chapter_only = bool(stored_by) and stored_by <= {"chapters", "server_markers", "server_markers_imported"}
-        if text_read or (which == "work" and chapter_only):
+        if text_read or (READS_CHAPTERS and chapter_only):
             ev = [c for c in ev if c.source is not Source.CREDITS_TEXT] + text_candidates(path, ev, rec)
             text_read = True
             fetched.add("credits_text")
@@ -130,7 +148,7 @@ for fid, path in conn.execute("select id, canonical_path from files where missin
         ):
             cands = [c for c in ev if c.type is t and not c.stale]
             kwargs = {}
-            if which == "work":
+            if READS_CHAPTERS:
                 kwargs["read_by"] = [
                     Source(s)
                     for s in ("season_audio", "credits_text")

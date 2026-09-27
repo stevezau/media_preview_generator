@@ -357,14 +357,18 @@ class TestTextOverAnOnlineStart:
         assert (d.status, d.marker.start_ms) == (DecisionStatus.DECIDED, 5_700_000)
 
 
-def hinted(start_ms: int, chapter_ms: int, end_ms: int | None = None, *, moves: bool = True) -> Candidate:
-    """A credit text answer read against the credits chapter at ``chapter_ms``, the frames moving it or not."""
-    return Candidate(T.CREDITS, start_ms, end_ms, Source.CREDITS_TEXT, 1.0, chapter_hint(chapter_ms, moves=moves))
+def hinted(
+    start_ms: int, chapter_ms: int, end_ms: int | None = None, *, moves: bool = True, to_ms: int | None = None
+) -> Candidate:
+    """A credit text answer read against the credits chapter at ``chapter_ms``, the frames moving it (to ``to_ms`` when
+    given) or not."""
+    label = chapter_hint(chapter_ms, moves=moves, to_ms=to_ms)
+    return Candidate(T.CREDITS, start_ms, end_ms, Source.CREDITS_TEXT, 1.0, label)
 
 
 class TestTextMovesAChaptersStart:
     """Rule 3 since 2026-09-27: credit text read against the credits chapter moves the chapter's start to the roll when
-    the frames show the chapter off it (``rule_j.moves_chapter``)."""
+    the frames show the chapter off it (``rule_j.chapter_moves_to``)."""
 
     @pytest.mark.parametrize("start_ms", [5_580_000, 5_720_000])
     @pytest.mark.parametrize("level", ["high", "medium"])
@@ -386,6 +390,26 @@ class TestTextMovesAChaptersStart:
             5_650_000,
             ("chapters",),
         )
+
+    def test_a_hint_naming_its_own_start_moves_the_chapter_there(self):
+        # Version 7: a chapter on the story moves to the first text after it, before the roll rule J reads later
+        # (10 Things I Hate About You: the chapter on the final kiss, the crawl's first lines 44 s later, rule J 166 s
+        # after those). The answer itself keeps rule J's start; only the chapter moves to the hint's.
+        d = credits([chapter(5_529_000), hinted(5_738_000, 5_529_000, to_ms=5_573_000)])[T.CREDITS]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, TEXT_MOVES_CHAPTER_REASON)
+        assert (d.marker.start_ms, d.marker.decided_by) == (5_573_000, ("chapters", "credits_text"))
+
+    def test_a_hinted_start_within_10_s_of_the_chapter_keeps_it(self):
+        d = credits([chapter(5_529_000), hinted(5_738_000, 5_529_000, to_ms=5_539_000)])[T.CREDITS]
+        assert (d.reason, d.marker.start_ms) == ("chapters", 5_529_000)
+
+    def test_an_answer_another_source_confirms_decides_before_the_hints_start(self):
+        # SkipDB agreeing with credit text's own start: the two outvote the chapter from that start (rule 3's credit
+        # text and agreeing sources), not from the first text the hint names.
+        d = credits(
+            [chapter(5_529_000), hinted(5_738_000, 5_529_000, to_ms=5_573_000), skipdb(5_740_000)], level="medium"
+        )[T.CREDITS]
+        assert (d.status, d.marker.start_ms) == (DecisionStatus.DECIDED, 5_738_000)
 
     @pytest.mark.parametrize(
         "answer",
