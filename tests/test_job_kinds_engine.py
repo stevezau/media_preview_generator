@@ -122,7 +122,8 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
             handlers=handlers,
         )
         assert tracker.wait(timeout=10)
-    assert seen["check_cancel_check"] is cancel_cb and tracker.cancel_check is cancel_cb
+    # The file's work gets the tracker's check, which reads the job's and stays True once the tracker is cancelled.
+    assert seen["check_cancel_check"] == tracker.is_cancelled and tracker.cancel_check is cancel_cb
     assert seen["item"].canonical_path == "/m/b.mkv"
     kwargs = seen["kwargs"]
     assert set(kwargs) == {
@@ -143,7 +144,7 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
     # The kind's job log names the worker: in its own pickup line, and in the file's closing line.
     assert kwargs["worker_name"] == worker.display_name
     assert picked_up == [("/m/b.mkv", worker.display_name)]
-    assert kwargs["cancel_check"] is cancel_cb
+    assert kwargs["cancel_check"] == tracker.is_cancelled
     assert kwargs["pause_check"] is pause_cb
     # The dispatcher hands each worker partial(pool._update_worker_progress, worker); the worker forwards it as-is.
     assert kwargs["progress_callback"].func == pool._update_worker_progress
@@ -185,12 +186,12 @@ def test_check_exception_routes_to_worker():
             handlers=handlers,
         )
         assert tracker.wait(timeout=10)
-    assert seen["check_cancel_check"] is tracker.cancel_check is cancel_cb
+    assert seen["check_cancel_check"] == tracker.is_cancelled and tracker.cancel_check is cancel_cb
     assert process.call_count == 1
     call = process.call_args
     assert call.args[0].canonical_path == "/m/c.mkv"
     assert call.kwargs["gpu"] is None and call.kwargs["gpu_device_path"] is None
-    assert call.kwargs["cancel_check"] is cancel_cb
+    assert call.kwargs["cancel_check"] == tracker.is_cancelled
     assert call.kwargs["pause_check"] is pause_cb
     assert call.kwargs["progress_callback"].func == pool._update_worker_progress
     assert call.kwargs["progress_callback"].args == (worker,)

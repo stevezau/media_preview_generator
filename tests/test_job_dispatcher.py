@@ -132,6 +132,35 @@ class TestJobTracker:
         assert tracker.done_event.is_set()
         assert tracker.failed == 3
 
+    def test_is_cancelled_stays_true_after_the_jobs_flag_is_cleared_when_the_tracker_was_cancelled(self):
+        # A cancel ends the job's wait while its files may still run; the job's teardown then clears its flag. The
+        # files' work reads is_cancelled, so it must not flip back.
+        flag = threading.Event()
+        tracker = JobTracker(
+            job_id="job-1",
+            items=_pi_list_or_passthrough([("k1", "t1", "movie")]),
+            config=_make_config(),
+            registry=MagicMock(),
+            callbacks={"cancel_check": flag.is_set},
+        )
+        assert tracker.is_cancelled() is False
+        flag.set()
+        assert tracker.is_cancelled() is True
+        tracker.cancel()
+        flag.clear()
+        assert tracker.is_cancelled() is True
+
+    def test_is_cancelled_without_a_cancel_callback_is_true_only_once_the_tracker_is_cancelled(self):
+        tracker = JobTracker(
+            job_id="job-1",
+            items=_pi_list_or_passthrough([("k1", "t1", "movie")]),
+            config=_make_config(),
+            registry=MagicMock(),
+        )
+        assert tracker.is_cancelled() is False
+        tracker.cancel()
+        assert tracker.is_cancelled() is True
+
     def test_get_result(self):
         tracker = JobTracker(
             job_id="job-1",
@@ -638,11 +667,13 @@ class TestJobDispatcher:
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
     def test_cancel_passes_cancel_check_to_worker(self, mock_process):
-        """Cancelled job's cancel_check is passed through to the worker thread."""
+        """The check stage and the worker get the tracker's cancel check, which reads the job's."""
         cancel_checks_received = []
 
         def capturing_process(*args, **kwargs):
             cancel_checks_received.append(kwargs.get("cancel_check"))
+            if kwargs.get("check_only"):
+                return _fake_process_item(*args, **kwargs)
             return _ms("generated")
 
         mock_process.side_effect = capturing_process
@@ -662,8 +693,8 @@ class TestJobDispatcher:
         )
         assert tracker.wait(timeout=10)
 
-        assert len(cancel_checks_received) == 1
-        assert cancel_checks_received[0] is cancel_fn
+        assert cancel_checks_received == [tracker.is_cancelled, tracker.is_cancelled]  # check stage, then the worker
+        assert tracker.cancel_check is cancel_fn
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
