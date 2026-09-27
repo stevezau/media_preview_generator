@@ -495,6 +495,10 @@ class PipelineContext:
     # the file's outcome like ``_run_notes``: a rule-only re-decide tells a new or changed answer from one this job only
     # stored again (``_keep_published_before_rule_change``).
     _answers_before: dict[str, frozenset[tuple]] = field(default_factory=dict, repr=False)
+    # Per file of this job, set and dropped with ``_answers_before``: whether the file on disk was another than the one
+    # stored when the job's first stage of it began. The checking stage stores the new file before it hands it to a
+    # worker, so the worker's stage can't tell on its own that it publishes a replaced file (``VERIFY_LATER``).
+    _replaced_at_start: dict[str, bool] = field(default_factory=dict, repr=False)
     # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, per file a
     # decide-again job ran, whether its decisions changed and whether a type is still in review, and per file the weekly
     # online re-check ran, whether an online database now has an entry for it and whether its decisions changed.
@@ -849,6 +853,7 @@ def _forget_run(ctx: PipelineContext, path: str) -> None:
     ctx._pending_skips.pop(path, None)
     ctx._run_notes.pop(path, None)
     ctx._answers_before.pop(path, None)
+    ctx._replaced_at_start.pop(path, None)
 
 
 # Versions of one Plex item run on different threads under different path locks. Each publish reads what is ours on
@@ -3106,6 +3111,7 @@ def _attempt(
         ctx._answers_before[path] = (
             frozenset(_answer_key(r) for r in ctx.store.evidence_rows(existing.id)) if unchanged else frozenset()
         )
+        ctx._replaced_at_start[path] = existing is not None and not unchanged
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
     if refresh_probe or not unchanged or not existing.duration_ms or stale_rules:
@@ -3353,7 +3359,7 @@ def _attempt(
     in_review = review_message(decisions, types)
     if identity_changed(rec):
         raise _FileChangedError(path)
-    replaced = existing is not None and not unchanged
+    replaced = ctx._replaced_at_start.get(path, existing is not None and not unchanged)
     rows = []
     # A worker holds a GPU or CPU worker previews need: when this job retries a write Plex's busy database refused, it
     # waits for that database only briefly (the checking stage, holding no worker, waits as long as a job may).
@@ -3759,6 +3765,7 @@ def _run(
                         return None
                     ctx._refreshed.pop(path, None)
                     ctx._answers_before.pop(path, None)
+                    ctx._replaced_at_start.pop(path, None)
                     _count_skipped(ctx, skipped)
                     if (
                         not notes.logged
@@ -3772,6 +3779,7 @@ def _run(
         except _FileChangedError:
             logger.info("{} changed while its markers were detected; detecting again", path)
             ctx._answers_before.pop(path, None)  # what the new file had stored is read again
+            ctx._replaced_at_start.pop(path, None)
     _forget_run(ctx, path)
     message = "The file kept changing while it was analysed; it will be tried again on the next run"
     _log_failure(ctx, path, notes or RunNotes(), message)

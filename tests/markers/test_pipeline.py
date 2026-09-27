@@ -4248,6 +4248,25 @@ class TestReadBackVerify:
         expected = ServerStatus.UP_TO_DATE if history in ("unchanged", "replaced-no-op") else ServerStatus.WRITTEN
         assert row["status"] == expected.value
 
+    def test_a_replaced_file_a_worker_finishes_asks_for_a_later_check(self, store, media):
+        # The checking stage stores the new file before it hands it to a worker (here credit text, checking the
+        # chapter); the worker's stage still publishes a replaced file and says so (phase 1 lab row 17's verify job).
+        reg = _registry(media, ServerType.JELLYFIN)
+        jf = ready_publisher("jellyfin_bridge")
+        spec = pipeline.LocalDetectorSpec(
+            Source.CREDITS_TEXT, frozenset({T.CREDITS}), MagicMock(return_value=[]), checks_chapters=True
+        )
+        _run(
+            _ctx(store, reg, detectors=(spec,)), media, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH), stage="process"
+        )
+        os.utime(media, ns=(7, 7))
+        ctx = _ctx(store, reg, detectors=(spec,))
+        handed_on, _ = _run(ctx, media, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH))
+        assert handed_on is None
+        out, _ = _run(ctx, media, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH), stage="process")
+        assert out.publisher_rows[0].get("verify_later") is True
+        assert not ctx._replaced_at_start  # dropped with the file's outcome
+
     def test_a_replaced_file_that_waits_asks_for_no_later_check(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
