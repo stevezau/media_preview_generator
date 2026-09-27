@@ -182,6 +182,33 @@ class TestWorkerHandOff:
         again, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
         assert again is not None and len(find.calls) == 1  # answered at this version against this chapter: not again
 
+    def test_credits_a_chapter_decided_arent_read_again_after_the_read_failed(self, store, media, find):
+        # The chapter decides without credit text's answer, so a file it failed to decode isn't decoded again on every
+        # run just to check the chapter (``failed_here``); a changed file is read again.
+        chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
+        find.answer = frames.FrameDecodeError("ffmpeg exited 1")
+        out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="process")
+        assert out is not None and out.outcome_key == FileOutcome.PUBLISHED.value and len(find.calls) == 1
+        again, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert again is not None and len(find.calls) == 1
+        assert store.get_markers(store.get_file(media).id)[T.CREDITS] == Marker(
+            T.CREDITS, 1_290_000, DUR, ("chapters",)
+        )
+        with open(media, "ab") as fh:
+            fh.write(b"more")
+        changed, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert changed is None  # handed to a worker to read the new file
+
+    def test_a_locked_chapter_marker_takes_no_worker(self, store, media, find):
+        # A lock decides the type whatever the frames show, so credit text isn't read to check it.
+        chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
+        handed_on, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert handed_on is None
+        rec = store.get_file(media)
+        store.lock_marker(rec.id, Marker(T.CREDITS, 1_290_000, DUR, ("chapters",), locked=True))
+        out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert out is not None and find.calls == []
+
     def test_credits_a_chapter_decided_take_no_worker_with_credit_text_off(self, store, media, find):
         chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
         out, _ = _run(ctx_for(store, media, credits_text=False), media, pubs(), probe=chapters, stage="check")

@@ -2276,7 +2276,9 @@ class TestDetect:
             ("steps back to the earliest kept start; credits chapter at 5650000 ms", False, False),
             ("steps back to the earliest kept start; credits chapter at 5600000 ms", False, True),  # another chapter
             ("steps back to the earliest kept start", False, True),  # read before the chapter was there
-            ("steps back to the earliest kept start; credits chapter at 5650000 ms", True, True),  # chapters off now
+            # Chapters off now: the label moves nothing and the start is the same, so no decode for it (nor again
+            # when chapters come back on with this chapter).
+            ("steps back to the earliest kept start; credits chapter at 5650000 ms", True, False),
             ("steps back to the earliest kept start", True, False),
         ],
         ids=["same-chapter", "other-chapter", "no-chapter-then", "chapters-off", "off-and-read-without"],

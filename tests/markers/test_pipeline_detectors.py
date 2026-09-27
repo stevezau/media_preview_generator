@@ -9,15 +9,27 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from media_preview_generator.markers.decide import DecisionStatus
+from media_preview_generator.markers.audio import season
+from media_preview_generator.markers.decide import AUDIO_OVER_CHAPTER_REASON, DecisionStatus
 from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FILE_BUSY, FileOutcome, ServerStatus
 from media_preview_generator.markers.pipeline import DetectorUnavailableError, LocalDetectorSpec
+from media_preview_generator.markers.probe import Chapter
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.servers.base import ServerType
 from tests.markers import test_pipeline
 from tests.markers.fakes import ready_publisher, server_config
-from tests.markers.test_pipeline import DUR, INTRO_ONLY, TIDB_INTRO, _clients, _ctx, _media_root, _registry, _run
+from tests.markers.test_pipeline import (
+    DUR,
+    INTRO_ONLY,
+    TIDB_INTRO,
+    _clients,
+    _ctx,
+    _media_root,
+    _probe,
+    _registry,
+    _run,
+)
 
 # test_pipeline's fixtures, shared by name (an import of them reads as unused to the linter).
 media = test_pipeline.media
@@ -643,3 +655,65 @@ class TestAnotherJobsRunOfTheFile:
         assert not thread.is_alive()
         self._given_back(out, media, self.NEXT_RUN_ROW)
         assert waiter.busy_promised() == {"/media/other.mkv"}
+
+
+class TestSeasonAudioChecksAnIntroChapter:
+    """Spec §5.5 rule 3 (2026-09-27): an intro chapter an online answer ends inside waits for season audio in the same
+    run; season audio and the online answer ending the intro inside the chapter overrule it, and season audio that
+    failed on the file or found nothing leaves the chapter deciding, without being asked again for it."""
+
+    CHAPTERS = (
+        Chapter(0, 126_771, "Chapter 1"),
+        Chapter(126_771, 157_068, "Intro"),
+        Chapter(157_068, None, "Chapter 2"),
+    )
+    INTRODB = Candidate(T.INTRO, 126_500, 145_000, Source.INTRODB)
+    SETTINGS = {
+        "sources": [{"id": "chapters", "enabled": True}, {"id": "introdb", "enabled": True},
+                    {"id": "season_audio", "enabled": True}],
+        "detect": {"intro": True, "credits": False},
+    }  # fmt: skip
+
+    def _run(self, store, media, detect):
+        spec = _spec(detect, needs_worker=lambda file, ctx: False, failed_here=season.season_audio_failed_here)
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(
+            store,
+            reg,
+            detectors=(spec,),
+            settings_raw=self.SETTINGS,
+            clients=_clients(introdb=LookupResult("ok", (self.INTRODB,))),
+        )
+        out, _ = _run(ctx, media, _pubs(), probe=_probe(self.CHAPTERS))
+        rec = store.get_file(media)
+        return out, store.get_decisions(rec.id)[T.INTRO], store.get_markers(rec.id).get(T.INTRO)
+
+    def test_season_audio_agreeing_with_the_online_answer_overrules_the_chapter(self, store, media):
+        detect = MagicMock(return_value=[Candidate(T.INTRO, 126_900, 145_600, Source.SEASON_AUDIO, 1.0, "5/6")])
+        out, decision, marker = self._run(store, media, detect)
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert decision.status is DecisionStatus.DECIDED
+        assert decision.reason.startswith(AUDIO_OVER_CHAPTER_REASON)
+        # Season audio supplies the end (rule 13); the chapter's 157.068 s end, 11 s into the episode, is gone.
+        assert marker.end_ms == 145_600
+        assert set(marker.decided_by) == {"introdb", "season_audio"}
+        detect.assert_called_once()
+
+    @pytest.mark.parametrize("answer", ["fails", "nothing"])
+    def test_season_audio_that_cant_check_it_leaves_the_chapter_deciding(self, store, media, answer):
+        calls = []
+
+        def detect(file, *, ctx, **kwargs):
+            calls.append(file.canonical_path)
+            if answer == "fails":
+                ctx.store.set_detector_failure(file.id, Source.SEASON_AUDIO, "fingerprint failed")
+                raise DetectorUnavailableError("fingerprint failed")
+            return []
+
+        out, decision, marker = self._run(store, media, detect)
+        assert decision.status is DecisionStatus.DECIDED
+        assert marker == Marker(T.INTRO, 126_771, 157_068, ("chapters",))
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        _again, _decision, marker = self._run(store, media, detect)
+        assert marker == Marker(T.INTRO, 126_771, 157_068, ("chapters",))
+        assert calls == [media]  # not asked again for the chapter

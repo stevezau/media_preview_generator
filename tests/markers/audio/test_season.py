@@ -3578,3 +3578,46 @@ class TestAnswersThatBarelyMove:
             out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": pub}, stage="process")
         assert pub.write.call_args.args[1] == [mine]
         assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+
+class TestWhatTheRulesAskOfSeasonAudio:
+    """``season_audio_compared`` (a rule-change keep counts season audio's "no match" only when it had another episode
+    to compare) and ``season_audio_failed_here`` (a rule waiting for season audio stops when this episode's own file
+    couldn't be fingerprinted)."""
+
+    def test_an_episode_with_a_fingerprinted_sibling_was_compared(self, store, show):
+        first, second = show(1, 2)
+        rec = _store_fingerprint(store, first, noise(1, 3_000))
+        _store_fingerprint(store, second, noise(2, 3_000))
+        assert season.season_audio_compared(rec, SimpleNamespace(store=store)) is True
+
+    def test_an_episode_whose_siblings_have_no_fingerprint_was_not_compared(self, store, show):
+        first, second = show(1, 2)
+        rec = _store_fingerprint(store, first, noise(1, 3_000))
+        ctx = SimpleNamespace(store=store)
+        assert season.season_audio_compared(rec, ctx) is False  # the sibling was never read
+        store.upsert_file(
+            FileIdentity(second, *_identity(second)),
+            duration_ms=DUR,
+            season_key=os.path.dirname(second),
+            is_movie=False,
+        )
+        assert season.season_audio_compared(rec, ctx) is False  # read, but never fingerprinted
+
+    def test_an_episode_alone_in_its_season_was_not_compared(self, store, show):
+        (only,) = show(1, 1)
+        rec = _store_fingerprint(store, only, noise(1, 3_000))
+        assert season.season_audio_compared(rec, SimpleNamespace(store=store)) is False
+
+    def test_a_fingerprint_failure_recorded_for_the_file_is_a_failure_here(self, store, show):
+        (only,) = show(1, 1)
+        rec = _store_fingerprint(store, only, noise(1, 3_000))
+        ctx = SimpleNamespace(store=store)
+        assert season.season_audio_failed_here(rec, ctx) is False
+        store.set_detector_failure(rec.id, Source.SEASON_AUDIO, "fingerprint failed")
+        assert season.season_audio_failed_here(rec, ctx) is True
+
+    def test_the_spec_carries_both(self):
+        spec = _spec()
+        assert spec.failed_here is season.season_audio_failed_here
+        assert spec.compared is season.season_audio_compared

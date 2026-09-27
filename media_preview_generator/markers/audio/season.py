@@ -1747,7 +1747,29 @@ def season_audio_spec(ffmpeg_path: str | None) -> LocalDetectorSpec | None:
         needs_worker=season_audio_needs_worker,
         followups=season_audio_followups,
         failed_here=season_audio_failed_here,
+        compared=season_audio_compared,
     )
+
+
+def season_audio_compared(rec: FileRecord, ctx: PipelineContext) -> bool:
+    """Whether season audio had another episode to compare this one with: one of its season group whose stored record
+    has a fingerprint. Without one it finds nothing whatever the episode holds, so its "no match" checks no marker
+    (``LocalDetectorSpec.compared``).
+
+    Args:
+        rec: The episode.
+        ctx: The job's context.
+
+    Returns:
+        True when another episode of the season group has a stored fingerprint.
+    """
+    for path in season_group(rec.canonical_path).episodes:
+        if path == rec.canonical_path:
+            continue
+        member = ctx.store.get_file(path)
+        if member is not None and cached_fingerprint(ctx.store, member) is not None:
+            return True
+    return False
 
 
 def season_audio_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:

@@ -59,8 +59,9 @@ AUDIO_OVER_CHAPTER_REASON = "season audio and agreeing sources contradict the ch
 # than this from it (2026-09-27 audit: one show's IntroDB, read on this file's clock, 6-7 s into the roll where credit
 # text had its first card).
 TEXT_OVER_ONLINE_MS = 5_000
-# The note a credits decision's reason carries when credit text supplied the start of agreeing answers
-# (:func:`took_start_from_text`).
+# The note a credits decision's reason carries when credit text supplied the start of agreeing answers over another
+# source that isn't a server's marker, by ``TEXT_OVER_ONLINE_MS`` or by the user's order (:func:`took_start_from_text`).
+# A server's marker may still move that start later afterwards (rule 7), which the reason then adds.
 TEXT_START_NOTE = "start from credit text"
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
 # independence group -- never two votes, whether or not they agree with each other.

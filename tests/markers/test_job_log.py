@@ -1142,6 +1142,14 @@ class TestDecidedLine:
                 id="text-moves-an-unnamed-chapter",
             ),
             pytest.param(
+                _decided(T.CREDITS, 5_590_000, 5_854_000, "chapters", "credits_text", "server_markers",
+                         reason=TEXT_MOVES_CHAPTER_REASON + "; start shortened to the server's own marker (plex-1)"),
+                {T.CREDITS: {5_529_000: "Credits"}},
+                'credits 1:33:10–1:37:34 (the "Credits" chapter, moved to the first credit card by credit text; start '
+                "moved to the server's own marker)",
+                id="text-moves-the-chapter-then-a-server-shortens-it",
+            ),
+            pytest.param(
                 _decided(T.CREDITS, 2_577_000, 2_618_000, "introdb", "credits_text",
                          reason="sources agree: introdb, credits_text; start from credit text"),
                 {},

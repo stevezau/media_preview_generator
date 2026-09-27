@@ -532,7 +532,8 @@ roll starts 10–60 s after the chapter, no keyframe between them holds text, an
 all lit (at least one). The lit-keyframe checks came from sflix's replay: 5 chapters the frames moved earlier onto
 story text (a T-shirt, a poster, a screen, an epilogue caption; every one with a lit keyframe without text between) and
 2 moved later off black cards 320×180 reads nothing on (The Half of It, Dark Matter S02E05). An answer read against
-another chapter than today's, or none, is read again (`credits_text_due`: the run's basis names the chapter).
+another chapter than today's, or before the file had one, is read again (`credits_text_due`: the run's basis
+names the chapter); with chapters off a found answer stays as it is (the chapter never changes the start).
 Harness, GPU decode, version 5 → 6 on the same decodes: rule J alone on the 80 (78 on disk) 65 → 66 within 10 s,
 early 2 → 2, late 5 → 5; the 80's gate 5 of 5 both; the 205 Medium useful 101 → 101, wrong 15 → 18, High wrong
 14 → 17 by the set's truth, and the three new answers are on credits by frame check (Mayday's end titles over the
@@ -846,7 +847,8 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    replaced file waits again for its own read. Somebody Somewhere S03E02–E07: HMAX "Credits" chapters 40–70 s late, SkipDB and
    credit text within 2 s of the frame-checked start. **A credits chapter off the roll (2026-09-27):** credit text reads
    every file whose credits a chapter decided alone (`LocalDetectorSpec.checks_chapters`: the pipeline asks it while
-   the type rests on chapters and server markers only). When its answer's `chapter_hint` says the frames move this
+   the type rests on chapters and server markers only, unlocked, and not again after it failed to read the file as
+   it is, `failed_here`). When its answer's `chapter_hint` says the frames move this
    chapter (§5.4 version 6), the answer starts more than 10 s from it and no other source agrees with the chapter's
    start, the chapter keeps the window and credit text supplies the start: end the earlier of the chapter's and the
    text's, `decided_by` chapters + credit text, reason `decide.TEXT_MOVES_CHAPTER_REASON`; a moved marker failing sanity
@@ -1006,7 +1008,9 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     on sources that never decide alone (rule 6) is kept only while nothing that reads the file speaks against it: not
     when such a source answers the type and disagrees, nor when a detector that reads the file for the type read it at
     its version now and gave no agreeing answer (`keep_published(read_by=…)`, the pipeline passing the local detectors
-    answered at this version). The check the rule waited for has then been made (Somebody Somewhere S03E07: a lone
+    answered at this version that had something to compare the file with, `LocalDetectorSpec.compared`: season
+    audio only when another episode of the season group has a fingerprint, since alone it finds nothing whatever
+    the episode holds). The check the rule waited for has then been made (Somebody Somewhere S03E07: a lone
     SkipDB intro 9 s into the story that season audio found no match for). Its cost: S03E03's lone SkipDB intro, which
     was right, goes to Needs review the same way, as on every new install.
 

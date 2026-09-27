@@ -876,16 +876,17 @@ def credits_answer_version(rec: FileRecord, ctx: PipelineContext) -> int:
 
 
 def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
-    """Whether a stored answer of this version is asked again anyway: a found start read against another credits
-    chapter than the one the rules would decide from now (or against one when chapters are off now, or none when there
-    is one: :func:`credits_chapter_hint_ms`), or a "nothing found" read when the look-back stopped after one step, on a
-    file where a step after the first can be read now.
+    """Whether a stored answer of this version is asked again anyway: a found start not read against the credits
+    chapter the rules would decide from now (:func:`credits_chapter_hint_ms`; with chapters off or no such chapter, a
+    found start is never asked again), or a "nothing found" read when the look-back stopped after one step, on a file
+    where a step after the first can be read now.
 
-    Nothing else can differ. A found start had story before it within the one step, so the steps after it are never
-    read and it is the same answer; and where no step of 30 s or more fits between the first step and 30 s before the
-    earliest start the decision keeps (:func:`_next_step_start`) -- every movie on Automatic, whose first step is all
-    before its 900 s cap -- nothing more is read now. A file of unknown kind (no season, not a movie) reads the movie
-    tail but has no cap, so it can be asked. Asked once: the answer it stores is based on :data:`LOOK_BACK_BASIS`.
+    A found start is otherwise the same answer: it had story before it within the one step, so the steps after it are
+    never read. For "nothing found" nothing else can differ: where no step of 30 s or more fits between the first step
+    and 30 s before the earliest start the decision keeps (:func:`_next_step_start`) -- every movie on Automatic, whose
+    first step is all before its 900 s cap -- nothing more is read now. A file of unknown kind (no season, not a movie)
+    reads the movie tail but has no cap, so it can be asked. Asked once: the answer it stores is based on
+    :data:`LOOK_BACK_BASIS`.
 
     Args:
         rec: The file.
@@ -900,7 +901,10 @@ def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
     stored = [row for row in ctx.store.evidence_rows(rec.id) if row.source is Source.CREDITS_TEXT]
     found = any(row.type is not None for row in stored)
     if found and run is not None and run.startswith(LOOK_BACK_BASIS):
-        return run != _basis(credits_chapter_hint_ms(rec, ctx))
+        # Read again only against a chapter it wasn't read against: the chapter never changes the start, and a label
+        # for a chapter the rules don't choose now moves nothing (``decide._text_moves_chapter`` matches its start).
+        chapter_ms = credits_chapter_hint_ms(rec, ctx)
+        return chapter_ms is not None and run != _basis(chapter_ms)
     if run == LOOK_BACK_BASIS or not stored or found:
         return False
     tail_start = frames.tail_start_s(rec.duration_ms, tail_s=_tail_s(rec, ctx))

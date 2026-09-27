@@ -4461,12 +4461,17 @@ class TestDecideRulesVersion:
         assert self._run(store, reg, plex, clients).outcome_key == FileOutcome.UP_TO_DATE.value
         assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
 
-    @pytest.mark.parametrize(("audio", "kept"), [([], False), ([(128_000, 157_000)], True)], ids=["nothing", "agrees"])
+    @pytest.mark.parametrize(
+        ("audio", "compared", "outcome"),
+        [([], True, "goes"), ([(128_000, 157_000)], True, "agrees"), ([], False, "kept")],
+        ids=["nothing", "agrees", "nothing-with-no-other-episode"],
+    )
     def test_a_lone_skipdb_intro_goes_once_season_audio_read_the_file_without_agreeing(
-        self, store, media, monkeypatch, audio, kept
+        self, store, media, monkeypatch, audio, compared, outcome
     ):
         # 2026-09-27 audit (Somebody Somewhere S03E07, 9 s into the story): the keep is for installs with nothing that
-        # reads the file to check a lone online answer. Where season audio read it and found nothing to agree, it goes.
+        # reads the file to check a lone online answer. Where season audio read it and found nothing to agree, it goes;
+        # season audio with no other episode to compare (``LocalDetectorSpec.compared``) checked nothing, so it stays.
         plex = ready_publisher()
         clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
         reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
@@ -4482,6 +4487,7 @@ class TestDecideRulesVersion:
             detect=season_audio,
             stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}),
             needs_worker=lambda file, ctx: False,
+            compared=lambda file, ctx: compared,
         )
         with_audio = {**self.SKIPDB_ONLY, "sources": [{"id": "skipdb", "enabled": True},
                                                       {"id": "season_audio", "enabled": True}]}  # fmt: skip
@@ -4490,7 +4496,12 @@ class TestDecideRulesVersion:
 
         assert reads == [media]
         decision = store.get_decisions(rec.id)[T.INTRO]
-        if kept:
+        if outcome == "kept":
+            assert decision.status is DecisionStatus.DECIDED
+            assert decision.reason.startswith("kept: published before a rule change")
+            assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+            assert all(c.args[1] != [] for c in plex.write.call_args_list)
+        elif outcome == "agrees":
             # Agreeing, season audio makes SkipDB's intro a decision of today's rules: no keep needed.
             assert (decision.status, decision.reason) == (DecisionStatus.DECIDED, "sources agree: skipdb, season_audio")
             assert store.get_markers(rec.id)[T.INTRO] == Marker(T.INTRO, 128_000, 156_824, ("skipdb", "season_audio"))

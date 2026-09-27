@@ -9,7 +9,7 @@ line can't land inside it (``write_lines``)::
       SkipDB: no entry
       Credit text: credits start at 2:00:14 (keeps the "Credits" chapter at 2:00:11; saved earlier)
       Plex's own markers: none
-      Decided: credits 2:00:11–2:03:39 (the "Credits" chapter and credit text agree)
+      Decided: credits 2:00:11–2:03:39, from the "Credits" chapter
       Sent to Plex: credits 2:00:11–2:03:39
     32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed
 
@@ -508,7 +508,7 @@ def type_phrase(decision: TypeDecision, chapters: Mapping[MarkerType, Mapping[in
         overruled = f'the "{overruled}" chapter' if overruled else "the chapters"
         if marker.locked:
             core = f"{span} (locked by you)"
-        elif decision.reason == TEXT_MOVES_CHAPTER_REASON:
+        elif decision.reason.startswith(TEXT_MOVES_CHAPTER_REASON):
             core = f"{span} ({overruled}, moved to the first credit card by credit text)"
         elif len(names) > 1:
             core = f"{span} ({_and(names)} agree)"

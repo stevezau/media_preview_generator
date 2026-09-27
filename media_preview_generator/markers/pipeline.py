@@ -318,6 +318,10 @@ class LocalDetectorSpec:
         checks_chapters: It reads the file even for a type chapters decided alone, so the decision rules can check the
             chapter against the file itself (credit text: a release's "Credits" chapter is often seconds to minutes
             off the first card, spec §5.5 rule 3).
+        compared: ``compared(file, ctx)``: whether its answer at this version had something to compare the file with,
+            so finding nothing there checked a marker (season audio: another episode of the season has a fingerprint);
+            None: always. A marker published before a rule change is taken off only by a detector that did
+            (``_keep_published_before_rule_change``).
     """
 
     source: Source
@@ -331,6 +335,7 @@ class LocalDetectorSpec:
     followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
     failed_here: Callable[[FileRecord, PipelineContext], bool] | None = None
     checks_chapters: bool = False
+    compared: Callable[[FileRecord, PipelineContext], bool] | None = None
 
     def answer_version(self, rec: FileRecord, ctx: PipelineContext) -> int:
         """The version a stored answer for ``rec`` must have to count."""
@@ -1495,7 +1500,8 @@ def _keep_published_before_rule_change(
 ) -> dict[MarkerType, TypeDecision]:
     """The file's decisions with a marker published before the decision rules changed kept where today's rules leave
     its type in Needs review or without a marker (``decide.keep_published``): a rule change alone never takes a marker
-    off the servers; new or changed evidence can.
+    off the servers; new or changed evidence can, and so can a detector that read the file and found nothing to agree
+    with a marker resting only on sources that never decide alone (below).
 
     A type is looked at when its stored decision is decided with a marker of ours, and either it was kept this way
     before, or the file was last decided under older rules (``DECIDE_RULES`` in ``version_reruns``) and a server was
@@ -1503,8 +1509,9 @@ def _keep_published_before_rule_change(
     changed ones are those not stored when the job's first stage of the file began (``_answers_before``), so an answer
     only stored again (a forced run, a parser's new version) is no news. A locked type is always decided (``decide``),
     and a marker carried over from a replaced file rests on no source, so neither is ever kept here. The local detectors
-    of the type that read the file at their version now go with it (``read_by``): a lone online answer isn't kept once
-    one of them read the file without an answer agreeing with it.
+    of the type that read the file at their version now, with something to compare it with (``LocalDetectorSpec.compared``),
+    go with it (``read_by``): a lone online answer isn't kept once one of them read the file without an answer agreeing
+    with it. Season audio with no other episode to match finds nothing whatever the file holds, so it doesn't count.
     """
     undecided = [
         t for t, d in decisions.items() if d.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE)
@@ -1541,7 +1548,9 @@ def _keep_published_before_rule_change(
             read_by=[
                 spec.source
                 for spec in ctx.local_detectors
-                if mtype in spec.types and _answered_at_this_version(ctx, rec, spec.source)
+                if mtype in spec.types
+                and _answered_at_this_version(ctx, rec, spec.source)
+                and (spec.compared is None or spec.compared(rec, ctx))
             ],
         )
     return out
@@ -1708,7 +1717,12 @@ def _detector_pending(
         ctx.force
         or any(decisions[t].status is not DecisionStatus.DECIDED for t in wanted)
         or _rests_on_detector(spec, decisions, wanted)
-        or (spec.checks_chapters and any(_decided_by_chapters_alone(decisions[t]) for t in wanted))
+        or (
+            spec.checks_chapters
+            and any(_decided_by_chapters_alone(decisions[t]) for t in wanted)
+            # The chapter decides without the answer: a file the detector failed on isn't read again for it.
+            and not (spec.failed_here is not None and spec.failed_here(rec, ctx))
+        )
     )
     return asks and _detector_due(ctx, rec, spec)
 
