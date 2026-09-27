@@ -9,7 +9,7 @@ b = json.load(open(sys.argv[2]))
 moves = Counter()
 for key in sorted(a, key=lambda k: (a[k]["path"], k)):
     x, y = a[key], b.get(key)
-    if y is None:
+    if y is None or x.get("kept_own") or y.get("kept_own"):  # every server keeps its own: never published
         continue
     mx = x["marker"] if x["status"] == "decided" else None
     my = y["marker"] if y["status"] == "decided" else None
