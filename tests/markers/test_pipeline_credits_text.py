@@ -199,6 +199,31 @@ class TestWorkerHandOff:
         changed, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
         assert changed is None  # handed to a worker to read the new file
 
+    def test_a_chapter_an_older_version_kept_is_listed_after_an_update_and_read_again(
+        self, monkeypatch, store, media, find
+    ):
+        # The chapter decides alone, so only the version re-run reaches the file after an update (nothing else runs a
+        # movie again): sflix's 10 Things I Hate About You kept version 6's answer beside its chapter after version 7,
+        # which moves such a chapter, shipped (2026-09-28).
+        from media_preview_generator.markers import versions
+
+        chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
+        with monkeypatch.context() as patched:
+            patched.setattr(detector, "CREDITS_TEXT_VERSION", detector.CREDITS_TEXT_VERSION - 1)
+            _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="process")
+        rec = store.get_file(media)
+        assert store.get_markers(rec.id)[T.CREDITS].decided_by == ("chapters",)
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION - 1
+
+        due = versions.files_to_read_again(store, load_global(validate_global(settings(), None)[0]))
+
+        assert due == {media: {"credits_text": detector.CREDITS_TEXT_VERSION}}
+        out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
+        assert out is None and len(find.calls) == 1  # handed to a worker to read at today's version
+        _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="process")
+        assert len(find.calls) == 2
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
+
     def test_a_locked_chapter_marker_takes_no_worker(self, store, media, find):
         # A lock decides the type whatever the frames show, so credit text isn't read to check it.
         chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))

@@ -718,7 +718,9 @@ whose markers relied on the older version are read again once, without you start
 checks, and a Low-priority **Intro & Credits: re-checking files after an update** job runs behind your previews,
 100 files at a time with 30 minutes between batches, so a large library doesn't keep your GPU busy for days. It takes
 the files still on disk whose marker was decided with the older version's answer, or is still in Needs review or not
-found beside one; a marker decided by other sources is left as it is until that file's next job. Each file is read
+found beside one. On-screen credit text and season audio also check markers other sources decided (a "Credits" or
+"Intro" chapter, an online database's times), so a better version of either reads those files again too; any other
+marker decided by other sources is left as it is until that file's next job. Each file is read
 again once per update, restarts included. Locked markers are never touched. Cancelling a batch stops it: the files
 it hadn't reached are taken by a later batch, from the next start. An update that changes how the answers are weighed
 against each other goes through the same batches: every file with a marker that isn't locked, one in Needs review, or
@@ -731,7 +733,9 @@ stays, and the job log adds "kept: published before a rule change", until a new 
 new release has no chapters, say). When the new file is the same length as the one it replaced (within a second) and
 no source finds anything for a marker type in it, the marker you had keeps its place, as Plex's own markers do; the
 job log says "from the file it replaced". Anything the new file's own sources find, even an answer that only puts the
-marker in Needs review, is used instead, and a file of another length is decided from scratch.
+marker in Needs review, is used instead, and a file of another length is decided from scratch. A marker that only
+season audio or on-screen credit text found isn't kept when today's version of that same check read the new file and
+found nothing there: on a file of the same length that is its newer verdict on the same picture and sound.
 
 ### Needs review
 

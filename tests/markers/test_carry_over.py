@@ -161,6 +161,33 @@ class TestCarryOver:
         out = co.carry_over(decisions, DUR, lambda wanted: previous, enabled=("chapters", "introdb", "server_markers"))
         assert out[T.INTRO] == (_carried(T.INTRO, *INTRO) if carried else decisions[T.INTRO])
 
+    @pytest.mark.parametrize(
+        ("mtype", "decided_by", "read_by", "carried"),
+        [
+            # Small Prophets S01E05: season audio v9's 0-12 s logo stretch, which v10 passes over on the same file.
+            (T.INTRO, ("season_audio",), {"season_audio", "season_audio_previous"}, False),
+            (T.INTRO, ("season_audio_previous", "server_markers"), {"season_audio", "season_audio_previous"}, False),
+            (T.CREDITS, ("credits_text",), {"credits_text"}, False),
+            # A chapter or an online answer still speaks: the new file lacking them says nothing about the intro.
+            (T.INTRO, ("season_audio", "chapters"), {"season_audio", "season_audio_previous"}, True),
+            (T.INTRO, ("introdb", "season_audio"), {"season_audio", "season_audio_previous"}, True),
+            # Season audio didn't read this file now (an older version, or no other episode to match).
+            (T.INTRO, ("season_audio",), set(), True),
+            (T.INTRO, ("user",), {"season_audio", "season_audio_previous"}, True),
+            (T.INTRO, (co.CARRIED_OVER,), {"season_audio", "season_audio_previous"}, True),
+        ],
+        ids=["audio", "previous-season-with-a-server", "credit-text", "audio-and-chapter", "online-and-audio",
+             "audio-not-read-now", "user", "carried-before"],
+    )  # fmt: skip
+    def test_a_marker_only_content_detectors_decided_isnt_carried_where_they_read_the_file_now(
+        self, mtype, decided_by, read_by, carried
+    ):
+        times = INTRO if mtype is T.INTRO else CREDITS
+        decisions = _decisions(**{mtype.value: _none(mtype)})
+        previous = {mtype: _previous(mtype, times, decided_by=decided_by)}
+        out = co.carry_over(decisions, DUR, lambda wanted: previous, read_by={mtype: read_by})
+        assert out[mtype] == (_carried(mtype, *times) if carried else decisions[mtype])
+
     def test_two_carried_markers_that_overlap_carry_only_the_first(self):
         decisions = _decisions(intro=_none(T.INTRO), recap=_none(T.RECAP))
         previous = {T.INTRO: _previous(T.INTRO, INTRO), T.RECAP: _previous(T.RECAP, (60_000, 120_000))}
@@ -445,6 +472,45 @@ class TestPipeline:
         _run(_ctx(store, _registry(new, ServerType.PLEX), settings_raw=NOTHING), new, {"plex-1": ready_publisher()},
              probe=_probe(), stage="process")  # fmt: skip
         assert T.INTRO not in store.get_markers(store.get_file(new).id)
+
+
+class TestContentDetectorsReadingTheNewFile:
+    """A marker season audio alone decided for the replaced file isn't carried once season audio, at its version now,
+    read the new file and found nothing (Small Prophets S01E05 and E06 on sflix, 2026-09-28)."""
+
+    def _spec(self, answers, compared=True):
+        from media_preview_generator.markers.pipeline import LocalDetectorSpec
+
+        def detect(rec, **_kwargs):
+            return answers.pop(0)
+
+        return LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), detect,
+                                 stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}),
+                                 compared=lambda rec, ctx: compared)  # fmt: skip
+
+    def _replaced_in_place(self, tmp_path, store, spec):
+        path = _episode(tmp_path, NEW_NAME)
+        ctx = _ctx(store, _registry(path, ServerType.PLEX), settings_raw=NOTHING, detectors=(spec,))
+        _run(ctx, path, {"plex-1": ready_publisher()}, probe=_probe(), stage="process")
+        rec = store.get_file(path)
+        assert store.get_markers(rec.id)[T.INTRO].decided_by == ("season_audio",)
+        with open(path, "ab") as f:
+            f.write(b"replaced")
+        ctx = _ctx(store, _registry(path, ServerType.PLEX), settings_raw=NOTHING, detectors=(spec,))
+        _run(ctx, path, {"plex-1": ready_publisher()}, probe=_probe(), stage="process")
+        return store.get_file(path)
+
+    def test_nothing_found_now_on_the_same_length_takes_it_off(self, tmp_path, store):
+        logo = Candidate(T.INTRO, 0, 12_012, Source.SEASON_AUDIO, 1.0, "1/1")
+        rec = self._replaced_in_place(tmp_path, store, self._spec([[logo], []]))
+        assert T.INTRO not in store.get_markers(rec.id)
+        assert store.get_decisions(rec.id)[T.INTRO].status is DecisionStatus.NO_EVIDENCE
+
+    def test_nothing_to_compare_with_carries_it(self, tmp_path, store):
+        # Season audio finds nothing whatever the file holds without another episode to match: no verdict on it.
+        logo = Candidate(T.INTRO, 0, 12_012, Source.SEASON_AUDIO, 1.0, "1/1")
+        rec = self._replaced_in_place(tmp_path, store, self._spec([[logo], []], compared=False))
+        assert store.get_markers(rec.id)[T.INTRO] == Marker(T.INTRO, 0, 12_012, (co.CARRIED_OVER,))
 
 
 class TestCantTell:

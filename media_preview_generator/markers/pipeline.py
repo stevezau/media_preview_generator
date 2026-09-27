@@ -1474,9 +1474,10 @@ def _carry_over(
     decisions: dict[MarkerType, TypeDecision],
 ) -> dict[MarkerType, TypeDecision]:
     """The file's final decisions with the carry-over (spec §5.5 rule 15, ``carry_over``): a type no source answered
-    for keeps what the file it replaced had decided, at the same length. The servers' item ids are asked only when a
-    type has no evidence (publishing asks them next anyway); a server that can't name the item, or a replaced file's
-    disk that can't tell, leaves a marker carried before as it is."""
+    for keeps what the file it replaced had decided, at the same length, unless only content detectors that read this
+    file now decided it. The servers' item ids are asked only when a type has no evidence (publishing asks them next
+    anyway); a server that can't name the item, or a replaced file's disk that can't tell, leaves a marker carried
+    before as it is."""
 
     def previous(wanted: frozenset[MarkerType]) -> dict[MarkerType, PreviousDecision | None]:
         item_ids = {owner.config.id: servers.item_id(owner) for owner in owners}
@@ -1497,6 +1498,20 @@ def _carry_over(
         previous,
         kept=ctx.store.get_markers(rec.id),
         enabled=_decision_order(ctx.settings),
+        read_by={mtype: _content_read_by(ctx, rec, mtype) for mtype in decisions},
+    )
+
+
+def _content_read_by(ctx: PipelineContext, rec: FileRecord, mtype: MarkerType) -> frozenset[str]:
+    """The sources of the local detectors of a type that read the file at their version now with something to compare
+    it with (``LocalDetectorSpec.compared``), as rule 16's ``read_by`` counts them: their verdict on the file is today's."""
+    return frozenset(
+        source.value
+        for spec in ctx.local_detectors
+        if mtype in spec.types
+        and _answered_at_this_version(ctx, rec, spec.source)
+        and (spec.compared is None or spec.compared(rec, ctx))
+        for source in spec.stored_sources
     )
 
 

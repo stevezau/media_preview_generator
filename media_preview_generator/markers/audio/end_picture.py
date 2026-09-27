@@ -35,7 +35,8 @@ from .matcher import Hit
 # answers carry it too (``season.SEASON_AUDIO_ANSWER_VERSION``), so the answers resting on the shares are due again.
 # 2: one nearest-pixel scaler on every vendor (was scale_cuda, scale_vaapi, or swscale's bicubic on the CPU).
 # 3: the end card (the last 1.5 s matching on pictures that aren't flat passes the stretch).
-CHECK_VERSION = 3
+# 4: a flat frame beside one that isn't is compared by correlation (was: never alike), 2026-09-28.
+CHECK_VERSION = 4
 # Idents and music beds under a cold open start near the file's start; a candidate starting at or before this is
 # checked, a later one is taken as it is (the window the owner's rule was measured with).
 EARLY_START_S = 30.0
@@ -118,14 +119,17 @@ def partners(members: Sequence[Hit]) -> list[Hit]:
 
 
 def frames_alike(x: np.ndarray, y: np.ndarray) -> bool:
-    """Whether two 64×36 grey frames show the same picture."""
+    """Whether two 64×36 grey frames show the same picture: by brightness when both are flat, otherwise by
+    correlation. A flat frame beside one that isn't is compared by correlation too: a dark card fading in or out sits
+    on either side of ``FLAT_STD`` in two episodes (Game of Thrones S08E06's "Directed by" on black, σ 4.4-4.8 against
+    another release's 2.6-3.3 with a correlation of 1.00), while black with noise doesn't correlate with a picture. A
+    frame of one grey level has nothing to correlate and matches no picture."""
     sx, sy = float(x.std()), float(y.std())
     if sx < FLAT_STD and sy < FLAT_STD:
         return abs(float(x.mean()) - float(y.mean())) < FLAT_MEAN_DIFF
-    if sx < FLAT_STD or sy < FLAT_STD:
-        return False
     zx, zy = (x - x.mean()).ravel(), (y - y.mean()).ravel()
-    return float(zx @ zy / (np.linalg.norm(zx) * np.linalg.norm(zy))) > MIN_CORRELATION
+    norms = float(np.linalg.norm(zx)) * float(np.linalg.norm(zy))
+    return norms > 0.0 and float(zx @ zy) / norms > MIN_CORRELATION
 
 
 def _card_picture(frame: np.ndarray) -> bool:

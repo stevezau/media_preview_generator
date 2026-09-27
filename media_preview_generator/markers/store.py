@@ -1021,11 +1021,13 @@ class MarkerStore:
         types: Iterable[MarkerType],
         version: int,
         version_step: int = 0,
+        checks_others: bool = False,
     ) -> list[str]:
         """Canonical paths of the files with an answer stored under ``sources`` from a version older than ``version``
-        that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``) or that
-        an undecided type of ``types`` was decided without (Needs review, no evidence), sorted; files marked missing,
-        and files already taken for ``detector`` at ``version`` (``record_version_reruns``), are left out.
+        that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``; with
+        ``checks_others``, whatever decided it) or that an undecided type of ``types`` was decided without (Needs
+        review, no evidence), sorted; files marked missing, and files already taken for ``detector`` at ``version``
+        (``record_version_reruns``), are left out.
 
         Args:
             detector: The name its re-runs are recorded under.
@@ -1034,6 +1036,7 @@ class MarkerStore:
             version: Its version now.
             version_step: A stored version is compared modulo this; 0 compares it whole (credit text stores the
                 user's window above its version).
+            checks_others: Its answer checks what other sources decided (``versions.AnswerVersion.checks_others``).
 
         Returns:
             The paths.
@@ -1052,8 +1055,8 @@ class MarkerStore:
                 f"WHERE f.missing_since IS NULL AND v.source IN ({in_sources}) AND d.type IN ({in_types}) "
                 "AND (CASE WHEN ? > 0 THEN v.version % ? ELSE v.version END) < ? "
                 "AND (r.version IS NULL OR r.version < ?) "
-                "AND (d.status IN (?, ?) OR (d.status = ? AND m.locked = 0 AND EXISTS "
-                f"(SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN ({in_sources})))) "
+                "AND (d.status IN (?, ?) OR (d.status = ? AND m.locked = 0 AND (? OR EXISTS "
+                f"(SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN ({in_sources}))))) "
                 "ORDER BY f.canonical_path",
                 (
                     detector,
@@ -1066,21 +1069,26 @@ class MarkerStore:
                     DecisionStatus.NEEDS_REVIEW.value,
                     DecisionStatus.NO_EVIDENCE.value,
                     DecisionStatus.DECIDED.value,
+                    int(checks_others),
                     *names,
                 ),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
-    def files_decided_under_older_rules(self, detector: str, version: int) -> list[str]:
+    def files_decided_under_older_rules(
+        self, detector: str, version: int, *, carried_by: str | None = None
+    ) -> list[str]:
         """Canonical paths of the files not recorded as decided under ``version`` of the decision rules (``detector``
         in ``version_reruns``) with a type those rules could decide differently from what is stored, sorted: an
         unlocked type with a stored answer of its type, decided, in Needs review, not found (its answers failed a
-        check a rule may have changed) or left to the servers' own markers; not one whose detection is off. Files
-        marked missing are left out.
+        check a rule may have changed) or left to the servers' own markers, or one holding a marker carried over from
+        a replaced file (``carried_by`` among its deciding sources: the carry-over is a rule too); not one whose
+        detection is off. Files marked missing are left out.
 
         Args:
             detector: The name the rules' version is recorded under.
             version: The rules' version now.
+            carried_by: ``Marker.decided_by`` of a carried marker (``carry_over.CARRIED_OVER``); None lists none.
 
         Returns:
             The paths.
@@ -1092,8 +1100,9 @@ class MarkerStore:
                 "LEFT JOIN markers m ON m.file_id = d.file_id AND m.type = d.type "
                 "LEFT JOIN version_reruns r ON r.file_id = d.file_id AND r.detector = ? "
                 "WHERE f.missing_since IS NULL AND (r.version IS NULL OR r.version < ?) AND COALESCE(m.locked, 0) = 0 "
-                "AND EXISTS (SELECT 1 FROM evidence e WHERE e.file_id = d.file_id AND e.type = d.type)",
-                (detector, version),
+                "AND (EXISTS (SELECT 1 FROM evidence e WHERE e.file_id = d.file_id AND e.type = d.type) "
+                "OR EXISTS (SELECT 1 FROM json_each(COALESCE(m.decided_by, '[]')) WHERE json_each.value = ?))",
+                (detector, version, carried_by),
             ).fetchall()
         found = {
             r["canonical_path"]

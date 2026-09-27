@@ -16,6 +16,12 @@ The rule is narrow on purpose:
   and a type left off or to a server's own marker.
 - Only within 1 s of the replaced file's length, and only a marker at least one of whose deciding sources is still
   turned on (a user's marker, or one carried before, whose sources aren't known, always counts).
+- Not a marker only the detectors that read the file's content decided (season audio, credit text) when each of them
+  read the new file at its version now, with something to compare it with, and found nothing: on a file of the same
+  length that is today's answer about the same content, and the replaced file's marker an older version's. Small
+  Prophets S01E05 and E06 kept season audio version 9's 0-12 s logo stretch this way after version 10, which passes
+  it over, found nothing on the same files (sflix, 2026-09-28). A chapter, an online answer or a user's marker still
+  carries: a replacement without the chapter, or one an online source doesn't list, says nothing about the intro.
 - The replaced file: an earlier identity at the same path (kept aside by ``MarkerStore.upsert_file``; not when the new
   file was moved here from another path it is known at), or a file last published to one of the new file's server
   items that is gone from disk (one still there is another version, decided on its own). Of these, the one stored
@@ -129,6 +135,7 @@ def carry_over(
     *,
     kept: Mapping[MarkerType, Marker] | None = None,
     enabled: Collection[str] | None = None,
+    read_by: Mapping[MarkerType, Collection[str]] | None = None,
 ) -> dict[MarkerType, TypeDecision]:
     """One file's decisions with the replaced file's markers kept for the types it has no evidence of.
 
@@ -139,6 +146,9 @@ def carry_over(
         kept: The file's stored markers: a carried one stays when the replaced file can't be told now.
         enabled: The sources turned on (None: every source); a marker none of whose deciding sources is on isn't
             carried.
+        read_by: Per type, the sources of the content detectors that read the new file at their version now with
+            something to compare it with (their answers stored under these sources); a marker only they decided isn't
+            carried, since the type has no evidence (none of them found it).
 
     Returns:
         The decisions, a carried type decided by ``carried_over`` with :data:`CARRIED_OVER_REASON`.
@@ -163,6 +173,7 @@ def carry_over(
             held.marker is None
             or abs(held.duration_ms - duration_ms) > MAX_LENGTH_CHANGE_MS
             or not _sources_on(held.decided_by, enabled)
+            or _read_again_without_it(held.decided_by, (read_by or {}).get(mtype, ()))
         ):
             continue
         else:
@@ -179,6 +190,14 @@ def _sources_on(decided_by: Iterable[str], enabled: Collection[str] | None) -> b
     if enabled is None or not deciding or any(s in _ALWAYS_ON for s in deciding):
         return True
     return any(s in enabled for s in deciding)
+
+
+def _read_again_without_it(decided_by: Iterable[str], read_by: Collection[str]) -> bool:
+    """Whether every deciding source of a replaced file's marker (servers' confirming markers aside) is a content
+    detector that read the new file now and found nothing (a marker with no known source, a user's or a carried one,
+    never is)."""
+    deciding = [s for s in decided_by if s not in _CONFIRMING_ONLY]
+    return bool(deciding) and all(s in read_by for s in deciding)
 
 
 def _fitted(mtype: MarkerType, times: tuple[int, int], duration_ms: int) -> Marker | None:
