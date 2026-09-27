@@ -159,9 +159,6 @@ OTHER_RELEASE_MIN_SHIFT_MS = 15_000
 # Both must be at least this long: a short card matches a stretch of another length by chance (one episode,
 # a 16 s title card beside a 15 s season audio answer elsewhere).
 OTHER_RELEASE_MIN_LENGTH_MS = 30_000
-# A season audio intro only one other episode supports that starts more than this after an agreeing answer of another
-# source is part of the opening those two files share, not its start (rule 4, :func:`_partial_season_match`).
-PARTIAL_MATCH_MIN_SHIFT_MS = 15_000
 SHORTENED_NOTE = "shortened to the server's own marker"
 # The reason of a type no source gave a candidate of (not even one failing sanity): nothing to go on.
 NO_EVIDENCE_REASON = "no evidence"
@@ -608,7 +605,7 @@ def _compose_cluster(
 def _partial_season_match(candidate: Candidate, confirmed: list[Candidate]) -> bool:
     """Whether a season audio intro may be only part of the opening, so it doesn't set an agreed intro's start (rule 4):
     one other episode supports it (its label ``support/others``), and an agreeing answer of another source that isn't a
-    server's marker starts more than ``PARTIAL_MATCH_MIN_SHIFT_MS`` before it. Two files can share only part of their
+    server's marker starts more than ``OTHER_RELEASE_MIN_SHIFT_MS`` (15 s) before it. Two files can share only part of their
     opening (2026-09-27 audit: a season split over three disks left two episodes matched with each other alone, at
     63-112 s of a 5-112 s title sequence IntroDB had right), where a stretch more episodes share is the opening itself.
     """
@@ -617,7 +614,7 @@ def _partial_season_match(candidate: Candidate, confirmed: list[Candidate]) -> b
     return any(
         c.source not in SERVER_SOURCES
         and _group(c) != _group(candidate)
-        and candidate.start_ms - c.start_ms > PARTIAL_MATCH_MIN_SHIFT_MS
+        and candidate.start_ms - c.start_ms > OTHER_RELEASE_MIN_SHIFT_MS
         for c in confirmed
     )
 

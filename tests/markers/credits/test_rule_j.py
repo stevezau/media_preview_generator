@@ -432,10 +432,10 @@ class TestMovesChapter:
         rows = [bright(t) for t in range(900, 1100, 4)]
         assert rule_j.moves_chapter(rows, 985.0, 1000.0) is False
 
-    @pytest.mark.parametrize(("start_s", "moved"), [(760.0, True), (759.9, False)])
-    def test_it_moves_back_at_most_240_s(self, start_s, moved):
-        rows = self.texted([start_s, *range(764, 1004, 4)])
-        assert rule_j.moves_chapter(rows, start_s, 1000.0) is moved
+    def test_how_far_back_is_bounded_only_by_text_on_screen(self):
+        # 300 s of roll before the chapter: the decision's sanity checks bound the moved marker, not rule J.
+        rows = self.texted(range(700, 1004, 4))
+        assert rule_j.moves_chapter(rows, 700.0, 1000.0) is True
 
     def test_a_chapter_on_the_last_shot_moves_forward_to_the_roll(self):
         # No text from the chapter to the roll: the chapter is on the story (A Christmas Carol (1984): 13 s early).
@@ -446,11 +446,6 @@ class TestMovesChapter:
         # The roll rule J found later isn't the first card when text is already on the screen after the chapter.
         rows = [bright(t) for t in range(900, 1000, 4)] + [bright(1004, 1)] + self.texted(range(1030, 1100, 4))
         assert rule_j.moves_chapter(rows, 1030.0, 1000.0) is False
-
-    @pytest.mark.parametrize(("start_s", "moved"), [(1060.0, True), (1060.1, False)])
-    def test_it_moves_forward_at_most_60_s(self, start_s, moved):
-        rows = [bright(t) for t in range(900, 1060, 4)] + self.texted([start_s, start_s + 4])
-        assert rule_j.moves_chapter(rows, start_s, 1000.0) is moved
 
     @pytest.mark.parametrize(("blank_s", "moved"), [(962.0, True), (962.1, False), (990.0, False)])
     def test_lit_footage_without_text_after_the_starts_fade_keeps_the_chapter(self, blank_s, moved):
@@ -471,7 +466,9 @@ class TestMovesChapter:
             pytest.param([bright(t) for t in range(1000, 1020, 4)], True, id="footage"),
             pytest.param([dark(t) for t in range(1000, 1020, 4)], False, id="black: cards too small to read"),
             pytest.param([bright(1000.0), dark(1004.0), bright(1008.0)], False, id="black in the middle"),
-            pytest.param([bright(t) for t in range(1000, 1018, 4)] + [dark(1018.0)], True, id="the fade into the roll"),
+            pytest.param(
+                [bright(t) for t in range(1000, 1018, 4)] + [dark(1018.0)], False, id="a dark keyframe at the end"
+            ),
             pytest.param([], False, id="no keyframe to show it"),
         ],
     )

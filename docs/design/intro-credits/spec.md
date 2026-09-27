@@ -526,10 +526,11 @@ frame near the coarse start shows the roll does it start from the latest credit 
 *A file with a credits chapter is read against it* (`decide.credits_chapter_start_ms`: the chapter rule 3 decides
 from, when chapters are on). The answer keeps rule J's own start and carries `decide.chapter_hint`: whether the frames
 show that chapter off the roll (`rule_j.moves_chapter`). Off it means one of two shapes. *Inside the roll*: the roll
-starts 10–240 s before the chapter and text stays on the screen all the way (no stretch of keyframes without a box
-over 8 s, and no lit keyframe without one after the start's own 1 s, the fade into the first card). *On the story*: the
-roll starts 10–60 s after the chapter, no keyframe between them holds text, and those up to 2.5 s before the roll are
-all lit (at least one). The lit-keyframe checks came from sflix's replay: 5 chapters the frames moved earlier onto
+starts more than 10 s before the chapter and text stays on the screen all the way (no stretch of keyframes without a
+box over 8 s, and no lit keyframe without one after the start's own 1 s, the fade into the first card). *On the
+story*: the roll starts more than 10 s after the chapter and every keyframe between them, at least one, is lit and
+holds no text. How far a chapter moves is bounded only by the moved marker's sanity checks (rule 2; distance caps of
+240 and 60 s changed nothing on the verdict set or the replay). The lit-keyframe checks came from sflix's replay: 5 chapters the frames moved earlier onto
 story text (a T-shirt, a poster, a screen, an epilogue caption; every one with a lit keyframe without text between) and
 2 moved later off black cards 320×180 reads nothing on (The Half of It, Dark Matter S02E05). An answer read against
 another chapter than today's, or before the file had one, is read again (`credits_text_due`: the run's basis
@@ -881,7 +882,7 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    clock, 6–7 s into the roll where credit text had the first card). **A partial season match (2026-09-27):** a season
    audio intro only one other episode supports (label `1/n`) that starts more than 15 s after an agreeing answer of
    another source that isn't a server's marker is part of the opening those two files share, so it doesn't set the
-   agreed intro's start (`decide._partial_season_match`, `PARTIAL_MATCH_MIN_SHIFT_MS`). Game of Thrones S03E04/E09: the
+   agreed intro's start (`decide._partial_season_match`, the 15 s of rule 14's `OTHER_RELEASE_MIN_SHIFT_MS`). Game of Thrones S03E04/E09: the
    season split over three disks left two episodes matched with each other alone, at 63–112 s of a 5–112 s title
    sequence IntroDB had right (held fix 3 would regroup the season itself).
 5. If two groups of agreeing sources would publish times that don't agree with each other → "Needs review". Before

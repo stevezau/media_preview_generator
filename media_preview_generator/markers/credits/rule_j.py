@@ -160,13 +160,6 @@ CHAPTER_TEXT_GAP_S = 8.0
 # replay of one library: 5 chapters moved earlier onto the story, every one with such a keyframe; none of the moves
 # frame-checked right, one to three per show, had one).
 CHAPTER_START_FADE_S = 1.0
-# ... and never further than these: a roll further away is another one (or a scene with text), not the chapter's.
-CHAPTER_EARLIER_MAX_S = 240.0
-CHAPTER_LATER_MAX_S = 60.0
-# A chapter moves later only from footage: every keyframe from it to this long before the roll's start is lit. Dark
-# keyframes there may hold credit text too small to read at 320 px (two releases' chapters sat on such cards, 22 and
-# 30 s before the first text rule J read); the last seconds before the start are the fade into the roll.
-CHAPTER_LATER_FADE_S = 2.5
 
 
 @dataclass(frozen=True)
@@ -1187,18 +1180,18 @@ def moves_chapter(rows: Sequence[Row], start_s: float, chapter_s: float) -> bool
     the roll, on its closing logos, or where a montage after the first cards ends (2026-09-27 audit: 6 of 21 movie
     credits chapters and 4 of 20 TV ones more than 5 s off). The frames show it off only in two shapes:
 
-    * **Inside the roll**: the roll starts more than ``CHAPTER_AGREES_S`` and no more than ``CHAPTER_EARLIER_MAX_S``
-      before the chapter, and text is on the screen all the way from it to the chapter -- no stretch of keyframes
-      without any box longer than ``CHAPTER_TEXT_GAP_S``, and no lit keyframe without one after the start's own
-      ``CHAPTER_START_FADE_S``. Text that stops between the two (a caption, a dedication split off by black) leaves
-      the chapter, and so does text between shots of plain footage: it was the story's (a T-shirt, a poster, a screen).
-    * **On the story**: the roll starts more than ``CHAPTER_AGREES_S`` and no more than ``CHAPTER_LATER_MAX_S`` after
-      the chapter, no keyframe from the chapter to it holds any text, and those up to ``CHAPTER_LATER_FADE_S`` before
-      it are all lit, at least one: the chapter sits on footage, not on black cards too small to read.
+    * **Inside the roll**: the roll starts more than ``CHAPTER_AGREES_S`` before the chapter, and text is on the
+      screen all the way from it to the chapter -- no stretch of keyframes without any box longer than
+      ``CHAPTER_TEXT_GAP_S``, and no lit keyframe without one after the start's own ``CHAPTER_START_FADE_S``. Text that
+      stops between the two (a caption, a dedication split off by black) leaves the chapter, and so does text between
+      shots of plain footage: it was the story's (a T-shirt, a poster, a screen).
+    * **On the story**: the roll starts more than ``CHAPTER_AGREES_S`` after the chapter, and every keyframe from the
+      chapter to it, at least one, is lit and holds no text: the chapter sits on footage, not on black cards too small
+      to read at 320 px (two releases' chapters sat on such cards, 22 and 30 s before the first text rule J read).
 
     A roll starting within ``CHAPTER_AGREES_S`` of the chapter agrees with it (an end title card or a show's closing
-    logo a few seconds before the first card is the chapter's to include), and a roll further away than either bound
-    is another one, or a scene with text.
+    logo a few seconds before the first card is the chapter's to include). How far a chapter may move is bounded by the
+    decision's sanity checks on the moved marker (``decide._text_moves_chapter``).
 
     Args:
         rows: The tail's keyframe rows the start was found on, without the text that never moves
@@ -1213,15 +1206,10 @@ def moves_chapter(rows: Sequence[Row], start_s: float, chapter_s: float) -> bool
         return False
     dark = RULE_J.dark
     if start_s < chapter_s:
-        if chapter_s - start_s > CHAPTER_EARLIER_MAX_S:
-            return False
         between = [row for row in rows if start_s < row[0] < chapter_s]
         if any(row[1] == 0 and row[2] >= dark and row[0] > start_s + CHAPTER_START_FADE_S for row in between):
             return False
         stops = [start_s, *sorted(row[0] for row in between if row[1] >= 1), chapter_s]
         return max(b - a for a, b in zip(stops, stops[1:], strict=False)) <= CHAPTER_TEXT_GAP_S
-    if start_s - chapter_s > CHAPTER_LATER_MAX_S:
-        return False
     between = [row for row in rows if chapter_s <= row[0] < start_s]
-    footage = [row for row in between if row[0] < start_s - CHAPTER_LATER_FADE_S]
-    return not any(row[1] >= 1 for row in between) and bool(footage) and all(row[2] >= dark for row in footage)
+    return bool(between) and all(row[1] == 0 and row[2] >= dark for row in between)
