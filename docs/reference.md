@@ -538,7 +538,7 @@ per type (the rest add up under "other").
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
 | POST | `/api/markers/item/markers` | Save your own markers for one file, lock them and publish to every owning server |
 | DELETE | `/api/markers/item/markers` | Unlock one or more marker types of one file |
-| GET | `/api/markers/season` | Every episode of one episode's season with its decisions (API only) |
+| GET | `/api/markers/season` | Inspector Season view data for one episode's season |
 | POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
 | GET | `/api/markers/sources/local` | Whether season audio matching and on-screen credit text can run in this container |
 | POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |

@@ -63,6 +63,10 @@
         allFrames: 'Every frame of the preview, with intro frames edged blue and credits frames orange. Click one to see it larger.',
         unlock: 'Lets later checks decide these times again. What your servers show now stays until the next Intro & Credits job.',
         pick: 'Frames one second apart, read from the video. Step ten seconds either way to find the first frame.',
+        lock: 'Keep these times exactly as they are. Later checks won\'t change them, and your servers get them now.',
+        unlockHeader: 'Let later checks set these times again. What your servers show now stays until the next Intro & Credits job.',
+        scope: 'Intros are found by comparing a season\'s episodes, so the whole season is the natural place to check and publish them.',
+        publish: 'Runs Intro & Credits for this season as a job: decided episodes go to every server that doesn\'t show them yet, the rest are checked again.',
         versions: 'The server keeps these files under one item. Each has its own preview; Plex shows one set of markers for all of them.',
     };
 
@@ -88,6 +92,13 @@
         adjust: null,
         review: {},
         confirmUnlock: false,
+        confirmLock: false,
+        locking: false,
+        scope: 'episode',
+        season: null,
+        seasonError: '',
+        seasonSeq: 0,
+        publishing: false,
         busy: '',
         job: null,
     };
@@ -530,6 +541,10 @@
         state.adjust = null;
         state.review = {};
         state.confirmUnlock = false;
+        state.confirmLock = false;
+        state.locking = false;
+        state.season = null;
+        state.seasonError = '';
         state.view = 'timeline';
         state.allIndex = 0;
         state.job = null;
@@ -542,10 +557,18 @@
         state.path = path;
         state.bifOnly = '';
         state.titleHint = opts.title || '';
+        state.scope = opts.scope === 'season' ? 'season' : 'episode';
         fold(true);
-        if (!opts.fromHistory) setUrl(new URLSearchParams({ path: path }), !!opts.replace);
+        if (!opts.fromHistory) setUrl(fileParams(), !!opts.replace);
         watchJobs();
         loadFile();
+        if (state.scope === 'season') loadSeason();
+    }
+
+    function fileParams() {
+        const params = new URLSearchParams({ path: state.path });
+        if (state.scope === 'season') params.set('view', 'season');
+        return params;
     }
 
     async function loadFile() {
@@ -724,10 +747,18 @@
                 + 'is sent anywhere. Check the path, or the libraries on the Servers page.', 'secondary'));
         } else {
             if (state.file.versions && state.file.versions.length > 1) body.appendChild(versionsBar());
+            if (state.file.kind === 'episode') body.appendChild(scopeToggle());
             const banner = el('div');
             banner.id = 'inspJobBanner';
             body.appendChild(banner);
             renderJobBanner(banner);
+            if (state.scope === 'season') {
+                body.appendChild(seasonCard());
+                parts.push(body);
+                root.replaceChildren.apply(root, parts);
+                tooltips(root);
+                return;
+            }
             reviewTypes().forEach(function (type) { body.appendChild(reviewPanel(type)); });
             body.appendChild(summaryCard());
             body.appendChild(wholeFileCard());
@@ -786,13 +817,92 @@
             return list;
         }
         list.push(actionButton('Re-detect intro & credits', 'btn btn-outline-secondary', redetect, TIPS.redetect, 'inspRedetect'));
+        if (state.scope === 'season') return list;
+        if (analysed && lockedTypes().length) {
+            const b = actionButton('Back to automatic', 'btn btn-outline-secondary', askUnlock, TIPS.unlockHeader, 'inspUnlock');
+            if (state.adjust || state.locking) b.querySelector('button').disabled = true;
+            list.push(b);
+        } else if (analysed && lockableTypes().length) {
+            const b = actionButton(state.locking ? 'Locking…' : 'Lock', 'btn btn-outline-secondary', askLock, TIPS.lock, 'inspLock');
+            if (state.adjust || state.locking) b.querySelector('button').disabled = true;
+            list.push(b);
+        }
         if (analysed && !reviewTypes().length) {
             const label = state.adjust ? 'Adjusting…' : 'Adjust';
             const b = actionButton(label, 'btn btn-insp-primary', startAdjust, TIPS.adjust, 'inspAdjust');
-            if (state.adjust) b.querySelector('button').disabled = true;
+            if (state.adjust || state.locking) b.querySelector('button').disabled = true;
             list.push(b);
         }
         return list;
+    }
+
+    // What Lock can send: the decided types a server with Intro & Credits on can show (the save route refuses the whole
+    // request over one no owner can show).
+    function lockableTypes() {
+        return decidedTypes().filter(function (t) { return enabledOwners(t).length > 0; });
+    }
+
+    function askLock() {
+        state.confirmLock = true;
+        state.confirmUnlock = false;
+        render();
+        const row = $('inspLockConfirmRow');
+        if (row) row.scrollIntoView({ block: 'nearest' });
+    }
+
+    function askUnlock() {
+        state.confirmUnlock = true;
+        state.confirmLock = false;
+        render();
+        const row = $('inspLocked');
+        if (row) row.scrollIntoView({ block: 'nearest' });
+    }
+
+    // Lock changes no time: the decided times go through the same save as Adjust (the same lock, the same publish to
+    // every owner) exactly as they are.
+    async function lockNow() {
+        const dur = duration();
+        const types = lockableTypes();
+        const markers = types.map(function (t) {
+            const m = decided(t);
+            const runsToEnd = TO_END_TYPES.indexOf(t) !== -1 && toEnd(m, dur);
+            return { type: t, start_ms: m.start_ms, end_ms: runsToEnd ? null : segmentEnd(m, dur) };
+        });
+        const path = state.path;
+        state.locking = true;
+        state.confirmLock = false;
+        render();
+        try {
+            const answer = await saveMarkers(markers, path);
+            toast('Locked', `These times stay until you go back to automatic. ${savedMessage(answer)}`, 'success');
+            if (state.path !== path) return;
+            state.locking = false;
+            await loadFile();
+        } catch (e) {
+            toast('Lock', `Couldn't lock these times: ${e.message}`, 'danger');
+            if (state.path !== path) return;
+            state.locking = false;
+            render();
+        }
+    }
+
+    function lockConfirmRow() {
+        const types = lockableTypes();
+        const dur = duration();
+        const row = el('div', 'insp-confirm-inline mt-3');
+        row.id = 'inspLockConfirmRow';
+        const names = receivers(types);
+        const listed = types.map(function (t) { return `${TYPE_LABELS[t]} ${rangeText(decided(t), dur)}`; }).join(' · ');
+        const text = el('div');
+        text.append(el('div', 'fw-semibold', `Lock these times? ${listed}`),
+            el('div', 'insp-small', `Later checks won't change them, and they go to ${names.length ? joinWith(names, 'and') : 'your servers'} now, the same way Save sends them.`));
+        const buttons = el('div', 'd-flex gap-2 flex-wrap');
+        const yes = button(`Lock and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn btn-sm btn-insp-primary', lockNow);
+        yes.id = 'inspLockConfirm';
+        const no = button('Leave them as they are', 'btn btn-sm btn-outline-secondary', function () { state.confirmLock = false; render(); });
+        buttons.append(yes, no);
+        row.append(text, buttons);
+        return row;
     }
 
     function loadingCard() {
@@ -865,6 +975,198 @@
         target.replaceChildren(box);
     }
 
+    // ------------------------------------------------------------------ season
+
+    const CHIP_NAMES = {
+        chapters: 'Chapters', theintrodb: 'TheIntroDB', introdb: 'IntroDB', skipdb: 'SkipDB', season_audio: 'Audio',
+        season_audio_previous: 'Previous season', credits_text: 'Credit text', user: 'Your marker',
+    };
+    const DOT_WORDS = {
+        ok: 'shows our markers', waiting: 'waiting', failed: 'failed', skipped: 'skipped', none: 'nothing sent yet',
+        off: 'Intro & Credits is off',
+    };
+    // Matches markers.audio.season.MAX_GROUP_EPISODES: a folder with more episodes is capped to the nearest this many.
+    const MAX_GROUP_EPISODES = 40;
+
+    function scopeToggle() {
+        const row = el('div', 'd-flex align-items-center gap-2');
+        const seg = el('div', 'insp-seg');
+        seg.setAttribute('role', 'group');
+        seg.setAttribute('aria-label', 'Show this episode or the whole season');
+        [['episode', 'This episode', 'inspScopeEpisode'], ['season', 'Whole season', 'inspScopeSeason']].forEach(function (opt) {
+            const on = state.scope === opt[0];
+            const b = button(opt[1], 'btn' + (on ? ' active' : ''), function () { setScope(opt[0]); });
+            b.id = opt[2];
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            seg.appendChild(b);
+        });
+        row.appendChild(withInfo(seg, TIPS.scope));
+        return row;
+    }
+
+    function setScope(scope) {
+        if (state.scope === scope) return;
+        state.scope = scope;
+        state.adjust = null;
+        state.confirmLock = false;
+        state.confirmUnlock = false;
+        setUrl(fileParams(), false);
+        if (scope === 'season') loadSeason();
+        render();
+    }
+
+    async function loadSeason() {
+        const seq = ++state.seasonSeq;
+        const path = state.path;
+        state.season = null;
+        state.seasonError = '';
+        render();
+        const res = await getJson('/api/markers/season?path=' + encodeURIComponent(path)).catch(function (e) {
+            return { ok: false, status: 0, data: { error: e.message } };
+        });
+        if (seq !== state.seasonSeq || state.path !== path) return;
+        if (res.ok) state.season = res.data;
+        else state.seasonError = (res.data && res.data.error) || `HTTP ${res.status}`;
+        if (state.scope === 'season') render();
+    }
+
+    function seasonTimes(ep) {
+        const dur = ep.duration_ms;
+        const parts = [];
+        ['intro', 'credits'].forEach(function (t) {
+            const d = ep[t] || {};
+            if (d.status === 'decided' && d.marker) parts.push(`${TYPE_LABELS[t]} ${rangeText(d.marker, dur)}`);
+        });
+        if (ep.needs_review) return ['Needs review', 'insp-state-review'];
+        if (!ep.known) return ['Not checked yet', 'insp-state-muted'];
+        if (!parts.length) return ['Nothing found', 'insp-state-muted'];
+        return [parts.join(' · '), ''];
+    }
+
+    function seasonLane(ep, scale) {
+        const lane = el('div', 'insp-season-lane');
+        if (!ep.duration_ms || !scale) {
+            lane.appendChild(el('div', 'insp-small ps-2', ep.known ? 'Length not known yet' : ''));
+            return lane;
+        }
+        const track = el('div', 'insp-season-track');
+        track.style.width = `${pct(ep.duration_ms, scale)}%`;
+        lane.appendChild(track);
+        ['intro', 'credits'].forEach(function (t) {
+            const d = ep[t] || {};
+            if (d.status !== 'decided' || !d.marker) return;
+            const m = d.marker;
+            const bar = el('div', 'insp-bar insp-bar-' + t);
+            bar.style.left = `${pct(m.start_ms, scale)}%`;
+            bar.style.width = `${Math.max(0.4, pct(segmentEnd(m, ep.duration_ms) - m.start_ms, scale))}%`;
+            bar.title = `${TYPE_LABELS[t]} ${rangeText(m, ep.duration_ms)}`;
+            lane.appendChild(bar);
+        });
+        return lane;
+    }
+
+    function seasonDots(ep, servers) {
+        const dots = el('div', 'insp-dots');
+        servers.forEach(function (server) {
+            const st = (ep.servers || {})[server.server_id] || { state: 'none', message: '' };
+            const dot = el('span', 'insp-dot insp-dot-' + st.state);
+            dot.title = `${server.server_name}: ${st.message || DOT_WORDS[st.state] || st.state}`;
+            dot.setAttribute('role', 'img');
+            dot.setAttribute('aria-label', dot.title);
+            dots.appendChild(dot);
+        });
+        return dots;
+    }
+
+    function seasonCard() {
+        const card = el('div', 'insp-card');
+        card.id = 'inspSeason';
+        if (state.seasonError) {
+            card.append(el('div', 'fw-semibold', 'Couldn\'t load this season'), el('div', 'insp-small', state.seasonError));
+            return card;
+        }
+        const payload = state.season;
+        if (!payload) {
+            card.append(el('span', 'spinner-border spinner-border-sm me-2'), el('span', '', 'Loading the season…'));
+            return card;
+        }
+        const servers = payload.servers || [];
+        const episodes = payload.episodes || [];
+        const counts = payload.counts || {};
+        const on = servers.filter(function (s) { return s.markers_enabled; }).length;
+        const head = el('div', 'd-flex justify-content-between align-items-start flex-wrap gap-2 mb-3');
+        const titles = el('div');
+        const show = String(payload.show || '').replace(/\s*\{[a-z]+-[^}]*\}/gi, '').trim();
+        titles.appendChild(el('div', 'insp-card-title', `${show} · ${payload.season || ''}`));
+        const total = counts.total_episodes || counts.episodes || 0;
+        titles.appendChild(el('div', 'insp-small mt-1', total > MAX_GROUP_EPISODES
+            ? `${total} episodes (showing the ${MAX_GROUP_EPISODES} nearest)` : `${total} episodes`));
+        const acts = el('div', 'd-flex align-items-center gap-2 flex-wrap');
+        const ready = el('span', 'insp-chip', `${counts.ready || 0} ready`);
+        ready.id = 'inspSeasonReady';
+        acts.appendChild(ready);
+        if (counts.needs_review) {
+            const review = el('span', 'insp-chip insp-state-review', `${counts.needs_review} need review`);
+            review.id = 'inspSeasonReview';
+            acts.appendChild(review);
+        }
+        const publish = button(state.publishing ? 'Queueing…' : `Publish ${counts.ready || 0} to ${on} server${on === 1 ? '' : 's'}`,
+            'btn btn-insp-primary', publishSeason);
+        publish.id = 'inspPublishSeason';
+        publish.disabled = state.publishing || !counts.ready || !on;
+        acts.appendChild(withInfo(publish, TIPS.publish));
+        head.append(titles, acts);
+        card.appendChild(head);
+
+        const scale = Math.max.apply(null, [0].concat(episodes.map(function (e) { return e.duration_ms || 0; })));
+        const grid = el('div', 'insp-season');
+        const top = el('div', 'insp-season-row insp-season-head');
+        top.append(el('div', '', 'EP'), el('div', '', scale ? `INTRO & CREDITS · 0:00 – ${clock(scale)}, ONE SCALE` : 'INTRO & CREDITS'),
+            el('div', '', 'TIMES'), el('div', '', 'SOURCES'), el('div', '', servers.map(function (s) { return s.server_name; }).join(' · ')));
+        grid.appendChild(top);
+        episodes.forEach(function (ep) {
+            const row = el('button', 'insp-season-row' + (ep.path === state.path ? ' is-current' : ''));
+            row.type = 'button';
+            row.dataset.path = ep.path;
+            row.dataset.episode = ep.episode || ep.name;
+            row.setAttribute('aria-label', `Open ${ep.episode || ep.name}`);
+            const times = seasonTimes(ep);
+            const timesCell = el('div', times[1], times[0]);
+            if (ep.needs_review && ep.review_reason) timesCell.title = ep.review_reason;
+            const chips = el('div', 'insp-season-chips');
+            (ep.evidence || []).forEach(function (chip) {
+                const name = CHIP_NAMES[chip.source] || chip.source;
+                chips.appendChild(el('span', 'insp-mini-chip', chip.label ? `${name} ${chip.label}` : name));
+            });
+            if (['intro', 'credits'].some(function (t) { return ep[t] && ep[t].marker && ep[t].marker.locked; })) {
+                chips.appendChild(el('span', 'insp-mini-chip is-locked', '🔒 Locked by you'));
+            }
+            row.append(el('div', 'fw-semibold', ep.episode || ep.name), seasonLane(ep, scale), timesCell, chips, seasonDots(ep, servers));
+            row.addEventListener('click', function () { openFile(ep.path, { scope: 'episode' }); });
+            grid.appendChild(row);
+        });
+        card.appendChild(grid);
+        card.appendChild(el('div', 'insp-small mt-2', 'Intro in blue, credits in orange, each episode drawn to one scale. Dots: green = server shows our markers, amber = waiting, red = failed, grey = off, skipped or nothing sent yet. Choose an episode to open it.'));
+        return card;
+    }
+
+    async function publishSeason() {
+        const path = state.path;
+        state.publishing = true;
+        render();
+        try {
+            const data = await sendJson('POST', '/api/markers/season/publish', { path: path });
+            toast('Publish season', 'Queued — see the Dashboard', 'success');
+            if (state.path === path) {
+                state.job = { id: data.job_id, kind: MARKERS_JOB, status: 'pending', name: 'Publish season', percent: 0 };
+            }
+        } catch (e) {
+            toast('Publish season', `Couldn't queue it: ${e.message}`, 'danger');
+        }
+        state.publishing = false;
+        if (state.path === path) render();
+    }
+
     // ---------------------------------------------------------------- summary
 
     function typePhrase(types) {
@@ -874,31 +1176,31 @@
     }
 
     function serverSentences() {
+        // Servers in the same state share one sentence: each phrase is [said of one server, said of several].
         const groups = {};
         const order = [];
-        const add = function (phrase, name) {
-            if (!groups[phrase]) { groups[phrase] = []; order.push(phrase); }
-            groups[phrase].push(name);
+        const add = function (one, many, name) {
+            if (!groups[one]) { groups[one] = { many: many, names: [] }; order.push(one); }
+            groups[one].names.push(name);
         };
         const shown = decidedTypes();
         servers().forEach(function (s) {
             const name = serverName(s);
             const mine = shown.filter(function (t) { return (s.can_show || []).indexOf(t) !== -1; });
             const them = mine.length === 2 ? 'both' : (mine.length === 1 ? 'it' : 'them');
-            if (s.error) add('couldn\'t be read just now', name);
-            else if (s.plan === 'up_to_date') add(`${'has|have'} ${them}`, name);
-            else if (s.plan === 'will_add') add(`${'gets|get'} ${mine.length === 1 ? 'it' : 'them'} on the next job`, name);
-            else if (s.plan === 'will_replace') add(`${'shows|show'} other times; the next job replaces them`, name);
-            else if (s.plan === 'will_remove') add(`${'loses|lose'} the markers this app sent, on the next job`, name);
-            else if (s.plan === 'waiting') add(`${'is|are'} waiting for its other versions to agree`, name);
-            else if (s.plan === 'keeps_plex' || s.plan === 'keeps_emby') add(`${'keeps|keep'} its own markers`, name);
-            else if (s.plan === 'not_enabled') add(`${'has|have'} Intro & Credits turned off`, name);
-            else if (s.plan === 'unknown') add(`couldn't be read just now`, name);
+            const onNext = `${mine.length === 1 ? 'it' : 'them'} on the next job`;
+            if (s.error || s.plan === 'unknown') add('couldn\'t be read just now', 'couldn\'t be read just now', name);
+            else if (s.plan === 'up_to_date') add(`has ${them}`, `have ${them}`, name);
+            else if (s.plan === 'will_add') add(`gets ${onNext}`, `get ${onNext}`, name);
+            else if (s.plan === 'will_replace') add('shows other times; the next job replaces them', 'show other times; the next job replaces them', name);
+            else if (s.plan === 'will_remove') add('loses the markers this app sent, on the next job', 'lose the markers this app sent, on the next job', name);
+            else if (s.plan === 'waiting') add('is waiting for its other versions to agree', 'are waiting for their other versions to agree', name);
+            else if (s.plan === 'keeps_plex' || s.plan === 'keeps_emby') add('keeps its own markers', 'keep their own markers', name);
+            else if (s.plan === 'not_enabled') add('has Intro & Credits turned off', 'have Intro & Credits turned off', name);
         });
-        return order.map(function (phrase) {
-            const names = groups[phrase];
-            const verb = phrase.replace(/(\w+)\|(\w+)/, function (_m, one, many) { return names.length > 1 ? many : one; });
-            return `${joinWith(names, 'and')} ${verb}.`;
+        return order.map(function (one) {
+            const group = groups[one];
+            return `${joinWith(group.names, 'and')} ${group.names.length > 1 ? group.many : one}.`;
         });
     }
 
@@ -1001,15 +1303,11 @@
         row.appendChild(el('i', 'bi bi-lock-fill'));
         row.appendChild(el('span', '', `You set the ${typePhrase(locked)}, so later checks keep ${locked.length === 1 && locked[0] !== 'credits' ? 'it' : 'them'}.`));
         if (state.confirmUnlock) {
-            row.appendChild(el('span', 'insp-small', 'The next check decides again and may move them.'));
+            row.appendChild(el('span', 'insp-small', 'Back to automatic? Your times stay on your servers for now; the next check decides again and may move them.'));
             const yes = button('Go back to automatic', 'btn btn-sm btn-outline-danger', unlock);
             yes.id = 'inspUnlockConfirm';
-            const no = button('Keep mine', 'btn btn-sm btn-outline-secondary', function () { state.confirmUnlock = false; render(); });
+            const no = button('Keep them locked', 'btn btn-sm btn-outline-secondary', function () { state.confirmUnlock = false; render(); });
             row.append(yes, no);
-        } else {
-            const b = button('Back to automatic', 'btn btn-sm btn-outline-secondary', function () { state.confirmUnlock = true; render(); });
-            b.id = 'inspUnlock';
-            row.appendChild(withInfo(b, TIPS.unlock));
         }
         return row;
     }
@@ -1030,6 +1328,7 @@
         card.appendChild(factsChips());
         const unlockRow = unlockControls();
         if (unlockRow) card.appendChild(unlockRow);
+        if (state.confirmLock && lockableTypes().length) card.appendChild(lockConfirmRow());
         return card;
     }
 
@@ -1676,8 +1975,9 @@
         for (const type of adjustTypes()) {
             const m = state.adjust.model[type];
             const end = m.toEnd ? dur : m.end;
-            if (end <= m.start) return `The ${TYPE_WORDS[type]} has to end after it starts.`;
-            if (m.start >= dur) return `The ${TYPE_WORDS[type]} has to start inside the file.`;
+            const plural = type === 'credits';
+            if (end <= m.start) return `The ${TYPE_WORDS[type]} ${plural ? 'have' : 'has'} to end after ${plural ? 'they start' : 'it starts'}.`;
+            if (m.start >= dur) return `The ${TYPE_WORDS[type]} ${plural ? 'have' : 'has'} to start inside the file.`;
         }
         return '';
     }
@@ -1976,11 +2276,14 @@
         if (m) {
             const gap = Math.abs(row.start_ms - m.start_ms);
             const agrees = gap <= (START_TYPES.indexOf(row.type) !== -1 ? 5000 : 10000);
-            const who = (m.decided_by || []).map(function (s) { return (SOURCES[s] || [s])[0].toLowerCase(); });
+            // "the season audio", "the chapters", but "your times" for the user's own.
+            const who = (m.decided_by || []).map(function (s) {
+                return s === 'user' ? 'your times' : `the ${(SOURCES[s] || [s])[0].toLowerCase()}`;
+            });
             return {
                 icon: agrees ? 'used' : 'warn',
                 text: extra.concat([agrees
-                    ? `Agrees with the ${joinWith(who, 'and') || 'decision'}, so ${who.length === 1 ? 'that answer is' : 'those answers are'} kept`
+                    ? `Agrees with ${joinWith(who, 'and') || 'the decision'}, so ${who.length === 1 ? 'that answer is' : 'those answers are'} kept`
                     : `${Math.round(gap / 1000)} s from the decision, so not used`]).join(' · '),
             };
         }
@@ -2175,12 +2478,16 @@
 
     // ---------------------------------------------------------------- actions
 
+    // Both answer after an await: the job banner is only set when the file it was asked for is still the one open.
     async function regenerate() {
+        const path = state.path;
         state.busy = 'regenerate';
         render();
         try {
-            const job = await sendJson('POST', '/api/jobs/manual', { file_paths: [state.path], force_regenerate: true, priority: 1 });
-            state.job = { id: job.id, kind: job.kind || 'previews', status: job.status || 'pending', name: job.library_name || 'Regenerate preview', percent: 0 };
+            const job = await sendJson('POST', '/api/jobs/manual', { file_paths: [path], force_regenerate: true, priority: 1 });
+            if (state.path === path) {
+                state.job = { id: job.id, kind: job.kind || 'previews', status: job.status || 'pending', name: job.library_name || 'Regenerate preview', percent: 0 };
+            }
             toast('Regenerate preview', 'Queued. The preview is rebuilt as a job on the Dashboard.', 'success');
         } catch (e) {
             toast('Regenerate preview', `Couldn't queue it: ${e.message}`, 'danger');
@@ -2190,11 +2497,14 @@
     }
 
     async function redetect() {
+        const path = state.path;
         state.busy = 'redetect';
         render();
         try {
-            const data = await sendJson('POST', '/api/markers/item/redetect', { path: state.path });
-            state.job = { id: data.job_id, kind: MARKERS_JOB, status: 'pending', name: 'Intro & Credits', percent: 0 };
+            const data = await sendJson('POST', '/api/markers/item/redetect', { path: path });
+            if (state.path === path) {
+                state.job = { id: data.job_id, kind: MARKERS_JOB, status: 'pending', name: 'Intro & Credits', percent: 0 };
+            }
             toast('Intro & credits', 'Queued. This page updates when the job finishes.', 'success');
         } catch (e) {
             toast('Intro & credits', `Couldn't queue it: ${e.message}`, 'danger');
@@ -2224,7 +2534,11 @@
             renderJobBanner();
             clearTimeout(reloadTimer);
             // A finished Intro & Credits job changed what was decided; a preview job the frames. Either way: read again.
-            reloadTimer = setTimeout(function () { if (!state.adjust) loadFile(); }, kind === MARKERS_JOB ? 500 : 800);
+            reloadTimer = setTimeout(function () {
+                if (state.adjust) return;
+                loadFile();
+                if (state.scope === 'season') loadSeason();
+            }, kind === MARKERS_JOB ? 500 : 800);
             return;
         }
         state.job = {
@@ -2267,7 +2581,7 @@
         const path = (params.get('path') || params.get('file') || '').trim();
         const bif = (params.get('bif') || '').trim();
         if (path.startsWith('/')) {
-            openFile(path, { replace: replace, fromHistory: !replace });
+            openFile(path, { replace: replace, fromHistory: !replace, scope: params.get('view') === 'season' ? 'season' : 'episode' });
             if (replace && !params.get('path')) setUrl(new URLSearchParams({ path: path }), true);
             return true;
         }

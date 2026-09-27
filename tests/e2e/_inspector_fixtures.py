@@ -4,6 +4,8 @@ Every Inspector call is answered here through one ``page.route`` dispatcher, in 
 (``api_inspector``, ``api_markers.marker_item``, ``api_jobs.media_search``). Frames are small JPEGs drawn with Pillow:
 scenes in colour, an intro's title card, credits as white lines on black, so a screenshot reads like the design.
 Writes (save, unlock, re-detect, regenerate) are captured, appended before they are answered (see ``_mocks``).
+``InspectorApi.answers`` swaps a route's answer (an error, a different save result), ``hold_writes`` keeps a write
+unanswered until ``release_writes()``, and ``hold_paths`` does the same for one file's ``GET /api/inspector/file``.
 """
 
 from __future__ import annotations
@@ -357,6 +359,35 @@ def review_film() -> tuple[dict, dict]:
     return file, item
 
 
+# Public names for the builders above, for tests that assemble their own payloads.
+decision = _type
+marker = _marker
+server_row = _server
+evidence_row = _evidence
+preview_row = _preview_row
+
+
+def save_row(sid: str, name: str, stype: str, result: str = "written", **over: Any) -> dict:
+    """One server's row in the ``POST /api/markers/item/markers`` answer (``api_markers`` save's shape)."""
+    row = {
+        "server_id": sid,
+        "server_name": name,
+        "server_type": stype,
+        "result": result,
+        "message": "",
+        "can_show": ["intro", "credits"],
+        "cant_show": [],
+        "notes": [],
+        "replaced_own": [],
+    }
+    row.update(over)
+    return row
+
+
+def save_answer(path: str | None, rows: list[dict]) -> dict:
+    return {"canonical_path": path, "duration_ms": 0, "markers": {}, "servers": rows, "queued_job_id": None}
+
+
 def search_results() -> list[dict]:
     """``GET /api/media/search?q=matrix`` plus a show, as ``api_jobs.media_search`` merges them."""
     plex = [{"id": "plex-1", "name": "Plex", "type": "plex"}]
@@ -444,6 +475,77 @@ def show_seasons() -> list[dict]:
     return [season(1, 10), season(2, 8)]
 
 
+def season_payload(*, ready: int | None = None, total: int | None = None, markers_on: bool = True) -> dict:
+    """``GET /api/markers/season`` for Blood Legacy season 1 (``markers.inspect.season_payload``'s shape)."""
+    folder = f"{SHOW_FOLDER}/Season 01"
+    durations = [
+        EPISODE_MS,
+        1_710_000,
+        1_590_000,
+        1_650_000,
+        1_620_000,
+        1_680_000,
+        None,
+        1_640_000,
+        1_700_000,
+        1_660_000,
+    ]
+    episodes = []
+    for i, dur in enumerate(durations):
+        n = i + 1
+        path = EPISODE if n == 1 else f"{folder}/Blood Legacy (2024) - S01E{n:02d} - [WEBDL-1080p].mkv"
+        intro = _type("decided", _marker("intro", 165_000 + i * 2000, 179_000 + i * 2000, ["season_audio"]))
+        credits = _type(
+            "decided", _marker("credits", (dur or EPISODE_MS) - 157_000, dur or EPISODE_MS, ["chapters"], locked=n == 2)
+        )
+        if n == 4:
+            intro = _type("no_evidence")
+        if n == 7:
+            intro, credits = _type(None), _type(None)
+        if n == 10:
+            credits = _type("needs_review", reason="sources disagree")
+        for d in (intro, credits):
+            d.pop("shortened_by", None)
+        dots = {
+            "plex-1": {"state": "ok" if n not in (7, 10) else "none", "message": ""},
+            "jf-1": {"state": "waiting" if n == 3 else "none", "message": "Waiting for Jellyfin to add the file"},
+        }
+        episodes.append(
+            {
+                "path": path,
+                "name": os.path.basename(path),
+                "episode": f"E{n:02d}",
+                "known": n != 7,
+                "duration_ms": dur,
+                "intro": intro,
+                "credits": credits,
+                "needs_review": n == 10,
+                "review_reason": "Sources disagree: chapters, credits_text" if n == 10 else "",
+                "evidence": []
+                if n == 7
+                else [{"source": "season_audio", "label": "9/10"}, {"source": "chapters", "label": ""}],
+                "servers": dots,
+            }
+        )
+    decided = sum(1 for e in episodes if e["known"] and not e["needs_review"]) + 1
+    return {
+        "folder": folder,
+        "show": "Blood Legacy (2024) {tvdb-436915}",
+        "season": "Season 1",
+        "servers": [
+            {"server_id": "plex-1", "server_name": "Plex", "server_type": "plex", "markers_enabled": markers_on},
+            {"server_id": "jf-1", "server_name": "Jellyfin", "server_type": "jellyfin", "markers_enabled": markers_on},
+        ],
+        "episodes": episodes,
+        "counts": {
+            "episodes": len(episodes),
+            "total_episodes": total if total is not None else len(episodes),
+            "ready": ready if ready is not None else decided,
+            "needs_review": 1,
+        },
+    }
+
+
 @dataclass
 class InspectorApi:
     """The mocked Inspector API for one page: payloads per path, and every write it was sent."""
@@ -454,18 +556,55 @@ class InspectorApi:
     saves: list[dict] = field(default_factory=list)
     unlocks: list[dict] = field(default_factory=list)
     redetects: list[dict] = field(default_factory=list)
+    season: dict | None = None
+    season_requests: list[str] = field(default_factory=list)
+    season_publishes: list[dict] = field(default_factory=list)
     manual_jobs: list[dict] = field(default_factory=list)
     frame_requests: list[dict] = field(default_factory=list)
     # While True, GET /api/inspector/file isn't answered until ``release()``: the page's loading state stays up.
     hold_files: bool = False
     held: list[tuple[Route, dict]] = field(default_factory=list)
     after_save: dict[str, dict] = field(default_factory=dict)
+    after_unlock: dict[str, dict] = field(default_factory=dict)
+    # A route's answer in place of the default, as (status, body). Keys: save, unlock, redetect, manual, publish,
+    # search, status, show, season.
+    answers: dict[str, tuple[int, Any]] = field(default_factory=dict)
+    # Writes named here (save, unlock, redetect, manual, publish) are captured but not answered until
+    # ``release_writes()``, so the page's in-flight state stays up.
+    hold_writes: set[str] = field(default_factory=set)
+    held_writes: list[tuple[Route, Any, int]] = field(default_factory=list)
+    # GET /api/inspector/file for these paths isn't answered until ``release_path(path)``.
+    hold_paths: set[str] = field(default_factory=set)
+    held_paths: dict[str, list[tuple[Route, Any, int]]] = field(default_factory=dict)
+    servers_list: list[dict] = field(default_factory=lambda: copy.deepcopy(SERVERS))
+    # POST /api/inspector/status rows per path, over ``statuses()``.
+    status_items: dict[str, dict] = field(default_factory=dict)
+    # GET /api/bif/info answers per BIF path (``?bif=`` opens); any other path is a 400.
+    bif_info: dict[str, dict] = field(default_factory=dict)
+    # GET /api/inspector/frames: how many 503s (server busy) a read starting at start_ms gets before its frames.
+    frames_busy: dict[int, int] = field(default_factory=dict)
+    # GET /api/inspector/frames: every read answers this (status, body) instead of frames.
+    frames_error: tuple[int, dict] | None = None
+    file_requests: list[str] = field(default_factory=list)
+    item_requests: list[str] = field(default_factory=list)
+    search_requests: list[dict] = field(default_factory=list)
 
     def release(self) -> None:
         self.hold_files = False
         while self.held:
             route, body = self.held.pop(0)
             _fulfill_json(route, body)
+
+    def release_writes(self) -> None:
+        self.hold_writes = set()
+        while self.held_writes:
+            route, body, status = self.held_writes.pop(0)
+            _fulfill_json(route, body, status=status)
+
+    def release_path(self, path: str) -> None:
+        self.hold_paths.discard(path)
+        for route, body, status in self.held_paths.pop(path, []):
+            _fulfill_json(route, body, status=status)
 
     def add(self, file: dict, item: Any, kinds: list[tuple[int, int, str]] | None = None) -> None:
         path = file["canonical_path"]
@@ -504,27 +643,39 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
         except Exception:
             return {}
 
+    def answer(route: Route, key: str, body: Any, status: int = 200) -> None:
+        status, body = api.answers.get(key, (status, body))
+        if key in api.hold_writes:
+            api.held_writes.append((route, body, status))
+        else:
+            _fulfill_json(route, body, status=status)
+
     def handler(route: Route) -> None:
         url = urlparse(route.request.url)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         method = route.request.method
         p = url.path
         if p == "/api/servers" and method == "GET":
-            _fulfill_json(route, {"servers": SERVERS})
+            _fulfill_json(route, {"servers": api.servers_list})
         elif p == "/api/media/search":
+            api.search_requests.append(q)
             query = q.get("q", "").lower()
             results = [r for r in search_results() if query in r["title"].lower()] if query != "zzz" else []
-            _fulfill_json(route, {"query": query, "results": results, "error": None})
+            answer(route, "search", {"query": query, "results": results, "error": None})
         elif p == "/api/inspector/status":
             body = json_body(route)
-            known = statuses()
-            _fulfill_json(route, {"items": {x: known.get(x, {"in_library": False}) for x in body.get("paths", [])}})
+            known = {**statuses(), **api.status_items}
+            answer(route, "status", {"items": {x: known.get(x, {"in_library": False}) for x in body.get("paths", [])}})
         elif p == "/api/inspector/show":
-            _fulfill_json(route, {"seasons": show_seasons()})
+            answer(route, "show", {"seasons": show_seasons()})
         elif p == "/api/inspector/file":
             path = q.get("path", "")
+            api.file_requests.append(path)
+            status = 200
             if path in api.files:
                 body = api.files[path]
+                if isinstance(body, tuple):
+                    status, body = body
             else:
                 body = {
                     "canonical_path": path,
@@ -542,10 +693,13 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
                 }
             if api.hold_files:
                 api.held.append((route, body))
+            elif path in api.hold_paths:
+                api.held_paths.setdefault(path, []).append((route, body, status))
             else:
-                _fulfill_json(route, body)
+                _fulfill_json(route, body, status=status)
         elif p == "/api/markers/item" and method == "GET":
             path = q.get("path", "")
+            api.item_requests.append(path)
             item = api.items.get(path)
             if isinstance(item, tuple):
                 _fulfill_json(route, item[1], status=item[0])
@@ -556,56 +710,54 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
         elif p == "/api/markers/item/markers" and method == "POST":
             body = json_body(route)
             api.saves.append(body)
-            if body.get("path") in api.after_save:
+            if body.get("path") in api.after_save and "save" not in api.answers:
                 api.items[body["path"]] = api.after_save[body["path"]]
-            _fulfill_json(
-                route,
-                {
-                    "canonical_path": body.get("path"),
-                    "duration_ms": 0,
-                    "markers": {},
-                    "servers": [
-                        {
-                            "server_id": "plex-1",
-                            "server_name": "Plex",
-                            "server_type": "plex",
-                            "result": "written",
-                            "message": "",
-                            "can_show": ["intro", "credits"],
-                            "cant_show": [],
-                            "notes": [],
-                            "replaced_own": [],
-                        }
-                    ],
-                    "queued_job_id": None,
-                },
-            )
+            answer(route, "save", save_answer(body.get("path"), [save_row("plex-1", "Plex", "plex")]))
         elif p == "/api/markers/item/markers" and method == "DELETE":
-            api.unlocks.append(json_body(route))
-            _fulfill_json(
+            body = json_body(route)
+            api.unlocks.append(body)
+            if body.get("path") in api.after_unlock and "unlock" not in api.answers:
+                api.items[body["path"]] = api.after_unlock[body["path"]]
+            answer(
                 route,
-                {
-                    "canonical_path": json_body(route).get("path"),
-                    "unlocked": ["credits"],
-                    "markers": {},
-                    "decisions": {},
-                },
+                "unlock",
+                {"canonical_path": body.get("path"), "unlocked": ["credits"], "markers": {}, "decisions": {}},
             )
         elif p == "/api/markers/item/redetect":
             api.redetects.append(json_body(route))
-            _fulfill_json(route, {"job_id": "job-redetect-1"}, status=202)
+            answer(route, "redetect", {"job_id": "job-redetect-1"}, status=202)
+        elif p == "/api/markers/season" and method == "GET":
+            api.season_requests.append(q.get("path", ""))
+            answer(route, "season", api.season if api.season is not None else season_payload())
+        elif p == "/api/markers/season/publish" and method == "POST":
+            api.season_publishes.append(json_body(route))
+            answer(route, "publish", {"job_id": "job-season-1"}, status=202)
         elif p == "/api/jobs/manual":
             api.manual_jobs.append(json_body(route))
-            _fulfill_json(
+            answer(
                 route,
+                "manual",
                 {"id": "job-preview-1", "kind": "previews", "status": "pending", "library_name": "Manual: file"},
                 status=201,
             )
+        elif p == "/api/bif/info":
+            info = api.bif_info.get(q.get("path", ""))
+            if info is None:
+                _fulfill_json(route, {"error": "Not a preview file"}, status=400)
+            else:
+                _fulfill_json(route, info)
         elif p == "/api/inspector/frames":
             path = q.get("path", "")
             start = int(q.get("start_ms", "0"))
             count = int(q.get("count", "7"))
             api.frame_requests.append({"path": path, "start_ms": start, "count": count})
+            if api.frames_error is not None:
+                _fulfill_json(route, api.frames_error[1], status=api.frames_error[0])
+                return
+            if api.frames_busy.get(start):
+                api.frames_busy[start] -= 1
+                _fulfill_json(route, {"error": "Busy reading other frames; try again"}, status=503)
+                return
             frames = [
                 {
                     "t_ms": start + i * 1000,
@@ -619,12 +771,13 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
             _fulfill_json(route, {"path": path, "start_ms": start, "step_ms": 1000, "frames": frames})
         elif p == "/api/bif/frame" or p == "/api/bif/trickplay/frame":
             index = int(q.get("index", "0"))
+            files = {f: file for f, file in api.files.items() if isinstance(file, dict)}
             path = next(
-                (f for f, file in api.files.items() if (file.get("preview") or {}).get("path") == q.get("path")), ""
+                (f for f, file in files.items() if (file.get("preview") or {}).get("path") == q.get("path")), ""
             )
             if not path:
-                path = next(iter(api.files), "")
-            step = ((api.files.get(path) or {}).get("preview") or {}).get("interval_ms") or 2000
+                path = next(iter(files), "")
+            step = ((files.get(path) or {}).get("preview") or {}).get("interval_ms") or 2000
             route.fulfill(
                 status=200,
                 content_type="image/jpeg",
@@ -635,7 +788,7 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
 
     page.route(
         re.compile(
-            r".*/api/(servers|media/search|inspector/.*|markers/item.*|jobs/manual|bif/frame|bif/trickplay/frame)(\?.*)?$"
+            r".*/api/(servers|media/search|inspector/.*|markers/item.*|markers/season.*|jobs/manual|bif/info|bif/frame|bif/trickplay/frame)(\?.*)?$"
         ),
         handler,
     )

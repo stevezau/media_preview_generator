@@ -2245,10 +2245,13 @@ file and read its length.
   shows fourteen frames a second apart; **◀ 10 s** / **10 s ▶** move along. Choosing shows **Selected: …** with
   **Save and send to …** and **Not now**.
 - **Saving locks.** There is no adjusted-but-unlocked marker. A saved marker is locked and published straight away to
-  every server that has the file and has Intro & Credits on. Detection and later jobs leave it alone. To lock the
-  decided times as they are, open Adjust and save without moving anything.
-- **Back to automatic** drops the lock, after asking. Your times stay on the servers for now; the next check decides
-  those types again and may move them, and **Re-detect** does that straight away. It publishes nothing.
+  every server that has the file and has Intro & Credits on. Detection and later jobs leave it alone.
+- **Lock** (beside Adjust) locks the times the app already decided, unchanged, and publishes them. It lists the times
+  and where they go first (**Lock and send to …** / **Leave them as they are**); a type no server with Intro & Credits
+  on could show is left out.
+- **Back to automatic** replaces Lock once anything on the file is locked. It asks first, then drops the lock. Your
+  times stay on the servers for now; the next check decides those types again and may move them, and **Re-detect**
+  does that straight away. It publishes nothing.
 - **Your marker wins over "Keep Plex's" and "Keep Emby's".** See [Plex](https://mediapreviewgenerator.dev/guides/#plex-writing-straight-into-plexs-database)
   and [Emby](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin) for the row message.
 - **Recap and preview** a job decided stay editable in Adjust; only Jellyfin shows them. **Emby and credits:** an
@@ -2265,11 +2268,24 @@ publishes your marker". Whenever a server's row comes back waiting or failed, th
 away: a High-priority Intro & Credits job for the file that sends your markers (it doesn't detect again), and retries
 a server that hasn't added the file to its library yet. Saving again before it starts reuses it.
 
-### A season at a glance
+### Season view in the Inspector
 
-Search for a show in the [Inspector](https://mediapreviewgenerator.dev/guides/#inspector) and pick a season: every episode is listed with its state
-(**Intro + credits**, **Credits only**, **Not checked yet**, **Needs review**), read from this app's own records, so a
-whole season shows at once. Choosing an episode opens it.
+For a TV episode, the [Inspector](https://mediapreviewgenerator.dev/guides/#inspector) has a **This episode** / **Whole season** switch. **Whole season** lists
+the season's episodes (the same group season audio uses), each with its intro (blue) and credits (orange) drawn on one
+shared scale, the times, the sources behind them, a 🔒 when you locked one, and one dot per server (green: shows our
+markers, amber: waiting, red: failed, grey: off, skipped or nothing sent yet). A season of more than 40 episodes lists
+the 40 nearest, and the header says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own
+records, so a whole season loads at once; **This episode** stays the place for what a server shows right now. An
+episode in **Needs review** says so (hover for the reason). Choosing a row opens that episode.
+
+**Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
+(or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
+and the rest are checked again. Clicking it again while that job is still queued or running reuses it. N (and
+**N ready**) counts the episodes with at least one decided marker, since the job sends those even when another type
+of the same episode is in Needs review; **N need review** counts the episodes with any type in review, recaps and
+previews included.
+
+Searching for a show also lists every episode of a season with its state, right in the search results.
 
 ### Plex: writing straight into Plex's database
 
@@ -4269,7 +4285,7 @@ per type (the rest add up under "other").
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
 | POST | `/api/markers/item/markers` | Save your own markers for one file, lock them and publish to every owning server |
 | DELETE | `/api/markers/item/markers` | Unlock one or more marker types of one file |
-| GET | `/api/markers/season` | Every episode of one episode's season with its decisions (API only) |
+| GET | `/api/markers/season` | Inspector Season view data for one episode's season |
 | POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
 | GET | `/api/markers/sources/local` | Whether season audio matching and on-screen credit text can run in this container |
 | POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |
