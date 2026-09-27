@@ -208,6 +208,11 @@ class TestFindCredits:
         )
         assert (result.start_s, result.end_s, result.scale) == (858.0, None, 2)
 
+    def test_a_chapter_is_never_read_against_an_answer_that_found_nothing(self):
+        # detect_credits_text reads the chapter only after a found start; a caller that didn't check gets told so.
+        with pytest.raises(ValueError, match="found start"):
+            detector.chapter_origin(detector.CreditsTextResult(None, None, (), (), ()), 5_000_000)
+
     @pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
     def test_only_the_320x180_reading_keeps_a_card_on_black(self, monkeypatch, probes, scale):
         # Version 7's anchor reads dark keyframes after a card as its black ground. The 640x360 reading's rows leave out

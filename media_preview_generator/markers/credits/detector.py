@@ -836,13 +836,19 @@ def chapter_origin(result: CreditsTextResult, chapter_ms: int) -> str:
 
     Returns:
         The label.
+
+    Raises:
+        ValueError: The answer found nothing: there is no start to read the chapter against.
     """
+    start_s = result.start_s
+    if start_s is None:
+        raise ValueError("a credits chapter is only read against a found start")
     rows = rule_j.without_overlays(result.key_rows, result.overlays)
-    moved_s = rule_j.chapter_moves_to(rows, result.start_s, chapter_ms / 1000.0)
+    moved_s = rule_j.chapter_moves_to(rows, start_s, chapter_ms / 1000.0)
     if moved_s is None:
         return chapter_hint(chapter_ms, moves=False)
     to_ms = int(round(moved_s * 1000))
-    return chapter_hint(chapter_ms, moves=True, to_ms=None if to_ms == int(round(result.start_s * 1000)) else to_ms)
+    return chapter_hint(chapter_ms, moves=True, to_ms=None if to_ms == int(round(start_s * 1000)) else to_ms)
 
 
 def _basis(chapter_ms: int | None) -> str:
