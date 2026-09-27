@@ -66,9 +66,15 @@ copy of this folder.
 1. **Credit text and season audio list every unlocked decided type beside their older answer**
    (`AnswerVersion.checks_others`): they check what other sources decided (§5.5 rules 3, 4, 16). On today's sflix
    copy: 161 more credit text files, 10 Things and A Beautiful Imperfection among them.
-2. **A marker only content detectors decided isn't carried** to a same-length replacement they read now, with
-   something to compare it with, and found nothing in (`carry_over`'s `read_by`). Decide rules version 3; the re-run
-   lists files holding a carried marker too (a carried marker has no answer of its type).
+2. **A marker only content detectors decided isn't carried** to a same-length replacement a **newer** version of them
+   read and found nothing in (`carry_over`'s `read_by`, `ReadNow.newer_than`). The same version finding nothing is
+   rule 15's own case (another encode) and still carries. The deciding versions are kept aside with the snapshot
+   (`replaced_versions`, matched on `seen_at`, no schema bump) or read from a replaced file gone from disk; a snapshot
+   kept aside by a build without them was decided at most at season audio 2010 and credit text 7
+   (`VERSIONS_BEFORE_THEY_WERE_KEPT`), which is how Small Prophets' (season audio v9, re-read at 3010) still drop.
+   The verdict counts only while it isn't due again (`pipeline._read_now`, shared with rule 16): a "nothing" whose
+   read again failed after the season changed is from before. Decide rules version 3; the re-run lists files holding
+   a carried marker too (a carried marker has no answer of its type).
 3. **A flat frame beside one that isn't is compared by correlation** (`end_picture.frames_alike`, check version 4),
    as the spec already said; a frame of one grey level still matches no picture.
 
@@ -90,8 +96,20 @@ Baseline answer key (`../credits-accuracy/metrics.py`, split 70/30 by file with 
 5/51. Fresh sample (`proof_fresh.py`, 70/30 by file with seed 20260929): published wrong 11/78 → 10/77 (tuning 9 → 8,
 held out 2 → 2), the lost-right Game of Thrones S08E06 (held out) back, Homicide Hunter S06E03 still lost.
 
-Season audio's four truth sets (#323's harness, 570 files) with check version 4: no answer changes; of the 92 shares
-under the pass line 4 rise. On sflix's 179 failing shares, 16 rise and two answers change (the table).
+Season audio's four truth sets (#323's harness, 570 files) with check version 4: no answer changes. Every one of their
+605 shares measured again (`share_variants.py`, decoded once, each variant on the same frames): check 3 gives the
+cached value for all 605, check 4 raises 4 (none enough to change an answer). On sflix's 731 stored shares (94 not
+readable on storage: one show ffprobe rejects here), check 3 again equals what sflix stored for every one, and check 4
+raises 22, turning 15 passing on the four files above; two answers change (the table).
+
+Not changed after review: the end card needing a picture on **both** sides (`--card-both` in `share_variants.py`).
+It changes no share of the 605 and one of sflix's: Game of Thrones S08E06 against E02 at the old folder group's end
+(111.58 s), a right pass (1.0) that would fail (0.67), the card fainter in one release. Its current answer (111.15 s:
+E04 1.0, E02 0.5) is the same either way, but the rule only ever removed a right pass, so it stays out.
+
+After review of #330 (HIGH: the carry-over dropped a marker when the same version found nothing; MED: a due answer
+whose read failed counted as a verdict): the replay of today's copy and both samples give the same numbers as above;
+the re-check lists the same 1410 files.
 
 ## Scripts
 
@@ -100,6 +118,7 @@ under the pass line 4 rise. On sflix's 179 failing shares, 16 rise and two answe
 | `season_repro.py`, `season_members.py` | The app's season step for one episode from a `markers.db` copy: candidates, support, guards; each partner's runs |
 | `endpic_probe.py` | Per-instant end-picture comparison (σ, mean, correlation) for one pair |
 | `reshare_db.py` | Every stored share under the pass line measured again with the tree's check, into a copy |
+| `share_variants.py` | Shares decoded once and compared under check 3, check 4 and the end card needing both sides |
 | `due_diff.py` | The tree's version re-run listing on a copy |
 | `vtext_paths.py` | The tree's credit text through the harness caches for a `{path: is_episode}` file |
 | `intel_probe.py`, `run_intel.sh` | Credit text on sflix's own GPU in a throwaway container (read-only mounts) |
