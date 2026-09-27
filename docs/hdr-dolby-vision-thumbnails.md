@@ -51,7 +51,7 @@ Intel and AMD need no extra step beyond passing `/dev/dri`, which also brings th
 
 ## Checking the result
 
-- The **BIF Viewer** (`/bif-viewer`) shows the published thumbnails for Plex, Emby or Jellyfin, frame by frame ([BIF Viewer](multi-server.md#bif-viewer-multi-server)).
+- The **Inspector** (`/inspector`) shows the published thumbnails for Plex, Emby or Jellyfin, frame by frame ([Inspector](multi-server.md#inspector-multi-server)).
 - To redo files after fixing a setting, start a job with **Regenerate** ticked. Otherwise files with a current preview are skipped.
 - If a file failed on the GPU and was redone on the CPU, its worker card shows a yellow **CPU fallback** badge, and the job log gives the reason.
 
