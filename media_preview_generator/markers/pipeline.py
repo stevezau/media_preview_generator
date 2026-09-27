@@ -3325,6 +3325,8 @@ def _attempt(
         if not gather_all:
             decisions = _decide(ctx, rec, types, intro_limit)
 
+    if cancelled():  # a detector stopped part way decides nothing: the file is left as it was for the next run
+        return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
     decisions = _decide(ctx, rec, types, intro_limit)
     # A type that ends undecided while every server keeps its own and shows one is nothing for the user to review: the
     # servers' own markers stay whatever it would decide. That holds whether the file was skipped for it or an answer

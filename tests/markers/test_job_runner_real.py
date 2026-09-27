@@ -1,6 +1,9 @@
 """Intro & Credits jobs end to end on the real JobManager, JobGate and dispatcher (fake servers and publishers)."""
 
 import os
+import signal
+import sqlite3
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -1196,3 +1199,264 @@ class TestCreditTextOnTheWorkers:
         assert setup.store.evidence_version(rec.id, Source.CREDITS_TEXT) is None  # asked again next run
         assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         assert self._released(engine)
+
+
+# Stands in for ffmpeg: notes its argv, then decodes until it is killed (luma frames for a rawvideo decode, nothing for
+# a fingerprint). With the stop file there it fails at once, so a test's teardown can end whatever still runs.
+_FAKE_FFMPEG = """#!{python}
+import os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(here, "started.log"), "a") as log:
+    log.write(str(os.getpid()) + " " + " ".join(sys.argv[1:]) + "\\n")
+if os.path.exists(os.path.join(here, "stop")):
+    sys.exit(1)
+if "rawvideo" in sys.argv:
+    frame = bytes({frame_bytes})
+    while True:
+        sys.stdout.buffer.write(frame)
+        sys.stdout.buffer.flush()
+time.sleep(600)
+"""
+
+
+def _running(pid: int) -> bool:
+    """Whether a process is alive (a zombie isn't: it has stopped decoding)."""
+    try:
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+class _Hold:
+    """Holds the first thread that reaches it, once armed, until the test releases it: a step that doesn't look at the
+    job's cancel meanwhile (an ffprobe, the worker picking the file up, a text detection helper starting)."""
+
+    def __init__(self) -> None:
+        self.armed = threading.Event()
+        self.reached = threading.Event()
+        self.released = threading.Event()
+        self._lock = threading.Lock()
+
+    def __call__(self) -> None:
+        if not self.armed.is_set():
+            return
+        with self._lock:
+            if self.reached.is_set():
+                return
+            self.reached.set()
+        self.released.wait(30)
+
+
+class TestACancelStopsTheFileWheneverItLands:
+    """Lab regression phase 3 row 6: a cancel stops the file's work whenever it lands. The job's own thread ends as soon
+    as the dispatcher lets go of a cancelled job, and its teardown clears the job's cancel flag while the file may still
+    be running: a step that didn't look at the cancel in those milliseconds (a text detection helper starting on a fresh
+    app, an ffprobe, the worker picking the file up) must still see it afterwards.
+
+    Every cell holds the file at one step, lands the cancel as ``POST /api/jobs/<id>/cancel`` does, waits for the job's
+    thread to end (the flag is gone from then on), and lets the file go on. Real runner, gate, dispatcher, worker,
+    pipeline and detectors; only ffprobe, the server, text detection and the ffmpeg binary (a script that decodes until
+    it is killed) are faked."""
+
+    SOURCES = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "credits_text", "server_markers")
+
+    @pytest.fixture
+    def lab(self, engine, tmp_path, monkeypatch):
+        from media_preview_generator.markers.audio import end_picture, season
+        from media_preview_generator.markers.credits import detector, frames
+        from media_preview_generator.markers.credits.textdet_helper import TextDetState
+        from media_preview_generator.markers.pipeline import default_local_detectors
+        from media_preview_generator.markers.probe import StreamStarts
+
+        folder = tmp_path / "tv" / "Rick and Morty (2013) {tvdb-275274}" / "Season 01"
+        folder.mkdir(parents=True)
+        episodes = []
+        for number in (1, 2, 3):
+            media = folder / f"Rick and Morty (2013) - S01E{number:02d}.mkv"
+            media.write_bytes(b"x" * (100 + number))
+            episodes.append(str(media))
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        ffmpeg = bin_dir / "ffmpeg"
+        ffmpeg.write_text(_FAKE_FFMPEG.format(python=sys.executable, frame_bytes=frames.FRAME_W * frames.FRAME_H))
+        ffmpeg.chmod(0o755)
+        db_path = str(tmp_path / "markers.db")
+        store = MarkerStore(db_path)
+        registry = FakeRegistry({"plex-1": server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "tv"))})
+        # One GPU worker and no CPU worker, as the lab's app.
+        config = SimpleNamespace(cpu_threads=0, gpu_threads=1, scan_workers=4, ffmpeg_path=str(ffmpeg))
+        lab = SimpleNamespace(
+            episodes=episodes, store=store, publisher=ready_publisher(), source="credits_text", hold=_Hold(),
+            hold_at="", picked_up=[],
+        )  # fmt: skip
+
+        def build_context(*, registry, config, priority, force=False, **_kwargs):
+            raw = {
+                "detect": {"intro": lab.source == "season_audio", "credits": lab.source == "credits_text"},
+                "sources": [{"id": source, "enabled": source == lab.source} for source in self.SOURCES],
+            }
+            settings = load_global(validate_global(raw, None)[0])
+            return PipelineContext(
+                registry=registry, config=config, settings=settings, store=store, priority=priority, ffprobe="ffprobe",
+                force=force, clients={}, credits_text=TextDetState.AVAILABLE, live_config=registry.get_config,
+                local_detectors=default_local_detectors(settings, config, credits_text=TextDetState.AVAILABLE),
+            )  # fmt: skip
+
+        def held_at(step):
+            if lab.hold_at == step:
+                lab.hold()
+
+        def probe(path, **_kwargs):
+            held_at("ffprobe")
+            return MediaProbe(DURATION, ())
+
+        real_log_pickup = pipeline.log_pickup
+
+        def log_pickup(item, worker, *, ctx):
+            lab.picked_up.append(item.canonical_path)
+            held_at("pickup")
+            real_log_pickup(item, worker, ctx=ctx)
+
+        def detect_boxes(planes, **_kwargs):
+            held_at("text detection")
+            return [()] * len(planes)
+
+        def frozen():
+            held_at("decode poll")
+            return False
+
+        pool = MagicMock()
+        pool.detect_boxes.side_effect = detect_boxes
+        monkeypatch.setattr(job_runner, "load_config", lambda: config)
+        monkeypatch.setattr(
+            job_runner, "_build_selected_gpus", lambda s, **kw: [("NVIDIA", "cuda:0", {"name": "Test GPU"})]
+        )
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(job_runner, "build_context", build_context)
+        monkeypatch.setattr(job_runner, "run_detector_checks", lambda *args, **kwargs: None)
+        # Every decode loop asks the job's freeze check once per poll: a poll held there hasn't looked at the cancel.
+        monkeypatch.setattr(job_runner, "_freeze_check", lambda jm, job_id: frozen)
+        monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
+        monkeypatch.setattr(pipeline, "log_pickup", log_pickup)
+        monkeypatch.setattr(pipeline, "probe_media", probe)
+        monkeypatch.setattr(pipeline, "publisher_for", lambda *args, **kwargs: lab.publisher)
+        monkeypatch.setattr(season, "probe_media", lambda path, **kwargs: MediaProbe(DURATION, ()))
+        monkeypatch.setattr(season, "chromaprint_ffmpeg", lambda configured: configured)
+        monkeypatch.setattr(end_picture, "stream_starts", lambda path, **kwargs: StreamStarts(0.0, 0.0))
+        monkeypatch.setattr(frames, "container_start_s", lambda *args, **kwargs: 0.0)
+        monkeypatch.setattr(frames, "keyframe_thinning", lambda *args, **kwargs: frames.KeyframeThinning())
+        monkeypatch.setattr(detector, "get_textdet_pool", lambda: pool)
+
+        def started() -> list[tuple[int, str]]:
+            try:
+                lines = (bin_dir / "started.log").read_text().splitlines()
+            except FileNotFoundError:
+                return []
+            return [(int(pid), argv) for pid, _, argv in (line.partition(" ") for line in lines)]
+
+        def snapshot() -> list[str]:
+            db = sqlite3.connect(db_path)
+            try:
+                return list(db.iterdump())
+            finally:
+                db.close()
+
+        lab.started, lab.snapshot = started, snapshot
+        yield lab
+        # Whatever a failing cell left running: nothing new decodes, what runs is killed, and the worker is let go.
+        lab.hold.released.set()
+        (bin_dir / "stop").touch()
+        for pid, _argv in started():
+            if _running(pid):
+                os.kill(pid, signal.SIGKILL)
+        _wait_for(lambda: not TestCreditTextOnTheWorkers._worker().is_busy, timeout=15)
+        store.close()
+
+    @staticmethod
+    def _cancel_while_held(engine, lab, paths, *, hold_at, arm_on=None, before_cancel=None):
+        """Run a job on its own thread, hold the file at ``hold_at``, land the cancel, and let the file go on once the
+        job's thread has ended. Returns the job and the markers database as it was when the cancel landed."""
+        lab.hold_at = hold_at
+        if arm_on is None:
+            lab.hold.armed.set()
+        job = triggers.create_intro_credits_job(library_name="TV", priority=2, source="manual", file_paths=paths)
+        runner = threading.Thread(target=job_runner.run_intro_credits_job, args=(job.id,), daemon=True)
+        runner.start()
+        if arm_on is not None:
+            assert _wait_for(lambda: any(arm_on in argv for _pid, argv in lab.started())), lab.started()
+            lab.hold.armed.set()
+        assert lab.hold.reached.wait(10), f"the file never reached the {hold_at}"
+        if before_cancel is not None:
+            before_cancel(job)
+        stored = lab.snapshot()
+        # POST /api/jobs/<id>/cancel
+        engine.jm.request_cancellation(job.id)
+        engine.jm.add_log(job.id, "WARNING - Cancellation requested by user")
+        engine.jm.cancel_job(job.id)
+        runner.join(10)
+        assert not runner.is_alive(), "the job's thread didn't end after the cancel"
+        # The teardown cleared the job's cancel flag: from here on the file sees only what the dispatcher kept.
+        assert engine.jm.is_cancellation_requested(job.id) is False
+        lab.hold.released.set()
+        return engine.jm.get_job(job.id), stored
+
+    @staticmethod
+    def _assert_stopped_with_nothing_kept(engine, lab, job, stored, *, decodes):
+        worker = TestCreditTextOnTheWorkers._worker()
+        assert _wait_for(lambda: not worker.is_busy, timeout=5), f"the file ran on after the cancel: {lab.started()}"
+        assert len(lab.started()) == decodes, lab.started()
+        assert not [pid for pid, _argv in lab.started() if _running(pid)], "a decode outlived the cancel"
+        assert lab.snapshot() == stored  # no answer, fingerprint, end picture or decision stored after the cancel
+        assert lab.publisher.write.call_count == 0
+        assert job.status is JobStatus.CANCELLED
+        assert engine.gate.snapshot()[0] == 0
+
+    def test_a_file_waiting_for_a_worker_when_the_cancel_lands_is_never_picked_up(self, engine, lab):
+        # The only worker is held picking up the first episode while the second waits in the queue for it.
+        from media_preview_generator.jobs.dispatcher import get_dispatcher
+
+        first, second, _third = lab.episodes
+
+        def second_queued(job):
+            tracker = get_dispatcher()._trackers[job.id]
+            assert _wait_for(lambda: [item.canonical_path for item in tracker.item_queue] == [second])
+
+        job, stored = self._cancel_while_held(engine, lab, [first, second], hold_at="pickup",
+                                              before_cancel=second_queued)  # fmt: skip
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=0)
+        assert lab.picked_up == [first]
+
+    def test_a_cancel_as_the_worker_picks_the_file_up_starts_no_decode(self, engine, lab):
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="pickup")
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=0)
+
+    def test_a_cancel_during_the_chapters_step_stores_nothing_and_hands_no_worker_the_file(self, engine, lab):
+        # The checking stage's ffprobe of the file: it runs before any worker has it.
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="ffprobe")
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=0)
+        assert lab.picked_up == []
+        assert lab.store.get_file(lab.episodes[0]) is None
+
+    def test_a_cancel_while_a_fresh_apps_text_detection_helper_starts_stops_the_credit_text_decode(self, engine, lab):
+        # The first text detection request of a fresh app waits for its helper to start and self-test (seconds): the
+        # lab row's cancel lands there, just after the decode appears.
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="text detection")
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)
+        assert "rawvideo" in lab.started()[0][1]
+
+    def test_a_cancel_during_the_season_audio_fingerprint_stops_it(self, engine, lab):
+        lab.source = "season_audio"
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="decode poll",
+                                              arm_on="chromaprint")  # fmt: skip
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)
+
+    def test_a_cancel_during_the_end_picture_decode_stops_it(self, engine, lab, monkeypatch):
+        # The season's fingerprints match on an intro in the first 30 s, so its end picture is decoded.
+        from media_preview_generator.markers.audio import fingerprint
+        from tests.markers.audio.test_season import early_points
+
+        monkeypatch.setattr(fingerprint, "compute_fingerprint", lambda path, duration_ms, **kwargs: early_points(path))
+        lab.source = "season_audio"
+        job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="decode poll", arm_on="rawvideo")
+        self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)

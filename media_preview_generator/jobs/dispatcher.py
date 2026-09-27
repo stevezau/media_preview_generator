@@ -161,10 +161,16 @@ class JobTracker:
         return False
 
     def is_cancelled(self) -> bool:
-        """Check if this job has been cancelled."""
-        if self.cancel_check:
-            return self.cancel_check()
-        return False
+        """Check if this job has been cancelled; once the tracker is cancelled, for good.
+
+        :meth:`cancel` ends the job's wait at once while its files may still be running, and the job's teardown then
+        clears the flag ``cancel_check`` reads. The work on those files (a worker, a checking thread) is handed this
+        check instead of ``cancel_check``, so a step that didn't look in those milliseconds still sees the cancel.
+        """
+        # The job's flag first: one read False because the teardown cleared it comes after ``cancel`` set ``cancelled``.
+        if self.cancel_check and self.cancel_check():
+            return True
+        return self.cancelled
 
     def record_completion(
         self,
@@ -853,7 +859,7 @@ class JobDispatcher:
                     title_max_width=tracker.title_max_width,
                     job_id=job_id,
                     library_name=library_name,
-                    cancel_check=tracker.cancel_check,
+                    cancel_check=tracker.is_cancelled,
                     pause_check=tracker.pause_check,
                     process_fn=tracker.handlers.process_fn if tracker.handlers else None,
                     outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
@@ -1066,7 +1072,7 @@ class JobDispatcher:
                     gpu=None,
                     gpu_device_path=None,
                     progress_callback=None,
-                    cancel_check=tracker.cancel_check,
+                    cancel_check=tracker.is_cancelled,
                     server_id_filter=per_item_pin,
                     regenerate=bool(getattr(tracker.config, "regenerate_thumbnails", False)),
                     check_only=True,
@@ -1111,7 +1117,7 @@ class JobDispatcher:
         register_job_thread(tracker.job_id)
         with failure_scope(tracker.job_id):
             try:
-                outcome = tracker.handlers.check_fn(item, cancel_check=tracker.cancel_check)
+                outcome = tracker.handlers.check_fn(item, cancel_check=tracker.is_cancelled)
             except Exception as exc:
                 logger.debug(
                     "Dispatcher: {} check raised for {!r} ({}: {}); routing to a worker.",
