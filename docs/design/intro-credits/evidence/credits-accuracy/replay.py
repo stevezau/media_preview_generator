@@ -139,8 +139,8 @@ def carried(rec, fid, decisions, fetched, runs):
     read the file now when its stored answer is at the tree's version or the file is read again after the update."""
     try:
         from media_preview_generator.markers import carry_over as co
-        from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSION
         from media_preview_generator.markers.audio.season import SEASON_AUDIO_ANSWER_VERSION
+        from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSION
     except ImportError:
         return decisions
     items = conn.execute("select server_id, item_id from publish_state where file_id=? and item_id is not null",
@@ -163,11 +163,12 @@ def carried(rec, fid, decisions, fetched, runs):
 
     kwargs = {}
     if "read_by" in co.carry_over.__code__.co_varnames:
-        kwargs["read_by"] = {
+        by_type = {
             MarkerType.INTRO: {"season_audio", "season_audio_previous"}
             if rec.season_key and read_now("season_audio") else set(),
             MarkerType.CREDITS: {"credits_text"} if read_now("credits_text") else set(),
         }
+        kwargs["read_by"] = lambda mtype: by_type.get(mtype, set())
     full = {t: decisions.get(t, D.TypeDecision(t, D.DecisionStatus.DISABLED, None, None, "detection off"))
             for t in MarkerType}  # fmt: skip
     out = co.carry_over(full, rec.duration_ms or 0, previous, kept=store.get_markers(fid), **kwargs)

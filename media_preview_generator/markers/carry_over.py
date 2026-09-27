@@ -135,7 +135,7 @@ def carry_over(
     *,
     kept: Mapping[MarkerType, Marker] | None = None,
     enabled: Collection[str] | None = None,
-    read_by: Mapping[MarkerType, Collection[str]] | None = None,
+    read_by: Callable[[MarkerType], Collection[str]] | None = None,
 ) -> dict[MarkerType, TypeDecision]:
     """One file's decisions with the replaced file's markers kept for the types it has no evidence of.
 
@@ -146,9 +146,10 @@ def carry_over(
         kept: The file's stored markers: a carried one stays when the replaced file can't be told now.
         enabled: The sources turned on (None: every source); a marker none of whose deciding sources is on isn't
             carried.
-        read_by: Per type, the sources of the content detectors that read the new file at their version now with
-            something to compare it with (their answers stored under these sources); a marker only they decided isn't
-            carried, since the type has no evidence (none of them found it).
+        read_by: A type's sources of the content detectors that read the new file at their version now with
+            something to compare it with (their answers stored under these sources), asked only for a marker that
+            would be carried; a marker only they decided isn't carried, since the type has no evidence (none of them
+            found it). None: no detector counts.
 
     Returns:
         The decisions, a carried type decided by ``carried_over`` with :data:`CARRIED_OVER_REASON`.
@@ -173,7 +174,7 @@ def carry_over(
             held.marker is None
             or abs(held.duration_ms - duration_ms) > MAX_LENGTH_CHANGE_MS
             or not _sources_on(held.decided_by, enabled)
-            or _read_again_without_it(held.decided_by, (read_by or {}).get(mtype, ()))
+            or (read_by is not None and _read_again_without_it(held.decided_by, read_by(mtype)))
         ):
             continue
         else:

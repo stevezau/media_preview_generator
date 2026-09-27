@@ -1498,7 +1498,7 @@ def _carry_over(
         previous,
         kept=ctx.store.get_markers(rec.id),
         enabled=_decision_order(ctx.settings),
-        read_by={mtype: _content_read_by(ctx, rec, mtype) for mtype in decisions},
+        read_by=lambda mtype: _content_read_by(ctx, rec, mtype),
     )
 
 

@@ -185,7 +185,9 @@ class TestCarryOver:
         times = INTRO if mtype is T.INTRO else CREDITS
         decisions = _decisions(**{mtype.value: _none(mtype)})
         previous = {mtype: _previous(mtype, times, decided_by=decided_by)}
-        out = co.carry_over(decisions, DUR, lambda wanted: previous, read_by={mtype: read_by})
+        out = co.carry_over(
+            decisions, DUR, lambda wanted: previous, read_by=lambda asked: read_by if asked is mtype else ()
+        )
         assert out[mtype] == (_carried(mtype, *times) if carried else decisions[mtype])
 
     def test_two_carried_markers_that_overlap_carry_only_the_first(self):
