@@ -1084,11 +1084,17 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     chapter, a season match its guards passed over, no crowd entry, no roll found), and what does tell another cut,
     the length, is checked instead. The exception (decide rules version 3, 2026-09-28): a marker only the detectors
     that read the content decided (season audio, credit text; servers' confirming markers aside) isn't carried when
-    each of them read the new file at its version now, with something to compare it with, and found nothing
-    (`carry_over`'s `read_by`, rule 16's detectors): on a file of the same length that is today's verdict on the same
-    content, and the replaced file's marker an older version's. Small Prophets S01E05 and E06 on sflix kept season
-    audio version 9's 0–12 s logo stretch after version 10, which passes it over, found nothing on the same files;
-    Tomb Raider King's and RuPaul's carried markers came from chapters and still carry. Any candidate of the type, even one failing sanity or leaving the type in review,
+    each of them read the new file at a **newer** version than the one that decided the replaced file's marker, and
+    found nothing, its answer today's verdict on the file (`pipeline._read_now`, rule 16's too: at its version now,
+    with something to compare it with, and not due again, so a "nothing" whose read again failed or was cancelled
+    doesn't count): the detector's own update passed the old answer over. Small Prophets S01E05 and E06 on sflix
+    kept season audio version 9's 0–12 s logo stretch after version 10, which passes it over, found nothing on the
+    same files. The same version finding nothing is rule 15's own case (another encode of the episode) and still
+    carries, as does a marker whose deciding version isn't known. The versions are kept aside with the snapshot
+    (`replaced_versions`, matched on its `seen_at`) or read from a replaced file gone from disk; a snapshot a build
+    without them kept aside (82dc2bc and before, or a rollback to one) was decided at most at season audio 2010 and
+    credit text 7 (`carry_over.VERSIONS_BEFORE_THEY_WERE_KEPT`). Tomb Raider King's and RuPaul's carried markers came
+    from chapters and still carry. Any candidate of the type, even one failing sanity or leaving the type in review,
     is the new file's own evidence and wins. The carried marker is clamped to the new file's end, dropped when it
     would overlap the file's own intro/recap or credits/preview more than rules 9–10 allow, and decided by
     `carried_over` alone ("carried over from the file it replaced (same length)"; the job log and summary name "the
@@ -1180,7 +1186,9 @@ markers(file_id, type, start_ms, end_ms, decided_by, locked, updated_at)   -- de
 publish_state(file_id, server_id, item_id, markers_hash, status, message, verified_at)
 ```
 - File identity = path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers (what was
-  decided is kept aside first, `replaced_decisions`, for the carry-over of §5.5 rule 15).
+  decided is kept aside first, `replaced_decisions`, with the versions of the answers that decided it,
+  `replaced_versions`, for the carry-over of §5.5 rule 15; no schema bump: a build without the second table leaves
+  it unread, and a row it writes has no versions matched to its `seen_at`).
 - `markers` is the single source of truth; servers are projections of it. `publish_state` is per `server_id`, so two
   Plex servers are tracked independently.
 
@@ -3629,8 +3637,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     as Plex's own. From the copy before #323 it predicts what went live (1133 files listed, the three published moves,
     10 Things unmoved).
   - **Small Prophets S01E05/E06** got season audio v9's 0–12 s logo stretch back through the carry-over after v10 found
-    nothing on the same files: a marker only content detectors decided isn't carried to a replacement they read now
-    and found nothing in.
+    nothing on the same files: a marker only content detectors decided isn't carried to a replacement a newer version
+    of them read and found nothing in (the same version finding nothing still carries: rule 15's own case). Their
+    snapshots predate versions being kept with them, so they count as at most season audio 2010.
+  - Season audio's or credit text's "nothing" counts as a verdict on the file (the carry-over and rule 16) only while
+    it isn't due again: one whose read again failed is from before the season changed.
   - **Game of Thrones S08E06** lost its intro when the cross-disk group moved the end 0.43 s onto a near-black card that
     one release shows just above the flat line and another just under it: such a pair is compared by correlation now.
   - Not changed: Homicide Hunter S06E01/E03 (a 20-episode group; 5 and 4 of 19 support, under the quorum), Somebody

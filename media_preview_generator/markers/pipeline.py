@@ -37,7 +37,7 @@ from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
-from .carry_over import carry_over, is_carried_over, previous_decisions
+from .carry_over import ReadNow, carry_over, is_carried_over, previous_decisions
 from .credits.detector import CPU_RECHECK_PHASE, CUT_SHORT, credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
@@ -305,6 +305,8 @@ class LocalDetectorSpec:
         version: Stored with its answer; an answer from another version is asked again, even for decided types.
         version_of: ``version_of(file, ctx)``: the version for this file when it depends on the file or the settings
             (credit text: the window the user chose for the file's kind); None: ``version``.
+        version_step: What part of a stored version is the detector's own: it is compared modulo this, 0 compares it
+            whole (credit text stores the user's window above it, as ``versions.AnswerVersion.version_step``).
         due: ``due(file, ctx)``: whether a stored answer of this version is out of date anyway (None: never).
         needs_worker: ``needs_worker(file, ctx)``: whether it needs a GPU/CPU worker now (None: always). One that
             doesn't runs on the checking thread, unless another detector that has to run at the same source needs a
@@ -330,6 +332,7 @@ class LocalDetectorSpec:
     stores: frozenset[Source] = frozenset()
     version: int = 1
     version_of: Callable[[FileRecord, PipelineContext], int] | None = None
+    version_step: int = 0
     due: Callable[[FileRecord, PipelineContext], bool] | None = None
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
     followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
@@ -1502,17 +1505,30 @@ def _carry_over(
     )
 
 
-def _content_read_by(ctx: PipelineContext, rec: FileRecord, mtype: MarkerType) -> frozenset[str]:
-    """The sources of the local detectors of a type that read the file at their version now with something to compare
-    it with (``LocalDetectorSpec.compared``), as rule 16's ``read_by`` counts them: their verdict on the file is today's."""
-    return frozenset(
-        source.value
+def _content_read_by(ctx: PipelineContext, rec: FileRecord, mtype: MarkerType) -> dict[str, ReadNow]:
+    """The local detectors of a type whose stored answer is today's verdict on the file (``_read_now``), per source
+    their answers are stored under, with the version they read it at (the carry-over's ``read_by``)."""
+    return {
+        source.value: ReadNow(spec.answer_version(rec, ctx), spec.version_step)
+        for spec in _read_now(ctx, rec, mtype)
+        for source in spec.stored_sources
+    }
+
+
+def _read_now(ctx: PipelineContext, rec: FileRecord, mtype: MarkerType) -> list[LocalDetectorSpec]:
+    """The local detectors of a type whose stored answer is today's verdict on the file: read at their version now,
+    with something to compare it with (``LocalDetectorSpec.compared``), and not out of date (``LocalDetectorSpec.due``).
+    An answer that is due and whose read again failed this time (the detector unavailable, a cancel) is an older
+    verdict: season audio's "nothing" from before a sibling was fingerprinted counts for nothing, though "compared"
+    asked now would say it had one."""
+    return [
+        spec
         for spec in ctx.local_detectors
         if mtype in spec.types
         and _answered_at_this_version(ctx, rec, spec.source)
         and (spec.compared is None or spec.compared(rec, ctx))
-        for source in spec.stored_sources
-    )
+        and (spec.due is None or not spec.due(rec, ctx))
+    ]
 
 
 def _keep_published_before_rule_change(
@@ -1529,8 +1545,8 @@ def _keep_published_before_rule_change(
     changed ones are those not stored when the job's first stage of the file began (``_answers_before``), so an answer
     only stored again (a forced run, a parser's new version) is no news. A locked type is always decided (``decide``),
     and a marker carried over from a replaced file rests on no source, so neither is ever kept here. The local detectors
-    of the type that read the file at their version now, with something to compare it with (``LocalDetectorSpec.compared``),
-    go with it (``read_by``): a lone online answer isn't kept once one of them read the file without an answer agreeing
+    of the type whose stored answer is today's verdict on the file (``_read_now``: at their version now, with something
+    to compare it with, not due) go with it (``read_by``): a lone online answer isn't kept once one of them read the file without an answer agreeing
     with it. Season audio with no other episode to match finds nothing whatever the file holds, so it doesn't count.
     """
     undecided = [
@@ -1565,13 +1581,7 @@ def _keep_published_before_rule_change(
             candidates=[c for c, _key in of_type],
             changed=[c for c, key in of_type if key not in known],
             duration_ms=rec.duration_ms or 0,
-            read_by=[
-                spec.source
-                for spec in ctx.local_detectors
-                if mtype in spec.types
-                and _answered_at_this_version(ctx, rec, spec.source)
-                and (spec.compared is None or spec.compared(rec, ctx))
-            ],
+            read_by=[spec.source for spec in _read_now(ctx, rec, mtype)],
         )
     return out
 

@@ -4529,6 +4529,46 @@ class TestDecideRulesVersion:
             assert store.get_markers(rec.id) == {}
             assert plex.write.call_args.args == ("item-plex-1", [])
 
+    def test_a_nothing_due_again_whose_read_fails_checks_nothing(self, store, media, monkeypatch):
+        # Season audio stored "nothing" with no other episode to compare (kept). A sibling fingerprinted later makes that
+        # answer due and "compared" say yes; the read again fails. The old "nothing" is no verdict on the file, so the
+        # intro stays (2026-09-28 review of the carry-over's read_by, which shares ``pipeline._read_now``).
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
+        reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
+        answers = [[], pipeline.DetectorUnavailableError("a stalled mount")]
+        state = {"compared": False, "due": False}
+
+        def season_audio(file, **kwargs):
+            answer = answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        spec = pipeline.LocalDetectorSpec(
+            source=Source.SEASON_AUDIO,
+            types=frozenset({T.INTRO}),
+            detect=season_audio,
+            stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}),
+            needs_worker=lambda file, ctx: False,
+            compared=lambda file, ctx: state["compared"],
+            due=lambda file, ctx: state["due"],
+        )
+        with_audio = {**self.SKIPDB_ONLY, "sources": [{"id": "skipdb", "enabled": True},
+                                                      {"id": "season_audio", "enabled": True}]}  # fmt: skip
+        _run(_ctx(store, reg, clients=clients, settings_raw=with_audio, detectors=(spec,)), media, {"plex-1": plex})
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+        assert store.evidence_fetched_at(rec.id, Source.SEASON_AUDIO) is not None
+
+        state.update(compared=True, due=True)
+        _run(_ctx(store, reg, clients=clients, settings_raw=with_audio, detectors=(spec,)), media, {"plex-1": plex})
+
+        assert answers == []  # read again, and it failed
+        decision = store.get_decisions(rec.id)[T.INTRO]
+        assert decision.reason.startswith("kept: published before a rule change")
+        assert store.get_markers(rec.id) == {T.INTRO: self.SKIPDB_MARKER}
+        assert all(c.args[1] != [] for c in plex.write.call_args_list)
+
     @pytest.mark.parametrize("arrives", ["with-the-rule-change", "on-a-later-run"])
     def test_new_evidence_that_contradicts_the_kept_intro_replaces_it(self, store, media, monkeypatch, arrives):
         plex = ready_publisher()

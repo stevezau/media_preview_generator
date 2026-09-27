@@ -772,8 +772,9 @@ new release has no chapters, say). When the new file is the same length as the o
 no source finds anything for a marker type in it, the marker you had keeps its place, as Plex's own markers do; the
 job log says "from the file it replaced". Anything the new file's own sources find, even an answer that only puts the
 marker in Needs review, is used instead, and a file of another length is decided from scratch. A marker that only
-season audio or on-screen credit text found isn't kept when today's version of that same check read the new file and
-found nothing there: on a file of the same length that is its newer verdict on the same picture and sound.
+season audio or on-screen credit text found isn't kept when a newer version of that same check, from an update, read
+the new file and found nothing there: the update passed the old answer over. The same version finding nothing on the
+new file keeps it, since another release of the episode can sound or look different enough.
 
 ### Needs review
 

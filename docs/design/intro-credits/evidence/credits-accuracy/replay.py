@@ -154,21 +154,29 @@ def carried(rec, fid, decisions, fetched, runs):
         return co.previous_decisions(store, rec, [tuple(i) for i in items], wanted=wanted, gone=gone)
 
     current = {"credits_text": CREDITS_TEXT_VERSION, "season_audio": SEASON_AUDIO_ANSWER_VERSION}
+    steps = {"credits_text": 1000, "season_audio": 0}
 
     def read_now(source):
-        stored = store.evidence_version(fid, Source(source))
-        version = current[source]
-        return source in fetched and (runs or (stored or 0) % 1000 == version % 1000 if source == "credits_text"
-                                      else runs or stored == version)  # fmt: skip
+        """The version season audio or credit text read the file at now: the tree's when the app runs the file after
+        the update, else the stored one when it is the tree's; None when neither."""
+        if source not in fetched:
+            return None
+        if runs:
+            return current[source]
+        stored = store.evidence_version(fid, Source(source)) or 0
+        same = stored % 1000 == current[source] % 1000 if steps[source] else stored == current[source]
+        return stored if same else None
 
     kwargs = {}
     if "read_by" in co.carry_over.__code__.co_varnames:
+        audio = read_now("season_audio") if rec.season_key else None
+        text = read_now("credits_text")
         by_type = {
-            MarkerType.INTRO: {"season_audio", "season_audio_previous"}
-            if rec.season_key and read_now("season_audio") else set(),
-            MarkerType.CREDITS: {"credits_text"} if read_now("credits_text") else set(),
-        }
-        kwargs["read_by"] = lambda mtype: by_type.get(mtype, set())
+            MarkerType.INTRO: {} if audio is None else {s: co.ReadNow(audio) for s in ("season_audio",
+                                                                                    "season_audio_previous")},
+            MarkerType.CREDITS: {} if text is None else {"credits_text": co.ReadNow(text, steps["credits_text"])},
+        }  # fmt: skip
+        kwargs["read_by"] = lambda mtype: by_type.get(mtype, {})
     full = {t: decisions.get(t, D.TypeDecision(t, D.DecisionStatus.DISABLED, None, None, "detection off"))
             for t in MarkerType}  # fmt: skip
     out = co.carry_over(full, rec.duration_ms or 0, previous, kept=store.get_markers(fid), **kwargs)
@@ -192,7 +200,13 @@ for fid, path in conn.execute("select id, canonical_path from files where missin
     own = kept_own(fid)
     # Credit text as this tree reads it.
     text_read = "credits_text" in fetched
-    if runs and MarkerType.CREDITS.value not in own and MarkerType.CREDITS in types and path in TEXT and "error" not in TEXT[path]:
+    if (
+        runs
+        and MarkerType.CREDITS.value not in own
+        and MarkerType.CREDITS in types
+        and path in TEXT
+        and "error" not in TEXT[path]
+    ):
         stored_by = (
             set(
                 json.loads(
