@@ -50,6 +50,28 @@ The ten credits still wrong are all but two late starts: rule J reading the roll
 ones are chapters credit text can't correct: 10 Things I Hate About You (the chapter 43 s early, rule J's own start
 166 s late) and A Beautiful Imperfection (rule J starts on the same epilogue text as the chapter).
 
+## The harness sets
+
+`tools.markers_eval credits-text --decode gpu --sets 80,205,accused,isurvived --online`, base tree then work tree on
+the same decodes (`run_base.sh`, then the work run with `--changed-since` the base's JSON; `ct_verdicts.py` lists the
+files whose verdict changed):
+
+| | Base (version 5) | Work (version 6) |
+|---|---|---|
+| Rule J alone on the 80 (78 on disk): within 10 s / early / late / none | 65 / 2 / 5 / 0 | 66 / 2 / 5 / 0 |
+| The 80's gate | 5 of 5 | 5 of 5 |
+| The 205, Medium useful / wrong / late / missed | 101 / 15 / 9 / 77 | 101 / 18 / 8 / 75 |
+| The 205, High useful / wrong | 98 / 14 | 97 / 17 |
+| Accused (57), credit text useful / wrong / late | 50 / 4 / 3 | 50 / 4 / 3 (28 starts moved: 26 nearer the first card, 16 now within 1 s; 2 further, one 5.5 s early onto an epilogue card) |
+| I Survived (16) | 14 / 1 / 0, 1 none | the same |
+| Online 43 cases, credits useful (TheIntroDB on) | 33 | 35 |
+
+The 205's three new "wrong" (more than 10 s before the set's truth) were frame-checked and are on credits: Mayday
+(2026)'s end titles over the closing aerial shots ("MAYDAY", "written and directed by"), where the set's truth marks
+the crawl 127 s later, and credit text now agrees with Plex's start (8.6 s apart; 10.5 s before, 1.9 s of refine);
+Wild Wild Punjab's cast-name montage, 15 s before the crew cards the truth marks (credit text now agrees with Plex);
+The Young Offenders' cast roll over the last shot, 1 s earlier than before.
+
 ## What moved on sflix's copy
 
 Every file of the audit's `markers.db` decided again (`moves.py replay_base_t2.json replay_work_t3.json`): 104 credits

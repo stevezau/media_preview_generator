@@ -91,6 +91,18 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
   win such a pair was wrong on In Treatment S02 ×4 and Family Guy S14E01. Westworld S03E07 stays there too (lengths
   5.03 s apart), and the rule 4 composition gap the property test found (predates these rules) is unfixed.
 
+**Open after the 2026-09-27 credits accuracy fixes** (§14 2026-09-27 "Credits accuracy",
+`evidence/credits-accuracy/README.md`):
+- **Late rule J starts** are most of what is left wrong: first cards over footage it reads after the roll starts
+  (17 Again 82 s, '71 120 s with SkipDB agreeing, 21 Jump Street 102 s, #SKYKING 24 s, several 6–12 s). On the
+  audit's Plex comparison ours is 12 of 81 wrong against Plex's 8 of 80, though ours skips story on 1 and Plex's on 8.
+- **Two early chapters credit text can't correct**: 10 Things I Hate About You (rule J's own start 166 s late) and A
+  Beautiful Imperfection (rule J starts on the same epilogue text as the chapter).
+- **The Accused epilogue-card gap** gains a file: version 6's refine walks back over credits over the footage onto an
+  epilogue card on black that touches them (5.5 s early; it was 7.5 s late).
+- **Spring of the Blade S01E14's intro** now ends at the title card but starts on the licence cards 11 s before the
+  title sequence (the chapter's start and IntroDB's).
+
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
   read-only queries only (`sqlite3 "file:<db>?mode=ro"`). The owner's two one-off exceptions (§14 2026-09-16 Q7,
@@ -521,6 +533,14 @@ all lit (at least one). The lit-keyframe checks came from sflix's replay: 5 chap
 story text (a T-shirt, a poster, a screen, an epilogue caption; every one with a lit keyframe without text between) and
 2 moved later off black cards 320×180 reads nothing on (The Half of It, Dark Matter S02E05). An answer read against
 another chapter than today's, or none, is read again (`credits_text_due`: the run's basis names the chapter).
+Harness, GPU decode, version 5 → 6 on the same decodes: rule J alone on the 80 (78 on disk) 65 → 66 within 10 s,
+early 2 → 2, late 5 → 5; the 80's gate 5 of 5 both; the 205 Medium useful 101 → 101, wrong 15 → 18, High wrong
+14 → 17 by the set's truth, and the three new answers are on credits by frame check (Mayday's end titles over the
+closing shots, 127 s before the crawl the set's truth marks; Wild Wild Punjab's cast-name montage; The Young
+Offenders' cast roll over the last shot, 1 s earlier than version 5); Accused 50 / 4 / 3 counts unchanged, 28 of 57
+starts moved, 26 nearer the first card (16 now within 1 s of it) and 2 further, one of them from 7.5 s late to 5.5 s
+early onto an epilogue card touching the roll (the gap §0 lists); I Survived unchanged; the 43 online cases' credits
+useful 33 → 35.
 An intra-only file's thinned keyframe pass counts its stride from the seek, so its rest of the file is decoded from the
 tail's own start and the rows before the end dropped: the frames after the end are then the ones the 320×180 reading
 read (the cost: its whole tail again, thinned; 450 frames for a movie). At 640×360 each text detection request carries 16 frames, the pixels of 64 at 320×180, so the helper's
@@ -3390,3 +3410,39 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     and a one-version item still shows exactly what was decided (2026-09-25). A move of 0.5 s or more is stored and
     published as before; a lock or the user's own edit, however small, is never subject to it. The cost: an answer
     built up week by week can stay up to 0.5 s from the one all its episodes at once would give.
+
+- 2026-09-27 · **Credits accuracy after the sflix audit** (§5.4 version 6; §5.5 rules 3, 4 and 16;
+  `evidence/credits-accuracy/`). The audit frame-checked a stratified sample of the 1403 markers published to sflix's
+  Plex (credits 22.9 % [13.8–35.5 %] more than 5 s off, nearly all late; six that skip story) and compared credits with
+  Plex's own on 86 files. Each failure shape is fixed where it starts, and nothing is tuned to one file:
+  - **A release's "Credits" chapter was trusted outright**; it was more than 5 s off the first card on 10 of 41
+    frame-checked chapter files, 3 on the story. Credit text now reads every file a chapter decided, against that
+    chapter, and moves its start where the frames show it off the roll (rule 3; rule J's `moves_chapter`); the chapter
+    keeps the window and its end, and a file without an answer keeps the chapter. The lit-keyframe checks came from the
+    replay of sflix's copy: without them 5 chapters moved earlier onto story text and 2 later off black cards too small
+    to read.
+  - **Rule J missed a roll's first card over footage** (Accused, Killer Cases, Homicide Hunter: 6–8 s late) and started
+    one episode on a caption 14 s before the roll: version 6's refine walks back over the roll's own band from near the
+    coarse start (§5.4).
+  - **Source order beat the frames**: IntroDB's credits start on Stargate Atlantis S01E06/E07, 6–7 s into the roll, won
+    by order over credit text's. Credit text now supplies an agreeing credits start more than 5 s from the winner's
+    (rule 4), and the reason says "start from credit text".
+  - **An "Intro" chapter ran into the story** (Spring of the Blade S01E02/E03/E14, 5–37 s): an intro chapter an online
+    answer ends inside waits for season audio, and the two agreeing overrule it (rule 3).
+  - **A lone online answer was kept by "published before a rule change"** (Somebody Somewhere S03E07, 9 s into the
+    story): it goes once a detector that reads the file answered at its version without agreeing (rule 16).
+  - **Season audio matched half the title sequence** (Game of Thrones S03E04/E09, split over three disks): a match only
+    one other episode supports doesn't set an agreed intro's start (rule 4). Held fix 3 stays held.
+  Measured before (`dev` `4a34687`) and after, on the audit's verdict set split 70/30 by file (`random.Random(20260927)`):
+  credits wrong 22 of 88 → 10 of 88 (tuning 14/61 → 6/61, held out 8/27 → 4/27), skipping story 4 → 2; intros 4 of 51
+  wrong before and after, skipping story 2 → 0. On the audit's Plex comparison ours 16 of 81 → 12 of 81 wrong (Plex's
+  own 8 of 80), skipping story 2 → 1 (Plex's 8). The six harmful markers: A Christmas Carol (1984) and Homicide Hunter
+  S06E13 come right, Somebody Somewhere S03E07 goes to Needs review, Spring of the Blade S01E14 no longer skips story;
+  10 Things I Hate About You and A Beautiful Imperfection don't change (§0). The replay of sflix's whole copy moved 104
+  credits starts and 7 intros; every show among them was frame-checked (README). Versions: `DECIDE_RULES_VERSION` 2
+  (every decided file is decided again after the update, and a chapter file's credit text is read in that run: 342 on
+  sflix's copy), `CREDITS_TEXT_VERSION` 6 (the 617 files whose credits rest on credit text are read again once). Cost:
+  one credit text read per chapter file, a median 6.5 s per episode and 11 s per film on storage's P5000. The job log
+  names each rule in plain words: "the "Credits" chapter, moved to the first credit card by credit text", "start from
+  credit text", "the "Intro" chapter runs on into the episode", and credit text's own line says whether it moves or
+  keeps the chapter.
