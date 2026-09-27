@@ -58,32 +58,39 @@ from .decide import (
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, is_season_folder, merge_ids
 from .job_log import (
     ALREADY_DECIDED,
+    EPISODE_ONLY_SOURCES,
     SEASON_RECHECK_LABEL,
     RunNotes,
     SeasonEpisode,
     ServerResult,
+    chapter_names,
     clock,
     decide_again_line,
     decided_line,
     display_name,
     done_line,
+    file_start_line,
     file_title,
-    head_line,
     kept_types,
+    last_seasons_audio_line,
+    make_source_view,
     nothing_was_sent,
     online_recheck_line,
     path_year,
-    pickup_line,
-    read_phrase,
+    read_result_line,
+    reading_line,
     review_note,
     season_line,
     season_of,
-    sent_line,
+    server_result_line,
+    server_source_line,
     show_name,
-    source_lines,
+    source_line,
+    titled,
     totals_line,
+    worker_completed_line,
     worker_device,
-    write_lines,
+    write_line,
 )
 from .locks import FILE_RUN_LOCKS
 from .locks import KeyedLocks as _KeyedLocks
@@ -2030,7 +2037,13 @@ def _counted_as(ctx: PipelineContext, owner: _Owning, found: list[Candidate]) ->
 
 
 def _read_server_markers(
-    ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, refresh: bool, *, first_read_only: bool
+    ctx: PipelineContext,
+    rec: FileRecord,
+    servers: _ItemServers,
+    refresh: bool,
+    *,
+    first_read_only: bool,
+    notes: RunNotes | None = None,
 ) -> set[str]:
     """Store each owning server's current markers for the file as evidence, when they are due.
 
@@ -2048,6 +2061,8 @@ def _read_server_markers(
             is never read, nor a Plex or Emby item that may show ours (another version's, or a type kept as the
             server's own); an answer from such a Plex server or item stored before ``PLEX_CHECKED_SINCE`` stops
             counting (``_drop_older_reader_answer``).
+        notes: The file's run notes, so a server never read at all for this file says why (``server_not_read``); None
+            when nothing logs this run (``publish_now``'s own use of this function).
 
     Returns:
         The ids of the servers whose answer was stored.
@@ -2058,6 +2073,8 @@ def _read_server_markers(
         published = ctx.store.get_publish_state(rec.id, cfg.id)
         if published and published.markers:
             # What's there now is (partly) ours: never a second opinion.
+            if notes is not None:
+                notes.server_not_read[cfg.id] = "this server shows our markers"
             if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id):
                 read.add(cfg.id)
             continue
@@ -2066,12 +2083,18 @@ def _read_server_markers(
             and not _server_markers_due(ctx, rec, cfg.id, first_read_only=first_read_only)
             and not _staleness_known_now(ctx, rec, servers, owner)
         ):
+            if notes is not None:
+                notes.server_not_read[cfg.id] = "not due yet"
             continue
         item_id = servers.item_id(owner)
         if not item_id:
+            if notes is not None:
+                notes.server_not_read[cfg.id] = "not in this server's library yet"
             continue
         item_wide = cfg.type in _ITEM_WIDE_MARKERS
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
+            if notes is not None:
+                notes.server_not_read[cfg.id] = "another version of this item shows our markers"
             if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
                 read.add(cfg.id)
             continue
@@ -2099,6 +2122,8 @@ def _read_server_markers(
             continue
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             # Another version of this item was published while the read was out: it may show ours.
+            if notes is not None:
+                notes.server_not_read[cfg.id] = "another version of this item shows our markers"
             if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
                 read.add(cfg.id)
             continue
@@ -2568,12 +2593,15 @@ def _publish_to(
     *,
     kept_own: frozenset[MarkerType] = frozenset(),
     brief_db_wait: bool = False,
+    notes: RunNotes | None = None,
 ) -> dict:
     # in_review: why the file's types in Needs review are there (``review_message``), "" when none is. kept_own: types
     # left undecided while every server keeps its own and shows one. The row's wording names them, and the file is
     # recorded on its item even with nothing to send; what is sent is exactly what an undecided type sends.
     # brief_db_wait: a worker whose job retries a busy write waits for Plex's database only
     # ``plex_db.WORKER_BUSY_TIMEOUT_S`` (the retry comes a few minutes later), also for another thread's check of it.
+    # notes: so the job log's "Sent to" line can say "our last sent" -- what we published there before this run's
+    # write, since it's about to be overwritten (None: unknown, the manual "publish now" path logs nothing).
     cfg = owner.config
     path = rec.canonical_path
     db_timeout_s = ctx.db_timeout_s
@@ -2581,6 +2609,8 @@ def _publish_to(
         db_timeout_s = WORKER_BUSY_TIMEOUT_S
     store = ctx.store
     last = store.get_publish_state(rec.id, cfg.id)
+    if notes is not None:
+        notes.sent_before[cfg.id] = tuple(last.markers) if last is not None else None
 
     def _finish(
         status: ServerStatus,
@@ -3127,6 +3157,14 @@ def _attempt(
     known_kind = ctx.store.get_server_kind(existing.id) if unchanged else None
     path_ids = ids_from_path(path)
     ids, lookups_allowed, confirmed_kind = _resolve_kind(path_ids, servers, known_kind)
+    types = _enabled_types(ctx.settings, ids)
+    notes.types, notes.is_episode = types, ids.is_episode
+    title = _note_title(notes, item, ids, servers)
+    if not notes.worker and not notes.start_logged:
+        # A worker's own pickup line already named this (``log_pickup``); the checking thread names itself here,
+        # live, rather than waiting for the file to finish.
+        notes.start_logged = True
+        write_line(file_start_line(title, types, is_episode=ids.is_episode))
     rec = ctx.store.upsert_file(
         FileIdentity(path, st.st_size, st.st_mtime_ns),
         duration_ms=probe.duration_ms if probe else None,
@@ -3150,12 +3188,17 @@ def _attempt(
             version=CHAPTER_RULES_VERSION,
         )
         notes.answered(Source.CHAPTERS)
+        chapters_view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, {}, frozenset())
+        write_line(titled(title, source_line(Source.CHAPTERS, chapters_view)))
+    elif ctx.settings.source_enabled(Source.CHAPTERS.value) and (Source.CHAPTERS, "") not in notes.asked:
+        # Not reread this run (the file's unchanged): its line still comes from what's already stored, same as
+        # every other reused source, rather than being left out of the file's block. ``notes.asked`` already has it
+        # when an earlier stage of this same run (the checking thread) logged it: no second line for that.
+        chapters_view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, {}, frozenset())
+        write_line(titled(title, source_line(Source.CHAPTERS, chapters_view)))
     _mark_refreshed(ctx, path, Source.CHAPTERS)
     if not rec.duration_ms:
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
-
-    types = _enabled_types(ctx.settings, ids)
-    notes.types, notes.is_episode = types, ids.is_episode
     # Season step for chapters (finding F1): an intro chapter far longer than the season's others needs a second source.
     # Siblings are compared before any detector can hand this file to a worker.
     intro_limit = None
@@ -3201,9 +3244,13 @@ def _attempt(
         ):
             notes.not_asked[source] = ALREADY_DECIDED
             skipped_decided[source] = types
+            if source is not Source.CHAPTERS and not (source in EPISODE_ONLY_SOURCES and not notes.is_episode):
+                view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
+                write_line(titled(title, source_line(source, view)))
             continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
+        pending: list = []
         if source in _ONLINE_LABELS:
             client = ctx.clients.get(source.value)
             if (
@@ -3255,7 +3302,9 @@ def _attempt(
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
-            for server_id in _read_server_markers(ctx, rec, servers, refresh, first_read_only=first_read_only):
+            for server_id in _read_server_markers(
+                ctx, rec, servers, refresh, first_read_only=first_read_only, notes=notes
+            ):
                 notes.answered(Source.SERVER_MARKERS, server_id)
         else:
             here = [spec for spec in ctx.local_detectors if spec.source is source]
@@ -3294,6 +3343,9 @@ def _attempt(
             for spec in pending:
                 fell_back: list[str] = []
                 phases: list[str] = []
+                on_gpu = gpu is not None
+                device = worker_device(notes.worker) if on_gpu else ""
+                write_line(titled(title, reading_line(source, on_gpu=on_gpu, device=device)))
                 read_started = ctx.monotonic()
                 unanswered = _run_detector(
                     ctx,
@@ -3308,23 +3360,50 @@ def _attempt(
                     fallback_callback=_noting(fell_back, fallback_callback),
                     gpu_worker=gpu_worker,
                 )
-                notes.reads[spec.source] = read_phrase(
-                    gpu is not None,
-                    ctx.monotonic() - read_started,
-                    fell_back[0] if fell_back else "",
-                    gpu_read_nothing=CPU_RECHECK_PHASE in phases,
-                    device=worker_device(notes.worker) if gpu is not None else "",
-                )
                 if unanswered is None:
                     for stored in spec.stored_sources:
                         notes.answered(stored)
                 else:
                     notes.unanswered[spec.source] = _detector_unanswered(unanswered)
+                evidence_now = ctx.store.evidence_rows(rec.id)
+                own_rows = [r for r in evidence_now if r.source is source and r.origin == ""]
+                write_line(
+                    titled(
+                        title,
+                        read_result_line(
+                            source,
+                            notes.unanswered.get(spec.source),
+                            own_rows,
+                            chapter_names(evidence_now),
+                            seconds=ctx.monotonic() - read_started,
+                            fallback=fell_back[0] if fell_back else "",
+                            gpu_read_nothing=CPU_RECHECK_PHASE in phases,
+                        ),
+                    )
+                )
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
         _mark_refreshed(ctx, path, source)
         if not gather_all:
             decisions = _decide(ctx, rec, types, intro_limit)
+        hidden = source in EPISODE_ONLY_SOURCES and not notes.is_episode
+        if source is Source.SERVER_MARKERS:
+            view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
+            for owner in owning:
+                write_line(
+                    titled(
+                        title,
+                        server_source_line(owner.config.id, owner.config.name, view, _UNUSED_SERVER_MARKERS),
+                    )
+                )
+        elif source is not Source.CHAPTERS and not hidden and not pending:
+            view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
+            write_line(titled(title, source_line(source, view)))
+        elif source is Source.SEASON_AUDIO and pending and not hidden:
+            view = make_source_view(ctx.store.evidence_rows(rec.id), notes, skipped, decisions, types)
+            extra = last_seasons_audio_line(view)
+            if extra:
+                write_line(titled(title, extra))
 
     if cancelled():  # a detector stopped part way decides nothing: the file is left as it was for the next run
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
@@ -3348,6 +3427,7 @@ def _attempt(
         }
     decisions = _keep_published_before_rule_change(ctx, rec, decisions)
     decisions = _carry_over(ctx, rec, servers, owners, decisions)
+    write_line(titled(title, decided_line(decisions, types, ctx.store.evidence_rows(rec.id))))
     fingerprint = ctx.settings.detection_fingerprint()
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
@@ -3374,11 +3454,21 @@ def _attempt(
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
         with cancellable_waits(cancel_check):  # a cancelled job stops waiting for a busy database
             row = _publish_to(
-                owner, rec, markers, in_review, servers, ctx, phase, kept_own=kept_own, brief_db_wait=brief_db_wait
+                owner,
+                rec,
+                markers,
+                in_review,
+                servers,
+                ctx,
+                phase,
+                kept_own=kept_own,
+                brief_db_wait=brief_db_wait,
+                notes=notes,
             )
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)
+        write_line(titled(title, server_result_line(_server_result(ctx, rec, row, decisions, notes))))
     waiting_to_retry = any(
         r["status"] == ServerStatus.WAITING.value and r.get("reason_code") in RETRY_REASON_CODES for r in rows
     )
@@ -3386,19 +3476,7 @@ def _attempt(
     if outcome is not FileOutcome.FAILED:
         ctx.decided_by.add(decided_groups(decisions))
     try:
-        _log_file(
-            ctx,
-            rec,
-            owning,
-            decisions,
-            types,
-            rows,
-            notes,
-            skipped,
-            changed=changed,
-            outcome=outcome,
-            title=lambda: _note_title(notes, item, ids, servers),
-        )
+        _log_file(ctx, rec, decisions, types, rows, notes, changed=changed, outcome=outcome, title=title)
     except Exception as exc:
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
@@ -3431,10 +3509,28 @@ def _unstored_lookup(source: Source, result: LookupResult | None) -> str:
     return f"unavailable ({detail})" if detail else "unavailable"
 
 
+def _prior_markers(notes: RunNotes | None, evidence: list, server_id: str) -> tuple[Marker, ...] | None:
+    """What a server held before this run's write: our own last-published record (``notes.sent_before``) when we've
+    published there before, else the server's own markers as its evidence (read this run or saved) says, else None
+    when neither is known."""
+    sent_before = notes.sent_before.get(server_id) if notes is not None else None
+    if sent_before is not None:
+        return sent_before
+    own = [r for r in evidence if r.source in SERVER_SOURCES and r.origin == server_id]
+    if not own:
+        return None
+    return tuple(Marker(r.type, r.start_ms, r.end_ms, ()) for r in own if r.type is not None and r.start_ms is not None)
+
+
 def _server_result(
-    ctx: PipelineContext, rec: FileRecord, row: dict, decisions: dict[MarkerType, TypeDecision]
+    ctx: PipelineContext,
+    rec: FileRecord,
+    row: dict,
+    decisions: dict[MarkerType, TypeDecision],
+    notes: RunNotes | None = None,
 ) -> ServerResult:
-    """A server's row with our markers it has now and the types it keeps as its own."""
+    """A server's row with our markers it has now, the types it keeps as its own, and what it held before this run's
+    write (``notes``: None when nothing logs this run)."""
     ours: tuple[Marker, ...] = ()
     item_kept: frozenset[MarkerType] = frozenset()
     shown = (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value, ServerStatus.WAITING.value)
@@ -3448,7 +3544,12 @@ def _server_result(
             item_kept = item_row.kept_types if item_row is not None else frozenset()
     kept = kept_types(decisions, item_kept)
     withheld = frozenset(t for t in kept if decisions[t].status is DecisionStatus.DECIDED)
-    return ServerResult(row, ours, kept, withheld)
+    had = (
+        _prior_markers(notes, ctx.store.evidence_rows(rec.id), row["server_id"])
+        if row["status"] == (ServerStatus.WRITTEN.value)
+        else None
+    )
+    return ServerResult(row, ours, kept, withheld, had)
 
 
 def _found_online(ctx: PipelineContext, rec: FileRecord, notes: RunNotes) -> bool:
@@ -3505,6 +3606,10 @@ def _note_title(notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: 
         elif listed := _listed_title(item):
             notes.title = file_title(path, listed, path_year(path))
         elif found is None:
+            # Named live, right after pickup: no other step has resolved an owner's item id for us to reuse yet
+            # (that used to happen incidentally, later in the run), so it's resolved here for the lookup to use.
+            for owner in servers.owning:
+                servers.item_id(owner)
             notes.title = file_title(path, *look_up_title(path, servers.title_asks()))
         else:
             notes.title = display_name(path)
@@ -3546,28 +3651,44 @@ def _stage_seconds(ctx: PipelineContext, notes: RunNotes) -> float | None:
     return None if notes.started is None else max(0.0, ctx.monotonic() - notes.started)
 
 
+def _outcome_status(outcome: FileOutcome) -> str:
+    if outcome is FileOutcome.FAILED:
+        return "failed"
+    if outcome is FileOutcome.SKIPPED:
+        return "skipped"
+    return "success"
+
+
+def _outcome_reason(rows: list[dict], status: str) -> str:
+    """Why a worker's "completed" line ends "failed" or "skipped": the matching server row's own message, if one."""
+    if status == "success":
+        return ""
+    matching = ServerStatus.FAILED.value if status == "failed" else ServerStatus.SKIPPED.value
+    for row in rows:
+        if row.get("status") == matching and row.get("message"):
+            return str(row["message"])
+    return ""
+
+
 def _log_file(
     ctx: PipelineContext,
     rec: FileRecord,
-    owning: list[_Owning],
     decisions: dict[MarkerType, TypeDecision],
     types: frozenset[MarkerType],
     rows: list[dict],
     notes: RunNotes,
-    skipped: dict[Source, str],
     *,
     changed: bool,
     outcome: FileOutcome,
-    title: Callable[[], str],
+    title: str,
 ) -> None:
-    """Log the file's full block (``job_log``): what each source answered, what was decided, what was sent where and
-    how long it took, written together as one block. A failed file's block is at WARNING.
+    """Log the file's last line(s): a Season job's (or a TheIntroDB recheck's, a decide-again job's, the weekly online
+    re-check's) own count of this file, and the worker's "completed" line or the checking thread's "done" line. Every
+    other line -- each source's, "Decided" and each server's -- was already logged live as that work happened.
 
-    Every file gets this block, whatever it did: an unchanged file, a Season job's unchanged episode, a decide-again
-    job's unchanged file and a weekly online re-check's file with nothing new all log it too -- a Season job (and a
-    TheIntroDB recheck) additionally counts its episode into its season's summary line, a decide-again job into its
-    one summary line, the weekly online re-check into its one summary line, each logged after every file's block once
-    the job ends. A failed file is always logged.
+    Every file gets its "completed"/"done" line, whatever it did: an unchanged file, a Season job's unchanged episode,
+    a decide-again job's unchanged file and a weekly online re-check's file with nothing new all log it too. A failed
+    file is always logged, at WARNING.
     """
     season = decided_again = rechecked_online = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
@@ -3580,52 +3701,45 @@ def _log_file(
         rechecked_online = (_found_online(ctx, rec, notes), changed)
     ctx._note_finished(rows, season, decided_again, rechecked_online)
     failed = outcome is FileOutcome.FAILED
-    servers = [_server_result(ctx, rec, row, decisions) for row in rows]
-    name = title()
-    evidence = ctx.store.evidence_rows(rec.id)
-    is_episode = bool(notes.is_episode)
-    lines = [head_line(name, types, is_episode=is_episode)]
-    lines += source_lines(
-        ctx.settings.ordered_enabled_sources(),
-        evidence,
-        [(owner.config.id, owner.config.name) for owner in owning],
-        notes,
-        skipped,
-        _UNUSED_SERVER_MARKERS,
-        decisions=decisions,
-        types=types,
-        is_episode=is_episode,
-    )
-    lines.append(decided_line(decisions, types, evidence))
-    lines += [sent_line(server) for server in servers]
-    lines.append(
-        done_line(
-            name,
-            _stage_seconds(ctx, notes),
-            worker=notes.worker,
-            cpu_rerun=notes.cpu_rerun,
-            failed=failed,
-            nothing_sent=nothing_was_sent(rows),
+    seconds = _stage_seconds(ctx, notes)
+    level = "WARNING" if failed else "INFO"
+    if notes.worker:
+        status = _outcome_status(outcome)
+        reason = _outcome_reason(rows, status)
+        write_line(
+            worker_completed_line(
+                notes.worker, title, seconds, status=status, reason=reason, cpu_rerun=notes.cpu_rerun
+            ),
+            level,
         )
-    )
-    write_lines(lines, "WARNING" if failed else "INFO")
+    else:
+        write_line(titled(title, done_line(seconds, failed=failed, nothing_sent=nothing_was_sent(rows))), level)
     notes.logged = True
 
 
 def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str) -> None:
-    """Log the block of a file that failed before its lines were written (it couldn't be read, say), at WARNING.
-    Never raises: the file already has its outcome."""
+    """Log a file that failed before its "Decided" line and its "completed"/"done" line were written (it couldn't be
+    read, or kept changing while it was analysed): its start line too, if nothing logged it yet. Never raises: the
+    file already has its outcome."""
     try:
         title = notes.title or display_name(path)
         path_ids = ids_from_path(path)
         types = notes.types if notes.types is not None else _enabled_types(ctx.settings, path_ids)
         is_episode = notes.is_episode if notes.is_episode is not None else path_ids.is_episode
-        lines = [head_line(title, types, is_episode=is_episode)]
-        lines.append(f"  Failed: {message}")
-        lines.append(
-            done_line(title, _stage_seconds(ctx, notes), worker=notes.worker, cpu_rerun=notes.cpu_rerun, failed=True)
-        )
-        write_lines(lines, "WARNING")
+        if not notes.start_logged:
+            notes.start_logged = True
+            write_line(file_start_line(title, types, is_episode=is_episode, worker=notes.worker))
+        write_line(titled(title, f"Failed: {message}"), "WARNING")
+        seconds = _stage_seconds(ctx, notes)
+        if notes.worker:
+            write_line(
+                worker_completed_line(
+                    notes.worker, title, seconds, status="failed", reason=message, cpu_rerun=notes.cpu_rerun
+                ),
+                "WARNING",
+            )
+        else:
+            write_line(titled(title, done_line(seconds, failed=True)), "WARNING")
         notes.logged = True
     except Exception as exc:
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
@@ -3634,16 +3748,16 @@ def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str)
 def _log_gone(path: str, notes: RunNotes, message: str) -> None:
     """Log the one line of a file a newer file replaced (``_not_on_disk``). Never raises."""
     try:
-        write_lines([f"{notes.title or display_name(path)}: {message}"])
+        write_line(f"{notes.title or display_name(path)}: {message}")
         notes.logged = True
     except Exception as exc:
         logger.warning("Couldn't write the job log line for {}: {}", path, type(exc).__name__)
 
 
 def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> None:
-    """Log that a worker started a file (``KindHandlers.pickup_fn``): its title, as the file's checking stage found it
-    (from its path when no checking stage ran it). What it's checked for is named on its block's own header once the
-    worker finishes it.
+    """Log that a worker started a file (``KindHandlers.pickup_fn``): its title and what it's checked for, as the
+    checking stage that ran before it found them (from its path, checking nothing yet known, when no checking stage
+    ran it first).
 
     Args:
         item: The file.
@@ -3653,7 +3767,11 @@ def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> N
     path = item.canonical_path
     notes = ctx._run_notes.get(path)
     title = (notes.title if notes is not None else "") or display_name(path)
-    write_lines([pickup_line(worker, title)])
+    types = notes.types if notes is not None and notes.types is not None else frozenset()
+    is_episode = notes.is_episode if notes is not None and notes.is_episode is not None else False
+    if notes is not None:
+        notes.start_logged = True
+    write_line(file_start_line(title, types, is_episode=is_episode, worker=worker))
 
 
 def _run(

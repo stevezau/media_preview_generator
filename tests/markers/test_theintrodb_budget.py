@@ -286,14 +286,14 @@ class TestSeriesWithNoEntriesIsPaused:
     def test_each_skipped_episode_says_why_in_its_source_line(self, store, episodes, loguru_caplog):
         self._run_all(store, episodes, FakeClient(NO_DATA))
 
-        # Each file's block opens with its name and has one line per source.
+        # Each file's own line opens with its name and is followed by one line per source.
         theintrodb: dict[str, str] = {}
         name = ""
         for message in (r.getMessage() for r in loguru_caplog.records):
             if message.endswith(": checking intro"):
                 name = message.split(":", 1)[0]
-            elif message.startswith("  TheIntroDB: "):
-                theintrodb[name] = message.removeprefix("  TheIntroDB: ")
+            elif message.startswith(f"{name} · Checking TheIntroDB… "):
+                theintrodb[name] = message.removeprefix(f"{name} · Checking TheIntroDB… ")
         assert theintrodb == {
             **{f"Rick and Morty (2013) S01E0{n}": "no entry (asked now)" for n in (1, 2, 3)},
             **{
@@ -322,11 +322,14 @@ class TestBudgetRecheckJobLog:
         for path in episodes[:3]:
             _run(recheck, path, {"plex-1": ready_publisher()})
 
-        # Every episode still logs its own block, still refused by the same daily limit.
+        # Every episode still logs its own lines, still refused by the same daily limit.
         heads = [r.getMessage() for r in loguru_caplog.records if r.getMessage().endswith(": checking intro")]
         assert heads == [f"Rick and Morty (2013) S01E0{n}: checking intro" for n in (1, 2, 3)]
-        theintrodb = [r.getMessage() for r in loguru_caplog.records if r.getMessage().startswith("  TheIntroDB: ")]
-        assert theintrodb == ["  TheIntroDB: skipped (daily limit reached, resets 00:00 UTC)"] * 3
+        theintrodb = [r.getMessage() for r in loguru_caplog.records if " · Checking TheIntroDB… " in r.getMessage()]
+        assert theintrodb == [
+            f"Rick and Morty (2013) S01E0{n} · Checking TheIntroDB… skipped (daily limit reached, resets 00:00 UTC)"
+            for n in (1, 2, 3)
+        ]
         assert recheck.summary_lines({FileOutcome.NO_MARKERS.value: 3}) == [
             "TheIntroDB recheck, Rick and Morty (2013) S01 (3 episodes): no change",
             "Done: 3 files · 0 sent to PLEX-1 · 0 need review · 3 nothing found · TheIntroDB skipped for 3 files",
