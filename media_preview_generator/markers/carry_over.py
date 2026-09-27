@@ -23,7 +23,7 @@ The rule is narrow on purpose:
   it over, found nothing on the same files (sflix, 2026-09-28). The same version finding nothing on the new file is
   the case this rule is for (another encode's audio or picture), so that marker still carries, and so does one whose
   deciding version isn't known. A snapshot kept aside by a build before versions were kept with it (or by a rollback
-  to one) was decided at most at that build's versions (``VERSIONS_BEFORE_THEY_WERE_KEPT``). A chapter, an online
+  to one) counts as decided at most at ``VERSIONS_BEFORE_THEY_WERE_KEPT``. A chapter, an online
   answer or a user's marker still carries: a replacement without the chapter, or one an online source doesn't list,
   says nothing about the intro.
 - The replaced file: an earlier identity at the same path (kept aside by ``MarkerStore.upsert_file``; not when the new
@@ -75,10 +75,16 @@ _CONFIRMING_ONLY = frozenset(source.value for source in SERVER_SOURCES)
 # What ``previous`` answers per type: the replaced file's decision, or None when it can't be told now.
 Previous = Mapping[MarkerType, PreviousDecision | None]
 # The newest versions a build without ``replaced_versions`` had (82dc2bc and every build before it, a rollback to one
-# included): season audio v10 with end-picture check 3, credit text 7. A snapshot such a build kept aside was decided at
-# most at these, so a newer version reading the new file is known to be newer; an equal one isn't.
+# included): season audio v10 with end-picture check 3. A snapshot such a build kept aside was decided at most at these,
+# so a newer version reading the new file is known to be newer; an equal one isn't.
 VERSIONS_BEFORE_THEY_WERE_KEPT = MappingProxyType(
-    {"season_audio": 2010, "season_audio_previous": 2010, "credits_text": 7}
+    {
+        "season_audio": 2010,
+        "season_audio_previous": 2010,
+        # 8, not 82dc2bc's 7: #327 (credit text 8) may reach dev first and store 8 without the table; too high only
+        # keeps a carried marker.
+        "credits_text": 8,
+    }
 )
 
 

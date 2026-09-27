@@ -1093,7 +1093,7 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     carries, as does a marker whose deciding version isn't known. The versions are kept aside with the snapshot
     (`replaced_versions`, matched on its `seen_at`) or read from a replaced file gone from disk; a snapshot a build
     without them kept aside (82dc2bc and before, or a rollback to one) was decided at most at season audio 2010 and
-    credit text 7 (`carry_over.VERSIONS_BEFORE_THEY_WERE_KEPT`). Tomb Raider King's and RuPaul's carried markers came
+    credit text 8, the version #327 may ship without the table (`carry_over.VERSIONS_BEFORE_THEY_WERE_KEPT`). Tomb Raider King's and RuPaul's carried markers came
     from chapters and still carry. Any candidate of the type, even one failing sanity or leaving the type in review,
     is the new file's own evidence and wins. The carried marker is clamped to the new file's end, dropped when it
     would overlap the file's own intro/recap or credits/preview more than rules 9–10 allow, and decided by

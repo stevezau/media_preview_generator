@@ -70,7 +70,8 @@ copy of this folder.
    read and found nothing in (`carry_over`'s `read_by`, `ReadNow.newer_than`). The same version finding nothing is
    rule 15's own case (another encode) and still carries. The deciding versions are kept aside with the snapshot
    (`replaced_versions`, matched on `seen_at`, no schema bump) or read from a replaced file gone from disk; a snapshot
-   kept aside by a build without them was decided at most at season audio 2010 and credit text 7
+   kept aside by a build without them counts as decided at most at season audio 2010 and credit text 8 (#327's
+   version, in case it ships first)
    (`VERSIONS_BEFORE_THEY_WERE_KEPT`), which is how Small Prophets' (season audio v9, re-read at 3010) still drop.
    The verdict counts only while it isn't due again (`pipeline._read_now`, shared with rule 16): a "nothing" whose
    read again failed after the season changed is from before. Decide rules version 3; the re-run lists files holding
