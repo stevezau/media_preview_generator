@@ -15,6 +15,16 @@ def _no_background_fingerprint_sweep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_title_cache():
+    """Each test starts in a process that has named no film yet (``titles.TITLE_CACHE``)."""
+    from media_preview_generator.markers.titles import TITLE_CACHE
+
+    TITLE_CACHE.clear()
+    yield
+    TITLE_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_gpu_decode_checks(monkeypatch):
     """Each test starts with the process's GPU decode checks unrun, on a fake decoder instead of ffmpeg where every
     device decodes like the CPU (the check only logs; it moves nothing). Tests of the check install their own
@@ -25,6 +35,16 @@ def _fresh_gpu_decode_checks(monkeypatch):
         return ((0.0, clip.name),)
 
     monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=like_the_cpu))
+
+
+@pytest.fixture(autouse=True)
+def _readable_video_unknown(monkeypatch):
+    """A credits tail that gave no frame isn't measured with a real ffprobe (``frames.readable_video_s`` can't tell),
+    since faked decodes give no frames for "nothing found". Tests of files cut short install their own answer, and the
+    tests of the function itself import it before this runs."""
+    from media_preview_generator.markers.credits import frames
+
+    monkeypatch.setattr(frames, "readable_video_s", lambda *args, **kwargs: None)
 
 
 @pytest.fixture

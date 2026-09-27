@@ -1031,11 +1031,12 @@ def _replacement_video(canonical_path: str, *, movie_library: bool) -> str | Non
     return max(same_episode, key=_entry_mtime).name if same_episode else None
 
 
-def _source_replaced_reason(canonical_path: str, registry: ServerRegistry) -> str | None:
+def source_replaced_reason(canonical_path: str, registry: ServerRegistry) -> str | None:
     """Say which newer file replaced a missing source file, or ``None`` when it may still turn up.
 
     A webhook can name a file that's already been replaced: Sonarr or Radarr importing the same episode or movie again
-    under a new name deletes the old file, and no retry can find it. Only a replacement sitting in the file's own folder
+    under a new name deletes the old file, and no retry can find it. Previews and Intro & Credits (``markers.pipeline``)
+    both end such a file on this answer. Only a replacement sitting in the file's own folder
     counts, and only while the library's disk looks plainly mounted: ``gone_from_disk`` with the path mapping and
     library folders as roots says "not gone" when one of them is missing, empty or unreadable (a stale bind mount shows
     an empty underlay), and when the file sits directly in one. A missing folder is never taken as a deletion: a union
@@ -1570,7 +1571,7 @@ def process_canonical_path(
                 ", ".join(f"{srv.name}/{adp.name}" for srv, adp, _ in publishers),
             )
         else:
-            replaced_reason = _source_replaced_reason(canonical_path, registry)
+            replaced_reason = source_replaced_reason(canonical_path, registry)
             if replaced_reason is not None:
                 logger.info(
                     "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); "

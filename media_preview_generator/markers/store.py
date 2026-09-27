@@ -1309,8 +1309,9 @@ class MarkerStore:
         """Store a local detector's answer under each of its sources, and what it was based on, in one transaction.
 
         A failure (or the process ending) part way leaves the old answer and the old basis, so the answer stays due. A
-        credit text answer (found or not) means its decode finished, so the file's decode timeout is forgotten: an
-        answer asked again the same day (a detector version bump) isn't held back by a timeout the answer replaced.
+        credit text answer (found or not) means its decode finished, so the file's decode timeout and its recorded
+        failure are forgotten: an answer asked again the same day (a detector version bump) isn't held back by a
+        timeout the answer replaced, nor a later one by a "cut short" a forced re-detect read past.
 
         Args:
             file_id: The file.
@@ -1332,6 +1333,11 @@ class MarkerStore:
                     "DELETE FROM credits_text_timeouts "
                     "WHERE canonical_path = (SELECT canonical_path FROM files WHERE id=?)",
                     (file_id,),
+                )
+                # So is a failure recorded for it (a decode error, or the file found cut short): read now, it neither
+                # holds the file back nor stops rule 3 waiting for this answer.
+                conn.execute(
+                    "DELETE FROM detector_failures WHERE file_id=? AND source=?", (file_id, Source.CREDITS_TEXT.value)
                 )
 
     @staticmethod

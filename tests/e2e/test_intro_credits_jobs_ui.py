@@ -598,7 +598,7 @@ class TestQueueRows:
         expect(gone).to_have_text("Gone from disk × 2")
         expect(gone).to_have_class(re.compile(r"\bbg-secondary\b"))
         assert gone.get_attribute("title") == (
-            "Replaced by a newer file before this job reached it; the newer file gets its own preview."
+            "Replaced by a newer file before this job reached it; the newer file is run on its own."
         )
 
     def test_follow_up_whose_preview_job_is_not_listed_renders_in_place(self, dashboard) -> None:
@@ -989,6 +989,7 @@ class TestFilesPanel:
             "markers_no_owners",
             "failed",
             "skipped_file_not_found",
+            "skipped_source_gone",
         ]
         page.evaluate("() => hideModalSafely(document.getElementById('logsModal'))")
         expect(page.locator("#logsModal")).to_be_hidden(timeout=3000)

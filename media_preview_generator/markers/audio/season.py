@@ -24,7 +24,7 @@ import math
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -138,6 +138,12 @@ _TOO_LONG_RUN_PTS = math.floor(MAX_INTRO_S / POINT_S) + 1
 _TOO_LONG_OVERLAP_PTS = _TOO_LONG_RUN_PTS + 2 * (_GAP_PTS - 1) + 1
 _SEASON_FOLDER_RE = re.compile(r"^(?:season|series|staffel|saison)\s*(\d{1,4})$", re.IGNORECASE)
 _SEASON_AUDIO_SOURCES = frozenset({Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value})
+# An episode's new season audio answer that moved less than this at both ends keeps the times stored with its last
+# one. Every episode that joins the season matches the others again and moves their answers by a few milliseconds;
+# each move was a new decision, sent to the servers again (2026-09-26: A Different World S04E07 was sent to the same
+# Plex item 8 times in 4 hours, always showing 1:09–2:12; 142 such sends across 59 files). An answer is stored and
+# decided as found otherwise, so a move of this much or more is published.
+KEEP_STORED_TIMES_MS = 500
 
 
 @dataclass(frozen=True)
@@ -1380,6 +1386,31 @@ def _candidate(segment: IntroSegment, others: int, source: Source) -> Candidate:
     )
 
 
+def _with_stored_times(ctx: PipelineContext, rec: FileRecord, found: Candidate) -> Candidate:
+    """``found`` with the times of the episode's stored answer from the same source, when that answer is of this
+    version and neither end moved ``KEEP_STORED_TIMES_MS`` or more; ``found`` as it is otherwise.
+
+    Its support (``origin``, ``confidence``) is always the new match's. The stored row is this file's as it is now:
+    a changed file's evidence goes with its identity (``MarkerStore.upsert_file``).
+    """
+    if ctx.store.evidence_version(rec.id, found.source) != SEASON_AUDIO_ANSWER_VERSION:
+        return found
+    stored = [
+        row
+        for row in ctx.store.evidence_rows(rec.id)
+        if row.source is found.source and row.type is MarkerType.INTRO and row.start_ms is not None
+    ]
+    if len(stored) != 1 or stored[0].end_ms is None or found.end_ms is None:
+        return found
+    row = stored[0]
+    if (
+        abs(found.start_ms - row.start_ms) >= KEEP_STORED_TIMES_MS
+        or abs(found.end_ms - row.end_ms) >= KEEP_STORED_TIMES_MS
+    ):
+        return found
+    return replace(found, start_ms=row.start_ms, end_ms=row.end_ms)
+
+
 def intro_rests_on_season_audio(ctx: PipelineContext, rec: FileRecord) -> bool:
     """Whether a file's published intro was decided with its season audio answer or previous-season hint.
 
@@ -1654,7 +1685,7 @@ def detect_season_audio(
     except end_picture.CheckUnavailableError as exc:
         raise DetectorUnavailableError(str(exc)) from exc
     if segment is not None:
-        candidates.append(_candidate(segment, len(matching.files) - 1, matching.source))
+        candidates.append(_with_stored_times(ctx, rec, _candidate(segment, len(matching.files) - 1, matching.source)))
 
     # Every file read for the match (the previous season's included, which _matching adds to records) but one left out
     # for want of its retimed fingerprint: that one enters the signature as it is, so its fingerprint made later makes

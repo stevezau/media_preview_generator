@@ -235,6 +235,8 @@ class Worker:
         # None keeps the previews process_canonical_path flow.
         self.process_fn = None
         self.outcome_keys: tuple[str, ...] = ()
+        # A non-preview kind's own "picked up" line (``KindHandlers.pickup_fn``); None logs the generic one.
+        self.pickup_fn: Callable[[Any, str], None] | None = None
 
         # In-place GPU→CPU fallback state (set during a retry, cleared on next
         # task assignment). Surfaced to the UI so users see why the switch
@@ -317,6 +319,7 @@ class Worker:
         pause_check=None,
         process_fn: Callable[..., ItemOutcome] | None = None,
         outcome_keys: tuple[str, ...] | None = None,
+        pickup_fn: Callable[[Any, str], None] | None = None,
     ) -> None:
         """Assign a :class:`ProcessableItem` to this worker.
 
@@ -341,6 +344,8 @@ class Worker:
             process_fn: Non-preview kind's per-item function; None runs the
                 previews ``process_canonical_path`` flow.
             outcome_keys: Valid outcome keys for ``process_fn``'s kind.
+            pickup_fn: ``process_fn``'s kind's own "picked up" line
+                (``KindHandlers.pickup_fn``); None logs the generic one.
         """
         # Pre-claimed workers (is_busy=True but no current_task yet) are
         # acceptable — _find_available_worker(claim=True) atomically reserves
@@ -389,6 +394,7 @@ class Worker:
         self.pause_check = pause_check
         self.process_fn = process_fn
         self.outcome_keys = tuple(outcome_keys or ())
+        self.pickup_fn = pickup_fn
 
         self.frame = 0
         self.fps = 0
@@ -701,6 +707,21 @@ class Worker:
                 if self._done_event is not None:
                     self._done_event.set()
 
+    def _log_pickup(self, item, display_name: str) -> None:
+        """Log that this worker started a non-preview item: the kind's own line, or the generic one.
+
+        Args:
+            item: The :class:`ProcessableItem` being started.
+            display_name: What the generic line names the item by.
+        """
+        if self.pickup_fn is not None:
+            try:
+                self.pickup_fn(item, self.display_name)
+                return
+            except Exception as exc:  # a line describing the item mustn't stop the item
+                logger.debug("{}: the kind's pickup line failed: {}", self.display_name, type(exc).__name__)
+        logger.info("{} picked up: {}", self.display_name, display_name)
+
     def _process_custom_item(self, item, progress_callback) -> None:
         """Run a non-preview kind's ``process_fn`` with the same GPU→CPU fallback previews use.
 
@@ -711,7 +732,7 @@ class Worker:
         register_job_thread(self.current_job_id or "")
         display_name = self.media_file or self.media_title or item.canonical_path
         with failure_scope(self.current_job_id):
-            logger.info("{} picked up: {}", self.display_name, display_name)
+            self._log_pickup(item, display_name)
 
             def _phase_cb(text: str) -> None:
                 self.current_phase = text or ""
@@ -737,6 +758,7 @@ class Worker:
                     fallback_callback=_fallback_cb,
                     # True on a GPU worker's CPU rerun too: CPU work it does is its own, not a CPU worker's.
                     gpu_worker=self.worker_type == "GPU",
+                    worker_name=self.display_name,
                 )
 
             # Exception text reaches the file's row (served by the jobs API) and the log, and can carry a server URL

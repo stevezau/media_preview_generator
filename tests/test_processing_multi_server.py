@@ -1553,6 +1553,79 @@ class TestSkipIfExists:
         assert result.publishers[0].status in _PUBLISHED_LIKE_STATUSES
 
 
+class TestCopiesSharingOnePlexBundle:
+    """Two byte-identical files that Plex gives the same part hash — so one
+    bundle and one ``index-sd.bif`` between them, as Plex itself lays it out.
+
+    Live case: Boxing S2026E94 and its "pt2" copy (item 689756, both parts
+    hash ``7bd4b8cf…``) rebuilt the shared BIF every night, each copy finding
+    the other's fingerprint on it. Each may build it once; after that a scan
+    must skip both.
+    """
+
+    _HASH = "7bd4b8cfed7b096007252de23fe3b71150b1c3af"
+
+    def _scan(self, mock_config, registry, paths: list[Path], generated: list[str]) -> list:
+        def fake_generate_images(video_file, output_folder, *args, **kwargs):
+            generated.append(video_file)
+            _populate_frames(output_folder, count=3, real_images=False)
+            return (True, 3, "h264", 1.0, 30.0, None)
+
+        parts = [(self._HASH, str(p)) for p in paths]
+        results = []
+        with (
+            patch.object(PlexServer, "get_bundle_metadata", return_value=parts) as tree,
+            patch.object(PlexServer, "trigger_refresh"),
+            patch(
+                "media_preview_generator.processing.multi_server.generate_images",
+                side_effect=fake_generate_images,
+            ),
+        ):
+            for path in paths:
+                reset_frame_cache()
+                results.append(
+                    process_canonical_path(
+                        canonical_path=str(path),
+                        registry=registry,
+                        config=mock_config,
+                        item_id_by_server={"plex-1": "689756"},
+                    )
+                )
+        assert {c.args[0] for c in tree.call_args_list} <= {"689756"}
+        return results
+
+    def test_copies_are_not_regenerated_when_both_have_published(self, mock_config_for_processing, tmp_path):
+        media_dir = tmp_path / "data" / "Sports" / "Garcia vs Benn (2026-09-12) E94"
+        original = _seed_canonical_file(media_dir, name="Boxing - S2026E94 - Garcia vs Benn.mkv")
+        os.utime(original, (1_789_284_991, 1_789_284_991))
+        copy = media_dir / "Boxing - S2026E94 - pt2 - Garcia vs Benn.mkv"
+        copy.write_bytes(original.read_bytes())
+        os.utime(copy, (1_789_279_158, 1_789_279_158))
+        plex_config = tmp_path / "plexcfg"
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="plex-1",
+                    server_type=ServerType.PLEX,
+                    libraries=[Library(id="12", name="Sports", remote_paths=(str(tmp_path / "data"),), enabled=True)],
+                    output={"adapter": "plex_bundle", "plex_config_folder": str(plex_config), "frame_interval": 10},
+                )
+            ],
+        )
+        shared_bif = plex_config / "Media/localhost/7" / f"{self._HASH[1:]}.bundle/Contents/Indexes/index-sd.bif"
+
+        first_night: list[str] = []
+        results = self._scan(mock_config_for_processing, registry, [copy, original], first_night)
+        assert [r.publishers[0].output_paths for r in results] == [[shared_bif], [shared_bif]]
+        assert first_night == [str(copy), str(original)]
+
+        second_night: list[str] = []
+        results = self._scan(mock_config_for_processing, registry, [copy, original], second_night)
+        assert second_night == [], "a copy rebuilt the BIF it shares with the other copy"
+        assert [r.publishers[0].status for r in results] == [PublisherStatus.SKIPPED_OUTPUT_EXISTS] * 2
+        assert read_bif_metadata(str(shared_bif)).frame_count == 3
+
+
 class TestPartialSuccessRetryIdempotency:
     """When one publisher succeeds and another reports SKIPPED_NOT_INDEXED,
     the retry must NOT re-run FFmpeg or re-publish for the

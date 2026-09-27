@@ -19,7 +19,7 @@ from ..config import Config
 from ..job_kinds import JOB_KIND_PREVIEWS, ItemOutcome, KindHandlers, normalize_outcome, outcome_value
 from ..processing.generator import ProcessingResult
 from ..web.jobs import PRIORITY_NORMAL
-from .worker import Worker, WorkerPool
+from .worker import JOB_LOG_SKIP, Worker, WorkerPool
 
 _submission_counter_lock = threading.Lock()
 _submission_counter = 0
@@ -558,7 +558,8 @@ class JobDispatcher:
         tracker.in_progress_fraction_getter = lambda jid=job_id: self._get_in_progress_fraction(jid)
         with self._trackers_lock:
             self._trackers[job_id] = tracker
-        logger.info(
+        # A kind whose job log starts with its own line keeps this one to the app log.
+        logger.bind(**{JOB_LOG_SKIP: kind != JOB_KIND_PREVIEWS}).info(
             "Dispatcher: submitted {} {} items for job {} ({})",
             len(items),
             kind,
@@ -856,6 +857,7 @@ class JobDispatcher:
                     pause_check=tracker.pause_check,
                     process_fn=tracker.handlers.process_fn if tracker.handlers else None,
                     outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
+                    pickup_fn=tracker.handlers.pickup_fn if tracker.handlers else None,
                 )
             except Exception as exc:
                 self._fail_unstarted_item(worker, tracker, item, exc)

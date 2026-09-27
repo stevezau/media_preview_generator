@@ -21,6 +21,9 @@ class FileOutcome(str, Enum):
     NO_MARKERS = "markers_none"
     NO_OWNERS = "markers_no_owners"
     FILE_NOT_FOUND = "skipped_file_not_found"
+    # Previews' outcome for a file a newer one replaced in its folder
+    # (``processing.multi_server.source_replaced_reason``): no retry can find it, so none is queued.
+    SOURCE_GONE = "skipped_source_gone"
     FAILED = "failed"
 
 

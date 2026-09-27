@@ -229,7 +229,10 @@ def mv_block() -> str:
     data = json.loads((OUT / "pick.json").read_text())
     lines = ["MV_SCALE=("]
     for entry in data["tv"] + data["movies"]:
-        lines.append(f'    -v "{entry["host"]}:{entry["container"]}:ro"')
+        src, dst = entry["host"], entry["container"]
+        if "," in src or "," in dst:  # --mount is comma-delimited; a comma would split the option
+            raise ValueError(f"comma in mount path: {src!r} -> {dst!r}")
+        lines.append(f'    --mount "type=bind,src={src},dst={dst},readonly"')
     lines.append(")")
     return "\n".join(lines)
 

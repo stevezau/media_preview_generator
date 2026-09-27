@@ -26,6 +26,7 @@ from media_preview_generator.markers.credits.frames import (
     DecodeTimeoutError,
     FrameDecodeError,
     GpuDecodeError,
+    GpuReadNothingError,
     KeyframeThinning,
 )
 from media_preview_generator.markers.probe import (
@@ -36,6 +37,9 @@ from media_preview_generator.markers.probe import (
     VideoPacket,
     VideoPackets,
 )
+
+# Imported before ``tests/markers/conftest.py`` fakes it for every test: these are its own tests.
+readable_video_s = frames.readable_video_s
 
 FF = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 MOVIE = "/media/Movie (2020)/Movie.mkv"
@@ -667,12 +671,15 @@ class TestRunDecode:
             )
         assert str(excinfo.value) == f"ffmpeg exited 1 decoding Movie.mkv on the CPU: {error}"
 
-    def test_no_frames_on_the_gpu_is_a_gpu_failure(self):
-        with pytest.raises(GpuDecodeError, match="no frames") as excinfo:
+    def test_no_frames_on_the_gpu_says_so_without_blaming_the_gpu(self):
+        # A GPU failure to anything that meets it, but its own kind: the credit text detector reads the file on the CPU
+        # to tell a GPU that missed the frames from a file that has none there.
+        with pytest.raises(GpuReadNothingError) as excinfo:
             frames.run_decode(
                 _fake_ffmpeg([], []), hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
             )
-        assert type(excinfo.value) is GpuDecodeError
+        assert isinstance(excinfo.value, GpuDecodeError)
+        assert str(excinfo.value) == "the GPU read no frames in that part of the file"
 
     def test_no_frames_on_the_cpu_is_an_empty_answer(self):
         assert (
@@ -1494,3 +1501,81 @@ class TestKeyframeThinning:
         with pytest.raises(DecodeCancelledError, match="cancelled before decoding Movie.mkv"):
             frames.keyframe_thinning(MOVIE, FF, cancel_check=lambda: True)
         assert probed == []
+
+
+class TestReadableVideo:
+    """How far a file whose tail gave no frame can be read (a file cut short keeps its stated duration)."""
+
+    @pytest.fixture
+    def reads(self, monkeypatch):
+        """``probe.last_video_time_s`` per call: the next of ``reads.answers`` (a time, None, or an error); the
+        container's start time is ``reads.start`` (or an error), read by the real ``container_start_s`` rules."""
+
+        class Reads(list):
+            answers: list = []
+            start: float | BaseException = 0.0
+            starts: list = []
+
+        calls = Reads()
+
+        def last_video_time_s(path, **kwargs):
+            calls.append({"path": path, **kwargs})
+            answer = calls.answers[len(calls) - 1]
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        def container_start_s(path, ffmpeg, *, cancel_check=None, timeout_s):
+            if cancel_check and cancel_check():
+                raise DecodeCancelledError(f"cancelled before decoding {os.path.basename(path)}")
+            calls.starts.append({"path": path, "ffmpeg": ffmpeg, "timeout_s": timeout_s})
+            if isinstance(calls.start, BaseException):
+                raise calls.start
+            return calls.start
+
+        calls.starts = []
+        monkeypatch.setattr(frames, "last_video_time_s", last_video_time_s)
+        monkeypatch.setattr(frames, "container_start_s", container_start_s)
+        return calls
+
+    def test_the_tail_is_read_from_where_it_starts(self, reads):
+        reads.answers = [1630.2]
+        assert readable_video_s(MOVIE, FF, from_s=2190.0) == 1630.2
+        # The ffprobe beside the configured ffmpeg, the probe's short bound.
+        assert reads == [{"path": MOVIE, "ffprobe": frames.ffprobe_path_for(FF), "from_s": 2190.0, "timeout_s": 30.0}]
+        assert reads.starts == [{"path": MOVIE, "ffmpeg": FF, "timeout_s": 30.0}]
+
+    def test_the_seek_is_on_the_streams_own_times(self, reads):
+        # A recording whose times start 30000 s in: seeking to 2190 would read the whole file from its first packet.
+        reads.start, reads.answers = 30000.0, [2230.5]
+        assert readable_video_s(MOVIE, FF, from_s=2190.0) == 2230.5
+        assert reads[0]["from_s"] == 32190.0
+
+    def test_a_tail_read_that_finds_no_packet_reads_the_whole_file(self, reads):
+        # An MP4 cut short: its index points past the end, so the seek into the tail reads nothing.
+        reads.answers = [None, 45.2]
+        assert readable_video_s(MOVIE, FF, from_s=2190.0, timeout_s=7.0) == 45.2
+        assert [(call["from_s"], call["timeout_s"]) for call in reads] == [(2190.0, 7.0), (None, 7.0)]
+
+    @pytest.mark.parametrize(
+        ("start", "answers"),
+        [
+            (0.0, [None, None]),
+            (0.0, [ProbeTimeoutError("ffprobe failed: TimeoutExpired")]),
+            (0.0, [ProbeStalledError("Not reading x: 2 earlier ffprobes are still stuck")]),
+            (0.0, [None, ProbeError("ffprobe exited 1")]),
+            (DecodeTimeoutError("reading the start time of Movie.mkv timed out after 30 s"), []),
+            (frames.ReadStalledError("could not read the start time of Movie.mkv"), []),
+            (FrameDecodeError("could not read the start time of Movie.mkv: ffprobe exited 1"), []),
+        ],
+        ids=["no-packets", "timeout", "stalled", "failed", "start-timeout", "start-stalled", "start-failed"],
+    )
+    def test_what_cant_be_told_is_none(self, reads, start, answers):
+        # Never a reason to call a file cut short: its tail is then "nothing found", as before.
+        reads.start, reads.answers = start, answers
+        assert readable_video_s(MOVIE, FF, from_s=2190.0) is None
+
+    def test_a_cancelled_job_is_not_probed(self, reads):
+        with pytest.raises(DecodeCancelledError, match="cancelled before decoding Movie.mkv"):
+            readable_video_s(MOVIE, FF, from_s=2190.0, cancel_check=lambda: True)
+        assert (list(reads), reads.starts) == ([], [])

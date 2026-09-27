@@ -283,20 +283,21 @@ class TestSeriesWithNoEntriesIsPaused:
         assert "TheIntroDB has no entry for 3 or more episodes of Rick and Morty (2013) (tvdb:275274)" in message
         assert "aren't looked up there until 2026-10-01 04:00 UTC" in message
 
-    def test_each_skipped_episode_says_why_in_its_sources_line(self, store, episodes, loguru_caplog):
+    def test_each_skipped_episode_says_why_in_its_source_line(self, store, episodes, loguru_caplog):
         self._run_all(store, episodes, FakeClient(NO_DATA))
 
-        sources = {
-            r.getMessage().split(":", 1)[0]: r.getMessage().split("\n  sources: ", 1)[1].split(" · ")[0]
-            for r in loguru_caplog.records
-            if "\n  sources: " in r.getMessage()
-        }
-        assert sources == {
-            **{f"Rick and Morty (2013) S01E0{n}": "TheIntroDB no entry" for n in (1, 2, 3)},
+        # Each file's block opens with its name and has one line per source.
+        theintrodb: dict[str, str] = {}
+        name = ""
+        for message in (r.getMessage() for r in loguru_caplog.records):
+            if message.endswith(": checking intro"):
+                name = message.split(":", 1)[0]
+            elif message.startswith("  TheIntroDB: "):
+                theintrodb[name] = message.removeprefix("  TheIntroDB: ")
+        assert theintrodb == {
+            **{f"Rick and Morty (2013) S01E0{n}": "no entry" for n in (1, 2, 3)},
             **{
-                f"Rick and Morty (2013) S01E0{n}": (
-                    "TheIntroDB skipped (no data for this show; asked again after 2026-10-01)"
-                )
+                f"Rick and Morty (2013) S01E0{n}": "skipped (no data for this show; asked again after 2026-10-01)"
                 for n in (4, 5, 6)
             },
         }
@@ -319,7 +320,7 @@ class TestBudgetRecheckJobLog:
         for path in episodes[:3]:
             _run(recheck, path, {"plex-1": ready_publisher()})
 
-        assert not [r for r in loguru_caplog.records if "\n  sources: " in r.getMessage()]
+        assert not [r for r in loguru_caplog.records if r.getMessage().startswith("  TheIntroDB: ")]
         assert recheck.summary_lines({FileOutcome.NO_MARKERS.value: 3}) == [
             "TheIntroDB recheck, Rick and Morty (2013) S01 (3 episodes): no change",
             "Done: 3 files · 0 sent to PLEX-1 · 0 need review · 3 nothing found · TheIntroDB skipped for 3 files",
@@ -338,8 +339,8 @@ class TestBudgetRecheckJobLog:
         recheck.recheck_label = BUDGET_RECHECK_LABEL
         _run(recheck, movie, {"plex-1": ready_publisher()})
 
-        lines = [r.getMessage() for r in loguru_caplog.records if "\n  sources: " in r.getMessage()]
-        assert [line.split(":", 1)[0] for line in lines] == ["Heat (1995)"]
+        lines = [r.getMessage() for r in loguru_caplog.records if ": checking " in r.getMessage()]
+        assert lines == ["Heat (1995): checking credits (films get credits only)"]
         assert recheck.summary_lines({FileOutcome.NO_MARKERS.value: 1})[:-1] == []
 
 

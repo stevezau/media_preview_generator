@@ -628,6 +628,22 @@ class EmbyApiClient(MediaServer):
         item = self._fetch_item_fields(item_id, "Chapters", raise_no_answer=raise_no_answer)
         return None if item is None else _chapter_rows(item)
 
+    def get_runtime_ms(self, item_id: str) -> int | None:
+        """The item's length, from the ``RunTimeTicks`` every item answer carries (100 ns ticks).
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            Milliseconds, or None when the item couldn't be fetched or has no length yet.
+        """
+        # "Path" only because both servers need a valid field to ask for; the length comes with any item answer.
+        item = self._fetch_item_fields(item_id, "Path")
+        ticks = item.get("RunTimeTicks") if item else None
+        if isinstance(ticks, bool) or not isinstance(ticks, int) or ticks <= 0:
+            return None
+        return ticks // 10_000
+
     def get_chapters_and_versions(
         self, item_id: str
     ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None]]] | None:
@@ -746,7 +762,7 @@ class EmbyApiClient(MediaServer):
         (season/episode are still reported) — the episode's own (per-episode) ProviderIds are
         never used as a stand-in for the series', since a wrong id would route another show's
         markers to this file. Movies never report a ``tvdb`` id (different id space to
-        tmdb/imdb). Unrecognised item types report no ids at all.
+        tmdb/imdb). Unrecognised item types report no ids at all. A movie also reports its ``title`` and ``year``.
         """
         item = self._fetch_item_fields(item_id, "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
         if item is None:
@@ -778,6 +794,9 @@ class EmbyApiClient(MediaServer):
         else:
             providers_source = item
             allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+            # A movie's own title, for the Intro & Credits job log (an episode is named by its path there).
+            out["title"] = item.get("Name") or None
+            out["year"] = item.get("ProductionYear") or None
 
         providers = {str(k).lower(): str(v) for k, v in (providers_source.get("ProviderIds") or {}).items() if v}
         for scheme in allowed_schemes:

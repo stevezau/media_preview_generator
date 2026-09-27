@@ -1536,7 +1536,7 @@ const STATUS_META = {
 
     // Legacy / pipeline-specific outcomes.
     skipped_file_not_found: { label: 'Not Found',     cls: 'bg-warning text-dark', tip: 'File not found on disk' },
-    skipped_source_gone:    { label: 'Gone from disk', cls: 'bg-secondary', tip: 'Replaced by a newer file before this job reached it; the newer file gets its own preview.' },
+    skipped_source_gone:    { label: 'Gone from disk', cls: 'bg-secondary', tip: 'Replaced by a newer file before this job reached it; the newer file is run on its own.' },
     skipped_excluded:       { label: 'Excluded',      cls: 'bg-secondary', tip: 'Path matched an exclusion rule' },
     skipped_invalid_hash:   { label: 'Invalid Hash',  cls: 'bg-warning text-dark', tip: 'Could not compute the path hash' },
     unresolved_plex:        { label: 'Not In Plex',   cls: 'bg-danger', tip: 'Could not find this item in Plex after lookup' },

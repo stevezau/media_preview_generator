@@ -9,6 +9,9 @@ import pytest
 
 from media_preview_generator.markers.credits import frames
 
+# Imported before ``tests/markers/conftest.py`` fakes it for every test: these tests read real files with it.
+readable_video_s = frames.readable_video_s
+
 # The module's clips are encoded on the CPU in module fixtures, which pytest-timeout counts against the first test that
 # uses each one: up to about 35 s under a full xdist run, past the suite's 30 s.
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(180)]
@@ -163,6 +166,51 @@ def test_cpu_keyframes_of_the_tail(clip):
 def test_cpu_one_frame_a_second_before_a_time(clip):
     rows = _rows(clip, start_s=50.0, length_s=21.0, keyframes_only=False, fps=1, gpu=None, gpu_device_path=None)
     assert [round(r[0]) for r in rows] == list(range(50, 71))
+
+
+@pytest.fixture(scope="module")
+def cut_short(tmp_path_factory):
+    """A 120 s clip as Matroska and as a fast-start MP4, each whole and cut to its first 40 % of bytes (a download or
+    copy that stopped): the header still states 120 s."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg")
+    folder = tmp_path_factory.mktemp("cut-short")
+    whole_mkv, whole_mp4 = folder / "whole.mkv", folder / "whole.mp4"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=120", "-c:v", "libx264",
+         "-g", "20", "-pix_fmt", "yuv420p", str(whole_mkv)],
+        check=True,
+    )  # fmt: skip
+    subprocess.run([ffmpeg, "-v", "error", "-i", str(whole_mkv), "-c", "copy", "-movflags", "+faststart",
+                    str(whole_mp4)], check=True)  # fmt: skip
+    files = {}
+    for whole in (whole_mkv, whole_mp4):
+        data = whole.read_bytes()
+        cut = folder / f"cut{whole.suffix}"
+        cut.write_bytes(data[: len(data) * 2 // 5])
+        files[whole.suffix.lstrip(".")] = (str(whole), str(cut))
+    return ffmpeg, files
+
+
+@pytest.mark.parametrize("container", ["mkv", "mp4"])
+def test_a_file_cut_short_reads_no_tail_and_is_measured_where_it_ends(cut_short, container):
+    from media_preview_generator.markers.probe import ffprobe_path_for, probe_media
+
+    ffmpeg, files = cut_short
+    whole, cut = files[container]
+    assert probe_media(cut, ffprobe=ffprobe_path_for(ffmpeg)).duration_ms == pytest.approx(120_000, abs=100)
+    # The tail's keyframe pass reads no frame and exits cleanly, as it did on the GPU and the CPU in production.
+    assert _rows((ffmpeg, cut), start_s=90.0, length_s=None, keyframes_only=True, fps=None, gpu=None,
+                 gpu_device_path=None, start_time_s=0.0) == []  # fmt: skip
+    # Only its packets show where it ends; the whole file reads to its stated length.
+    assert 30.0 < readable_video_s(cut, ffmpeg, from_s=90.0) < 70.0
+    assert readable_video_s(whole, ffmpeg, from_s=90.0) == pytest.approx(119.9, abs=0.2)
+
+
+def test_a_recording_with_a_pcr_base_is_measured_in_file_seconds(recording):
+    ffmpeg, path = recording
+    assert readable_video_s(path, ffmpeg, from_s=20.0) == pytest.approx(39.9, abs=0.2)
 
 
 def test_a_recording_with_a_pcr_base_reports_file_seconds(recording):
@@ -358,8 +406,8 @@ def test_cuda_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
     gpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu="NVIDIA", gpu_device_path="cuda:0")
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == VP9_KEYFRAMES
     assert gpu == cpu
-    # No keyframe in the window: a GPU failure, so the worker reruns the file on the CPU (which reads no roll).
-    with pytest.raises(frames.GpuDecodeError, match="decoded no frames"):
+    # No keyframe in the window: no frames on the GPU, so the detector reads the file on the CPU (which reads no roll).
+    with pytest.raises(frames.GpuReadNothingError, match="read no frames"):
         _thinned_rows(ffmpeg, clips["one-key.webm"], drop, gpu="NVIDIA", gpu_device_path="cuda:0")
 
 
@@ -376,5 +424,5 @@ def test_vaapi_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
     gpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=vendor, gpu_device_path=device)
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == VP9_KEYFRAMES
     assert gpu == cpu
-    with pytest.raises(frames.GpuDecodeError, match="decoded no frames"):
+    with pytest.raises(frames.GpuReadNothingError, match="read no frames"):
         _thinned_rows(ffmpeg, clips["one-key.webm"], drop, gpu=vendor, gpu_device_path=device)

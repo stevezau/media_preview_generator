@@ -825,6 +825,103 @@ class TestScheduleRunNow:
         assert updated["last_run"] is not None
 
 
+class TestNextRunAfterAFire:
+    """Live case: TV Daily ("0 2 * * *") fired at 02:00; APScheduler moved on to
+    the next day's 02:00, but ``schedules.json`` kept ``next_run`` at the 02:00
+    that had just fired — ``_update_last_run`` saved the copy last refreshed by
+    a page read, which was still the upcoming (now fired) run."""
+
+    def test_stored_next_run_matches_the_scheduler_when_a_cron_schedule_fires(self, scheduler_manager, monkeypatch):
+        import json
+        import time
+        from datetime import datetime, timedelta
+
+        monkeypatch.setattr(
+            "media_preview_generator.web.settings_manager.get_settings_manager",
+            lambda: MagicMock(processing_paused=False),
+        )
+        callback = MagicMock()
+        scheduler_manager.set_run_job_callback(callback)
+        schedule = scheduler_manager.create_schedule(
+            name="TV Daily", library_id="2", library_name="TV Shows", cron_expression="0 2 * * *"
+        )
+        sid = schedule["id"]
+        fire_at = datetime.now(UTC) - timedelta(seconds=1)
+        scheduler_manager.scheduler.modify_job(sid, next_run_time=fire_at)
+        # The Schedules page polls, which copies the upcoming run into memory.
+        assert [s["next_run"] for s in scheduler_manager.get_all_schedules()] == [fire_at.isoformat()]
+
+        scheduler_manager.scheduler.wakeup()
+
+        def stored() -> dict:
+            with open(scheduler_manager.schedules_file) as fh:
+                return json.load(fh)["schedules"][sid]
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            live = scheduler_manager.scheduler.get_job(sid).next_run_time
+            if callback.called and stored()["last_run"] and datetime.fromisoformat(stored()["next_run"]) == live:
+                break
+            time.sleep(0.05)
+
+        callback.assert_called_once()
+        assert callback.call_args.kwargs["parent_schedule_id"] == sid
+        live = scheduler_manager.scheduler.get_job(sid).next_run_time
+        assert live > fire_at
+        assert (live.hour, live.minute) == (2, 0)
+        assert stored()["last_run"] is not None
+        assert datetime.fromisoformat(stored()["next_run"]) == live, (
+            f"schedules.json next_run {stored()['next_run']} is the run that just fired; the scheduler holds {live}"
+        )
+        assert datetime.fromisoformat(scheduler_manager.get_schedule(sid)["next_run"]) == live
+
+    def _dispatch(self, manager, code: int, job_id: str) -> None:
+        from datetime import datetime
+
+        from apscheduler.events import JobSubmissionEvent
+
+        manager.scheduler._dispatch_event(JobSubmissionEvent(code, job_id, "default", [datetime.now(UTC)]))
+
+    def test_stored_next_run_moves_on_when_a_fire_is_skipped_because_the_last_run_is_still_going(
+        self, scheduler_manager
+    ):
+        """With ``max_instances=1`` APScheduler still advances the job past a
+        skipped fire, and reports it with EVENT_JOB_MAX_INSTANCES instead."""
+        import json
+        from datetime import datetime, timedelta
+
+        from apscheduler.events import EVENT_JOB_MAX_INSTANCES
+
+        schedule = scheduler_manager.create_schedule(name="Every 15", library_id="2", interval_minutes=15)
+        sid = schedule["id"]
+        moved_on = datetime.now(UTC) + timedelta(minutes=30)
+        scheduler_manager.scheduler.modify_job(sid, next_run_time=moved_on)
+
+        self._dispatch(scheduler_manager, EVENT_JOB_MAX_INSTANCES, sid)
+
+        with open(scheduler_manager.schedules_file) as fh:
+            assert datetime.fromisoformat(json.load(fh)["schedules"][sid]["next_run"]) == moved_on
+
+    def test_does_not_save_when_the_job_is_not_a_schedule(self, scheduler_manager):
+        from apscheduler.events import EVENT_JOB_SUBMITTED
+
+        with patch.object(scheduler_manager, "_save_schedules") as save:
+            self._dispatch(scheduler_manager, EVENT_JOB_SUBMITTED, "quiet_hours_pause_0")
+
+        save.assert_not_called()
+
+    def test_does_not_save_when_next_run_is_unchanged(self, scheduler_manager):
+        """Each save rotates a backup; a no-op save would push real restore points out."""
+        from apscheduler.events import EVENT_JOB_SUBMITTED
+
+        schedule = scheduler_manager.create_schedule(name="TV", library_id="2", cron_expression="0 2 * * *")
+
+        with patch.object(scheduler_manager, "_save_schedules") as save:
+            self._dispatch(scheduler_manager, EVENT_JOB_SUBMITTED, schedule["id"])
+
+        save.assert_not_called()
+
+
 # ========================================================================
 # Persistence
 # ========================================================================

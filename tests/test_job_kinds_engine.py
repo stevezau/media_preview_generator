@@ -101,7 +101,13 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
         seen["phase_on_worker"] = worker.current_phase
         return ItemOutcome("markers_needs_review", "no agreement", [_row("markers_needs_review")])
 
-    handlers = KindHandlers(check_fn=check, process_fn=process, outcome_keys=KEYS)
+    picked_up = []
+    handlers = KindHandlers(
+        check_fn=check,
+        process_fn=process,
+        outcome_keys=KEYS,
+        pickup_fn=lambda item, worker_name: picked_up.append((item.canonical_path, worker_name)),
+    )
     with (
         patch("media_preview_generator.processing.generator._notify_file_result"),
         patch("media_preview_generator.web.jobs.get_job_manager"),
@@ -129,10 +135,14 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
         "ffmpeg_threads",
         "fallback_callback",
         "gpu_worker",
+        "worker_name",
     }
     assert kwargs["gpu"] is None and kwargs["gpu_device_path"] is None
     assert kwargs["ffmpeg_threads"] is None  # a CPU worker: FFmpeg's own thread count
     assert kwargs["gpu_worker"] is False
+    # The kind's job log names the worker: in its own pickup line, and in the file's closing line.
+    assert kwargs["worker_name"] == worker.display_name
+    assert picked_up == [("/m/b.mkv", worker.display_name)]
     assert kwargs["cancel_check"] is cancel_cb
     assert kwargs["pause_check"] is pause_cb
     # The dispatcher hands each worker partial(pool._update_worker_progress, worker); the worker forwards it as-is.
@@ -534,18 +544,58 @@ def test_a_kinds_process_fn_gets_the_workers_own_ffmpeg_threads_on_its_gpu_only(
     assert gpu_workers == [worker_type == "GPU"] * len(expected)
 
 
+@pytest.mark.parametrize("pickup", ["own", "none", "raises"])
+def test_a_kinds_own_pickup_line_replaces_the_generic_one(pickup):
+    # Intro & Credits logs "GPU Worker 1 (…) picked up <title>: checking …" itself; a kind without one, or whose line
+    # fails, gets the generic line, and the item runs either way.
+    from loguru import logger
+
+    from media_preview_generator.jobs.worker import Worker
+
+    picked = []
+
+    def own(item, worker_name):
+        picked.append((item.canonical_path, worker_name))
+        if pickup == "raises":
+            raise RuntimeError("no title")
+
+    w = Worker(1, "GPU", gpu="NVIDIA", gpu_device="cuda:0")
+    w.display_name = "GPU Worker 1 (NVIDIA TITAN RTX)"
+    lines: list[str] = []
+    handler = logger.add(lambda m: lines.append(m.record["message"]), level="INFO", format="{message}")
+    done = threading.Event()
+    w._done_event = done
+    try:
+        with patch("media_preview_generator.jobs.worker._notify_file_result"):
+            w.assign_task(_items("/m/t.mkv")[0], _config(), MagicMock(), job_id="jt",
+                          process_fn=lambda item, **kw: ItemOutcome("markers_published"), outcome_keys=KEYS,
+                          pickup_fn=None if pickup == "none" else own)  # fmt: skip
+            assert done.wait(timeout=10)
+            w.current_thread.join(timeout=5)
+    finally:
+        logger.remove(handler)
+
+    generic = [line for line in lines if line == "GPU Worker 1 (NVIDIA TITAN RTX) picked up: /m/t.mkv"]
+    assert picked == ([] if pickup == "none" else [("/m/t.mkv", "GPU Worker 1 (NVIDIA TITAN RTX)")])
+    assert len(generic) == (0 if pickup == "own" else 1)
+    assert w.completed == 1
+
+
 def test_a_cpu_fallback_inside_a_kinds_step_shows_on_the_worker_row(caplog):
     # The end-picture check decodes a few seconds on the CPU without failing the item: the row says so, as it does for
     # a whole-item CPU rerun, and the next item starts clear.
     from media_preview_generator.jobs.worker import Worker
 
     def process(item, **kwargs):
-        kwargs["fallback_callback"]("decoded a.mkv on the CPU: the GPU decoded no frames")
+        kwargs["fallback_callback"]("decoded a.mkv on the CPU: the GPU read no frames in that part of the file")
         return ItemOutcome("markers_published")
 
     w = Worker(1, "GPU", gpu="NVIDIA", gpu_device="cuda:0", ffmpeg_threads=2)
     _run_custom(w, process)
-    assert w.fallback_active is True and w.fallback_reason == "decoded a.mkv on the CPU: the GPU decoded no frames"
+    assert (
+        w.fallback_active is True
+        and w.fallback_reason == "decoded a.mkv on the CPU: the GPU read no frames in that part of the file"
+    )
     assert w.completed == 1
     _run_custom(w, lambda item, **kwargs: ItemOutcome("markers_published"))
     assert w.fallback_active is False and w.fallback_reason is None

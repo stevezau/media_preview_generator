@@ -252,7 +252,7 @@ Possible causes:
 
 - Thumbnails already exist (use the **Regenerate** option when starting a job to force)
 - File not found (check [path mappings](reference.md#path-mappings))
-- Gone from disk: a newer file replaced it before its job ran (the newer file gets its own preview)
+- Gone from disk: a newer file replaced it before its job ran (the newer file is processed on its own)
 - Invalid file format
 
 ### Why does a worker's ETA show "-"?<a id="why-does-eta-show-calculating-for-so-long"></a>

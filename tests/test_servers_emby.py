@@ -1868,8 +1868,14 @@ class TestGetExternalIdsEdgeCases:
 
     def test_movie_uses_own_provider_ids_with_single_fetch(self, make_server):
         server = make_server()
-        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "862", "Imdb": "tt0114709"}}
+        movie = {
+            "Type": "Movie",
+            "Name": "Toy Story",
+            "ProductionYear": 1995,
+            "ProviderIds": {"Tmdb": "862", "Imdb": "tt0114709"},
+        }
         server._fetch_item_fields = MagicMock(return_value=movie)
+        # The movie's own title and year come with its ids (the Intro & Credits job log names it by them).
         assert server.get_external_ids("m-1") == {
             "kind": "movie",
             "tmdb": "862",
@@ -1877,6 +1883,8 @@ class TestGetExternalIdsEdgeCases:
             "tvdb": None,
             "season": None,
             "episode": None,
+            "title": "Toy Story",
+            "year": 1995,
         }
         server._fetch_item_fields.assert_called_once_with("m-1", "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
 
@@ -2082,6 +2090,47 @@ class TestChapterMarkers:
             }
         )
         assert server.get_chapter_markers("42") == [{"marker_type": "IntroEnd", "start_ms": 2, "name": "ok"}]
+
+
+class TestRuntime:
+    """``get_runtime_ms``: the Inspector's timeline scale for a file whose own length isn't stored yet."""
+
+    def test_ticks_become_milliseconds(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value={"RunTimeTicks": 13_220_004_999})
+        assert server.get_runtime_ms("42") == 1_322_000
+        server._fetch_item_fields.assert_called_once_with("42", "Path")
+
+    @pytest.mark.parametrize(
+        ("user_id", "path", "params", "body"),
+        [
+            ("u1", "/Users/u1/Items/42", {"Fields": "Path"}, {"Id": "42", "RunTimeTicks": 26_400_000_000}),
+            (
+                None,
+                "/Items",
+                {"Ids": "42", "Fields": "Path"},
+                {"Items": [{"Id": "42", "RunTimeTicks": 26_400_000_000}]},
+            ),
+        ],
+        ids=["per-user", "api-key"],
+    )
+    def test_reads_the_length_on_either_route(self, make_server, user_id, path, params, body):
+        server = make_server(user_id=user_id)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = body
+        server._request = MagicMock(return_value=resp)
+        assert server.get_runtime_ms("42") == 2_640_000
+        server._request.assert_called_once_with("GET", path, params=params)
+
+    @pytest.mark.parametrize(
+        "item",
+        [None, {}, {"RunTimeTicks": None}, {"RunTimeTicks": 0}, {"RunTimeTicks": "123"}, {"RunTimeTicks": True}],
+        ids=["unfetched", "missing", "null", "zero", "text", "bool"],
+    )
+    def test_no_usable_length_is_none(self, make_server, item):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=item)
+        assert server.get_runtime_ms("42") is None
 
 
 def _json_resp(status, body=None, *, json_error=False):

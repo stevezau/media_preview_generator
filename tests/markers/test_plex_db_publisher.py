@@ -2091,6 +2091,22 @@ class TestNotMadeForThisFile:
         assert answer is None
         assert time.monotonic() - start < 0.5 + plex_db.WAIT_SLICE_S + 0.5
 
+    def test_a_shorter_db_timeout_bounds_the_read(self, tmp_path, monkeypatch):
+        # The Inspector builds its publisher with a shorter db_timeout_s: a page load waits that long, not the job's.
+        monkeypatch.setattr(plex_db, "STALE_READ_WAIT_S", 30.0)
+        folder, db = self._item(tmp_path, self.BONES_INTRO)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        pub._db_timeout_s = 0.3
+        lock = plex_db._db_lock(str(db))
+        lock.acquire()
+        start = time.monotonic()
+        try:
+            answer = pub.types_not_made_for_file("7")
+        finally:
+            lock.release()
+        assert answer is None
+        assert time.monotonic() - start < 0.3 + plex_db.WAIT_SLICE_S + 0.5
+
     def test_the_publishers_read_stops_when_the_job_is_cancelled(self, tmp_path, monkeypatch):
         monkeypatch.setattr(plex_db, "STALE_READ_WAIT_S", 30.0)
         folder, db = self._item(tmp_path, self.BONES_INTRO)

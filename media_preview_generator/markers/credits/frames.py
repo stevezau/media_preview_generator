@@ -33,6 +33,7 @@ from ..probe import (
     ProbeTimeoutError,
     VideoPacket,
     ffprobe_path_for,
+    last_video_time_s,
     probe_media,
     video_packets,
 )
@@ -96,7 +97,16 @@ class ReadStalledError(FrameDecodeError):
 
 
 class GpuDecodeError(FrameDecodeError):
-    """The GPU decode failed or gave no frames; the worker reruns the file on the CPU."""
+    """The GPU decode failed; the worker reruns the file on the CPU."""
+
+
+class GpuReadNothingError(GpuDecodeError):
+    """The GPU decode exited cleanly without a frame: the GPU missed them, or the file has none there (it ends before
+    its stated length). The credit text detector reads the same file on the CPU to tell which, rather than blaming the
+    GPU (``detector.detect_credits_text``); anything else that meets it treats it as any GPU failure."""
+
+    def __init__(self, message: str = "the GPU read no frames in that part of the file") -> None:
+        super().__init__(message)
 
 
 class DecodeTimeoutError(FrameDecodeError):
@@ -290,6 +300,49 @@ def container_start_s(
     return (probe.start_time_ms or 0) / 1000.0
 
 
+def readable_video_s(
+    path: str,
+    ffmpeg: str,
+    *,
+    from_s: float,
+    cancel_check: Callable[[], bool] | None = None,
+    timeout_s: float = PROBE_TIMEOUT_S,
+) -> float | None:
+    """How far into the file its video can be read, for a tail that gave no frames on the CPU: a file cut short (a
+    download or copy that stopped) keeps its stated duration, and its tail is past its end.
+
+    Read from ``from_s`` (the tail's start) to the end, and from the start of the file when that read finds no packet
+    (an MP4's index pointing past its end). ffprobe seeks on the stream's own times, so the container's start time
+    (:func:`container_start_s`) is added first: a recording whose times start 30000 s in would otherwise be read whole.
+    Each probe has the probe's own time limit.
+
+    Args:
+        path: The media file.
+        ffmpeg: The ffmpeg binary (ffprobe is taken from beside it).
+        from_s: Where the tail starts, in seconds from the start of the file.
+        cancel_check: True once the job is cancelled; checked before probing.
+        timeout_s: Hard limit for each probe (plus ``probe.KILL_WAIT_S``).
+
+    Returns:
+        Seconds from the start of the file to the last video packet; None when that can't be told (ffprobe failed,
+        timed out, wasn't started for earlier stuck ones, or read no packet).
+
+    Raises:
+        DecodeCancelledError: Already cancelled (nothing is probed).
+    """
+    name = os.path.basename(path)
+    ffprobe = ffprobe_path_for(ffmpeg)
+    try:
+        start_s = container_start_s(path, ffmpeg, cancel_check=cancel_check, timeout_s=timeout_s)
+        end_s = last_video_time_s(path, ffprobe=ffprobe, from_s=from_s + start_s, timeout_s=timeout_s)
+        if end_s is None:
+            end_s = last_video_time_s(path, ffprobe=ffprobe, from_s=None, timeout_s=timeout_s)
+    except (FrameDecodeError, ProbeError) as exc:
+        logger.debug("Couldn't tell how far {} can be read: {}", name, exc)
+        return None
+    return end_s
+
+
 def keyframe_thinning(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool] | None = None,
                       timeout_s: float = PROBE_TIMEOUT_S) -> KeyframeThinning:  # fmt: skip
     """Which packets the keyframe pass drops before the decoder, from one ffprobe of the first video packets.
@@ -304,7 +357,7 @@ def keyframe_thinning(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool
       is kept per ``INTRA_ONLY_SPACING_S`` over their frame interval.
     - A codec whose decoder ignores ``-skip_frame`` (``SKIP_FRAME_IGNORED``: VP9): its packets not flagged as
       keyframes are dropped. A file whose container flags none in the tail gives the pass no frames, like any file
-      without a keyframe in its tail: the GPU decode fails, and the worker's CPU rerun finds no roll.
+      without a keyframe in its tail: the CPU reads the tail again after the GPU and finds no roll either.
 
     Thinning saves the decode and the text detection, not the reading: the tail is still read from disk in full.
 
@@ -466,7 +519,8 @@ def run_decode(
 
     Raises:
         DecodeCancelledError: Cancelled (ffmpeg is killed).
-        GpuDecodeError: The GPU decode exited non-zero or gave no frames.
+        GpuReadNothingError: The GPU decode exited cleanly without a frame.
+        GpuDecodeError: The GPU decode exited non-zero.
         DecodeTimeoutError: The decode (on the GPU or the CPU) ran past ``timeout_s``; ffmpeg is killed.
         FrameDecodeError: ffmpeg couldn't be started, a CPU decode exited non-zero, text detection answered boxes for a
             number of frames it wasn't asked or boxes that aren't four numbers each, or a clean exit wrote a number of
@@ -561,7 +615,7 @@ def run_decode(
             raise GpuDecodeError(_gpu_failure(returncode, lines, name))
         raise FrameDecodeError(_with_ffmpegs_error(f"ffmpeg exited {returncode} decoding {name} on the CPU", lines))
     if not boxes and hw_active:
-        raise GpuDecodeError(f"the GPU decoded no frames from {name}")
+        raise GpuReadNothingError()
     pts = [_parse_pts(value, pts_offset_s) for value in _PTS_RE.findall(stderr)]
     if len(pts) != len(boxes):
         # ffmpeg exited cleanly, so a showinfo line per frame is the contract. Pairing anyway would put a frame's boxes

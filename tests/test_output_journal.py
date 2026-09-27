@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from media_preview_generator.output.journal import (
     JOURNAL_SCHEMA_VERSION,
@@ -305,3 +306,171 @@ class TestClearMeta:
         out = tmp_path / "ghost.bif"
         # Never created.
         clear_meta([out])  # no exception
+
+
+def _copy_of(original, path, *, mtime: int):
+    """Write a byte-identical copy of ``original`` at ``path`` with its own mtime."""
+    path.write_bytes(original.read_bytes())
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+class TestOutputSharedByCopies:
+    """Plex names a bundle after a hash of the file's content, so copies of one
+    video share an ``index-sd.bif``. Live case: Boxing S2026E94 and its "pt2"
+    copy (same 12,170,979,064 bytes, same Plex part hash) rebuilt the shared
+    BIF every night because each found the other's fingerprint on it."""
+
+    def test_copies_sharing_an_output_both_stay_fresh_when_each_has_published(self, tmp_path):
+        original = tmp_path / "Event - S2026E94.mkv"
+        original.write_bytes(b"x" * 500)
+        os.utime(original, (1_000_000, 1_000_000))
+        copy = _copy_of(original, tmp_path / "Event - S2026E94 - pt2.mkv", mtime=2_000_000)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        write_meta([bif], str(original), publisher="plex_bundle")
+        write_meta([bif], str(copy), publisher="plex_bundle")
+
+        assert outputs_fresh_for_source([bif], str(original)) is True
+        assert outputs_fresh_for_source([bif], str(copy)) is True
+        sources = json.loads(_meta_path_for(bif).read_text())["sources"]
+        assert [(s["path"], s["mtime"], s["size"]) for s in sources] == [
+            (str(original), 1_000_000, 500),
+            (str(copy), 2_000_000, 500),
+        ]
+
+    def test_copy_not_yet_recorded_is_not_fresh_when_output_has_another_source(self, tmp_path):
+        original = tmp_path / "a.mkv"
+        original.write_bytes(b"x" * 500)
+        os.utime(original, (1_000_000, 1_000_000))
+        copy = _copy_of(original, tmp_path / "b.mkv", mtime=2_000_000)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        write_meta([bif], str(original))
+
+        assert outputs_fresh_for_source([bif], str(copy)) is False
+
+    def test_source_of_a_different_size_is_dropped_when_output_rebuilt(self, tmp_path):
+        """The output now holds frames from the new publisher only; an entry
+        whose size differs can't be a copy of it, so it must not vouch for it."""
+        first = tmp_path / "a.mkv"
+        first.write_bytes(b"x" * 500)
+        os.utime(first, (1_000_000, 1_000_000))
+        other = tmp_path / "b.mkv"
+        other.write_bytes(b"y" * 900)
+        os.utime(other, (2_000_000, 2_000_000))
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        write_meta([bif], str(first))
+        write_meta([bif], str(other))
+
+        assert outputs_fresh_for_source([bif], str(first)) is False
+        assert outputs_fresh_for_source([bif], str(other)) is True
+        sources = json.loads(_meta_path_for(bif).read_text())["sources"]
+        assert [s["path"] for s in sources] == [str(other)]
+
+    def test_republish_replaces_its_own_entry_when_source_replaced(self, tmp_path):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 500)
+        os.utime(source, (1_000_000, 1_000_000))
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+        write_meta([bif], str(source))
+
+        os.utime(source, (3_000_000, 3_000_000))  # same size, new file
+        write_meta([bif], str(source))
+
+        sources = json.loads(_meta_path_for(bif).read_text())["sources"]
+        assert [(s["path"], s["mtime"]) for s in sources] == [(str(source), 3_000_000)]
+
+    def test_meta_written_before_sources_existed_is_read_and_kept_when_copy_publishes(self, tmp_path):
+        """Upgrading must not force a regeneration storm: a single-source
+        ``.meta`` from the previous release still proves freshness, and a copy
+        publishing next to it keeps that entry."""
+        original = tmp_path / "a.mkv"
+        original.write_bytes(b"x" * 500)
+        os.utime(original, (1_000_000, 1_000_000))
+        copy = _copy_of(original, tmp_path / "b.mkv", mtime=2_000_000)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+        _meta_path_for(bif).write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "source_path": str(original),
+                    "source_mtime": 1_000_000,
+                    "source_size": 500,
+                    "publisher": "plex_bundle",
+                }
+            )
+        )
+        assert outputs_fresh_for_source([bif], str(original)) is True
+
+        write_meta([bif], str(copy), publisher="plex_bundle")
+
+        assert outputs_fresh_for_source([bif], str(original)) is True
+        assert outputs_fresh_for_source([bif], str(copy)) is True
+
+    def test_keeps_both_copies_when_they_publish_at_the_same_moment(self, tmp_path):
+        """Each writer must merge into what the other wrote, not into what it read before."""
+        import threading
+        from unittest.mock import patch
+
+        from media_preview_generator.output import journal
+
+        original = tmp_path / "a.mkv"
+        original.write_bytes(b"x" * 500)
+        os.utime(original, (1_000_000, 1_000_000))
+        copy = _copy_of(original, tmp_path / "b.mkv", mtime=2_000_000)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        both_read = threading.Barrier(2, timeout=0.5)
+        real_read = journal._read_sources
+
+        def read_then_wait(meta_path):
+            sources = real_read(meta_path)
+            try:
+                both_read.wait()  # without the lock, both reads see no sources
+            except threading.BrokenBarrierError:
+                pass  # the lock keeps the other writer out; carry on alone
+            return sources
+
+        with patch.object(journal, "_read_sources", side_effect=read_then_wait):
+            writers = [threading.Thread(target=write_meta, args=([bif], str(p))) for p in (original, copy)]
+            for w in writers:
+                w.start()
+            for w in writers:
+                w.join()
+
+        sources = json.loads(_meta_path_for(bif).read_text())["sources"]
+        assert sorted(s["path"] for s in sources) == [str(original), str(copy)]
+
+    def test_does_not_raise_when_the_existing_meta_cannot_be_read(self, tmp_path):
+        from unittest.mock import patch
+
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x")
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        with patch(
+            "media_preview_generator.output.journal._read_sources", side_effect=PermissionError("stale NFS handle")
+        ):
+            write_meta([bif], str(source))  # must not raise
+
+        assert not _meta_path_for(bif).exists()
+
+    def test_leaves_no_temp_files_behind_when_written(self, tmp_path):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x")
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        write_meta([bif], str(source))
+        write_meta([bif], str(source))
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["index-sd.bif", "index-sd.bif.meta", "movie.mkv"]

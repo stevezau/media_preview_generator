@@ -28,6 +28,8 @@ from loguru import logger
 
 from ..config.paths import is_path_excluded
 from ..job_kinds import ItemOutcome, KindHandlers
+from ..jobs.worker import JOB_LOG_SKIP
+from ..processing.multi_server import source_replaced_reason
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch
@@ -36,7 +38,7 @@ from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
 from .carry_over import carry_over, is_carried_over, previous_decisions
-from .credits.detector import credits_text_spec
+from .credits.detector import CPU_RECHECK_PHASE, CUT_SHORT, credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
@@ -55,21 +57,33 @@ from .decide import (
 )
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, is_season_folder, merge_ids
 from .job_log import (
+    ALREADY_DECIDED,
     SEASON_RECHECK_LABEL,
     RunNotes,
     SeasonEpisode,
     ServerResult,
     clock,
+    compact_line,
     decide_again_line,
-    file_lines,
+    decided_line,
+    display_name,
+    done_line,
+    file_title,
+    head_line,
+    is_unchanged_result,
     kept_types,
     online_recheck_line,
+    path_year,
+    pickup_line,
+    read_phrase,
     review_note,
     season_line,
     season_of,
+    sent_line,
     show_name,
-    source_answers,
+    source_lines,
     totals_line,
+    write_lines,
 )
 from .locks import FILE_RUN_LOCKS
 from .locks import KeyedLocks as _KeyedLocks
@@ -145,6 +159,8 @@ from .sources.server_markers import (
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient, is_key_refusal
 from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, PreviousDecision, get_marker_store
+from .titles import NO_TITLE, TITLE_CACHE, title_of
+from .titles import look_up as look_up_title
 
 NO_DATA_RETRY = timedelta(days=14)
 # TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
@@ -255,8 +271,9 @@ def _no_phase(_text: str) -> None:
 
 
 class DetectorUnavailableError(Exception):
-    """A local detector couldn't answer this time (its tool failed, the job was cancelled). Nothing is stored for it,
-    so the next run asks it again."""
+    """A local detector couldn't answer this time (its tool failed, the job was cancelled). No answer is stored for it,
+    so the next run asks it again, unless the detector itself gives up at once there (credit text on a file that timed
+    out lately or was found cut short)."""
 
 
 @dataclass(frozen=True)
@@ -395,6 +412,7 @@ class PipelineContext:
             processing paused (Pause all, quiet hours) or this job paused by its schedule's stop time
             (``job_runner``). A pause of this job by hand isn't one: it gives the job's slot back and lets the running
             file finish. Handed to the detectors on a worker; None: never.
+        monotonic: The clock the job log's step times are read from (tests use a fake one).
     """
 
     registry: Any
@@ -420,6 +438,7 @@ class PipelineContext:
     busy_writes_retried: bool = False
     retry_file_cap: int = 500
     freeze_check: Callable[[], bool] | None = None
+    monotonic: Callable[[], float] = time.monotonic
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -851,6 +870,7 @@ class _ItemServers:
         self._item_ids: dict[str, str | None] = {}
         self._asked_ids = False
         self._server_ids: MediaIds | None = None
+        self._title: tuple[str | None, object] = NO_TITLE
         self._markers: dict[str, list[Candidate] | None] = {}
         self._parts: dict[str, dict[str, list[int | None] | None]] = {}
         self._stale: dict[str, frozenset[MarkerType] | None] = {}
@@ -890,8 +910,28 @@ class _ItemServers:
                     continue
                 if isinstance(raw, dict):
                     self._server_ids = ids_from_server_dict(raw)
+                    self._title = title_of(raw)
                     break
         return self._server_ids
+
+    def answered_title(self) -> tuple[str | None, object] | None:
+        """The title and year in the external ids answer this run already has, without asking.
+
+        Returns:
+            ``(title, year)``; ``titles.NO_TITLE`` when the run asked and no server gave a title; None when the run
+            didn't ask.
+        """
+        return self._title if self._asked_ids else None
+
+    def title_asks(self) -> list[Callable[[], object]]:
+        """Per owning server whose item id for the file this run already knows (a hint, or looked up for another step),
+        a call for its external ids answer; a server whose id isn't known yet isn't asked for it."""
+        asks = []
+        for owner in self.owning:
+            item_id = self._item_ids.get(owner.config.id) or self._hints.get(owner.config.id)
+            if item_id:
+                asks.append(lambda server=owner.server, item_id=str(item_id): server.get_external_ids(item_id))
+        return asks
 
     def markers(self, owner: _Owning, item_id: str, duration_ms: int | None) -> list[Candidate] | None:
         """The server's markers for this file (``read_server_markers``), read at most once per run.
@@ -2986,6 +3026,23 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
         ctx.request_followups(stale)
 
 
+def _not_on_disk(path: str, ctx: PipelineContext) -> ItemOutcome:
+    """The outcome of a file not on disk, by previews' rule (``source_replaced_reason``): one a newer file replaced in
+    its folder is gone from disk for good, and its job queues no retry (the newer file is run on its own); any other is
+    not found, and a webhook's job tries it again (it may still be copying in)."""
+    replaced = source_replaced_reason(path, ctx.registry)
+    if replaced is None:
+        return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
+    # The app log's account; the job's log gets the file's one line (``_log_gone``).
+    logger.bind(**{JOB_LOG_SKIP: True}).info(
+        "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); skipping without "
+        "a retry. The newer file gets its own Intro & Credits run from its own webhook or the next scan.",
+        path,
+        replaced.removeprefix("Skipped: "),
+    )
+    return ItemOutcome(FileOutcome.SOURCE_GONE.value, replaced)
+
+
 def _attempt(
     item: ProcessableItem,
     ctx: PipelineContext,
@@ -3020,7 +3077,7 @@ def _attempt(
         # Held under the file's run lock; the row is read before its disk is checked.
         if mark_if_missing(ctx.store, ctx.store.get_file(path), list(ctx.registry.configs())):
             ctx.note_missing()
-        return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
+        return _not_on_disk(path, ctx)
     except OSError as exc:
         return ItemOutcome(FileOutcome.FAILED.value, f"Couldn't read the file: {type(exc).__name__}")
     if not stat.S_ISREG(st.st_mode):
@@ -3078,6 +3135,7 @@ def _attempt(
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
 
     types = _enabled_types(ctx.settings, ids)
+    notes.types, notes.is_episode = types, ids.is_episode
     # Season step for chapters (finding F1): an intro chapter far longer than the season's others needs a second source.
     # Siblings are compared before any detector can hand this file to a worker.
     intro_limit = None
@@ -3121,7 +3179,7 @@ def _attempt(
             and not _stale_evidence(ctx, rec, source)
             and not _decided_with_a_due_answer(ctx, rec, source, decisions, types)
         ):
-            notes.not_asked[source] = "not needed (already decided)"
+            notes.not_asked[source] = ALREADY_DECIDED
             skipped_decided[source] = types
             continue
         if cancelled():
@@ -3188,7 +3246,7 @@ def _attempt(
             elif not any(spec.types & types for spec in here):
                 notes.not_asked[source] = "doesn't apply to this file"
             elif not pending:
-                notes.not_asked[source] = "not needed (already decided)"
+                notes.not_asked[source] = ALREADY_DECIDED
                 if not gather_all:
                     answerable = frozenset(t for spec in here for t in spec.types & types)
                     skipped_decided[source] = frozenset(t for t in answerable if _decided_beyond_chapters(decisions[t]))
@@ -3211,26 +3269,36 @@ def _attempt(
                     notes.not_asked[source] = f"not read (every server keeps its own {kept_names})"
                 pending = reading
             if not local and any(_needs_worker(ctx, rec, spec) for spec in pending):
+                _note_title(notes, item, ids, servers)  # the worker's pickup line names the file
                 return None  # sources already refreshed stay marked; the worker refreshes the rest
             for spec in pending:
+                fell_back: list[str] = []
+                phases: list[str] = []
+                read_started = ctx.monotonic()
                 unanswered = _run_detector(
                     ctx,
                     rec,
                     spec,
                     gpu=gpu,
                     gpu_device_path=gpu_device_path,
-                    phase=phase,
+                    phase=_noting(phases, phase),
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                     ffmpeg_threads=ffmpeg_threads,
-                    fallback_callback=fallback_callback,
+                    fallback_callback=_noting(fell_back, fallback_callback),
                     gpu_worker=gpu_worker,
+                )
+                notes.reads[spec.source] = read_phrase(
+                    gpu is not None,
+                    ctx.monotonic() - read_started,
+                    fell_back[0] if fell_back else "",
+                    gpu_read_nothing=CPU_RECHECK_PHASE in phases,
                 )
                 if unanswered is None:
                     for stored in spec.stored_sources:
                         notes.answered(stored)
                 else:
-                    notes.unanswered[spec.source] = f"no answer this time ({unanswered})"
+                    notes.unanswered[spec.source] = _detector_unanswered(unanswered)
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
         _mark_refreshed(ctx, path, source)
@@ -3295,7 +3363,19 @@ def _attempt(
     if outcome is not FileOutcome.FAILED:
         ctx.decided_by.add(decided_groups(decisions))
     try:
-        _log_file(ctx, rec, owning, decisions, types, rows, notes, skipped, changed=changed)
+        _log_file(
+            ctx,
+            rec,
+            owning,
+            decisions,
+            types,
+            rows,
+            notes,
+            skipped,
+            changed=changed,
+            outcome=outcome,
+            title=lambda: _note_title(notes, item, ids, servers),
+        )
     except Exception as exc:
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
@@ -3331,13 +3411,13 @@ def _unstored_lookup(source: Source, result: LookupResult | None) -> str:
 def _server_result(
     ctx: PipelineContext, rec: FileRecord, row: dict, decisions: dict[MarkerType, TypeDecision]
 ) -> ServerResult:
-    """A server's row with the types of ours it has now and the types it keeps as its own."""
-    ours: frozenset[MarkerType] = frozenset()
+    """A server's row with our markers it has now and the types it keeps as its own."""
+    ours: tuple[Marker, ...] = ()
     item_kept: frozenset[MarkerType] = frozenset()
     shown = (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value, ServerStatus.WAITING.value)
     state = ctx.store.get_publish_state(rec.id, row["server_id"]) if row["status"] in shown else None
     if state is not None:
-        ours = frozenset(m.type for m in state.markers)
+        ours = tuple(state.markers)
         if state.item_id:
             # Another version of the item may be publishing: its row is read under the item's lock (see _ITEM_LOCKS).
             with _ITEM_LOCKS.hold((row["server_id"], state.item_id)):
@@ -3368,6 +3448,81 @@ def _found_online(ctx: PipelineContext, rec: FileRecord, notes: RunNotes) -> boo
     )
 
 
+def _listed_title(item: ProcessableItem) -> str:
+    """The title a server's library listing gave the item; "" for a file a sender or the store named (its title is its
+    file name) or a listing that had no title (its path, or "<unknown>")."""
+    title = (item.title or "").strip()
+    if not item.server_id or not title or title.startswith("<") or "/" in title or "\\" in title:
+        return ""
+    return "" if title == os.path.basename(item.canonical_path) else title
+
+
+def _note_title(notes: RunNotes, item: ProcessableItem, ids: MediaIds, servers: _ItemServers) -> str:
+    """The file's title for its job log lines, found once per job (``job_log.file_title``). Never raises.
+
+    An episode is named from its path, with no lookup. Anything else by its server's title: from the answer this run
+    already has, then the title this process kept (``titles.TITLE_CACHE``), then the title its library listing gave
+    (the year from its file name); only when the file's server was never asked this process, one lookup of at most
+    ``titles.LOOKUP_TIMEOUT_S``. Without a title, its file name. Called once the run's decisions are made (its log
+    lines, or its hand-off to a worker), outside any publisher's or Plex database's lock.
+    """
+    if notes.title:
+        return notes.title
+    path = item.canonical_path
+    try:
+        if ids.is_episode or ids_from_path(path).is_episode:
+            notes.title = display_name(path)
+            return notes.title
+        answer = servers.answered_title()
+        if answer is not None:
+            TITLE_CACHE.put(path, answer)  # the run's own ask counts as the file's one lookup
+        found = answer if answer is not None and answer[0] else TITLE_CACHE.get(path)
+        if found is not None and found[0]:
+            notes.title = file_title(path, *found)
+        elif listed := _listed_title(item):
+            notes.title = file_title(path, listed, path_year(path))
+        elif found is None:
+            notes.title = file_title(path, *look_up_title(path, servers.title_asks()))
+        else:
+            notes.title = display_name(path)
+    except Exception as exc:
+        logger.debug("Couldn't name {} for the job log: {}", path, type(exc).__name__)
+        notes.title = display_name(path)
+    return notes.title
+
+
+def _noting(noted: list[str], callback: Callable[[str], None] | None) -> Callable[[str], None] | None:
+    """A detector's ``fallback_callback`` or ``phase_callback`` that also keeps what it was told (why a step fell back
+    to the CPU, the steps it went through), for the detector's job log line."""
+    if callback is None:
+        return None
+
+    def told(text: str) -> None:
+        noted.append(text)
+        callback(text)
+
+    return told
+
+
+def _detector_unanswered(reason: str) -> str:
+    """How a detector's line says it had no answer: a file found cut short says so plainly (it isn't read again until it
+    changes); anything else had no answer this time."""
+    return reason if reason.startswith(CUT_SHORT) else f"no answer this time ({reason})"
+
+
+def _start_stage(notes: RunNotes, started: float, *, worker: str, cpu_rerun: bool) -> None:
+    """Note which stage runs the file and when it started; a stage run again on the same worker (its CPU rerun, a retry
+    after the file changed) keeps its first start."""
+    if notes.started is None or notes.worker != worker:
+        notes.started = started
+    notes.worker = worker
+    notes.cpu_rerun = cpu_rerun
+
+
+def _stage_seconds(ctx: PipelineContext, notes: RunNotes) -> float | None:
+    return None if notes.started is None else max(0.0, ctx.monotonic() - notes.started)
+
+
 def _log_file(
     ctx: PipelineContext,
     rec: FileRecord,
@@ -3379,13 +3534,17 @@ def _log_file(
     skipped: dict[Source, str],
     *,
     changed: bool,
+    outcome: FileOutcome,
+    title: Callable[[], str],
 ) -> None:
-    """Log what each source answered, what was decided and what was sent where (the job log's lines for this file).
+    """Log the file's lines (``job_log``): what each source answered, what was decided, what was sent where and how long
+    it took, as one block; or one line when its answer didn't change and its servers are up to date. A failed file's
+    block is at WARNING.
 
     A Season job (and a TheIntroDB recheck) logs only files whose decisions changed; the rest go into their season's
     summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there. A
     decide-again job logs only files whose decisions changed too; the rest go into its one summary line. The weekly
-    online re-check also logs a file an online database now has an entry for.
+    online re-check also logs a file an online database now has an entry for. A failed file is always logged.
     """
     season = decided_again = rechecked_online = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
@@ -3397,25 +3556,86 @@ def _log_file(
     if ctx.online_recheck:
         rechecked_online = (_found_online(ctx, rec, notes), changed)
     ctx._note_finished(rows, season, decided_again, rechecked_online)
+    failed = outcome is FileOutcome.FAILED
+    newly_found = rechecked_online is not None and rechecked_online[0]
     grouped = season is not None or decided_again is not None or rechecked_online is not None
-    if grouped and not changed and not (rechecked_online is not None and rechecked_online[0]):
+    if grouped and not changed and not newly_found and not failed:
+        notes.logged = True  # its season's (or the job's) summary line names it
         return
-    sources = source_answers(
+    servers = [_server_result(ctx, rec, row, decisions) for row in rows]
+    name = title()
+    if not changed and not newly_found and not failed and is_unchanged_result(rows):
+        write_lines([compact_line(name, servers, decisions, types)])
+        notes.logged = True
+        return
+    evidence = ctx.store.evidence_rows(rec.id)
+    is_episode = bool(notes.is_episode)
+    # A worker's pickup line opened the file's lines; a file the checking thread finished opens them here.
+    lines = [] if notes.worker else [head_line(name, types, is_episode=is_episode)]
+    lines += source_lines(
         ctx.settings.ordered_enabled_sources(),
-        ctx.store.evidence_rows(rec.id),
+        evidence,
         [(owner.config.id, owner.config.name) for owner in owning],
         notes,
         skipped,
         _UNUSED_SERVER_MARKERS,
-    )
-    text = file_lines(
-        rec.canonical_path,
         decisions=decisions,
         types=types,
-        servers=[_server_result(ctx, rec, row, decisions) for row in rows],
-        sources=sources,
+        is_episode=is_episode,
     )
-    logger.info("{}", text)
+    lines.append(decided_line(decisions, types, evidence))
+    lines += [sent_line(server) for server in servers]
+    lines.append(
+        done_line(name, _stage_seconds(ctx, notes), worker=notes.worker, cpu_rerun=notes.cpu_rerun, failed=failed)
+    )
+    write_lines(lines, "WARNING" if failed else "INFO")
+    notes.logged = True
+
+
+def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str) -> None:
+    """Log the block of a file that failed before its lines were written (it couldn't be read, say), at WARNING.
+    Never raises: the file already has its outcome."""
+    try:
+        title = notes.title or display_name(path)
+        path_ids = ids_from_path(path)
+        types = notes.types if notes.types is not None else _enabled_types(ctx.settings, path_ids)
+        is_episode = notes.is_episode if notes.is_episode is not None else path_ids.is_episode
+        lines = [] if notes.worker else [head_line(title, types, is_episode=is_episode)]
+        lines.append(f"  Failed: {message}")
+        lines.append(
+            done_line(title, _stage_seconds(ctx, notes), worker=notes.worker, cpu_rerun=notes.cpu_rerun, failed=True)
+        )
+        write_lines(lines, "WARNING")
+        notes.logged = True
+    except Exception as exc:
+        logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
+
+
+def _log_gone(path: str, notes: RunNotes, message: str) -> None:
+    """Log the one line of a file a newer file replaced (``_not_on_disk``). Never raises."""
+    try:
+        write_lines([f"{notes.title or display_name(path)}: {message}"])
+        notes.logged = True
+    except Exception as exc:
+        logger.warning("Couldn't write the job log line for {}: {}", path, type(exc).__name__)
+
+
+def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> None:
+    """Log that a worker started a file (``KindHandlers.pickup_fn``): its title and what it is checked for, as the
+    file's checking stage found them (from its path when no checking stage ran it).
+
+    Args:
+        item: The file.
+        worker: The worker's display name.
+        ctx: The job's context.
+    """
+    path = item.canonical_path
+    notes = ctx._run_notes.get(path)
+    path_ids = ids_from_path(path)
+    title = (notes.title if notes is not None else "") or display_name(path)
+    types = notes.types if notes is not None and notes.types is not None else _enabled_types(ctx.settings, path_ids)
+    is_episode = notes.is_episode if notes is not None and notes.is_episode is not None else path_ids.is_episode
+    write_lines([pickup_line(worker, title, types, is_episode=is_episode)])
 
 
 def _run(
@@ -3432,12 +3652,15 @@ def _run(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
+    worker_name: str | None = None,
 ) -> ItemOutcome | None:
     """Run one stage of a file under its run lock (``check_item``, ``process_item``).
 
     ``pause_check`` goes to the detectors (a worker's ``ctx.freeze_check``); ``job_paused`` is the dispatcher's pause
     for the job, which only decides whether a worker waiting for another job's run of the file gives it back.
+    ``worker_name`` names the worker in the file's job log lines.
     """
+    started = ctx.monotonic()
     if cancel_check and cancel_check():
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
     if is_extra(item.canonical_path):
@@ -3463,6 +3686,7 @@ def _run(
             return True
         return holder_frozen or waited_s >= WORKER_FILE_WAIT_NO_RETRY_S
 
+    notes: RunNotes | None = None
     for _ in range(MAX_ATTEMPTS):
         try:
             wait_s = None if local else 0.0
@@ -3485,6 +3709,12 @@ def _run(
                 with ctx._running(path):
                     skipped = ctx._pending_skips.pop(path, {})
                     notes = ctx._run_notes.pop(path, None) or RunNotes()
+                    _start_stage(
+                        notes,
+                        started,
+                        worker=(worker_name or "a worker") if local else "",
+                        cpu_rerun=local and gpu_worker and gpu is None,
+                    )
                     try:
                         outcome = _attempt(
                             item,
@@ -3516,14 +3746,22 @@ def _run(
                     ctx._refreshed.pop(path, None)
                     ctx._answers_before.pop(path, None)
                     _count_skipped(ctx, skipped)
+                    if (
+                        not notes.logged
+                        and outcome.outcome_key == FileOutcome.FAILED.value
+                        and outcome.message != _CANCELLED
+                    ):
+                        _log_failure(ctx, path, notes, outcome.message)
+                    elif not notes.logged and outcome.outcome_key == FileOutcome.SOURCE_GONE.value:
+                        _log_gone(path, notes, outcome.message)
                     return outcome
         except _FileChangedError:
             logger.info("{} changed while its markers were detected; detecting again", path)
             ctx._answers_before.pop(path, None)  # what the new file had stored is read again
     _forget_run(ctx, path)
-    return ItemOutcome(
-        FileOutcome.FAILED.value, "The file kept changing while it was analysed; it will be tried again on the next run"
-    )
+    message = "The file kept changing while it was analysed; it will be tried again on the next run"
+    _log_failure(ctx, path, notes or RunNotes(), message)
+    return ItemOutcome(FileOutcome.FAILED.value, message)
 
 
 def check_item(
@@ -3559,6 +3797,7 @@ def process_item(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
+    worker_name: str | None = None,
 ) -> ItemOutcome:
     """Worker stage: the same steps plus local detectors on the worker's GPU/CPU.
 
@@ -3584,6 +3823,7 @@ def process_item(
         fallback_callback: Shows on the worker's row that a step fell back from the GPU to the CPU inside a detector.
         gpu_worker: Whether a GPU worker runs the file, its CPU rerun included (``gpu`` None): CPU text detection it
             asks for then is its own, not one of the CPU workers' (``TextDetectorPool.detect_boxes``).
+        worker_name: The worker's display name, for the file's job log lines.
 
     Returns:
         The item's outcome.
@@ -3601,6 +3841,7 @@ def process_item(
         ffmpeg_threads=ffmpeg_threads,
         fallback_callback=fallback_callback,
         gpu_worker=gpu_worker,
+        worker_name=worker_name,
     )
 
 
@@ -3616,6 +3857,7 @@ def kind_handlers(ctx: PipelineContext) -> KindHandlers:
     return KindHandlers(
         check_fn=lambda item, *, cancel_check=None: check_item(item, ctx=ctx, cancel_check=cancel_check),
         process_fn=lambda item, **kwargs: process_item(item, ctx=ctx, **kwargs),
+        pickup_fn=lambda item, worker: log_pickup(item, worker, ctx=ctx),
         outcome_keys=OUTCOME_KEYS,
         check_label="Looking up markers…",
         check_worker_label="Intro & Credits",

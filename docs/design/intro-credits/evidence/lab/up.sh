@@ -21,19 +21,19 @@ if [[ "$HERE" != /* || ! -d "${HERE}/synth" || ! -f "${HERE}/env" ]]; then
     echo "not a lab folder: ${HERE} (needs an absolute path with synth/ and env; set MLAB_DIR)" >&2
     exit 1
 fi
-MV=(-v "/data_16tb2/TV Shows/Rick and Morty (2013) {tvdb-275274}/Season 01:/media/tv/Rick and Morty (2013)/Season 01:ro"
-    -v "/data_16tb/TV Shows/South Park (1997) {tvdb-75897}/Season 01:/media/tv/South Park (1997)/Season 01:ro"
-    -v "/data_16tb/Movies/Toy Story (1995) {tmdb-862}:/media/movies/Toy Story (1995):ro"
-    -v "/data_16tb/Movies/Up (2009) {tmdb-14160}:/media/movies/Up (2009):ro"
-    -v "${HERE}/synth/Synth Show (2020):/media/synth/Synth Show (2020):ro"
-    -v "${HERE}/synth/Synth Chapters (2021):/media/synth-chapters/Synth Chapters (2021):ro"
-    -v "${HERE}/synth/Synth Audio (2022):/media/synth-audio/Synth Audio (2022):ro"
-    -v "${HERE}/synth/Synth Movie (2023):/media/synth-movies/Synth Movie (2023):ro"
-    -v "${HERE}/synth/Synth Credits (2024):/media/synth-credits/Synth Credits (2024):ro"
-    -v "${HERE}/synth/Synth Credits Open (2025):/media/synth-credits/Synth Credits Open (2025):ro")
+MV=(--mount "type=bind,src=/data_16tb2/TV Shows/Rick and Morty (2013) {tvdb-275274}/Season 01,dst=/media/tv/Rick and Morty (2013)/Season 01,readonly"
+    --mount "type=bind,src=/data_16tb/TV Shows/South Park (1997) {tvdb-75897}/Season 01,dst=/media/tv/South Park (1997)/Season 01,readonly"
+    --mount "type=bind,src=/data_16tb/Movies/Toy Story (1995) {tmdb-862},dst=/media/movies/Toy Story (1995),readonly"
+    --mount "type=bind,src=/data_16tb/Movies/Up (2009) {tmdb-14160},dst=/media/movies/Up (2009),readonly"
+    --mount "type=bind,src=${HERE}/synth/Synth Show (2020),dst=/media/synth/Synth Show (2020),readonly"
+    --mount "type=bind,src=${HERE}/synth/Synth Chapters (2021),dst=/media/synth-chapters/Synth Chapters (2021),readonly"
+    --mount "type=bind,src=${HERE}/synth/Synth Audio (2022),dst=/media/synth-audio/Synth Audio (2022),readonly"
+    --mount "type=bind,src=${HERE}/synth/Synth Movie (2023),dst=/media/synth-movies/Synth Movie (2023),readonly"
+    --mount "type=bind,src=${HERE}/synth/Synth Credits (2024),dst=/media/synth-credits/Synth Credits (2024),readonly"
+    --mount "type=bind,src=${HERE}/synth/Synth Credits Open (2025),dst=/media/synth-credits/Synth Credits Open (2025),readonly")
 # A second location of the Synth Chapters library, for Plex only: a version of an episode the app can't read (phase 2
 # version-drift row). The app must never see it, so app.sh doesn't get it.
-PLEXONLY=(-v "${HERE}/synth/_plexonly:/media/plexonly:ro")
+PLEXONLY=(--mount "type=bind,src=${HERE}/synth/_plexonly,dst=/media/plexonly,readonly")
 # Phase 1 scale run (Task 20 Step 4): real seasons and movies with truth, picked by `./scale_score.py pick`, which writes
 # the mounts to scale_mounts.sh (git-ignored: it lists real library folders; results/scale/pick.json has each folder's
 # reason). Plex and both Jellyfins get them; Emby doesn't (its Intro & Credits is off until the phase 2 plugin, and

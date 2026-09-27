@@ -2017,7 +2017,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         self.last_replaced_stale_types = result.replaced_stale
         newly_kept = result.kept_types - kept_before
         if newly_kept:
-            logger.info(
+            # The file's "Sent to" job log line says so.
+            logger.debug(
                 "Plex {}: item {} shows Plex's own {} instead of ours; keeping them (Keep Plex's)",
                 self._config.name,
                 rating_key,
@@ -2032,7 +2033,8 @@ class PlexMarkerPublisher(MarkerPublisher):
                 " and ".join(t.value for t in MarkerType if t in result.replaced_own),
             )
         if result.changed:
-            logger.info(
+            # The file's "Sent to" job log line says so.
+            logger.debug(
                 "Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(result.ours)
             )
         self.last_write_changed = result.changed
@@ -2046,8 +2048,9 @@ class PlexMarkerPublisher(MarkerPublisher):
         See ``_types_not_made_for_file`` for the rule.
 
         Read from Plex's database with the same lock proof and read-only connection as a write, locally or through the
-        Plex marker agent, waiting at most :data:`STALE_READ_WAIT_S` for its locks (and less once the job is cancelled,
-        ``base.cancellable_waits``).
+        Plex marker agent, waiting at most :data:`STALE_READ_WAIT_S` for its locks, or this publisher's
+        ``db_timeout_s`` when that is shorter (the Inspector's), and less once the job is cancelled
+        (``base.cancellable_waits``).
 
         Args:
             item_id: Plex rating key.
@@ -2057,7 +2060,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         """
         try:
             rating_key = _rating_key(item_id)
-            deadline = time.monotonic() + STALE_READ_WAIT_S
+            deadline = time.monotonic() + min(STALE_READ_WAIT_S, self._db_timeout())
             if not self._local_checks(deadline=deadline).ready:
                 return None
             stale = self._db.read_item(rating_key, deadline=deadline).stale_types

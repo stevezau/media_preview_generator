@@ -2156,7 +2156,7 @@ class PlexServer(MediaServer):
         (season/episode are still reported) — the episode's own guids are never used as a stand-in
         for the show's, since a wrong id would route another show's markers to this file. Movies
         never report a ``tvdb`` id (different id space to tmdb/imdb). Unrecognised item types
-        report no ids at all.
+        report no ids at all. A movie also reports its ``title`` and ``year``.
         """
         from ..plex_client import retry_plex_call
 
@@ -2206,6 +2206,9 @@ class PlexServer(MediaServer):
         else:
             guid_node = node
             allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+            # A movie's own title, for the Intro & Credits job log (an episode is named by its path there).
+            out["title"] = node.get("title") or None
+            out["year"] = node.get("year") or None
 
         for guid in guid_node.findall("Guid"):
             scheme, _, value = (guid.get("id") or "").partition("://")

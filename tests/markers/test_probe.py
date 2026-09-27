@@ -20,6 +20,7 @@ from media_preview_generator.markers.probe import (
     VideoPackets,
     ffprobe_path_for,
     kill_and_collect,
+    last_video_time_s,
     probe_media,
     video_packets,
 )
@@ -513,6 +514,48 @@ class TestVideoPackets:
                 video_packets("/m/a.mkv", ffprobe="ffprobe", packets=24)
             monkeypatch.setitem(probe._stuck, probe.FFPROBE_REAPER, 0)
         run.assert_not_called()
+
+
+class TestLastVideoTime:
+    """How far a file's video can be read (a file cut short keeps its stated duration): its last packet's time."""
+
+    def test_reads_the_main_video_streams_packets_from_where_its_told_to_the_end(self):
+        payload = {"packets": [{"pts_time": "1630.125000"}, {"pts_time": "1630.208000"}, {"pts_time": "1630.167000"},
+                               {"pts_time": "N/A"}, {}],
+                   "format": {"start_time": "0.000000"}}  # fmt: skip
+        proc = _ok(payload)
+        with patch(RUN, return_value=proc) as run:
+            end_s = last_video_time_s("/m/a.mkv", ffprobe="/usr/bin/ffprobe", from_s=2190.0, timeout_s=30.0)
+        # The latest time, not the last packet's: B-frames come out of order.
+        assert end_s == 1630.208
+        assert run.call_args.args[0] == [
+            "/usr/bin/ffprobe", "-v", "error", "-select_streams", "V:0", "-read_intervals", "2190.000%",
+            "-show_entries", "packet=pts_time:format=start_time", "-of", "json=compact=1", "/m/a.mkv",
+        ]  # fmt: skip
+        assert proc.communicate.call_args.kwargs == {"timeout": 30.0}
+
+    def test_the_whole_file_is_read_without_a_start(self):
+        with patch(RUN, return_value=_ok({"packets": [{"pts_time": "12.5"}]})) as run:
+            assert last_video_time_s("/m/a.mp4", ffprobe="ffprobe", from_s=None) == 12.5
+        assert "-read_intervals" not in run.call_args.args[0]
+
+    def test_the_containers_start_time_is_taken_off(self):
+        # A recording's PCR base: its packets read 30000 s in, but the file is 40 s long.
+        payload = {"packets": [{"pts_time": "30039.900000"}], "format": {"start_time": "30000.000000"}}
+        with patch(RUN, return_value=_ok(payload)):
+            assert last_video_time_s("/m/a.ts", ffprobe="ffprobe", from_s=None) == pytest.approx(39.9)
+
+    @pytest.mark.parametrize("stdout", ['{"packets": []}', "{}", '{"packets": [{"pts_time": "N/A"}]}'])
+    def test_no_packet_with_a_time_is_none(self, stdout):
+        with patch(RUN, return_value=_proc(stdout=stdout)):
+            assert last_video_time_s("/m/a.mp4", ffprobe="ffprobe", from_s=2190.0) is None
+
+    @pytest.mark.parametrize("stdout", ["not json", "[]", '{"packets": {}}', '{"packets": ["1.0"]}'])
+    def test_anything_but_its_packet_list_is_a_probe_error(self, stdout):
+        with patch(RUN, return_value=_proc(stdout=stdout)):
+            with pytest.raises(ProbeError) as caught:
+                last_video_time_s("/m/a.mkv", ffprobe="ffprobe", from_s=2190.0)
+        assert type(caught.value) is ProbeError
 
 
 class TestStreamStarts:
