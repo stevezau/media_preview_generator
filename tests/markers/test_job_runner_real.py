@@ -1068,17 +1068,19 @@ class TestCreditTextOnTheWorkers:
         assert not [m for m in messages if m.startswith(("Started job", "Dispatcher: submitted"))]
         start = messages.index(f"{worker} picked up {episode}")
         end = next(n for n, m in enumerate(messages) if m.startswith(f"{episode}: done in "))
-        read_on = "the CPU" if rerun else "the GPU"
+        read_on = "the CPU" if rerun else "the GPU (Test GPU)"
         # The file's lines (its own header first) are written together as it finishes; the worker's own GPU fallback
         # warning comes before.
         block = messages[end - 4 : end]
         assert block[0] == f"{episode}: checking credits"
         assert [line.split(":", 1)[0] for line in block[1:]] == ["  Credit text", "  Decided", "  Sent to PLEX-1"]
-        assert re.fullmatch(rf"  Credit text: none found \(read on {read_on} in [\d.]+ s\)", block[1]), block
+        assert re.fullmatch(rf"  Credit text: none found \(read on {re.escape(read_on)} in [\d.]+ s\)", block[1]), block
         assert block[2:] == ["  Decided: credits nothing found", "  Sent to PLEX-1: nothing to send"]
         assert start < end - 4
         assert re.fullmatch(
-            rf"{re.escape(episode)}: done in [\d.]+ s on GPU Worker 1" + (", rerun on the CPU" if rerun else ""),
+            rf"{re.escape(episode)}: done in [\d.]+ s on GPU Worker 1"
+            + (", rerun on the CPU" if rerun else "")
+            + r" \(nothing new to send\)",
             messages[end],
         )
         # The totals come after the file's lines, however the job log's queue was drained; the job manager's own
@@ -1117,10 +1119,13 @@ class TestCreditTextOnTheWorkers:
         assert measured == [DURATION / 1000 - frames.EPISODE_TAIL_S]
         assert again.status is JobStatus.COMPLETED and _outcome(engine.jm, again.id) == {"markers_none": 1}
         assert any(cut_short in line for line in engine.jm.get_logs(again.id))
-        # Nothing changed since, so the file's one line says so.
-        assert "INFO - Rick and Morty (2013) S01E01: unchanged, nothing sent to PLEX-1; nothing found" in [
-            line.split("] ", 1)[1] for line in engine.jm.get_logs(again.id)
-        ]
+        # Nothing changed since, so the file still gets its full block, not a decode.
+        messages = [line.split("] ", 1)[1] for line in engine.jm.get_logs(again.id)]
+        assert "INFO - Rick and Morty (2013) S01E01: checking credits" in messages
+        assert f"INFO -   Credit text: {cut_short}" in messages
+        assert "INFO -   Decided: credits nothing found" in messages
+        assert "INFO -   Sent to PLEX-1: nothing to send" in messages
+        assert "INFO - Rick and Morty (2013) S01E01: done in 0 s, no worker needed (nothing new to send)" in messages
         assert detector.credits_text_failed_here(rec, SimpleNamespace(store=setup.store)) is True
 
     def test_a_gpu_that_misses_frames_the_cpu_reads_is_a_gpu_fallback(self, engine, setup, monkeypatch):

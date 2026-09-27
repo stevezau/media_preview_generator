@@ -63,15 +63,14 @@ from .job_log import (
     SeasonEpisode,
     ServerResult,
     clock,
-    compact_line,
     decide_again_line,
     decided_line,
     display_name,
     done_line,
     file_title,
     head_line,
-    is_unchanged_result,
     kept_types,
+    nothing_was_sent,
     online_recheck_line,
     path_year,
     pickup_line,
@@ -83,6 +82,7 @@ from .job_log import (
     show_name,
     source_lines,
     totals_line,
+    worker_device,
     write_lines,
 )
 from .locks import FILE_RUN_LOCKS
@@ -3313,6 +3313,7 @@ def _attempt(
                     ctx.monotonic() - read_started,
                     fell_back[0] if fell_back else "",
                     gpu_read_nothing=CPU_RECHECK_PHASE in phases,
+                    device=worker_device(notes.worker) if gpu is not None else "",
                 )
                 if unanswered is None:
                     for stored in spec.stored_sources:
@@ -3559,14 +3560,14 @@ def _log_file(
     outcome: FileOutcome,
     title: Callable[[], str],
 ) -> None:
-    """Log the file's lines (``job_log``): what each source answered, what was decided, what was sent where and how long
-    it took, as one block; or one line when its answer didn't change and its servers are up to date. A failed file's
-    block is at WARNING.
+    """Log the file's full block (``job_log``): what each source answered, what was decided, what was sent where and
+    how long it took, written together as one block. A failed file's block is at WARNING.
 
-    A Season job (and a TheIntroDB recheck) logs only files whose decisions changed; the rest go into their season's
-    summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there. A
-    decide-again job logs only files whose decisions changed too; the rest go into its one summary line. The weekly
-    online re-check also logs a file an online database now has an entry for. A failed file is always logged.
+    Every file gets this block, whatever it did: an unchanged file, a Season job's unchanged episode, a decide-again
+    job's unchanged file and a weekly online re-check's file with nothing new all log it too -- a Season job (and a
+    TheIntroDB recheck) additionally counts its episode into its season's summary line, a decide-again job into its
+    one summary line, the weekly online re-check into its one summary line, each logged after every file's block once
+    the job ends. A failed file is always logged.
     """
     season = decided_again = rechecked_online = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
@@ -3579,17 +3580,8 @@ def _log_file(
         rechecked_online = (_found_online(ctx, rec, notes), changed)
     ctx._note_finished(rows, season, decided_again, rechecked_online)
     failed = outcome is FileOutcome.FAILED
-    newly_found = rechecked_online is not None and rechecked_online[0]
-    grouped = season is not None or decided_again is not None or rechecked_online is not None
-    if grouped and not changed and not newly_found and not failed:
-        notes.logged = True  # its season's (or the job's) summary line names it
-        return
     servers = [_server_result(ctx, rec, row, decisions) for row in rows]
     name = title()
-    if not changed and not newly_found and not failed and is_unchanged_result(rows):
-        write_lines([compact_line(name, servers, decisions, types)])
-        notes.logged = True
-        return
     evidence = ctx.store.evidence_rows(rec.id)
     is_episode = bool(notes.is_episode)
     lines = [head_line(name, types, is_episode=is_episode)]
@@ -3607,7 +3599,14 @@ def _log_file(
     lines.append(decided_line(decisions, types, evidence))
     lines += [sent_line(server) for server in servers]
     lines.append(
-        done_line(name, _stage_seconds(ctx, notes), worker=notes.worker, cpu_rerun=notes.cpu_rerun, failed=failed)
+        done_line(
+            name,
+            _stage_seconds(ctx, notes),
+            worker=notes.worker,
+            cpu_rerun=notes.cpu_rerun,
+            failed=failed,
+            nothing_sent=nothing_was_sent(rows),
+        )
     )
     write_lines(lines, "WARNING" if failed else "INFO")
     notes.logged = True

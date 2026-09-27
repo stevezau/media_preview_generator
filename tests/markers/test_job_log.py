@@ -30,13 +30,13 @@ from media_preview_generator.markers.job_log import (
     SeasonEpisode,
     ServerResult,
     clock,
-    compact_line,
     decide_again_line,
     display_name,
     done_line,
     duration,
     file_title,
     head_line,
+    nothing_was_sent,
     online_recheck_line,
     pickup_line,
     read_phrase,
@@ -46,6 +46,7 @@ from media_preview_generator.markers.job_log import (
     start_line,
     totals_line,
     type_phrase,
+    worker_device,
     write_lines,
 )
 from media_preview_generator.markers.models import (
@@ -305,11 +306,11 @@ class TestApprovedLayouts:
             "Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)",
             "GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)",
             "32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)",
-            '  Chapters: "Credits" chapter at 2:00:11–2:03:39',
-            "  SkipDB: no entry",
+            '  Chapters: "Credits" chapter at 2:00:11–2:03:39 (asked now)',
+            "  SkipDB: no entry (asked now)",
             '  Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; '
-            "read on the GPU in 9 s)",
-            "  Plex's own markers: none",
+            "read on the GPU (NVIDIA GeForce RTX 3060) in 9 s)",
+            "  Plex's own markers: none (asked now)",
             '  Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)',
             "  Sent to Plex: credits 1:59:32–2:03:39",
             "32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1",
@@ -340,11 +341,11 @@ class TestApprovedLayouts:
         assert _messages(job_log) == [
             "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05",
             "Accused S04E05: checking intro and credits",
-            "  Chapters: none",
-            "  IntroDB: intro 0:41–1:12",
-            "  Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes)",
-            "  Credit text: credits start at 41:48 (read on the GPU in 13 s)",
-            "  Plex's own markers: none",
+            "  Chapters: none (asked now)",
+            "  IntroDB: intro 0:41–1:12 (asked now)",
+            "  Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; read on the CPU in 0 s)",
+            "  Credit text: credits start at 41:48 (read on the GPU (Intel UHD 770) in 13 s)",
+            "  Plex's own markers: none (asked now)",
             "  Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)",
             "  Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10",
             "Accused S04E05: done in 25 s on GPU Worker 2",
@@ -361,13 +362,13 @@ class TestFileBlocks:
 
         assert _messages(job_log) == [
             HEAD,
-            "  Chapters: none",
-            "  TheIntroDB: credits 21:36–22:00",
+            "  Chapters: none (asked now)",
+            "  TheIntroDB: credits 21:36–22:00 (asked now)",
             "  Credit text: none found (read on the CPU in 0 s)",
-            "  Plex's own markers: none",
+            "  Plex's own markers: none (asked now)",
             f"  Decided: intro nothing found · credits 21:36–22:00 from TheIntroDB {ONLINE_ONLY}",
             "  Sent to Plex: nothing to send",
-            DONE,
+            f"{DONE} (nothing new to send)",
         ]
         # Needs review keeps the block at INFO.
         assert {level for level, _ in job_log} == {"INFO"}
@@ -381,10 +382,10 @@ class TestFileBlocks:
 
         assert _messages(job_log) == [
             HEAD,
-            "  Chapters: none",
-            "  TheIntroDB: no entry",
+            "  Chapters: none (asked now)",
+            "  TheIntroDB: no entry (asked now)",
             "  Credit text: credits start at 21:31 (read on the CPU in 0 s)",
-            "  Plex's own markers: none",
+            "  Plex's own markers: none (asked now)",
             "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
             "  Sent to Plex: credits 21:31–22:01",
             DONE,
@@ -407,9 +408,9 @@ class TestFileBlocks:
 
         assert _messages(job_log) == [
             HEAD,
-            '  Chapters: "Intro" chapter at 2:06–2:37',
-            "  TheIntroDB: no entry",
-            "  Plex's own markers: credits start at 21:30",
+            '  Chapters: "Intro" chapter at 2:06–2:37 (asked now)',
+            "  TheIntroDB: no entry (asked now)",
+            "  Plex's own markers: credits start at 21:30 (asked now)",
             "  Credit text: not read (every server keeps its own credits)",
             '  Decided: intro 2:06–2:37, from the "Intro" chapter · credits kept Plex\'s own',
             "  Sent to Plex: intro 2:06–2:37; kept Plex's own credits",
@@ -426,7 +427,9 @@ class TestFileBlocks:
         ctx = _job(store, media, _plex(media, keeps_own_credits=True))
         _run(ctx, media, {"plex-1": plex}, probe=_probe(INTRO_CHAPTERS))
 
-        assert "  Plex's own markers: credits start at 21:30 (made for an earlier file)" in _messages(job_log)
+        assert "  Plex's own markers: credits start at 21:30 (made for an earlier file; asked now)" in _messages(
+            job_log
+        )
         ctx.local_detectors[0].detect.assert_called_once()
 
     def test_a_decided_type_the_server_keeps_its_own_of_says_ours_wasnt_written(self, store, media, job_log):
@@ -442,9 +445,9 @@ class TestFileBlocks:
 
         assert _messages(job_log) == [
             HEAD,
-            '  Chapters: "Intro" chapter at 2:06–2:37, "Credits" chapter from 21:35',
-            "  TheIntroDB: no entry",
-            "  Plex's own markers: credits start at 21:30",
+            '  Chapters: "Intro" chapter at 2:06–2:37, "Credits" chapter from 21:35 (asked now)',
+            "  TheIntroDB: no entry (asked now)",
+            "  Plex's own markers: credits start at 21:30 (asked now)",
             "  Credit text: not read (a chapter named Credits is used as-is)",
             '  Decided: intro 2:06–2:37, from the "Intro" chapter · credits 21:35–22:01, from the "Credits" chapter',
             "  Sent to Plex: intro 2:06–2:37; kept Plex's own credits instead of ours (\"Keep Plex's\")",
@@ -458,13 +461,13 @@ class TestFileBlocks:
 
         assert _messages(job_log) == [
             HEAD,
-            '  Chapters: "Intro" chapter at 2:06–2:37',
-            "  TheIntroDB: credits 21:36–22:00",
+            '  Chapters: "Intro" chapter at 2:06–2:37 (asked now)',
+            "  TheIntroDB: credits 21:36–22:00 (asked now)",
             "  Credit text: none found (read on the CPU in 0 s)",
             "  Plex's own markers: not read",
             f'  Decided: intro 2:06–2:37, from the "Intro" chapter · credits 21:36–22:00 from TheIntroDB {ONLINE_ONLY}',
             "  Sent to Plex: not in Plex's library yet (waiting for it to add the file)",
-            DONE,
+            f"{DONE} (nothing new to send)",
         ]
         row = out.publisher_rows[0]
         assert (row["status"], row["reason_code"]) == (ServerStatus.WAITING.value, NOT_IN_LIBRARY)
@@ -481,33 +484,58 @@ class TestFileBlocks:
             "Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found · TheIntroDB skipped for 1 file"
         ]
 
-    def test_a_file_whose_answer_didnt_change_gets_one_line(self, store, media, job_log):
+    def test_a_file_whose_answer_didnt_change_gets_a_full_block_too(self, store, media, job_log):
         reg = _plex(media)
         for expected in (FileOutcome.PUBLISHED, FileOutcome.UP_TO_DATE):
             ctx = _job(store, media, reg, now=lambda: datetime.now(UTC))
             out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
             assert out.outcome_key == expected.value
 
-        assert len(job_log) == 8 + 1
-        assert _messages(job_log)[-1] == f"{EPISODE}: unchanged, Plex already has our credits"
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert _messages(job_log) == [
+            HEAD,
+            "  Chapters: none (asked now)",
+            "  TheIntroDB: no entry (asked now)",
+            "  Credit text: credits start at 21:31 (read on the CPU in 0 s)",
+            "  Plex's own markers: none (asked now)",
+            "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
+            "  Sent to Plex: credits 21:31–22:01",
+            DONE,
+            HEAD,
+            f"  Chapters: none (saved {today})",
+            f"  TheIntroDB: no entry (saved {today})",
+            f"  Credit text: credits start at 21:31 (saved {today})",
+            f"  Plex's own markers: none (saved {today})",
+            "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
+            "  Sent to Plex: already up to date (credits 21:31–22:01)",
+            f"{DONE} (nothing new to send)",
+        ]
 
-    def test_nothing_found_twice_says_so_in_one_line_the_second_time(self, store, media, job_log):
+    def test_nothing_found_twice_still_logs_a_full_block_the_second_time(self, store, media, job_log):
         reg = _plex(media)
         for _ in range(2):
             ctx = _job(store, media, reg, found=(), now=lambda: datetime.now(UTC))
             out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
             assert out.outcome_key == FileOutcome.NO_MARKERS.value
 
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         assert _messages(job_log) == [
             HEAD,
-            "  Chapters: none",
-            "  TheIntroDB: no entry",
+            "  Chapters: none (asked now)",
+            "  TheIntroDB: no entry (asked now)",
             "  Credit text: none found (read on the CPU in 0 s)",
-            "  Plex's own markers: none",
+            "  Plex's own markers: none (asked now)",
             "  Decided: intro nothing found · credits nothing found",
             "  Sent to Plex: nothing to send",
-            DONE,
-            f"{EPISODE}: unchanged, nothing sent to Plex; nothing found",
+            f"{DONE} (nothing new to send)",
+            HEAD,
+            f"  Chapters: none (saved {today})",
+            f"  TheIntroDB: no entry (saved {today})",
+            f"  Credit text: none found (saved {today})",
+            f"  Plex's own markers: none (saved {today})",
+            "  Decided: intro nothing found · credits nothing found",
+            "  Sent to Plex: nothing to send",
+            f"{DONE} (nothing new to send)",
         ]
 
     def test_a_movie_without_a_server_title_is_named_by_its_file(self, store, movie, job_log):
@@ -517,8 +545,8 @@ class TestFileBlocks:
 
         assert _messages(job_log) == [
             "Heat (1995): checking credits (films get credits only)",
-            '  Chapters: "Credits" chapter from 21:35',
-            "  Plex's own markers: none",
+            '  Chapters: "Credits" chapter from 21:35 (asked now)',
+            "  Plex's own markers: none (asked now)",
             "  TheIntroDB: not asked (no server confirmed whether it's a movie or an episode)",
             "  Credit text: not read (a chapter named Credits is used as-is)",
             '  Decided: credits 21:35–22:01, from the "Credits" chapter',
@@ -533,10 +561,10 @@ class TestFileBlocks:
         _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
 
         assert _messages(job_log)[1:5] == [
-            "  Chapters: none",
+            "  Chapters: none (asked now)",
             "  TheIntroDB: unavailable (HTTP 503)",
             "  Credit text: no answer this time (the decode timed out)",
-            "  Plex's own markers: none",
+            "  Plex's own markers: none (asked now)",
         ]
 
     def test_a_file_the_worker_finishes_opens_with_the_pickup_line_and_names_the_checking_stages_answers(
@@ -553,10 +581,10 @@ class TestFileBlocks:
         assert _messages(job_log) == [
             f"CPU Worker 1 picked up {EPISODE}",
             f"{EPISODE}: checking intro and credits",
-            "  Chapters: none",
-            "  TheIntroDB: no entry",
+            "  Chapters: none (asked now)",
+            "  TheIntroDB: no entry (asked now)",
             "  Credit text: credits start at 21:31 (read on the CPU in 0 s)",
-            "  Plex's own markers: none",
+            "  Plex's own markers: none (asked now)",
             "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
             "  Sent to Plex: credits 21:31–22:01",
             f"{EPISODE}: done in 0 s on CPU Worker 1",
@@ -867,31 +895,39 @@ class TestSourceLines:
     @pytest.mark.parametrize(
         ("source", "rows", "expected"),
         [
-            (Source.CHAPTERS, [_row(Source.CHAPTERS)], "  Chapters: none"),
+            (Source.CHAPTERS, [_row(Source.CHAPTERS)], "  Chapters: none (asked now)"),
             (
                 Source.CHAPTERS,
                 [_row(Source.CHAPTERS, T.INTRO, 41_000, 72_000, label="Opening")],
-                '  Chapters: "Opening" chapter at 0:41–1:12',
+                '  Chapters: "Opening" chapter at 0:41–1:12 (asked now)',
             ),
             (
                 Source.CHAPTERS,
                 [_row(Source.CHAPTERS, T.INTRO, 41_000, 72_000)],
-                "  Chapters: intro chapter at 0:41–1:12",
+                "  Chapters: intro chapter at 0:41–1:12 (asked now)",
             ),
-            (Source.THEINTRODB, [_row(Source.THEINTRODB)], "  TheIntroDB: no entry"),
-            (Source.SKIPDB, [_row(Source.SKIPDB, T.CREDITS, 2_508_000, 2_590_000)], "  SkipDB: credits 41:48–43:10"),
-            (Source.INTRODB, [_row(Source.INTRODB, T.INTRO, 41_000, 72_000)], "  IntroDB: intro 0:41–1:12"),
-            (Source.SEASON_AUDIO, [_row(Source.SEASON_AUDIO)], "  Season audio: no match"),
+            (Source.THEINTRODB, [_row(Source.THEINTRODB)], "  TheIntroDB: no entry (asked now)"),
+            (
+                Source.SKIPDB,
+                [_row(Source.SKIPDB, T.CREDITS, 2_508_000, 2_590_000)],
+                "  SkipDB: credits 41:48–43:10 (asked now)",
+            ),
+            (
+                Source.INTRODB,
+                [_row(Source.INTRODB, T.INTRO, 41_000, 72_000)],
+                "  IntroDB: intro 0:41–1:12 (asked now)",
+            ),
+            (Source.SEASON_AUDIO, [_row(Source.SEASON_AUDIO)], "  Season audio: no match (asked now)"),
             (
                 Source.SEASON_AUDIO,
                 [_row(Source.SEASON_AUDIO, T.INTRO, 41_000, 72_000, label="9/9")],
-                "  Season audio: intro 0:41–1:12 (same theme found in 10 of 10 episodes)",
+                "  Season audio: intro 0:41–1:12 (same theme found in 10 of 10 episodes; asked now)",
             ),
-            (Source.CREDITS_TEXT, [_row(Source.CREDITS_TEXT)], "  Credit text: none found"),
+            (Source.CREDITS_TEXT, [_row(Source.CREDITS_TEXT)], "  Credit text: none found (asked now)"),
             (
                 Source.CREDITS_TEXT,
                 [_row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, 2_590_000)],
-                "  Credit text: credits 41:48–43:10",
+                "  Credit text: credits 41:48–43:10 (asked now)",
             ),
         ],
         ids=[
@@ -924,7 +960,7 @@ class TestSourceLines:
             _row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, 2_590_000, label=chapter_hint(2_470_000, moves=moves)),
         ]
         assert _lines_for(["credits_text"], rows, _asked(Source.CREDITS_TEXT)) == [
-            f"  Credit text: credits 41:48–43:10 ({note})"
+            f"  Credit text: credits 41:48–43:10 ({note}; asked now)"
         ]
 
     def test_a_chapter_moved_to_the_first_text_after_it_says_where(self):
@@ -935,7 +971,7 @@ class TestSourceLines:
         ]  # fmt: skip
         assert _lines_for(["credits_text"], rows, _asked(Source.CREDITS_TEXT)) == [
             '  Credit text: credits 41:48–43:10 (moves the "End Credits" chapter at 41:10 to the first text after it, '
-            "41:25)"
+            "41:25; asked now)"
         ]
 
     def test_credit_text_read_against_an_unnamed_credits_chapter_calls_it_the_credits_chapter(self):
@@ -954,17 +990,17 @@ class TestSourceLines:
             _row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, None),
         ]
         assert _lines_for(["chapters", "season_audio", "credits_text"], rows, RunNotes()) == [
-            "  Chapters: none (saved earlier)",
-            "  Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; saved earlier)",
-            "  Credit text: credits start at 41:48 (saved earlier)",
+            "  Chapters: none (saved 2026-09-27)",
+            "  Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; saved 2026-09-27)",
+            "  Credit text: credits start at 41:48 (saved 2026-09-27)",
         ]
 
     def test_last_seasons_audio_follows_season_audio(self):
         rows = [_row(Source.SEASON_AUDIO), _row(Source.SEASON_AUDIO_PREVIOUS, T.INTRO, 41_000, 72_000, label="7/8")]
         notes = _asked(Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS)
         assert _lines_for(["season_audio"], rows, notes) == [
-            "  Season audio: no match",
-            "  Last season's audio: intro 0:41–1:12 (same theme found in 7 of last season's 8 episodes)",
+            "  Season audio: no match (asked now)",
+            "  Last season's audio: intro 0:41–1:12 (same theme found in 7 of last season's 8 episodes; asked now)",
         ]
 
     @pytest.mark.parametrize(
@@ -1034,7 +1070,7 @@ class TestSourceLines:
         notes = _asked(Source.CHAPTERS)
         notes.not_asked[Source.CREDITS_TEXT] = ALREADY_DECIDED
         assert _lines_for(["chapters", "credits_text"], rows, notes, decisions=decisions) == [
-            '  Chapters: "End Credits" chapter at 41:48–43:10',
+            '  Chapters: "End Credits" chapter at 41:48–43:10 (asked now)',
             "  Credit text: not read (a chapter named End Credits is used as-is)",
         ]
 
@@ -1055,11 +1091,11 @@ class TestSourceLines:
     @pytest.mark.parametrize(
         ("rows", "asked", "expected"),
         [
-            ([_row(Source.SERVER_MARKERS, origin="plex-1")], True, "  Plex's own markers: none"),
+            ([_row(Source.SERVER_MARKERS, origin="plex-1")], True, "  Plex's own markers: none (asked now)"),
             (
                 [_row(Source.SERVER_MARKERS, T.CREDITS, 2_508_000, 2_590_000, origin="plex-1")],
                 True,
-                "  Plex's own markers: credits 41:48–43:10",
+                "  Plex's own markers: credits 41:48–43:10 (asked now)",
             ),
             (
                 [
@@ -1069,29 +1105,29 @@ class TestSourceLines:
                     )
                 ],
                 True,
-                "  Plex's own markers: credits 41:48–43:10 (made for an earlier file)",
+                "  Plex's own markers: credits 41:48–43:10 (made for an earlier file; asked now)",
             ),
             (
                 [_row(Source.SERVER_MARKERS, origin="plex-1", detail="unusable")],
                 True,
-                f"  Plex's own markers: {UNUSABLE['unusable']}",
+                f"  Plex's own markers: {UNUSABLE['unusable'][:-1]}; asked now)",
             ),
             (
-                # A reason and "(saved earlier)" join inside the reason's own bracket, not stack a second one.
+                # A reason and "(saved <date>)" join inside the reason's own bracket, not stack a second one.
                 [_row(Source.SERVER_MARKERS, origin="plex-1", detail="unusable")],
                 False,
                 "  Plex's own markers: couldn't be used (unreadable, another cut, or its library hides a type in "
-                "Plex; saved earlier)",
+                "Plex; saved 2026-09-27)",
             ),
             (
                 [_row(Source.SERVER_MARKERS_IMPORTED, T.INTRO, 41_000, 72_000, origin="plex-1")],
                 True,
-                "  Plex's imported markers: intro 0:41–1:12",
+                "  Plex's imported markers: intro 0:41–1:12 (asked now)",
             ),
-            ([_row(Source.SERVER_MARKERS, origin="plex-1")], False, "  Plex's own markers: none (saved earlier)"),
+            ([_row(Source.SERVER_MARKERS, origin="plex-1")], False, "  Plex's own markers: none (saved 2026-09-27)"),
         ],
-        ids=["none", "answer", "made-for-an-earlier-file", "unusable", "unusable-saved-earlier", "imported",
-             "saved-earlier"],
+        ids=["none", "answer", "made-for-an-earlier-file", "unusable", "unusable-saved-date", "imported",
+             "saved-date"],
     )  # fmt: skip
     def test_each_servers_own_markers(self, rows, asked, expected):
         notes = _asked(Source.SERVER_MARKERS, server="plex-1") if asked else RunNotes()
@@ -1104,8 +1140,8 @@ class TestSourceLines:
         servers = [("plex-1", "Plex"), ("emby-1", "Emby")]
         order = ["server_markers", "credits_text", "chapters"]  # the user's order doesn't move the lines
         assert _lines_for(order, rows, notes, servers=servers) == [
-            "  Chapters: none",
-            "  Plex's own markers: none",
+            "  Chapters: none (asked now)",
+            "  Plex's own markers: none (asked now)",
             "  Credit text: not available here",
             "  Emby's own markers: not read",
         ]
@@ -1116,7 +1152,10 @@ class TestSourceLines:
         notes.not_asked[Source.SEASON_AUDIO] = "doesn't apply to this file"
         rows = [_row(Source.CHAPTERS), _row(Source.SKIPDB)]
         enabled = ["chapters", "introdb", "skipdb", "season_audio"]
-        assert _lines_for(enabled, rows, notes, is_episode=False) == ["  Chapters: none", "  SkipDB: no entry"]
+        assert _lines_for(enabled, rows, notes, is_episode=False) == [
+            "  Chapters: none (asked now)",
+            "  SkipDB: no entry (asked now)",
+        ]
 
 
 class TestDecidedLine:
@@ -1255,26 +1294,11 @@ class TestSentLine:
         assert sent_line(result) == f"  Sent to Plex: {expected}"
 
 
-class TestCompactLines:
-    @pytest.mark.parametrize(
-        ("servers", "decisions", "expected"),
-        [
-            ([_server(ServerStatus.UP_TO_DATE, (INTRO_M, CREDITS_M))], BOTH_DECIDED,
-             "Plex already has our intro and credits"),
-            ([_server(ServerStatus.UP_TO_DATE, (INTRO_M,), kept={T.CREDITS})], BOTH_DECIDED,
-             "Plex already has our intro; Plex keeps its own credits"),
-            ([_server(ServerStatus.NEEDS_REVIEW)],
-             {**NONE_DECIDED, T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None,
-                                                      Marker(T.CREDITS, 1, 2, ("credits_text",)), "alone")},
-             "nothing sent to Plex; still needs review (credits from credit text only)"),
-            ([_server(ServerStatus.NONE)], NONE_DECIDED, "nothing sent to Plex; nothing found"),
-        ],
-        ids=["up-to-date", "kept-own", "in-review", "nothing-found"],
-    )  # fmt: skip
-    def test_wording(self, servers, decisions, expected):
-        assert compact_line("Accused S04E05", servers, decisions, BOTH) == f"Accused S04E05: unchanged, {expected}"
+class TestUnchangedFilesGetFullBlocks:
+    """A file whose answer didn't change and whose servers are up to date logs its full block too, not a one-line
+    summary: every source's answer (a reused one saying when it was last stored), what was decided and what was sent."""
 
-    def test_a_hundred_file_recheck_logs_a_line_per_file(self, store, tmp_path, job_log):
+    def test_a_hundred_file_recheck_logs_a_block_per_file(self, store, tmp_path, job_log):
         paths = [_accused(tmp_path, episode) for episode in range(1, 6)]
         reg = _plex(paths[0])
 
@@ -1287,9 +1311,26 @@ class TestCompactLines:
         job_log.clear()
         run_all()
 
-        assert _messages(job_log) == [
-            f"Accused S04E{n:02d}: unchanged, Plex already has our credits" for n in range(1, 6)
+        heads = [m for m in _messages(job_log) if m.startswith("Accused S04E") and ": checking" in m]
+        assert heads == [f"Accused S04E{n:02d}: checking intro and credits" for n in range(1, 6)]
+        dones = [m for m in _messages(job_log) if ": done in" in m]
+        assert dones == [
+            f"Accused S04E{n:02d}: done in 0 s, no worker needed (nothing new to send)" for n in range(1, 6)
         ]
+        # Every source's line is still there, its reused answer saying when it was stored rather than "asked now".
+        first_block = _messages(job_log)[:8]
+        assert first_block[0] == "Accused S04E01: checking intro and credits"
+        assert [line.split(":", 1)[0] for line in first_block[1:7]] == [
+            "  Chapters",
+            "  TheIntroDB",
+            "  Credit text",
+            "  Plex's own markers",
+            "  Decided",
+            "  Sent to Plex",
+        ]
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert first_block[3] == f"  Credit text: credits start at 21:31 (saved {today})"
+        assert first_block[6] == "  Sent to Plex: already up to date (credits 21:31–22:01)"
 
 
 class TestTitles:
@@ -1400,7 +1441,16 @@ class TestTitles:
         # A later job over the same film (decide again, a version re-run, a Season job) asks nothing.
         second, lookups = self._check(self._quiet_job(store, reg), item)
         assert second.outcome_key == FileOutcome.UP_TO_DATE.value
-        assert _messages(job_log) == ["Heat (1995): unchanged, Plex already has our credits"]
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert _messages(job_log) == [
+            "Heat (1995): checking credits (films get credits only)",
+            f'  Chapters: "Credits" chapter from 21:35 (saved {today})',
+            f"  Plex's own markers: none (saved {today})",
+            "  Credit text: not read (a chapter named Credits is used as-is)",
+            '  Decided: credits 21:35–22:01, from the "Credits" chapter',
+            "  Sent to Plex: already up to date (credits 21:35–22:01)",
+            "Heat (1995): done in 0 s, no worker needed (nothing new to send)",
+        ]
         lookups.assert_not_called()
         assert server.get_external_ids.call_count == 1
 
@@ -1472,7 +1522,16 @@ class TestTitles:
         self._check(self._quiet_job(store, reg), item)
         assert server.get_external_ids.call_count == 1
         name = "Heat (1995)"
-        assert _messages(job_log) == [f"{name}: unchanged, Plex already has our credits"]
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert _messages(job_log) == [
+            f"{name}: checking credits (films get credits only)",
+            f'  Chapters: "Credits" chapter from 21:35 (saved {today})',
+            f"  Plex's own markers: none (saved {today})",
+            "  Credit text: not read (a chapter named Credits is used as-is)",
+            '  Decided: credits 21:35–22:01, from the "Credits" chapter',
+            "  Sent to Plex: already up to date (credits 21:35–22:01)",
+            f"{name}: done in 0 s, no worker needed (nothing new to send)",
+        ]
 
 
 def _wait_for(predicate, timeout=5.0):
@@ -1540,8 +1599,12 @@ class TestLineWords:
             ({"seconds": 3, "worker": "CPU Worker 1", "failed": True}, "X: failed after 3 s on CPU Worker 1"),
             ({"seconds": 3, "failed": True}, "X: failed after 3 s"),
             ({"seconds": None}, "X: done, no worker needed"),
+            ({"seconds": 0.5, "nothing_sent": True}, "X: done in 0.5 s, no worker needed (nothing new to send)"),
+            # A failed file's line never gets the note: it already says it failed, not what it sent.
+            ({"seconds": 3, "failed": True, "nothing_sent": True}, "X: failed after 3 s"),
         ],
-        ids=["checking-thread", "worker", "cpu-rerun", "failed-on-worker", "failed-on-checking-thread", "no-time"],
+        ids=["checking-thread", "worker", "cpu-rerun", "failed-on-worker", "failed-on-checking-thread", "no-time",
+             "nothing-sent", "failed-ignores-nothing-sent"],
     )  # fmt: skip
     def test_done_line(self, kwargs, expected):
         seconds = kwargs.pop("seconds")
@@ -1562,6 +1625,31 @@ class TestLineWords:
 
     def test_pickup_line(self):
         assert pickup_line("CPU Worker 1", "X") == "CPU Worker 1 picked up X"
+
+    @pytest.mark.parametrize(
+        ("worker", "expected"),
+        [
+            ("GPU Worker 2 (Intel UHD 770)", "Intel UHD 770"),
+            ("CPU Worker 1", ""),
+            ("", ""),
+        ],
+        ids=["gpu", "cpu", "checking-thread"],
+    )
+    def test_worker_device(self, worker, expected):
+        assert worker_device(worker) == expected
+
+    @pytest.mark.parametrize(
+        ("rows", "expected"),
+        [
+            ([{"status": ServerStatus.WRITTEN.value}], False),
+            ([{"status": ServerStatus.UP_TO_DATE.value}, {"status": ServerStatus.WRITTEN.value}], False),
+            ([{"status": ServerStatus.UP_TO_DATE.value}], True),
+            ([], True),
+        ],
+        ids=["written", "one-written", "up-to-date", "no-servers"],
+    )
+    def test_nothing_was_sent(self, rows, expected):
+        assert nothing_was_sent(rows) is expected
 
     def test_a_worker_that_finds_no_checking_stage_notes_names_the_file_from_its_path(self, store, media, job_log):
         ctx = _job(store, media, _plex(media))
@@ -1617,7 +1705,7 @@ class TestStartLine:
 
 
 class TestSeasonJob:
-    def test_unchanged_episodes_share_one_line_and_a_changed_one_gets_its_block(self, store, tmp_path, job_log):
+    def test_unchanged_episodes_get_full_blocks_too_and_the_season_total_comes_last(self, store, tmp_path, job_log):
         folder = tmp_path / "media" / "tv" / "Rick and Morty (2013) {tvdb-275274}" / "Season 01"
         folder.mkdir(parents=True)
         paths = []
@@ -1646,16 +1734,43 @@ class TestSeasonJob:
         paused_until = store.series_lookups_paused_until(
             Source.THEINTRODB, "tvdb:275274", pause=pipeline.SERIES_NO_ENTRY_PAUSE
         )
-        assert _messages(job_log) == [
+        # The fixtures' fixed clock, not the real day: the first job stored every answer then.
+        saved = "2026-09-27"
+        skip_note = f"skipped (no data for this show; asked again after {paused_until:%Y-%m-%d})"
+
+        def unchanged_block(episode: int, *, theintrodb: str) -> list[str]:
+            title = f"Rick and Morty (2013) S01E{episode:02d}"
+            return [
+                f"{title}: checking intro and credits",
+                f"  Chapters: none (saved {saved})",
+                f"  TheIntroDB: {theintrodb}",
+                f"  Credit text: credits start at 21:31 (saved {saved})",
+                f"  Plex's own markers: none (saved {saved})",
+                "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
+                "  Sent to Plex: already up to date (credits 21:31–22:01)",
+                f"{title}: done in 0 s, no worker needed (nothing new to send)",
+            ]
+
+        changed_block = [
             "Rick and Morty (2013) S01E02: checking intro and credits",
-            '  Chapters: "Intro" chapter at 2:06–2:37',
-            f"  TheIntroDB: skipped (no data for this show; asked again after {paused_until:%Y-%m-%d})",
+            '  Chapters: "Intro" chapter at 2:06–2:37 (asked now)',
+            f"  TheIntroDB: {skip_note}",
             "  Credit text: credits start at 21:31 (read on the CPU in 0 s)",
             "  Plex's own markers: not read",
             '  Decided: intro 2:06–2:37, from the "Intro" chapter · credits 21:31–22:01 (credit text)',
             "  Sent to Plex: intro 2:06–2:37 · credits 21:31–22:01",
             "Rick and Morty (2013) S01E02: done in 0 s, no worker needed",
         ]
+        # E01/E03 aren't due for anything, so TheIntroDB's stored "no entry" is reused; E04 is still due (nothing else
+        # about it changed) and finds the pause in place, same as the replaced E02.
+        expected = [
+            *unchanged_block(1, theintrodb=f"no entry (saved {saved})"),
+            *changed_block,
+            *unchanged_block(3, theintrodb=f"no entry (saved {saved})"),
+            *unchanged_block(4, theintrodb=skip_note),
+        ]
+        assert _messages(job_log) == expected
+
         counts = {key: outcomes.count(key) for key in set(outcomes)}
         assert counts == {FileOutcome.UP_TO_DATE.value: 3, FileOutcome.PUBLISHED.value: 1}
         assert season.summary_lines(counts) == [
@@ -1695,14 +1810,15 @@ class TestSeasonJob:
 
 class TestDecideAgainJob:
     """The one job after settings v16 decides files again, reusing answers that aren't due: like a Season job, it logs
-    the files whose decisions changed and one line for the rest."""
+    every file's full block, changed or not, then its own one summary line of totals."""
 
-    def test_changed_files_get_their_lines_and_the_rest_one_line(self, store, media, job_log, monkeypatch):
+    def test_changed_and_unchanged_files_both_get_full_blocks(self, store, media, job_log, monkeypatch):
         monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")  # how an older build left credit text alone
         out, _ = _run(_job(store, media, _plex(media)), media, {"plex-1": ready_publisher()}, probe=_probe())
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
         monkeypatch.undo()
         job_log.clear()
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
 
         again = _job(store, media, _plex(media))
         again.decide_again = True
@@ -1710,10 +1826,10 @@ class TestDecideAgainJob:
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert _messages(job_log) == [
             HEAD,
-            "  Chapters: none (saved earlier)",
-            "  TheIntroDB: no entry (saved earlier)",
-            "  Credit text: credits start at 21:31 (saved earlier)",
-            "  Plex's own markers: none (saved earlier)",
+            f"  Chapters: none (saved {today})",
+            f"  TheIntroDB: no entry (saved {today})",
+            f"  Credit text: credits start at 21:31 (saved {today})",
+            f"  Plex's own markers: none (saved {today})",
             "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
             "  Sent to Plex: credits 21:31–22:01",
             DONE,
@@ -1727,7 +1843,16 @@ class TestDecideAgainJob:
         quiet = _job(store, media, _plex(media))
         quiet.decide_again = True
         _run(quiet, media, {"plex-1": ready_publisher()})
-        assert job_log == []
+        assert _messages(job_log) == [
+            HEAD,
+            f"  Chapters: none (saved {today})",
+            f"  TheIntroDB: no entry (saved {today})",
+            f"  Credit text: credits start at 21:31 (saved {today})",
+            f"  Plex's own markers: none (saved {today})",
+            "  Decided: intro nothing found · credits 21:31–22:01 (credit text)",
+            "  Sent to Plex: already up to date (credits 21:31–22:01)",
+            f"{DONE} (nothing new to send)",
+        ]
         assert quiet.summary_lines({FileOutcome.UP_TO_DATE.value: 1})[0] == (
             "Decided again after the update (1 file): 1 unchanged"
         )
@@ -1776,23 +1901,24 @@ class TestOnlineRecheckJob:
         assert len(weekly.clients["theintrodb"].calls) == 1
         # Its credit text answer isn't due: the file isn't read again.
         weekly.local_detectors[0].detect.assert_not_called()
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         assert _messages(job_log) == [
             HEAD,
-            "  Chapters: none (saved earlier)",
-            "  TheIntroDB: credits 21:36–22:00",
-            "  Credit text: none found (saved earlier)",
+            f"  Chapters: none (saved {today})",
+            "  TheIntroDB: credits 21:36–22:00 (asked now)",
+            f"  Credit text: none found (saved {today})",
             # A server's "none" a day old is read again while a type is undecided, as on any run.
-            "  Plex's own markers: none",
+            "  Plex's own markers: none (asked now)",
             f"  Decided: intro nothing found · credits 21:36–22:00 from TheIntroDB {ONLINE_ONLY}",
             "  Sent to Plex: nothing to send",
-            DONE,
+            f"{DONE} (nothing new to send)",
         ]
         assert weekly.summary_lines({FileOutcome.NEEDS_REVIEW.value: 1}) == [
             "Weekly online re-check (1 file): 1 newly found online, 0 unchanged",
             "Done: 1 file · 0 sent to Plex · 1 needs review · 0 nothing found",
         ]
 
-    def test_a_file_still_not_found_logs_only_the_summary_line(self, store, media, job_log):
+    def test_a_file_still_not_found_gets_a_full_block_too(self, store, media, job_log):
         self._first_run(store, media)
         job_log.clear()
 
@@ -1800,7 +1926,17 @@ class TestOnlineRecheckJob:
         _run(weekly, media, {"plex-1": ready_publisher()})
 
         assert len(weekly.clients["theintrodb"].calls) == 1  # due, so asked
-        assert job_log == []
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert _messages(job_log) == [
+            HEAD,
+            f"  Chapters: none (saved {today})",
+            "  TheIntroDB: no entry (asked now)",
+            f"  Credit text: none found (saved {today})",
+            "  Plex's own markers: none (asked now)",
+            "  Decided: intro nothing found · credits nothing found",
+            "  Sent to Plex: nothing to send",
+            f"{DONE} (nothing new to send)",
+        ]
         assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1})[0] == (
             "Weekly online re-check (1 file): 0 newly found online, 1 unchanged"
         )
@@ -1813,7 +1949,17 @@ class TestOnlineRecheckJob:
         _run(weekly, media, {"plex-1": ready_publisher()})
 
         assert weekly.clients["theintrodb"].calls == []
-        assert job_log == []
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert _messages(job_log) == [
+            HEAD,
+            f"  Chapters: none (saved {today})",
+            f"  TheIntroDB: no entry (saved {today})",
+            f"  Credit text: none found (saved {today})",
+            "  Plex's own markers: none (asked now)",
+            "  Decided: intro nothing found · credits nothing found",
+            "  Sent to Plex: nothing to send",
+            f"{DONE} (nothing new to send)",
+        ]
         assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1})[0] == (
             "Weekly online re-check (1 file): 0 newly found online, 1 unchanged"
         )
