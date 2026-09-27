@@ -3510,4 +3510,6 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   wrong before and after, no intro moved in the replay; the Plex comparison 12 → 7 of 81 wrong (Plex's own 8 of 80),
   skipping story 2 → 1 (Plex's 8). The replay of sflix's copy moved 7 credits starts more than 5 s, each onto the first
   card or the show's end logo. Harness: §5.4 version 7. `CREDITS_TEXT_VERSION` 7: every stored credit text answer is
-  read again once (912 files on sflix's disks), which also re-reads 10 Things against its chapter.
+  read again once (912 files on sflix's disks), which also re-reads 10 Things against its chapter. Lab: phase 1 16 of
+  16, no row worse than #320's run; phase 3 row 6 (a cancel at pickup) fails on `dev` too, 4 of 6 traced trials there
+  (the README).

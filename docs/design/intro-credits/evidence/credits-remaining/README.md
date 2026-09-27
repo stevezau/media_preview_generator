@@ -149,6 +149,24 @@ Bargatze Hello World, To Dye For) off their first card. Stargate Atlantis' first
 
 ## Lab regression
 
+`lab_run.sh` on this branch's image (`11c7e8c`): `phase4_row13_reset.py` with the old app, a fresh app on a new empty
+config volume (`mlab_app_config_credrem`; `mlab_app_config` is other lanes' and stays), `./phase2_matrix.py configure`,
+then `lab_rows.sh` (phase4_row13_run.sh's rows and order, stopping at the first row worse than #320's run). Logs in
+`local/lab_run.log` and `local/lab_rows.log`.
+
+- Phase 1 (inside phase 2 row 19): **16 of 16 pass**.
+- Phase 2: 16 of 24 pass. Phase 3: 3 of 12 pass (1, 4, 7).
+- Every failure but one is on #320's list and fails the same check (`../credits-accuracy/README.md` "Lab regression":
+  the `publish_when` rows, row 6's G3, the `-threads 2`/`scale_cuda` rows, phase 3 row 5, phase 3 row 11).
+- **Phase 3 row 6** (cancel mid-decode; passed in #320's run) failed "the decode stopped within 10 s", the run stopped
+  there, and the row was traced on a fresh app per trial with the decodes sampled every 0.5 s (`ps` in the app) and the
+  app's log. The cancel lands as the worker picks the file up; when the item misses it, the whole file is read and
+  stored as "unchanged", on both images: `dev` `cab4ccf` missed it in 4 of 6 traced trials, this branch in 5 of 6, with
+  the same decode timeline (the reference decode check, the keyframe pass, the 1 fps windows, the 640×360 pass). The
+  row passes only when its 1 s polls land in a 2–3 s gap between two decodes about 10 s after the cancel. Nothing on
+  this branch touches the cancel path; why the item misses a cancel made at pickup is not traced (a separate issue).
+  The run resumed at phase 3 row 7.
+
 ## Cost
 
 A file whose 1 fps walk reaches its window's floor decodes one more 24 s window at 1 fps (9 of 428 answers on the
