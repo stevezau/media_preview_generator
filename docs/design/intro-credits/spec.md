@@ -109,11 +109,14 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
   comparison ours is 7 of 81 wrong against Plex's 8 of 80, skipping story on 1 against Plex's 8.
 - ~~Epilogue text on black glued to the roll~~: done in credit text v8 by reading the words (no box-level signal
   separated a prose card from a credit card, `evidence/credits-remaining/README.md`).
-- **The lab matrices have drifted from the app** (found by this lane's row-13 run; details in
-  `evidence/credits-accuracy/README.md` "Lab regression"): phase 2 and 3 rows that set the removed `publish_when`
-  stop on a `KeyError`, and phase 2 rows 6 and 18 and phase 3 rows 3, 5 and 9 check behaviour that changed on purpose
-  since 2026-09-21 (season audio deciding alone, the worker's thread count, one scaler; row 5 not traced). Each fails the
-  same way on `dev`. The matrices need updating before the next full lab regression can gate anything.
+- **The lab matrices are current as of `dev` `cab4ccf`** (2026-09-27; `evidence/lab/CHANGES.md` lists every row
+  changed, old and new expectation, and the cite). The drift this lane's row-13 run found (rows setting the removed
+  `publish_when`, season audio deciding alone, the worker's thread count, one scaler, the helper's fallback wording
+  since #314) is gone, and a clean full run (`phase4_row13_reset.py`, a new empty config volume, `phase4_row13_run.sh`)
+  gates again: phase 1 16 of 16, phase 2 24 of 24, phase 3 12 of 12. Phase 3 row 6 (a cancel landing at pickup is
+  missed) was a real bug, intermittent on `dev` `cab4ccf` (it passed in that run and failed the one before it); #325
+  fixes it. The combined proof on `dev` `0e1ddb9` with #323, #325 and these matrices passed every row, row 6 in the
+  full run and in 5 of 5 extra trials.
 - **Spring of the Blade S01E14's intro** now ends at the title card but starts on the licence cards 11 s before the
   title sequence (the chapter's start and IntroDB's).
 

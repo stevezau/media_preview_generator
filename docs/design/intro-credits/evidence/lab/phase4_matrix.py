@@ -318,8 +318,8 @@ def all_results(body: dict | None) -> dict[str, str]:
 
 
 def set_settings() -> None:
-    """The settings every row starts from: publish at High, Keep Plex's and Keep Emby's off, Plex's detection off."""
-    p2.set_publish_when("high")
+    """The settings every row starts from: Keep Plex's and Keep Emby's off, Plex's detection off. (It also set "Publish
+    when" to High until that setting was removed on 2026-09-24: every file is decided at Medium's rules now.)"""
     p1.set_redetect("restore")
     for server_id in EMBYS:
         set_keep_emby(server_id, keep=False)

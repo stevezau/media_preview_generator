@@ -347,9 +347,27 @@ def server_entries() -> list[dict]:
     ]
 
 
-def set_publish_when(level: str) -> None:
-    app_ok("POST", "/api/settings", {"markers": {"publish_when": level}})
-    say(f"publish_when -> {app_ok('GET', '/api/settings')['markers']['publish_when']}")
+def post_removed_publish_when(level: str) -> dict:
+    """Post the removed ``markers.publish_when`` as an older client or settings.json still has it.
+
+    "Publish when" was removed on 2026-09-24 (spec §8, §14): every file is decided at Medium's rules and a posted or
+    stored ``publish_when`` is ignored. The app must take the post and keep no such key.
+
+    Args:
+        level: The level posted, "high" or "medium".
+
+    Returns:
+        ``{"status", "stored_keys", "ignored"}``; ``ignored`` is True when the post was taken and nothing kept it.
+    """
+    status, _ = app("POST", "/api/settings", {"markers": {"publish_when": level}})
+    stored = app_ok("GET", "/api/settings")["markers"]
+    say(f"posted the removed publish_when={level}: HTTP {status}; stored markers keys {sorted(stored)}")
+    return {"status": status, "stored_keys": sorted(stored), "ignored": status == 200 and "publish_when" not in stored}
+
+
+def pool_workers() -> list[dict]:
+    """The app's workers (GPU and CPU): their count caps how many fingerprints run at once (spec §5.6, since #314)."""
+    return app_ok("GET", "/api/jobs/workers")["workers"]
 
 
 def set_detect(**types: bool) -> dict:
@@ -457,6 +475,7 @@ class ChromaprintSampler(threading.Thread):
         super().__init__(daemon=True)
         self.peak = 0
         self.argv: list[str] = []
+        self.argvs: list[str] = []
         self.stop = threading.Event()
 
     def run(self) -> None:
@@ -466,13 +485,13 @@ class ChromaprintSampler(threading.Thread):
             self.peak = max(self.peak, len(lines))
             if lines and not self.argv:
                 self.argv = lines[0].split()
+            self.argvs += [line for line in lines if line not in self.argvs]
             self.stop.wait(0.5)
 
-    def threads_ok(self) -> bool:
-        """``-threads 2`` in the argv seen (True when no chromaprint process ran)."""
-        if not self.argv:
-            return True
-        return "-threads" in self.argv and self.argv[self.argv.index("-threads") + 1] == "2"
+    def own_thread_count(self) -> bool:
+        """No ``-threads`` on any chromaprint ffmpeg seen: fingerprints are CPU work and run at ffmpeg's own thread
+        count on any worker (spec §5.6 "Threads", #314). False when none was seen, so a check can't pass on nothing."""
+        return bool(self.argvs) and not any("-threads" in line.split() for line in self.argvs)
 
 
 ROWS: dict[int, Any] = {}
@@ -541,16 +560,62 @@ def _served_intros(paths: list[str]) -> dict[str, dict[str, list]]:
     return served
 
 
-def _season_audio_backfill(level: str) -> dict:
-    set_publish_when(level)
+def intro_served_as_decided(served: dict[str, list], marker: dict | None, tolerance_ms: int = 1_000) -> dict[str, bool]:
+    """Per server: it serves exactly one intro, at the decided intro's start and end (±``tolerance_ms``).
+
+    Args:
+        served: Server id -> the intros it serves, as ``_served_intros`` / ``listed_intros`` read them (Plex markers,
+            Jellyfin segments, Emby marker chapters).
+        marker: The decided intro (``start_ms``, ``end_ms``), or None when nothing was decided.
+        tolerance_ms: How far a served edge may sit from the decided one.
+
+    Returns:
+        Server id -> whether it serves the decided intro and nothing else.
+    """
+    out = {}
+    for sid, markers in served.items():
+        if sid == "mlab-plex":
+            spans = [(m["start"], m["end"]) for m in markers]
+        elif sid in p1.JELLYFINS:
+            spans = [(m["start_ticks"] // p1.TICKS_PER_MS, m["end_ticks"] // p1.TICKS_PER_MS) for m in markers]
+        else:
+            starts = [m["ms"] for m in markers if m["type"] == "IntroStart"]
+            ends = [m["ms"] for m in markers if m["type"] == "IntroEnd"]
+            spans = list(zip(starts, ends, strict=True)) if len(starts) == len(ends) else []
+        out[sid] = (
+            marker is not None
+            and len(spans) == 1
+            and abs(spans[0][0] - marker["start_ms"]) <= tolerance_ms
+            and abs(spans[0][1] - marker["end_ms"]) <= tolerance_ms
+        )
+    return out
+
+
+def decided_by_season_audio_alone(intro: dict, truth: tuple[int, int]) -> bool:
+    """An intro decision made by season audio alone (owner 2026-09-24, spec §5.3 and §5.5 rule 6), within row 2's
+    tolerances of the theme (end ±5 s, start ±15 s)."""
+    marker = intro.get("marker") or {}
+    return (
+        intro["status"] == "decided"
+        and marker.get("decided_by") == ["season_audio"]
+        and _near([{**marker, "source": "season_audio", "type": "intro"}], "season_audio", truth)
+    )
+
+
+# Row 2's two forced runs: the first fingerprints the show, the second reuses the cached fingerprints.
+ROW2_RUNS = ("first", "second")
+
+
+def _season_audio_backfill(run: str) -> dict:
     paths = [audio_path(1, e) for e in range(1, 5)] + [audio_path(2, 1)]
-    # Plex's own intro rows (row 3 runs Plex's detection on this season) are Plex's, not ours: they must stay as they are.
+    # Plex's own intro rows on S02E01 (row 3 runs Plex's detection on this show) are Plex's, not ours: they must stay.
     before = _served_intros(paths)
+    workers = pool_workers()
     sampler = ChromaprintSampler()
     sampler.start()
     try:
         job, _ = run_job(
-            {"file_paths": [AUDIO_SHOW], "library_name": f"Phase 2 row 2 season audio ({level})", "force": True}
+            {"file_paths": [AUDIO_SHOW], "library_name": f"Phase 2 row 2 season audio ({run} run)", "force": True}
         )
     finally:
         sampler.stop.set()
@@ -574,55 +639,69 @@ def _season_audio_backfill(level: str) -> dict:
             "served_intros_before": before,
             "served_intros": _served_intros(paths),
             "published": published,
+            "workers": [w["worker_name"] for w in workers],
             "chromaprint_peak": sampler.peak,
             "chromaprint_argv": sampler.argv,
+            "chromaprint_argvs": sampler.argvs,
         }
     )
     return evidence
 
 
 def _season_audio_checks(evidence: dict) -> dict[str, bool]:
-    """Row 2's checks from its recorded evidence (``evidence[level]`` for "high", then "medium")."""
+    """Row 2's checks from its recorded evidence (``evidence[run]`` for the "first", then the "second" run)."""
     checks = {}
-    for level, run in evidence.items():
-        episodes = run["episodes"]
-        checks[f"{level}: job completed"] = run["job"]["status"] == "completed"
+    for run, recorded in evidence.items():
+        episodes = recorded["episodes"]
+        checks[f"{run}: job completed"] = recorded["job"]["status"] == "completed"
         for label, episode in episodes.items():
             if label.startswith("S01"):
-                truth = AUDIO_TRUTH[(1, int(label[-2:]))]
-                checks[f"{level}: {label} needs review with season audio near the theme"] = episode["intro"][
-                    "status"
-                ] == "needs_review" and _near(episode["season_audio_evidence"], "season_audio", truth)
+                number = int(label[-2:])
+                truth = AUDIO_TRUTH[(1, number)]
+                name = audio_path(1, number).rsplit("/", 1)[-1]
+                checks[f"{run}: {label} decided by season audio alone near the theme, with its answer near it"] = (
+                    decided_by_season_audio_alone(episode["intro"], truth)
+                    and _near(episode["season_audio_evidence"], "season_audio", truth)
+                )
+                served = intro_served_as_decided(recorded["served_intros"][name], episode["intro"].get("marker"))
+                checks[f"{run}: {label} every server serves the decided intro"] = all(served.values())
         s2e01 = episodes["S02E01"]
-        checks[f"{level}: S02E01 not decided, no same-season season audio answer"] = s2e01["intro"][
+        checks[f"{run}: S02E01 not decided, no same-season season audio answer"] = s2e01["intro"][
             "status"
         ] != "decided" and not any(e["source"] == "season_audio" and e["type"] for e in s2e01["season_audio_evidence"])
-        argv = run["chromaprint_argv"]
-        # No intro of ours on any server: no published intro in the app's records, Jellyfin and Emby show no intro, and
-        # Plex shows only the intro rows it had before the job (its own detection's, from row 3). Credits are out of
-        # this row's scope: since phase 3, credit text alone decides credits at Medium (see _published_credits).
-        checks[f"{level}: no server serves an intro of ours"] = not any(
-            m["type"] == "intro" for v in run["published"].values() for markers in v.values() for m in markers
-        ) and all(
-            v["mlab-plex"] == run["served_intros_before"][name]["mlab-plex"]
-            and not any(x for sid, x in v.items() if sid != "mlab-plex")
-            for name, v in run["served_intros"].items()
+        # No intro of ours on S02E01: none published in the app's records, Jellyfin and Emby show none, and Plex shows
+        # only the intro rows it had before the job (its own detection's, from row 3). Credits are out of this row's
+        # scope: since phase 3, credit text alone decides credits at Medium (see _published_credits).
+        s2e01_name = audio_path(2, 1).rsplit("/", 1)[-1]
+        s2e01_served = recorded["served_intros"][s2e01_name]
+        checks[f"{run}: no server serves an intro of ours on S02E01"] = not any(
+            m["type"] == "intro" for markers in recorded["published"][s2e01_name].values() for m in markers
+        ) and (
+            s2e01_served["mlab-plex"] == recorded["served_intros_before"][s2e01_name]["mlab-plex"]
+            and not any(x for sid, x in s2e01_served.items() if sid != "mlab-plex")
         )
-        if level == "high":
-            # The show's fingerprints were deleted before this run, so it has to fingerprint.
-            checks["high: chromaprint ffmpeg ran, at most two at once, each with -threads 2"] = (
-                0 < run["chromaprint_peak"] <= 2 and "-threads" in argv and argv[argv.index("-threads") + 1] == "2"
+        argvs = recorded["chromaprint_argvs"]
+        if run == "first":
+            # The show's fingerprints were deleted before this run, so it has to fingerprint. Since #314 the worker
+            # pool is the cap (no app-wide limit of two) and chromaprint runs at ffmpeg's own thread count (spec §5.6).
+            workers = len(recorded["workers"])
+            checks[f"first: chromaprint ffmpeg ran, at most one per worker at once ({workers} workers)"] = (
+                0 < recorded["chromaprint_peak"] <= workers
             )
+            checks["first: every chromaprint ffmpeg at ffmpeg's own thread count (no -threads)"] = bool(
+                argvs
+            ) and not any("-threads" in line.split() for line in argvs)
         else:
-            # A forced run reads its evidence again but reuses cached fingerprints, and the High run cached them all.
-            checks["medium: no chromaprint ffmpeg (every fingerprint cached by the High run)"] = (
-                run["chromaprint_peak"] == 0 and not argv
+            # A forced run reads its evidence again but reuses cached fingerprints, and the first run cached them all.
+            checks["second: no chromaprint ffmpeg (every fingerprint cached by the first run)"] = (
+                recorded["chromaprint_peak"] == 0 and not argvs
             )
     # The hint uses the previous season's cached fingerprints only (spec §6.2 step 4, test_season.py
     # test_no_cached_previous_season_gives_no_hint_and_fingerprints_nothing_else): a run where S02E01 went before S01 was
-    # fingerprinted has an empty hint, and the next run, once S01 is cached, has it.
+    # fingerprinted has an empty hint, and the next run, once S01 is cached, has it. It never decides alone (checked
+    # above for both runs: owner 2026-09-13, unchanged by the 2026-09-24 ruling).
     checks["S02E01's previous-season hint is near the theme once S01 is cached (second run)"] = _near(
-        evidence["medium"]["episodes"]["S02E01"]["season_audio_evidence"], "season_audio_previous", AUDIO_TRUTH[(2, 1)]
+        evidence["second"]["episodes"]["S02E01"]["season_audio_evidence"], "season_audio_previous", AUDIO_TRUTH[(2, 1)]
     )
     return checks
 
@@ -640,32 +719,44 @@ def _published_credits(run: dict) -> dict[str, list]:
 
 def delete_fingerprints(folder: str) -> str:
     """Delete the app's cached fingerprints of every file under ``folder`` (markers.db in the lab app's config volume;
-    the image has no sqlite3 CLI). Returns the number of rows deleted."""
+    the image has no sqlite3 CLI). Returns the number of rows deleted: "0" on a fresh config no Intro & Credits job has
+    run on yet, which has no markers.db or no fingerprints table, so nothing is cached.
+
+    It runs as the app's user and opens the database ``mode=rw``, which never creates the file: a root ``docker exec``
+    on a fresh config would leave an empty root-owned markers.db the app can't write ("attempt to write a readonly
+    database", every Intro & Credits job fails)."""
     statement = (
         f"DELETE FROM fingerprints WHERE file_id IN (SELECT id FROM files WHERE canonical_path LIKE '{folder}/%')"
     )
     return sh(
-        "docker", "exec", "mlab-app", "python3", "-c",
-        "import sqlite3, sys; c = sqlite3.connect('/config/markers.db'); n = c.execute(sys.argv[1]).rowcount; c.commit(); print(n)",
+        "docker", "exec", "-u", "1000:1000", "mlab-app", "python3", "-c",
+        "import os, sqlite3, sys\n"
+        "if not os.path.exists('/config/markers.db'): print(0); sys.exit()\n"
+        "c = sqlite3.connect('file:/config/markers.db?mode=rw', uri=True)\n"
+        "t = c.execute(\"select 1 from sqlite_master where type='table' and name='fingerprints'\").fetchone()\n"
+        "n = c.execute(sys.argv[1]).rowcount if t else 0; c.commit(); print(n)",
         statement,
     ).strip()  # fmt: skip
 
 
 @row(2)
 def row_02_season_audio_backfill() -> dict:
-    """Synth Audio S01 + S02E01, forced, at High and then at Medium: season audio finds every S01 theme but never
-    decides alone (R2) — every intro Needs review; S02E01 gets no same-season answer, only the previous-season hint
-    (from S01's cached fingerprints, so from the second run); no server serves an intro. The show's fingerprints are
-    deleted first, so the High run fingerprints (at most two chromaprint ffmpeg at once, each with -threads 2) and the
-    Medium run reuses them. Row 4's S02E02 is set aside for the row (S02E01 must be alone in its season) and put back.
-    P2_REEVALUATE=1 re-checks the recorded runs."""
+    """Synth Audio S01 + S02E01, forced, twice: season audio finds every S01 theme and decides each intro alone (owner
+    2026-09-24, overriding R2; spec §5.3, §5.5 rule 6), and every server serves it ("Use ours"); S02E01 gets no
+    same-season answer, only the previous-season hint (from S01's cached fingerprints, so from the second run), which
+    never decides alone, and no server serves an intro of ours on it. The show's fingerprints are deleted first, so the
+    first run fingerprints (at most one chromaprint ffmpeg per worker at once, each at ffmpeg's own thread count: spec
+    §5.6, #314) and the second reuses them. Row 4's S02E02 is set aside for the row (S02E01 must be alone in its
+    season) and put back. P2_REEVALUATE=1 re-checks the recorded runs."""
     recorded = RESULTS / "p2-row-02.json"
     setup: dict[str, Any] = {}
     if os.environ.get("P2_REEVALUATE") and recorded.exists():
         body = json.loads(recorded.read_text())
-        evidence = {level: body[level] for level in ("high", "medium")}
+        evidence = {run: body[run] for run in ROW2_RUNS}
         setup = body.get("setup", {})
     else:
+        # "Use ours": the row reads what every server serves, and "Keep Plex's" would leave Plex its own intros.
+        setup["on_plex_redetect"] = (p1.set_redetect("restore").get("plex") or {}).get("on_plex_redetect")
         s2e02 = AUDIO_HOST / "Season 02" / STAGED_S2E02.name
         setup["s2e02_set_aside"] = s2e02.exists()
         try:
@@ -673,9 +764,8 @@ def row_02_season_audio_backfill() -> dict:
                 s2e02.unlink()
                 setup["s2e02_gone"] = rescan_until("Synth Audio", [audio_path(2, 2)], present=False)
             setup["fingerprints_deleted"] = delete_fingerprints(AUDIO_SHOW)
-            evidence = {level: _season_audio_backfill(level) for level in ("high", "medium")}
+            evidence = {run: _season_audio_backfill(run) for run in ROW2_RUNS}
         finally:
-            set_publish_when("high")
             if setup["s2e02_set_aside"] and not s2e02.exists():
                 shutil.copyfile(STAGED_S2E02, s2e02)
                 try:
@@ -686,72 +776,115 @@ def row_02_season_audio_backfill() -> dict:
     notes = [
         f"setup {setup}",
         *(
-            f"{level}: job {evidence[level]['job']['id'][:8]} {evidence[level]['job']['progress'].get('outcome')}; "
-            f"chromaprint peak {evidence[level]['chromaprint_peak']}"
-            for level in evidence
+            f"{run}: job {evidence[run]['job']['id'][:8]} {evidence[run]['job']['progress'].get('outcome')}; "
+            f"chromaprint peak {evidence[run]['chromaprint_peak']} on {len(evidence[run]['workers'])} workers"
+            for run in evidence
         ),
     ]
     notes += [
-        f"{level} {label}: intro {e['intro']['status']}; audio {[(a['source'], a['start_ms'], a['end_ms'], a['label']) for a in e['season_audio_evidence']]}"
-        for level in evidence for label, e in evidence[level]["episodes"].items()
+        f"{run} {label}: intro {e['intro']['status']} {(e['intro'].get('marker') or {}).get('decided_by')} {e['intro'].get('reason')!r}; audio {[(a['source'], a['start_ms'], a['end_ms'], a['label']) for a in e['season_audio_evidence']]}"
+        for run in evidence for label, e in evidence[run]["episodes"].items()
     ]  # fmt: skip
     notes.append(
         "expectation changed: S02E01's hint in the first run of a fresh show can be empty — it uses cached previous-season "
         "fingerprints only, and S02E01 ran before S01 was fingerprinted"
     )
-    notes += [f"{level}: credits published (not this row's question): {_published_credits(evidence[level])}" for level in evidence]  # fmt: skip
+    notes.append(
+        "expectation changed (2026-09-27 lab matrices update): the High/Medium runs are gone with the removed "
+        "publish_when (schema 16); season audio decides an intro alone since 2026-09-24; fingerprints run one per "
+        "worker at ffmpeg's own thread count since #314"
+    )
+    notes += [f"{run}: credits published (not this row's question): {_published_credits(evidence[run])}" for run in evidence]  # fmt: skip
     return checks_result(
-        2, "Season audio backfill at High and Medium on five servers", checks, {"setup": setup, **evidence}, notes
+        2, "Season audio backfill, twice, on five servers", checks, {"setup": setup, **evidence}, notes
     )
 
 
 @row(3)
-def row_03_high_alone() -> dict:
-    """S01E02 at High is Needs review even when Plex's own intro agrees (G3); records Plex's own intro rows for S01."""
-    set_publish_when("high")
+def row_03_agreeing_server_marker() -> dict:
+    """S01E02 with Plex's own intro agreeing with season audio (the G3 premise): season audio decides the intro alone,
+    at its own edges, and Plex's marker is not counted as a second source (G3 still holds; spec §5.3, §5.5 rules 4, 6
+    and 7; §14 2026-09-24 "An agreeing server marker no longer holds season audio back"). Under "Use ours" the forced
+    job writes our intro back over Plex's own. Records Plex's own intro rows for S01.
+
+    The app never reads a Plex item it has published to as evidence (Plex can't tell our markers from its own:
+    ``pipeline._read_server_markers``, ``MarkerStore.published_to_item``, spec §13 item 17), and since season audio
+    decides alone, row 2 publishes our intro on every S01 episode. So the row first takes our intro off S01E02 (intro
+    detection off, one forced job) before Plex detects its own; a normal job over S01 at the end writes ours back where
+    Plex's detection replaced them."""
+    p1.set_redetect("restore")
     s1 = [audio_path(1, e) for e in range(1, 5)]
+    name = s1[1].rsplit("/", 1)[-1]
+    try:
+        set_detect(intro=False, credits=True)
+        cleared_job, cleared_files = run_job(
+            {"file_paths": [s1[1]], "library_name": "Phase 2 row 3 our intro off", "force": True}
+        )
+    finally:
+        set_detect(intro=True, credits=True)
+    cleared = {
+        "job": cleared_job["status"],
+        "plex_row": server_row(cleared_files, name, "mlab-plex"),
+        "published": inspector_server(s1[1], "mlab-plex").get("published"),
+        "served": [m for m in p1.plex_served(plex_item(s1[1])) if m["type"] == "intro"],
+    }
     with PlexDetection() as prefs_before:
         season = plex_season(s1[0])
         plex("PUT", f"/library/metadata/{season}/intro", force=1)
         p1.plex_wait_idle(min_wait=15, timeout=900)
         plex_intros = {p.rsplit("/", 1)[-1]: [r for r in plex_rows(plex_item(p)) if r["text"] == "intro"] for p in s1}
-    job, files = run_job({"file_paths": [s1[1]], "library_name": "Phase 2 row 3 High alone", "force": True})
+    job, files = run_job({"file_paths": [s1[1]], "library_name": "Phase 2 row 3 agreeing Plex intro", "force": True})
     payload = p1.item_payload(s1[1])
     intro = payload["decisions"]["intro"]
+    marker = intro.get("marker") or {}
     server_rows_ = [e for e in payload["evidence"] if e["source"].startswith("server_markers") and e["type"] == "intro"]
     audio = [e for e in payload["evidence"] if e["source"] == "season_audio" and e["type"] == "intro"]
     agrees = any(abs(s["end_ms"] - a["end_ms"]) <= 5_000 for s in server_rows_ for a in audio)
-    published = {p.rsplit("/", 1)[-1]: inspector_server(p, "mlab-plex").get("published") for p in s1}
+    plex_served_intros = [m for m in p1.plex_served(plex_item(s1[1])) if m["type"] == "intro"]
+    plex_row = server_row(files, name, "mlab-plex")
+    # Plex's forced detection replaced the whole season's intros; a normal job under "Use ours" writes ours back.
+    restored, _ = run_job({"file_paths": [AUDIO_S1], "library_name": "Phase 2 row 3 restore"})
     checks = {
+        "our intro off S01E02 first: the job completed and Plex served no intro": cleared["job"] == "completed"
+        and not cleared["served"]
+        and not any(m["type"] == "intro" for m in cleared["published"] or []),
         "job completed": job["status"] == "completed",
         "Plex's own intro and season audio agree within 5 s on S01E02 (the G3 premise)": agrees,
-        "S01E02 intro needs review at High": intro["status"] == "needs_review",
-        "nothing of ours published to Plex on S01 (Plex's rows are its own)": not any(published.values()),
+        "S01E02 intro decided": intro["status"] == "decided",
+        "decided by season audio alone, not as a pair with Plex's marker (G3)": marker.get("decided_by")
+        == ["season_audio"]
+        and "single source (season_audio)" in (intro.get("reason") or ""),
+        "at season audio's own edges": any(
+            (a["start_ms"], a["end_ms"]) == (marker.get("start_ms"), marker.get("end_ms")) for a in audio
+        ),
+        "Use ours: the job wrote our intro back to Plex and Plex serves it": plex_row.get("status") == "markers_written"
+        and intro_served_as_decided({"mlab-plex": plex_served_intros}, marker or None)["mlab-plex"],
+        "restore job over S01 completed": restored["status"] == "completed",
     }
     notes = [
+        f"our intro off first: {cleared}",
         f"Plex's own intro rows after forced season detection: { {k: [(r['start'], r['end']) for r in v] for k, v in plex_intros.items()} }",
         f"S01E02 evidence: server markers {[(e['source'], e['origin'], e['start_ms'], e['end_ms']) for e in server_rows_]}; "
         f"season audio {[(e['start_ms'], e['end_ms'], e['label']) for e in audio]}; a server marker agrees within 5 s: {agrees}",
-        f"S01E02 intro {intro['status']}: {intro['reason']}",
+        f"S01E02 intro {intro['status']}: {intro['reason']}; decided_by {marker.get('decided_by')}",
+        f"Plex row {plex_row}; Plex serves {plex_served_intros}",
         f"Plex detection prefs before {prefs_before}",
+        "expectation changed (2026-09-27 lab matrices update): was 'Needs review at High' (G3); High is gone (schema 16) "
+        "and since 2026-09-24 an agreeing server marker no longer holds season audio back, which decides alone",
     ]  # fmt: skip
-    evidence = {"plex_intro_rows": plex_intros, "payload": payload, "job": job["id"], "files": files, "agrees": agrees}
-    return checks_result(3, "High alone: season audio + server markers never decide (G3)", checks, evidence, notes)
+    evidence = {"cleared": cleared, "plex_intro_rows": plex_intros, "payload": payload, "job": job["id"],
+                "files": files, "agrees": agrees, "restore_job": restored["id"]}  # fmt: skip
+    return checks_result(
+        3, "Season audio with an agreeing Plex intro decides alone, never as a pair (G3)", checks, evidence, notes
+    )
 
 
 @row(4)
 def row_04_weekly_release() -> dict:
     """A new S02E02 arrives by webhook: its job matches it against S02E01 and queues one Season job holding only
-    S02E01 (NORMAL, from a webhook follow-up); S02E01 then has a same-season season audio answer near the theme and
-    still Needs review (R2/G3); nothing is served."""
-    set_publish_when("medium")
-    try:
-        return _weekly_release()
-    finally:
-        set_publish_when("high")
-
-
-def _weekly_release() -> dict:
+    S02E01 (NORMAL, from a webhook follow-up); S02E01 then has a same-season season audio answer near the theme, and
+    season audio decides both intros alone (spec §5.3, owner 2026-09-24), each served by every server."""
+    p1.set_redetect("restore")
     target = AUDIO_HOST / "Season 02" / STAGED_S2E02.name
     if not target.exists():
         shutil.copyfile(STAGED_S2E02, target)
@@ -790,6 +923,7 @@ def _weekly_release() -> dict:
         )  # fmt: skip
 
     served = {e: listed_intros(audio_path(2, e)) for e in (1, 2)}
+    served_ok = {e: intro_served_as_decided(served[e], episodes[e]["decisions"]["intro"].get("marker")) for e in (1, 2)}
     checks = {
         "exactly one Season job": len(season_jobs) == 1,
         "named Season: Synth Audio (2022) · Season 02": found["library_name"]
@@ -797,15 +931,22 @@ def _weekly_release() -> dict:
         "it holds only S02E01": season_files == [audio_path(2, 1)],
         "at NORMAL (queued by a webhook follow-up)": found["priority"] == 2,
         "S02E01 has a same-season season audio answer near the theme": near(episodes[1], 1),
-        "S02E01 intro still needs review": episodes[1]["decisions"]["intro"]["status"] == "needs_review",
-        "S02E02 intro needs review": episodes[2]["decisions"]["intro"]["status"] == "needs_review",
-        "no intro served on S02": not any(any(v.values()) for v in served.values()),
+        "S02E01 intro decided by season audio alone near the theme": decided_by_season_audio_alone(
+            episodes[1]["decisions"]["intro"], AUDIO_TRUTH[(2, 1)]
+        ),
+        "S02E02 intro decided by season audio alone near the theme": decided_by_season_audio_alone(
+            episodes[2]["decisions"]["intro"], AUDIO_TRUTH[(2, 2)]
+        ),
+        "every server serves both decided intros on S02": all(all(v.values()) for v in served_ok.values()),
     }
     notes = [
         f"jobs since the webhook: {[(j['id'][:8], j['library_name'], j['kind'], j['priority'], j['status']) for j in jobs]}",
         f"S02E02 near its theme too: {near(episodes[2], 2)}",
+        f"served as decided: {served_ok}",
+        "expectation changed (2026-09-27 lab matrices update): was 'both intros still need review, nothing served' (R2); "
+        "since 2026-09-24 season audio decides an intro alone",
     ] + [
-        f"S02E0{e}: {p['decisions']['intro']['status']} {[(x['source'], x['start_ms'], x['end_ms'], x['label']) for x in p['evidence'] if x['source'].startswith('season_audio')]}"
+        f"S02E0{e}: {p['decisions']['intro']['status']} {(p['decisions']['intro'].get('marker') or {}).get('decided_by')} {[(x['source'], x['start_ms'], x['end_ms'], x['label']) for x in p['evidence'] if x['source'].startswith('season_audio')]}"
         for e, p in episodes.items()
     ]  # fmt: skip
     evidence = {
@@ -846,15 +987,15 @@ def rick_files() -> dict[int, str]:
 
 
 @row(5)
-def row_05_rick_high() -> dict:
-    """Rick and Morty S01 at High, a normal job: season audio is in decided_by on at least one episode (agreeing with
-    an online source) and no decided intro is wrong against the 11 online truth cases."""
+def row_05_rick_season() -> dict:
+    """Rick and Morty S01 at the app's rules (Medium, the only rules since 2026-09-24: spec §5.5 rule 6), a normal job:
+    season audio is in decided_by on at least one episode and no decided intro is wrong against the 11 online truth
+    cases."""
     sys.path.insert(0, str(REPO))
     from tools.markers_eval.score import judge_intro
 
-    set_publish_when("high")
     before = {e: p1.item_payload(p)["decisions"]["intro"] for e, p in rick_files().items()}
-    job, _ = run_job({"file_paths": [p1.RICK_SEASON], "library_name": "Phase 2 row 5 Rick and Morty High"})
+    job, _ = run_job({"file_paths": [p1.RICK_SEASON], "library_name": "Phase 2 row 5 Rick and Morty"})
     truth = rick_truth()
     verdicts, with_audio, detail = {"useful": 0, "wrong": 0, "missed": 0}, [], {}
     for episode, path in sorted(rick_files().items()):
@@ -881,9 +1022,14 @@ def row_05_rick_high() -> dict:
     notes = [
         f"useful/wrong/missed on the {len(truth)} online truth cases: {verdicts}",
         f"episodes whose intro decided_by has season_audio: {with_audio}",
+        "expectation changed (2026-09-27 lab matrices update): the row ran at High, removed with publish_when (schema 16)",
     ] + [f"{k}: {v['status']} {v['marker'] and (v['marker']['start_ms'], v['marker']['end_ms'], v['marker']['decided_by'])} {v['verdict']}" for k, v in detail.items()]  # fmt: skip
     return checks_result(
-        5, "Rick and Morty S01 at High", checks, {"job": job, "verdicts": verdicts, "episodes": detail}, notes
+        5,
+        "Rick and Morty S01 at the app's rules",
+        checks,
+        {"job": job, "verdicts": verdicts, "episodes": detail},
+        notes,
     )
 
 
@@ -910,9 +1056,17 @@ def synth_chapter_paths() -> list[str]:
     return [p1.synth_path(e) for e in (1, 2, 3)]
 
 
+def _emby_intro_near(marks: list[dict] | None, truth: tuple[int, int]) -> bool:
+    """One IntroStart and one IntroEnd on an Emby item, within row 2's tolerances of the theme (start ±15 s, end ±5 s)."""
+    starts = [m["ms"] for m in marks or [] if m["type"] == "IntroStart"]
+    ends = [m["ms"] for m in marks or [] if m["type"] == "IntroEnd"]
+    return len(starts) == len(ends) == 1 and abs(starts[0] - truth[0]) <= 15_000 and abs(ends[0] - truth[1]) <= 5_000
+
+
 @row(6)
 def row_06_emby_write_and_serve() -> dict:
-    """Emby 4.10 lists our marker chapters at the decisions (R1: credits start always) next to the file's own chapters;
+    """Emby 4.10 lists our marker chapters at the decisions (R1: credits start always) next to the file's own chapters,
+    Synth Audio S01's season audio intros included (season audio decides an intro alone since 2026-09-24, spec §5.3);
     the Extended copy (10 s tail) is its own item with its own CreditsStart and the "Emby skips to the end of the file"
     note; PlaybackInfo of the grouped item is recorded (evidence gap from Task 10)."""
     audio = [audio_path(1, e) for e in range(1, 5)]
@@ -936,7 +1090,9 @@ def row_06_emby_write_and_serve() -> dict:
     checks = {
         "Synth Chapters E01–E03 and Synth Audio S01 marker chapters = decisions": all(v["ok"] for v in served.values()),
         "Synth Chapters keep their 4 plain chapters": all(served[p.rsplit("/", 1)[-1]]["plain_chapters"] == 4 for p in synth_chapter_paths()),
-        "Synth Audio S01 has no intro on Emby (G3: needs review)": not any(m["type"].startswith("Intro") for p in audio for m in served[p.rsplit("/", 1)[-1]]["got"] or []),
+        "Synth Audio S01 intros on Emby near the theme (season audio decides alone)": all(
+            _emby_intro_near(served[p.rsplit("/", 1)[-1]]["got"], AUDIO_TRUTH[(1, e)]) for e, p in enumerate(audio, 1)
+        ),
         "Extended job completed": job["status"] == "completed",
         "Extended and E01 are separate Emby items": versions[ext_name]["item"] not in (None, versions[e01_name]["item"]),
         "Extended gets CreditsStart at the decided start (R1)": versions[ext_name]["ok"] and any(m["type"] == "CreditsStart" for m in versions[ext_name]["got"] or []),
@@ -1156,7 +1312,6 @@ def reconcile_job(timeout: float = 1800) -> tuple[dict, list[dict], dict]:
 def row_10_reconcile_restores() -> dict:
     """Markers Plex, Jellyfin and Emby dropped come back from one Check servers job, Plex's credits ``final`` flag
     included; a second run lists no files. A forced job first puts right a ``final`` flag left from a deleted version."""
-    set_publish_when("high")
     p1.set_redetect("restore")
     ep = p1.synth_path(1)
     truth = p1.SYNTH_TRUTH[1]
@@ -1287,7 +1442,6 @@ def row_12_plex_p3_p4() -> dict:
     """P3 steps 2–4: an intro published next to Plex's own credits rows ([index] order, then Plex's forced credits
     detection). P4: after we remove our intro (pv:intros key deleted), does Plex's non-forced intro detection add its
     own? Both answers are recorded; the row passes when the lab steps ran and our markers are back at the end."""
-    set_publish_when("high")
     p1.set_redetect("restore")
     rick = rick_files()[1]
     rick_item = plex_item(rick)
@@ -1638,9 +1792,11 @@ def row_17_security() -> dict:
 
 @row(18)
 def row_18_resources() -> dict:
-    """A forced job on Rick and Morty S01 with its fingerprints deleted: at most two chromaprint ffmpeg at once with
-    -threads 2; peak CPU and memory next to phase 1 row 15 (86 %, 99 MiB)."""
+    """A forced job on Rick and Morty S01 with its fingerprints deleted: at most one chromaprint ffmpeg per worker at
+    once, each at ffmpeg's own thread count (the worker pool is the cap and fingerprints are CPU work: spec §5.6, #314);
+    peak CPU and memory next to phase 1 row 15 (86 %, 99 MiB)."""
     deleted = delete_fingerprints(p1.RICK_SEASON)
+    workers = pool_workers()
     sampler, stats = ChromaprintSampler(), p1.StatsSampler()
     sampler.start()
     stats.start()
@@ -1656,18 +1812,22 @@ def row_18_resources() -> dict:
     cpu = [float(s["cpu"].rstrip("%")) for s in stats.samples]
     mem = [p1._mib(s["mem"]) for s in stats.samples]
     checks = {
-        "fingerprints deleted": deleted not in ("", "0"),
+        "fingerprints deleted": deleted.isdigit() and int(deleted) > 0,
         "job completed": job["status"] == "completed",
         "chromaprint ffmpeg ran": sampler.peak > 0,
-        "at most two at once with -threads 2": sampler.peak <= 2 and sampler.threads_ok(),
+        f"at most one at once per worker ({len(workers)} workers)": sampler.peak <= len(workers),
+        "every chromaprint ffmpeg at ffmpeg's own thread count (no -threads)": sampler.own_thread_count(),
     }
     duration = job["started_at"] and job["completed_at"]
     notes = [
         f"fingerprint rows deleted {deleted}; job {job['id'][:8]} {job['started_at']} -> {job['completed_at']} ({duration and 'done'})",
-        f"chromaprint peak {sampler.peak}, argv {' '.join(sampler.argv)}",
+        f"workers {[w['worker_name'] for w in workers]}; chromaprint peak {sampler.peak}, argv {' '.join(sampler.argv)}",
         f"{len(stats.samples)} docker stats samples: peak CPU {max(cpu, default=0):.1f}%, peak memory {max(mem, default=0):.0f} MiB (phase 1 row 15: 86 %, 99 MiB)",
+        "expectation changed (2026-09-27 lab matrices update): was 'at most two at once with -threads 2'; since #314 "
+        "the worker pool caps fingerprints and they run at ffmpeg's own thread count",
     ]
-    evidence = {"peak_cpu": max(cpu, default=None), "peak_mem_mib": max(mem, default=None), "chromaprint_peak": sampler.peak, "argv": sampler.argv, "job": job}  # fmt: skip
+    evidence = {"peak_cpu": max(cpu, default=None), "peak_mem_mib": max(mem, default=None), "chromaprint_peak": sampler.peak, "argv": sampler.argv,
+                "argvs": sampler.argvs, "workers": [w["worker_name"] for w in workers], "job": job}  # fmt: skip
     return checks_result(18, "Resources during a forced Rick and Morty S01 job", checks, evidence, notes)
 
 
@@ -2282,9 +2442,9 @@ def row_25_locked_marker_through_emby_publisher() -> dict:
             == p4.expected_on(sid, p4.INTRO_EDIT, p4.CREDITS_EDIT)
             and sorted(rows_both["replaced_own"]) == ["credits", "intro"],
         })  # fmt: skip
-    checks["the Keep Emby's job ran and recorded ours behind Emby's own rows (markers_written on both)"] = (
-        job["status"] == "completed" and steps["kept"]["statuses"] == dict.fromkeys(EMBY_SERVERS, "markers_written")
-    )
+    checks["the Keep Emby's job ran and recorded ours behind Emby's own rows (markers_written on both)"] = job[
+        "status"
+    ] == "completed" and steps["kept"]["statuses"] == dict.fromkeys(EMBY_SERVERS, "markers_written")
     checks["the lab was put back (Keep Emby's off, Emby's own rows cleared, episode settled)"] = not cleanup_errors
     checks["Check servers completed, and a second run has nothing left to do for the file"] = (
         check_job["status"] == "completed"
