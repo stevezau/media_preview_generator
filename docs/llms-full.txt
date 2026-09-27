@@ -2004,8 +2004,8 @@ drag-to-reorder:
   other source has to agree). When SkipDB's credits disagree with a credits chapter, the on-screen credit text is read
   in the same run: if it agrees with SkipDB, those two decide, starting where the credit text does; if not, the chapter
   stands. The credit text also reads every file whose credits a chapter decided: when the chapter is off the credit roll
-  (inside it, or on the last shot before it), the skip starts at the first credit card and still ends where the
-  chapter does. When an online answer ends an intro inside an intro chapter, the episode waits for season audio: if
+  (inside it, or on the story before it), the skip starts at the first credit text the frames show and still ends where
+  the chapter does. When an online answer ends an intro inside an intro chapter, the episode waits for season audio: if
   season audio agrees with the online answer, those two decide.
 - **When sources agree on credits**, the start comes from the first of them in your order, except that on-screen
   credit text supplies the start when it is more than 5 s from that one's: the online databases were timed on other

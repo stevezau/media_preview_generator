@@ -927,6 +927,17 @@ class TestSourceLines:
             f"  Credit text: credits 41:48–43:10 ({note})"
         ]
 
+    def test_a_chapter_moved_to_the_first_text_after_it_says_where(self):
+        rows = [
+            _row(Source.CHAPTERS, T.CREDITS, 2_470_000, 2_590_000, label="End Credits"),
+            _row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, 2_590_000,
+                 label=chapter_hint(2_470_000, moves=True, to_ms=2_485_000)),
+        ]  # fmt: skip
+        assert _lines_for(["credits_text"], rows, _asked(Source.CREDITS_TEXT)) == [
+            '  Credit text: credits 41:48–43:10 (moves the "End Credits" chapter at 41:10 to the first text after it, '
+            "41:25)"
+        ]
+
     def test_credit_text_read_against_an_unnamed_credits_chapter_calls_it_the_credits_chapter(self):
         rows = [_row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, None, label=chapter_hint(2_470_000, moves=True))]
         notes = _asked(Source.CREDITS_TEXT)

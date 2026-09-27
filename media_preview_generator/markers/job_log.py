@@ -679,9 +679,11 @@ def _chapter_check(label: str, chapters: Mapping[MarkerType, Mapping[int, str]])
     hint = read_chapter_hint(label)
     if hint is None:
         return ""
-    chapter_ms, moves = hint
+    chapter_ms, moves, to_ms = hint
     name = (chapters.get(MarkerType.CREDITS) or {}).get(chapter_ms) or _chapter_of(chapters, MarkerType.CREDITS, None)
     chapter = f'the "{name}" chapter' if name else "the credits chapter"
+    if moves and to_ms is not None:
+        return f"moves {chapter} at {clock(chapter_ms)} to the first text after it, {clock(to_ms)}"
     if moves:
         return f"moves {chapter} at {clock(chapter_ms)} to the first credit card"
     return f"keeps {chapter} at {clock(chapter_ms)}"

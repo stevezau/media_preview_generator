@@ -164,7 +164,7 @@ SHORTENED_NOTE = "shortened to the server's own marker"
 NO_EVIDENCE_REASON = "no evidence"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
 # :func:`chapter_hint`'s label, read back.
-_CHAPTER_HINT_RE = re.compile(r"^the frames (move|keep) the credits chapter at (\d+) ms$")
+_CHAPTER_HINT_RE = re.compile(r"^the frames (move|keep) the credits chapter at (\d+) ms(?: to (\d+) ms)?$")
 _ENUM_ORDER = {source: i for i, source in enumerate(Source)}
 
 
@@ -771,35 +771,40 @@ def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: 
     return replace(decision, reason=TEXT_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
 
 
-def chapter_hint(chapter_start_ms: int, *, moves: bool) -> str:
+def chapter_hint(chapter_start_ms: int, *, moves: bool, to_ms: int | None = None) -> str:
     """The label a credit text answer read against a credits chapter carries (``Candidate.origin``): which chapter it
     read the frames against, and whether they show that chapter off the roll the answer starts
-    (``credits.rule_j.moves_chapter``), so the rules move only the chapter it was read for (:func:`_text_moves_chapter`).
+    (``credits.rule_j.chapter_moves_to``), so the rules move only the chapter it was read for
+    (:func:`_text_moves_chapter`).
 
     Args:
         chapter_start_ms: The chapter's start.
         moves: The frames show the chapter off the roll.
+        to_ms: Where the frames put the moved chapter's start when that isn't the answer's own start (a chapter on the
+            story before the first text of a roll rule J reads later, version 7); None for the answer's start.
 
     Returns:
         The label.
     """
     verdict = "the frames move" if moves else "the frames keep"
-    return f"{verdict} the credits chapter at {chapter_start_ms} ms"
+    target = f" to {to_ms} ms" if moves and to_ms is not None else ""
+    return f"{verdict} the credits chapter at {chapter_start_ms} ms{target}"
 
 
-def read_chapter_hint(label: str) -> tuple[int, bool] | None:
+def read_chapter_hint(label: str) -> tuple[int, bool, int | None] | None:
     """:func:`chapter_hint`'s label read back.
 
     Args:
         label: A credit text answer's label (``Candidate.origin``, stored as the evidence row's ``label``).
 
     Returns:
-        ``(chapter_start_ms, moves)``, or None when the label isn't such a hint.
+        ``(chapter_start_ms, moves, to_ms)`` (``to_ms`` None: the answer's own start), or None when the label isn't
+        such a hint.
     """
     match = _CHAPTER_HINT_RE.match(label or "")
     if match is None:
         return None
-    return int(match.group(2)), match.group(1) == "move"
+    return int(match.group(2)), match.group(1) == "move", None if match.group(3) is None else int(match.group(3))
 
 
 def credits_chapter_start_ms(
@@ -847,8 +852,9 @@ def _text_moves_chapter(
 ) -> TypeDecision | None:
     """Credits whose start credit text moved off the chapter (rule 3, 2026-09-27): the detector read the frames against
     this chapter and found it off the roll its answer starts (:func:`chapter_hint` with ``moves``,
-    ``credits.rule_j.moves_chapter``: inside the roll, or on the last shot before it). The chapter gives the window and
-    its end; credit text the start (a release's "Credits" chapter was more than 5 s off the first card on 10 of 41
+    ``credits.rule_j.chapter_moves_to``: inside the roll, or on the last shot before it). The chapter gives the window
+    and its end; credit text the start -- the hint's own start when it names one (the first text after a chapter on the
+    story, version 7), else the answer's (a release's "Credits" chapter was more than 5 s off the first card on 10 of 41
     frame-checked files, 3 of them on the story). Nothing else may agree with the chapter's start: a source that does
     keeps it, as one source never overrides a chapter another confirms.
 
@@ -857,14 +863,23 @@ def _text_moves_chapter(
         fails sanity.
     """
     tol = _tolerance_ms(MarkerType.CREDITS)
-    hint = chapter_hint(chosen.start_ms, moves=True)
-    text = [c for c in others if c.source is Source.CREDITS_TEXT and c.origin == hint]
-    if len(text) != 1 or abs(text[0].start_ms - chapter.start_ms) <= tol:
+    text = [
+        (c, hint)
+        for c in others
+        if c.source is Source.CREDITS_TEXT
+        and (hint := read_chapter_hint(c.origin)) is not None
+        and hint[:2] == (chosen.start_ms, True)
+    ]
+    if len(text) != 1:
+        return None
+    answer, (_, _, to_ms) = text[0]
+    start_ms = answer.start_ms if to_ms is None else to_ms
+    if abs(start_ms - chapter.start_ms) <= tol:
         return None
     if any(c.source is not Source.CREDITS_TEXT and abs(c.start_ms - chapter.start_ms) <= tol for c in others):
         return None
-    end = min(chapter.end_ms, resolve_end_ms(text[0], ctx.duration_ms))
-    marker = _composed_marker(MarkerType.CREDITS, text[0].start_ms, end, {Source.CHAPTERS, Source.CREDITS_TEXT}, ctx)
+    end = min(chapter.end_ms, resolve_end_ms(answer, ctx.duration_ms))
+    marker = _composed_marker(MarkerType.CREDITS, start_ms, end, {Source.CHAPTERS, Source.CREDITS_TEXT}, ctx)
     if not _marker_is_sane(marker, ctx):
         return None
     return TypeDecision(MarkerType.CREDITS, DecisionStatus.DECIDED, marker, None, TEXT_MOVES_CHAPTER_REASON)

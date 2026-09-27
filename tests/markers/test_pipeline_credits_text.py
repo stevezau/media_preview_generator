@@ -484,9 +484,9 @@ class TestCreditsWindow:
     def test_automatic_stores_the_answer_under_the_version_it_always_had(self, store, media):
         spec = detector.credits_text_spec()
         rec = store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False)
-        assert detector.CREDITS_TEXT_VERSION == 6
-        assert spec.answer_version(rec, ctx_for(store, media)) == 6
-        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 6
+        assert detector.CREDITS_TEXT_VERSION == 7
+        assert spec.answer_version(rec, ctx_for(store, media)) == 7
+        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 7
 
     def test_an_answer_read_on_another_window_is_read_again_and_stored_under_the_new_one(self, store, media, find):
         _run(ctx_for(store, media), media, pubs(), stage="process")
