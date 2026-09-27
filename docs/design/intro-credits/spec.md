@@ -504,6 +504,23 @@ and logo, a lower third's words — makes credit frames of 3–5 boxes that the 
 `overlay_boxes` can't take it: it is on screen only in the stretch the run opens on, never across the story before
 (I Survived S01E14: court footage, 68 s early). Sparse text the roll runs into without a break stays its start. It
 moves starts later only.
+**Version 6** (2026-09-27 in §14, `evidence/credits-accuracy/`). *The 1 fps refine walks back over the roll's own
+frames* (`rule_j.refine_start`): a credit frame, or a frame whose text sits in the band of the run the start came from
+(`in_band`). A roll's first card over the closing footage reads one or two boxes on a lit frame, under the three a lit
+credit frame needs, and the walk used to stop at the first dense card behind it (Accused, Killer Cases, Homicide
+Hunter: 6–8 s late). The walk starts from the latest such frame within `REFINE_GAP_S` of the coarse start, never from a
+caption cut off from it (Homicide Hunter S06E13: a mugshot caption 14 s before the roll, 13 s early); only when no 1 fps
+frame near the coarse start shows the roll does it start from the latest credit frame in the window, as before.
+*A file with a credits chapter is read against it* (`decide.credits_chapter_start_ms`: the chapter rule 3 decides
+from, when chapters are on). The answer keeps rule J's own start and carries `decide.chapter_hint`: whether the frames
+show that chapter off the roll (`rule_j.moves_chapter`). Off it means one of two shapes. *Inside the roll*: the roll
+starts 10–240 s before the chapter and text stays on the screen all the way (no stretch of keyframes without a box
+over 8 s, and no lit keyframe without one after the start's own 1 s, the fade into the first card). *On the story*: the
+roll starts 10–60 s after the chapter, no keyframe between them holds text, and those up to 2.5 s before the roll are
+all lit (at least one). The lit-keyframe checks came from sflix's replay: 5 chapters the frames moved earlier onto
+story text (a T-shirt, a poster, a screen, an epilogue caption; every one with a lit keyframe without text between) and
+2 moved later off black cards 320×180 reads nothing on (The Half of It, Dark Matter S02E05). An answer read against
+another chapter than today's, or none, is read again (`credits_text_due`: the run's basis names the chapter).
 An intra-only file's thinned keyframe pass counts its stride from the seek, so its rest of the file is decoded from the
 tail's own start and the rows before the end dropped: the frames after the end are then the ones the 320×180 reading
 read (the cost: its whole tail again, thinned; 450 frames for a movie). At 640×360 each text detection request carries 16 frames, the pixels of 64 at 320×180, so the helper's
@@ -807,7 +824,24 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    (credit text: a decode error or a timeout recorded for this size and mtime, `LocalDetectorSpec.failed_here`) leaves
    the source order (`pipeline._decide`), so the chapter then decides as before, on the same run or the next. A
    replaced file waits again for its own read. Somebody Somewhere S03E02–E07: HMAX "Credits" chapters 40–70 s late, SkipDB and
-   credit text within 2 s of the frame-checked start.
+   credit text within 2 s of the frame-checked start. **A credits chapter off the roll (2026-09-27):** credit text reads
+   every file whose credits a chapter decided alone (`LocalDetectorSpec.checks_chapters`: the pipeline asks it while
+   the type rests on chapters and server markers only). When its answer's `chapter_hint` says the frames move this
+   chapter (§5.4 version 6), the answer starts more than 10 s from it and no other source agrees with the chapter's
+   start, the chapter keeps the window and credit text supplies the start: end the earlier of the chapter's and the
+   text's, `decided_by` chapters + credit text, reason `decide.TEXT_MOVES_CHAPTER_REASON`; a moved marker failing sanity
+   leaves the chapter. A release's "Credits" chapter was more than 5 s off the first card on 10 of 41 frame-checked
+   chapter files of the 2026-09-27 audit, 3 of them on the story (A Christmas Carol 1984, 13 s before the roll). **An
+   intro chapter an online answer ends inside (2026-09-27):** when IntroDB, TheIntroDB or SkipDB (or an importer's copy)
+   ends the intro inside the chapter more than 5 s before its end, nothing agrees with the chapter's end, and season
+   audio is among the sources without an answer, the chapter waits in Needs review (`decide.AUDIO_CHECKS_CHAPTER_REASON`)
+   so season audio reads the episode in the same run (a detector that can't answer here leaves the order as above;
+   season audio's `failed_here` is a fingerprint failure of this file). When every agreeing cluster that contradicts an
+   intro chapter holds season audio and a non-server source of another group, and the intro they compose (rule 4, rule
+   13's end) ends inside the chapter, they decide (`decide.AUDIO_OVER_CHAPTER_REASON`). A chapter that ends before them
+   stays in Needs review as before: on the library chapter set the chapter was the right one every time (Family Guy
+   S14). Spring of the Blade S01E02/E03/E14: WEB "Intro" chapters ending 5–37 s into the episode; IntroDB and season
+   audio end at the episode's title card.
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. An agreeing set needs a candidate that is neither markers already on a server nor season audio (or its
    previous-season hint): season audio and a server's own detection never decide together (G3; with season audio
@@ -818,7 +852,16 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    from the first of them in source order; the other edge takes the safer value across them (latest intro/recap
    start, earliest credits/preview end). If the composed marker fails sanity → "Needs review". (Taking the safest
    agreed edge instead was tried in the phase-1 audit and rejected: it hid a contradiction and published a wrong
-   Daredevil S03E02 intro.)
+   Daredevil S03E02 intro.) **Credit text's credits start (2026-09-27):** in agreeing credits, a confirming credit
+   text answer supplies the start whenever the source-order winner starts more than 5 s from it
+   (`decide.TEXT_OVER_ONLINE_MS`); the reason then adds "; start from credit text" (`decide.took_start_from_text`).
+   Online times come from whichever release their users timed (Stargate Atlantis S01E06/E07: IntroDB, on this file's
+   clock, 6–7 s into the roll where credit text had the first card). **A partial season match (2026-09-27):** a season
+   audio intro only one other episode supports (label `1/n`) that starts more than 15 s after an agreeing answer of
+   another source that isn't a server's marker is part of the opening those two files share, so it doesn't set the
+   agreed intro's start (`decide._partial_season_match`, `PARTIAL_MATCH_MIN_SHIFT_MS`). Game of Thrones S03E04/E09: the
+   season split over three disks left two episodes matched with each other alone, at 63–112 s of a 5–112 s title
+   sequence IntroDB had right (held fix 3 would regroup the season itself).
 5. If two groups of agreeing sources would publish times that don't agree with each other → "Needs review". Before
    anything is published (chapters, agreement or "Medium"), any two agreeing candidates from different independent
    sources that are both outside the tolerance of the published time send it to "Needs review" — a third source that
@@ -939,7 +982,13 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     or went) or is turned off; a marker no server was sent, a carried-over marker (it rests on no source) and every new
     file get today's rules, and a locked type is always decided. The case
     that asked for it: SkipDB never deciding alone (rule 6) would otherwise take intros users already see off every
-    install that has no season audio to confirm them (arm64 has no chromaprint).
+    install that has no season audio to confirm them (arm64 has no chromaprint). Since 2026-09-27 a marker resting only
+    on sources that never decide alone (rule 6) is kept only while nothing that reads the file speaks against it: not
+    when such a source answers the type and disagrees, nor when a detector that reads the file for the type read it at
+    its version now and gave no agreeing answer (`keep_published(read_by=…)`, the pipeline passing the local detectors
+    answered at this version). The check the rule waited for has then been made (Somebody Somewhere S03E07: a lone
+    SkipDB intro 9 s into the story that season audio found no match for). Its cost: S03E03's lone SkipDB intro, which
+    was right, goes to Needs review the same way, as on every new install.
 
 ### 5.6 Resource rules
 Intro & Credits jobs run on the preview workers with no worker cap of their own: priority alone orders the work. The

@@ -2210,6 +2210,10 @@ def _ref_decide_type(mtype, cands, x):
         if not _ref_times_sane(Candidate(mtype, result.start_ms, result.end_ms, winner.source), x):
             return review(_ref_own_marker(winner, x), "agreeing sources disagree on the other edge")
         reason = "sources agree: " + ", ".join(result.decided_by)
+        # Credit text supplied the start over another source that isn't a server's marker: the reason says so.
+        credited = {S(v) for v in result.decided_by} - set(_REF_SERVER) - {S.CREDITS_TEXT}
+        if mtype is T.CREDITS and winner.source is S.CREDITS_TEXT and credited:
+            reason += "; start from credit text"
     else:
         groups = sorted({_ref_group(c) for c in sane})
         ranked = sorted(sane, key=lambda c: _ref_rank(c, x))
@@ -3230,7 +3234,11 @@ def _expected_agreeing(kinds, a, b, level):
         if sources & set(_REF_SERVER) and sources - set(_REF_SERVER):
             return DecisionStatus.NEEDS_REVIEW, None, None, _REF_AUDIO_WITH_SERVER
         return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, a, b)
-    return DecisionStatus.DECIDED, _own(a), _credited(*sources), "sources agree: " + ", ".join(_credited(*sources))
+    reason = "sources agree: " + ", ".join(_credited(*sources))
+    winner = min((c for c in (a, b) if c.source not in _REF_SERVER), key=lambda c: _ref_source_rank(c.source, ctx()))
+    if a.type is T.CREDITS and winner.source is S.CREDITS_TEXT and not sources <= {S.CREDITS_TEXT, *_REF_SERVER}:
+        reason += "; start from credit text"  # credit text supplied the start over another source
+    return DecisionStatus.DECIDED, _own(a), _credited(*sources), reason
 
 
 def _expected_disagreeing(kinds, near, far, level):

@@ -129,7 +129,8 @@ class TestWithSkipDb:
         start = 5_700_000 + offset_ms
         d = credits([text(5_700_000), skipdb(start, 5_990_000)])[T.CREDITS]
         if abs(offset_ms) <= 10_000:
-            assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: skipdb, credits_text")
+            note = "; start from credit text" if abs(offset_ms) > 5_000 else ""
+            assert (d.status, d.reason) == (DecisionStatus.DECIDED, f"sources agree: skipdb, credits_text{note}")
             assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
                 5_700_000,
                 5_990_000,
@@ -162,12 +163,16 @@ class TestWithSkipDb:
 class TestWithIntroDb:
     """IntroDB is on by default and ranks above credits text in the default order."""
 
-    @pytest.mark.parametrize(("introdb_ms", "start_ms"), [(5_704_000, 5_704_000), (5_708_000, 5_700_000)])
+    @pytest.mark.parametrize(
+        ("introdb_ms", "start_ms", "note"),
+        [(5_704_000, 5_704_000, ""), (5_708_000, 5_700_000, "; start from credit text")],
+    )
     @pytest.mark.parametrize("level", ["high", "medium"])
-    def test_agreeing_publishes_introdbs_start_with_the_texts_end(self, level, introdb_ms, start_ms):
-        # By source order within 5 s of the text's start; over 5 s the text's own (TEXT_OVER_ONLINE_MS).
+    def test_agreeing_publishes_introdbs_start_with_the_texts_end(self, level, introdb_ms, start_ms, note):
+        # By source order within 5 s of the text's start; over 5 s the text's own (TEXT_OVER_ONLINE_MS), which the
+        # reason says (the job log's "start from credit text").
         d = credits([introdb(introdb_ms), text(5_700_000, 5_900_000)], level=level)[T.CREDITS]
-        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "sources agree: introdb, credits_text")
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, f"sources agree: introdb, credits_text{note}")
         assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
             start_ms,
             5_900_000,
@@ -238,7 +243,10 @@ class TestWithServerMarkers:
             MOVIE_MS,
             ("credits_text", "skipdb", "server_markers"),
         )
-        assert d.reason == "sources agree: credits_text, skipdb; start shortened to the server's own marker (plex-1)"
+        assert d.reason == (
+            "sources agree: credits_text, skipdb; start from credit text; start shortened to the server's own marker "
+            "(plex-1)"
+        )
 
     @pytest.mark.parametrize("copied_from", ["", "introdb", "skipdb", "aniskip"])
     def test_an_importer_plugins_markers_agree_like_any_independent_source(self, copied_from):

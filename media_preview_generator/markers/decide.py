@@ -59,6 +59,9 @@ AUDIO_OVER_CHAPTER_REASON = "season audio and agreeing sources contradict the ch
 # than this from it (2026-09-27 audit: one show's IntroDB, read on this file's clock, 6-7 s into the roll where credit
 # text had its first card).
 TEXT_OVER_ONLINE_MS = 5_000
+# The note a credits decision's reason carries when credit text supplied the start of agreeing answers
+# (:func:`took_start_from_text`).
+TEXT_START_NOTE = "start from credit text"
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
 # independence group -- never two votes, whether or not they agree with each other.
 _INTRODB_GROUP = "introdb/theintrodb"
@@ -162,6 +165,8 @@ SHORTENED_NOTE = "shortened to the server's own marker"
 # The reason of a type no source gave a candidate of (not even one failing sanity): nothing to go on.
 NO_EVIDENCE_REASON = "no evidence"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
+# :func:`chapter_hint`'s label, read back.
+_CHAPTER_HINT_RE = re.compile(r"^the frames (move|keep) the credits chapter at (\d+) ms$")
 _ENUM_ORDER = {source: i for i, source in enumerate(Source)}
 
 
@@ -784,6 +789,21 @@ def chapter_hint(chapter_start_ms: int, *, moves: bool) -> str:
     return f"{verdict} the credits chapter at {chapter_start_ms} ms"
 
 
+def read_chapter_hint(label: str) -> tuple[int, bool] | None:
+    """:func:`chapter_hint`'s label read back.
+
+    Args:
+        label: A credit text answer's label (``Candidate.origin``, stored as the evidence row's ``label``).
+
+    Returns:
+        ``(chapter_start_ms, moves)``, or None when the label isn't such a hint.
+    """
+    match = _CHAPTER_HINT_RE.match(label or "")
+    if match is None:
+        return None
+    return int(match.group(2)), match.group(1) == "move"
+
+
 def credits_chapter_start_ms(
     candidates: Iterable[Candidate],
     *,
@@ -930,7 +950,24 @@ def _decide_from_cliques(
     marker, winner = _compose_cluster(merged, mtype, ctx, text_start=text_start)
     if not _marker_is_sane(marker, ctx):
         return _review(mtype, _own_marker(winner, ctx), "agreeing sources disagree on the other edge")
-    return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "sources agree: " + ", ".join(marker.decided_by))
+    reason = "sources agree: " + ", ".join(marker.decided_by)
+    if mtype is MarkerType.CREDITS and not text_start and winner.source is Source.CREDITS_TEXT:
+        others = {c.source for c in merged if c.source.value in marker.decided_by} - SERVER_SOURCES - {winner.source}
+        if others:
+            reason += f"; {TEXT_START_NOTE}"
+    return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, reason)
+
+
+def took_start_from_text(reason: str) -> bool:
+    """Whether a credits decision's reason says credit text supplied the start of the agreeing answers (rule 4).
+
+    Args:
+        reason: The decision's reason.
+
+    Returns:
+        True when it carries :data:`TEXT_START_NOTE`.
+    """
+    return f"; {TEXT_START_NOTE}" in (reason or "")
 
 
 def _may_decide_alone(candidate: Candidate) -> bool:

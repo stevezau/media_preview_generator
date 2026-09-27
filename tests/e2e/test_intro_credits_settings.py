@@ -384,7 +384,8 @@ class TestIntroCreditsSettings:
         expect(note).to_have_text(
             "How it decides: sources are asked in the order above. "
             "Chapters in the file decide on their own, unless two other sources agree on something different or an "
-            "intro chapter is far longer than the rest of its season's. "
+            "intro chapter is far longer than the rest of its season's; on-screen credit text moves a credits "
+            "chapter's start to the first credit card when the chapter is off it. "
             "An online database's answer is published once an independent source agrees with it: on-screen credits, "
             "season audio, another database, or a server's own marker (IntroDB and TheIntroDB count as one). "
             "A single answer decides alone only when it checks your own file: on-screen credit text for credits, "

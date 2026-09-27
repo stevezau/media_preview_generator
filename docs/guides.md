@@ -617,7 +617,13 @@ drag-to-reorder:
   (then the file goes to **Needs review**), or an intro chapter is much longer than the rest of its season's (then one
   other source has to agree). When SkipDB's credits disagree with a credits chapter, the on-screen credit text is read
   in the same run: if it agrees with SkipDB, those two decide, starting where the credit text does; if not, the chapter
-  stands.
+  stands. The credit text also reads every file whose credits a chapter decided: when the chapter is off the credit roll
+  (inside it, or on the last shot before it), the skip starts at the first credit card and still ends where the
+  chapter does. When an online answer ends an intro inside an intro chapter, the episode waits for season audio: if
+  season audio agrees with the online answer, those two decide.
+- **When sources agree on credits**, the start comes from the first of them in your order, except that on-screen
+  credit text supplies the start when it is more than 5 s from that one's: the online databases were timed on other
+  releases.
 - **An online database's answer** is published once an independent source agrees with it: on-screen credit text,
   season audio, another database, or a server's own marker. IntroDB and TheIntroDB count as one, because IntroDB's data
   looks partly copied. Their credits may end up to 5 s past the end of your file (they were timed on a slightly longer
@@ -1127,22 +1133,23 @@ next time an episode of that season is checked.
 
 A job starts with one line saying how many files it checks and why it ran: a follow-up to a preview job, a Season job,
 a re-check after an update, a schedule, or a Re-detect you asked for. Then each file gets a short block, one line per
-step, each with its own time. A film the job finished without a GPU or CPU worker:
+step, each with its own time. A file a GPU or CPU worker read starts with the worker's line, written when it picks
+the file up. A film whose "Credits" chapter credit text checked:
 
 ```
 [07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
-[07:37:13] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
-[07:37:13] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39
-[07:37:13] INFO -   SkipDB: no entry
-[07:37:13] INFO -   Plex's own markers: none
-[07:37:13] INFO -   Credit text: not read (a chapter named Credits is used as-is)
-[07:37:13] INFO -   Decided: credits 2:00:11–2:03:39, from the "Credits" chapter
-[07:37:13] INFO -   Sent to Plex: credits 2:00:11–2:03:39
-[07:37:13] INFO - 32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed
-[07:37:13] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
+[07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
+[07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39
+[07:37:23] INFO -   SkipDB: no entry
+[07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU in 9 s)
+[07:37:23] INFO -   Plex's own markers: none
+[07:37:23] INFO -   Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)
+[07:37:23] INFO -   Sent to Plex: credits 1:59:32–2:03:39
+[07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1
+[07:37:23] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
 ```
 
-A TV episode a worker read starts with the worker's line, written when it picks the file up:
+A TV episode:
 
 ```
 [09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05: checking intro and credits
@@ -1164,7 +1171,12 @@ A TV episode a worker read starts with the worker's line, written when it picks 
   stored before (by an earlier run, or while the job checked another episode of the season) and was used without
   asking again. Times are `m:ss`, or `h:mm:ss` past an hour.
 - **Decided** gives each type and why: the chapter it came from, the sources that agree, "kept Plex's own", or "needs
-  review" / "nothing found" with the reason.
+  review" / "nothing found" with the reason. When the file's own frames or audio corrected a chapter or an online
+  answer, it says so: "moved to the first credit card by credit text", "start from credit text", or an intro chapter
+  that "runs on into the episode".
+- A file with a "Credits" chapter has credit text read it too. Its line says whether the frames keep the chapter or
+  move its start to the first credit card (a chapter is often a few seconds or more off, early on the last shot or
+  late in the roll).
 - One **Sent to** line per server: what was sent, "already up to date", "kept Plex's own credits", "failed (…)", or
   "not in Plex's library yet" (the job tries it again).
 - A file that failed has its lines as warnings, with the reason.

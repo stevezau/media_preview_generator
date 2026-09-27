@@ -7,9 +7,9 @@ line can't land inside it (``write_lines``)::
     32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
       Chapters: "Credits" chapter at 2:00:11–2:03:39
       SkipDB: no entry
+      Credit text: credits start at 2:00:14 (keeps the "Credits" chapter at 2:00:11; saved earlier)
       Plex's own markers: none
-      Credit text: not read (a chapter named Credits is used as-is)
-      Decided: credits 2:00:11–2:03:39, from the "Credits" chapter
+      Decided: credits 2:00:11–2:03:39 (the "Credits" chapter and credit text agree)
       Sent to Plex: credits 2:00:11–2:03:39
     32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed
 
@@ -33,7 +33,19 @@ from dataclasses import dataclass, field
 from loguru import logger
 
 from .carry_over import CARRIED_OVER
-from .decide import KEPT_BEFORE_RULE_CHANGE, DecisionStatus, TypeDecision, kept_before_rule_change, shortened_by
+from .decide import (
+    AUDIO_OVER_CHAPTER_REASON,
+    KEPT_BEFORE_RULE_CHANGE,
+    TEXT_MOVES_CHAPTER_REASON,
+    TEXT_OVER_CHAPTER_REASON,
+    TEXT_START_NOTE,
+    DecisionStatus,
+    TypeDecision,
+    kept_before_rule_change,
+    read_chapter_hint,
+    shortened_by,
+    took_start_from_text,
+)
 from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, STALE_SERVER_MARKERS_DETAIL, Marker, MarkerType, Source
 from .outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FileOutcome, ServerStatus, is_kept_own
@@ -491,8 +503,13 @@ def type_phrase(decision: TypeDecision, chapters: Mapping[MarkerType, Mapping[in
         chapter = _chapter_of(names_by_type, decision.type, marker.start_ms)
         names = _names(marker.decided_by, chapter)
         span = f"{mtype} {_span(marker.start_ms, marker.end_ms)}"
+        # The chapter a rule moved or overruled no longer starts where the marker does: named when it is the only one.
+        overruled = _chapter_of(names_by_type, decision.type, None)
+        overruled = f'the "{overruled}" chapter' if overruled else "the chapters"
         if marker.locked:
             core = f"{span} (locked by you)"
+        elif decision.reason == TEXT_MOVES_CHAPTER_REASON:
+            core = f"{span} ({overruled}, moved to the first credit card by credit text)"
         elif len(names) > 1:
             core = f"{span} ({_and(names)} agree)"
         elif names == [CARRIED_OVER_LABEL]:
@@ -502,6 +519,12 @@ def type_phrase(decision: TypeDecision, chapters: Mapping[MarkerType, Mapping[in
         else:
             core = f"{span} ({names[0] if names else decision.reason})"
         notes = []
+        if not marker.locked and took_start_from_text(decision.reason):
+            notes.append(TEXT_START_NOTE)
+        if not marker.locked and decision.reason.startswith(AUDIO_OVER_CHAPTER_REASON):
+            notes.append(f"{overruled} runs on into the episode")
+        if not marker.locked and decision.reason.startswith(TEXT_OVER_CHAPTER_REASON):
+            notes.append(f"{overruled} is off the credit roll")
         if not marker.locked and shortened_by(decision.reason) is not None:
             notes.append("start moved to the server's own marker")
         if kept_before_rule_change(decision.reason):
@@ -649,7 +672,21 @@ def _season_detail(source: Source, label: str) -> str:
     return f"same theme found in {int(support) + 1} of {int(others) + 1} episodes"
 
 
-def _row_phrase(row: EvidenceRow) -> tuple[str, str]:
+def _chapter_check(label: str, chapters: Mapping[MarkerType, Mapping[int, str]]) -> str:
+    """What a credit text answer read against the file's credits chapter found (``decide.chapter_hint``): the chapter
+    off the roll, so the answer moves its start, or the chapter kept; "" for an answer read without one."""
+    hint = read_chapter_hint(label)
+    if hint is None:
+        return ""
+    chapter_ms, moves = hint
+    name = (chapters.get(MarkerType.CREDITS) or {}).get(chapter_ms) or _chapter_of(chapters, MarkerType.CREDITS, None)
+    chapter = f'the "{name}" chapter' if name else "the credits chapter"
+    if moves:
+        return f"moves {chapter} at {clock(chapter_ms)} to the first credit card"
+    return f"keeps {chapter} at {clock(chapter_ms)}"
+
+
+def _row_phrase(row: EvidenceRow, chapters: Mapping[MarkerType, Mapping[int, str]]) -> tuple[str, str]:
     """A typed evidence row's answer, and a note about it ("" when none)."""
     if row.source is Source.CHAPTERS:
         where = _span(row.start_ms, row.end_ms)
@@ -658,11 +695,18 @@ def _row_phrase(row: EvidenceRow) -> tuple[str, str]:
     phrase = _typed_span(row.type, row.start_ms, row.end_ms)
     if row.source in (Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS):
         return phrase, _season_detail(row.source, row.label)
+    if row.source is Source.CREDITS_TEXT:
+        return phrase, _chapter_check(row.label, chapters)
     # A server's marker made for an earlier file is shown, but counted for nothing (``Candidate.stale``).
     return phrase, "made for an earlier file" if row.detail == STALE_SERVER_MARKERS_DETAIL else ""
 
 
-def _answer(rows: list[EvidenceRow], empty: str, extras: list[str]) -> str:
+def _answer(
+    rows: list[EvidenceRow],
+    empty: str,
+    extras: list[str],
+    chapters: Mapping[MarkerType, Mapping[int, str]] | None = None,
+) -> str:
     order = list(MarkerType)
     # Rows that give the same answer are named once.
     unique: dict[tuple, EvidenceRow] = {}
@@ -673,7 +717,7 @@ def _answer(rows: list[EvidenceRow], empty: str, extras: list[str]) -> str:
         unique.values(),
         key=lambda r: (order.index(r.type), r.start_ms, r.end_ms if r.end_ms is not None else -1, r.label),
     )
-    phrases = [_row_phrase(r) for r in typed]
+    phrases = [_row_phrase(r, chapters or {}) for r in typed]
     if len(phrases) == 1 and phrases[0][1]:
         text, extras = phrases[0][0], [phrases[0][1], *extras]
     else:
@@ -733,7 +777,7 @@ def _source_line(source: Source, view: _SourceView) -> tuple[str, bool]:
             extras = [SAVED]
         else:
             extras = [notes.reads[source]] if source in _READ_SHOWN and source in notes.reads else []
-        return f"{INDENT}{label}: {_answer(own, _EMPTY_ANSWER.get(source, 'none'), extras)}", True
+        return f"{INDENT}{label}: {_answer(own, _EMPTY_ANSWER.get(source, 'none'), extras, view.chapters)}", True
     note = notes.not_asked.get(source)
     if note == ALREADY_DECIDED:
         note = _already_decided(source, view.decisions, view.types, view.chapters)

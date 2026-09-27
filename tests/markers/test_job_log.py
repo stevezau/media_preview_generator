@@ -16,7 +16,14 @@ import pytest
 from loguru import logger
 
 from media_preview_generator.markers import job_runner, pipeline, titles
-from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
+from media_preview_generator.markers.decide import (
+    AUDIO_OVER_CHAPTER_REASON,
+    TEXT_MOVES_CHAPTER_REASON,
+    TEXT_OVER_CHAPTER_REASON,
+    DecisionStatus,
+    TypeDecision,
+    chapter_hint,
+)
 from media_preview_generator.markers.job_log import (
     ALREADY_DECIDED,
     RunNotes,
@@ -246,7 +253,9 @@ def _accused_job(store, reg, clock):
 
 
 class TestApprovedLayouts:
-    def test_a_film_the_checking_thread_finished(self, tmp_path, store, job_log):
+    def test_a_film_whose_credits_chapter_a_gpu_worker_checked(self, tmp_path, store, job_log):
+        # Credit text reads a film a "Credits" chapter decided alone (spec §5.5 rule 3, 2026-09-27): here the chapter
+        # sits 39 s into the roll, so credit text moves its start to the first card.
         folder = tmp_path / "media" / "movies" / "32 Frames A 9 11 Mystery (2026)"
         folder.mkdir(parents=True)
         path = folder / "32 Frames A 9 11 Mystery (2026) - [AMZN][WEBDL-1080p][EAC3 5.1][h264]-cinepth.mkv"
@@ -256,19 +265,36 @@ class TestApprovedLayouts:
         reg.get("plex-1").get_external_ids.return_value = dict(MOVIE_IDS)
         clock = FakeClock()
         skipdb = FakeClient(NO_DATA)
+
+        def read_credit_text(*args, **kwargs):
+            clock.advance(9)
+            hint = chapter_hint(7_211_000, moves=True)
+            return [Candidate(T.CREDITS, 7_172_000, None, Source.CREDITS_TEXT, origin=hint)]
+
+        credit_text = LocalDetectorSpec(
+            Source.CREDITS_TEXT, frozenset({T.CREDITS}), MagicMock(side_effect=read_credit_text), checks_chapters=True
+        )
         ctx = _ctx(
             store,
             reg,
             settings_raw=MOVIE_SETTINGS,
             clients={"introdb": FakeClient(NO_DATA), "skipdb": skipdb, "theintrodb": FakeClient(NO_DATA)},
-            detectors=(_credit_text(),),
+            detectors=(credit_text,),
         )
         ctx.monotonic = clock
         publisher = ready_publisher()
         publisher.write.side_effect = lambda *a, **k: (clock.advance(0.5), publisher.succeed(*a, **k))[1]
         chapters = (Chapter(0, 7_211_000, "Movie"), Chapter(7_211_000, MOVIE_DURATION, "Credits"))
+        probe = _probe(chapters, duration=MOVIE_DURATION)
 
-        out, _ = _run(ctx, movie_path, {"plex-1": publisher}, probe=_probe(chapters, duration=MOVIE_DURATION))
+        handed_on, _ = _run(ctx, movie_path, {"plex-1": publisher}, probe=probe)
+        assert handed_on is None and job_log == []
+        worker = "GPU Worker 1 (NVIDIA GeForce RTX 3060)"
+        pipeline.log_pickup(ProcessableItem(canonical_path=movie_path, server_id="plex-1"), worker, ctx=ctx)
+        out, _ = _run(
+            ctx, movie_path, {"plex-1": publisher}, probe=probe, stage="process", gpu="cuda", worker_name=worker,
+            gpu_worker=True,
+        )  # fmt: skip
 
         job = SimpleNamespace(parent_schedule_id="")
         cfg = {"source": "radarr", "follows_job_id": "c7ca6327-1111-2222-3333-444455556666"}
@@ -276,20 +302,22 @@ class TestApprovedLayouts:
         log = [first, *_messages(job_log), *ctx.summary_lines({out.outcome_key: 1})]
         assert log == [
             "Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)",
-            "32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)",
+            "GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026): checking credits "
+            "(films get credits only)",
             '  Chapters: "Credits" chapter at 2:00:11–2:03:39',
             "  SkipDB: no entry",
+            '  Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; '
+            "read on the GPU in 9 s)",
             "  Plex's own markers: none",
-            "  Credit text: not read (a chapter named Credits is used as-is)",
-            '  Decided: credits 2:00:11–2:03:39, from the "Credits" chapter',
-            "  Sent to Plex: credits 2:00:11–2:03:39",
-            "32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed",
+            '  Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)',
+            "  Sent to Plex: credits 1:59:32–2:03:39",
+            "32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1",
             "Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found",
         ]
         assert {level for level, _ in job_log} == {"INFO"}
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert len(skipdb.calls) == 1
-        ctx.local_detectors[0].detect.assert_not_called()
+        credit_text.detect.assert_called_once()
 
     def test_a_tv_episode_a_gpu_worker_scanned(self, tmp_path, store, job_log):
         episode = _accused(tmp_path)
@@ -877,6 +905,32 @@ class TestSourceLines:
     def test_an_answer_this_job(self, source, rows, expected):
         assert _lines_for([source.value], rows, _asked(source)) == [expected]
 
+    @pytest.mark.parametrize(
+        ("moves", "note"),
+        [
+            (True, 'moves the "End Credits" chapter at 41:10 to the first credit card'),
+            (False, 'keeps the "End Credits" chapter at 41:10'),
+        ],
+        ids=["moves", "keeps"],
+    )
+    def test_credit_text_read_against_a_credits_chapter_says_what_it_found(self, moves, note):
+        rows = [
+            _row(Source.CHAPTERS, T.CREDITS, 2_470_000, 2_590_000, label="End Credits"),
+            _row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, 2_590_000, label=chapter_hint(2_470_000, moves=moves)),
+        ]
+        assert _lines_for(["credits_text"], rows, _asked(Source.CREDITS_TEXT)) == [
+            f"  Credit text: credits 41:48–43:10 ({note})"
+        ]
+
+    def test_credit_text_read_against_an_unnamed_credits_chapter_calls_it_the_credits_chapter(self):
+        rows = [_row(Source.CREDITS_TEXT, T.CREDITS, 2_508_000, None, label=chapter_hint(2_470_000, moves=True))]
+        notes = _asked(Source.CREDITS_TEXT)
+        notes.reads[Source.CREDITS_TEXT] = read_phrase(True, 7.2)
+        assert _lines_for(["credits_text"], rows, notes) == [
+            "  Credit text: credits start at 41:48 (moves the credits chapter at 41:10 to the first credit card; read "
+            "on the GPU in 7.2 s)"
+        ]
+
     def test_an_answer_stored_earlier_says_so(self):
         rows = [
             _row(Source.CHAPTERS),
@@ -1071,6 +1125,47 @@ class TestDecidedLine:
     )  # fmt: skip
     def test_type_phrase(self, decision, expected):
         assert type_phrase(decision) == expected
+
+    @pytest.mark.parametrize(
+        ("decision", "chapters", "expected"),
+        [
+            pytest.param(
+                _decided(T.CREDITS, 5_572_000, 5_854_000, "chapters", "credits_text", reason=TEXT_MOVES_CHAPTER_REASON),
+                {T.CREDITS: {5_529_000: "Credits"}},
+                'credits 1:32:52–1:37:34 (the "Credits" chapter, moved to the first credit card by credit text)',
+                id="text-moves-the-chapter",
+            ),
+            pytest.param(
+                _decided(T.CREDITS, 5_572_000, 5_854_000, "chapters", "credits_text", reason=TEXT_MOVES_CHAPTER_REASON),
+                {},
+                "credits 1:32:52–1:37:34 (the chapters, moved to the first credit card by credit text)",
+                id="text-moves-an-unnamed-chapter",
+            ),
+            pytest.param(
+                _decided(T.CREDITS, 2_577_000, 2_618_000, "introdb", "credits_text",
+                         reason="sources agree: introdb, credits_text; start from credit text"),
+                {},
+                "credits 42:57–43:38 (IntroDB and credit text agree; start from credit text)",
+                id="text-sets-the-start-of-agreeing-answers",
+            ),
+            pytest.param(
+                _decided(T.INTRO, 11_000, 104_000, "introdb", "season_audio",
+                         reason=AUDIO_OVER_CHAPTER_REASON + "introdb, season_audio"),
+                {T.INTRO: {0: "Intro"}},
+                'intro 0:11–1:44 (IntroDB and season audio agree; the "Intro" chapter runs on into the episode)',
+                id="season-audio-over-an-intro-chapter",
+            ),
+            pytest.param(
+                _decided(T.CREDITS, 2_508_000, 2_590_000, "skipdb", "credits_text",
+                         reason=TEXT_OVER_CHAPTER_REASON + "skipdb, credits_text"),
+                {T.CREDITS: {2_470_000: "Credits"}},
+                'credits 41:48–43:10 (SkipDB and credit text agree; the "Credits" chapter is off the credit roll)',
+                id="credit-text-over-a-credits-chapter",
+            ),
+        ],
+    )  # fmt: skip
+    def test_the_2026_09_27_rules_say_what_they_did(self, decision, chapters, expected):
+        assert type_phrase(decision, chapters) == expected
 
     def test_a_marker_the_server_shortened_or_kept_through_a_rule_change_says_so(self):
         shortened = _decided(
