@@ -10,6 +10,8 @@ readonly SCRIPTS="${HERE}/../lab"
 export MLAB_DIR
 export MLAB_APP_IMAGE=$1
 export MLAB_APP_GPU=nvidia
+# The volume lab_run.sh made the fresh app on: phase 3's rows recreate the app through app.sh.
+export MLAB_APP_CONFIG_VOLUME="${CONFIG_VOLUME:-mlab_app_config_credrem}"
 readonly PYTHON="${MLAB_PYTHON:-/home/data/.venv/bin/python}"
 readonly LOG="${HERE}/local/lab_rows.log"
 readonly PHASE2_ROWS=(23 1 21 17 19 22 2 3 4 18 5 6 8 7 9 10 11 12 13 14 16 15 20 24)

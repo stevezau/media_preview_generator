@@ -12,6 +12,7 @@ export MLAB_PYTHON="${MLAB_PYTHON:-/home/data/.venv/bin/python}"
 readonly IMAGE=$1
 readonly STEP="${2:-all}"
 readonly LOG="${HERE}/local/lab_run.log"
+readonly CONFIG_VOLUME="${CONFIG_VOLUME:-mlab_app_config_credrem}"
 mkdir -p "${HERE}/local"
 
 cd "$SCRIPTS"
@@ -28,10 +29,13 @@ fi
 if [[ "$STEP" == "all" || "$STEP" == "reset" ]]; then
     log "reset (old app)"
     nice -n 19 "$MLAB_PYTHON" phase4_row13_reset.py >>"$LOG" 2>&1 || { log "reset FAILED"; exit 1; }
-    log "fresh app on ${IMAGE}"
-    docker rm -f mlab-app >>"$LOG" 2>&1
-    docker volume rm mlab_app_config >>"$LOG" 2>&1
-    MLAB_APP_IMAGE="$IMAGE" MLAB_APP_GPU=nvidia ./app.sh recreate >>"$LOG" 2>&1
+    # A new empty config volume rather than removing mlab_app_config, which other lanes' runs keep.
+    log "fresh app on ${IMAGE} (config volume ${CONFIG_VOLUME})"
+    if docker volume inspect "$CONFIG_VOLUME" >/dev/null 2>&1; then
+        log "config volume ${CONFIG_VOLUME} exists: pick a new name (CONFIG_VOLUME=...)"
+        exit 1
+    fi
+    MLAB_APP_CONFIG_VOLUME="$CONFIG_VOLUME" MLAB_APP_IMAGE="$IMAGE" MLAB_APP_GPU=nvidia ./app.sh recreate >>"$LOG" 2>&1
     nice -n 19 "$MLAB_PYTHON" phase2_matrix.py configure >>"$LOG" 2>&1
 fi
 if [[ "$STEP" == "all" || "$STEP" == "run" ]]; then
