@@ -992,11 +992,23 @@ def refine_start(
     Returns:
         The refined start in seconds.
     """
-    t = coarse.pts_s
-    floor_s = t - before_s
-    window = [j for j, row in enumerate(fine_rows) if floor_s <= row[0] <= t + REFINE_AFTER_S]
+    window, j, _ = _refine_walk(rows, coarse, fine_rows, before_s, params)
     if not window:
         return fade_back(rows, coarse.index, -1.0)
+    if j is None:
+        return coarse.pts_s
+    return fade_back(fine_rows, j, coarse.pts_s - before_s)
+
+
+def _refine_walk(
+    rows: Sequence[Row], coarse: Coarse, fine_rows: Sequence[Row], before_s: float, params: RuleParams
+) -> tuple[list[int], int | None, bool]:
+    """:func:`refine_start`'s walk: the window's 1 fps rows, the row the walk ends on before the fade (None when nothing
+    in the window is a credit frame), and whether it walked from the roll near the coarse start."""
+    t = coarse.pts_s
+    window = [j for j, row in enumerate(fine_rows) if t - before_s <= row[0] <= t + REFINE_AFTER_S]
+    if not window:
+        return window, None, False
     band = band_of(rows, coarse.index if coarse.run_index is None else coarse.run_index, coarse.end_index, params)
     roll = [j for j in window if is_credit(fine_rows[j], params) or (band is not None and in_band(fine_rows[j], band))]
     # A coarse start whose text the 1 fps frames don't show (a card between two samples) walks from the latest credit
@@ -1004,35 +1016,43 @@ def refine_start(
     near = [j for j in roll if fine_rows[j][0] >= t - REFINE_GAP_S]
     walk_from = near or [j for j in window if is_credit(fine_rows[j], params)]
     if not walk_from:
-        return t
+        return window, None, False
     j = walk_from[-1]
     while True:
         earlier = [k for k in roll if k < j and fine_rows[j][0] - fine_rows[k][0] <= REFINE_GAP_S]
         if not earlier:
             break
         j = earlier[0]
-    return fade_back(fine_rows, j, floor_s)
+    return window, j, bool(near)
 
 
 def refine_reaches_floor(
-    coarse: Coarse, fine_rows: Sequence[Row], start_s: float, *, before_s: float = REFINE_BEFORE_S
+    rows: Sequence[Row],
+    coarse: Coarse,
+    fine_rows: Sequence[Row],
+    *,
+    before_s: float = REFINE_BEFORE_S,
+    params: RuleParams = RULE_J,
 ) -> bool:
-    """Whether :func:`refine_start`'s walk ran to the first 1 fps row of its window (version 7): the roll's frames reach
-    the window's floor, so the roll may begin before it. The coarse start can sit up to one 24 s join after the roll's
-    first frame -- the anchor's one step over a frame, or a decode order that puts a later keyframe first in the run --
-    and the window reaches only ``before_s`` back (2026-09-27 audit: three films 8-12 s late on that floor).
+    """Whether :func:`refine_start`'s walk over the roll ran to the first 1 fps row of its window (version 7), so the
+    roll may begin before it. The coarse start can sit up to one 24 s join after the roll's first frame -- the anchor's
+    one step over a frame, or a decode order that puts a later keyframe first in the run -- and the window reaches only
+    ``before_s`` back (2026-09-27 audit: 3 Women, 12 s late on that floor). Only the roll's own frames count: a fade
+    over black down to the floor, or a walk from a lone credit frame when nothing near the coarse start shows the roll,
+    is no reason to read further.
 
     Args:
+        rows: The keyframe rows the coarse start came from.
         coarse: The coarse start the walk refined.
         fine_rows: The 1 fps rows it walked.
-        start_s: :func:`refine_start`'s answer.
         before_s: The window it read, back from the coarse start.
+        params: Rule thresholds.
 
     Returns:
-        True when the answer is the window's first row.
+        True when the walk from the roll ends on the window's first row.
     """
-    window = [row[0] for row in fine_rows if coarse.pts_s - before_s <= row[0] <= coarse.pts_s + REFINE_AFTER_S]
-    return bool(window) and start_s <= min(window)
+    window, j, from_roll = _refine_walk(rows, coarse, fine_rows, before_s, params)
+    return from_roll and j is not None and fine_rows[j][0] <= min(fine_rows[k][0] for k in window)
 
 
 def credits_start(

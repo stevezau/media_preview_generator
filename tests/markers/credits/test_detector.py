@@ -208,6 +208,36 @@ class TestFindCredits:
         )
         assert (result.start_s, result.end_s, result.scale) == (858.0, None, 2)
 
+    @pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
+    def test_only_the_320x180_reading_keeps_a_card_on_black(self, monkeypatch, probes, scale):
+        # Version 7's anchor reads dark keyframes after a card as its black ground. The 640x360 reading's rows leave out
+        # the text 320x180 boxed, so there the rest of an epilogue card reads the same way (Accused (2020) S05E01: kept,
+        # 27.5 s early). Every call that finds a start, the join before the tail included, reads at its decode's size.
+        tail = [(870.0 + 2 * i, 3, 10.0) for i in range(225)]
+        before = [(750.0 + 2 * i, 0, 120.0) for i in range(54)] + [(858.0 + 2 * i, 3, 10.0) for i in range(7)]
+        fine = [(float(t), 0, 120.0) for t in range(838, 858)] + [(float(t), 3, 10.0) for t in range(858, 860)]
+        unboxed_tail = [(pts, 0, luma) for pts, _, luma in tail]
+        decodes = Decodes(tail, before, fine) if scale == 1 else Decodes(unboxed_tail, tail, before, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        calls: list[tuple[str, bool, int]] = []
+
+        def spy(name):
+            real = getattr(rule_j, name)
+
+            def recorded(*args, **kwargs):
+                calls.append((name, kwargs["black_reads"], decodes.calls[-1]["scale"]))
+                return real(*args, **kwargs)
+
+            return recorded
+
+        for name in ("coarse_start", "joined_before"):
+            monkeypatch.setattr(rule_j, name, spy(name))
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.scale) == (858.0, scale)
+        assert {name for name, _, read_at in calls if read_at == scale} == {"coarse_start", "joined_before"}
+        assert all(black is (read_at == 1) for _, black, read_at in calls)
+
     @pytest.mark.parametrize(
         "error",
         [frames.GpuDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the GPU"),
@@ -975,6 +1005,8 @@ class TestFindCredits:
         refine = [call for call in fine_calls if call[0] < 5700.0]
         assert refine[:windows] == [(5680.0, 21.0), (5656.0, 24.0)][:windows]
         assert len(refine) == windows
+        seconds = [row[0] for row in result.fine_rows]
+        assert seconds == sorted(set(seconds))  # the two windows share 5680 s: read once, in order
 
     @pytest.mark.parametrize(
         ("keep_every", "drop_non_key"), [(48, False), (None, True), (48, True)], ids=["intra-only", "vp9", "vp9-intra-only"]

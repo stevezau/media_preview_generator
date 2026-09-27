@@ -66,8 +66,8 @@ if TYPE_CHECKING:
 CREDITS_TEXT_VERSION = 7
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
-# (300 s) gives 300,005, so a chosen window's version never equals Automatic's, and another window's answer is asked
-# again.
+# (300 s) gives 300,000 plus the version, so a chosen window's version never equals Automatic's, and another window's
+# answer is asked again.
 _WINDOW_VERSION_STEP = 1000
 # Stored with every answer as what it was based on (``detector_runs``). An answer without it was read when the look-back
 # stopped after one step (:func:`credits_text_due`).
@@ -448,10 +448,11 @@ def _read_credits(
     fine_start = max(0.0, coarse.pts_s - rule_j.REFINE_BEFORE_S)
     fine_length = coarse.pts_s + rule_j.REFINE_AFTER_S - fine_start
     fine_rows = decode_rows(start_s=fine_start, length_s=fine_length, keyframes_only=False, fps=1)
-    start_s = rule_j.refine_start(rule_rows, coarse, rule_j.without_overlays(fine_rows, overlays))
-    if fine_start > 0 and rule_j.refine_reaches_floor(coarse, rule_j.without_overlays(fine_rows, overlays), start_s):
-        # The roll's frames run to the window's first second: read once more, one 24 s join further back, the most
-        # rule J's coarse start can sit after the roll's first frame (rule_j.refine_reaches_floor).
+    own_fine = rule_j.without_overlays(fine_rows, overlays)
+    start_s = rule_j.refine_start(rule_rows, coarse, own_fine)
+    if fine_start > 0 and rule_j.refine_reaches_floor(rule_rows, coarse, own_fine):
+        # The walk over the roll's own frames ran to the window's first second: read once more, one 24 s join further
+        # back, the most rule J's coarse start can sit after the roll's first frame (rule_j.refine_reaches_floor).
         more_start = max(0.0, fine_start - rule_j.RULE_J.gap_s)
         first_s = min(row[0] for row in fine_rows)
         more = decode_rows(start_s=more_start, length_s=fine_start - more_start, keyframes_only=False, fps=1)

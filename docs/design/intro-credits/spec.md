@@ -766,10 +766,12 @@ and its answer is version 2's (`rule_j.boxes_of`).
    would take those answers away.
 9. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
    then back over the fade (luma < 12, steps ≤ 4 s). The 1 fps rows are read without step 4's overlays too, so the
-   walk can't step back over a bug the keyframes already dropped. **Version 7:** a walk that runs to the window's
-   first second (`rule_j.refine_reaches_floor`) reads one more window, 24 s (the join) before it, once: the coarse
-   start can sit up to one join after the roll's first frame, by the anchor's step or by a decode order that puts a
-   later keyframe first in the run (3 Women (1977): 21 s, answered 12 s late on the window's floor).
+   walk can't step back over a bug the keyframes already dropped. **Version 7:** a walk over the roll's own frames
+   that runs to the window's first second (`rule_j.refine_reaches_floor`) reads one more window, 24 s (the join)
+   before it, once: the coarse start can sit up to one join after the roll's first frame, by the anchor's step or by
+   a decode order that puts a later keyframe first in the run (3 Women (1977): 21 s, answered 12 s late on the
+   window's floor). A fade over black down to the floor, or a walk from a lone credit frame when nothing near the
+   coarse start shows the roll, reads nothing more.
 
 **Measured** on 80 files with chapter truth (40 movies, 40 TV; 3 movie truths corrected by frame checks,
 `evidence/credits/adjudicated.json`, sheets in `evidence/credits/framechecks/`):

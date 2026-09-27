@@ -1,4 +1,4 @@
-"""Why a credits chapter didn't move: the chapter, the work tree's credit text answer and moves_chapter's inputs.
+"""Why a credits chapter didn't move: the chapter, the work tree's credit text answer and chapter_moves_to's inputs.
 
 Usage: why_not_moved.py <replay_work.json> <id> [<id> ...]
 """
@@ -29,7 +29,7 @@ for ident in sys.argv[2:]:
     rows = rule_j.without_overlays(rows_from_json(r["key"]), [tuple(b) for b in r["overlays"]])
     chapter = row["stored_marker"][0] / 1000 if row["stored_marker"] else None
     print("   text start", start, "end", r["end_s"], "chapter", chapter,
-          "moves", None if chapter is None or start is None else rule_j.moves_chapter(rows, start, chapter))  # fmt: skip
+          "moves", None if chapter is None or start is None else rule_j.chapter_moves_to(rows, start, chapter))  # fmt: skip
     if chapter is not None and start is not None:
         lo, hi = min(start, chapter) - 3, max(start, chapter) + 3
         for x in sorted(rows, key=lambda x: x[0]):

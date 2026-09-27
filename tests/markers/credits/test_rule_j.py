@@ -364,15 +364,24 @@ class TestRefine:
             pytest.param([dark(t, 1, 20.0) for t in range(84, 102)], True, id="window decoded from later on"),
             pytest.param([bright(t) for t in range(80, 102)], False, id="no roll frame in the window"),
             pytest.param([], False, id="no 1 fps rows"),
+            # The fade walks black down to the floor, but the roll's own frames stop at 100 s: nothing more to read.
+            pytest.param(
+                [*[dark(t, 0, 5.0) for t in range(80, 100)], dark(100, 1, 20.0), dark(101, 1, 20.0)],
+                False,
+                id="black to the floor",
+            ),
+            # Nothing near the coarse start shows the roll, and the walk starts from a lone credit frame at the floor.
+            pytest.param(
+                [dark(80, 1, 20.0), *[bright(t) for t in range(81, 102)]], False, id="a lone card at the floor"
+            ),
         ],
     )
     def test_the_walk_reaching_the_windows_floor_asks_for_more(self, fine, reaches):
         # Version 7: the coarse start can sit up to one 24 s join after the roll's first frame (the anchor's step, or a
-        # decode order that puts a later keyframe first: 3 Women, 21 s), so a walk that runs to the window's first
-        # second may have more roll before it.
+        # decode order that puts a later keyframe first: 3 Women, 21 s), so a walk over the roll that runs to the
+        # window's first second may have more roll before it.
         coarse = rule_j.coarse_start(self.ROWS)
-        start = rule_j.refine_start(self.ROWS, coarse, fine)
-        assert rule_j.refine_reaches_floor(coarse, fine, start) is reaches
+        assert rule_j.refine_reaches_floor(self.ROWS, coarse, fine) is reaches
 
     def test_fade_back_steps_over_dark_frames_up_to_4_s_apart(self):
         coarse = rule_j.coarse_start(self.ROWS)
