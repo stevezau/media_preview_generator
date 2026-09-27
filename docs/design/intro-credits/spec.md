@@ -100,6 +100,11 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
   Beautiful Imperfection (rule J starts on the same epilogue text as the chapter).
 - **The Accused epilogue-card gap** gains a file: version 6's refine walks back over credits over the footage onto an
   epilogue card on black that touches them (5.5 s early; it was 7.5 s late).
+- **The lab matrices have drifted from the app** (found by this lane's row-13 run; details in
+  `evidence/credits-accuracy/README.md` "Lab regression"): phase 2 and 3 rows that set the removed `publish_when`
+  stop on a `KeyError`, and phase 2 rows 6 and 18 and phase 3 rows 3, 5 and 9 check behaviour that changed on purpose
+  since 2026-09-21 (season audio deciding alone, the worker's thread count, one scaler; row 5 not traced). Each fails the
+  same way on `dev`. The matrices need updating before the next full lab regression can gate anything.
 - **Spring of the Blade S01E14's intro** now ends at the title card but starts on the licence cards 11 s before the
   title sequence (the chapter's start and IntroDB's).
 
@@ -3450,4 +3455,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   one credit text read per chapter file, a median 6.5 s per episode and 11 s per film on storage's P5000. The job log
   names each rule in plain words: "the "Credits" chapter, moved to the first credit card by credit text", "start from
   credit text", "the "Intro" chapter runs on into the episode", and credit text's own line says whether it moves or
-  keeps the chapter.
+  keeps the chapter. The lab's row-13 run found one regression, fixed here: a replaced file that now goes to a worker
+  for credit text lost its delayed verify job, because the checking stage stores the new file before handing it on;
+  the job keeps "replaced" from its first stage to the worker's (phase 1 16 of 16 after). The run's other failures are
+  the matrices' own drift and fail the same way on `dev` (§0).

@@ -72,6 +72,26 @@ the crawl 127 s later, and credit text now agrees with Plex's start (8.6 s apart
 Wild Wild Punjab's cast-name montage, 15 s before the crew cards the truth marks (credit text now agrees with Plex);
 The Young Offenders' cast roll over the last shot, 1 s earlier than before.
 
+## Lab regression
+
+`phase4_row13_run.sh` on this branch's image (`ec86ead`), after `phase4_row13_reset.py`, a fresh `mlab_app_config`,
+`./app.sh recreate` and `./phase2_matrix.py configure` (logs in `local/lab/`):
+
+- Phase 1 (inside phase 2 row 19): **16 of 16 pass**. The first run, on `c560952`, failed row 17: a replaced file whose
+  credit text now goes to a worker lost its delayed verify job. Fixed in `ec86ead` (the job keeps "replaced" from its
+  first stage to the worker's), and the row then passed.
+- Phase 2: 16 of 24 pass. Phase 3: 4 of 12 pass (1, 4, 6, 7).
+- Every failure is the matrices' own drift since their last run (2026-09-21), and fails the same way on `dev`:
+  - Phase 2 rows 2, 3, 4, 5, 10, 12 and phase 3 rows 2, 8, 10, 16 stop on `KeyError: 'publish_when'`: the setting was
+    removed on 2026-09-24. Phase 3 row 11 fails because it re-runs phase 2 row 3.
+  - Phase 2 row 6 expects Synth Audio's lone season audio intros in Needs review (G3 at High). Since 2026-09-24,
+    season audio decides an intro alone.
+  - Phase 2 row 18 and phase 3 rows 3 and 9 expect `-threads 2` and `scale_cuda`. Since #314 decodes use the worker's
+    own thread count, and since the one-scaler change they use one scaler on every vendor.
+  - Phase 3 row 5 finds no single "this request on the CPU" line where it expects one (cause not traced; the same on `dev`).
+  Rows 6 and 18 of phase 2 and 3, 5 and 9 of phase 3 were run again on an image of `origin/dev` (`034727b`); each
+  failed the same check. The `publish_when` rows fail inside the matrix script before any app behaviour is read.
+
 ## What moved on sflix's copy
 
 Every file of the audit's `markers.db` decided again (`moves.py replay_base_t2.json replay_work_t3.json`): 104 credits
