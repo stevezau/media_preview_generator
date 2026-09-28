@@ -123,6 +123,12 @@ _DOT = " · "
 _CHAPTER_RULE = "chapters"
 # Release tags and ids in a folder or file name ("{tvdb-275274}", "[imdbid-tt0944947]", "[1080p]").
 _TAG_RE = re.compile(r"[\{\[][^\}\]]*[\}\]]")
+# A resolution or cut a file's own name gives ("Heat (1995) - [Bluray-1080p]…", "…2160p…", "…Extended…"): the only
+# tell-apart a job log line can afford for two copies of the same film sharing a title -- data already in the path,
+# never a lookup.
+_VERSION_TAG_RE = re.compile(
+    r"\b(2160p|1080p|720p|480p|4K|UHD|Extended|Director'?s Cut|Unrated|Remastered)\b", re.IGNORECASE
+)
 # A release group after the tags ("…[h264]-cinepth"): dropped with them.
 _GROUP_RE = re.compile(r"(?<=[\]\}])-[^\s\[\]\{\}()]+$")
 # Separators left behind once the tags are gone ("(2026) - -", "--").
@@ -193,6 +199,9 @@ class RunNotes:
         self.asked.add((source, origin))
         self.unanswered.pop(source, None)
         self.not_asked.pop(source, None)
+        # A fresh answer, even to a key an earlier stage of this run already logged a line for (``logged_sources``):
+        # the line that answer earns isn't held back as a repeat of one that no longer describes it.
+        self.logged_sources.discard((source, origin))
 
 
 @dataclass(frozen=True)
@@ -373,6 +382,20 @@ def path_year(canonical_path: str) -> str | None:
         if found:
             return found.group(1)
     return None
+
+
+def version_tag(canonical_path: str) -> str | None:
+    """A resolution or cut a file's own name gives, when its job log title needs a short tell-apart from another
+    file in the same job that resolved to the same title (two copies of one film, say).
+
+    Args:
+        canonical_path: The file's local path.
+
+    Returns:
+        E.g. ``"1080p"``; None when the name gives none.
+    """
+    found = _VERSION_TAG_RE.search(os.path.basename(canonical_path))
+    return found.group(1) if found else None
 
 
 def season_of(canonical_path: str) -> tuple[str, str]:
@@ -701,6 +724,11 @@ def _written_phrase(result: ServerResult, name: str) -> str:
         elif result.had_is_ours:
             removed.append(mtype.value)
         # else: only the server's own evidence shows this type -- never ours to send, so never ours to call removed
+    if unchanged and not (added or replaced or removed or unread):
+        # A WRITTEN row only happens when the write really changed the server (a basis mismatch): every type
+        # matching what we last sent means it must have drifted since (a Plex rescan dropping markers, say), and
+        # this write restored it -- neither "added" (nothing's new) nor merely "unchanged" (bytes were sent).
+        return _upper_first(f"restored {_and(unchanged)}")
     parts = []
     if added:
         parts.append(f"added {_and(added)}")

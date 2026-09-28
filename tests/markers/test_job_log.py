@@ -781,25 +781,81 @@ class TestFileBlocks:
         # The bug is swallowed at debug, not raised into the file's own outcome; no line for either server logs.
         assert not any("[Plex]" in m or "[Emby]" in m for m in _messages(job_log))
 
-    def test_a_waiting_rows_stale_markers_arent_treated_as_our_last_sent(self, store, media, job_log):
+    def test_a_raising_source_view_doesnt_change_the_files_outcome(self, store, media, job_log):
+        # ``make_source_view`` runs inside the guarded lambda (``_log_source``), so a bug building it is swallowed
+        # the same way a bug in the line itself would be -- it can't fail the file or stop its markers being sent.
+        ctx = _job(store, media, _plex(media))
+        publisher = ready_publisher()
+        with patch.object(pipeline, "make_source_view", side_effect=RuntimeError("boom")):
+            out, _ = _run(ctx, media, {"plex-1": publisher}, probe=_probe())
+
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert publisher.write.call_count == 1
+        # Every source line that would have gone through ``make_source_view`` is swallowed, but the file's own
+        # decision and Sent lines (which don't build a source view) still log.
+        messages = _messages(job_log)
+        assert any(m.startswith(f"{EPISODE} · Decided:") for m in messages)
+        assert any("[Plex]" in m for m in messages)
+
+    def test_a_waiting_rows_carried_over_markers_are_still_our_last_sent(self, store, media, job_log):
         # A row's ``markers`` field keeps whatever an older WRITTEN attempt stored even once a later attempt only
         # got as far as WAITING (``_publish_to``'s own ``_finish``: "rows that don't know the item keep the last
-        # one"). That leftover isn't this run's "our last sent" -- it's stale, from before the wait.
+        # one"). The server never learned of the wait: what it has is still that older write.
         reg = _plex(media)
         ctx = _job(store, media, reg)
         st = os.stat(media)
         rec = ctx.store.upsert_file(
             FileIdentity(media, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
         )
-        stale = (Marker(T.CREDITS, 999_000, 1_000_000, ()),)
-        ctx.store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=list(stale), status="written")
+        last_sent = (Marker(T.CREDITS, 999_000, 1_000_000, ()),)
+        ctx.store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=list(last_sent), status="written")
         ctx.store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=None, status="waiting")
 
         out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
 
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         sent = next(m for m in _messages(job_log) if "[Plex]" in m)
-        assert "replaced" not in sent.lower()
+        assert sent == "Rick and Morty (2013) S01E01 · [Plex] Replaced credits 16:39–16:40 → 21:31–22:01"
+
+    def test_a_failed_rows_last_written_set_is_still_our_last_sent(self, store, media, job_log):
+        # Reproduces the review's own case: credits written, the row then set to failed (a busy database, say) --
+        # the server was never told to remove them, so the next write must say what changed, not "added".
+        reg = _plex(media)
+        ctx = _job(store, media, reg)
+        st = os.stat(media)
+        rec = ctx.store.upsert_file(
+            FileIdentity(media, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
+        )
+        last_sent = (Marker(T.CREDITS, 999_000, 1_000_000, ()),)
+        ctx.store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=list(last_sent), status="written")
+        ctx.store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=None, status="failed")
+
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        sent = next(m for m in _messages(job_log) if "[Plex]" in m)
+        assert sent == "Rick and Morty (2013) S01E01 · [Plex] Replaced credits 16:39–16:40 → 21:31–22:01"
+
+    def test_a_row_moved_to_a_different_item_treats_its_markers_as_unread(self, store, media, job_log):
+        # A merge or split can move the file to a different item on the same server: the old row's markers were
+        # never sent to *this* item, so they aren't "our last sent" for it.
+        reg = _plex(media)
+        ctx = _job(store, media, reg)
+        st = os.stat(media)
+        rec = ctx.store.upsert_file(
+            FileIdentity(media, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
+        )
+        old = (Marker(T.CREDITS, 999_000, 1_000_000, ()),)
+        ctx.store.set_publish_state(rec.id, "plex-1", item_id="item-old", markers=list(old), status="written")
+        reg.get("plex-1").resolve_remote_path_to_item_id.return_value = "item-new"
+
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        sent = next(m for m in _messages(job_log) if "[Plex]" in m)
+        assert (
+            sent == "Rick and Morty (2013) S01E01 · [Plex] Sent credits 21:31–22:01 (what Plex had before wasn't read)"
+        )
 
 
 class TestConcurrentWorkers:
@@ -970,6 +1026,31 @@ def _asked(*sources: Source, server: str = "") -> RunNotes:
     for source in sources:
         notes.answered(source, server if source is Source.SERVER_MARKERS else "")
     return notes
+
+
+class TestRunNotesAnswered:
+    """A source offered again (its "not needed" line already logged) whose answer changes this stage: the fresh
+    answer earns its own line, not the "not needed" one it already had."""
+
+    def test_answering_a_source_clears_its_already_logged_line(self):
+        notes = RunNotes()
+        notes.not_asked[Source.INTRODB] = ALREADY_DECIDED
+        notes.logged_sources.add((Source.INTRODB, ""))
+
+        notes.answered(Source.INTRODB)
+
+        assert (Source.INTRODB, "") not in notes.logged_sources
+        assert Source.INTRODB not in notes.not_asked
+
+    def test_answering_a_servers_own_markers_clears_only_that_servers_key(self):
+        notes = RunNotes()
+        notes.logged_sources.add((Source.SERVER_MARKERS, "plex-1"))
+        notes.logged_sources.add((Source.SERVER_MARKERS, "emby-1"))
+
+        notes.answered(Source.SERVER_MARKERS, "plex-1")
+
+        assert (Source.SERVER_MARKERS, "plex-1") not in notes.logged_sources
+        assert (Source.SERVER_MARKERS, "emby-1") in notes.logged_sources
 
 
 class TestSourceLines:
@@ -1418,26 +1499,24 @@ class TestSentLine:
         result = _server(ServerStatus.WRITTEN, (CREDITS_M,))
         assert server_result_line(result) == ("[Plex] Sent credits 41:48–43:10 (what Plex had before wasn't read)")
 
-    def test_a_span_unchanged_from_what_we_sent_before_isnt_called_added(self):
-        # A basis mismatch can trigger a real write (``ServerStatus.WRITTEN``) of exactly what we last sent -- that's
-        # not a new addition, so the line mustn't claim one.
+    def test_a_span_unchanged_from_what_we_sent_before_is_called_restored(self):
+        # A WRITTEN row only happens when the write really changed the server (a basis mismatch): if every type
+        # still matches what we last sent, the server must have drifted since (a Plex rescan dropping markers, say)
+        # and this write restored them -- not "added" (nothing's new) and not merely "unchanged" (bytes were sent).
         result = _server(ServerStatus.WRITTEN, (INTRO_M,), had=(INTRO_M,))
-        line = server_result_line(result)
-        assert "added" not in line.lower()
-        assert "intro 0:41–1:12" in line
+        assert server_result_line(result) == "[Plex] Restored intro 0:41–1:12"
 
     def test_a_type_only_in_the_servers_own_evidence_isnt_called_removed(self):
         # ``had`` fell back to the server's own evidence (we've never published there): a type it shows that we
-        # never sent isn't ours to call removed -- it's simply left out, not claimed as a change we made.
+        # never sent isn't ours to call removed -- it's simply left out, not claimed as a change we made. Intro is
+        # unchanged and nothing else is claimed either way, so the whole line is "Restored".
         result = _server(ServerStatus.WRITTEN, (INTRO_M,), had=(INTRO_M, CREDITS_M_OLD), had_is_ours=False)
-        line = server_result_line(result)
-        assert "removed" not in line.lower()
-        assert "credits" not in line.lower()
+        assert server_result_line(result) == "[Plex] Restored intro 0:41–1:12"
 
     def test_a_type_the_last_sent_no_longer_holds_is_called_removed(self):
         # The same shape, but ``had`` really is our own record: this one is ours to call removed.
         result = _server(ServerStatus.WRITTEN, (INTRO_M,), had=(INTRO_M, CREDITS_M_OLD), had_is_ours=True)
-        assert "removed credits (it no longer holds)" in server_result_line(result).lower()
+        assert server_result_line(result) == "[Plex] Unchanged intro 0:41–1:12; removed credits (it no longer holds)"
 
 
 class TestUnchangedFilesGetFullBlocks:
@@ -1567,11 +1646,13 @@ class TestTitles:
         lookups.assert_not_called()
 
     def test_a_film_without_an_answer_is_looked_up_once_per_process(self, store, movie, job_log):
+        # A hint gives ``title_asks`` a known item id (a webhook payload, say): naming the file never searches for
+        # one itself (that's ``_publish_to``'s job, later in the same run).
         self._known_movie(store, movie)
         reg = _plex(movie)
         server = reg.get("plex-1")
         server.get_external_ids.return_value = {**MOVIE_IDS, "title": "Heat", "year": "1995"}
-        item = ProcessableItem(canonical_path=movie, server_id="")
+        item = ProcessableItem(canonical_path=movie, server_id="", item_id_by_server={"plex-1": "item-plex-1"})
 
         first, lookups = self._check(self._quiet_job(store, reg), item)
         assert first.outcome_key == FileOutcome.PUBLISHED.value
@@ -1613,7 +1694,9 @@ class TestTitles:
         reg = _plex(movie)
         server = reg.get("plex-1")
         server.get_external_ids.return_value = {**MOVIE_IDS, "title": "Heat: The Director's Cut", "year": "1995"}
-        item = ProcessableItem(canonical_path=movie, server_id="plex-1", title=item_title)
+        item = ProcessableItem(
+            canonical_path=movie, server_id="plex-1", title=item_title, item_id_by_server={"plex-1": "item-plex-1"}
+        )
 
         _, looked_up = self._check(self._quiet_job(store, reg), item)
 
@@ -1621,77 +1704,43 @@ class TestTitles:
         assert looked_up.call_count == lookups
         assert server.get_external_ids.call_count == lookups
 
-    def test_a_hung_item_id_lookup_doesnt_block_the_title(self, store, movie, monkeypatch):
-        # resolve_remote_path_to_item_id (not get_external_ids) is the one that's unbounded: a real server retries
-        # it a few times at its own network timeout. Naming the file mustn't run it on the file's own thread --
-        # only the title lookup's own bounded background thread (``titles.look_up``) may call it.
+    def test_without_a_known_item_id_the_title_never_asks_a_server(self, store, movie):
+        # No hint, and nothing else this run resolved the owner's item id yet (naming the file happens before the
+        # per-source loop, so before ``_publish_to`` or server_markers could): searching for one is ``_publish_to``'s
+        # job, with a file outcome to justify the wait. A log line never causes that search.
         reg = _plex(movie)
         server = reg.get("plex-1")
-        release = threading.Event()
-
-        def hangs(path, *, library_ids):
-            release.wait(10)
-            return "item-plex-1"
-
-        server.resolve_remote_path_to_item_id.side_effect = hangs
-        server.get_external_ids.return_value = {**MOVIE_IDS, "title": "Heat", "year": "1995"}
-        monkeypatch.setattr(titles, "LOOKUP_TIMEOUT_S", 0.2)
-
         ctx = self._quiet_job(store, reg)
         item = ProcessableItem(canonical_path=movie, server_id="")
         owning = pipeline._owning_servers(item, ctx)
         owners = pipeline._publishing_owners(item, ctx, owning)
         servers = pipeline._ItemServers(item, owning)
-        notes = RunNotes()
-        try:
-            started = time.monotonic()
-            title = pipeline._note_title(notes, item, MediaIds("movie"), servers, owners)
-            took = time.monotonic() - started
 
-            assert title == "Heat (1995)"
-            assert took < 0.2 + 1.0, took
-        finally:
-            release.set()
+        title = pipeline._note_title(ctx, RunNotes(), item, MediaIds("movie"), servers, owners)
 
-    @pytest.mark.parametrize("failure", ["times-out", "raises", "no-title"])
-    def test_a_lookup_that_fails_never_holds_or_fails_the_file(self, store, movie, job_log, monkeypatch, failure):
+        assert title == "Heat (1995)"
+        server.resolve_remote_path_to_item_id.assert_not_called()
+        server.get_external_ids.assert_not_called()
+
+    @pytest.mark.parametrize("failure", ["raises", "no-title"])
+    def test_a_lookup_that_fails_never_holds_or_fails_the_file(self, store, movie, job_log, failure):
         self._known_movie(store, movie)
         reg = _plex(movie)
         server = reg.get("plex-1")
-        release = threading.Event()
-        answered = threading.Event()
-
-        def hangs(item_id):
-            release.wait(10)
-            answered.set()
-            return {**MOVIE_IDS, "title": "Heat", "year": "1995"}
-
-        if failure == "times-out":
-            server.get_external_ids.side_effect = hangs
-        elif failure == "raises":
+        if failure == "raises":
             server.get_external_ids.side_effect = RuntimeError("Plex refused the connection")
         else:
             server.get_external_ids.return_value = {k: v for k, v in MOVIE_IDS.items() if k not in ("title", "year")}
-        monkeypatch.setattr(titles, "LOOKUP_TIMEOUT_S", 0.2)
         publisher = ready_publisher()
-        item = ProcessableItem(canonical_path=movie, server_id="")
-        try:
-            started = time.monotonic()
-            out, _ = self._check(self._quiet_job(store, reg), item, publisher)
-            took = time.monotonic() - started
+        item = ProcessableItem(canonical_path=movie, server_id="", item_id_by_server={"plex-1": "item-plex-1"})
 
-            assert out.outcome_key == FileOutcome.PUBLISHED.value
-            assert publisher.write.call_count == 1
-            # Named by its cleaned file name; the file waited no longer than the lookup's timeout.
-            assert _messages(job_log)[0] == "Heat (1995): checking credits (films get credits only)"
-            assert took < 0.2 + 1.0, took
-            assert server.get_external_ids.call_count == 1
-        finally:
-            release.set()
-        if failure == "times-out":
-            # The answer that came after the wait is kept: a later job names the film by it, without asking.
-            assert answered.wait(5)
-            assert _wait_for(lambda: titles.TITLE_CACHE.get(movie) == ("Heat", "1995"))
+        out, _ = self._check(self._quiet_job(store, reg), item, publisher)
+
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert publisher.write.call_count == 1
+        # Named by its cleaned file name.
+        assert _messages(job_log)[0] == "Heat (1995): checking credits (films get credits only)"
+        assert server.get_external_ids.call_count == 1
         job_log.clear()
         self._check(self._quiet_job(store, reg), item)
         assert server.get_external_ids.call_count == 1
@@ -1708,13 +1757,29 @@ class TestTitles:
         ]
 
 
-def _wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return False
+class TestTitleTellApart:
+    """Two files in one job that resolve to the same title (two copies of one film): the second gets a short
+    tell-apart from data already in its own name, the first stays plain."""
+
+    def test_the_first_file_with_a_title_keeps_it_plain(self, store, movie):
+        ctx = _job(store, movie, _plex(movie))
+        assert pipeline._claim_title(ctx, "Heat (1995)", "/movies/Heat (1995) [1080p].mkv") == "Heat (1995)"
+
+    def test_a_second_file_with_the_same_title_gets_its_own_resolution_tag(self, store, movie):
+        ctx = _job(store, movie, _plex(movie))
+        assert pipeline._claim_title(ctx, "Heat (1995)", "/movies/Heat (1995) [2160p].mkv") == "Heat (1995)"
+        assert pipeline._claim_title(ctx, "Heat (1995)", "/movies/Heat (1995) [1080p].mkv") == "Heat (1995) (1080p)"
+
+    def test_a_second_file_with_no_tag_in_its_name_keeps_the_plain_title(self, store, movie):
+        # No data at hand to tell them apart with: left as it is, same as the file it collides with.
+        ctx = _job(store, movie, _plex(movie))
+        assert pipeline._claim_title(ctx, "Heat (1995)", "/movies/Heat (1995) [2160p].mkv") == "Heat (1995)"
+        assert pipeline._claim_title(ctx, "Heat (1995)", "/movies/Heat (1995) copy.mkv") == "Heat (1995)"
+
+    def test_a_different_title_is_never_held_back_by_anothers_count(self, store, movie):
+        ctx = _job(store, movie, _plex(movie))
+        pipeline._claim_title(ctx, "Heat (1995)", "/movies/Heat (1995) [2160p].mkv")
+        assert pipeline._claim_title(ctx, "Se7en (1995)", "/movies/Se7en (1995) [2160p].mkv") == "Se7en (1995)"
 
 
 class TestTitleCache:
@@ -1732,24 +1797,10 @@ class TestTitleCache:
         assert titles.look_up("/m/x.mkv", []) == titles.NO_TITLE
         assert titles.TITLE_CACHE.get("/m/x.mkv") is None
 
-    def test_while_every_lookup_slot_is_held_a_file_skips_its_lookup_at_once(self, monkeypatch):
-        monkeypatch.setattr(titles, "_IN_FLIGHT", threading.BoundedSemaphore(1))
-        titles._IN_FLIGHT.acquire()
-        try:
-            ask = MagicMock(return_value={"title": "X"})
-            started = time.monotonic()
-            assert titles.look_up("/m/x.mkv", [ask], timeout_s=5) == titles.NO_TITLE
-            assert time.monotonic() - started < 1
-            ask.assert_not_called()
-            # Not asked, so not counted: a later job may still ask once.
-            assert titles.TITLE_CACHE.get("/m/x.mkv") is None
-        finally:
-            titles._IN_FLIGHT.release()
-
     def test_the_first_server_with_a_title_names_the_film(self):
         asks = [MagicMock(side_effect=RuntimeError("down")), MagicMock(return_value=None),
                 MagicMock(return_value={"title": " Heat ", "year": 1995}), MagicMock()]  # fmt: skip
-        assert titles.look_up("/m/heat.mkv", asks, timeout_s=5) == ("Heat", 1995)
+        assert titles.look_up("/m/heat.mkv", asks) == ("Heat", 1995)
         asks[3].assert_not_called()
         assert titles.TITLE_CACHE.get("/m/heat.mkv") == ("Heat", 1995)
 
@@ -1930,8 +1981,8 @@ class TestSeasonJob:
         paused_until = store.series_lookups_paused_until(
             Source.THEINTRODB, "tvdb:275274", pause=pipeline.SERIES_NO_ENTRY_PAUSE
         )
-        # The fixtures' fixed clock, not the real day: the first job stored every answer then.
-        saved = "2026-09-27"
+        # The store's own clock (real time, not the job's fixed one): whatever day the first job actually ran on.
+        saved = store.evidence_rows(store.get_file(paths[0]).id)[0].fetched_at[:10]
         skip_note = f"skipped (no data for this show; asked again after {paused_until:%Y-%m-%d})"
 
         def unchanged_block(episode: int, *, theintrodb: str) -> list[str]:
