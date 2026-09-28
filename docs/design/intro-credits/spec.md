@@ -74,8 +74,8 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 §14 2026-09-25). Each has its evidence folder under `evidence/` (map in `evidence/README.md`):
 - ~~Held fix 3, a season on every disk~~: done in season audio v10 (§5.3, §14 2026-09-27), with the quorum of a
   second opening and the file-start bumper rule it waited for.
-- **The Accused epilogue-card gap:** cards glued onto the front of a roll 320×180 does see are still answered
-  11.5–40.5 s early on 4 Accused files (`evidence/credits/small-text-retry.md`, `evidence/credits/small-text-retry/`).
+- ~~The Accused epilogue-card gap~~: done in credit text v8 (§5.4 "Version 8, prose cards"): the card the start
+  lands on is read, and the start moves past prose.
 - **Plex-host checks before release** (the plex host was down): the text helper's 640×360 self-test on the TITAN RTX
   and the Intel iGPU, a 4K VAAPI tail's timing, and the Intel answers with this code
   (`evidence/credits/small-text-retry.md` "Before release").
@@ -103,20 +103,30 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 **Open after the 2026-09-27 credits fixes** (§14 2026-09-27 "Credits accuracy" and "The credits errors left after
 #320", `evidence/credits-accuracy/README.md`, `evidence/credits-remaining/README.md`):
 - **Late starts the detector can't see**: names over bright footage or a collage (17 Again 82 s, '71 120 s with SkipDB
-  agreeing, 21 Jump Street 102 s, 14 Peaks 42 s with its chapter), cards 320×180 boxes nothing on (#SKYKING 24 s), and
-  one late chapter the inside-the-roll check keeps (A Trip to Infinity, credit text right). On the audit's Plex
+  agreeing, 21 Jump Street 102 s, 14 Peaks 42 s with its chapter), and one late chapter the inside-the-roll check keeps
+  (A Trip to Infinity, credit text right). (#SKYKING, listed here before, starts at 5,289 s by frame check, after
+  epilogue text; v8 answers it.) On the audit's Plex
   comparison ours is 7 of 81 wrong against Plex's 8 of 80, skipping story on 1 against Plex's 8.
-- **Epilogue text on black glued to the roll**: A Beautiful Imperfection (chapter and rule J on the epilogue, as
-  Plex's own start) and Accused's 4 episodes 11.5–40.5 s early. No box-level signal (line width, lines, time on
-  screen) separates a prose card from a credit card on the sets: every threshold that catches them moves right
-  answers too (`evidence/credits-remaining/README.md`).
-- **The lab matrices have drifted from the app** (found by this lane's row-13 run; details in
-  `evidence/credits-accuracy/README.md` "Lab regression"): phase 2 and 3 rows that set the removed `publish_when`
-  stop on a `KeyError`, and phase 2 rows 6 and 18 and phase 3 rows 3, 5 and 9 check behaviour that changed on purpose
-  since 2026-09-21 (season audio deciding alone, the worker's thread count, one scaler; row 5 not traced). Each fails the
-  same way on `dev`. The matrices need updating before the next full lab regression can gate anything.
+- ~~Epilogue text on black glued to the roll~~: done in credit text v8 by reading the words (no box-level signal
+  separated a prose card from a credit card, `evidence/credits-remaining/README.md`).
+- **The lab matrices are current as of `dev` `cab4ccf`** (2026-09-27; `evidence/lab/CHANGES.md` lists every row
+  changed, old and new expectation, and the cite). The drift this lane's row-13 run found (rows setting the removed
+  `publish_when`, season audio deciding alone, the worker's thread count, one scaler, the helper's fallback wording
+  since #314) is gone, and a clean full run (`phase4_row13_reset.py`, a new empty config volume, `phase4_row13_run.sh`)
+  gates again: phase 1 16 of 16, phase 2 24 of 24, phase 3 12 of 12. Phase 3 row 6 (a cancel landing at pickup is
+  missed) was a real bug, intermittent on `dev` `cab4ccf` (it passed in that run and failed the one before it); #325
+  fixes it. The combined proof on `dev` `0e1ddb9` with #323, #325 and these matrices passed every row, row 6 in the
+  full run and in 5 of 5 extra trials.
 - **Spring of the Blade S01E14's intro** now ends at the title card but starts on the licence cards 11 s before the
   title sequence (the chapter's start and IntroDB's).
+
+**Open after the card read** (§14 2026-09-27 "The card the credits start on"; `evidence/card-read/README.md`):
+- **Two epilogues still stop the move early**: To Dye For's letter-spaced third card reads as 2.1 words to a line
+  (21 s early, from 41), Trainwreck's last statement has no full stop (12 s early, from 50).
+- **The intro window and cap are held** on branch `fix/intro-window-cap` (the Alias S02E09 miss above stays open):
+  half the episode up to 20 minutes and intros up to 300 s bring Alias S02E09/E10 right, but on the library chapter set
+  Evil S04 ×4 become partial (their title music is re-cut per episode) and Glass Heart S01E03 loses its 13 s title
+  card; the two general rules tried against them lost more (that branch's `evidence/card-read/README.md`).
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -517,7 +527,8 @@ decodes are unchanged. Any other stream (every other decoder honors `-skip_frame
 stuck on the mount is "no answer" this run only, with nothing recorded against the file. The start-time probe
 (`frames.container_start_s`) is handled the same way.
 
-**Text detector.** RapidOCR **detection model only** (no recognition) at the frame's own 320 px
+**Text detector.** RapidOCR **detection model** at the frame's own 320 px (recognition reads one kind of frame
+only, the card the start lands on: "Version 8, prose cards" below)
 (`det_limit_side_len=320, det_limit_type="max"`) — same hits as default upscaling (19/19, 0 false), far cheaper.
 `det_limit_side_len=320` is actually ignored by rapidocr 1.4.4 under `limit_type="max"` (the limit is raised to 960
 for any frame under it): the frame keeps its own size because it's already under that raised limit, not because the
@@ -625,6 +636,46 @@ list), early 2 → 2; the 80's gate 5 of 5 by the frame check (High wrong 1 → 
 101 → 106, wrong 18 → 18, High useful 97 → 102, wrong 17 → 17, and every answer that moved earlier than the set's
 truth is on credits by frame check (Louis C.K. Ridiculous, A Little Prayer, Animal); Accused 50 / 4 / 3, I Survived and
 the online cases unchanged.
+**Version 8, prose cards** (2026-09-27 in §14, `evidence/card-read/`). Rule J reads boxes, not words, so an
+epilogue's sentences on black that touch the roll are its first card and the start lands on them (Accused ×7, Breach,
+#SKYKING, A Beautiful Imperfection, Gandhari: 6–46 s early). When the first text at or after the start, in the rows
+already read, is dark, the 30 s from the start are decoded at 1 fps (`cards.FIRST_CARD_WINDOW_S`) and split into cards
+(`cards.cards`: seconds with text between blank ones, split where neither second's boxes lie mostly inside the
+other's), and the first card is read once, at the middle of its fullest seconds, at 1280×720 (`frames.read_text_at`,
+`cards.READ_SCALE`; a refine window's decode command on the worker's own device). The reader is PP-OCRv5's Latin
+recognition model (`latin_PP-OCRv5_rec_mobile.onnx`, Apache-2.0, RapidOCR's ONNX export at its v3.9.2 tag, in the image
+beside the detection model and pinned by sha256) on the detection model's boxes, in the same helper process with the
+same device, CPU fallback and back-off (`textdet_helper` "read" requests); the helper's self-test also compares 3
+card-sized frames' words, GPU against CPU, and a GPU that reads other words isn't used (storage's P5000, plex's Intel
+iGPU and TITAN RTX all pass and read real-looking cards as the CPU does; AMD untested). Both run with ONNX Runtime's
+basic graph optimisations, so the WebGPU and CPU graphs are the same. A line read under 0.9 confidence is left out:
+text in a script the Latin model can't read comes out as "words" at 0.5–0.8 (777 Charlie's Kannada crawl), Latin text
+at 0.95 or more. The card is **prose** (`cards.is_prose`) when a sentence, the words up to a line ending in a full stop
+that isn't an initialism's ("p.g.a.", "U.S."), has at least 4 words and 3 to a line on average (a list of names whose
+line ends in "Jr." or a dot leader has 2), or a line has 7 or more words, most starting lower-case. On prose, the
+rest of the 90 s after the start (`cards.CARD_WINDOW_S`, twice Gandhari's 46 s of epilogue) is decoded at 1 fps at
+320×180 and 640×360 (`_small_text`, for credit cards only the larger frame boxes), each card after the first is read
+in turn, and the start moves to the first card that isn't prose or is on screen for a single second (text on the move:
+a crawl, where the roll clearly continues). The first card is read however long it stays: the start's second can be
+its fade-in alone (#SKYKING). Prose to the window's end, or a card at or past the answer's end, keeps the start; the
+end never moves. Both windows stop at the answer's end when a scene follows the roll: nothing past the credits is
+decoded. The answer keeps the old start (`prose_start_s`), and a credits chapter from 10 s before it to the
+new start is read as moving (`chapter_origin`). A card that can't be read (a slow or stalled decode, a helper that
+died) keeps the start the roll gave; a GPU failure is the worker's CPU rerun, as at 640×360. A cancel kills every credits
+decode's ffmpeg within 0.1 s (`frames.run_decode`'s watcher), even while a text detection or reading request is in
+flight: a fresh app's first request waits 10–14 s for its helper to start and self-test (lab phase 3 row 6). `CREDITS_TEXT_VERSION` 8
+reads every stored answer again once.
+Measured on the same decodes as v7 (frame checks in the README): the 14 named files 1 → 12 right (Accused ×7, Breach,
+#SKYKING, A Beautiful Imperfection, Gandhari's closing title after its last shot; Avengers kept; To Dye For 41 → 21 s
+early and Trainwreck 50 → 12 s early, §0); the 80 unchanged; the 205 right 71 → 73 (Facing El Chapo; Ocean with David
+Attenborough, whose truth sits on its epilogue), early 38 → 36, late 41 unchanged (3 answers already late moved 1–23 s
+later); Accused's other 46 and I Survived unchanged; the audit's answer key, credits wrong 8 → 7 of 88 (tuning 4 → 4 of
+61, held out 4 → 3 of 27), skipping story 1 → 0; the Plex comparison 7 → 6 of 81 (5 with #SKYKING frame-checked:
+its truth there sits on the epilogue), skipping story 1 → 0 (Plex's own 8 of 80, 8). Other moves, each frame-checked
+right: past a dedication or a help-line notice, either side of which is right as with C03's dedication (13 Minutes,
+Paris, Texas, Habeas Corpus S01E06), and 1–2 s past an "Inspired by …" credit (The Wargame ×5). Cost on a CPU worker:
+a dark start reads one card, 8–18 s of CPU (2–3.5 s wall) on 1080p and 55 s (6 s) on a 4K HEVC film, nearly all of it
+the 30 s decode; a prose start 42–71 s (8–14 s). On a GPU worker the decodes and both models run on the GPU.
 An intra-only file's thinned keyframe pass counts its stride from the seek, so its rest of the file is decoded from the
 tail's own start and the rows before the end dropped: the frames after the end are then the ones the 320×180 reading
 read (the cost: its whole tail again, thinned; 450 frames for a movie). At 640×360 each text detection request carries 16 frames, the pixels of 64 at 320×180, so the helper's
@@ -3606,3 +3657,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   across disks): 308 members to fingerprint (CPU, 2–14 s each), 3,419 new pairs (6.3 ms each, under a CPU-minute) and
   a re-pick of every answer from cached pairs; the whole library's split seasons hold 374,539 cross-folder pairs
   (about 0.7 CPU-hours). A group lookup lists each library folder once (about 16 ms for sflix's four).
+- 2026-09-27 · **The card the credits start on** (credit text v8, §5.4; `evidence/card-read/`). From the prior-art
+  research, approved by the owner: PP-OCRv5's Latin recognition model reads the card rule J's start lands on when it is
+  on black, on the worker's own device with the existing fallback, and the start moves past prose cards to the first
+  that isn't, never past a card on screen for a single second (a crawl) or the answer's end. Four rules carry their
+  evidence (§5.4 "Version 8"): a sentence needs 3 words to a line (Fightland S01E08's cast list ends in "JR.", Paris,
+  Texas' crawl in dot leaders); lines under 0.9 confidence are left out (another script); the first card is read
+  however short (#SKYKING's fade-in); a one-second card after it ends the walk (the owner's "never past where the roll
+  clearly continues"). Measured on the answer key (seed 20260927 split), the 80 and 205 credit sets, Accused and I
+  Survived (numbers in §5.4): no new wrong answer, credits skipping story 1 → 0 on both audit sets, intros unchanged.
+  Cost on a CPU worker: +8–18 s CPU on 1080p (+55 s on 4K HEVC) where the start is on black, +42–71 s where it is
+  prose. The approved intro window (half the episode, up to 20 minutes) and cap (300 s) are held on
+  `fix/intro-window-cap`: they add new wrong answers on the library chapter set (§0).

@@ -134,7 +134,7 @@
                            highlight on the Automation dropdown. Same pattern
                            as the Help and Notification toggles further down. #}
                         <button type="button"
-                                class="nav-link btn btn-link dropdown-toggle d-flex align-items-center {% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.bif_viewer') %}active{% endif %}"
+                                class="nav-link btn btn-link dropdown-toggle d-flex align-items-center {% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector') %}active{% endif %}"
                                 id="navToolsDropdown"
                                 data-bs-toggle="dropdown" aria-expanded="false">
                             <i class="bi bi-wrench-adjustable me-1"></i>Tools
@@ -151,15 +151,9 @@
                                 </a>
                             </li>
                             <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' and request.args.get('tab') != 'markers' %}active{% endif %}" href="{{ url_for('main.bif_viewer') }}">
-                                    <i class="bi bi-film me-2"></i>Preview Inspector
-                                </a>
-                            </li>
-                            <li>
-                                {# Same page as the Preview Inspector, opened on its Intro & Credits tab: the editor and
-                                   the Whole-season view live there. A separate entry so it can be found. #}
-                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' and request.args.get('tab') == 'markers' %}active{% endif %}" href="{{ url_for('main.bif_viewer', tab='markers') }}">
-                                    <i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits
+                                {# One page for a file's preview frames and its intro & credits. #}
+                                <a class="dropdown-item {% if request.endpoint == 'main.inspector' %}active{% endif %}" href="{{ url_for('main.inspector') }}">
+                                    <i class="bi bi-film me-2"></i>Inspector
                                 </a>
                             </li>
                             <li><hr class="dropdown-divider"></li>

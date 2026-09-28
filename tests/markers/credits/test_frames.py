@@ -726,6 +726,68 @@ class TestRunDecode:
             if child_pid_file.exists() and not _gone(int(child_pid_file.read_text())):
                 os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
 
+    @pytest.mark.parametrize("hw", [True, False], ids=["gpu", "cpu"])
+    @pytest.mark.parametrize("frames_left", [50, 3], ids=["mid-decode", "last-chunk"])
+    def test_a_cancel_during_a_slow_text_detection_call_kills_ffmpeg_at_once(self, tmp_path, hw, frames_left):
+        # Lab phase 3 row 6: a fresh app's first text detection request waits 10-14 s for its helper to start and
+        # self-test. A cancel landing then must stop ffmpeg within a poll, not after the request, and the decode ends
+        # as cancelled (never as a GPU failure, which would read the file again on the CPU). "last-chunk": ffmpeg has
+        # written its last frames, so the decode is in its final, partial text detection call when the cancel lands.
+        cancelled, in_detection, let_go = threading.Event(), threading.Event(), threading.Event()
+        pid_file = tmp_path / "ffmpeg.pid"
+        calls: list[int] = []
+
+        def helper_starting(planes):
+            calls.append(len(planes))
+            in_detection.set()
+            let_go.wait(20)
+            return [()] * len(planes)
+
+        outcome: dict = {}
+
+        def decode():
+            try:
+                frames.run_decode(
+                    _fake_ffmpeg(
+                        [10] * frames_left,
+                        ["1"] * frames_left,
+                        sleep_s=0.05,
+                        pid_file=str(pid_file),
+                        linger_s=30,
+                        close_stdout=frames_left < 4,  # the last frames are out: ffmpeg lingers as it exits
+                    ),
+                    hw_active=hw,
+                    pts_offset_s=0.0,
+                    detect_boxes=helper_starting,
+                    cancel_check=cancelled.is_set,
+                    chunk_frames=4,
+                )
+            except BaseException as exc:  # noqa: BLE001 - the test reads what ended the decode
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=decode, daemon=True)
+        worker.start()
+        try:
+            assert in_detection.wait(10)
+            cancelled.set()
+            _assert_gone(pid_file, within_s=2)  # while text detection is still busy
+            assert worker.is_alive() and calls == [calls[0]]
+        finally:
+            let_go.set()
+            worker.join(10)
+        assert isinstance(outcome.get("error"), DecodeCancelledError), outcome
+        assert len(calls) == 1  # nothing more is sent to text detection after the cancel
+
+    def test_a_decode_that_ends_without_a_cancel_starts_no_kill(self, tmp_path):
+        # The watcher only acts on a cancel: a decode that finishes on its own keeps its rows and exit code.
+        before = set(threading.enumerate())
+        rows = frames.run_decode(
+            _fake_ffmpeg([10, 250], ["1", "2"]), hw_active=True, pts_offset_s=0.0, detect_boxes=_detector([]),
+            cancel_check=lambda: False, chunk_frames=4,
+        )  # fmt: skip
+        assert [row[:2] for row in rows] == [(1.0, 0), (2.0, 3)]
+        assert not [t for t in set(threading.enumerate()) - before if t.name == "credits-cancel" and t.is_alive()]
+
     def test_cancel_while_ffmpeg_is_still_exiting(self, tmp_path):
         # ffmpeg can close its output and linger (flushing, a driver teardown). A cancel there must not wait for the
         # deadline: the job would hold the worker for the whole timeout and the file would be recorded as timed out.
@@ -1106,7 +1168,9 @@ class TestRunDecodePause:
         assert isinstance(out.get("error"), DecodeCancelledError)
         assert time.monotonic() - started < 3
         _assert_gone(pid_file, within_s=5)
-        assert group_signals[:2] == [(pid, signal.SIGSTOP), (pid, signal.SIGCONT)]
+        # Stopped by the pause, then killed as it stood: the cancel watcher kills the frozen group directly (SIGKILL
+        # reaches a stopped process), so no SIGCONT has to come first.
+        assert group_signals[0] == (pid, signal.SIGSTOP)
 
     def test_no_ffmpeg_starts_while_paused(self, tmp_path):
         pid_file = tmp_path / "ffmpeg.pid"
@@ -1359,6 +1423,68 @@ class TestDecodeRows:
                                             drop_non_key=drop_non_key)  # fmt: skip
         assert seen["command"] == expected
         assert expected[expected.index("-bsf:V:0") + 1] == bsf
+
+
+class TestReadTextAt:
+    @pytest.mark.parametrize(
+        ("gpu", "device", "hw"), [("NVIDIA", "cuda:0", True), (None, None, False)], ids=["gpu", "cpu"]
+    )
+    def test_one_second_at_the_read_size_on_the_workers_device_one_frame_per_request(
+        self, monkeypatch, gpu, device, hw
+    ):
+        seen: dict = {}
+        asked: list[tuple] = []
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            seen.update(kwargs)
+            assert kwargs["detect_boxes"](np.zeros((1, 720, 1280), np.uint8)) == [()]
+            assert kwargs["detect_boxes"](np.zeros((1, 720, 1280), np.uint8)) == [()]
+            return []
+
+        def read_text(planes):
+            asked.append(planes.shape)
+            return [["THE INVESTIGATION", "IS NOW CLOSED."] if len(asked) == 1 else ["LATER"]]
+
+        def cancel():
+            return False
+
+        monkeypatch.setattr(frames, "run_decode", fake_run)
+        lines = frames.read_text_at(MOVIE, ffmpeg=FF, at_s=5692.0, scale=4, gpu=gpu, gpu_device_path=device,
+                                    read_text=read_text, cancel_check=cancel, timeout_s=42.0, start_time_s=0.0,
+                                    download_format="p010le", ffmpeg_threads=3)  # fmt: skip
+        expected_command, _ = frames.decode_command(
+            FF, MOVIE, start_s=5692.0, length_s=1.0, keyframes_only=False, fps=1, gpu=gpu, gpu_device_path=device,
+            scale=4, download_format="p010le", ffmpeg_threads=3,
+        )  # fmt: skip
+        # The first frame of the second is the card's: a second frame (the next second's, when ffmpeg rounds) is never
+        # read at all.
+        assert lines == ["THE INVESTIGATION", "IS NOW CLOSED."]
+        assert asked == [(1, 720, 1280)]
+        seen.pop("detect_boxes")
+        assert seen == {
+            "command": expected_command,
+            "hw_active": hw,
+            "cancel_check": cancel,
+            "pause_check": None,
+            "timeout_s": 42.0,
+            "pts_offset_s": 0.0,
+            "name": "Movie.mkv",
+            "scale": 4,
+            "chunk_frames": 1,
+        }
+
+    def test_no_frame_there_reads_nothing(self, monkeypatch):
+        monkeypatch.setattr(frames, "run_decode", lambda command, **kwargs: [])
+        lines = frames.read_text_at(MOVIE, ffmpeg=FF, at_s=5692.0, scale=4, gpu=None, gpu_device_path=None,
+                                    read_text=lambda planes: [["NEVER"]], start_time_s=0.0)  # fmt: skip
+        assert lines == []
+
+    def test_a_cancel_before_the_decode_starts_none(self, monkeypatch):
+        monkeypatch.setattr(frames, "run_decode", lambda command, **kwargs: pytest.fail("decoded after a cancel"))
+        with pytest.raises(frames.DecodeCancelledError):
+            frames.read_text_at(MOVIE, ffmpeg=FF, at_s=5692.0, scale=4, gpu=None, gpu_device_path=None,
+                                read_text=lambda planes: [], cancel_check=lambda: True, start_time_s=0.0)  # fmt: skip
 
 
 def _packets(count: int, *, fps: float = 24.0, start_s: float = 0.0, keyframe: bool = True) -> list[VideoPacket]:

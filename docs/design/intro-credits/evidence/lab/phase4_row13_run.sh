@@ -2,10 +2,12 @@
 # Row 13 step 2-3: the phase 2 and phase 3 matrices on the phase-4 images, in the order their results docs prescribe,
 # one row per process (a row that fails does not stop the run; the log says which one did).
 #
-#   MLAB_DIR=/path/to/lab-folder ./phase4_row13_run.sh
+#   MLAB_DIR=/path/to/lab-folder MLAB_APP_IMAGE=<image> MLAB_APP_CONFIG_VOLUME=<the run's volume> ./phase4_row13_run.sh
 #
-# Start from the state phase4_row13_reset.py leaves (our markers off the lab servers, fresh mlab-app config, then
-# ./phase2_matrix.py configure). Phase 2 row 19 IS the phase 1 regression and does not reset markers.db itself; it takes
+# Start from the state phase4_row13_reset.py leaves (our markers off the lab servers, mlab-app on a new empty config
+# volume, then ./phase2_matrix.py configure). MLAB_APP_CONFIG_VOLUME must name that volume: phase 3 rows recreate the app
+# through app.sh, which would otherwise put it back on mlab_app_config. Phase 2 row 19 IS the phase 1 regression and
+# does not reset markers.db itself; it takes
 # about 15 minutes for its 600 s wait. Phase 3 rows 2-9 build on row 2's stored answer, so its order matters, and its
 # rows 12-15 belong to the plex host (phase3-results.md), so they are not run here.
 set -euo pipefail
@@ -30,6 +32,8 @@ for pattern in 'p2-row-??' 'p3-row-??' 'row-[01]?'; do
         [[ -e "$old" ]] && mv "$old" "$ARCHIVE/"
     done
 done
+# The previous run's log goes with its results rather than being emptied.
+[[ -s "$LOG" ]] && mv "$LOG" "$ARCHIVE/"
 : >"$LOG"
 cd "$HERE"
 

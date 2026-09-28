@@ -453,8 +453,8 @@ jobs:
         continue-on-error: true
 
       - name: Credit text prerequisites (model and font)
-        # tests/markers/credits' integration-marked real-model tests skip without the model and the DejaVu font;
-        # fetch the model the same pinned, sha256-checked way the image does.
+        # tests/markers/credits' integration-marked real-model tests skip without the models and the DejaVu font;
+        # fetch the models the same pinned, sha256-checked way the image does.
         run: |
           set -euo pipefail
           python3 scripts/fetch_textdet_model.py --out "$RUNNER_TEMP/models"
@@ -467,6 +467,7 @@ jobs:
         env:
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
           MEDIA_PREVIEW_TEXTDET_MODEL: ${{ runner.temp }}/models/ch_PP-OCRv4_det_infer.onnx
+          MEDIA_PREVIEW_TEXTREC_MODEL: ${{ runner.temp }}/models/latin_PP-OCRv5_rec_mobile.onnx
         run: pytest -m integration --no-cov --tb=short -rs tests/integration/ tests/markers/credits/
         timeout-minutes: 15
 
@@ -485,7 +486,7 @@ jobs:
     # builds — and the image carries native wheels (onnxruntime, opencv-python-headless, pyclipper, numpy) that must
     # exist for linux/arm64. Builds natively on GitHub's free arm64 runner and only loads the image into this
     # runner's Docker: no push, no registry login, no secrets, no :dev / :latest tag. Then checks that the credit
-    # text detector runs inside it and that its model is the one the Dockerfile's fetch step pins.
+    # text detector and reader run inside it and that their models are the ones the Dockerfile's fetch step pins.
     name: arm64 image (build and check, no push)
     if: github.event_name == 'pull_request'
     needs: lint
@@ -495,7 +496,6 @@ jobs:
       contents: read
     env:
       CHECK_IMAGE: media-preview-generator-arm64-check:local
-      MODEL_PATH: /app/models/ch_PP-OCRv4_det_infer.onnx
     steps:
       - uses: actions/checkout@v4
         with:
@@ -528,25 +528,30 @@ jobs:
             exit 1
           fi
 
-      - name: The credit text detector runs in the image
+      - name: The credit text detector and reader run in the image
         run: >-
           docker run --rm --entrypoint python3 "$CHECK_IMAGE"
           -m media_preview_generator.markers.credits.textdet_helper --check
 
-      - name: The image's model is the one the Dockerfile's fetch step pins
+      - name: The image's models are the ones the Dockerfile's fetch step pins
         run: |
           set -euo pipefail
-          expected="$(python3 -c 'import runpy; print(runpy.run_path("scripts/fetch_textdet_model.py")["MODEL_SHA256"])')"
-          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::Could not read MODEL_SHA256 from scripts/fetch_textdet_model.py (got '$expected')"
-            exit 1
-          fi
-          read -r actual _ < <(docker run --rm --entrypoint sha256sum "$CHECK_IMAGE" "$MODEL_PATH")
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::$MODEL_PATH is $actual, the fetch step pins $expected"
-            exit 1
-          fi
-          echo "$MODEL_PATH matches the pin ($expected)"
+          check() {
+            local path="$1" pin="$2" expected actual
+            expected="$(python3 -c "import runpy; print(runpy.run_path('scripts/fetch_textdet_model.py')['$pin'])")"
+            if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not read $pin from scripts/fetch_textdet_model.py (got '$expected')"
+              exit 1
+            fi
+            read -r actual _ < <(docker run --rm --entrypoint sha256sum "$CHECK_IMAGE" "$path")
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::$path is $actual, the fetch step pins $expected"
+              exit 1
+            fi
+            echo "$path matches the pin ($expected)"
+          }
+          check /app/models/ch_PP-OCRv4_det_infer.onnx MODEL_SHA256
+          check /app/models/latin_PP-OCRv5_rec_mobile.onnx REC_SHA256
 
   marker-agent-image:
     # The Plex marker agent (plex-marker-agent/) installs the app's wheel with --no-deps, so the only libraries in

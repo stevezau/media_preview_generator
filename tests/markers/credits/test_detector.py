@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import threading
@@ -13,6 +14,7 @@ import pytest
 
 from media_preview_generator.markers.credits import decode_check, detector, frames, rule_j
 from media_preview_generator.markers.credits.textdet_helper import (
+    TextDetCancelledError,
     TextDetShuttingDownError,
     TextDetUnavailableError,
 )
@@ -1676,6 +1678,12 @@ class FakePool:
         self.hooks.append((on_cpu, cancel_check))
         return [()] * len(planes)
 
+    def read_text(self, planes, *, gpu, gpu_device_path, gpu_worker=None, on_cpu=None, cancel_check=None):
+        self.calls.append(("read", gpu, gpu_device_path))
+        self.gpu_workers.append(gpu_worker)
+        self.hooks.append((on_cpu, cancel_check))
+        return [["A LINE."]] * len(planes)
+
 
 @pytest.fixture
 def pool(monkeypatch):
@@ -2097,6 +2105,27 @@ class TestDetect:
         seen[0]["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
         assert pool.calls == [(gpu, device)]
         assert pool.gpu_workers == [asks_as_gpu_worker]
+
+    @pytest.mark.parametrize(
+        ("gpu", "gpu_worker", "asks_as_gpu_worker"),
+        [("NVIDIA", True, True), (None, True, True), (None, False, False)],
+        ids=["gpu-worker", "gpu-workers-cpu-rerun", "cpu-worker"],
+    )
+    def test_the_card_at_the_start_is_read_on_the_workers_own_device_with_its_hooks(
+        self, monkeypatch, pool, ctx, gpu, gpu_worker, asks_as_gpu_worker
+    ):
+        # The recognition model runs where the detection model does (spec §5.4, "Prose cards"): the same routing, the
+        # same CPU fallback shown on the worker's row, the same cancel.
+        seen = self._find(monkeypatch, None)
+        device = "cuda:0" if gpu else None
+        shown = lambda reason: None  # noqa: E731 — identity is asserted
+        cancel = lambda: False  # noqa: E731 — identity is asserted
+        detector.detect_credits_text(MOVIE, ctx=ctx, gpu=gpu, gpu_device_path=device, gpu_worker=gpu_worker,
+                                     cancel_check=cancel, fallback_callback=shown)  # fmt: skip
+        assert seen[0]["read_text"](frames.np.zeros((1, 720, 1280), frames.np.uint8)) == [["A LINE."]]
+        assert pool.calls == [("read", gpu, device)]
+        assert pool.gpu_workers == [asks_as_gpu_worker]
+        assert pool.hooks == [(shown, cancel)]
 
     def test_text_detection_reports_a_cpu_fallback_to_the_worker_row_and_stops_waiting_on_a_cancel(
         self, monkeypatch, pool, ctx
@@ -2653,3 +2682,269 @@ def test_a_roll_too_small_to_box_at_320x180_is_found_at_640x360_on_a_real_decode
     result = _find_credits_on_the_cpu(clip, real_model, duration_s=540)
     assert result.scale == 2
     assert result.start_s is not None and abs(result.start_s - 420.0) <= 10.0
+
+
+# Prose cards (spec §5.4): the epilogue card the roll's start lands on, the card after it, and the first credit card,
+# each at its own place on screen so that no second's text lies inside another card's.
+PROSE_CARD = ((30, 70, 290, 80), (40, 85, 280, 95))
+MORE_PROSE = ((20, 100, 300, 110),)
+CREDIT_CARD = ((120, 40, 200, 50),)
+PROSE = ["Robert Hanssen is now serving a life sentence."]
+CREDIT = ["directed by", "Billy Ray"]
+
+
+def one_fps(first: float, last: float, boxes, luma: float = 12.0) -> list:
+    return [(float(t), len(boxes), luma, boxes) for t in range(int(first), int(last) + 1)]
+
+
+def blank(t: float) -> tuple:
+    return (float(t), 0, 12.0, ())
+
+
+# The 1 fps rows after the start: the epilogue card 5690-5694, black, more prose 5696-5699, black, the first credit
+# card 5701-5704.
+AFTER_START = [*one_fps(5690, 5694, PROSE_CARD), blank(5695), *one_fps(5696, 5699, MORE_PROSE), blank(5700),
+               *one_fps(5701, 5704, CREDIT_CARD)]  # fmt: skip
+
+
+class Reads:
+    """``frames.read_text_at``: the text at each time asked for, from a list of (from_s, to_s, lines)."""
+
+    def __init__(self, *spans):
+        self.spans, self.calls = spans, []
+
+    def __call__(self, path, **kwargs):
+        self.calls.append({"path": path, **kwargs})
+        return next((lines for lo, hi, lines in self.spans if lo <= kwargs["at_s"] <= hi), [])
+
+
+class Raises:
+    """``frames.read_text_at`` failing."""
+
+    def __init__(self, error: BaseException):
+        self.error = error
+
+    def __call__(self, path, **kwargs):
+        raise self.error
+
+
+def read_text(planes):
+    raise AssertionError("frames.read_text_at is faked: the reader is only handed on")
+
+
+class TestProseCards:
+    def _find(self, monkeypatch, decodes, reads, *, duration_ms=5_910_000, gpu="NVIDIA", text=read_text):
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        monkeypatch.setattr(detector.frames, "read_text_at", reads)
+        phases: list[str] = []
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=duration_ms, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=gpu, gpu_device_path="cuda:0" if gpu else None,
+                                       phase=phases.append, read_text=text)  # fmt: skip
+        return result, phases
+
+    def test_a_start_on_prose_cards_moves_to_the_first_card_that_isnt(self, monkeypatch, probes):
+        # Breach: four epilogue cards on black glued to the roll, then "directed by Billy Ray".
+        decodes = Decodes(STORY + ROLL, FINE, AFTER_START, AFTER_START, AFTER_START)
+        reads = Reads((5690, 5694, PROSE), (5696, 5699, PROSE), (5701, 5704, CREDIT))
+        result, phases = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.prose_start_s, result.end_s) == (5701.0, 5690.0, None)
+        worker = {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
+                  "detect_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
+                  "download_format": DOWNLOAD, "keyframes_only": False, "fps": 1}  # fmt: skip
+        # The card at the start from 30 s of 1 fps rows; only once it reads as prose, the rest of the 90 s at both
+        # sizes (the 640x360 rows for small credit cards 320x180 doesn't box).
+        assert decodes.calls[2:] == [
+            {**worker, "start_s": 5690.0, "length_s": 30.0, "scale": 1},
+            {**worker, "start_s": 5694.0, "length_s": 86.0, "scale": 1},
+            {**worker, "start_s": 5694.0, "length_s": 86.0, "scale": 2},
+        ]
+        # Each card read once, at a second where all of it is on screen, at 1280x720 on the worker's own device.
+        assert [call["at_s"] for call in reads.calls] == [5692.0, 5698.0, 5703.0]
+        assert all(call["scale"] == 4 and call["gpu"] == "NVIDIA" and call["gpu_device_path"] == "cuda:0"
+                   and call["read_text"] is read_text for call in reads.calls)  # fmt: skip
+        assert phases[-1] == "Reading the card the credits start on…"
+
+    def test_a_start_whose_card_isnt_prose_stays_and_nothing_more_is_decoded(self, monkeypatch, probes):
+        decodes = Decodes(STORY + ROLL, FINE, AFTER_START)
+        reads = Reads((5690, 5694, CREDIT))
+        result, _ = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.prose_start_s) == (5690.0, None)
+        assert len(decodes.calls) == 3 and [call["at_s"] for call in reads.calls] == [5692.0]
+
+    def test_a_start_on_lit_text_is_never_read(self, monkeypatch, probes):
+        lit_fine = [(row[0], row[1], 60.0 if row[1] else row[2], row[3]) for row in FINE]
+        lit_roll = [(row[0], 3, 60.0, (*CARDS, (40, 100, 128, 110))) for row in ROLL]
+        decodes = Decodes(STORY + lit_roll, lit_fine)
+        result, _ = self._find(monkeypatch, decodes, Reads())
+        assert result.prose_start_s is None and len(decodes.calls) == 2
+
+    def test_prose_up_to_the_end_of_the_window_keeps_the_start(self, monkeypatch, probes):
+        decodes = Decodes(STORY + ROLL, FINE, AFTER_START, AFTER_START, AFTER_START)
+        reads = Reads((5690, 5704, PROSE))
+        result, _ = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.prose_start_s) == (5690.0, None)
+
+    def test_the_start_never_moves_to_or_past_the_end(self, monkeypatch, probes):
+        # An answer whose roll ends (a scene follows) before the card the walk would move to keeps its start.
+        decodes = Decodes(*[AFTER_START] * 6)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        monkeypatch.setattr(detector.frames, "read_text_at", Reads((5690, 5699, PROSE), (5701, 5704, CREDIT)))
+        found = detector.CreditsTextResult(5690.0, 5701.0, tuple(STORY + ROLL), tuple(FINE), ())
+        decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
+                  "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
+                  "ffmpeg_threads": None}  # fmt: skip
+        kept = detector._past_prose(MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=print)
+        assert kept is found
+        later_end = dataclasses.replace(found, end_s=5702.0)
+        moved = detector._past_prose(MOVIE.canonical_path, later_end, decode=decode, read_text=read_text, show=print)
+        assert (moved.start_s, moved.end_s, moved.prose_start_s) == (5701.0, 5702.0, 5690.0)
+
+    @pytest.mark.parametrize(
+        ("end_s", "first_window", "rest_window"),
+        [(None, 30.0, 86.0), (5702.0, 13.0, 9.0), (5800.0, 30.0, 86.0)],
+        ids=["roll-to-the-end", "roll-ends-inside-the-windows", "roll-ends-after-them"],
+    )
+    def test_the_card_windows_stop_at_the_rolls_end(self, monkeypatch, probes, end_s, first_window, rest_window):
+        # A roll that ends before the file (a scene follows) is read no further than its end: past it there is no card
+        # the start could move to, only the scene. A roll that runs to the end of the file is inside the file's end.
+        calls = []
+
+        def decodes(path, **kwargs):  # the rows of each window only, as a decode gives them
+            calls.append(kwargs)
+            lo, hi = kwargs["start_s"], kwargs["start_s"] + kwargs["length_s"]
+            return [row for row in AFTER_START if lo <= row[0] < hi]  # -t: the window's last second is out
+
+        reads = Reads((5690, 5699, PROSE), (5701, 5704, CREDIT))
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        monkeypatch.setattr(detector.frames, "read_text_at", reads)
+        found = detector.CreditsTextResult(5690.0, end_s, tuple(STORY + ROLL), tuple(FINE), ())
+        decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
+                  "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
+                  "ffmpeg_threads": None}  # fmt: skip
+        result = detector._past_prose(MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=print)
+        windows = [(call["start_s"], call["length_s"], call["scale"]) for call in calls]
+        assert windows == [(5690.0, first_window, 1), (5694.0, rest_window, 1), (5694.0, rest_window, 2)]
+        if end_s is not None:
+            assert all(call["at_s"] <= end_s for call in reads.calls)
+        # The credit card's two seconds are read whole, the roll's last credit frame (its end) included, and the start
+        # moves to it.
+        assert (5702.0 if end_s == 5702.0 else 5703.0) in [call["at_s"] for call in reads.calls]
+        assert (result.start_s, result.prose_start_s) == (5701.0, 5690.0)
+
+    def test_a_last_prose_card_at_the_rolls_end_is_read_and_keeps_the_start(self, monkeypatch, probes):
+        # The last card runs to the roll's end (5701-5702) and is prose too: read whole, not taken for a crawl for
+        # missing its last second, so the start stays (prose to the end of what there is).
+        def decodes(path, **kwargs):
+            lo, hi = kwargs["start_s"], kwargs["start_s"] + kwargs["length_s"]
+            return [row for row in AFTER_START if lo <= row[0] < hi]
+
+        reads = Reads((5690, 5704, PROSE))
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        monkeypatch.setattr(detector.frames, "read_text_at", reads)
+        found = detector.CreditsTextResult(5690.0, 5702.0, tuple(STORY + ROLL), tuple(FINE), ())
+        decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
+                  "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
+                  "ffmpeg_threads": None}  # fmt: skip
+        result = detector._past_prose(MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=print)
+        assert result is found
+        assert [call["at_s"] for call in reads.calls] == [5692.0, 5698.0, 5702.0]
+
+    def test_without_a_reader_no_card_is_read(self, monkeypatch, probes):
+        decodes = Decodes(STORY + ROLL, FINE)
+        result, _ = self._find(monkeypatch, decodes, Reads(), text=None)
+        assert (result.start_s, result.prose_start_s) == (5690.0, None) and len(decodes.calls) == 2
+
+    @pytest.mark.parametrize(
+        ("where", "error"),
+        [
+            ("first card", frames.DecodeTimeoutError("decoding timed out after 600 s")),
+            ("first card", frames.ReadStalledError("earlier reads of the mount are stuck")),
+            ("reading", TextDetUnavailableError("the text detection helper died")),
+            ("the rest", frames.FrameDecodeError("ffmpeg exited 1")),
+        ],
+    )
+    def test_a_card_that_cant_be_read_keeps_the_start_the_roll_gave(self, monkeypatch, probes, where, error):
+        # The answer was found: losing it, or reading the file again every day, over its first card is no better.
+        first = error if where == "first card" else AFTER_START
+        rest = error if where == "the rest" else AFTER_START
+        decodes = Decodes(STORY + ROLL, FINE, first, rest, AFTER_START)
+        reads = Raises(error) if where == "reading" else Reads((5690, 5694, PROSE))
+        result, _ = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.end_s, result.prose_start_s) == (5690.0, None, None)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            frames.GpuDecodeError("ffmpeg exited 69 on the GPU"),
+            frames.GpuReadNothingError(),
+            TextDetShuttingDownError("Text detection is shutting down"),
+            frames.DecodeCancelledError("cancelled"),
+            TextDetCancelledError("cancelled"),
+        ],
+        ids=["gpu", "gpu-read-nothing", "app-stopping", "decode-cancelled", "text-cancelled"],
+    )
+    @pytest.mark.parametrize("where", ["first card", "reading"])
+    def test_a_gpu_failure_a_cancel_or_the_app_stopping_is_raised(self, monkeypatch, probes, error, where):
+        # The GPU's failure is the worker's CPU rerun of the file, as at 640x360; a cancel and a stop are no answer.
+        decodes = Decodes(STORY + ROLL, FINE, error if where == "first card" else AFTER_START)
+        reads = Raises(error) if where == "reading" else Reads()
+        with pytest.raises(type(error)):
+            self._find(monkeypatch, decodes, reads)
+
+    def test_a_start_on_text_320x180_doesnt_see_is_never_moved(self, monkeypatch, probes):
+        # A 640x360 answer on small credits: 320x180's first card is the prose card 10 s later, not the start's own, and
+        # moving past it would skip real credits.
+        later = [*(blank(t) for t in range(5690, 5700)), *one_fps(5700, 5704, PROSE_CARD), blank(5705),
+                 *one_fps(5706, 5709, CREDIT_CARD)]  # fmt: skip
+        decodes = Decodes(STORY + ROLL, FINE, later)
+        reads = Reads((5700, 5704, PROSE), (5706, 5709, CREDIT))
+        result, _ = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.prose_start_s) == (5690.0, None)
+        assert len(decodes.calls) == 3 and reads.calls == []
+
+    def test_a_card_the_window_cuts_short_is_no_crawl(self, monkeypatch, probes):
+        # Prose cards to the window's end: the last one is on screen in the window's last second, so it reads as one
+        # second long there. It is left out, and prose to the window's end keeps the start.
+        rest = [*one_fps(5690, 5694, PROSE_CARD), blank(5695), *one_fps(5696, 5777, MORE_PROSE), blank(5778),
+                *one_fps(5779, 5779, CREDIT_CARD)]  # fmt: skip
+        decodes = Decodes(STORY + ROLL, FINE, AFTER_START, rest, rest)
+        reads = Reads((5690, 5694, PROSE), (5696, 5777, PROSE), (5779, 5779, PROSE))
+        result, _ = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.prose_start_s) == (5690.0, None)
+
+    def test_a_small_credit_card_only_640x360_boxes_ends_the_prose(self, monkeypatch, probes):
+        # Accused S02E04: after the epilogue, the credits' small cards box nothing at 320x180; the next card that
+        # does is 10 s later. The 640x360 rows show the small one, so the start isn't moved past it.
+        small_card = ((140, 150, 180, 158),)  # 9 px tall: small text
+        at_320 = [*one_fps(5690, 5694, PROSE_CARD), *(blank(t) for t in range(5695, 5705)),
+                  *one_fps(5705, 5708, CREDIT_CARD)]  # fmt: skip
+        at_640 = [*one_fps(5690, 5694, PROSE_CARD), blank(5695), *one_fps(5696, 5699, small_card, luma=80.0),
+                  *(blank(t) for t in range(5700, 5705)), *one_fps(5705, 5708, CREDIT_CARD)]  # fmt: skip
+        decodes = Decodes(STORY + ROLL, FINE, at_320, at_320, at_640)
+        reads = Reads((5690, 5694, PROSE), (5696, 5699, ["PRODUCER / DIRECTOR"]), (5705, 5708, CREDIT))
+        result, _ = self._find(monkeypatch, decodes, reads)
+        assert (result.start_s, result.prose_start_s) == (5696.0, 5690.0)
+
+
+class TestChapterOnProse:
+    def _result(self, start_s, prose_start_s):
+        return detector.CreditsTextResult(start_s, None, tuple(STORY + ROLL), (), (), prose_start_s=prose_start_s)
+
+    @pytest.mark.parametrize("chapter_s", [5681.0, 5690.0, 5700.0])
+    def test_a_chapter_on_the_prose_cards_moves_to_the_start_past_them(self, chapter_s):
+        # A Beautiful Imperfection: the "Credits" chapter on the epilogue, where rule J started too.
+        origin = detector.chapter_origin(self._result(5701.0, 5690.0), int(chapter_s * 1000))
+        assert origin == chapter_hint(int(chapter_s * 1000), moves=True)
+
+    @pytest.mark.parametrize("chapter_s", [5679.0, 5701.0, 5720.0])
+    def test_a_chapter_off_the_prose_cards_is_read_as_before(self, chapter_s):
+        result = self._result(5701.0, 5690.0)
+        rows = rule_j.without_overlays(result.key_rows, result.overlays)
+        moved = rule_j.chapter_moves_to(rows, 5701.0, chapter_s)
+        expected = chapter_hint(int(chapter_s * 1000), moves=moved is not None,
+                                to_ms=None if moved in (None, 5701.0) else int(round(moved * 1000)))  # fmt: skip
+        assert detector.chapter_origin(result, int(chapter_s * 1000)) == expected
+
+    def test_an_unmoved_start_reads_its_chapter_as_before(self):
+        result = self._result(5690.0, None)
+        assert detector.chapter_origin(result, 5_690_000) == chapter_hint(5_690_000, moves=False)

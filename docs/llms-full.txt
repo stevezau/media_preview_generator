@@ -1324,7 +1324,7 @@ Intel and AMD need no extra step beyond passing `/dev/dri`, which also brings th
 
 ## Checking the result
 
-- The **BIF Viewer** (`/bif-viewer`) shows the published thumbnails for Plex, Emby or Jellyfin, frame by frame ([BIF Viewer](https://mediapreviewgenerator.dev/multi-server/#bif-viewer-multi-server)).
+- The **Inspector** (`/inspector`) shows the published thumbnails for Plex, Emby or Jellyfin, frame by frame ([Inspector](https://mediapreviewgenerator.dev/multi-server/#inspector-multi-server)).
 - To redo files after fixing a setting, start a job with **Regenerate** ticked. Otherwise files with a current preview are skipped.
 - If a file failed on the GPU and was redone on the CPU, its worker card shows a yellow **CPU fallback** badge, and the job log gives the reason.
 
@@ -1611,6 +1611,44 @@ The Triggers tab includes:
 - **Activity Log** — recent webhook events with status badges
 
 The legacy `/webhooks` and `/schedules` URLs still work — they 302-redirect to the Triggers and Schedules tabs on the new page.
+
+### Inspector
+
+**Tools → Inspector** (`/inspector`) shows one film or episode on one page: its preview frames, and where its intro
+and credits are on each server.
+
+- **Search.** Type a title and results appear as you type, from every server (or the one picked in the dropdown). A
+  film several servers have is one row. Each row says whether the preview is ready (and how many frames it has) and
+  what Intro & Credits has for it: **Intro + credits**, **Credits set**, **Not checked yet** or **Needs review**. A TV
+  show opens in place: pick the season, then the episode, each with its own state. A path starting with `/` opens that
+  file directly. Choosing a file folds the results away; **Back to the results** brings them back.
+- **Links.** `/inspector?path=<file>` opens a file, so the page can be linked and bookmarked. The eye button on a job's
+  file rows (including a filter to **Needs review**) opens the Inspector on that file. The old `/bif-viewer` address
+  redirects here.
+- **The file.** A sentence says what happens, e.g. "Skip Intro runs 2:45 – 2:59 and Skip Credits starts at 24:59. Plex
+  has both. Jellyfin gets them on the next job." Below it: when the preview was made, how many frames it has and how
+  far apart, and its size. **Whole episode** (or film) is a strip of the preview's frames with the intro in blue and
+  the credits in orange, and one row for what was decided and one for what each server shows now. The close-ups show
+  the frames either side of each edge. **How it was decided** lists every source, what it found and whether it was
+  used. **On your servers** says, per server, the intro & credits state and the preview state; **File locations**
+  opens to the preview's path (Plex's bundle BIF, Emby's BIF next to the video, Jellyfin's trickplay folder).
+- **All frames** swaps the strip for every frame of the preview, intro frames edged blue and credits orange; click one
+  (or use the arrow keys) to see it larger.
+- **A file not checked yet** shows the markers each server has today in grey, with the end of the film zoomed when
+  they sit there, and a close-up of each. **Check intro & credits now** checks it.
+- **Regenerate preview** rebuilds the preview for every server that has the file (a job on the Dashboard);
+  **Re-detect intro & credits** asks every source again. While a job works on the file, a bar says so and shows its
+  progress; the page reads the file again when the job ends.
+- **States.** A file with no preview says so, and its close-ups read frames straight from the video. A path in no
+  server's library says **Not in any library**; a file that has gone says **Gone from disk**. A server that can't be
+  reached marks only its own row. A Plex item with several versions shows a switch between them.
+
+**Exact frames.** Preview frames are 2 to 10 seconds apart, too coarse to put an edge on, so Adjust and **Needs your
+check** read frames one second apart straight from the video. Only a file the app already knows is read (one in a
+server's library that Intro & Credits has seen, or that a server lists), with ffmpeg on the CPU at low priority, at
+most two at a time, and each read stops after 30 seconds. HDR10 and HLG frames are tone-mapped like the previews;
+Dolby Vision Profile 5 frames aren't, so their colours look off. The frames are kept in a size-capped folder under the
+system temp folder; nothing is written next to your media.
 
 ### Production Server
 
@@ -2191,30 +2229,34 @@ order its episodes arrived in.
 
 ### Adjusting, adding and locking markers
 
-Open it from **Tools → Intro & Credits** (the same page as Tools → Preview Inspector, opened on its Intro & Credits tab), search for a title and open a file. The Intro & Credits tab has three buttons for setting a marker yourself. Adjust stays greyed out until a job
-has read the file's length.
+Open the file in the [Inspector](https://mediapreviewgenerator.dev/guides/#inspector) (**Tools → Inspector**). **Adjust** appears once a job has checked the
+file and read its length.
 
-- **Adjust** opens the editor on the timeline. Drag the handle at each edge of a marker, or type the times. **Save and
-  publish to N servers** saves; **Cancel** throws the edit away. A time that looks odd (an intro shorter or longer than
-  most, credits that don't run to the end) gets a warning and is still saved. Only two things are refused: a marker
-  outside the file, and one that ends before it starts.
-- **Add a marker where nothing was found.** On a file where no source found a marker, Adjust still opens. A type with
-  no marker shows **Add intro**, **Add credits**, **Add recap** or **Add preview** where its bar would be. It puts a
-  marker on the timeline at a starting time that is round on purpose, so it can't be mistaken for something the app
-  found: an intro or recap from 0:00 to 0:30, credits the last 60 seconds, a preview the last 30. Drag it to where it
-  really is. **Remove** takes back a marker you added before you save it.
+- **Adjust** turns each close-up into an editor on frames read straight from the video, one second apart. Click the
+  frame where an edge belongs, step it with **◀ 1 s** / **1 s ▶**, or type the time. Credits (and a preview) can run to
+  the end of the file or end earlier. **Save and send to …** saves; **Cancel** throws the edit away. Only two things
+  are refused: a marker outside the file, and one that ends before it starts.
+- **Add a marker where nothing was found.** In Adjust, an intro or credits nothing was found for has **Add intro** or
+  **Add credits**. It starts from times that are round on purpose, so they can't be mistaken for something the app
+  found: an intro from 0:00 to 0:30, credits the last 60 seconds. Move its edges to where it really is.
+- **Needs your check.** When the sources disagree on a type, or the only answer can't decide alone, the Inspector asks
+  you: each answer is shown with where it came from and seven frames around it, one second apart (the ringed frame is
+  where it starts), with a button such as **Credits start at 1:32:37**. **Neither is right? Pick the frame yourself**
+  shows fourteen frames a second apart; **◀ 10 s** / **10 s ▶** move along. Choosing shows **Selected: …** with
+  **Save and send to …** and **Not now**.
 - **Saving locks.** There is no adjusted-but-unlocked marker. A saved marker is locked and published straight away to
   every server that has the file and has Intro & Credits on. Detection and later jobs leave it alone.
-- **Lock** on its own locks the times the app already decided, unchanged, and publishes them. Once anything on the file
-  is locked the same button reads **Unlock**. It asks first, then drops the lock. Your times stay on the servers for
-  now; the next check decides those types again and may move them, and **Re-detect** does that straight away. Unlock
-  publishes nothing.
+- **Lock** (beside Adjust) locks the times the app already decided, unchanged, and publishes them. It lists the times
+  and where they go first (**Lock and send to …** / **Leave them as they are**); a type no server with Intro & Credits
+  on could show is left out.
+- **Back to automatic** replaces Lock once anything on the file is locked. It asks first, then drops the lock. Your
+  times stay on the servers for now; the next check decides those types again and may move them, and **Re-detect**
+  does that straight away. It publishes nothing.
 - **Your marker wins over "Keep Plex's" and "Keep Emby's".** See [Plex](https://mediapreviewgenerator.dev/guides/#plex-writing-straight-into-plexs-database)
   and [Emby](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin) for the row message.
-- **Recap and preview** stay editable, with a note per server: only Jellyfin shows them. Where a server can't show a
-  type the editor says so ("Only Jellyfin shows recaps. Plex has no recap marker, so this one won't reach it.") and
-  leaves that type out of the save when no server with Intro & Credits on could show it. **Emby and credits:** an edited credits
-  *end* is accepted, but Emby's Skip Credits always skips to the end of the file, and the editor says so.
+- **Recap and preview** a job decided stay editable in Adjust; only Jellyfin shows them. **Emby and credits:** an
+  edited credits *end* is accepted, but Emby's Skip Credits always skips to the end of the file, and the message after
+  saving says so.
 
 A save is one web request, so it is bounded. Your times are saved and locked before any server is contacted, so a
 server that fails can't lose your edit. Each call to a server waits at most 8 seconds, and Plex's database waits at most
@@ -2228,21 +2270,22 @@ a server that hasn't added the file to its library yet. Saving again before it s
 
 ### Season view in the Inspector
 
-For a TV episode, the Inspector's Intro & Credits tab has a **This episode** / **Whole season** switch. **Whole
-season** lists the season's episodes (the same group season audio uses) with each one's intro and credits, the
-sources behind them, and one dot per server. A season of more than 40 episodes lists the 40 nearest, and the header
-says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own records, so a whole season loads at
-once; **This episode** stays the place for what a server shows right now. An episode in **Needs review** has a
-**Review** button (its tooltip gives the reason) that opens that episode. Every row also has an **Edit** button that
-opens that episode in the marker editor; once you save there, that row shows your times and its 🔒 lock the next time
-you open **Whole season**.
+For a TV episode, the [Inspector](https://mediapreviewgenerator.dev/guides/#inspector) has a **This episode** / **Whole season** switch. **Whole season** lists
+the season's episodes (the same group season audio uses), each with its intro (blue) and credits (orange) drawn on one
+shared scale, the times, the sources behind them, a 🔒 when you locked one, and one dot per server (green: shows our
+markers, amber: waiting, red: failed, grey: off, skipped or nothing sent yet). A season of more than 40 episodes lists
+the 40 nearest, and the header says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own
+records, so a whole season loads at once; **This episode** stays the place for what a server shows right now. An
+episode in **Needs review** says so (hover for the reason). Choosing a row opens that episode.
 
 **Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
 (or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
 and the rest are checked again. Clicking it again while that job is still queued or running reuses it. N (and
 **N ready**) counts the episodes with at least one decided marker, since the job sends those even when another type
 of the same episode is in Needs review; **N need review** counts the episodes with any type in review, recaps and
-previews included. The header names the show and season the way the job does.
+previews included.
+
+Searching for a show also lists every episode of a season with its state, right in the search results.
 
 ### Plex: writing straight into Plex's database
 
@@ -2374,9 +2417,7 @@ of that type **and** they agree within 2 seconds. A newly added version that has
 hides that item's markers on Plex until it catches up — precision first. Jellyfin and Emby versions each get their
 own markers.
 
-In the Preview Inspector, the Intro & Credits tab shows the version you clicked. When that version's file isn't on
-this app's disk (the other version is, say, or a path mapping is missing), the tab says **"This version's file isn't on
-this disk"** instead of showing another version's markers.
+The Inspector shows the version you opened, with a switch to the item's other versions that are on this app's disk.
 
 ### Checking the servers still show them
 
@@ -2630,7 +2671,7 @@ table covers every state the check can report, using its exact wording:
 | *(Emby)* Emby shows "Unlock Feature" when a viewer clicks **Skip Intro**, or stops showing Skip Intro; the tab's amber **Emby Premiere** row reads "Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works." | Emby only skips intros on a server with an active Emby Premiere key. Without one, its player shows Skip Intro for the first few episodes, asks for Premiere instead of skipping, then hides the button | Add an Emby Premiere key to this Emby server. Nothing to change in this app: the markers are written either way, and the tab notices the key within an hour |
 | *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working. Saved season audio answers can't help decide an intro meanwhile, so one decided with them goes to **Needs review** on its next check unless other sources agree; they can still keep an intro in review that they contradict |
 | *(Settings)* **Matching audio across a season** shows "Not available": "ffmpeg didn't answer the check for the chromaprint muxer; it is checked again in 10 minutes" | ffmpeg timed out, couldn't start, or exited with an error when asked for its muxers (a busy or slow container start) | Nothing: jobs started meanwhile match no episodes, but saved season audio answers still count, and the check runs again after 10 minutes |
-| *(Settings)* **On-screen credit text** says "Not available" with one of: "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here" · "Needs the text detection model, which the Docker image includes; it isn't at …" · "The text detection model at … isn't the expected file" · "The text detection check didn't answer; it is checked again in 10 minutes" | Running outside the Docker image without the packages/model installed, a moved or corrupted model file, or the check timed out/crashed | Use the Docker image, which ships the packages and model; every other source keeps working meanwhile. The last reason clears itself — the check runs again after 10 minutes |
+| *(Settings)* **On-screen credit text** says "Not available" with one of: "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here" · "Needs the text detection model, which the Docker image includes; it isn't at …" (or the text recognition model) · "The text detection model at … isn't the expected file" (or recognition) · "The text detection check didn't answer; it is checked again in 10 minutes" | Running outside the Docker image without the packages/model installed, a moved or corrupted model file, or the check timed out/crashed | Use the Docker image, which ships the packages and model; every other source keeps working meanwhile. The last reason clears itself — the check runs again after 10 minutes |
 | Log line "Credit text detection on \<device\>: CPU (\<reason\>)" although this host has a GPU | The GPU can't run text detection in this container: the reason is e.g. "Vulkan reports no hardware GPU", "no WebGPU device is this GPU", "… GPUs have no WebGPU path in this app", "this GPU has no usable WebGPU adapter", or "WebGPU would run on llvmpipe …, a software renderer, not on this GPU" | Check the GPU is passed into the container the way previews use it. arm64 has no GPU path for credit text either way |
 | Log warning "Credit text detection on \<device\> runs on the CPU for the rest of this run of the app: the GPU was finding different boxes than the CPU" | This GPU finds other text than the CPU does, and a credits answer mustn't depend on which device read the file | Nothing to fix; that GPU's workers read credit text on the CPU |
 | Log warning "Credit text detection on \<device\>: its GPU helper failed (…); this request is read on the CPU and the GPU is tried again in 5 s" (or "couldn't start (…)") | Its GPU text detection crashed, hung or failed to start. That request, and the others of the next few seconds, are read on the CPU (the worker card shows the **CPU fallback** badge); the wait before the GPU is tried again doubles with each failure in a row, up to 10 minutes, and "back on the GPU after N failed requests" says when it works again. Failures in a row log once | If it keeps failing, check the GPU's driver and the log lines before the warning |
@@ -3329,7 +3370,7 @@ This page covers:
 - [Smart dedup: skipping work that's already done](https://mediapreviewgenerator.dev/multi-server/#smart-dedup-skipping-work-thats-already-done)
 - [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue)
 - [Setup Health — the unified "is everything set up right?" panel](https://mediapreviewgenerator.dev/multi-server/#setup-health--the-unified-is-everything-set-up-right-panel)
-- [BIF Viewer (multi-server)](https://mediapreviewgenerator.dev/multi-server/#bif-viewer-multi-server)
+- [Inspector (multi-server)](https://mediapreviewgenerator.dev/multi-server/#inspector-multi-server)
 - [Plex multi-server auto-discovery](https://mediapreviewgenerator.dev/multi-server/#plex-multi-server-auto-discovery)
 - [REST API summary](https://mediapreviewgenerator.dev/multi-server/#rest-api-summary)
 
@@ -3639,30 +3680,32 @@ it matters / how to fix" lives in the
 
 ---
 
-## BIF Viewer (multi-server)
+## Inspector (multi-server)
 
-The BIF Viewer at `/bif-viewer` lets you visually inspect a published
-preview to see exactly what a player would render. It works for all
-three vendors:
+The Inspector at `/inspector` (**Tools → Inspector**) shows a published
+preview frame by frame, and the file's intro and credits on each server.
+It works for all three vendors:
 
 * **Plex / Emby**: parses the BIF file directly via `bif_reader`,
   renders frames as JPEG via `/api/bif/frame?path=…&index=…`.
-* **Jellyfin**: parses the trickplay manifest, slices individual
-  thumbnails out of the tile-grid sheets via Pillow, serves them via
+* **Jellyfin**: slices individual thumbnails out of the trickplay
+  tile-grid sheets via Pillow, served via
   `/api/bif/trickplay/frame?server_id=…&sheets_dir=…&index=…&tile_width=10&tile_height=10`.
 
-Use the server-picker dropdown at the top of the page to switch
-between configured servers; the search results, frame list, and
-thumbnail grid all refresh per server.
+One search covers every server (or the one picked in its dropdown) and
+merges a film several servers have into one row. `GET /api/inspector/file`
+then says where each server keeps that file's preview, and the page draws
+its frames from the first one that is there. See
+[Guides → Inspector](https://mediapreviewgenerator.dev/guides/#inspector) and
+[Reference → Inspector endpoints](https://mediapreviewgenerator.dev/reference/#inspector-endpoints).
 
-**Multi-server search endpoint:**
+The older per-server search is still served for scripts:
 ```
 GET /api/bif/servers/<server_id>/search?q=<query>
 ```
 Returns up to 15 results: `{title, type, year, media_file,
 preview_path, preview_kind, preview_exists}`. `preview_kind` is
-`"bif"` (Plex/Emby) or `"trickplay"` (Jellyfin) — the viewer branches
-to the right renderer based on this.
+`"bif"` (Plex/Emby) or `"trickplay"` (Jellyfin).
 
 ---
 
@@ -3706,7 +3749,7 @@ issue #215.
 | POST | `/api/servers/auth/jellyfin/quick-connect/exchange` | Exchange approved secret for token |
 | GET | `/api/servers/<id>/health-check` | Per-server settings audit (all vendors) |
 | POST | `/api/servers/<id>/health-check/apply` | One-click fix of mis-set settings (all vendors) |
-| GET | `/api/bif/servers/<id>/search?q=...` | Multi-server BIF Viewer search; returns `preview_kind` per result |
+| GET | `/api/bif/servers/<id>/search?q=...` | One server's preview search (the Inspector searches every server through `/api/media/search`); returns `preview_kind` per result |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + sheet metadata |
 | GET | `/api/bif/trickplay/frame?server_id=...&sheets_dir=...&index=N&tile_width=10&tile_height=10` | Slice and serve a single thumbnail from a tile sheet |
 | POST | `/api/webhooks/incoming` | Universal webhook with vendor auto-detection |
@@ -3901,6 +3944,7 @@ into `settings.json`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEDIA_PREVIEW_TEXTDET_MODEL` | the Docker image's own copy (`/app/models/ch_PP-OCRv4_det_infer.onnx`) | Overrides the on-screen credit text model path, for development and the `tools/markers_eval credits-text` harness. |
+| `MEDIA_PREVIEW_TEXTREC_MODEL` | the Docker image's own copy (`/app/models/latin_PP-OCRv5_rec_mobile.onnx`) | Overrides the path of the model that reads the card the credits start on (epilogue text), for development and the same harness. |
 
 ### External Authentication (AUTH_METHOD)
 
@@ -4252,7 +4296,7 @@ per type (the rest add up under "other").
 | POST | `/api/markers/jobs` | Start an Intro & Credits job |
 | GET | `/api/markers/servers/{server_id}/status` | This server's Intro & Credits status (Edit tab) |
 | GET | `/api/markers/sources/usage` | Today's online-lookup usage per source |
-| GET | `/api/markers/item` | Inspector data for one file |
+| GET | `/api/markers/item` | Inspector data for one file (see also [Inspector Endpoints](https://mediapreviewgenerator.dev/reference/#inspector-endpoints)) |
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
 | POST | `/api/markers/item/markers` | Save your own markers for one file, lock them and publish to every owning server |
 | DELETE | `/api/markers/item/markers` | Unlock one or more marker types of one file |
@@ -4302,7 +4346,7 @@ reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
 #### GET /api/markers/item
 
 **Query:** either `path` (a file inside a server library), or `server_id` + `item_id`, optionally with
-`version_file`: the version's file as the Preview Inspector's search row gave it (needed for Plex, where every version
+`version_file`: the version's file as a server's search result gave it (needed for Plex, where every version
 of an item shares its id). By id, the version asked for is the one `version_file` names, else the one whose own id is
 `item_id` (a Jellyfin version, a merged Jellyfin item's primary version, or an Emby item, whose media sources list
 its other versions too), else the item's only version; another version is never opened in its place. A Plex
@@ -4477,8 +4521,8 @@ available (`""` when it is): no ffmpeg lists the muxer, or one didn't answer the
 after 10 minutes), e.g.
 `{"season_audio": {"available": true, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}`.
 
-`credits_text.available` is `false` when ONNX Runtime/OpenCV aren't installed, the text detection model isn't at
-its expected path or isn't the expected file, or the check didn't answer (checked again after 10 minutes; arm64
+`credits_text.available` is `false` when ONNX Runtime/OpenCV aren't installed, the text detection or recognition
+model isn't at its expected path or isn't the expected file, or the check didn't answer (checked again after 10 minutes; arm64
 has no GPU path but is still available on the CPU). `message` names the reason (`""` when available), e.g.
 `{"credits_text": {"available": true, "message": ""}}` or
 `{"credits_text": {"available": false, "message": "Needs the text detection model, which the Docker image includes; it isn't at /app/models/ch_PP-OCRv4_det_infer.onnx"}}`.
@@ -5007,9 +5051,95 @@ For full design and per-vendor details see [Multi-Media-Server](https://mediapre
 | POST | `/api/servers/<id>/plex-library-markers` | Plex only. Setup Health's **Turn on** for a library whose own *Intro markers* / *Credits markers* setting is off (Plex then hides every skip marker of that type there, ours included). Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them on with `PUT /library/sections/{id}/prefs` for that library only. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's **Set server-wide to Never**. Body `{"types": ["intro", "credits"]}` (one or both); sends `PUT /:/prefs?GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never` for the types given, which stops Plex's own detection without hiding any marker. 400 for any other type, a non-Plex server, or a server with Intro & Credits off. Returns `{ok, types}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
-| GET | `/api/bif/servers/<id>/search?q=<query>` | Multi-server BIF Viewer search; returns `preview_kind` (`bif` or `trickplay`) per result so the viewer renders the right format |
+| GET | `/api/bif/servers/<id>/search?q=<query>` | One server's preview search; returns `preview_kind` (`bif` or `trickplay`) per result. The Inspector searches every server through `GET /api/media/search` instead |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + report sheet metadata |
 | GET | `/api/bif/trickplay/frame?server_id=...&sheets_dir=...&index=N&tile_width=10&tile_height=10` | Slice and serve a single thumbnail JPEG from a trickplay tile sheet |
+
+### Inspector Endpoints
+
+The Inspector page (`/inspector`, [guide](https://mediapreviewgenerator.dev/guides/#inspector)) searches with `GET /api/media/search`, reads a file's
+Intro & Credits with `GET /api/markers/item`, and draws preview frames with `GET /api/bif/frame` and
+`GET /api/bif/trickplay/frame`. These routes add what it needs beyond them. All take the usual API token or a signed-in
+session (the `POST` routes also the page's CSRF token from a browser).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/inspector/status` | Preview and Intro & Credits state for search rows |
+| POST | `/api/inspector/show` | A show's seasons and episodes, each with its Intro & Credits state |
+| GET | `/api/inspector/file?path=...` | Where each server keeps one file's preview, what it holds, a job working on the file, other versions |
+| GET | `/api/inspector/frames?path=...&start_ms=...&count=...&width=...` | Exact frames one second apart, read from the video |
+
+#### POST /api/inspector/status
+
+**Request:** `{"paths": ["/media/…/file.mkv", …]}`, at most 30 local file paths (a search row's `paths[0]`).
+Limited to 120 requests a minute.
+
+**Response:** `{"items": {"<path>": {…}}}`. A path that isn't a file inside a server library is `{"in_library": false}`.
+Every other one:
+
+```json
+{
+  "in_library": true,
+  "exists": true,
+  "kind": "movie",
+  "quality": "2160p Dolby Vision",
+  "servers": ["Plex"],
+  "preview": {"state": "ready", "frames": 4089, "servers": ["Plex"]},
+  "markers": {"state": "not_checked", "label": "Not checked yet"}
+}
+```
+
+`quality` comes from the file's name. `preview.state` is `ready`, `missing`, or `unknown` (a server couldn't be
+asked); `frames` is the BIF's frame count (null for trickplay). `markers.state` is `not_checked`, `needs_review`,
+`both` ("Intro + credits"), `credits` ("Credits set" for a film, "Credits only" for an episode), `intro` or `none`
+("Nothing found"), from markers.db only. A file that took longer than 12 seconds to check has `error` instead.
+`400` for a body that isn't `{"paths": [...]}` or has more than 30.
+
+#### POST /api/inspector/show
+
+**Request:** `{"paths": ["/media/tv/Show (2024)", …]}`: a show's folders (a search row's `paths`), at most 10.
+
+**Response:** `{"seasons": [{"season": 1, "label": "Season 1", "episodes": [{"path", "code": "E01", "episode": 1,
+"markers": {"state", "label"}}]}]}`, seasons in order with Specials last, read from the folders on disk. `400` when
+no path is a folder inside a server library.
+
+#### GET /api/inspector/file
+
+**Query:** `path`, the file's local path.
+
+**Response:** `canonical_path`; `exists` (`false`: gone from disk; `null` for a path that is neither in a library nor in
+markers.db, which isn't looked at); `in_library`; `known` (markers.db has it); `title` (from its folders, e.g. "Blood
+Legacy (2024) · S01E01"); `kind`; `quality`; and, for a file that is there and in a library:
+
+- `duration_ms`: markers.db's, else the preview's frames × interval.
+- `previews`: one row per server holding the file — `server_id`, `server_name`, `server_type`, `kind` (`bif` or
+  `trickplay`), `path` (Plex's bundle BIF, Emby's BIF next to the video, Jellyfin's sheet folder), `exists`, `note`
+  (why there is no path, e.g. "Plex hasn't analysed this file yet"), `error` (e.g. "Couldn't reach Jellyfin"),
+  `versions`, and when it exists `frame_count`, `interval_ms`, `file_size`, `created_at` (plus `tile_width`,
+  `tile_height`, `sheets_dir` for trickplay). Each server is waited for at most 8 seconds.
+- `preview`: the row the frames are drawn from (the first BIF that is there, else trickplay), with `interval_ms`
+  checked against the file's length: a BIF header that leaves the interval out, or disagrees with length ÷ frames by
+  more than a quarter, gets length ÷ frames.
+- `versions`: `[{path, label, current}]` when the server keeps several versions of the item on this disk.
+- `job`: the queued or running job for this file (`id`, `kind`, `status`, `name`, `percent`), or null.
+
+`400` when `path` isn't an absolute path inside the media folder.
+
+#### GET /api/inspector/frames
+
+**Query:** `path` (required), `start_ms` (default 0), `count` (1-14, default 7), `width` (160, 240, 320 or 480;
+default 320). Limited to 120 requests a minute.
+
+**Response:** `{"path", "start_ms", "step_ms": 1000, "frames": [{"t_ms": 5557000, "src": "data:image/jpeg;base64,…"}]}`
+— fewer frames when the video ends first. Works for a file with no preview.
+
+Only a file the app already knows is read: it has to be a video inside a server library and the media folder
+(normalised, no `..`), and either markers.db has it or a server holding it lists it (remembered for 10 minutes).
+ffmpeg seeks (`-ss` before the input) and reads one frame a second on the CPU at low priority (`nice`), HDR10 and
+HLG tone-mapped with the previews' tone-map setting; at most two reads run at a time, and one still running after
+30 seconds is killed. Answers are cached in a private 64 MB folder under the system temp folder; nothing is written
+next to the media. `400` for a bad query or a path that isn't a video in a library; `404` for a file the app doesn't
+know; `502` when ffmpeg can't read the frames; `503` when both reads were busy for 2 seconds (the page asks again).
 
 ### Webhook Endpoints
 
@@ -5355,6 +5485,8 @@ unless noted.
 |----------|-------|
 | `POST /login` | 5 per minute |
 | `POST /api/auth/login` | 10 per minute |
+| `POST /api/inspector/status`, `GET /api/inspector/frames` | 120 per minute |
+| `POST /api/inspector/show` | 60 per minute |
 | Default | 200 per day, 50 per hour |
 
 Rate limit headers are included in responses:

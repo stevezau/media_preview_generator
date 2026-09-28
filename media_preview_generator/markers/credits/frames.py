@@ -450,6 +450,22 @@ def _kill(proc: subprocess.Popen) -> None:
         proc.wait(timeout=_KILL_WAIT_S)
 
 
+def _kill_on_cancel(
+    proc: subprocess.Popen, cancel_check: Callable[[], bool], done: threading.Event, cancelled: threading.Event
+) -> None:
+    """Watcher thread: kill ffmpeg's group as soon as the job is cancelled, whatever the decode loop is waiting on.
+
+    The loop itself looks at the cancel only between chunks, and one chunk's text detection can take a fresh app's whole
+    helper start and self-test (10-14 s on storage's P5000): ffmpeg would decode on through all of it (lab phase 3 row
+    6). ``cancelled`` tells the loop the kill was the cancel's, not ffmpeg failing.
+    """
+    while not done.wait(_POLL_S):
+        if cancel_check():
+            cancelled.set()
+            _kill(proc)
+            return
+
+
 def _reap(proc: subprocess.Popen, reader: threading.Thread) -> None:
     reader.join()
     with contextlib.suppress(OSError, ValueError):
@@ -500,7 +516,9 @@ def run_decode(
         pts_offset_s: The container's own first timestamp, subtracted from every row so they are seconds from the start
             of the file (see :func:`container_start_s`). Required, and 0.0 only for a container that starts at 0: a
             default would quietly hand back a recording's raw timestamps, tens of thousands of seconds out.
-        cancel_check: True once the job is cancelled; checked between chunks and while ffmpeg exits.
+        cancel_check: True once the job is cancelled; checked between chunks and while ffmpeg exits, and by a watcher
+            that kills ffmpeg within ``_POLL_S`` of a cancel even while a text detection call is in flight (the call
+            itself runs to its end; nothing is sent after it).
         timeout_s: Time limit for the decode, checked between chunks: the worker is released within ``timeout_s`` plus
             one text detection call plus 7 s (the bounded kill and reader waits), not counting time paused. A stalled
             network mount must not hold a worker.
@@ -572,10 +590,22 @@ def run_decode(
             name="credits-frames",
         )  # fmt: skip
         reader.start()
+        done, cancelled = threading.Event(), threading.Event()
+        watcher = None
         try:
+            if cancel_check is not None:
+                watcher = threading.Thread(
+                    target=_kill_on_cancel, args=(proc, cancel_check, done, cancelled), daemon=True,
+                    name="credits-cancel",
+                )  # fmt: skip
+                try:
+                    watcher.start()
+                except RuntimeError as exc:  # no thread to be had (a process limit): the loop's own checks remain
+                    logger.warning("No cancel watcher for the decode of {}: {}", name, exc)
+                    watcher = None
             while True:
                 freeze.hold(proc, cancel_check=cancel_check, name=name)
-                if cancel_check and cancel_check():
+                if cancelled.is_set() or (cancel_check and cancel_check()):
                     raise DecodeCancelledError(f"cancelled while decoding {name}")
                 if freeze.clock() > deadline:
                     raise DecodeTimeoutError(f"decoding {name} timed out after {timeout_s:g} s")
@@ -590,6 +620,8 @@ def run_decode(
                 pending.append(item)
                 if len(pending) == chunk_frames:
                     flush()
+            if cancelled.is_set():
+                raise DecodeCancelledError(f"cancelled while decoding {name}")
             if pending:
                 flush()
             while proc.poll() is None:  # ffmpeg can outlive its output; a cancel here must not wait for the deadline
@@ -600,11 +632,20 @@ def run_decode(
                     raise DecodeTimeoutError(f"decoding {name} timed out after {timeout_s:g} s")
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POLL_S)
+            if cancelled.is_set():
+                # Killed by the watcher during the last text detection call: the exit code is the kill's, not ffmpeg's.
+                raise DecodeCancelledError(f"cancelled while decoding {name}")
             returncode = proc.returncode
         except BaseException:
-            _kill(proc)
+            if not cancelled.is_set():  # the watcher already killed the whole group (its pid may be reaped by now)
+                _kill(proc)
             raise
         finally:
+            done.set()
+            if watcher is not None:
+                # It returns within a poll once ``done`` is set; one still in its own bounded kill is a daemon that
+                # ends by itself, so the worker isn't held for it.
+                watcher.join(2 * _POLL_S)
             _release(proc, reader, stop, name)
         stderr_file.seek(0)
         stderr = stderr_file.read()
@@ -737,3 +778,69 @@ def decode_rows(
     return run_decode(command, hw_active=hw_active, detect_boxes=detect_boxes, cancel_check=cancel_check,
                       pause_check=pause_check, timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale,
                       chunk_frames=max(1, CHUNK_FRAMES // (scale * scale)))  # fmt: skip
+
+
+def read_text_at(
+    path: str,
+    *,
+    ffmpeg: str,
+    at_s: float,
+    scale: int,
+    gpu: str | None,
+    gpu_device_path: str | None,
+    read_text: Callable[[np.ndarray], list[list[str]]],
+    cancel_check: Callable[[], bool] | None = None,
+    timeout_s: float = DECODE_TIMEOUT_S,
+    start_time_s: float | None = None,
+    download_format: str | None = None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
+    ffmpeg_threads: int | None = None,
+) -> list[str]:
+    """The words on the frame at ``at_s``: one second decoded at 1 fps and ``scale`` times 320x180 exactly as a refine
+    window is (the worker's device, the one scaler), and its frame read (a card at a credits start, spec §5.4).
+
+    Args:
+        path: The media file (read only).
+        ffmpeg: ffmpeg binary.
+        at_s: The frame's time, seconds from the start of the file.
+        scale: The frame size in multiples of 320x180 (``cards.READ_SCALE``).
+        gpu: The worker's GPU type, None on a CPU worker.
+        gpu_device_path: The worker's device.
+        read_text: The words on each of (n, H, W) uint8 luma planes.
+        cancel_check: As :func:`decode_rows`.
+        timeout_s: As :func:`decode_rows`.
+        start_time_s: As :func:`decode_rows`.
+        download_format: As :func:`decode_rows`.
+        pause_check: As :func:`decode_rows`.
+        ffmpeg_threads: As :func:`decode_rows`.
+
+    Returns:
+        The frame's text, one entry per box the detection model finds on it, top to bottom; empty when ffmpeg gave no
+        frame there.
+
+    Raises:
+        Everything :func:`decode_rows` raises.
+    """
+    name = os.path.basename(path)
+    if cancel_check and cancel_check():
+        raise DecodeCancelledError(f"cancelled before decoding {name}")
+    command, hw_active = decode_command(
+        ffmpeg, path, start_s=at_s, length_s=1.0, keyframes_only=False, fps=1, gpu=gpu, gpu_device_path=gpu_device_path,
+        scale=scale, download_format=download_format, ffmpeg_threads=ffmpeg_threads,
+    )  # fmt: skip
+    offset_s = (
+        container_start_s(path, ffmpeg, timeout_s=min(PROBE_TIMEOUT_S, timeout_s))
+        if start_time_s is None
+        else start_time_s
+    )
+    lines: list[list[str]] = []
+
+    def read(planes: np.ndarray) -> list[tuple[Box, ...]]:
+        if not lines:  # a second frame (``-t 1`` at 1 fps can give two) isn't read
+            lines.extend(read_text(planes))
+        return [() for _ in planes]
+
+    # One frame per request: a card's full-size frame is read on its own, not with others.
+    run_decode(command, hw_active=hw_active, detect_boxes=read, cancel_check=cancel_check, pause_check=pause_check,
+               timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale, chunk_frames=1)  # fmt: skip
+    return lines[0] if lines else []

@@ -1,4 +1,5 @@
-"""The image gets the pinned text detection model where the app looks for it, verified by sha256 at build."""
+"""The image gets the pinned text detection and recognition models where the app looks for them, verified by sha256
+at build."""
 
 from __future__ import annotations
 
@@ -27,6 +28,20 @@ def test_pins_match_the_detector_and_the_helper():
     assert re.fullmatch(r"[0-9a-f]{64}", fetch.WHEEL_SHA256)
 
 
+def test_recognition_pins_match_the_reader_and_the_helper():
+    from media_preview_generator.markers.credits import textdet_helper, textrec
+
+    assert (fetch.REC_FILE, fetch.REC_SHA256, fetch.REC_SIZE) == (
+        textrec.MODEL_FILE,
+        textrec.MODEL_SHA256,
+        textrec.MODEL_SIZE,
+    )
+    assert textdet_helper.DEFAULT_REC_MODEL_PATH == f"/app/models/{textrec.MODEL_FILE}"
+    # A tag, not a branch: the file behind the URL can't change under the pin.
+    assert fetch.REC_URL.startswith("https://") and "/resolve/v3.9.2/" in fetch.REC_URL
+    assert fetch.REC_URL.endswith("/" + fetch.REC_FILE)
+
+
 def _stages() -> dict[str, str]:
     """Each build stage's instructions (comments left out) by stage name (``""`` for the unnamed final stage)."""
     stages = {}
@@ -45,6 +60,17 @@ def test_the_model_is_fetched_in_its_own_stage_and_copied_to_app_models():
     assert "fetch_textdet_model" not in stages["toolchain"] + stages["builder"]
     runtime = stages[""]
     assert "COPY --from=model /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx" in runtime
+    assert (
+        "COPY --from=model /models/latin_PP-OCRv5_rec_mobile.onnx /app/models/latin_PP-OCRv5_rec_mobile.onnx" in runtime
+    )
+
+
+def test_both_models_licences_ship_with_the_code():
+    folder = ROOT / "media_preview_generator/markers/credits"
+    for notice in ("PP-OCRv4-det-NOTICE.txt", "PP-OCRv5-rec-NOTICE.txt"):
+        assert (folder / notice).is_file(), notice
+    assert "Apache License" in (folder / "PP-OCRv5-rec-LICENSE-Apache-2.0.txt").read_text()
+    assert fetch.REC_SHA256 in (folder / "PP-OCRv5-rec-NOTICE.txt").read_text()
 
 
 def test_the_version_arg_comes_after_the_dependency_wheels():
@@ -65,25 +91,39 @@ def _wheel(model: bytes) -> bytes:
     return buffer.getvalue()
 
 
-def test_verified_wheel_and_model_are_written(tmp_path, monkeypatch):
-    model = b"model-bytes"
+def _serve(monkeypatch, *, broken: str | None = None) -> tuple[bytes, bytes, list[str]]:
+    """Pin a fake wheel and recognition model (one of the three hashes wrong when ``broken`` names it) and serve them
+    by URL; returns the two models and the URLs asked for."""
+    model, rec = b"model-bytes", b"rec-model-bytes"
     wheel = _wheel(model)
-    monkeypatch.setattr(fetch, "WHEEL_SHA256", hashlib.sha256(wheel).hexdigest())
-    monkeypatch.setattr(fetch, "MODEL_SHA256", hashlib.sha256(model).hexdigest())
+    asked: list[str] = []
+
+    def pin(name: str, data: bytes) -> str:
+        return "0" * 64 if broken == name else hashlib.sha256(data).hexdigest()
+
+    monkeypatch.setattr(fetch, "WHEEL_SHA256", pin("wheel", wheel))
+    monkeypatch.setattr(fetch, "MODEL_SHA256", pin("model", model))
     monkeypatch.setattr(fetch, "MODEL_SIZE", len(model))
-    monkeypatch.setattr(fetch, "_download", lambda url: wheel)
+    monkeypatch.setattr(fetch, "REC_SHA256", pin("rec", rec))
+    monkeypatch.setattr(fetch, "REC_SIZE", len(rec))
+    monkeypatch.setattr(
+        fetch, "_download", lambda url: asked.append(url) or {fetch.WHEEL_URL: wheel, fetch.REC_URL: rec}[url]
+    )
+    return model, rec, asked
+
+
+def test_verified_wheel_and_models_are_written(tmp_path, monkeypatch):
+    model, rec, asked = _serve(monkeypatch)
     assert fetch.main(["--out", str(tmp_path)]) == 0
+    assert asked == [fetch.WHEEL_URL, fetch.REC_URL]
     assert (tmp_path / "ch_PP-OCRv4_det_infer.onnx").read_bytes() == model
+    assert (tmp_path / "latin_PP-OCRv5_rec_mobile.onnx").read_bytes() == rec
 
 
-@pytest.mark.parametrize("broken", ["wheel", "model"])
-def test_a_hash_mismatch_fails_the_build(tmp_path, monkeypatch, broken):
-    model = b"model-bytes"
-    wheel = _wheel(model)
-    monkeypatch.setattr(fetch, "WHEEL_SHA256", "0" * 64 if broken == "wheel" else hashlib.sha256(wheel).hexdigest())
-    monkeypatch.setattr(fetch, "MODEL_SHA256", "0" * 64 if broken == "model" else hashlib.sha256(model).hexdigest())
-    monkeypatch.setattr(fetch, "MODEL_SIZE", len(model))
-    monkeypatch.setattr(fetch, "_download", lambda url: wheel)
+@pytest.mark.parametrize("broken", ["wheel", "model", "rec"])
+def test_a_hash_mismatch_fails_the_build_and_writes_neither_model(tmp_path, monkeypatch, broken):
+    _serve(monkeypatch, broken=broken)
     with pytest.raises(SystemExit, match="sha256"):
         fetch.main(["--out", str(tmp_path)])
     assert not (tmp_path / "ch_PP-OCRv4_det_infer.onnx").exists()
+    assert not (tmp_path / "latin_PP-OCRv5_rec_mobile.onnx").exists()

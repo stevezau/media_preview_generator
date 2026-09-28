@@ -25,15 +25,22 @@ class _Decoder:
     """Stands in for ffmpeg + text detection: records every real decode and probe, answers rows per window."""
 
     def __init__(self, monkeypatch, *, gpu_fails=False):
-        self.decodes, self.probes = [], []
+        self.decodes, self.probes, self.reads = [], [], []
         self.gpu_fails = gpu_fails
         monkeypatch.setattr(frames, "decode_rows", self.decode_rows)
+        monkeypatch.setattr(frames, "read_text_at", self.read_text_at)
         monkeypatch.setattr(frames, "container_start_s", self.container_start_s)
         monkeypatch.setattr(frames, "keyframe_thinning", lambda *args, **kwargs: frames.KeyframeThinning())
 
     def container_start_s(self, path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
         self.probes.append(path)
         return 0.0
+
+    def read_text_at(self, path, **kwargs):
+        self.reads.append(kwargs)
+        if self.gpu_fails and kwargs["gpu"] is not None:
+            raise frames.GpuDecodeError("ffmpeg exited 69 on the GPU")
+        return [f"CARD AT {kwargs['at_s']:g}", f"READ AT {kwargs['scale']}X"]
 
     def decode_rows(self, path, **kwargs):
         self.decodes.append(kwargs)
@@ -240,8 +247,62 @@ def test_the_packet_probe_runs_once_per_file_and_its_failures_are_not_kept(tmp_p
     assert fresh.keyframe_thinning(str(other), "/ff") == frames.KeyframeThinning()
 
 
+def _read(**overrides):
+    kwargs = {"ffmpeg": "/ff", "at_s": 5692.0, "scale": 4, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
+              "read_text": lambda planes: [], "start_time_s": 0.0}  # fmt: skip
+    return {**kwargs, **overrides}
+
+
+def test_a_card_is_read_once_per_file_command_and_backend(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch)
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
+    assert cache.read_text_at(str(media), **_read()) == ["CARD AT 5692", "READ AT 4X"]
+    again = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").read_text_at(
+        str(media), **_read()
+    )
+    assert again == ["CARD AT 5692", "READ AT 4X"] and len(decoder.reads) == 1
+    for changed in ({"at_s": 5698.0}, {"scale": 2}, {"gpu": None, "gpu_device_path": None}, {"start_time_s": 12.5},
+                    {"download_format": "p010le"}):  # fmt: skip
+        cache.read_text_at(str(media), **_read(**changed))
+    assert len(decoder.reads) == 6
+    # Words read on another backend are another answer, and a frame's words are never a frame's rows.
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").read_text_at(str(media), **_read())
+    cache.decode_rows(str(media), **_kwargs(start_s=5692.0, length_s=1.0, keyframes_only=False, fps=1, scale=4))
+    assert (len(decoder.reads), len(decoder.decodes)) == (7, 1)
+    assert (cache.decoded, cache.reused) == (7, 0)
+
+
+def test_the_real_read_gets_every_argument_it_was_asked_for(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch)
+    read_text, cancel, paused = object(), object(), object()
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").read_text_at(
+        str(media),
+        **_read(
+            read_text=read_text,
+            cancel_check=cancel,
+            timeout_s=90.0,
+            start_time_s=12.5,
+            download_format="p010le",
+            pause_check=paused,
+            ffmpeg_threads=3,
+        ),  # fmt: skip
+    )
+    assert decoder.reads == [{"ffmpeg": "/ff", "at_s": 5692.0, "scale": 4, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
+                              "read_text": read_text, "cancel_check": cancel, "timeout_s": 90.0, "start_time_s": 12.5,
+                              "download_format": "p010le", "pause_check": paused, "ffmpeg_threads": 3}]  # fmt: skip
+
+
+def test_a_gpu_read_failure_is_kept_and_raised_again_without_decoding(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch, gpu_fails=True)
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
+    for _ in range(2):
+        with pytest.raises(frames.GpuDecodeError, match="exited 69"):
+            cache.read_text_at(str(media), **_read())
+    assert len(decoder.reads) == 1
+
+
 def test_the_probes_take_exactly_the_arguments_the_real_ones_take():
-    for name in ("container_start_s", "keyframe_thinning"):
+    for name in ("container_start_s", "keyframe_thinning", "read_text_at"):
         real = inspect.signature(getattr(frames, name)).parameters
         served = inspect.signature(getattr(DecodeCache, name)).parameters
         assert [p for p in served if p != "self"] == list(real), name
@@ -342,7 +403,7 @@ def test_a_failure_that_is_not_the_gpus_is_never_kept(tmp_path, monkeypatch, med
 
 def test_serving_puts_the_cache_in_front_of_the_frames_module_and_always_restores_it(tmp_path, monkeypatch):
     _Decoder(monkeypatch)
-    names = ("decode_rows", "container_start_s", "keyframe_thinning")
+    names = ("decode_rows", "container_start_s", "keyframe_thinning", "read_text_at")
     real = [getattr(frames, name) for name in names]
     cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
     with cache.serving():

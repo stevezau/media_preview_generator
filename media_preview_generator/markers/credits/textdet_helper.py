@@ -13,10 +13,13 @@ can hang at shutdown (ORT PR #29591).
 Protocol, one request at a time per helper:
 - helper → parent, once: ``{"ready": true, "backend": "webgpu"|"cpu", "selftest": {...}|null, "reason": str}``, plus
   ``"failed": true`` when a GPU helper is on the CPU because its WebGPU session failed this time
-- parent → helper: ``{"id": n, "frames": N, "height": H, "width": W}`` and a newline, then N×H×W bytes of luma
+- parent → helper: ``{"id": n, "frames": N, "height": H, "width": W}`` and a newline, then N×H×W bytes of luma; with
+  ``"read": true`` the frames' words are asked for instead of their boxes (a card at a credits start, spec §5.4)
 - helper → parent: ``{"id": n, "boxes": [N lists of [left, top, right, bottom]]}`` (one list per frame, in frame
-  order) or ``{"id": n, "error": str}``
+  order), ``{"id": n, "text": [N lists of strings]}`` for a read, or ``{"id": n, "error": str}``
 - stdin closed → the helper exits 0; no request for ``--idle-exit-s`` → it exits 75.
+
+Both models, detection and recognition, run in the same helper on the same device, and the self-test compares both.
 
 The web app imports this module; it loads no ONNX Runtime or OpenCV (only :func:`main`, in the helper, imports
 ``textdet``).
@@ -49,12 +52,15 @@ import numpy as np
 from loguru import logger
 
 from ..locks import KeyedLocks
+from .cards import READ_SCALE
 from .devices import choose_ep_device, pin_env_to_gpu, worker_pci_bus_id
 from .rule_j import Box
 
 MODULE = "media_preview_generator.markers.credits.textdet_helper"
 MODEL_ENV = "MEDIA_PREVIEW_TEXTDET_MODEL"
 DEFAULT_MODEL_PATH = "/app/models/ch_PP-OCRv4_det_infer.onnx"
+REC_MODEL_ENV = "MEDIA_PREVIEW_TEXTREC_MODEL"
+DEFAULT_REC_MODEL_PATH = "/app/models/latin_PP-OCRv5_rec_mobile.onnx"
 CPU_KEY = "cpu"
 # ONNX Runtime threads per helper. Each CPU worker's request gets a helper of its own, so a small number keeps the
 # total in line with the worker count the user chose.
@@ -64,6 +70,9 @@ SELFTEST_FRAMES = 20
 # this module can't import the detector), so the self-test also compares the boxes on these many frames of that size.
 SELFTEST_LARGE_SCALE = 2
 SELFTEST_LARGE_FRAMES = 8
+# ... and reads this many frames of the size a card at a credits start is read at (``cards.READ_SCALE``), whose words
+# must match too: the recognition model runs on the same device.
+SELFTEST_READ_FRAMES = 3
 # GPU/CPU pairs, each run back to back. Every round's boxes must match, so a backend whose answers vary from run to
 # run fails; the median of the rounds' own GPU/CPU time ratios goes in the log as information and decides nothing.
 SELFTEST_ROUNDS = 7
@@ -142,6 +151,11 @@ def model_path() -> str:
     return os.environ.get(MODEL_ENV) or DEFAULT_MODEL_PATH
 
 
+def rec_model_path() -> str:
+    """The recognition model file: ``MEDIA_PREVIEW_TEXTREC_MODEL`` (dev and harness runs), else the image's copy."""
+    return os.environ.get(REC_MODEL_ENV) or DEFAULT_REC_MODEL_PATH
+
+
 _state_lock = threading.Lock()
 _state: tuple[TextDetState, str, float | None] | None = None
 
@@ -154,15 +168,16 @@ def _find_spec(name: str) -> Any:
 def _run_state_check() -> tuple[TextDetState, str]:
     if any(_find_spec(name) is None for name in ("onnxruntime", "cv2", "pyclipper")):
         return TextDetState.ABSENT, NOT_INSTALLED
-    path = model_path()
-    if not os.path.isfile(path):
-        return (
-            TextDetState.ABSENT,
-            f"Needs the text detection model, which the Docker image includes; it isn't at {path}",
-        )
+    path, rec_path = model_path(), rec_model_path()
+    for what, where in (("detection", path), ("recognition", rec_path)):
+        if not os.path.isfile(where):
+            return (
+                TextDetState.ABSENT,
+                f"Needs the text {what} model, which the Docker image includes; it isn't at {where}",
+            )
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", MODULE, "--check", "--model", path],
+            [sys.executable, "-m", MODULE, "--check", "--model", path, "--rec-model", rec_path],
             capture_output=True,
             text=True,
             timeout=CHECK_TIMEOUT_S,
@@ -217,6 +232,7 @@ class SelfTest:
         ratio: The median of each round's own GPU/CPU time ratio (logged, not used to decide).
         same_boxes: Every frame's boxes matched, corner for corner, in every round.
         same_boxes_large: Every larger frame's boxes matched too (``SELFTEST_LARGE_SCALE``), or none were compared.
+        same_text: Every card-sized frame read the same words (``SELFTEST_READ_FRAMES``), or none were compared.
     """
 
     gpu_ms: float
@@ -224,18 +240,22 @@ class SelfTest:
     ratio: float
     same_boxes: bool
     same_boxes_large: bool = True
+    same_text: bool = True
 
     @property
     def use_gpu(self) -> bool:
-        """The GPU is used when it finds exactly the CPU's boxes, in the same places and at both sizes, however fast
-        it is: a GPU worker's work runs on its GPU, and the credits answer mustn't depend on which one read it."""
-        return self.same_boxes and self.same_boxes_large
+        """The GPU is used when it finds exactly the CPU's boxes, in the same places and at both sizes, and reads the
+        same words, however fast it is: a GPU worker's work runs on its GPU, and the credits answer mustn't depend on
+        which one read it."""
+        return self.same_boxes and self.same_boxes_large and self.same_text
 
     def cpu_reason(self) -> str:
         """Why this result keeps the CPU (for the helper's ready line and the log)."""
         if not self.same_boxes:
             return "the GPU was finding different boxes than the CPU"
-        return "the GPU was finding different boxes than the CPU at 640x360"
+        if not self.same_boxes_large:
+            return "the GPU was finding different boxes than the CPU at 640x360"
+        return "the GPU was reading different words than the CPU"
 
 
 def self_test(
@@ -247,6 +267,7 @@ def self_test(
     warmup: int = 3,
     rounds: int = SELFTEST_ROUNDS,
     large_frames: np.ndarray | None = None,
+    read_frames: np.ndarray | None = None,
 ) -> SelfTest:
     """Run both detectors on the same frames after a warm-up, compare the boxes they find, and time them.
 
@@ -269,10 +290,12 @@ def self_test(
         rounds: How many GPU/CPU pairs to run.
         large_frames: (n, H, W) uint8 luma at the detector's larger reading's size, each side's boxes compared once
             after the timed rounds (not timed); None compares none.
+        read_frames: (n, H, W) uint8 luma at the size a card is read at, each side's words (``read``) compared once
+            (not timed); None compares none.
 
     Returns:
         Each side's median milliseconds per frame, the median per-round ratio, and whether every frame's
-        boxes matched, corner for corner, in every round and on the larger frames.
+        boxes matched, corner for corner, in every round and on the larger frames, and the words read matched.
     """
     now = clock or _perf_counter
     for detector in (gpu, cpu):
@@ -294,8 +317,14 @@ def self_test(
         same_boxes = same_boxes and list(gpu_boxes) == list(cpu_boxes)
     ratios = [g / c if c > 0 else math.inf for g, c in zip(gpu_times, cpu_times, strict=True)]
     same_large = large_frames is None or list(gpu.detect(large_frames)) == list(cpu.detect(large_frames))
+    same_text = read_frames is None or list(gpu.read(read_frames)) == list(cpu.read(read_frames))
     return SelfTest(
-        round(median(gpu_times), 2), round(median(cpu_times), 2), round(median(ratios), 4), same_boxes, same_large
+        round(median(gpu_times), 2),
+        round(median(cpu_times), 2),
+        round(median(ratios), 4),
+        same_boxes,
+        same_large,
+        same_text,
     )
 
 
@@ -353,7 +382,8 @@ def _is_cpu_helper_key(key: str) -> bool:
 def helper_command(spec: HelperSpec) -> list[str]:
     """``python -m …textdet_helper`` with the spec's arguments."""
     command = [sys.executable, "-m", MODULE, "--backend", spec.backend, "--model", model_path(),
-               "--threads", str(THREADS), "--idle-exit-s", f"{IDLE_EXIT_S:g}"]  # fmt: skip
+               "--rec-model", rec_model_path(), "--threads", str(THREADS),
+               "--idle-exit-s", f"{IDLE_EXIT_S:g}"]  # fmt: skip
     if spec.pci_bus_id:
         command += ["--pci-bus-id", spec.pci_bus_id]
     if not spec.selftest:
@@ -423,8 +453,8 @@ class _Helper:
             raise HelperError(f"unreadable answer {line[:80]!r}")
         return message
 
-    def request(self, planes: np.ndarray) -> list[tuple[Box, ...]]:
-        """Each plane's text boxes for (n, H, W) uint8 luma planes.
+    def request(self, planes: np.ndarray, *, read: bool = False) -> list[tuple[Box, ...]] | list[list[str]]:
+        """Each plane's text boxes for (n, H, W) uint8 luma planes, or with ``read`` each plane's words.
 
         Raises:
             HelperError: The helper didn't read the frames, didn't answer, or answered something else.
@@ -432,17 +462,24 @@ class _Helper:
         frames = np.ascontiguousarray(planes, dtype=np.uint8)
         count, height, width = frames.shape
         self._next_id += 1
-        header = json.dumps({"id": self._next_id, "frames": count, "height": height, "width": width}).encode()
+        asked = {"id": self._next_id, "frames": count, "height": height, "width": width}
+        if read:
+            asked["read"] = True
+        header = json.dumps(asked).encode()
         # One budget covers sending and answering, so the worst case is the timeout this pool was given, not twice it.
         deadline = _monotonic() + self._timeout
         self._write(header + b"\n" + frames.tobytes(), deadline)
         reply = self.read_message(max(0.0, deadline - _monotonic()))
         self.last_used = _monotonic()
-        boxes = reply.get("boxes")
-        if reply.get("id") != self._next_id or "error" in reply or not isinstance(boxes, list) or len(boxes) != count:
+        answer = reply.get("text" if read else "boxes")
+        if reply.get("id") != self._next_id or "error" in reply or not isinstance(answer, list) or len(answer) != count:
             raise HelperError(f"bad answer: {str(reply.get('error') or reply)[:200]}")
+        if read:
+            if not all(isinstance(frame, list) and all(isinstance(line, str) for line in frame) for frame in answer):
+                raise HelperError("bad answer: a frame's text isn't a list of strings")
+            return answer
         try:
-            return [tuple((int(a), int(b), int(c), int(d)) for a, b, c, d in frame) for frame in boxes]
+            return [tuple((int(a), int(b), int(c), int(d)) for a, b, c, d in frame) for frame in answer]
         except (TypeError, ValueError) as exc:
             # A frame's entry that isn't four numbers per box would otherwise reach rule J as a row it can't read.
             raise HelperError(f"bad answer: boxes aren't four numbers each ({exc})") from exc
@@ -688,6 +725,49 @@ class TextDetectorPool:
             TextDetCancelledError: The job was cancelled while the request waited for a CPU helper.
             TextDetShuttingDownError: The pool is closed.
         """
+        return self._ask(planes, False, gpu, gpu_device_path, gpu_worker, on_cpu, cancel_check)
+
+    def read_text(
+        self,
+        planes: np.ndarray,
+        *,
+        gpu: str | None,
+        gpu_device_path: str | None,
+        gpu_worker: bool | None = None,
+        on_cpu: Callable[[str], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> list[list[str]]:
+        """The words on each luma plane (a card at a credits start, read at full size), on the worker's device exactly
+        as :meth:`detect_boxes` routes a request: the same helper, the same GPU fallback.
+
+        Args:
+            planes: (n, H, W) uint8.
+            gpu: The worker's GPU type, None on a CPU worker.
+            gpu_device_path: The worker's device.
+            gpu_worker: As :meth:`detect_boxes`.
+            on_cpu: As :meth:`detect_boxes`.
+            cancel_check: As :meth:`detect_boxes`.
+
+        Returns:
+            One plane's text per plane: one entry per box the detection model finds there, top to bottom.
+
+        Raises:
+            TextDetUnavailableError: The CPU helper failed (the next call starts a new one).
+            TextDetCancelledError: The job was cancelled while the request waited for a CPU helper.
+            TextDetShuttingDownError: The pool is closed.
+        """
+        return self._ask(planes, True, gpu, gpu_device_path, gpu_worker, on_cpu, cancel_check)
+
+    def _ask(
+        self,
+        planes: np.ndarray,
+        read: bool,
+        gpu: str | None,
+        gpu_device_path: str | None,
+        gpu_worker: bool | None,
+        on_cpu: Callable[[str], None] | None,
+        cancel_check: Callable[[], bool] | None,
+    ) -> Any:
         key = device_key(gpu, gpu_device_path)
         self._raise_if_closed()
         if key != CPU_KEY:
@@ -697,23 +777,27 @@ class TextDetectorPool:
                 cpu_reason = self._gpu_refused(key, gpu)
                 if cpu_reason is None:
                     try:
-                        boxes = self._on_helper(
+                        answer = self._on_helper(
                             key,
                             planes,
                             lambda: self._gpu_spec(key, gpu, gpu_device_path),
                             accept=lambda ready, spec: self._accept_gpu_helper(key, ready, spec.pci_bus_id),
+                            read=read,
                         )
                     except HelperError as exc:
                         self._raise_if_closed()  # close_all killed it: the pool ending, not the GPU failing
                         cpu_reason = self._gpu_failed(key, exc)
                     else:
-                        if boxes is not None:
+                        if answer is not None:
                             self._gpu_worked(key)
-                            return boxes
+                            return answer
                         cpu_reason = self._cpu_reason(key)  # the helper just gave the device its CPU verdict
             _report_cpu_fallback(on_cpu, cpu_reason)
         return self._on_cpu(
-            planes, for_gpu_worker=key != CPU_KEY if gpu_worker is None else gpu_worker, cancel_check=cancel_check
+            planes,
+            for_gpu_worker=key != CPU_KEY if gpu_worker is None else gpu_worker,
+            cancel_check=cancel_check,
+            read=read,
         )
 
     def backend_of(self, gpu: str | None, gpu_device_path: str | None) -> str | None:
@@ -907,19 +991,24 @@ class TextDetectorPool:
     # ---------------------------------------------------------------------------------------------------- CPU helpers
 
     def _on_cpu(
-        self, planes: np.ndarray, *, for_gpu_worker: bool, cancel_check: Callable[[], bool] | None = None
-    ) -> list[tuple[Box, ...]]:
+        self,
+        planes: np.ndarray,
+        *,
+        for_gpu_worker: bool,
+        cancel_check: Callable[[], bool] | None = None,
+        read: bool = False,
+    ) -> Any:
         key = self._take_cpu_helper(for_gpu_worker, cancel_check)
         try:
-            boxes = self._on_helper(key, planes, lambda: self._cpu_spec(key))
+            answer = self._on_helper(key, planes, lambda: self._cpu_spec(key), read=read)
         except HelperError as exc:
             self._raise_if_closed()  # close_all killed it: the pool ending, not text detection failing
             raise TextDetUnavailableError(f"Text detection failed: {exc}") from exc
         finally:
             self._return_cpu_helper(key, for_gpu_worker)
-        if boxes is None:  # pragma: no cover - a CPU helper either serves or raises
+        if answer is None:  # pragma: no cover - a CPU helper either serves or raises
             raise TextDetUnavailableError("Text detection failed: the CPU helper didn't answer")
-        return boxes
+        return answer
 
     def _read_cpu_limit(self) -> int:
         """The saved CPU worker count. Never read while _guard is held: the settings have a lock of their own."""
@@ -1047,13 +1136,14 @@ class TextDetectorPool:
         spec_for: Callable[[], HelperSpec],
         *,
         accept: Callable[[dict[str, Any], HelperSpec], bool] | None = None,
-    ) -> list[tuple[Box, ...]] | None:
+        read: bool = False,
+    ) -> Any:
         for attempt in (1, 2):
             helper = self._helper(key, spec_for, accept)
             if helper is None:
                 return None  # a GPU helper that came up on the CPU for good: the request goes to a CPU helper
             try:
-                return helper.request(planes)
+                return helper.request(planes, read=read)
             except HelperError:
                 code = helper.wait_exit(EXIT_CODE_WAIT_S)
                 self._drop(key)
@@ -1280,23 +1370,52 @@ def _software_adapter(adapters: list[tuple[str, int]] | None) -> str | None:
     return adapters[0][0]
 
 
-def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
-    """The detector this helper serves with, and the ready line saying which backend won and why.
+class _Engine:
+    """A helper's two models on one device: each frame's text boxes and, for a card at a credits start, its words."""
 
-    A GPU helper serves from the GPU when its WebGPU session is on a hardware adapter and, on a device's first start,
-    the self-test finds the CPU's boxes. Otherwise the ready line says ``cpu`` with the reason, and ``failed`` when that
-    reason is a failure this time (a session or self-test that raised) rather than a verdict on the GPU.
+    def __init__(self, detector: Any, reader: Any) -> None:
+        self._detector, self._reader = detector, reader
+
+    @property
+    def backend(self) -> str:
+        """``cpu`` or ``webgpu``: where both models run."""
+        return self._detector.backend
+
+    def detect(self, planes: np.ndarray) -> list[tuple[Box, ...]]:
+        return self._detector.detect(planes)
+
+    def read(self, planes: np.ndarray) -> list[list[str]]:
+        return self._reader.read(planes)
+
+
+def _start_detector(textdet: Any, textrec: Any, args: argparse.Namespace) -> tuple[_Engine, dict[str, Any]]:
+    """The models this helper serves with, and the ready line saying which backend won and why.
+
+    A GPU helper serves from the GPU when its WebGPU sessions are on a hardware adapter and, on a device's first start,
+    the self-test finds the CPU's boxes and reads its words. Otherwise the ready line says ``cpu`` with the reason, and
+    ``failed`` when that reason is a failure this time (a session or self-test that raised) rather than a verdict on the
+    GPU.
 
     Raises:
-        ModelError: The model file is missing or isn't the pinned one.
+        ModelError: A model file is missing or isn't the pinned one.
     """
-    built: list[Any] = []
+    built: list[_Engine] = []
 
-    def cpu() -> Any:
+    def engine(detection: Any, recognition: Any, backend: str) -> _Engine:
+        detector = textdet.TextDetector(detection, backend=backend)
+        return _Engine(detector, textrec.TextReader(detector, recognition))
+
+    def cpu() -> _Engine:
         # Built only when it is going to be used: on the --no-selftest path a CPU session would otherwise keep its
         # ONNX Runtime arena and intra-op threads for the helper's whole life without ever running a frame.
         if not built:
-            built.append(textdet.TextDetector(textdet.cpu_session(args.model, args.threads), backend="cpu"))
+            built.append(
+                engine(
+                    textdet.cpu_session(args.model, args.threads),
+                    textrec.cpu_session(args.rec_model, args.threads),
+                    "cpu",
+                )
+            )
         return built[0]
 
     if args.backend == "cpu":
@@ -1318,7 +1437,11 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
                 "selftest": None,
                 "reason": f"WebGPU would run on {software}, a software renderer, not on this GPU",
             }
-        gpu = textdet.TextDetector(textdet.webgpu_session(args.model, found[index], args.threads), backend="webgpu")
+        gpu = engine(
+            textdet.webgpu_session(args.model, found[index], args.threads),
+            textrec.webgpu_session(args.rec_model, found[index], args.threads),
+            "webgpu",
+        )
         if not args.selftest:
             return gpu, {"backend": "webgpu", "selftest": None, "reason": ""}
         result = self_test(
@@ -1326,13 +1449,14 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
             cpu(),
             textdet.synthetic_frames(SELFTEST_FRAMES),
             large_frames=textdet.synthetic_frames(SELFTEST_LARGE_FRAMES, scale=SELFTEST_LARGE_SCALE),
+            read_frames=textdet.synthetic_frames(SELFTEST_READ_FRAMES, scale=READ_SCALE),
         )
     except textdet.ModelError:
         raise
     except textdet.WebGpuSessionError as exc:
-        # Expected on a host whose Vulkan environment leaves Dawn no adapter (note N2), or a GPU Dawn rejects: the GPU
-        # can't run text detection here. ONNX Runtime has already printed its own "falling back to
-        # CPUExecutionProvider" block to stderr above this.
+        # Expected on a host whose Vulkan environment leaves Dawn no adapter (note N2), or a GPU Dawn rejects, for either
+        # model (the error names which): both run on the worker's one device, so the GPU can't run credit text here.
+        # ONNX Runtime has already printed its own "falling back to CPUExecutionProvider" block to stderr above this.
         return cpu(), {"backend": "cpu", "selftest": None, "reason": f"this GPU has no usable WebGPU adapter: {exc}"}
     except Exception as exc:  # noqa: BLE001 - any EP or driver failure means the CPU, this time
         return cpu(), {
@@ -1346,7 +1470,7 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
     return cpu(), {"backend": "cpu", "selftest": asdict(result), "reason": result.cpu_reason()}
 
 
-def _serve(detector: Any, protocol: BinaryIO, idle_exit_s: float) -> int:
+def _serve(engine: Any, protocol: BinaryIO, idle_exit_s: float) -> int:
     stdin = sys.stdin.buffer
     # poll, not select: select() raises ValueError for any descriptor at or above FD_SETSIZE (1024).
     requests = select.poll()
@@ -1364,17 +1488,19 @@ def _serve(detector: Any, protocol: BinaryIO, idle_exit_s: float) -> int:
         data = stdin.read(shape[0] * shape[1] * shape[2])
         if len(data) != shape[0] * shape[1] * shape[2]:
             return 0
+        planes = np.frombuffer(data, np.uint8).reshape(shape)
         try:
-            _send(
-                protocol,
-                {"id": request["id"], "boxes": detector.detect(np.frombuffer(data, np.uint8).reshape(shape))},
-            )
+            if request.get("read"):
+                _send(protocol, {"id": request["id"], "text": engine.read(planes)})
+            else:
+                _send(protocol, {"id": request["id"], "boxes": engine.detect(planes)})
         except Exception as exc:  # noqa: BLE001 - the parent decides what a failed request means
             _send(protocol, {"id": request["id"], "error": f"{type(exc).__name__}: {exc}"})
 
 
 def main(argv: list[str] | None = None) -> int:
-    """The helper process: ``--check`` once, or serve each frame's text boxes until stdin closes or it has been idle.
+    """The helper process: ``--check`` once, or serve each frame's text boxes (or words) until stdin closes or it has
+    been idle.
 
     Args:
         argv: Command-line arguments (``sys.argv[1:]`` when None).
@@ -1386,6 +1512,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--backend", choices=("webgpu", "cpu"), default="cpu")
     parser.add_argument("--model", default=model_path())
+    parser.add_argument("--rec-model", default=rec_model_path())
     parser.add_argument("--threads", type=int, default=THREADS)
     parser.add_argument("--pci-bus-id", default=None)
     parser.add_argument("--no-selftest", dest="selftest", action="store_false")
@@ -1394,22 +1521,24 @@ def main(argv: list[str] | None = None) -> int:
     protocol = os.fdopen(os.dup(1), "wb", buffering=0)
     os.dup2(2, 1)  # a native library printing to stdout must not corrupt the protocol
     try:
-        from . import textdet
+        from . import textdet, textrec
     except ImportError as exc:
         _send_text(protocol, f"{NOT_INSTALLED} ({exc})")
         return CHECK_ABSENT_CODE
     try:
         if args.check:
-            textdet.TextDetector(textdet.cpu_session(args.model, args.threads), backend="cpu").count(
-                textdet.synthetic_frames(1)
+            detector = textdet.TextDetector(textdet.cpu_session(args.model, args.threads), backend="cpu")
+            detector.count(textdet.synthetic_frames(1))
+            textrec.TextReader(detector, textrec.cpu_session(args.rec_model, args.threads)).read(
+                textdet.synthetic_frames(1, scale=SELFTEST_LARGE_SCALE)
             )
             return 0
-        detector, ready = _start_detector(textdet, args)
+        engine, ready = _start_detector(textdet, textrec, args)
     except textdet.ModelError as exc:
         _send_text(protocol, str(exc))
         return CHECK_ABSENT_CODE
     _send(protocol, {"ready": True, **ready})
-    return _serve(detector, protocol, args.idle_exit_s)
+    return _serve(engine, protocol, args.idle_exit_s)
 
 
 if __name__ == "__main__":

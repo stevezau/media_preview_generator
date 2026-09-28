@@ -1,4 +1,5 @@
-"""The real helper process with the real model: the protocol round trip gives the in-process detector's boxes."""
+"""The real helper process with the real models: the protocol round trip gives the in-process detector's boxes and
+reader's words."""
 
 import json
 import os
@@ -18,10 +19,31 @@ LAVAPIPE_ICD = "/usr/share/vulkan/icd.d/lvp_icd.json"
 @pytest.fixture
 def model(monkeypatch):
     path = os.environ.get(th.MODEL_ENV, th.DEFAULT_MODEL_PATH)
-    if not os.path.isfile(path):
-        pytest.skip("no text detection model (set MEDIA_PREVIEW_TEXTDET_MODEL)")
+    rec = os.environ.get(th.REC_MODEL_ENV, th.DEFAULT_REC_MODEL_PATH)
+    if not (os.path.isfile(path) and os.path.isfile(rec)):
+        pytest.skip("no text models (set MEDIA_PREVIEW_TEXTDET_MODEL and MEDIA_PREVIEW_TEXTREC_MODEL)")
     monkeypatch.setenv(th.MODEL_ENV, path)
+    monkeypatch.setenv(th.REC_MODEL_ENV, rec)
     return path
+
+
+def _cards():
+    """Two 1280x720 prose cards on black, as a credits start shows them."""
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+
+    planes = np.full((2, 720, 1280), 16, np.uint8)
+    for plane, words in zip(planes, ("The investigation is now closed.", "Directed by Billy Ray"), strict=True):
+        cv2.putText(plane, words, (160, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.6, 235, 3, cv2.LINE_AA)
+    return planes
+
+
+def _reads_in_process(model, planes):
+    textdet = pytest.importorskip("media_preview_generator.markers.credits.textdet")
+    from media_preview_generator.markers.credits import textrec
+
+    detector = textdet.TextDetector(textdet.cpu_session(model), backend="cpu")
+    return textrec.TextReader(detector, textrec.cpu_session(os.environ[th.REC_MODEL_ENV], 2)).read(planes)
 
 
 def test_the_cpu_helper_finds_what_the_detector_finds(model):
@@ -32,6 +54,17 @@ def test_the_cpu_helper_finds_what_the_detector_finds(model):
     pool = th.TextDetectorPool()
     try:
         assert pool.detect_boxes(frames, gpu=None, gpu_device_path=None) == expected
+    finally:
+        pool.close_all()
+
+
+def test_the_cpu_helper_reads_what_the_reader_reads(model):
+    planes = _cards()
+    expected = _reads_in_process(model, planes)
+    assert expected == [["The investigation is now closed."], ["Directed by Billy Ray"]]
+    pool = th.TextDetectorPool()
+    try:
+        assert pool.read_text(planes, gpu=None, gpu_device_path=None) == expected
     finally:
         pool.close_all()
 
@@ -121,6 +154,10 @@ def test_webgpu_on_an_nvidia_gpu_matches_the_cpu_and_is_used(model):
     try:
         assert pool.detect_boxes(frames, gpu="NVIDIA", gpu_device_path="cuda:0") == expected
         # Its speed doesn't decide: a GPU that finds the CPU's boxes is the GPU worker's text detection device.
+        assert pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
+        # And it reads a card's words there too, the CPU's words.
+        planes = _cards()
+        assert pool.read_text(planes, gpu="NVIDIA", gpu_device_path="cuda:0") == _reads_in_process(model, planes)
         assert pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
     finally:
         pool.close_all()

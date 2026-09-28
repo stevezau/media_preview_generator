@@ -113,7 +113,7 @@ class DecodeCache:
         self.reused = 0
         # The real functions, taken before :meth:`serving` puts this cache's own in their place on the module.
         self._container_start_s, self._decode_rows = frames.container_start_s, frames.decode_rows
-        self._keyframe_thinning = frames.keyframe_thinning
+        self._keyframe_thinning, self._read_text_at = frames.keyframe_thinning, frames.read_text_at
 
     def _entry(self, path: str, ffmpeg: str, what: str) -> Path:
         if ffmpeg not in self._builds:
@@ -235,6 +235,60 @@ class DecodeCache:
         self._keep(path, ffmpeg, what, before, {"rows": rows_to_json(rows)})
         return rows
 
+    def read_text_at(
+        self,
+        path: str,
+        *,
+        ffmpeg: str,
+        at_s: float,
+        scale: int,
+        gpu: str | None,
+        gpu_device_path: str | None,
+        read_text: Callable[[np.ndarray], list[list[str]]],
+        cancel_check: Callable[[], bool] | None = None,
+        timeout_s: float = frames.DECODE_TIMEOUT_S,
+        start_time_s: float | None = None,
+        download_format: str | None = None,
+        pause_check: Callable[[], bool] | Freeze | None = None,
+        ffmpeg_threads: int | None = None,
+    ) -> list[str]:
+        """:func:`frames.read_text_at`, once per file identity, exact command, start time and text detection backend
+        (the words are kept as rows are, under the backend that read them).
+
+        Raises:
+            frames.GpuDecodeError: This GPU decode failed, now or on an earlier run.
+            Everything else :func:`frames.read_text_at` raises, uncached.
+        """
+        command, _ = frames.decode_command(
+            ffmpeg, path, start_s=at_s, length_s=1.0, keyframes_only=False, fps=1, gpu=gpu,
+            gpu_device_path=gpu_device_path, scale=scale, download_format=download_format,
+            ffmpeg_threads=ffmpeg_threads,
+        )  # fmt: skip
+        if start_time_s is None:
+            start_time_s = self.container_start_s(path, ffmpeg, cancel_check=cancel_check)
+        what = f"text|{start_time_s!r}|{json.dumps(command)}"
+        before = self._backend()
+        if before is not None:
+            entry = self._entry(path, ffmpeg, f"rows|{before}|{what}")
+            if entry.exists():
+                stored = json.loads(entry.read_text())
+                self.reused += 1
+                if "gpu_error" in stored:
+                    raise frames.GpuDecodeError(stored["gpu_error"])
+                return [str(line) for line in stored["text"]]
+        self.decoded += 1
+        try:
+            text = self._read_text_at(
+                path, ffmpeg=ffmpeg, at_s=at_s, scale=scale, gpu=gpu, gpu_device_path=gpu_device_path,
+                read_text=read_text, cancel_check=cancel_check, timeout_s=timeout_s, start_time_s=start_time_s,
+                download_format=download_format, pause_check=pause_check, ffmpeg_threads=ffmpeg_threads,
+            )  # fmt: skip
+        except frames.GpuDecodeError as exc:
+            self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})
+            raise
+        self._keep(path, ffmpeg, what, before, {"text": text})
+        return text
+
     def _keep(self, path: str, ffmpeg: str, what: str, before: str | None, data: dict) -> None:
         after = self._backend()
         if after is not None and before in (None, after):
@@ -244,7 +298,7 @@ class DecodeCache:
     def serving(self) -> Iterator[None]:
         """Answer the detector's decodes and probes from this cache inside the block (``detector.find_credits`` reads
         these functions off the :mod:`frames` module at call time)."""
-        names = ("decode_rows", "container_start_s", "keyframe_thinning")
+        names = ("decode_rows", "container_start_s", "keyframe_thinning", "read_text_at")
         saved = {name: getattr(frames, name) for name in names}
         for name in names:
             setattr(frames, name, getattr(self, name))

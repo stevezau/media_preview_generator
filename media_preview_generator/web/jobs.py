@@ -2608,9 +2608,8 @@ class JobManager:
                 record["servers"] = slim
         if bif_path:
             # Surfaced as a top-level field so the Files panel's inspector
-            # link can deep-link to /bif-viewer?bif=<path> and skip the
-            # Plex title-search heuristic entirely (which fails on episodes
-            # whose release-group suffix collides with the SxxExx regex).
+            # link can open /inspector?bif=<path> for a row whose file isn't
+            # a full path (a full path opens /inspector?path=<file>).
             record["bif_path"] = bif_path
 
         try:

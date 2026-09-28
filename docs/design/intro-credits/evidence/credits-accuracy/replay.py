@@ -82,8 +82,10 @@ def text_candidates(path, ev, rec):
             overlays = tuple(tuple(b) for b in r["overlays"])
             if hasattr(detector, "chapter_origin"):
                 # The tree's own label, exactly as the detector builds it.
+                # Credit text v8 on: the start before the prose cards, which a chapter on them is read against.
+                extra = {"prose_start_s": r.get("prose_start_s")} if "prose_start_s" in r else {}
                 found = detector.CreditsTextResult(r["start_s"], r["end_s"], tuple(rows_from_json(r["key"])), (), (),
-                                                   overlays)  # fmt: skip
+                                                   overlays, **extra)  # fmt: skip
                 origin = detector.chapter_origin(found, chapter_ms)
             else:
                 rows = rule_j.without_overlays(rows_from_json(r["key"]), overlays)

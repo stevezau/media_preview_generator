@@ -32,7 +32,7 @@ This page covers:
 - [Smart dedup: skipping work that's already done](#smart-dedup-skipping-work-thats-already-done)
 - [Slow-backoff retry queue](#slow-backoff-retry-queue)
 - [Setup Health — the unified "is everything set up right?" panel](#setup-health--the-unified-is-everything-set-up-right-panel)
-- [BIF Viewer (multi-server)](#bif-viewer-multi-server)
+- [Inspector (multi-server)](#inspector-multi-server)
 - [Plex multi-server auto-discovery](#plex-multi-server-auto-discovery)
 - [REST API summary](#rest-api-summary)
 
@@ -342,30 +342,32 @@ it matters / how to fix" lives in the
 
 ---
 
-## BIF Viewer (multi-server)
+## Inspector (multi-server)
 
-The BIF Viewer at `/bif-viewer` lets you visually inspect a published
-preview to see exactly what a player would render. It works for all
-three vendors:
+The Inspector at `/inspector` (**Tools → Inspector**) shows a published
+preview frame by frame, and the file's intro and credits on each server.
+It works for all three vendors:
 
 * **Plex / Emby**: parses the BIF file directly via `bif_reader`,
   renders frames as JPEG via `/api/bif/frame?path=…&index=…`.
-* **Jellyfin**: parses the trickplay manifest, slices individual
-  thumbnails out of the tile-grid sheets via Pillow, serves them via
+* **Jellyfin**: slices individual thumbnails out of the trickplay
+  tile-grid sheets via Pillow, served via
   `/api/bif/trickplay/frame?server_id=…&sheets_dir=…&index=…&tile_width=10&tile_height=10`.
 
-Use the server-picker dropdown at the top of the page to switch
-between configured servers; the search results, frame list, and
-thumbnail grid all refresh per server.
+One search covers every server (or the one picked in its dropdown) and
+merges a film several servers have into one row. `GET /api/inspector/file`
+then says where each server keeps that file's preview, and the page draws
+its frames from the first one that is there. See
+[Guides → Inspector](guides.md#inspector) and
+[Reference → Inspector endpoints](reference.md#inspector-endpoints).
 
-**Multi-server search endpoint:**
+The older per-server search is still served for scripts:
 ```
 GET /api/bif/servers/<server_id>/search?q=<query>
 ```
 Returns up to 15 results: `{title, type, year, media_file,
 preview_path, preview_kind, preview_exists}`. `preview_kind` is
-`"bif"` (Plex/Emby) or `"trickplay"` (Jellyfin) — the viewer branches
-to the right renderer based on this.
+`"bif"` (Plex/Emby) or `"trickplay"` (Jellyfin).
 
 ---
 
@@ -409,7 +411,7 @@ issue #215.
 | POST | `/api/servers/auth/jellyfin/quick-connect/exchange` | Exchange approved secret for token |
 | GET | `/api/servers/<id>/health-check` | Per-server settings audit (all vendors) |
 | POST | `/api/servers/<id>/health-check/apply` | One-click fix of mis-set settings (all vendors) |
-| GET | `/api/bif/servers/<id>/search?q=...` | Multi-server BIF Viewer search; returns `preview_kind` per result |
+| GET | `/api/bif/servers/<id>/search?q=...` | One server's preview search (the Inspector searches every server through `/api/media/search`); returns `preview_kind` per result |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + sheet metadata |
 | GET | `/api/bif/trickplay/frame?server_id=...&sheets_dir=...&index=N&tile_width=10&tile_height=10` | Slice and serve a single thumbnail from a tile sheet |
 | POST | `/api/webhooks/incoming` | Universal webhook with vendor auto-detection |

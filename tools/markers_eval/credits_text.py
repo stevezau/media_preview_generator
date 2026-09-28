@@ -74,7 +74,12 @@ PACKAGE_ROOT = Path(credits_package.__file__).parents[2]
 DETECTOR_SOURCES = ("markers/credits/*.py", "markers/probe.py", "processing/hwaccel.py", "markers/decide.py")
 # The detector files that choose which windows are decoded (so they are in the ffmpeg command, the decode cache's key)
 # but never what a decode of a given command returns: :func:`decode_digest` leaves them out.
-RULE_FILES = ("markers/credits/rule_j.py", "markers/credits/detector.py", "markers/decide.py")
+RULE_FILES = (
+    "markers/credits/rule_j.py",
+    "markers/credits/detector.py",
+    "markers/decide.py",
+    "markers/credits/cards.py",
+)
 SHEET_TIMEOUT_S = 300
 # Q5: every answer that moves by more than this against an earlier run is frame-checked.
 CHANGED_BY_S = 10.0
@@ -531,6 +536,7 @@ class CreditsTextCache:
         backend: Callable[[], str | None],
         probe: Callable[[str], MediaProbe],
         decodes: DecodeCache | None = None,
+        read_text: Callable[[np.ndarray], list[list[str]]] | None = None,
     ) -> None:
         """Create the cache (``root/credits_text``).
 
@@ -545,6 +551,8 @@ class CreditsTextCache:
             probe: A file's duration.
             decodes: Where the detector's decodes are kept across detector changes, or None to decode every time an
                 answer isn't cached.
+            read_text: The words on luma planes (the card at a credits start, as the app reads it); None reads no
+                card, as before the card reading.
 
         Raises:
             ValueError: ``root`` is under /data*.
@@ -555,6 +563,7 @@ class CreditsTextCache:
         self._root.mkdir(parents=True, exist_ok=True)
         self._ffmpeg, self._decode, self._gpu_device = ffmpeg, decode, gpu_device
         self._detect_boxes, self._backend, self._probe, self._decodes = detect_boxes, backend, probe, decodes
+        self._read_text = read_text
         self._build: str | None = None
         self.detector_digest = detector_digest()
         self.gpu_fallbacks: set[str] = set()
@@ -566,7 +575,7 @@ class CreditsTextCache:
             return find_credits(
                 path, duration_ms=duration_ms, is_episode=is_episode, ffmpeg=self._ffmpeg,
                 detect_boxes=self._detect_boxes, gpu=gpu, gpu_device_path=self._gpu_device if gpu else None,
-                earliest_start_s=_earliest_start_s(duration_ms, is_episode=is_episode),
+                earliest_start_s=_earliest_start_s(duration_ms, is_episode=is_episode), read_text=self._read_text,
             )  # fmt: skip
 
     def result(self, path: str, *, is_episode: bool) -> dict:
@@ -612,7 +621,7 @@ class CreditsTextCache:
         data = {"start_s": found.start_s, "end_s": found.end_s, "key": rows_to_json(found.key_rows),
                 "fine": rows_to_json(found.fine_rows), "end": rows_to_json(found.end_rows),
                 "overlays": [list(box) for box in found.overlays], "scale": found.scale,
-                "runs": rows_to_json(found.run_rows)}  # fmt: skip
+                "runs": rows_to_json(found.run_rows), "prose_start_s": found.prose_start_s}  # fmt: skip
         if self._backend() == backend:
             cached.write_text(json.dumps(data))
         return data
@@ -627,11 +636,13 @@ class TextDetection:
         backend: What reads them right now: ``cpu``, or the GPU backend and its helper's device (``webgpu cuda:0``);
             None before the first request, when the helper's self-test hasn't chosen yet.
         close: Stops every helper, once, at the end of the whole run.
+        read_text: The words on luma planes (a card at a credits start), on the same helpers.
     """
 
     detect_boxes: Callable[[np.ndarray], list[tuple[rule_j.Box, ...]]]
     backend: Callable[[], str | None]
     close: Callable[[], None]
+    read_text: Callable[[np.ndarray], list[list[str]]] | None = None
 
 
 def _detection_on(decode: str, gpu_device: str) -> TextDetection:
@@ -651,7 +662,10 @@ def _detection_on(decode: str, gpu_device: str) -> TextDetection:
         return used if used in (None, "cpu") else f"{used} {textdet_helper.device_key(gpu, device)}"
 
     return TextDetection(
-        lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=device), backend, pool.close_all
+        lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=device),
+        backend,
+        pool.close_all,
+        lambda planes: pool.read_text(planes, gpu=gpu, gpu_device_path=device),
     )
 
 
@@ -804,7 +818,7 @@ def run_credits_text(
         decodes = DecodeCache(cache_root, digest=decode_digest(), backend=detection.backend)
         cache = CreditsTextCache(
             cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, detect_boxes=detect_boxes,
-            backend=detection.backend, probe=probes.probe, decodes=decodes,
+            backend=detection.backend, probe=probes.probe, decodes=decodes, read_text=detection.read_text,
         )  # fmt: skip
         summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
                          "detector_digest": cache.detector_digest, "decode_digest": decodes.digest,
