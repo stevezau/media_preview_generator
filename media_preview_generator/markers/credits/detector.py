@@ -10,6 +10,7 @@ item 14) from walking a start back over story keyframes whose only box is a chan
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import os
 import time
@@ -25,7 +26,7 @@ from ..decide import chapter_hint, credits_chapter_start_ms, credits_limits_ms, 
 from ..freeze import Freeze
 from ..job_log import clock
 from ..models import Candidate, FileIdentity, MarkerType, Source
-from . import frames, rule_j
+from . import cards, frames, rule_j
 from .textdet_helper import TextDetCancelledError, TextDetShuttingDownError, TextDetUnavailableError, get_textdet_pool
 
 if TYPE_CHECKING:
@@ -64,7 +65,10 @@ if TYPE_CHECKING:
 # (``rule_j.refine_reaches_floor``), and a credits chapter on the story moves to the first text after it
 # (``rule_j.chapter_moves_to``, the label naming where). Any stored answer can move: a start kept earlier can also bring
 # a roll a tail opened on into its join.
-CREDITS_TEXT_VERSION = 7
+# 8: the card the start lands on is read, and a start on prose cards on black (an epilogue's sentences) moves on to the
+# first card after them that isn't prose (``cards``, :func:`_past_prose`); a credits chapter on those cards moves with
+# it (:func:`chapter_origin`). Only starts on such cards move, later only.
+CREDITS_TEXT_VERSION = 8
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
 # (300 s) gives 300,000 plus the version, so a chosen window's version never equals Automatic's, and another window's
@@ -101,6 +105,10 @@ DENSE_BOXES = rule_j.RULE_J.dense * RETRY_SCALE
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
+READING_CARD_PHASE = "Reading the card the credits start on…"
+# The first card read has to start within this of the start's own text: two 1 fps decodes sample up to a second apart,
+# and a card fading in can box a second later.
+LANDS_ON_S = 2.0
 # Shown while the CPU reads again a tail the GPU read no frames from (and how the job log tells that reading apart).
 CPU_RECHECK_PHASE = "The GPU read no frames there; reading the credits on the CPU…"
 # A file whose decode timed out isn't decoded again for this long unless it changes or the run is forced (I1).
@@ -140,6 +148,8 @@ class CreditsTextResult:
             holds text only the larger frame boxes keeps all of its text), which can't be gathered again from
             ``key_rows`` alone; a frame's own text is these without ``overlays``. Empty at 1, where the runs are
             ``key_rows``'.
+        prose_start_s: Where rule J started the roll when the cards there read as prose and the start moved past them
+            (:func:`_past_prose`); None when it didn't move.
     """
 
     start_s: float | None
@@ -150,6 +160,7 @@ class CreditsTextResult:
     overlays: tuple[rule_j.Box, ...] = ()
     scale: int = 1
     run_rows: tuple[rule_j.Row, ...] = ()
+    prose_start_s: float | None = None
 
 
 def find_credits(
@@ -167,6 +178,7 @@ def find_credits(
     earliest_start_s: float | None = None,
     pause_check: Callable[[], bool] | None = None,
     ffmpeg_threads: int | None = None,
+    read_text: Callable[[np.ndarray], list[list[str]]] | None = None,
 ) -> CreditsTextResult:
     """Decode the tail, find the roll, refine its start and, when a scene follows it, its end.
 
@@ -220,8 +232,10 @@ def find_credits(
     A GPU failure, a cancel or the app stopping in either reading is the file's, and so is a timeout of the larger
     reading of a tail without an answer (it waits a day, as a 320x180 timeout does). A larger reading that times out
     after an answer, can't be decoded or can't have its text detected keeps the 320x180 answer or "nothing found"
-    (raised, both readings would run and fail again every day). A file takes up to two readings' time: each has the
-    decode limit, and the steps before the tail, it always had.
+    (raised, both readings would run and fail again every day). A card at the start that can't be read keeps the start
+    the same way (a GPU failure, a cancel or the app stopping there is the file's too). A file takes up to two readings'
+    time and, where its start is on black, the card step's: a 30 s decode and one read, and on prose cards two decodes
+    of the rest of 90 s and a read per card, each decode with the decode limit.
 
     Args:
         path: The media file (read only).
@@ -241,6 +255,8 @@ def find_credits(
             running decode's ffmpeg stops where it is and no decode starts until the resume (``frames.run_decode``),
             and the time limits leave the pause out, the look-back's shared one included.
         ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (``frames.decode_command``); None on a CPU worker.
+        read_text: The words on luma planes (``TextDetectorPool.read_text``): the card the start lands on is read, and
+            a start on prose cards moves past them (:func:`_past_prose`). None reads no card.
 
     Returns:
         The start, the end, and the rows they came from, with the scale they were read at.
@@ -272,6 +288,24 @@ def find_credits(
     )
     read = functools.partial(_read_credits, path, duration_ms=duration_ms, tail_start=tail_start, decode=decode,
                              thinning=thinning, earliest_start_s=earliest_start_s, show=show)  # fmt: skip
+    found = _the_roll(path, read)
+    if read_text is None or found.start_s is None:
+        return found
+    try:
+        return _past_prose(path, found, decode=decode, read_text=read_text, show=show)
+    except (frames.GpuDecodeError, TextDetShuttingDownError):
+        # As at 640x360: a GPU failure is the worker's CPU rerun of the file, and the app stopping is no answer.
+        raise
+    except (frames.FrameDecodeError, TextDetUnavailableError) as exc:
+        # The answer was found: a card that can't be read (a slow or stalled decode, a helper that died) keeps the start
+        # where the roll's frames put it, rather than losing the answer or reading the file again every day.
+        logger.warning("Kept the credits start of {} at {:.1f} s: reading the card there failed: {}",
+                       os.path.basename(path), found.start_s, exc)  # fmt: skip
+        return found
+
+
+def _the_roll(path: str, read: Callable[..., CreditsTextResult]) -> CreditsTextResult:
+    """:func:`find_credits`' two readings, 320x180 and then 640x360, and which one's answer is kept."""
     seen: list[rule_j.Row] = []
     found = read(scale=1, seen=(), decoded=seen)
     if not found.key_rows or (found.start_s is not None and found.end_s is None):
@@ -476,6 +510,88 @@ def _read_credits(
     return CreditsTextResult(
         start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows), overlays, scale, run_rows
     )
+
+
+def _past_prose(
+    path: str,
+    found: CreditsTextResult,
+    *,
+    decode: dict[str, Any],
+    read_text: Callable[[np.ndarray], list[list[str]]],
+    show: Callable[[str], None],
+) -> CreditsTextResult:
+    """The answer with its start moved past the prose cards it lands on (spec §5.4, "Prose cards").
+
+    Only a start on a card on black is read: the first text at or after it, in the rows already read, has to be dark.
+    The card itself comes from 1 fps rows from the start (``cards.FIRST_CARD_WINDOW_S``, overlays left out:
+    :func:`cards.cards`) and is read once at full size (``cards.READ_SCALE``) on the worker's device. When it reads as
+    prose, the rest of ``cards.CARD_WINDOW_S`` after it is decoded at 1 fps at both sizes, the 640x360 frames without
+    the tall boxes 320x180 didn't box (:func:`_small_text`: small credit cards count, dark footage doesn't), and each
+    card there is read in turn: the start moves to the first that isn't prose. Both windows stop at the answer's end
+    when it has one (a scene follows the roll). The start never moves to or past that end, and the end never moves.
+
+    Args:
+        path: The media file.
+        found: The answer, with a start.
+        decode: :func:`find_credits`' decode arguments.
+        read_text: The words on luma planes.
+        show: Shows the step on the worker row.
+
+    Returns:
+        ``found``, or ``found`` with the new start and ``prose_start_s`` set to the old one.
+    """
+    start = found.start_s
+    shown = rule_j.without_overlays(sorted([*found.fine_rows, *found.key_rows], key=lambda row: row[0]), found.overlays)
+    text_at_start = next((row for row in shown if row[0] >= start and rule_j.boxes_of(row)), None)
+    if text_at_start is None or text_at_start[2] >= rule_j.RULE_J.dark:
+        return found
+    name = os.path.basename(path)
+    reading = {key: decode[key] for key in ("ffmpeg", "gpu", "gpu_device_path", "cancel_check", "start_time_s",
+                                            "download_format", "pause_check", "ffmpeg_threads")}  # fmt: skip
+
+    def one_fps(start_s: float, end_s: float, scale: int = 1) -> list[rule_j.Row]:
+        return frames.decode_rows(path, **decode, start_s=start_s, length_s=end_s - start_s, keyframes_only=False,
+                                  fps=1, scale=scale)  # fmt: skip
+
+    def read(card: cards.Card) -> list[str]:
+        show(READING_CARD_PHASE)
+        lines = frames.read_text_at(path, at_s=card.read_s, scale=cards.READ_SCALE, read_text=read_text, **reading)
+        logger.debug("{}: the card at {:.1f} s reads {}", name, card.read_s, lines)
+        return lines
+
+    def window_end(length_s: float) -> float:
+        # Never past the roll's end: there only the scene after it plays, and no card there could be the new start. The
+        # end is the roll's last credit frame, and a -t window leaves its own last second out, so it runs 1 s beyond.
+        return start + length_s if found.end_s is None else min(start + length_s, found.end_s + 1.0)
+
+    show(READING_CARD_PHASE)
+    near = rule_j.without_overlays(one_fps(start, window_end(cards.FIRST_CARD_WINDOW_S)), found.overlays)
+    first = next(iter(cards.cards(near, start)), None)
+    if first is None or first.first_s > text_at_start[0] + LANDS_ON_S:
+        # 320x180 first sees text later than the start's own: the start is on text only a 640x360 reading boxed (small
+        # credits), and the card found is another, never the one the start lands on.
+        return found
+
+    def rest() -> list[cards.Card]:
+        end_s = window_end(cards.CARD_WINDOW_S)
+        if end_s <= first.last_s + 1.0:  # the first card runs to the roll's end: no second card to find
+            return []
+        cut_by_the_window = found.end_s is None or end_s < found.end_s + 1.0
+        seen = {row[0]: rule_j.boxes_of(row) for row in one_fps(first.last_s, end_s)}
+        larger = rule_j.without_overlays(_small_text(one_fps(first.last_s, end_s, RETRY_SCALE), seen), found.overlays)
+        # A card still on screen in the window's last second is cut short there (it would read as a one-second card);
+        # one at the roll's own end just ends with the roll.
+        return [
+            card
+            for card in cards.cards(larger, first.last_s)
+            if first.last_s < card.first_s and not (cut_by_the_window and card.last_s + 1.0 >= end_s)
+        ]
+
+    moved = cards.past_prose(first, rest, read)
+    if moved is None or (found.end_s is not None and moved >= found.end_s):
+        return found
+    logger.debug("{}: the credits start at {:.1f} s is on prose cards; moved to {:.1f} s", name, start, moved)
+    return dataclasses.replace(found, start_s=moved, prose_start_s=start)
 
 
 def _small_text(rows: Sequence[rule_j.Row], seen_boxes: dict[float, tuple[rule_j.Box, ...]]) -> list[rule_j.Row]:
@@ -743,7 +859,8 @@ def detect_credits_text(
             day, the file cut short now or before, cancelled, text detection failed); no answer is stored (a decode
             error or a file cut short is recorded as the file's detector failure). A failure of the 640x360 reading
             alone that doesn't raise (:func:`find_credits`: not on the GPU, a cancel, the app stopping, or a timeout
-            of a tail without an answer) is not one: that stores the 320x180 answer or "nothing found".
+            of a tail without an answer) is not one: that stores the 320x180 answer or "nothing found". Nor is a card
+            at the start that can't be read (the same failures): that stores the start the roll gave.
     """
     from ...processing.generator import CodecNotSupportedError
     from ..pipeline import DetectorAnswer, DetectorUnavailableError
@@ -764,6 +881,14 @@ def detect_credits_text(
             tail_s=_tail_s(rec, ctx),
             ffmpeg=ffmpeg,
             detect_boxes=lambda planes: pool.detect_boxes(
+                planes,
+                gpu=device,
+                gpu_device_path=device_path,
+                gpu_worker=gpu_worker or gpu is not None,
+                on_cpu=fallback_callback,
+                cancel_check=cancel_check,
+            ),
+            read_text=lambda planes: pool.read_text(
                 planes,
                 gpu=device,
                 gpu_device_path=device_path,
@@ -843,6 +968,11 @@ def chapter_origin(result: CreditsTextResult, chapter_ms: int) -> str:
     start_s = result.start_s
     if start_s is None:
         raise ValueError("a credits chapter is only read against a found start")
+    prose_s = result.prose_start_s
+    if prose_s is not None and prose_s - rule_j.CHAPTER_AGREES_S <= chapter_ms / 1000.0 < start_s:
+        # The chapter sits on the prose cards the start moved past, or agrees with where they begin (A Beautiful
+        # Imperfection: chapter and rule J both on the epilogue): their words show it off the roll, so it moves too.
+        return chapter_hint(chapter_ms, moves=True)
     rows = rule_j.without_overlays(result.key_rows, result.overlays)
     moved_s = rule_j.chapter_moves_to(rows, start_s, chapter_ms / 1000.0)
     if moved_s is None:

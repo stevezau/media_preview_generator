@@ -432,7 +432,7 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
                                "fine": [[5701.0, 2, 12.0, stored_cards]],
                                "end": [[5890.0, 2, 12.0, stored_cards]],
                                "overlays": [list(BUG)], "scale": 2,
-                               "runs": [[5700.0, 1, 12.0, stored_cards[:1]]]}  # fmt: skip
+                               "runs": [[5700.0, 1, 12.0, stored_cards[:1]]], "prose_start_s": None}  # fmt: skip
     assert len(calls) == 1
     assert (calls[0]["duration_ms"], calls[0]["gpu"], calls[0]["gpu_device_path"], calls[0]["is_episode"]) == (DUR, "NVIDIA", "cuda:0", False)  # fmt: skip
     monkeypatch.setattr(ct, "CREDITS_TEXT_VERSION", CREDITS_TEXT_VERSION + 1)
@@ -766,9 +766,12 @@ class _GateRun:
         def close():
             run.closed += 1
 
+        def read_text(planes):
+            return [[] for _ in planes]
+
         def detection(decode, gpu_device):
             run.seen["detection"] = (decode, gpu_device)
-            return ct.TextDetection(detect_boxes, backend, close)
+            return ct.TextDetection(detect_boxes, backend, close, read_text)
 
         def hdr_kind(path, *, ffprobe):
             run.seen.setdefault("hdr_ffprobe", set()).add(ffprobe)
@@ -782,7 +785,7 @@ class _GateRun:
         monkeypatch.setattr(ct, "hdr_kind", hdr_kind)
         monkeypatch.setattr(ct, "on_disk", lambda path: path not in gone)
         monkeypatch.setattr(ct, "SPEC_WITHIN_10S", spec_within_10s)
-        self.tmp_path, self.detect_boxes = tmp_path, detect_boxes
+        self.tmp_path, self.detect_boxes, self.read_text = tmp_path, detect_boxes, read_text
 
     def __call__(self, sets=("80", "205"), decode="gpu", gpu_device="cuda:0"):
         return ct.run_credits_text(decode=decode, gpu_device=gpu_device, sets=sets, online=False,
@@ -841,7 +844,9 @@ def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeyp
     assert run.counted[0] == (1, 180, 320) and decodes._backend() == "webgpu cuda:0"
     assert summary["text_detection"] == "webgpu cuda:0"
     assert kwargs.pop("backend")() == "webgpu cuda:0"
-    assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "detect_boxes": run.detect_boxes}
+    # The card at a credits start is read on the same helpers as the boxes (spec §5.4, "Prose cards").
+    assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "detect_boxes": run.detect_boxes,
+                      "read_text": run.read_text}  # fmt: skip
     assert run.seen["probes"] == (tmp_path / "cache", "/ffp")
     assert run.seen["hdr_ffprobe"] == {"/ffp"}
     assert run.seen["baseline"] == tmp_path / "b.json"

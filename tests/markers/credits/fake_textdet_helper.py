@@ -1,5 +1,6 @@
 """Stand-in for the text detection helper process: the same protocol, one box per 100 bright pixels (at most 9),
-the nth box at ``[n, 2n, n + 10, 2n + 12]`` so a test can tell the positions apart.
+the nth box at ``[n, 2n, n + 10, 2n + 12]`` so a test can tell the positions apart; a read request gets one line per
+frame, ``"<n> boxes read on <backend>"``.
 
     python fake_textdet_helper.py --backend cpu|webgpu --mode MODE [--idle-exit-s S] [--no-selftest]
 
@@ -27,6 +28,11 @@ import numpy as np
 
 def boxes_for(plane):
     return [[n, 2 * n, n + 10, 2 * n + 12] for n in range(min(9, int((plane > 200).sum()) // 100))]
+
+
+def text_for(plane, backend):
+    """A read request's answer: one line naming how many boxes the plane holds and the backend that read it."""
+    return [f"{len(boxes_for(plane))} boxes read on {backend}"]
 
 
 def send(out, message):
@@ -113,7 +119,10 @@ def main() -> int:
         if args.mode == "error-reply":
             send(out, {"id": request["id"], "error": "boom"})
             continue
-        send(out, {"id": request["id"], "boxes": [boxes_for(p) for p in planes]})
+        if request.get("read"):
+            send(out, {"id": request["id"], "text": [text_for(p, args.backend) for p in planes]})
+        else:
+            send(out, {"id": request["id"], "boxes": [boxes_for(p) for p in planes]})
         if args.mode == "crash-after-reply":
             os._exit(9)
 

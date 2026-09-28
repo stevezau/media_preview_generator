@@ -11,9 +11,10 @@ markers.db has no record of them), so the script deletes those for lab items thr
 when a lab item on Jellyfin or Emby still holds markers of ours: a matrix started from that state fails for the wrong
 reason (a fresh markers.db can't tell them from the server's own).
 
-Run it BEFORE removing mlab-app and mlab_app_config: the app's markers.db is what tells our markers from Plex's.
-Afterwards: docker rm -f mlab-app; docker volume rm mlab_app_config; MLAB_APP_GPU=nvidia ./app.sh recreate;
-./phase2_matrix.py configure. Detection is left off in the old config, which the volume removal discards.
+Run it with the app (and config volume) that wrote the lab's markers: its markers.db is what tells our markers from
+Plex's. Afterwards the next run gets a new empty config volume, and the old one is left as it is (never removed):
+MLAB_APP_CONFIG_VOLUME=<new volume> MLAB_APP_IMAGE=<image> MLAB_APP_GPU=nvidia ./app.sh recreate;
+./phase2_matrix.py configure. Detection is left off in the old config, which the next run doesn't use.
 """
 
 from __future__ import annotations

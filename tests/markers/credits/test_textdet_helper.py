@@ -138,14 +138,14 @@ class InFlight:
         self._lock = threading.Lock()
         real = th._Helper.request
 
-        def request(helper, planes):
+        def request(helper, planes, **kwargs):
             with self._lock:
                 self.now += 1
                 self.peak = max(self.peak, self.now)
                 if self.wanted and self.now >= self.wanted:
                     self.reached.set()
             try:
-                return real(helper, planes)
+                return real(helper, planes, **kwargs)
             finally:
                 with self._lock:
                     self.now -= 1
@@ -1021,11 +1021,17 @@ class TestCommand:
 
     def test_a_gpu_helper_is_started_with_its_device_and_the_self_test(self, monkeypatch, tmp_path):
         monkeypatch.setenv(th.MODEL_ENV, str(tmp_path / "m.onnx"))
+        monkeypatch.setenv(th.REC_MODEL_ENV, str(tmp_path / "r.onnx"))
         spec = th.HelperSpec("cuda:0", "webgpu", "0000:02:00.0", True, {})
         assert th.helper_command(spec) == [
             sys.executable, "-m", th.MODULE, "--backend", "webgpu", "--model", str(tmp_path / "m.onnx"),
-            "--threads", str(th.THREADS), "--idle-exit-s", f"{th.IDLE_EXIT_S:g}", "--pci-bus-id", "0000:02:00.0",
+            "--rec-model", str(tmp_path / "r.onnx"), "--threads", str(th.THREADS), "--idle-exit-s",
+            f"{th.IDLE_EXIT_S:g}", "--pci-bus-id", "0000:02:00.0",
         ]  # fmt: skip
+
+    def test_the_recognition_model_defaults_to_the_images_copy(self, monkeypatch):
+        monkeypatch.delenv(th.REC_MODEL_ENV, raising=False)
+        assert th.rec_model_path() == "/app/models/latin_PP-OCRv5_rec_mobile.onnx"
 
     def test_a_restart_without_an_address_asks_for_no_self_test(self, monkeypatch, tmp_path):
         monkeypatch.setenv(th.MODEL_ENV, str(tmp_path / "m.onnx"))
@@ -1123,6 +1129,9 @@ class TestAvailability:
         self.model = tmp_path / "model.onnx"
         self.model.write_bytes(b"m")
         monkeypatch.setenv(th.MODEL_ENV, str(self.model))
+        self.rec_model = tmp_path / "rec.onnx"
+        self.rec_model.write_bytes(b"r")
+        monkeypatch.setenv(th.REC_MODEL_ENV, str(self.rec_model))
         monkeypatch.setattr(th, "_find_spec", lambda name: object())
         self.now = [1000.0]
         monkeypatch.setattr(th, "_monotonic", lambda: self.now[0])
@@ -1147,7 +1156,9 @@ class TestAvailability:
         assert th.text_detection_state() is TextDetState.AVAILABLE
         assert len(self.runs) == 1
         command, kwargs = self.runs[0]
-        assert command[1:] == ["-m", th.MODULE, "--check", "--model", str(self.model)]
+        assert command[1:] == [
+            "-m", th.MODULE, "--check", "--model", str(self.model), "--rec-model", str(self.rec_model)
+        ]  # fmt: skip
         # A check that never returns would hold _state_lock, and with it every Settings readiness call in the
         # single gunicorn worker.
         assert kwargs["timeout"] == th.CHECK_TIMEOUT_S
@@ -1169,6 +1180,16 @@ class TestAvailability:
         assert th.text_detection_status() == (
             False,
             f"Needs the text detection model, which the Docker image includes; it isn't at {self.model}",
+        )
+
+    def test_a_missing_recognition_model_is_absent(self, monkeypatch):
+        # The card at a credits start is read with it (spec §5.4, "Prose cards"): without it credit text can't answer
+        # as the image does, so it is as unavailable as without the detection model.
+        self.rec_model.unlink()
+        self._run(monkeypatch, AssertionError("must not run"))
+        assert th.text_detection_status() == (
+            False,
+            f"Needs the text recognition model, which the Docker image includes; it isn't at {self.rec_model}",
         )
 
     def test_a_check_that_says_absent_is_absent_with_its_reason(self, monkeypatch):
@@ -1389,6 +1410,39 @@ class StubTextDet:
         return np.zeros((count, 180 * scale, 320 * scale), np.uint8)
 
 
+class StubReader:
+    """A stand-in :class:`textrec.TextReader`: each frame's words, shifted on the GPU when a test says so."""
+
+    def __init__(self, detector, *, differs=False):
+        self.detector, self.differs = detector, differs
+
+    def read(self, frames):
+        word = "gpu" if self.differs and self.detector.backend == "webgpu" else "cpu"
+        return [[f"NAME {i} {word}."] for i in range(len(frames))]
+
+
+class StubTextRec:
+    """The helper process's whole view of :mod:`textrec`."""
+
+    def __init__(self, *, gpu_reads_differ=False, webgpu_error=None):
+        self.gpu_reads_differ, self.webgpu_error = gpu_reads_differ, webgpu_error
+        self.cpu_sessions: list[tuple] = []
+        self.webgpu_sessions: list = []
+
+    def cpu_session(self, model, threads=2):
+        self.cpu_sessions.append((model, threads))
+        return "cpu-rec-session"
+
+    def webgpu_session(self, model, device, threads=2):
+        self.webgpu_sessions.append(device)
+        if self.webgpu_error is not None:
+            raise self.webgpu_error
+        return "gpu-rec-session"
+
+    def TextReader(self, detector, session):  # noqa: N802 - the name textrec exports
+        return StubReader(detector, differs=self.gpu_reads_differ)
+
+
 @pytest.mark.parametrize("error", [OSError("no libvulkan.so.1"), ValueError("a ctypes surprise")])
 def test_a_vulkan_listing_that_breaks_is_left_to_the_session(monkeypatch, error):
     # Anything going wrong in the check itself skips it: it must never read as the GPU failing.
@@ -1418,13 +1472,14 @@ class TestHelperProcessBackendChoice:
         monkeypatch.setattr(th, "_vulkan_adapters", lambda: listed[0])
         return listed
 
-    def _start(self, stub, **overrides):
+    def _start(self, stub, rec=None, **overrides):
         args = SimpleNamespace(
-            backend="webgpu", model="/models/det.onnx", threads=2, pci_bus_id="0000:02:00.0", selftest=True
-        )
+            backend="webgpu", model="/models/det.onnx", rec_model="/models/rec.onnx", threads=2,
+            pci_bus_id="0000:02:00.0", selftest=True,
+        )  # fmt: skip
         for name, value in overrides.items():
             setattr(args, name, value)
-        return th._start_detector(stub, args)
+        return th._start_detector(stub, rec if rec is not None else StubTextRec(), args)
 
     def test_a_gpu_that_is_clearly_faster_wins(self, clock):
         stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0)
@@ -1432,11 +1487,19 @@ class TestHelperProcessBackendChoice:
         assert detector.backend == "webgpu"
         assert ready == {
             "backend": "webgpu",
-            "selftest": {"gpu_ms": 1.0, "cpu_ms": 10.0, "ratio": 0.1, "same_boxes": True, "same_boxes_large": True},
+            "selftest": {
+                "gpu_ms": 1.0,
+                "cpu_ms": 10.0,
+                "ratio": 0.1,
+                "same_boxes": True,
+                "same_boxes_large": True,
+                "same_text": True,
+            },
             "reason": "",
         }
-        # 20 frames at 320x180 timed, and 8 at 640x360 compared.
-        assert stub.frame_sizes == [(th.SELFTEST_FRAMES, 1), (th.SELFTEST_LARGE_FRAMES, th.SELFTEST_LARGE_SCALE)]
+        # 20 frames at 320x180 timed, 8 at 640x360 compared, and 3 at the size a card is read at read.
+        assert stub.frame_sizes == [(th.SELFTEST_FRAMES, 1), (th.SELFTEST_LARGE_FRAMES, th.SELFTEST_LARGE_SCALE),
+                                    (th.SELFTEST_READ_FRAMES, th.READ_SCALE)]  # fmt: skip
 
     def test_a_slower_gpu_still_serves_from_the_gpu(self, clock):
         # The worker is a GPU worker: its text detection runs on its GPU when the GPU finds the CPU's boxes.
@@ -1445,7 +1508,14 @@ class TestHelperProcessBackendChoice:
         assert detector.backend == "webgpu"
         assert ready == {
             "backend": "webgpu",
-            "selftest": {"gpu_ms": 20.0, "cpu_ms": 10.0, "ratio": 2.0, "same_boxes": True, "same_boxes_large": True},
+            "selftest": {
+                "gpu_ms": 20.0,
+                "cpu_ms": 10.0,
+                "ratio": 2.0,
+                "same_boxes": True,
+                "same_boxes_large": True,
+                "same_text": True,
+            },
             "reason": "",
         }
 
@@ -1875,3 +1945,142 @@ class TestProtocol:
         helper = self._helper(json.dumps({"id": 1, "boxes": [[]]}).encode() + b"\n")
         with pytest.raises(th.HelperError, match="bad answer"):
             helper.request(self.PLANES)
+
+
+class TestReadingACard:
+    """``read_text``: a card at a credits start is read by the same helper, on the same device, with the same
+    fallback, as its boxes are found (spec §5.4, "Prose cards")."""
+
+    def test_a_gpu_workers_card_is_read_by_its_gpu_helper(self, envs):
+        env = envs()
+        assert env.pool.read_text(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == [
+            ["0 boxes read on webgpu"],
+            ["9 boxes read on webgpu"],
+        ]
+        # The same helper serves the boxes afterwards: one GPU helper, started once, with its self-test.
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.backends() == [("cuda:0", "webgpu", True)]
+
+    def test_a_cpu_workers_card_is_read_by_a_cpu_helper(self, envs):
+        env = envs()
+        assert env.pool.read_text(PLANES, gpu=None, gpu_device_path=None) == [
+            ["0 boxes read on cpu"],
+            ["9 boxes read on cpu"],
+        ]
+        assert env.backends() == [("cpu", "cpu", False)]
+
+    def test_a_failing_gpu_helper_hands_the_read_to_the_cpu_and_says_so(self, envs, clock):
+        env = envs(modes={"webgpu": "crash-on-request"})
+        reasons = []
+        text = env.pool.read_text(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0", on_cpu=reasons.append)
+        assert text == [["0 boxes read on cpu"], ["9 boxes read on cpu"]]
+        assert len(reasons) == 1
+        assert reasons[0].startswith("Credit text detection on the CPU: its GPU helper failed")
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"  # waiting out the back-off, as for boxes
+
+    def test_a_gpu_that_reads_other_words_than_the_cpu_moves_to_the_cpu_for_good(self, envs):
+        env = envs(modes={"webgpu": "selftest-cpu"})
+        assert env.pool.read_text(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0")[1] == ["9 boxes read on cpu"]
+        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            {"text": [["a"]]},  # one frame's text for two frames
+            {"text": [["a"], [1]]},  # a line that isn't a string
+            {"text": [["a"], "b"]},  # a frame's text that isn't a list
+            {"boxes": [[], []]},  # boxes for a read
+            {"error": "boom"},
+        ],
+    )
+    def test_a_read_answered_with_anything_but_each_frames_lines_is_a_bad_answer(self, reply):
+        helper = th._Helper.__new__(th._Helper)
+        helper._next_id, helper._timeout = 0, 5.0
+        helper._write = lambda data, deadline: None
+        helper.read_message = lambda timeout_s: {"id": 1, **reply}
+        with pytest.raises(th.HelperError, match="bad answer"):
+            helper.request(PLANES, read=True)
+
+    def test_a_read_request_says_so_in_its_header(self):
+        helper = th._Helper.__new__(th._Helper)
+        helper._next_id, helper._timeout = 0, 5.0
+        sent = []
+        helper._write = lambda data, deadline: sent.append(data)
+        helper.read_message = lambda timeout_s: {"id": 1, "text": [[], ["A LINE."]]}
+        assert helper.request(PLANES, read=True) == [[], ["A LINE."]]
+        header = json.loads(sent[0].split(b"\n", 1)[0])
+        assert header == {"id": 1, "frames": 2, "height": 180, "width": 320, "read": True}
+
+
+class _Reads(FakeDetector):
+    def __init__(self, word, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.word = word
+
+    def read(self, planes):
+        return [[self.word] for _ in planes]
+
+
+def test_the_self_test_needs_the_same_words_too():
+    clock = FakeClock()
+    frames = np.zeros((4, 180, 320), np.uint8)
+    card = np.zeros((1, 720, 1280), np.uint8)
+    gpu = _Reads("NAME 0 gpu.", [1] * 4, 0.001, clock)
+    cpu = _Reads("NAME 0 cpu.", [1] * 4, 0.002, clock)
+    result = th.self_test(gpu, cpu, frames, clock=clock, warmup=1, read_frames=card)
+    assert (result.same_boxes, result.same_text, result.use_gpu) == (True, False, False)
+    assert result.cpu_reason() == "the GPU was reading different words than the CPU"
+    same = th.self_test(cpu, cpu, frames, clock=clock, warmup=1, read_frames=card)
+    assert same.same_text and same.use_gpu
+
+
+def test_the_self_tests_read_frames_are_the_size_a_card_is_read_at():
+    from media_preview_generator.markers.credits import cards
+
+    assert th.READ_SCALE == cards.READ_SCALE
+
+
+def _helper_args() -> SimpleNamespace:
+    return SimpleNamespace(backend="webgpu", model="/m/det.onnx", rec_model="/m/rec.onnx", threads=2,
+                           pci_bus_id="0000:02:00.0", selftest=True)  # fmt: skip
+
+
+def test_a_gpu_whose_reads_differ_serves_from_the_cpu_in_the_helper_process(monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(th, "_perf_counter", clock)
+    monkeypatch.setattr(th, "_vulkan_adapters", lambda: [("Test GPU", th.VK_DISCRETE_GPU)])
+    rec = StubTextRec(gpu_reads_differ=True)
+    engine, ready = th._start_detector(StubTextDet(clock), rec, _helper_args())
+    assert engine.backend == "cpu"
+    assert ready["backend"] == "cpu" and ready["selftest"]["same_text"] is False
+    assert ready["reason"] == "the GPU was reading different words than the CPU"
+    # Both models on each side: the recognition model's GPU session on the same EP device, a CPU session beside it.
+    assert len(rec.webgpu_sessions) == 1 and rec.cpu_sessions == [("/m/rec.onnx", 2)]
+
+
+def test_a_recognition_session_that_fails_on_the_gpu_is_a_cpu_fallback_this_time(monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(th, "_perf_counter", clock)
+    monkeypatch.setattr(th, "_vulkan_adapters", lambda: [("Test GPU", th.VK_DISCRETE_GPU)])
+    rec = StubTextRec(webgpu_error=RuntimeError("EP_FAIL"))
+    engine, ready = th._start_detector(StubTextDet(clock), rec, _helper_args())
+    assert engine.backend == "cpu"
+    assert ready["failed"] is True and "EP_FAIL" in ready["reason"]
+
+
+def test_the_helper_process_serves_a_read_request_with_its_words(monkeypatch):
+    class Engine:
+        def detect(self, planes):
+            raise AssertionError("a read asks for words, not boxes")
+
+        def read(self, planes):
+            return [[f"{planes.shape[1]}x{planes.shape[2]}"] for _ in planes]
+
+    header = json.dumps({"id": 7, "frames": 2, "height": 4, "width": 6, "read": True}).encode() + b"\n"
+    stdin_r, stdin_w = os.pipe()
+    os.write(stdin_w, header + bytes(2 * 4 * 6))
+    os.close(stdin_w)
+    monkeypatch.setattr(th.sys, "stdin", SimpleNamespace(buffer=os.fdopen(stdin_r, "rb")))
+    out = io.BytesIO()
+    assert th._serve(Engine(), out, 5.0) == 0
+    assert json.loads(out.getvalue()) == {"id": 7, "text": [["4x6"], ["4x6"]]}

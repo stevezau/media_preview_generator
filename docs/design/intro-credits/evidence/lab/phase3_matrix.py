@@ -244,29 +244,115 @@ def decode_start_s(args: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
+# The packaged clips the reference decode check reads (spec §5.4 "Every GPU's credits decode is compared with the
+# CPU's, as a diagnostic", 2026-09-25): once per process per GPU, on a daemon thread of its own, never a worker's decode.
+REFERENCE_CLIPS = "/markers/credits/reference_clips/"
+
+
+def reference_decodes(decodes: list[str]) -> list[str]:
+    """The reference decode check's decodes among those a sampler saw.
+
+    Args:
+        decodes: Credit-text decode argvs.
+
+    Returns:
+        The ones that read a packaged reference clip.
+    """
+    return [a for a in decodes if REFERENCE_CLIPS in a]
+
+
+def file_decodes(decodes: list[str]) -> list[str]:
+    """The decodes of the files a job reads: every sampled decode but the reference decode check's.
+
+    Args:
+        decodes: Credit-text decode argvs.
+
+    Returns:
+        The ones that read a library file.
+    """
+    return [a for a in decodes if REFERENCE_CLIPS not in a]
+
+
+def one_scaler(args: str) -> bool:
+    """A decode that scales by the nearest pixel with ffmpeg's own scale filter and no vendor scaler (spec §5.4 "One
+    scaler on every path", credits text version 4).
+
+    Args:
+        args: A decode's argv.
+
+    Returns:
+        True for the shared scaler.
+    """
+    return re.search(r"scale=\d+:\d+:flags=neighbor", args) is not None and not any(
+        vendor in args for vendor in ("scale_cuda", "scale_vaapi", "scale_qsv")
+    )
+
+
+def gpu_threads(decodes: list[str], threads: int = 2) -> bool:
+    """Every decode on the GPU worker's own GPU with its ``ffmpeg_threads`` (``-threads N -filter_threads N``, spec §5.6
+    "Threads"); :func:`gpu_entry` gives the row's GPU worker ``ffmpeg_threads`` 2.
+
+    Args:
+        decodes: The file's decode argvs.
+        threads: The GPU's ``ffmpeg_threads``.
+
+    Returns:
+        True when there was at least one decode and every one matches.
+    """
+    return bool(decodes) and all(
+        "-hwaccel cuda" in a and f" -threads {threads} " in f" {a} " and f" -filter_threads {threads} " in f" {a} "
+        for a in decodes
+    )
+
+
 class ProcessSampler(threading.Thread):
-    """Credit-text decodes and text detection helpers in mlab-app, every 0.5 s, until the block ends."""
+    """Credit-text decodes and text detection helpers in mlab-app, every ``INTERVAL_S``, until the block ends.
+
+    One ``ps`` loop runs inside the container for the whole block. A refine window's decode lasts under a second on the
+    P5000 (0.7-0.9 s measured on 2026-09-27), and the earlier poll -- a new ``docker exec`` every 0.5 s, 0.1 s each --
+    let one go unseen: phase 3 row 16's premise failed on a working app in the full run (``CHANGES.md``). The loop ends
+    when the block does (a stop file), and at the latest after ``MAX_S``.
+    """
+
+    INTERVAL_S = 0.05
+    MAX_S = 3 * 3600
+    SAMPLE_END = "--mlab-sample--"
 
     def __init__(self) -> None:
         super().__init__(daemon=True)
         self.decodes: list[str] = []
         self.helpers: dict[str, str] = {}
         self.peak_helpers = 0
+        self.samples = 0
         self.stop = threading.Event()
+        self._stop_file = f"/tmp/mlab-sampler-{os.getpid()}-{id(self)}"
+        self._proc: subprocess.Popen | None = None
 
     def run(self) -> None:
-        while not self.stop.is_set():
-            out = sh("docker", "exec", "mlab-app", "ps", "-eo", "pid=,args=", check=False)
-            running = 0
-            for line in out.splitlines():
-                pid, _, args = line.strip().partition(" ")
-                if is_credit_decode(args) and args not in self.decodes:
-                    self.decodes.append(args)
-                if "textdet_helper" in args and "--check" not in args:
-                    running += 1
-                    self.helpers.setdefault(pid, args)
-            self.peak_helpers = max(self.peak_helpers, running)
-            self.stop.wait(0.5)
+        rounds = int(self.MAX_S / self.INTERVAL_S)
+        script = (
+            f'i=0; while [ ! -e "$1" ] && [ "$i" -lt {rounds} ]; do ps -eo pid=,args=; echo {self.SAMPLE_END}; '
+            f'i=$((i + 1)); sleep {self.INTERVAL_S}; done; rm -f "$1"'
+        )
+        self._proc = subprocess.Popen(
+            ["docker", "exec", "mlab-app", "sh", "-c", script, "mlab-sampler", self._stop_file],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )  # fmt: skip
+        running = 0
+        for raw in self._proc.stdout or []:
+            line = raw.strip()
+            if line == self.SAMPLE_END:
+                self.peak_helpers = max(self.peak_helpers, running)
+                self.samples += 1
+                running = 0
+                continue
+            pid, _, args = line.partition(" ")
+            if is_credit_decode(args) and args not in self.decodes:
+                self.decodes.append(args)
+            if "textdet_helper" in args and "--check" not in args:
+                running += 1
+                self.helpers.setdefault(pid, args)
+        self._proc.wait()
 
     def webgpu_pids(self) -> list[str]:
         """The helper PIDs seen running with the WebGPU backend.
@@ -282,7 +368,11 @@ class ProcessSampler(threading.Thread):
 
     def __exit__(self, *exc: object) -> None:
         self.stop.set()
-        self.join(timeout=5)
+        sh("docker", "exec", "mlab-app", "touch", self._stop_file, check=False)
+        self.join(timeout=10)
+        if self.is_alive() and self._proc is not None:
+            self._proc.kill()
+            self.join(timeout=5)
 
 
 def helper_threads(pid: str) -> str:
@@ -512,51 +602,44 @@ def row_01_capability() -> dict:
 
 
 @row(2)
-def row_02_high_then_medium() -> dict:
-    """High: credits text alone is Needs review, nothing published. Medium (Q1): published to all five servers, the skip
-    ending at the last credit before the scene (Q3) on Plex and Jellyfin; Emby gets the start and says it skips to the
-    end of the file (R1)."""
-    evidence: dict[str, Any] = {}
-    try:
-        p2.set_publish_when("high")
-        job_high, _ = credits_job("row 2 High", force=True)
-        payload_high = p1.item_payload(MOVIE)
-        evidence["duration_ms"] = payload_high["duration_ms"]
-        evidence["high"] = {"job": job_high["id"], "evidence": credits_evidence(MOVIE),
-                            "decision": payload_high["decisions"]["credits"]}  # fmt: skip
-        evidence["high_published"] = {
-            sid: p2.inspector_server(MOVIE, sid).get("published") for sid in p2.ALL_MARKER_SERVERS
-        }
-        p2.set_publish_when("medium")
-        job_medium, _ = credits_job("row 2 Medium", force=False)
-        evidence["medium"] = {"job": job_medium["id"], "decision": p1.item_payload(MOVIE)["decisions"]["credits"]}
-        evidence["servers"] = {sid: p2.inspector_server(MOVIE, sid) for sid in p2.ALL_MARKER_SERVERS}
-        evidence["inspector"] = screenshot(
-            '        await pg.goto("' + p1.APP + '/bif-viewer")\n'
-            "        await pg.wait_for_function(\"() => document.querySelector('#serverSelect option[value=mlab-plex]')\", timeout=20000)\n"
-            '        await pg.select_option("#serverSelect", "mlab-plex")\n'
-            # Plex titles the movie "Synth Credits" (the year is its own field), and the search returns both movies:
-            # the row is picked by its file, not by being first.
-            '        await pg.fill("#searchInput", "Synth Credits"); await pg.click("#searchBtn")\n'
-            "        hit = pg.locator('.result-item[data-media-file=\"" + MOVIE + "\"]').first\n"
-            "        await hit.wait_for(timeout=30000)\n"
-            "        await hit.click(); await pg.click('#inspectorMarkersTabBtn')\n"
-            "        await pg.wait_for_timeout(3000)\n"
-            '        lane = pg.locator(\'.mk-window[data-window="ending"] .mk-lane[data-lane="Credit text"]\').first\n'
-            "        print(json.dumps(await lane.inner_text()))",
-            p1.SHOTS / "p3-row02-inspector.png",
-        )
-    finally:
-        p2.set_publish_when("high")
-    rows = evidence["high"]["evidence"] if "high" in evidence else []
+def row_02_credit_text_alone() -> dict:
+    """Credit text alone decides credits (Q1; the app's only rules since 2026-09-24, spec §5.5 rule 6): published to all
+    five servers, the skip ending at the last credit before the scene (Q3) on Plex and Jellyfin; Emby gets the start
+    and says it skips to the end of the file (R1). A "Publish when: High" posted as an older client or settings.json
+    still has it is ignored (schema 16, spec §8): the row posts it first, and the lone answer still publishes."""
+    evidence: dict[str, Any] = {"publish_when_high": p2.post_removed_publish_when("high")}
+    job, _ = credits_job("row 2", force=True)
+    payload = p1.item_payload(MOVIE)
+    evidence["duration_ms"] = payload["duration_ms"]
+    evidence["job"] = job["id"]
+    evidence["evidence"] = credits_evidence(MOVIE)
+    evidence["decision"] = payload["decisions"]["credits"]
+    evidence["servers"] = {sid: p2.inspector_server(MOVIE, sid) for sid in p2.ALL_MARKER_SERVERS}
+    evidence["inspector"] = screenshot(
+        '        await pg.goto("' + p1.APP + '/bif-viewer")\n'
+        "        await pg.wait_for_function(\"() => document.querySelector('#serverSelect option[value=mlab-plex]')\", timeout=20000)\n"
+        '        await pg.select_option("#serverSelect", "mlab-plex")\n'
+        # Plex titles the movie "Synth Credits" (the year is its own field), and the search returns both movies:
+        # the row is picked by its file, not by being first.
+        '        await pg.fill("#searchInput", "Synth Credits"); await pg.click("#searchBtn")\n'
+        "        hit = pg.locator('.result-item[data-media-file=\"" + MOVIE + "\"]').first\n"
+        "        await hit.wait_for(timeout=30000)\n"
+        "        await hit.click(); await pg.click('#inspectorMarkersTabBtn')\n"
+        "        await pg.wait_for_timeout(3000)\n"
+        '        lane = pg.locator(\'.mk-window[data-window="ending"] .mk-lane[data-lane="Credit text"]\').first\n'
+        "        print(json.dumps(await lane.inner_text()))",
+        p1.SHOTS / "p3-row02-inspector.png",
+    )
+    rows = evidence["evidence"]
     start = rows[0]["start_ms"] if rows else None
     end = rows[0]["end_ms"] if rows else None
+    marker = evidence["decision"].get("marker") or {}
 
     def mss(ms: int) -> str:
         return f"{ms // 60_000}:{ms // 1000 % 60:02d}"
 
     def published(sid: str) -> dict | None:
-        markers = (evidence.get("servers", {}).get(sid) or {}).get("published") or []
+        markers = (evidence["servers"].get(sid) or {}).get("published") or []
         return next((m for m in markers if m["type"] == "credits"), None)
 
     premise = {
@@ -569,20 +652,26 @@ def row_02_high_then_medium() -> dict:
         and END_WINDOW_MS[0] <= end <= END_WINDOW_MS[1],
     }
     checks = {
-        "High: credits needs review": evidence.get("high", {}).get("decision", {}).get("status") == "needs_review",
-        "High: nothing of ours published": not any(evidence.get("high_published", {}).values()),
-        "Medium: credits decided with the text's end": (evidence.get("medium", {}).get("decision", {}).get("marker") or {}).get("end_ms") == end,
-        **{f"Medium: {sid} published start and end": (m := published(sid)) is not None and abs(m["start_ms"] - start) <= 1_000 and m["end_ms"] == end
+        "a posted publish_when High is taken and not kept": evidence["publish_when_high"]["ignored"],
+        "credits decided by credit text alone, with the text's end": evidence["decision"]["status"] == "decided"
+        and marker.get("decided_by") == ["credits_text"] and marker.get("end_ms") == end,
+        **{f"{sid} published start and end": (m := published(sid)) is not None and abs(m["start_ms"] - start) <= 1_000 and m["end_ms"] == end
            for sid in ("mlab-plex", "mlab-jellyfin", "mlab-jf12")},
-        **{f"Medium: {sid} published the start and says it skips to the end": (m := published(sid)) is not None
+        **{f"{sid} published the start and says it skips to the end": (m := published(sid)) is not None
            and abs(m["start_ms"] - start) <= 1_000
            and "Emby skips to the end of the file" in ((evidence["servers"][sid] or {}).get("publish_message") or "")
            for sid in p2.EMBY_SERVERS},
         "Inspector's Credit text lane shows start-end": start is not None and end is not None
         and any(f"{mss(start + d)}–{mss(end + e)}" in str(evidence.get("inspector", {}).get("page")) for d in (-1000, 0, 1000) for e in (-1000, 0, 1000)),
     }  # fmt: skip
+    notes = [
+        "expectation changed (2026-09-27 lab matrices update): the row's High half (credit text alone Needs review, "
+        "nothing published) is gone with the removed publish_when (schema 16); in its place a posted High must be "
+        "ignored and the lone answer still publish; the Medium half's checks are unchanged",
+        f"decision {evidence['decision']}",
+    ]
     return checks_result(
-        2, "Synthetic movie with a scene after the credits, at High then Medium", premise, checks, evidence
+        2, "Synthetic movie with a scene after the credits: credit text alone", premise, checks, evidence, notes
     )
 
 
@@ -623,19 +712,30 @@ def row_03_gpu_on_storage() -> dict:
         "the CPU-only run detected text on the CPU helper": bool(cpu_helpers)
         and all("--backend cpu" in a for a in cpu_helpers),
     }
+    decodes = file_decodes(sampler.decodes)
     checks = {
-        "decode used -hwaccel cuda and scale_cuda": any("-hwaccel cuda" in a and "scale_cuda=320:180" in a for a in sampler.decodes),
-        "decode used -threads 2": all(" -threads 2 " in f" {a} " for a in sampler.decodes),
+        "the file's decodes ran on CUDA with the one scaler (hwdownload, scale=320:180:flags=neighbor)": any(
+            "-hwaccel cuda" in a and "hwdownload" in a and "scale=320:180:flags=neighbor" in a for a in decodes
+        ),
+        "one scaler on both legs: every decode scales by the nearest pixel, none with scale_cuda": bool(decodes)
+        and all(one_scaler(a) for a in decodes + cpu_sampler.decodes),
+        "every decode of the file on the GPU with its ffmpeg_threads (-threads 2 -filter_threads 2)": gpu_threads(decodes),
         "a webgpu helper ran": bool(sampler.webgpu_pids()),
         "the self-test kept the GPU": any(": GPU (" in line for line in log),
         "GPU answer within 2 s of the CPU answer": bool(gpu_rows and cpu_rows) and abs(gpu_rows[0]["start_ms"] - cpu_rows[0]["start_ms"]) <= 2_000,
         "GPU end within 2 s of the CPU end": bool(gpu_rows and cpu_rows) and None not in (gpu_rows[0]["end_ms"], cpu_rows[0]["end_ms"])
         and abs(gpu_rows[0]["end_ms"] - cpu_rows[0]["end_ms"]) <= 2_000,
     }  # fmt: skip
-    evidence = {"job": job["id"], "decodes": sampler.decodes, "helpers": sampler.helpers, "log": log,
-                "cpu_decodes": cpu_sampler.decodes, "cpu_helpers": cpu_helpers,
+    evidence = {"job": job["id"], "decodes": decodes, "decode_check_decodes": reference_decodes(sampler.decodes),
+                "helpers": sampler.helpers, "log": log, "cpu_decodes": cpu_sampler.decodes, "cpu_helpers": cpu_helpers,
                 "cpu": cpu_rows, "gpu": gpu_rows, "workers_page": worker_page}  # fmt: skip
-    return checks_result(3, "GPU decode and WebGPU text detection on storage", premise, checks, evidence)
+    notes = [
+        "expectation changed (2026-09-27 lab matrices update): was 'scale_cuda' and '-threads 2' on every decode seen; "
+        "one scaler on every path since 2026-09-24 (credits text version 4), and the reference-clip decode check "
+        "(2026-09-25, a diagnostic off the workers) is kept out of the worker's thread check",
+        f"decode check's reference-clip decodes seen: {len(evidence['decode_check_decodes'])}",
+    ]
+    return checks_result(3, "GPU decode and WebGPU text detection on storage", premise, checks, evidence, notes)
 
 
 @row(4)
@@ -666,14 +766,20 @@ def row_04_gpu_decode_failure() -> dict:
     return checks_result(4, "GPU decode failure reruns on the CPU", premise, checks, evidence)
 
 
-# textdet_helper.GPU_RETRY_S, plus a margin: after one GPU failure the device's next request waits this long for the GPU.
+# More than textdet_helper.GPU_RETRY_BASE_S (5 s, doubling with each failure in a row since #314): after one GPU failure
+# the device's next request is read on the CPU until then, so a job this long after it is back on the GPU.
 GPU_RETRY_WAIT_S = 35
+# The helper's own words since #314 (textdet_helper._gpu_failed / _gpu_worked).
+FALLBACK_LINE = "this request is read on the CPU and the GPU is tried again in"
+BACK_ON_GPU_LINE = "back on the GPU after 1 failed request"
+PARKED_LINE = "for the rest of this run of the app"
 
 
 @row(5)
 def row_05_helper_killed_in_a_request() -> dict:
-    """A helper killed while it holds a request: that request reads on the CPU, and after the back-off the device's
-    next job is back on a new GPU helper (2026-09-25: one failure no longer parks the GPU for the run)."""
+    """A helper killed while it holds a request: that request reads on the CPU (one WARNING saying so), and after the
+    back-off the device's next job is back on a new GPU helper, logged as back on the GPU (2026-09-25: one failure no
+    longer parks the GPU for the run; the log's wording since #314)."""
     since = now_iso()
     evidence: dict[str, Any] = {}
     killed: str | None = None
@@ -696,17 +802,15 @@ def row_05_helper_killed_in_a_request() -> dict:
                 killed_job = p1.wait_job(started["id"])
                 evidence["killed_job"] = {"job": killed_job["id"], "status": killed_job["status"],
                                           "rows": credits_evidence(MOVIE)}  # fmt: skip
-                evidence["fallbacks"] = app_log_lines(
-                    since, "this request runs on the CPU because its GPU helper failed"
-                )
-                evidence["warnings"] = app_log_lines(since, "for the rest of this run of the app") + app_log_lines(
-                    since, "times in a row"
-                )
+                evidence["fallbacks"] = app_log_lines(since, FALLBACK_LINE)
+                evidence["warnings"] = app_log_lines(since, PARKED_LINE)
                 time.sleep(GPU_RETRY_WAIT_S)
                 again, _ = credits_job("row 5 after the kill", force=True)
                 evidence["after_job"] = {"job": again["id"], "status": again["status"],
                                          "rows": credits_evidence(MOVIE)}  # fmt: skip
                 evidence["webgpu_pids_after"] = sorted(sampler.webgpu_pids())
+                # Read inside the block: leaving it recreates the app, and its log goes with the old container.
+                evidence["back_on_gpu"] = app_log_lines(since, BACK_ON_GPU_LINE)
     finally:
         if killed is not None:
             sh("docker", "exec", "mlab-app", "kill", "-CONT", killed, check=False)
@@ -721,6 +825,7 @@ def row_05_helper_killed_in_a_request() -> dict:
     checks = {
         "exactly one this-request-on-the-CPU line": len(evidence.get("fallbacks", [])) == 1,
         "no warning: one failure doesn't park the GPU": evidence.get("warnings") == [],
+        "the log says the GPU is back after that one failed request": len(evidence.get("back_on_gpu", [])) == 1,
         "the job still completed": evidence.get("killed_job", {}).get("status") == "completed",
         "the answer still landed within 10 s of 540 s": near_truth(evidence.get("killed_job", {}).get("rows", [])),
         # The sampler keeps every helper it has seen, so a new one is a PID it didn't have before the kill.
@@ -728,7 +833,12 @@ def row_05_helper_killed_in_a_request() -> dict:
         "the next forced job still completed": evidence.get("after_job", {}).get("status") == "completed",
         "the next forced job still answered right": near_truth(evidence.get("after_job", {}).get("rows", [])),
     }
-    return checks_result(5, "A text detection helper killed during a request", premise, checks, evidence)
+    notes = [
+        "expectation changed (2026-09-27 lab matrices update): the fallback line's wording changed in #314 (was "
+        "'this request runs on the CPU because its GPU helper failed'); the 'times in a row' warning is gone with the "
+        "back-off, and the 'back on the GPU' line is checked in its place"
+    ]
+    return checks_result(5, "A text detection helper killed during a request", premise, checks, evidence, notes)
 
 
 @row(6)
@@ -802,7 +912,6 @@ def row_08_detection_unavailable() -> dict:
     stored = credits_evidence(MOVIE)
     evidence: dict[str, Any] = {"stored_before": stored}
     try:
-        p2.set_publish_when("medium")
         recreate_app(gpu=True, extra_env=BROKEN_MODEL_ENV)
         evidence["source"] = app_ok("GET", "/api/markers/sources/local")["credits_text"]
         job, _ = credits_job("row 8 detection unavailable", force=False)
@@ -813,7 +922,6 @@ def row_08_detection_unavailable() -> dict:
         back, _ = credits_job("row 8 detection back", force=False)
         evidence["restored"] = {"job": back["id"], "decision": p1.item_payload(MOVIE)["decisions"]["credits"],
                                 "source": app_ok("GET", "/api/markers/sources/local")["credits_text"]}  # fmt: skip
-        p2.set_publish_when("high")
     premise = {
         "one answer was stored before the row": len(stored) == 1,
         "the app can't read credit text": evidence.get("source", {}).get("available") is False,
@@ -829,7 +937,8 @@ def row_08_detection_unavailable() -> dict:
 
 @row(9)
 def row_09_resources() -> dict:
-    """A GPU credit-text job keeps to two ffmpeg threads and at most two detection helpers."""
+    """A GPU credit-text job keeps its file's decodes to the GPU's ``ffmpeg_threads`` (2 here: ``-threads 2
+    -filter_threads 2``, spec §5.6) and runs at most two detection helpers."""
     with GpuWorker(), ProcessSampler() as sampler:
         job, _ = credits_job("row 9 resources", force=True)
         pids = sorted(sampler.webgpu_pids())
@@ -840,7 +949,9 @@ def row_09_resources() -> dict:
         "a webgpu helper was seen": bool(pids),
     }
     checks = {
-        "every decode used -threads 2": all(" -threads 2 " in f" {a} " for a in sampler.decodes),
+        "every decode of the file on the GPU with -threads 2 -filter_threads 2": gpu_threads(
+            file_decodes(sampler.decodes)
+        ),
         # One GPU worker over one file, so this is a ceiling the row stays under, not one it exercises: the note
         # records what actually ran.
         "no more than two detection helpers at once": sampler.peak_helpers <= 2,
@@ -849,6 +960,9 @@ def row_09_resources() -> dict:
     notes = [
         f"webgpu helper threads: {threads or 'none read'}",
         f"helpers running at once, peak: {sampler.peak_helpers}",
+        f"reference decode check's decodes (a diagnostic off the workers, not checked): {len(reference_decodes(sampler.decodes))}",
+        "expectation changed (2026-09-27 lab matrices update): was '-threads 2' on every decode seen, the reference "
+        "decode check's (2026-09-25) included",
     ]
     evidence = {"job": job["id"], "decodes": sampler.decodes, "helpers": sampler.helpers,
                 "peak_helpers": sampler.peak_helpers, "helper_threads": threads}  # fmt: skip
@@ -862,18 +976,13 @@ def row_10_real_movies() -> dict:
     evidence: dict[str, Any] = {"harness_answers": str(HARNESS_ANSWERS),
                                 "movies": [{"name": p["name"], "harness_start_s": p["start_s"], "harness_end_s": p["end_s"]}
                                            for p in picks]}  # fmt: skip
-    seen: dict[str, list[dict]] = {}
-    try:
-        with OnlineSourcesOff():
-            p2.set_publish_when("medium")
-            with GpuWorker():  # the harness cache is a GPU run
-                job, _ = credits_job(
-                    "row 10 harness movies", force=True, paths=tuple(p["path"] for p in picks), timeout=7200
-                )
-            evidence["job"] = job["id"]
-            seen = {p["name"]: credits_evidence(p["path"]) for p in picks}
-    finally:
-        p2.set_publish_when("high")
+    with OnlineSourcesOff():
+        with GpuWorker():  # the harness cache is a GPU run
+            job, _ = credits_job(
+                "row 10 harness movies", force=True, paths=tuple(p["path"] for p in picks), timeout=7200
+            )
+        evidence["job"] = job["id"]
+        seen = {p["name"]: credits_evidence(p["path"]) for p in picks}
     compared = []
     for pick in picks:
         rows = seen.get(pick["name"], [])
@@ -931,21 +1040,23 @@ def row_11_regressions() -> dict:
 def row_16_roll_to_the_end() -> dict:
     """A roll that runs to the end of the file (Q3): no end is stored and the skip goes to the end of the file."""
     evidence: dict[str, Any] = {}
-    try:
-        p2.set_publish_when("medium")
-        with ProcessSampler() as sampler:
-            job, _ = credits_job("row 16 roll to the end", force=True, paths=(OPEN_MOVIE,))
-        payload = p1.item_payload(OPEN_MOVIE)
-        evidence.update(job=job["id"], rows=credits_evidence(OPEN_MOVIE), decodes=sampler.decodes,
-                        duration_ms=payload["duration_ms"], decision=payload["decisions"]["credits"],
-                        servers={sid: p2.inspector_server(OPEN_MOVIE, sid) for sid in p2.ALL_MARKER_SERVERS})  # fmt: skip
-    finally:
-        p2.set_publish_when("high")
+    with ProcessSampler() as sampler:
+        job, _ = credits_job("row 16 roll to the end", force=True, paths=(OPEN_MOVIE,))
+    payload = p1.item_payload(OPEN_MOVIE)
+    evidence.update(job=job["id"], rows=credits_evidence(OPEN_MOVIE), decodes=sampler.decodes,
+                    duration_ms=payload["duration_ms"], decision=payload["decisions"]["credits"],
+                    servers={sid: p2.inspector_server(OPEN_MOVIE, sid) for sid in p2.ALL_MARKER_SERVERS})  # fmt: skip
     rows = evidence.get("rows", [])
     start_ms = rows[0]["start_ms"] if rows else None
-    decodes = evidence.get("decodes", [])
+    # The open movie's own decodes: the reference decode check's clips (2026-09-25) would count toward "two decodes".
+    decodes = file_decodes(evidence.get("decodes", []))
     refines = [a for a in decodes if " -t 21.000 " in f" {a} "]
     past_start = [a for a in decodes if start_ms is not None and (decode_start_s(a) or 0) >= start_ms / 1000]
+    # The end window is a 1 fps -t 21 window from 1 s before the roll's last credit keyframe, so after the start. Since
+    # credit text v8 the card the start lands on is decoded too (-t 30 from the start, and -t 1 at 1280x720 to read it),
+    # inside the roll: those start at or after the start as well, and aren't a window past the credits.
+    end_windows = [a for a in past_start if " -t 21.000 " in f" {a} "]
+    card_step = [a for a in past_start if a not in end_windows]
     marker = (evidence.get("decision") or {}).get("marker") or {}
 
     def published(sid: str) -> dict | None:
@@ -970,13 +1081,19 @@ def row_16_roll_to_the_end() -> dict:
         **{f"{sid} says nothing about skipping to the end": "Emby skips to the end of the file"
            not in ((evidence.get("servers", {}).get(sid) or {}).get("publish_message") or "")
            for sid in p2.EMBY_SERVERS},
-        "no window past the credits was seen decoding": not past_start,
+        "no window past the credits was seen decoding": not end_windows,
+        # The card step stays inside the roll, which here runs to the end of the file.
+        "the card step's decodes stay inside the roll": all(
+            (decode_start_s(a) or 0) < OPEN_MOVIE_MS / 1000 for a in card_step
+        ),
     }  # fmt: skip
     # The stored end being None is decisive for what was stored. It implies no end window was decoded only because
     # this fixture's coarse end sits inside the 30 s bound (rule_j.KEEP_AFTER_CREDITS_S): in general credits_end can
-    # also return None after decoding the window, when the refined end fails that same check. A 0.5 s sampler can
-    # miss a 21 s window's decode, so the process check above corroborates, it doesn't stand on its own.
-    notes = [f"decodes seen: {len(decodes)} ({len(refines)} refine window(s))"]
+    # also return None after decoding the window, when the refined end fails that same check. A sampler can still
+    # miss a 21 s window's decode (under a second on the P5000), so the process check above corroborates, it doesn't
+    # stand on its own.
+    notes = [f"decodes seen: {len(decodes)} ({len(refines)} refine window(s), {len(card_step)} of the card step) in "
+             f"{sampler.samples} process samples"]  # fmt: skip
     return checks_result(16, "A roll that runs to the end of the file", premise, checks, evidence, notes)
 
 
@@ -990,7 +1107,6 @@ def row_17_locked_credits_from_credit_text() -> dict:
     lock = (560_000, 640_000)  # off the roll's 540 s and inside the movie's last 25 %
     evidence: dict[str, Any] = {}
     try:
-        p2.set_publish_when("medium")
         credits_job("row 17 detect", force=True)
         detected = p1.item_payload(MOVIE)
         evidence["detected"] = {
@@ -1014,7 +1130,6 @@ def row_17_locked_credits_from_credit_text() -> dict:
     finally:
         cleanup_errors = p1.run_cleanup(
             lambda: p1.unlock_markers(MOVIE, ["credits"]),
-            lambda: p2.set_publish_when("high"),
             lambda: credits_job("row 17 cleanup", force=True),
             lambda: evidence.update(cleanup={"served": p4.served(MOVIE), "stored": p4.stored_times(MOVIE)}),
         )
@@ -1046,11 +1161,11 @@ def row_17_locked_credits_from_credit_text() -> dict:
         "every server still serves the locked times and not credit text's": evidence["forced"]["served"]
         == p4.expected(None, lock),
         "markers.db holds the lock": evidence["forced"]["stored"] == {"credits": (*lock, 1)},
-        "unlock and a High run leave none of the locked times on any server": all(
+        "unlock and a forced run leave none of the locked times on any server": all(
             all(t != "credits" or s != lock[0] for t, s, _ in rows) for rows in evidence["cleanup"]["served"].values()
         ),
         "and the row is no longer locked in markers.db": evidence["cleanup"]["stored"].get("credits", (0, 0, 0))[2] == 0,
-        "the lab was put back (unlocked, High, movie re-run)": not cleanup_errors,
+        "the lab was put back (unlocked, movie re-run)": not cleanup_errors,
     }  # fmt: skip
     return checks_result(17, "A locked credits marker whose answer came from credit text", premise, checks, evidence)
 

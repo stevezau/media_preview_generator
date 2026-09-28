@@ -63,7 +63,9 @@ try:
     decodes = DecodeCache(root, digest=decode_digest(), backend=detection.backend)
     cache = CreditsTextCache(root, ffmpeg=ffmpeg, decode="gpu", gpu_device="cuda:0",
                              detect_boxes=detection.detect_boxes, backend=detection.backend, probe=probes.probe,
-                             decodes=decodes)  # fmt: skip
+                             decodes=decodes,
+                             # A tree from credit text v8 on reads the card its start lands on.
+                             **({"read_text": detection.read_text} if hasattr(detection, "read_text") else {}))  # fmt: skip
     print("detector", cache.detector_digest, "decode", decodes.digest, "backend", detection.backend(), flush=True)
     for n, (path, episode) in enumerate(files.items(), 1):
         if path in results and "error" not in results[path] and "--again" not in sys.argv:

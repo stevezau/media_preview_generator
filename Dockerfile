@@ -12,10 +12,10 @@ RUN apt-get update && \
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
-# Credit text detection model (Intro & Credits, spec §5.4): PP-OCRv4 detection from the pinned rapidocr_onnxruntime
-# 1.4.4 wheel, wheel and model both verified by sha256 (scripts/fetch_textdet_model.py). A stage of its own, so an
-# edit to the fetch script never invalidates the dependency wheel cache (Layer A), and BuildKit fetches it while the
-# wheels build.
+# Credit text models (Intro & Credits, spec §5.4): PP-OCRv4 detection from the pinned rapidocr_onnxruntime 1.4.4 wheel
+# and PP-OCRv5 Latin recognition from RapidOCR's model repository at a pinned tag, the wheel and both models verified
+# by sha256 (scripts/fetch_textdet_model.py). A stage of its own, so an edit to the fetch script never invalidates the
+# dependency wheel cache (Layer A), and BuildKit fetches it while the wheels build.
 FROM toolchain AS model
 COPY scripts/fetch_textdet_model.py /tmp/fetch_textdet_model.py
 RUN python3 /tmp/fetch_textdet_model.py --out /models
@@ -156,6 +156,7 @@ RUN pip3 install --no-cache-dir --no-index /tmp/wheels/*.whl \
 
 # Loaded only by the credit text detection helper process (markers/credits/textdet_helper.py).
 COPY --from=model /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx
+COPY --from=model /models/latin_PP-OCRv5_rec_mobile.onnx /app/models/latin_PP-OCRv5_rec_mobile.onnx
 
 # Replace init-adduser with clean version (no branding)
 COPY docker-init-user.sh /etc/s6-overlay/s6-rc.d/init-adduser/run

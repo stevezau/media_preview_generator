@@ -183,6 +183,7 @@ into `settings.json`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEDIA_PREVIEW_TEXTDET_MODEL` | the Docker image's own copy (`/app/models/ch_PP-OCRv4_det_infer.onnx`) | Overrides the on-screen credit text model path, for development and the `tools/markers_eval credits-text` harness. |
+| `MEDIA_PREVIEW_TEXTREC_MODEL` | the Docker image's own copy (`/app/models/latin_PP-OCRv5_rec_mobile.onnx`) | Overrides the path of the model that reads the card the credits start on (epilogue text), for development and the same harness. |
 
 ### External Authentication (AUTH_METHOD)
 
@@ -761,8 +762,8 @@ available (`""` when it is): no ffmpeg lists the muxer, or one didn't answer the
 after 10 minutes), e.g.
 `{"season_audio": {"available": true, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}`.
 
-`credits_text.available` is `false` when ONNX Runtime/OpenCV aren't installed, the text detection model isn't at
-its expected path or isn't the expected file, or the check didn't answer (checked again after 10 minutes; arm64
+`credits_text.available` is `false` when ONNX Runtime/OpenCV aren't installed, the text detection or recognition
+model isn't at its expected path or isn't the expected file, or the check didn't answer (checked again after 10 minutes; arm64
 has no GPU path but is still available on the CPU). `message` names the reason (`""` when available), e.g.
 `{"credits_text": {"available": true, "message": ""}}` or
 `{"credits_text": {"available": false, "message": "Needs the text detection model, which the Docker image includes; it isn't at /app/models/ch_PP-OCRv4_det_infer.onnx"}}`.
