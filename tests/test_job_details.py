@@ -90,6 +90,13 @@ class TestJobLibraryNames:
         job = _job({"webhook_paths": ["/data/movies/Heat (1995)/Heat (1995).mkv"]})
         assert job_library_names(job, configs) == ["Movies"]
 
+    def test_a_senders_path_is_read_through_the_webhook_prefixes(self):
+        # Sonarr sends its own view of the file; the follow-up keeps that path.
+        mapping = {"remote_prefix": "/data/tv", "local_prefix": "/data/tv", "webhook_prefixes": ["/sonarr/tv"]}
+        configs = saved_server_configs([{**SERVERS[0], "path_mappings": [mapping]}])
+        job = _job({"file_paths": ["/sonarr/tv/Show/Season 01/e01.mkv"]})
+        assert job_library_names(job, configs) == ["TV Shows"]
+
     def test_a_disabled_server_names_nothing(self):
         configs = saved_server_configs([{**SERVERS[0], "enabled": False}])
         job = _job({"webhook_paths": ["/data/movies/Heat (1995)/Heat (1995).mkv"]})

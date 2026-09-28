@@ -10,7 +10,7 @@ import os
 from collections.abc import Iterable, Sequence
 
 from ..servers.base import ServerConfig
-from ..servers.ownership import find_library_matches
+from ..servers.ownership import OwnershipMatch, find_library_matches, webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
 from .jobs import Job
 
@@ -59,10 +59,20 @@ def job_library_names(job: Job, configs: Sequence[ServerConfig]) -> list[str]:
     held = [
         match.library_name
         for path in paths[:_PATHS_FOR_LIBRARIES]
-        for match in find_library_matches(path, list(configs))
+        for match in _library_matches(path, list(configs))
         if pin is None or match.server_id == pin
     ]
     return _distinct(held)
+
+
+def _library_matches(path: str, configs: list[ServerConfig]) -> list[OwnershipMatch]:
+    """The libraries holding a file, whether the path is this app's or the sender's (Sonarr's ``/data/...``): the
+    first of its local forms (``webhook_path_candidates``) that any library holds."""
+    for candidate in webhook_path_candidates(path, configs):
+        matches = find_library_matches(candidate, configs)
+        if matches:
+            return matches
+    return []
 
 
 def _started_on(cfg: dict, job: Job, configs: Sequence[ServerConfig], pin: str | None) -> list[str]:

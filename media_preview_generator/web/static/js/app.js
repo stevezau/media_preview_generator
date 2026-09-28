@@ -1657,15 +1657,17 @@ function _markersFilesHtml(data, job) {
 function _loadJobFileList(job) {
     const id = String(job.id);
     const cached = _jobFileLists.get(id);
-    if (cached && (cached.loading
-        || (cached.status === job.status && (job.status !== 'running' || Date.now() - cached.at < JOB_FILE_LIST_REFRESH_MS)))) {
-        return;
+    if (cached && cached.loading) return;
+    if (cached && cached.status === job.status) {
+        // A running job's list grows, and a failed read is tried again: both after the refresh interval.
+        const changes = job.status === 'running' || !!(cached.data && cached.data.error);
+        if (!changes || Date.now() - cached.at < JOB_FILE_LIST_REFRESH_MS) return;
     }
     _jobFileLists.set(id, Object.assign({}, cached, { loading: true }));
     apiGet(`/api/jobs/${encodeURIComponent(id)}/file-list`).then(function (data) {
         _jobFileLists.set(id, { data: data, status: job.status, at: Date.now() });
     }).catch(function (err) {
-        // Kept for the refresh interval so a failing read isn't asked again on every re-render.
+        // Kept until the refresh interval, so a failing read isn't asked again on every re-render.
         const failed = { files: [], total: 0, error: String((err && err.message) || err) };
         _jobFileLists.set(id, { data: (cached && cached.data) || failed, status: job.status, at: Date.now() });
     }).finally(function () {
