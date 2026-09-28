@@ -266,9 +266,10 @@ a:focus-visible {
  * Plus frosted-glass effect on the navbar background — a modern dark
  * theme staple that reads as polish without being flashy.
  * ────────────────────────────────────────────────────────────────────── */
+/* No `position` here: Bootstrap's .sticky-top already makes the nav positioned (sticky), which anchors the
+ * ::after strip. Setting `relative` outranks .sticky-top and the navbar scrolls away with the page. */
 nav.navbar.sticky-top {
     border-bottom: 1px solid var(--surface-border) !important;
-    position: relative;
     backdrop-filter: saturate(180%) blur(14px);
     -webkit-backdrop-filter: saturate(180%) blur(14px);
 }
@@ -1165,10 +1166,18 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
      * clipped to the navbar's 56px height instead of spanning the
      * full viewport. Strip the filter on mobile so the offcanvas
      * slides over the whole screen as it should. The visual loss is
-     * minimal because the drawer covers the navbar anyway. */
+     * minimal because the drawer covers the navbar anyway. Without the
+     * blur the page scrolling under the pinned navbar would show through
+     * its translucent background, so it goes opaque here. */
     nav.navbar.sticky-top {
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
+    }
+    html[data-bs-theme="dark"] nav.navbar.sticky-top {
+        background-color: rgb(15, 15, 26) !important;
+    }
+    html[data-bs-theme="light"] nav.navbar.sticky-top {
+        background-color: #fff;
     }
 
     /* Hamburger toggle — opens the offcanvas drawer. Single ≡ glyph;
