@@ -987,7 +987,10 @@ class TestVersionReruns:
 
         (job,) = self._ic_jobs(jm)
         assert job.id == job_id
-        assert (job.library_name, job.priority) == ("Intro & Credits: re-checking files after an update", 3)
+        assert (job.library_name, job.priority) == (
+            "Intro & Credits: Re-checking 1 file after the app update · batch 1 of 1",
+            3,
+        )
         assert job.config == {
             "kind": JOB_KIND_INTRO_CREDITS,
             "source": "version_rerun",
@@ -997,8 +1000,67 @@ class TestVersionReruns:
             "force": False,
             "webhook_item_id_hints": {},
             "version_rerun": True,
+            "version_rerun_counts": {"total": 1, "batch": 1, "batch_size": 100},
         }
         due["listed"].assert_called_once_with(store, "global-settings")
+
+    @staticmethod
+    def _listed(due, count):
+        due["files"] = {f"/tv/A/S01/e{i}.mkv": {"credits_text": 4} for i in range(count)}
+
+    def test_the_first_batch_names_every_file_listed_and_how_many_batches_they_take(self, jm, store, due):
+        self._listed(due, 1568)
+
+        job = jm.get_job(triggers.submit_version_reruns())
+
+        assert job.library_name == "Intro & Credits: Re-checking 1,568 files after the app update · batch 1 of 16"
+        assert job.config["version_rerun_counts"] == {"total": 1568, "batch": 1, "batch_size": 100}
+        assert job.config["source"] == "version_rerun"
+
+    def test_the_next_batch_keeps_the_first_batchs_total_and_counts_on(self, jm, store, due):
+        # Fewer are due by now: the name keeps the total the first batch listed, so the batches add up.
+        self._listed(due, 1468)
+
+        job = jm.get_job(
+            triggers.submit_version_reruns(delay_s=1800, after={"total": 1568, "batch": 1, "batch_size": 100})
+        )
+
+        assert job.library_name == "Intro & Credits: Re-checking 1,568 files after the app update · batch 2 of 16"
+        assert job.config["version_rerun_counts"] == {"total": 1568, "batch": 2, "batch_size": 100}
+
+    def test_the_counts_on_the_saved_job_carry_the_next_batch_on_after_a_restart(self, jm, store, due, tmp_path):
+        from media_preview_generator.markers.job_runner import VERSION_RERUN_COUNTS
+        from media_preview_generator.web.jobs import JobManager
+
+        self._listed(due, 250)
+        first = triggers.submit_version_reruns()
+        jm.complete_job(first)
+        # A restart reads the finished batch back from the jobs database.
+        saved = JobManager(config_dir=str(tmp_path)).get_job(first)
+
+        second = jm.get_job(triggers.submit_version_reruns(after=saved.config[VERSION_RERUN_COUNTS]))
+
+        assert saved.library_name == "Intro & Credits: Re-checking 250 files after the app update · batch 1 of 3"
+        assert second.library_name == "Intro & Credits: Re-checking 250 files after the app update · batch 2 of 3"
+
+    def test_a_batch_past_the_first_count_is_its_own_last(self, jm, store, due):
+        # Files still due after their batch (e.g. back on disk later) run in one batch more than first counted.
+        job = jm.get_job(triggers.submit_version_reruns(after={"total": 250, "batch": 3, "batch_size": 100}))
+
+        assert job.library_name == "Intro & Credits: Re-checking 250 files after the app update · batch 4 of 4"
+
+    @pytest.mark.parametrize(
+        "after",
+        [None, {}, {"total": 0, "batch": 5}, {"total": "many", "batch": 1}, "not-a-mapping"],
+        ids=["start", "empty", "no-total", "unreadable", "not-a-mapping"],
+    )
+    def test_without_readable_counts_a_new_count_starts(self, jm, store, due, after):
+        self._listed(due, 101)
+
+        job = jm.get_job(triggers.submit_version_reruns(after=after))
+
+        assert job.library_name == "Intro & Credits: Re-checking 101 files after the app update · batch 1 of 2"
+        assert job.config["version_rerun_counts"] == {"total": 101, "batch": 1, "batch_size": 100}
 
     def test_the_next_batch_waits_for_the_gap_before_it_takes_a_slot(self, jm, store, due):
         from datetime import datetime, timedelta

@@ -756,8 +756,9 @@ Credits is off on every server, every online database is off, or the last re-che
 **After an update that improves a detector.** When an update brings a better version of on-screen credit text,
 season audio, chapters, the reading of markers already on your servers or an online database's answers, the files
 whose markers relied on the older version are read again once, without you starting anything. Each start of the app
-checks, and a Low-priority **Intro & Credits: re-checking files after an update** job runs behind your previews,
-100 files at a time with 30 minutes between batches, so a large library doesn't keep your GPU busy for days. It takes
+checks, and a Low-priority job runs behind your previews, 100 files at a time with 30 minutes between batches, so a
+large library doesn't keep your GPU busy for days. The queue names it by how far along it is, e.g. **Re-checking 1,568
+files after the app update · batch 3 of 16**. It takes
 the files still on disk whose marker was decided with the older version's answer, or is still in Needs review or not
 found beside one. On-screen credit text and season audio also check markers other sources decided (a "Credits" or
 "Intro" chapter, an online database's times), so a better version of either reads those files again too; any other
