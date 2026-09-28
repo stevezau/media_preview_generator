@@ -504,7 +504,7 @@
 
                     <div>
                         <div class="d-flex justify-content-between align-items-baseline gap-2 mb-2">
-                            <h6 class="mb-0" id="markersSourcesLabel">Where evidence comes from</h6>
+                            <h6 class="mb-0"><span id="markersSourcesLabel">Where we check</span><button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The places we look for intro and credits times, in the order they&#39;re asked."><i class="bi bi-info-circle"></i></button></h6>
                             <span class="small text-muted">drag to reorder</span>
                         </div>
                         <!-- Order is the order sources are checked and which one's times win. Reordered by the grip
@@ -514,7 +514,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Chapters inside the file</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Streaming releases often name chapters Intro, Title Sequence or End Credits. About 1 in 9 seasons in a sampled library."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Chapters named Intro, End Credits and so on, inside the file itself. Used on their own unless two other sources agree on different times."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Free · exact when present</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -529,7 +529,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: TheIntroDB</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="When it has data: intros 35 of 43 right, credits 23 right / 4 wrong. Has data for about 1 in 4 TV episodes and 1 in 100 movies. Works without a key (500 lookups a day); your own free key raises that. Used without the site's written permission — keys can be revoked."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A community database of intro and credits times, for TV and movies. Used when another source agrees with it." data-explain-title="TheIntroDB" data-explain-template="infoTheIntroDbTpl"><i class="bi bi-info-circle"></i></button>
                                     <div class="d-flex align-items-center gap-2 mt-1">
                                         <!-- new-password: stops a browser password manager filling this app's login into it. -->
                                         <input type="password" class="form-control form-control-sm markers-key-input" id="markersTheIntroDbKey"
@@ -550,7 +550,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: IntroDB.app</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intros 26 of 43 right, credits 17 right / 4 wrong on a verified set. Agreement with TheIntroDB counts as one vote because its data looks partly copied."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A community database of intro and credits times. Used when another source agrees with it."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">No key needed · TV only</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -565,7 +565,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: SkipDB</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only answers matched to the length of your file are used. Intros 16 of 43 right on a verified set, so it only counts once another source agrees."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A community database of skip times, matched to your file&#39;s length. Used when another source agrees with it."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Free lookups · matched to your file's length</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -580,7 +580,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Matching audio across a season</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 missed (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro on its own when nothing else answers. When another source disagrees, the episode goes to Needs review. A server's own intro marker doesn't count as a second source for it."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season&#39;s episodes share, so shows no database has still get intros. Used on its own unless another source disagrees."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
                                     <div class="small text-muted">Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
@@ -597,7 +597,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">On-screen credit text</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early on 1, missed 3. It can publish credits on its own."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Reads the credit roll on screen near the end of the file. Used on its own for credits, and to correct a credits chapter&#39;s start."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
                                     <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
@@ -614,7 +614,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Markers already on your servers</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex's own markers are sometimes wrong (for example ~80 s late on South Park S01), so they can only confirm another source."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intro and credits markers your servers already have. Used only to confirm another source, never on their own."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Second opinion, never copied as-is</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -626,31 +626,106 @@
                                 </div>
                             </li>
                         </ol>
-                        <!-- Each sentence mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium"); change both together. -->
-                        <p class="small text-muted mt-3 mb-0" id="markersHowItDecides">
-                            <strong>How it decides:</strong> sources are asked in the order above. Chapters in the file
-                            decide on their own, unless two other sources agree on something different or an intro
-                            chapter is far longer than the rest of its season's; on-screen credit text moves a credits
-                            chapter's start to the first credit card when the chapter is off it. An online database's
-                            answer is
-                            published once an independent source agrees with it: on-screen credits, season audio,
-                            another database, or a server's own marker (IntroDB and TheIntroDB count as one). A single
-                            answer decides alone only when it checks your own file: on-screen credit text for credits,
-                            or season audio for intros (so a show no online database has still gets them). If
-                            sources disagree, or the only answer can't decide alone, the file goes to Needs review so
-                            you can pick.
-                        </p>
                     </div>
                 </div>
 
-                <div class="mt-3">
-                    <button class="btn btn-sm btn-link px-0" type="button" data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false" aria-controls="markersAdvanced" id="markersAdvancedToggle">
-                        <i class="bi bi-chevron-right me-1"></i>Advanced
+                <!-- Each card, and the modal's detail below, mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium")
+                     and pipeline.py's source order; change both together. -->
+                <section class="mt-4" id="markersHowItDecides" aria-labelledby="markersHowItDecidesLabel">
+                    <h6 class="mb-1" id="markersHowItDecidesLabel">How it decides</h6>
+                    <p class="small text-muted mb-3">Every file goes through the same four steps. Each marker type (intro,
+                        credits) is decided on its own, so one can be sent while the other waits for your check.</p>
+                    <ol class="markers-steps list-unstyled mb-2">
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">1</span>
+                            <div class="markers-step-title">Ask the sources, in your order</div>
+                            <div class="markers-step-text">The list under <strong>Where we check</strong>. Once a type is settled by anything other than chapters alone or season audio alone, the rest are skipped as “not needed”. Your servers&#39; own markers are always read.</div>
+                        </li>
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">2</span>
+                            <div class="markers-step-title">Check who agrees</div>
+                            <div class="markers-step-text">Two answers agree when intro ends are within 5&nbsp;s or credits starts within 10&nbsp;s. When sources agree, the one higher in your order supplies the times.</div>
+                        </li>
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">3</span>
+                            <div class="markers-step-title">Decide</div>
+                            <div class="markers-step-text">A marker is sent when a chapter isn&#39;t contradicted, when two independent sources agree, or when a source that reads the file answers and nothing disagrees. Everything else needs your check.</div>
+                        </li>
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">4</span>
+                            <div class="markers-step-title">Send to your servers</div>
+                            <div class="markers-step-text">Each server gets the decided markers. With <strong>Keep Plex&#39;s</strong> or <strong>Keep Emby&#39;s</strong> on, that server&#39;s own marker of a type stays, unless it&#39;s impossible for the file (outside it, or under 3&nbsp;s).</div>
+                        </li>
+                    </ol>
+                    <button type="button" class="btn btn-link btn-sm px-0 info-modal-link" id="markersHowItDecidesMore"
+                            data-explain-title="How decisions are made" data-explain-template="markersDecisionsTpl">
+                        <i class="bi bi-info-circle me-1" aria-hidden="true"></i>See how decisions are made
                     </button>
+                </section>
+
+                <!-- "See how decisions are made": opens in #globalInfoModal. Same source of truth as the cards above. -->
+                <template id="markersDecisionsTpl">
+                    <h6>Who can decide alone</h6>
+                    <table class="table table-sm align-middle mb-1 markers-decide-alone">
+                        <tbody>
+                            <tr><td>Chapters in the file</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone</span></td></tr>
+                            <tr><td>On-screen credit text</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone</span></td></tr>
+                            <tr><td>Season audio</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone, intros only</span></td></tr>
+                            <tr><td>IntroDB / TheIntroDB</td><td class="text-end"><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Needs a second source</span></td></tr>
+                            <tr><td>SkipDB</td><td class="text-end"><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Needs a second source</span></td></tr>
+                            <tr><td>Your servers&#39; markers</td><td class="text-end"><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Needs a second source</span></td></tr>
+                        </tbody>
+                    </table>
+                    <p class="small text-muted">IntroDB and TheIntroDB count as one source. A plugin&#39;s imported copy of
+                        IntroDB or SkipDB counts as that database, not as a second opinion.</p>
+
+                    <h6 class="mt-4">The three outcomes</h6>
+                    <dl class="markers-outcomes">
+                        <dt><i class="bi bi-circle-fill text-success me-2" aria-hidden="true"></i>Decided and sent</dt>
+                        <dd>A chapter nobody contradicts · two independent sources agree · one file-reading source
+                            answers and nothing disagrees.</dd>
+                        <dt><i class="bi bi-circle-fill text-warning me-2" aria-hidden="true"></i>Needs your check</dt>
+                        <dd>Two agreeing sources contradict a chapter · two agreeing groups conflict · the only answer
+                            can&#39;t decide alone · sources disagree · an intro overlaps a recap by more than 5&nbsp;s, or a
+                            preview overlaps credits by more than 10&nbsp;s. You pick on real frames in the Inspector; the
+                            other type is still sent.</dd>
+                        <dt><i class="bi bi-circle-fill text-secondary me-2" aria-hidden="true"></i>Nothing found</dt>
+                        <dd>No source answered, or every answer failed the sanity checks: an intro starting after 35% of
+                            the file or running to its end, credits before the last 25%.</dd>
+                    </dl>
+
+                    <h6 class="mt-4">Rules that surprise people</h6>
+                    <ul class="mb-0 markers-surprises">
+                        <li><strong>Credit text moves a “Credits” chapter</strong> to the first credit card, unless another source agrees with the chapter.</li>
+                        <li><strong>Credits with no end run to the end of the file.</strong> Online credits that overshoot the end by up to 5&nbsp;s are cut there.</li>
+                        <li><strong>Season audio plus one more source</strong> overrides an intro chapter they both end inside.</li>
+                        <li><strong>A server&#39;s own marker can only move credits later,</strong> never lengthen them.</li>
+                        <li><strong>Your locks and adjustments always win,</strong> even over a type that&#39;s turned off or “Keep Plex&#39;s”.</li>
+                        <li><strong>A replaced file of the same length keeps the old marker</strong> only when nothing answers for that type, and not when a newer check read the new file and found nothing.</li>
+                        <li><strong>After an app update,</strong> files decided by an older version are checked again, 100 at a time, at low priority. A sent marker stays while one of its sources still agrees.</li>
+                    </ul>
+                </template>
+
+                <template id="infoTheIntroDbTpl">
+                    <p>Works without a key: 500 lookups a day. Your own free key raises that.</p>
+                    <p>It&#39;s used without the site&#39;s written permission, so keys can be revoked. It&#39;s off by
+                        default.</p>
+                    <p>IntroDB.app and TheIntroDB count as one source, so they can&#39;t confirm each other.</p>
+                </template>
+
+                <div class="markers-advanced border-top mt-4 pt-3">
+                    <h6 class="mb-0">
+                        <button class="btn btn-link p-0 text-reset text-decoration-none fw-semibold markers-advanced-toggle" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false"
+                                aria-controls="markersAdvanced" id="markersAdvancedToggle">
+                            <i class="bi bi-chevron-right collapse-chevron me-1" aria-hidden="true"></i>Advanced
+                        </button>
+                    </h6>
+                    <p class="small text-muted mt-1 mb-0">Only change this if you know what you&#39;re doing.</p>
                     <div class="collapse" id="markersAdvanced">
-                        <div class="card card-body mt-2">
+                        <div class="pt-3">
                             <h6 class="mb-3">Where to look for credits
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far from the end of a file to search for the credit roll. Automatic fits nearly every library. Raise it only if credits are being missed because they start earlier than this. A longer window takes longer to decode for every file."><i class="bi bi-info-circle"></i></button>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Automatic starts with the last 7½ minutes of a TV episode and 15 minutes of a film, and looks further back on its own when chapters or an online source point earlier."><i class="bi bi-info-circle"></i></button>
                             </h6>
                             <div class="markers-opt mb-3">
                                 <label for="markersCreditsWindowTv">TV episodes</label>

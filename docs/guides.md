@@ -639,20 +639,27 @@ local detection isn't reliable there either. You can still switch one on by hand
 
 ### Sources and the publish rule
 
-In **Settings → Intro & Credits**, "Where evidence comes from" lists every source in the order it's checked, with
-drag-to-reorder:
+In **Settings → Intro & Credits**, **Where we check** lists every source in the order it's checked, with
+drag-to-reorder. Each source's ⓘ says what it is and when it's used:
 
 | Source | Notes |
 |---|---|
-| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). On a TV episode (a file whose name has a season and an episode number) a chapter named `Ending` counts as credits, since anime names its ending that way; on a movie it doesn't, because there it is usually the last scene. `End` alone never counts. An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
+| Chapters inside the file | Free, exact when present. On a TV episode (a file whose name has a season and an episode number) a chapter named `Ending` counts as credits, since anime names its ending that way; on a movie it doesn't, because there it is usually the last scene. `End` alone never counts. An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
 | TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
 | IntroDB.app | No key needed, TV only. |
 | SkipDB | Free, only counts an answer matched to your file's own length, and only once another source agrees with it. |
-| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro by itself when nothing else answers — a show no online database has still gets intros. The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. An online intro of the same length (within 5 s) that starts more than 15 s away from season audio's, with nothing else agreeing with it, was timed on another release of the episode (one with a different cold open, say), so it is set aside rather than sending the episode to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, on the worker that runs the file. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
-| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Runs where the worker runs, as previews do: a GPU worker uses its GPU when a quick self-test shows it finds the same text as the CPU, and a CPU worker uses the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. A file that stops before the length it says it has (a download cut short) has no ending to read: the job log says so, and it isn't read again until it changes. |
+| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share, and publishes an intro by itself when nothing else answers — a show no online database has still gets intros. The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. An online intro of the same length (within 5 s) that starts more than 15 s away from season audio's, with nothing else agreeing with it, was timed on another release of the episode (one with a different cold open, say), so it is set aside rather than sending the episode to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, on the worker that runs the file. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
+| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it can skip into the story, and it can put credits on sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Runs where the worker runs, as previews do: a GPU worker uses its GPU when a quick self-test shows it finds the same text as the CPU, and a CPU worker uses the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. A file that stops before the length it says it has (a download cut short) has no ending to read: the job log says so, and it isn't read again until it changes. |
 | Markers already on your servers | Second opinion only — see below. |
 
-**How it decides** (the note under the list says the same):
+**How it decides** (the four steps under the list, and **See how decisions are made** beside them, say the same).
+Every file goes through the same steps, and each marker type is decided on its own, so one can be sent while the
+other waits for your check:
+
+- **Agreement.** Two answers agree when their intro ends are within 5 s, or their credits starts within 10 s. When
+  sources agree, the one higher in your order supplies the times. Once a type is settled by anything other than
+  chapters alone or season audio alone, the sources after it are skipped as "not needed"; your servers' own
+  markers are always read.
 
 - **Chapters** in the file decide on their own, unless two other independent sources agree on something different
   (then the file goes to **Needs review**), or an intro chapter is much longer than the rest of its season's (then one
@@ -675,8 +682,15 @@ drag-to-reorder:
   length finds the right cut but not the right edges (its credits often start minutes before the real credit roll, and
   some of its intros cover only part of the title sequence). The previous season's audio (a season's first episode)
   never publishes alone.
-- **Anything else** — sources that disagree, or an only answer that can't decide alone — goes to **Needs review** with
-  the reason, e.g. "Only IntroDB has the intro; an online answer needs a check against the file".
+- **Anything else** — two independent sources that agree contradicting a chapter, two agreeing groups that
+  conflict, sources that disagree, an only answer that can't decide alone, or an intro that overlaps a recap by more
+  than 5 s (a preview that overlaps credits by more than 10 s) — goes to **Needs review** with the reason, e.g.
+  "Only IntroDB has the intro; an online answer needs a check against the file". You pick on real frames in the
+  Inspector; the file's other marker type is still sent.
+- **Nothing found** — no source answered, or every answer failed the sanity checks: an intro starting after 35% of
+  the file or running to its end, or credits starting before the last 25%.
+- **Sending.** Each server gets the decided markers. With **Keep Plex's** or **Keep Emby's** on, that server's own
+  marker of a type stays unless it's impossible for the file (outside it, or under 3 s).
 
 There is no stricter mode. An earlier "Publish when: High" setting (always two agreeing sources) left most of a library
 in Needs review and was removed; upgrading queues one Low-priority Intro & Credits job that checks the files it held
@@ -692,18 +706,17 @@ more than 10 seconds later — so an "End Credits" chapter placed on the last sh
 the Inspector then says "Shortened to Plex's own credits start". Intro ends are never moved this way. A Jellyfin or
 Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip importer) never do that and
 don't count as an independent second opinion — they join the online-database group instead of adding a vote of their
-own. AniSkip itself is not a source: it matched IntroDB to within 44 ms on 21 % of intros, against 10 % between the
-two intro databases already counted as one, and nothing in the library carries the id it needs. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
+own. AniSkip itself is not a source: its intros often match IntroDB's almost exactly, and nothing in the library carries
+the id it needs. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
 file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
 Emby keeps each version's markers apart (see [Emby](#emby-the-media-preview-bridge-for-emby-plugin)), so its
 markers are read only from the file's own version and no such check applies. Season audio and a server's own marker never confirm each
 other: another source has to agree. Markers this app wrote itself never count as a server's own on Jellyfin, or on
 Emby while its Bridge plugin is still installed: it asks its own plugin there which markers are its. Plex records no
 author, so if you lose or reset the app's config folder, or remove and add the Plex server again, markers it wrote to
-Plex before that read back as Plex's own for those files. On the lab's scale run they never published a marker by
-themselves, but 57 credits and 36 intros came out shorter than they should be, 6 credits were published only because
-those old markers of ours counted as a second opinion, and 1 credits and 2 intros went to Needs review instead of
-being written.
+Plex before that read back as Plex's own for those files. They never publish a marker by themselves, but they can
+make one shorter than it should be, be the second opinion that publishes one, or send one to Needs review instead
+of being written.
 
 A marker you lock is never replaced by detection; to let detection decide a type again, **Unlock** it. See
 [Adjusting, adding and locking markers](#adjusting-adding-and-locking-markers).
@@ -840,8 +853,7 @@ every 10 minutes) when a cleanup is still waiting on a stalled network share.
 
 An episode with no other episode of its season on disk yet (a new season's first weekly release) is compared with the
 previous season's first 4 episodes that are already fingerprinted, when its folder is named like a season (`Season 2`
-next to `Season 1`). That answer never publishes on its own (alone it was 48 useful / 10 wrong / 24 missed on 82
-episodes), and it isn't a second opinion for season audio (it's the same method on the same show). The Inspector shows it as **Previous season audio**.
+next to `Season 1`). That answer never publishes on its own, and it isn't a second opinion for season audio (it's the same method on the same show). The Inspector shows it as **Previous season audio**.
 
 When a new episode arrives, the season's earlier episodes may now be decided differently: their audio answer can
 change, or the new episode's intro chapter changes what counts as normal for the season. Episodes outside the job
