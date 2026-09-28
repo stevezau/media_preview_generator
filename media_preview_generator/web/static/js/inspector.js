@@ -707,6 +707,17 @@
         return interval() || NO_PREVIEW_STEP_MS;
     }
 
+    // A preview whose file length isn't known has no times (e.g. Jellyfin trickplay with no stated interval on a file
+    // no server gave a length for): its frames are still shown, by number.
+    function lengthUnknown() {
+        const p = preview();
+        return !duration() && !!(p && p.frame_count);
+    }
+
+    function frameLabel(index) {
+        return lengthUnknown() ? `Frame ${(index + 1).toLocaleString()}` : clock(index * stripStep());
+    }
+
     function frameUrl(index) {
         const p = preview();
         if (!p) return '';
@@ -1374,7 +1385,7 @@
     function timelineCard() {
         const card = el('div', 'insp-card insp-timeline-card');
         card.id = 'inspTimeline';
-        if (!duration()) {
+        if (!duration() && !lengthUnknown()) {
             const head = el('div', 'insp-tl-head');
             head.appendChild(el('div', 'insp-card-title', 'Timeline'));
             card.append(head, el('div', 'insp-empty-strip', 'This file\'s length isn\'t known yet, so there is no timeline. Checking its intro & credits reads it.'));
@@ -1382,7 +1393,8 @@
         }
         const key = timelineKey();
         if (!timeline || timeline.key !== key) {
-            const keepT = timeline && timeline.path === (state.path || state.bifOnly) ? timeline.nowT() : null;
+            const same = timeline && timeline.path === (state.path || state.bifOnly) && timeline.numbered === lengthUnknown();
+            const keepT = same ? timeline.nowT() : null;
             timeline = makeTimeline(key, keepT);
         }
         card.appendChild(timeline.node);
@@ -1512,7 +1524,8 @@
         return label;
     }
 
-    function timelineTip(step) {
+    function timelineTip(step, numbered) {
+        if (numbered) return 'Every preview frame in order, by number. Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.';
         const head = preview() ? `Every preview frame in order, one every ${seconds(step)}.` : 'This file has no preview yet, so each tile is a place a frame will go.';
         const rows = state.bifOnly ? '' : ' Each row below shows what that server gives viewers.';
         return `${head} Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.${rows}`;
@@ -1521,23 +1534,27 @@
     // One strip of every preview frame, windowed: only the tiles near the viewport exist, and their images load once
     // the strip stops. Lanes, bands and edge lines are few, so they are drawn once in strip coordinates.
     function makeTimeline(key, keepT) {
-        const dur = duration();
         const p = preview();
-        const step = stripStep();
         const frames = p ? p.frame_count : 0;
-        let count = timelineSlots(step);
+        // With no length the strip counts in frames: one unit a frame, and the "duration" is the frame count.
+        const numbered = lengthUnknown();
+        const dur = numbered ? frames : duration();
+        const step = numbered ? 1 : stripStep();
+        let count = numbered ? frames : timelineSlots(step);
         // A preview a frame or two off the file's length is a whole preview, not a partial one.
         if (frames && (Math.abs(frames - count) <= 2 || frames > count)) count = frames;
         const width = count * PITCH - (PITCH - TILE_W);
         const xOf = function (t) { return (t / step) * PITCH + TILE_W / 2; };
-        const lanes = state.bifOnly ? [] : [foundLane(dur)].concat(servers().map(function (s) { return serverLane(s, dur); }));
+        const plain = state.bifOnly || numbered;
+        const lanes = plain ? [] : [foundLane(dur)].concat(servers().map(function (s) { return serverLane(s, dur); }));
         const height = lanes.length ? LANE_TOP + (lanes.length - 1) * LANE_PITCH + LANE_H : STRIP_BARE_H;
-        const lines = state.bifOnly ? [] : edgeLines(dur);
-        const chips = state.bifOnly ? [] : jumpChips(dur);
+        const lines = plain ? [] : edgeLines(dur);
+        const chips = plain ? [] : jumpChips(dur);
 
         const tl = {
             key: key,
             path: state.path || state.bifOnly,
+            numbered: numbered,
             step: step,
             frames: frames,
             count: count,
@@ -1558,8 +1575,9 @@
         // Head: title, range, legend, jump chips.
         const head = el('div', 'insp-tl-head');
         const titleRow = el('div', 'insp-tl-title');
-        titleRow.append(el('div', 'insp-card-title', 'Timeline'), el('div', 'insp-tl-range insp-mono', `0:00 – ${clock(dur)}`), infoIcon(timelineTip(step)));
-        if (!state.bifOnly) {
+        const range = numbered ? `${frames.toLocaleString()} frames` : `0:00 – ${clock(dur)}`;
+        titleRow.append(el('div', 'insp-card-title', 'Timeline'), el('div', 'insp-tl-range insp-mono', range), infoIcon(timelineTip(step, numbered)));
+        if (!plain) {
             const legend = el('div', 'insp-legend');
             const oursKey = el('span', 'insp-legend-item');
             const tones = lanes[0].bands.map(function (b) { return b.cls.indexOf('is-intro') !== -1 ? 'intro' : 'credits'; })
@@ -1594,6 +1612,11 @@
         }
         head.appendChild(jumps);
         node.appendChild(head);
+        if (numbered) {
+            const note = el('div', 'insp-tl-note', 'This file\'s length isn\'t known yet, so frames are shown by number.');
+            note.id = 'inspLengthNote';
+            node.appendChild(note);
+        }
 
         // Overview bar: thumbnails, our bands, the viewport box, the "now" bubble, and the axis.
         const ovRow = el('div', 'insp-tl-row');
@@ -1609,7 +1632,7 @@
         bar.setAttribute('aria-label', `Jump to this point in the ${state.bifOnly ? 'preview' : fileWord()}`);
         const thumbs = el('span', 'insp-ov-thumbs');
         bar.appendChild(thumbs);
-        if (isChecked()) {
+        if (!numbered && isChecked()) {
             decidedTypes().forEach(function (t) {
                 const m = decided(t);
                 const band = el('span', 'insp-ov-band is-' + tone(t));
@@ -1624,7 +1647,8 @@
             const r = bar.getBoundingClientRect();
             tl.goTo(clamp((e.clientX - r.left) / r.width, 0, 1) * dur, null, true);
         });
-        ovCol.append(bubbleRow, bar, axis(dur, 'insp-axis insp-ov-axis'));
+        ovCol.append(bubbleRow, bar);
+        if (!numbered) ovCol.appendChild(axis(dur, 'insp-axis insp-ov-axis'));
         ovRow.appendChild(ovCol);
         node.appendChild(ovRow);
 
@@ -1796,7 +1820,7 @@
             if (i < frames) {
                 const b = el('button', 'insp-tl-img');
                 b.type = 'button';
-                b.setAttribute('aria-label', `See frame ${clock(t)} large`);
+                b.setAttribute('aria-label', `See frame ${numbered ? i + 1 : clock(t)} large`);
                 const img = el('img');
                 img.alt = '';
                 img.draggable = false;
@@ -1806,7 +1830,7 @@
             } else {
                 wrapTile.appendChild(el('div', 'insp-tl-none', 'No preview'));
             }
-            wrapTile.appendChild(el('div', 'insp-tl-time insp-mono', clock(t)));
+            wrapTile.appendChild(el('div', 'insp-tl-time insp-mono', frameLabel(i)));
             return wrapTile;
         }
 
@@ -1853,12 +1877,13 @@
             const cur = tl.tiles.get(idx);
             if (cur) cur.classList.add('is-now');
             const t = idx * step;
-            nowTime.textContent = clock(t);
-            bubble.textContent = clock(t);
+            nowTime.textContent = frameLabel(idx);
+            bubble.textContent = frameLabel(idx);
+            const every = numbered ? '' : ` · one every ${seconds(step)}`;
             frameText.textContent = idx < frames
-                ? `preview frame ${(idx + 1).toLocaleString()} of ${frames.toLocaleString()} · one every ${seconds(step)}`
+                ? `preview frame ${(idx + 1).toLocaleString()} of ${frames.toLocaleString()}${every}`
                 : 'no preview frame here';
-            const tg = tagAt(t);
+            const tg = numbered ? ['', ''] : tagAt(t);
             tag.textContent = tg[0];
             tag.className = 'insp-readout-tag ' + tg[1];
             // The overview: the bubble over the centre time, the box over what the strip shows.
@@ -2066,12 +2091,13 @@
         const p = preview();
         const step = stripStep();
         const t = big * step;
+        const numbered = lengthUnknown();
         const img = $('inspBigImg');
         img.src = frameUrl(big);
-        img.alt = `Preview frame at ${clock(t)}`;
-        $('inspBigTime').textContent = clock(t);
+        img.alt = numbered ? `Preview frame ${big + 1}` : `Preview frame at ${clock(t)}`;
+        $('inspBigTime').textContent = frameLabel(big);
         $('inspBigText').textContent = `preview frame ${(big + 1).toLocaleString()} of ${Number(p.frame_count).toLocaleString()}`;
-        const tg = tagAt(t);
+        const tg = numbered ? ['', ''] : tagAt(t);
         const tag = $('inspBigTag');
         tag.textContent = tg[0];
         tag.className = 'insp-readout-tag ' + tg[1];
@@ -3066,7 +3092,9 @@
                 const own = ms.every(function (m) { return !m.ours; });
                 return `${n} shows ${ms.length} ${typePhrase(types)} marker${ms.length === 1 ? '' : 's'}${own ? ' of its own' : ''} today`;
             });
-            parts.push(`${joinWith(said, 'and')}, drawn ${allOwn ? 'in grey ' : ''}on the timeline.`);
+            // With no length there are no rows under the strip to draw them in.
+            const drawn = duration() ? `, drawn ${allOwn ? 'in grey ' : ''}on the timeline` : '';
+            parts.push(`${joinWith(said, 'and')}${drawn}.`);
         } else if (servers().every(function (s) { return Array.isArray(s.current); })) {
             parts.push('No server shows intro or credits markers for this file yet.');
         }

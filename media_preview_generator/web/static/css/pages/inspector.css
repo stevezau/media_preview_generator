@@ -982,6 +982,11 @@ button.insp-row:focus-visible,
     color: var(--insp-muted-2);
 }
 
+.insp-tl-note {
+    font-size: 13px;
+    color: var(--insp-muted);
+}
+
 .insp-tl-title .insp-legend {
     margin-left: 14px;
 }

@@ -458,3 +458,85 @@ class TestEpisodeTimeline:
         expect(authed_page.locator("#inspNow")).to_have_text("25:00")
         expect(authed_page.locator("#inspNowTag")).to_have_text("Credits")
         fx.screenshot(authed_page, "02-strip-at-credits")
+
+
+def _length_unknown() -> tuple[dict, dict]:
+    """An unchecked film whose only preview is Jellyfin trickplay with no stated interval, and no server gives its
+    length: there are frames, but no times to put them at."""
+    file, item = fx.unchecked_film()
+    folder = f"{fx.FILM.rsplit('/', 1)[0]}/trickplay/The Matrix (1999)/320 - 10x10"
+    trickplay = fx.preview_row(
+        "jf-1",
+        "Jellyfin",
+        "jellyfin",
+        path=folder,
+        sheets_dir=folder,
+        exists=True,
+        frame_count=818,
+        interval_ms=None,
+        tile_width=10,
+        tile_height=10,
+    )
+    file.update(duration_ms=None, previews=[trickplay], preview=dict(trickplay))
+    item["servers"][0]["duration_ms"] = None
+    return file, item
+
+
+@pytest.mark.e2e
+class TestLengthUnknown:
+    def test_frames_are_shown_by_number_and_open_large(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page, _api_with(_length_unknown()))
+        _open(authed_page, app_url, fx.FILM)
+
+        timeline = authed_page.locator("#inspTimeline")
+        expect(timeline.locator("#inspLengthNote")).to_have_text(
+            "This file's length isn't known yet, so frames are shown by number."
+        )
+        expect(timeline.locator(".insp-tl-range")).to_have_text("818 frames")
+        expect(timeline.locator(".insp-tl-title .info-icon")).to_have_attribute(
+            "aria-label", re.compile(r"^Every preview frame in order, by number\.")
+        )
+        expect(authed_page.locator("#inspNow")).to_have_text("Frame 1")
+        expect(authed_page.locator("#inspOvNow")).to_have_text("Frame 1")
+        expect(authed_page.locator("#inspFrameText")).to_have_text("preview frame 1 of 818")
+        expect(authed_page.locator("#inspNowTag")).to_have_text("")
+        times = authed_page.locator("#inspStrip .insp-tl-frame .insp-tl-time")
+        expect(times.nth(0)).to_have_text("Frame 1")
+        expect(times.nth(1)).to_have_text("Frame 2")
+        first = authed_page.locator("#inspStrip .insp-tl-frame[data-index='0']")
+        expect(first.get_by_role("button", name="See frame 1 large")).to_be_visible()
+        expect(first.locator("img")).to_have_attribute("src", re.compile(r"^/api/bif/trickplay/frame\?.*&index=0&"))
+        # No times, so nothing that needs one: no rows, edge lines, jump chips or time axis, and no Adjust.
+        expect(authed_page.locator("#inspStrip .insp-lane")).to_have_count(0)
+        expect(authed_page.locator("#inspStrip .insp-edge")).to_have_count(0)
+        expect(authed_page.locator(".insp-lane-names .insp-lane-name")).to_have_count(0)
+        expect(authed_page.locator("#inspJumps button")).to_have_count(0)
+        expect(timeline.locator(".insp-ov-axis")).to_have_count(0)
+        expect(authed_page.locator("#inspAdjust")).to_have_count(0)
+        expect(_tile(authed_page, "preview").locator(".insp-stat-title")).to_have_text("818 frames")
+        expect(authed_page.locator("#inspNotChecked .insp-notchecked-text")).to_have_text(
+            "Plex shows 2 credits markers of its own today. Checking the film decides ours. With “Keep Plex's "
+            "markers” on, Plex keeps its own either way."
+        )
+
+        authed_page.get_by_role("button", name="Forward 10 frames").click()
+        expect(authed_page.locator("#inspNow")).to_have_text("Frame 11")
+        expect(authed_page.locator("#inspFrameText")).to_have_text("preview frame 11 of 818")
+        fx.screenshot(authed_page, "23-length-unknown")
+
+        authed_page.locator("#inspStrip .insp-tl-frame.is-now .insp-tl-img").click()
+        dialog = authed_page.locator("#inspFrameDialog")
+        expect(dialog).to_be_visible()
+        expect(authed_page.locator("#inspBigTime")).to_have_text("Frame 11")
+        expect(authed_page.locator("#inspBigText")).to_have_text("preview frame 11 of 818")
+        expect(authed_page.locator("#inspBigTag")).to_have_text("")
+        expect(authed_page.locator("#inspBigImg")).to_have_attribute("src", re.compile(r"&index=10&"))
+        authed_page.keyboard.press("ArrowRight")
+        expect(authed_page.locator("#inspBigTime")).to_have_text("Frame 12")
+        expect(authed_page.locator("#inspBigImg")).to_have_attribute("src", re.compile(r"&index=11&"))
+        dialog.get_by_role("button", name="Previous").click()
+        expect(authed_page.locator("#inspBigTime")).to_have_text("Frame 11")
+        authed_page.keyboard.press("Escape")
+        expect(dialog).not_to_be_visible()
+        # The strip followed the big frame.
+        expect(authed_page.locator("#inspNow")).to_have_text("Frame 11")
