@@ -3,6 +3,15 @@
 {% block title %}Inspector - Media Preview Generator{% endblock %}
 
 {% block head %}
+{# The Inspector's type: IBM Plex Sans and Mono, from the same CDN as Bootstrap. The page falls back to the system
+   fonts when it can't reach it. #}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-400.css" integrity="sha384-KAoV+iN2OQM4nX8cLQwXAmxUpLLXBew80mRTAMwu9s6Qc2HHFDByndI1icVmJ9Mb" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-500.css" integrity="sha384-52y4Whr2v4Zdfrr/tDzM2gvi5+yKwGbHPH406s95qGkmjfXhaNO+Gf2IGdtIIYnq" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-600.css" integrity="sha384-JyLG9ggsH+KTlK4Vm1MJQ3ImRVsZr00dz86Xq3GWAYPdswFE0QQzcZXLCbmgyRdg" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-700.css" integrity="sha384-QY4Rb8q7h64DA1CJ9JDtcSfibv5lUCQpnskK/2ulLqqogyY6qlDds4NNu8tMmqGX" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.3.0/latin-400.css" integrity="sha384-gmcmgZJ3SePhkdTXTGuZ/8KFvswox1OAZgOI2fPRjJYwxwqZbjQbzM5Htb673EGZ" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.3.0/latin-500.css" integrity="sha384-jJBRof6uIBCAFnrM/Riy3vKp83V7JHomeoJaXYfnmI8f6uWadY1l56XztI2WC4j4" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.3.0/latin-600.css" integrity="sha384-A75I9qmmE5fTE5MC2L6Oc2qBdwETTaGdNYGQBYESl3XDopSOVzAjn4RoQXbd6hl3" crossorigin="anonymous">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/inspector.css') }}">
 {% endblock %}
 
@@ -12,11 +21,11 @@
 <div class="insp" id="inspector">
     <section id="inspSearch" aria-labelledby="inspSearchTitle">
         <div class="insp-crumb">Tools › Inspector</div>
-        <h1 class="insp-title" id="inspSearchTitle">Inspector</h1>
+        <h1 class="insp-search-title" id="inspSearchTitle">Inspector</h1>
         <p class="insp-lead">Find a film or episode to see its preview frames and where its intro and credits are.</p>
 
-        <div class="mt-4">
-            <label for="inspQuery" class="form-label fw-medium mb-2">Title or file path</label>
+        <div class="insp-search-field">
+            <label for="inspQuery" class="insp-label">Title or file path</label>
             <div class="insp-searchbox">
                 <i class="bi bi-search" aria-hidden="true"></i>
                 <input id="inspQuery" type="text" autocomplete="off" spellcheck="false"
@@ -33,16 +42,16 @@
             <div class="insp-hint" id="inspHint">Results appear as you type. Paste a path starting with / to open that file directly.</div>
         </div>
 
-        <div id="inspResults" class="insp-results mt-3" hidden aria-live="polite"></div>
+        <div id="inspResults" class="insp-results" hidden aria-live="polite"></div>
     </section>
 
     <div id="inspFolded" class="insp-folded" hidden>
-        <button type="button" class="btn btn-sm btn-outline-secondary" id="inspShowResults">
-            <i class="bi bi-search me-1"></i><span id="inspShowResultsText">Back to the search</span>
+        <button type="button" class="insp-back" id="inspShowResults">
+            <i class="bi bi-chevron-left" aria-hidden="true"></i><span id="inspShowResultsText">New search</span>
         </button>
     </div>
 
-    <section id="inspFile" hidden aria-live="polite"></section>
+    <section id="inspFile" class="insp-file" hidden aria-live="polite"></section>
 </div>
 {% endblock %}
 
