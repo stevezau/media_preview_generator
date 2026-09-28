@@ -97,42 +97,91 @@
                             <i class="bi bi-hdd-stack me-1"></i>Servers
                         </a>
                     </li>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle {% if request.endpoint == 'main.automation_page' %}active{% endif %}" href="{{ url_for('main.automation_page') }}" id="navAutomationDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                    {# Automation and Settings are hover menus (nav_menus.js): the word is a real link to the page, and
+                       hovering it, or ArrowDown / Space on it, opens the page's sections. No data-bs-toggle, or
+                       Bootstrap would swallow the click. In the phone menu a tap expands the list instead. Each item's
+                       data-anchor lets nav_menus.js mark the one the URL's #hash points at. #}
+                    <li class="nav-item dropdown nav-hover-menu">
+                        <a class="nav-link dropdown-toggle {% if request.endpoint == 'main.automation_page' %}active{% endif %}"
+                           href="{{ url_for('main.automation_page') }}" id="navAutomationDropdown" data-nav-menu-toggle
+                           aria-haspopup="true" aria-expanded="false" aria-controls="navAutomationMenu">
                             <i class="bi bi-magic me-1"></i>Automation
                         </a>
-                        <!-- Curated jump-points only — Automation itself is a single page with
-                             tabs; this dropdown lets users land on a specific tab without an
-                             extra click. Previously listed "All automation" (same as clicking
-                             the parent link) and "Activity Log" (an in-page section, not a
-                             destination); both removed for clarity. The ``data-anchor`` attrs
-                             power the hash-aware ``active`` highlighter at the bottom of this
-                             file. -->
-                        <ul class="dropdown-menu" aria-labelledby="navAutomationDropdown">
+                        <ul class="dropdown-menu" id="navAutomationMenu" aria-labelledby="navAutomationDropdown">
                             <li>
                                 <a class="dropdown-item" data-anchor="section-webhooks-overview"
-                                   href="{{ url_for('main.automation_page') }}#section-webhooks-overview">
-                                    <i class="bi bi-lightning-charge me-2"></i>Triggers
+                                   href="{{ url_for('main.automation_page') }}#section-webhooks-overview"
+                                   aria-label="Triggers: webhooks that start jobs as new media arrives">
+                                    <i class="bi bi-lightning-charge me-2" aria-hidden="true"></i>Triggers
                                 </a>
                             </li>
                             <li>
                                 <a class="dropdown-item" data-anchor="section-schedules-list"
-                                   href="{{ url_for('main.automation_page') }}#section-schedules-list">
-                                    <i class="bi bi-calendar-event me-2"></i>Schedules
+                                   href="{{ url_for('main.automation_page') }}#section-schedules-list"
+                                   aria-label="Schedules: recurring library scans">
+                                    <i class="bi bi-calendar-event me-2" aria-hidden="true"></i>Schedules
                                 </a>
                             </li>
                             <li>
                                 <a class="dropdown-item" data-anchor="section-schedules-quiet-hours"
-                                   href="{{ url_for('main.automation_page') }}#section-schedules-quiet-hours">
-                                    <i class="bi bi-moon-stars me-2"></i>Quiet Hours
+                                   href="{{ url_for('main.automation_page') }}#section-schedules-quiet-hours"
+                                   aria-label="Quiet Hours: times of day when processing pauses">
+                                    <i class="bi bi-moon-stars me-2" aria-hidden="true"></i>Quiet Hours
                                 </a>
                             </li>
                         </ul>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint == 'main.settings' %}active{% endif %}" href="{{ url_for('main.settings') }}">
+                    <li class="nav-item dropdown nav-hover-menu">
+                        <a class="nav-link dropdown-toggle {% if request.endpoint == 'main.settings' %}active{% endif %}"
+                           href="{{ url_for('main.settings') }}" id="navSettingsDropdown" data-nav-menu-toggle
+                           aria-haspopup="true" aria-expanded="false" aria-controls="navSettingsMenu">
                             <i class="bi bi-gear me-1"></i>Settings
                         </a>
+                        {# The Settings page's sidebar sections, in its order (settings.html). #}
+                        <ul class="dropdown-menu" id="navSettingsMenu" aria-labelledby="navSettingsDropdown">
+                            <li>
+                                <a class="dropdown-item" data-anchor="section-processing"
+                                   href="{{ url_for('main.settings') }}#section-processing"
+                                   aria-label="Processing Options: jobs, GPUs, CPU workers and thumbnails">
+                                    <i class="bi bi-speedometer2 me-2" aria-hidden="true"></i>Processing Options
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" data-anchor="section-markers"
+                                   href="{{ url_for('main.settings') }}#section-markers"
+                                   aria-label="Intro &amp; Credits: skip-intro and credits markers">
+                                    <i class="bi bi-skip-forward me-2" aria-hidden="true"></i>Intro &amp; Credits
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" data-anchor="section-logging"
+                                   href="{{ url_for('main.settings') }}#section-logging"
+                                   aria-label="Logging: log level, log files and job history">
+                                    <i class="bi bi-journal-text me-2" aria-hidden="true"></i>Logging
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" data-anchor="section-auth"
+                                   href="{{ url_for('main.settings') }}#section-auth"
+                                   aria-label="Authentication: the token that signs in to this web app">
+                                    <i class="bi bi-key me-2" aria-hidden="true"></i>Authentication
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" data-anchor="section-backups"
+                                   href="{{ url_for('main.settings') }}#section-backups"
+                                   aria-label="Backups: earlier copies of the config files">
+                                    <i class="bi bi-clock-history me-2" aria-hidden="true"></i>Backups
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" data-anchor="section-about"
+                                   href="{{ url_for('main.settings') }}#section-about"
+                                   aria-label="About: version and project links">
+                                    <i class="bi bi-info-circle me-2" aria-hidden="true"></i>About
+                                </a>
+                            </li>
+                        </ul>
                     </li>
                     <!-- Tools dropdown — diagnostic surfaces grouped together so the primary
                          nav stays focused on configuration. Previously Logs and Preview
@@ -495,7 +544,7 @@
             offcanvasEl.addEventListener('click', function (event) {
                 var link = event.target.closest('a.nav-link, a.dropdown-item');
                 if (!link) return;
-                if (link.matches('[data-bs-toggle="dropdown"]')) return;
+                if (link.matches('[data-bs-toggle="dropdown"], [data-nav-menu-toggle]')) return;
                 var href = link.getAttribute('href') || '';
                 if (href === '' || href === '#') return;
                 // Only dismiss on viewports below the navbar-expand-xl
@@ -510,29 +559,8 @@
         })();
     </script>
 
-    <!-- Hash-aware Automation sub-section highlighter. When the URL is
-         /automation#section-schedules-list (or similar), light up the
-         matching dropdown item so the user can see which sub-section is
-         current. Matches via the ``data-anchor`` attributes set on each
-         dropdown <a>. Without this the Automation parent lights up but
-         the dropdown items themselves give no feedback. -->
-    <script>
-        // Wrapped in DOMContentLoaded so the dropdown lookup survives if
-        // this block ever moves into <head>. It runs after the navbar in
-        // <body> today, but future-proofing is cheap.
-        document.addEventListener('DOMContentLoaded', function () {
-            var dropdown = document.querySelector('ul[aria-labelledby="navAutomationDropdown"]');
-            if (!dropdown) return;
-            function syncActiveAnchor() {
-                var hash = (window.location.hash || '').replace(/^#/, '');
-                dropdown.querySelectorAll('a.dropdown-item[data-anchor]').forEach(function (a) {
-                    a.classList.toggle('active', !!hash && a.getAttribute('data-anchor') === hash);
-                });
-            }
-            syncActiveAnchor();
-            window.addEventListener('hashchange', syncActiveAnchor);
-        });
-    </script>
+    <!-- Automation / Settings hover menus and their #section highlight. -->
+    <script src="{{ url_for('static', filename='js/nav_menus.js') }}"></script>
 
     <!-- Theme toggle — flips data-bs-theme on <html> and persists to
          localStorage.  The pre-paint script in <head> reads the saved

@@ -323,6 +323,16 @@ html[data-bs-theme="light"] .navbar .nav-link:hover {
     background-color: var(--plex-orange-soft);
 }
 
+/* Automation and Settings hover menus (nav_menus.js). Bootstrap places a navbar dropdown's list under its toggle
+ * only when its own JS opened it (it sets data-bs-popper then), so place these lists the same way. */
+@media (min-width: 1200px) {
+    .navbar .nav-hover-menu > .dropdown-menu {
+        top: 100%;
+        left: 0;
+        margin-top: var(--bs-dropdown-spacer);
+    }
+}
+
 /* ──────────────────────────────────────────────────────────────────────
  * Panel — modern replacement for Bootstrap's flat .card. Larger
  * radius, soft surface gradient, low-contrast border. Header has a

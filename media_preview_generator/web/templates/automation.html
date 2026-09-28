@@ -130,7 +130,26 @@
 
     /* --- Initial tab from URL -------------------------------------------- */
 
+    // /automation#section-… (the navbar's Automation menu, links from other pages): open the section's tab and go
+    // to it. The browser can't scroll to a section in the hidden tab, and showAutomationTab() alone would scroll to
+    // the top and swap the hash for the tab's.
+    function showSectionFromHash() {
+        var hash = window.location.hash;
+        if (hash.indexOf('#section-') !== 0) return false;
+        var section = document.getElementById(hash.slice(1));
+        if (!section) return false;
+        var which = section.closest('#pane-schedules') ? 'schedules' : 'triggers';
+        if (!document.getElementById('pane-' + which).classList.contains('active')) {
+            showAutomationTab(which);
+            history.replaceState(null, '', window.location.pathname + hash);
+        }
+        section.scrollIntoView();
+        return true;
+    }
+    window.addEventListener('hashchange', showSectionFromHash);
+
     document.addEventListener('DOMContentLoaded', function () {
+        if (showSectionFromHash()) return;
         var params = new URLSearchParams(window.location.search);
         var hash = (window.location.hash || '').toLowerCase();
         var tabParam = (params.get('tab') || '').toLowerCase();
