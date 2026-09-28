@@ -1,7 +1,7 @@
-"""Support link wiring: navbar coffee cup, Help menu item, Star button, and FUNDING.yml.
+"""Support link wiring: navbar coffee cup, Star button, and FUNDING.yml.
 
-The Ko-fi handle is duplicated across three files (base.html twice,
-.github/FUNDING.yml once). These tests pin them together so renaming the
+The Ko-fi handle is duplicated across two files (base.html and
+.github/FUNDING.yml). These tests pin them together so renaming the
 account in one place fails loudly instead of shipping a dead link.
 """
 
@@ -116,14 +116,20 @@ def dashboard_html(authenticated_client) -> str:
 
 
 class TestSponsorLinksInNavbar:
-    def test_renders_both_navbar_cup_and_help_menu_item(self, dashboard_html):
-        """Two entry points: the always-visible coffee cup and the Help dropdown."""
+    def test_renders_only_the_navbar_cup(self, dashboard_html):
+        """One entry point: the always-visible coffee cup. The Help menu no longer repeats it."""
         anchors = _sponsor_anchors(dashboard_html)
 
-        assert len(anchors) == 2, f"expected navbar cup + Help menu item, got {len(anchors)}"
+        assert [a.attrs.get("id", "") for a in anchors] == ["sponsorLinkBtn"]
 
-        ids = {a.attrs.get("id", "") for a in anchors}
-        assert "sponsorLinkBtn" in ids, "navbar cup anchor is missing its id"
+    def test_help_menu_has_no_coffee_item_but_keeps_the_repo_link(self, dashboard_html):
+        """The Help dropdown is for help; the cup beside it covers Ko-fi."""
+        start = dashboard_html.index('aria-labelledby="helpMenuBtn"')
+        help_menu = dashboard_html[start : dashboard_html.index("</ul>", start)]
+
+        assert SPONSOR_URL not in help_menu
+        assert "Buy me a coffee" not in help_menu
+        assert [a.text for a in _anchors_to(help_menu, STAR_URL)] == ["GitHub repository"]
 
     def test_no_link_still_points_at_github_sponsors(self, dashboard_html):
         """Ko-fi replaced GitHub Sponsors as the one place to chip in."""
@@ -152,7 +158,7 @@ class TestSponsorLinksInNavbar:
             )
 
     def test_every_sponsor_link_is_labelled_in_text_not_just_an_icon(self, dashboard_html):
-        """The Help row and the mobile drawer row both need a visible label."""
+        """The phone menu's row needs a visible label."""
         for anchor in _sponsor_anchors(dashboard_html):
             assert anchor.text == "Buy me a coffee", (
                 f"sponsor link {anchor.attrs.get('id') or anchor.attrs} has text {anchor.text!r}"
@@ -170,7 +176,7 @@ class TestSponsorLinksInNavbar:
         response = authenticated_client.get("/settings")
         assert response.status_code == 200
 
-        assert len(_sponsor_anchors(response.get_data(as_text=True))) == 2
+        assert len(_sponsor_anchors(response.get_data(as_text=True))) == 1
 
 
 class TestStarButton:

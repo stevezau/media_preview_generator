@@ -220,14 +220,17 @@ class TestDesktop:
         expect(dev_page.locator("#navStarBtn")).to_have_text("Star on GitHub", use_inner_text=True)
         expect(dev_page.locator("#sponsorLinkBtn")).to_have_text("Buy me a coffee", use_inner_text=True)
 
-    def test_help_menu_offers_the_same_coffee_link(self, dev_page: Page, dev_app: str) -> None:
+    def test_help_menu_leaves_the_coffee_link_to_the_navbar_cup(self, dev_page: Page, dev_app: str) -> None:
         _open(dev_page, dev_app, NO_UPDATE, DESKTOP)
         dev_page.locator("#helpMenuBtn").click()
 
-        item = dev_page.locator('.dropdown-menu[aria-labelledby="helpMenuBtn"] a', has_text="Buy me a coffee")
-        expect(item).to_be_visible()
-        expect(item).to_have_attribute("href", KOFI)
-        expect(dev_page.locator('.dropdown-menu[aria-labelledby="helpMenuBtn"] a[href*="sponsors"]')).to_have_count(0)
+        menu = dev_page.locator('.dropdown-menu[aria-labelledby="helpMenuBtn"]')
+        expect(menu.locator("a", has_text="GitHub repository")).to_be_visible()
+        expect(menu.locator(f'a[href="{KOFI}"]')).to_have_count(0)
+        expect(menu.locator('a[href*="sponsors"]')).to_have_count(0)
+        # The divider that set the coffee row off still separates the repo link, so it isn't stray.
+        expect(menu.locator("li:last-child a")).to_have_text("GitHub repository")
+        expect(menu.locator("li:nth-last-child(2) hr.dropdown-divider")).to_have_count(1)
 
 
 @pytest.mark.e2e

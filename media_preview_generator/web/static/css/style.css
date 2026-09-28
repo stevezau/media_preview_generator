@@ -790,8 +790,7 @@ html[data-bs-theme="light"] .navbar {
 }
 
 a:hover > .sponsor-cup,
-a:focus-visible > .sponsor-cup,
-.dropdown-item:hover > .sponsor-cup {
+a:focus-visible > .sponsor-cup {
     color: #bf3989;
 }
 
