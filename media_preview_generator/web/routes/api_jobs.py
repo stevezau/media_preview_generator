@@ -276,6 +276,25 @@ def api_set_token():
 # ============================================================================
 
 
+def _job_rows(jobs: list) -> list[dict]:
+    """The jobs as the Jobs page reads them: each job's fields plus ``library_names``, the libraries it covers
+    (``job_details.job_library_names``; empty where its config names none)."""
+    rows = [j.to_dict() for j in jobs]
+    try:
+        from ..job_details import job_library_names, saved_server_configs
+        from ..settings_manager import get_settings_manager
+
+        configs = saved_server_configs(get_settings_manager().get("media_servers"))
+        names = [job_library_names(j, configs) for j in jobs]
+    except Exception as exc:
+        # A library tag is a label: an unreadable server config must not empty the queue.
+        logger.debug("Couldn't work out the jobs' libraries: {}: {}", type(exc).__name__, exc)
+        names = [[] for _ in jobs]
+    for row, library_names in zip(rows, names, strict=True):
+        row["library_names"] = library_names
+    return rows
+
+
 @api.route("/jobs")
 @api_token_required
 def get_jobs():
@@ -330,7 +349,7 @@ def get_jobs():
         if page == 0:
             return jsonify(
                 {
-                    "jobs": [j.to_dict() for j in sorted_jobs],
+                    "jobs": _job_rows(sorted_jobs),
                     "total": total,
                     "page": 0,
                     "per_page": total,
@@ -345,7 +364,7 @@ def get_jobs():
 
         return jsonify(
             {
-                "jobs": [j.to_dict() for j in page_jobs],
+                "jobs": _job_rows(page_jobs),
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -1557,6 +1576,32 @@ def get_job_file_results(job_id):
             "total_pages": total_pages,
         }
     )
+
+
+# The files a queue row lists before "and N more".
+_FILE_LIST_LIMIT = 10
+
+
+@api.route("/jobs/<job_id>/file-list", methods=["GET"])
+@api_token_required
+def get_job_file_list(job_id):
+    """The first files of a job for its expanded row on the Jobs page, each with the title its job log uses.
+
+    Query params:
+        limit: The most files returned (default 10, max 50).
+
+    Returns:
+        JSON ``{"files": [{"title", "name", "path"}], "total": N}``; 404 when the job doesn't exist.
+    """
+    from ..job_details import job_file_list
+
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    limit = min(50, max(1, request.args.get("limit", _FILE_LIST_LIMIT, type=int)))
+    files, total = job_file_list(job, job_manager.get_file_results(job_id), limit)
+    return jsonify({"files": files, "total": total})
 
 
 @api.route("/jobs/workers", methods=["GET"])

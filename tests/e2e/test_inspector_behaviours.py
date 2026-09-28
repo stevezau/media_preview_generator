@@ -1119,11 +1119,11 @@ class TestLanesAndNotChecked:
             "Nothing here yet · check this film first"
         )
         plex = lanes.locator(".insp-lane[data-server-id='plex-1'] .insp-band")
-        expect(plex).to_have_text("Credits 2:09:28 → end (made for an earlier file)")
+        expect(plex).to_have_text("Plex's own · Credits 2:09:28 → end (made for an earlier file)")
         expect(plex).to_have_class(re.compile(r"\bis-own\b"))
         # Jellyfin's intro was sent there by this app earlier: ours, tinted, not a server's own.
         jf = lanes.locator(".insp-lane[data-server-id='jf-1'] .insp-band")
-        expect(jf).to_have_text("Intro 1:00 – 1:30")
+        expect(jf).to_have_text("Ours · Intro 1:00 – 1:30")
         expect(jf).to_have_class(re.compile(r"\bis-tint\b"))
         expect(authed_page.locator("#inspJumps button")).to_have_text(["Plex2:09:28"])
         expect(authed_page.locator("#inspServers .insp-server[data-server-id='jf-1'] .insp-server-shows")).to_have_text(

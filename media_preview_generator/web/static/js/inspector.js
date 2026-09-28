@@ -1439,12 +1439,14 @@
             return lane;
         }
         lane.bands = sortedCurrent(s).map(function (m, i) {
-            const text = `${TYPE_LABELS[m.type] || m.type} ${rangeText(m, dur)}${m.stale ? ' (made for an earlier file)' : ''}`;
+            // Whose marker it is, on the band itself: the tint and the grey alone need the legend.
+            const whose = m.ours ? 'Ours' : `${name}'s own`;
+            const text = `${whose} · ${TYPE_LABELS[m.type] || m.type} ${rangeText(m, dur)}${m.stale ? ' (made for an earlier file)' : ''}`;
             return {
                 start: m.start_ms,
                 end: segmentEnd(m, dur),
                 text: text,
-                aria: `${name}: ${m.ours ? 'our ' : ''}${text}`,
+                aria: m.ours ? `${name}: ${text}` : text,
                 cls: m.ours ? `is-tint is-${tone(m.type)}` : 'is-own',
                 key: m.ours ? m.type : `own-${s.server_id}-${i}`,
             };
@@ -1529,7 +1531,7 @@
     }
 
     // The hover says what the strip is; how to move around it is the ⓘ's detail.
-    const TIMELINE_HOW_TO = '<p>Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.</p>';
+    const TIMELINE_HOW_TO = '<p>Scroll or drag the strip, or click or drag along the bar above it to jump. Click a frame to see it large.</p>';
 
     function timelineTip(step, numbered) {
         if (numbered) return 'Every preview frame in order, by number.';
@@ -1650,9 +1652,47 @@
         }
         const box = el('span', 'insp-ov-box');
         bar.appendChild(box);
-        bar.addEventListener('click', function (e) {
+        // A click jumps; a press and drag along the bar (mouse or touch) scrubs the strip with it. As on the strip, a
+        // drag never also counts as a click where it ends.
+        const barTime = function (clientX) {
             const r = bar.getBoundingClientRect();
-            tl.goTo(clamp((e.clientX - r.left) / r.width, 0, 1) * dur, null, true);
+            return clamp((clientX - r.left) / r.width, 0, 1) * dur;
+        };
+        let scrub = null;
+        let swallowBarClick = false;
+        const onScrubMove = function (e) {
+            if (!scrub || e.pointerId !== scrub.id) return;
+            if (!scrub.moved && Math.abs(e.clientX - scrub.x) > 4) {
+                scrub.moved = true;
+                bar.classList.add('is-scrubbing');
+            }
+            if (scrub.moved) tl.goTo(barTime(e.clientX), null, false);
+        };
+        const onScrubEnd = function (e) {
+            if (!scrub || e.pointerId !== scrub.id) return;
+            window.removeEventListener('pointermove', onScrubMove);
+            window.removeEventListener('pointerup', onScrubEnd);
+            window.removeEventListener('pointercancel', onScrubEnd);
+            if (scrub.moved) {
+                swallowBarClick = true;
+                bar.classList.remove('is-scrubbing');
+                setTimeout(function () { swallowBarClick = false; }, 0);
+            }
+            scrub = null;
+        };
+        bar.addEventListener('pointerdown', function (e) {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+            scrub = { id: e.pointerId, x: e.clientX, moved: false };
+            window.addEventListener('pointermove', onScrubMove);
+            window.addEventListener('pointerup', onScrubEnd);
+            window.addEventListener('pointercancel', onScrubEnd);
+        });
+        bar.addEventListener('click', function (e) {
+            if (swallowBarClick) {
+                e.preventDefault();
+                return;
+            }
+            tl.goTo(barTime(e.clientX), null, true);
         });
         ovCol.append(bubbleRow, bar);
         if (!numbered) ovCol.appendChild(axis(dur, 'insp-axis insp-ov-axis'));

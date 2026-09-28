@@ -1365,6 +1365,8 @@ function toggleJobFiles(jobId) {
         expandedJobFileRows.delete(jobId);
     } else {
         expandedJobFileRows.add(jobId);
+        const job = jobs.find(function (j) { return String(j.id) === String(jobId); });
+        if (_isMarkersJob(job)) _loadJobFileList(job);
     }
     const icon = btn.querySelector('i');
     if (icon) {
@@ -1479,6 +1481,7 @@ function _serverBadge(item) {
         recently_added: { cls: 'bg-secondary',      label: 'Recently Added' },
         scheduled_recently_added: { cls: 'bg-secondary', label: 'Scheduled scan' },
         theintrodb_recheck: { cls: 'bg-secondary',  label: 'TheIntroDB recheck' },
+        version_rerun: { cls: 'bg-secondary',       label: 'App update' },
     };
     if (src && triggerPalette[src]) {
         const t = triggerPalette[src];
@@ -1592,6 +1595,86 @@ function _markersPauseState(job) {
 function _markersDisplayName(name) {
     const match = /^((?:Retry|Verify): )?Intro & Credits(?::| ·) (.+)$/.exec(name || '');
     return match ? (match[1] || '') + match[2] : (name || '');
+}
+
+// The libraries a job covers (``library_names`` from GET /api/jobs), left of its title; none when the title already
+// names the one library.
+function _libraryTagHtml(job, title) {
+    const names = Array.isArray(job.library_names) ? job.library_names.filter(Boolean) : [];
+    if (!names.length || (names.length === 1 && names[0] === title)) return '';
+    const label = names.length <= 2 ? names.join(' · ') : `${names.length} libraries`;
+    const tip = (names.length === 1 ? 'Library: ' : 'Libraries: ') + names.join(', ');
+    return `<span class="badge border text-body-secondary fw-normal job-library-tag" title="${escapeHtmlAttr(tip)}">`
+        + `<i class="bi bi-collection me-1" aria-hidden="true"></i>${escapeHtml(label)}</span>`;
+}
+
+// The re-check after an update (triggers.submit_version_reruns) says what it is; its counts are on its config.
+function _versionRerunInfoHtml(job) {
+    const cfg = (job && job.config) || {};
+    if (!_isMarkersJob(job) || cfg.source !== 'version_rerun') return '';
+    const size = Number((cfg.version_rerun_counts || {}).batch_size) || 0;
+    const tip = 'After an update, files whose intro or credits were found by an older version are checked again, '
+        + (size > 0 ? `${size} at a time` : 'a batch at a time') + ', at low priority.';
+    return `<button type="button" class="info-icon align-baseline job-rerun-info" tabindex="0" data-bs-toggle="tooltip" `
+        + `data-bs-placement="top" title="${escapeHtmlAttr(tip)}" aria-label="${escapeHtmlAttr(tip)}">`
+        + '<i class="bi bi-info-circle"></i></button>';
+}
+
+// An Intro & Credits row's files (GET /api/jobs/<id>/file-list), read when the row opens. A finished job's list is
+// kept; a running one's is read again at most every JOB_FILE_LIST_REFRESH_MS, since the queue re-renders every few
+// seconds.
+const _jobFileLists = new Map();
+const JOB_FILE_LIST_REFRESH_MS = 15000;
+
+function _markersFilesBlock(job) {
+    return `<div id="job-file-list-${escapeHtml(job.id)}" class="job-file-list mb-2">${_markersFilesBody(job)}</div>`;
+}
+
+function _markersFilesBody(job) {
+    const cached = _jobFileLists.get(String(job.id));
+    if (!cached || !cached.data) return '<strong>Files:</strong> <span class="text-muted">Loading…</span>';
+    if (cached.data.error) return '<strong>Files:</strong> <span class="text-muted">couldn\'t be read just now</span>';
+    return _markersFilesHtml(cached.data, job);
+}
+
+function _markersFilesHtml(data, job) {
+    const files = Array.isArray(data.files) ? data.files : [];
+    if (!files.length) {
+        const why = job.status === 'pending' ? 'listed when the job runs' : 'none';
+        return `<strong>Files:</strong> <span class="text-muted">${why}</span>`;
+    }
+    const rows = files.map(function (f) {
+        const name = String(f.name || '');
+        const title = String(f.title || '') || name;
+        const nameHtml = name && name !== title ? ` <span class="text-muted job-file-name">${escapeHtml(name)}</span>` : '';
+        return `<div class="job-file text-truncate" title="${escapeHtmlAttr(f.path || name)}">`
+            + `<span class="job-file-title">${escapeHtml(title)}</span>${nameHtml}</div>`;
+    }).join('');
+    const rest = (Number(data.total) || 0) - files.length;
+    const more = rest > 0 ? `<div class="text-muted mt-1 job-file-more">and ${rest.toLocaleString()} more</div>` : '';
+    return `<strong>Files:</strong><div class="mt-1">${rows}${more}</div>`;
+}
+
+function _loadJobFileList(job) {
+    const id = String(job.id);
+    const cached = _jobFileLists.get(id);
+    if (cached && cached.loading) return;
+    if (cached && cached.status === job.status) {
+        // A running job's list grows, and a failed read is tried again: both after the refresh interval.
+        const changes = job.status === 'running' || !!(cached.data && cached.data.error);
+        if (!changes || Date.now() - cached.at < JOB_FILE_LIST_REFRESH_MS) return;
+    }
+    _jobFileLists.set(id, Object.assign({}, cached, { loading: true }));
+    apiGet(`/api/jobs/${encodeURIComponent(id)}/file-list`).then(function (data) {
+        _jobFileLists.set(id, { data: data, status: job.status, at: Date.now() });
+    }).catch(function (err) {
+        // Kept until the refresh interval, so a failing read isn't asked again on every re-render.
+        const failed = { files: [], total: 0, error: String((err && err.message) || err) };
+        _jobFileLists.set(id, { data: (cached && cached.data) || failed, status: job.status, at: Date.now() });
+    }).finally(function () {
+        const box = document.getElementById('job-file-list-' + id);
+        if (box) box.innerHTML = _markersFilesBody(job);
+    });
 }
 
 // A webhook's Intro & Credits job is listed directly under the preview job it follows when that job is on this page.
@@ -2098,14 +2181,14 @@ function updateJobQueue(force) {
         }
         const hasMultiFile = webhookBasenames.length > 1;
         // Phase H5: also show the toggle when publisher rows exist, so single-file
-        // jobs surface their per-server publish breakdown.
+        // jobs surface their per-server publish breakdown. An Intro & Credits job always lists its files.
         const hasPublishers = Array.isArray(job.publishers) && job.publishers.length > 0;
-        const hasExpandableDetail = hasMultiFile || hasPublishers;
+        const hasExpandableDetail = hasMultiFile || hasPublishers || isMarkers;
         const isFilesExpanded = expandedJobFileRows.has(String(job.id));
         const libraryTitle = webhookBasenames.length > 0
             ? ` title="${escapeHtml(webhookBasenames.join(', '))}"`
             : '';
-        const toggleTitle = hasMultiFile ? 'Show files' : 'Show publishers';
+        const toggleTitle = hasMultiFile || isMarkers ? 'Show files' : 'Show publishers';
         const filesToggleBtn = hasExpandableDetail
             ? ` <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline" id="job-files-toggle-${escapeHtml(job.id)}"
                         onclick="toggleJobFiles('${escapeHtml(job.id)}')" aria-expanded="${isFilesExpanded ? 'true' : 'false'}" aria-controls="job-detail-${escapeHtml(job.id)}" title="${toggleTitle}">
@@ -2163,14 +2246,15 @@ function updateJobQueue(force) {
             && jobs.some(function (j) { return String(j.id) === String(job.config.follows_job_id); })
             ? String(job.config.follows_job_id)
             : '';
-        const nameHtml = (followsId ? '<span class="text-muted job-follow-arrow" aria-hidden="true">↳</span>' : '')
+        const followTip = `Runs after preview job ${followsId.substring(0, 8)} finishes its first try`;
+        const rowTitle = isMarkers ? _markersDisplayName(job.library_name) : (job.library_name || '');
+        const nameHtml = (followsId
+            ? `<span class="text-muted job-follow-arrow" tabindex="0" role="img" data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtmlAttr(followTip)}" aria-label="${escapeHtmlAttr(followTip)}">↳</span>`
+            : '')
+            + _libraryTagHtml(job, rowTitle)
             + _jobKindBadgeHtml(job)
-            + (isMarkers
-                ? `<span class="fw-medium">${escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries'}</span>`
-                    + (followsId
-                        ? `<span class="badge border text-body-secondary fw-normal job-follows" title="Starts after preview job ${escapeHtmlAttr(followsId.substring(0, 8))}'s first try">follows ${escapeHtml(followsId.substring(0, 8))}</span>`
-                        : '')
-                : `<span class="fw-medium">${escapeHtml(job.library_name) || 'All Libraries'}</span>`);
+            + `<span class="fw-medium">${escapeHtml(rowTitle) || 'All Libraries'}</span>`
+            + _versionRerunInfoHtml(job);
         const nameTitle = isMarkers && !libraryTitle && job.library_name
             ? ` title="${escapeHtmlAttr(job.library_name)}"`
             : libraryTitle;
@@ -2199,9 +2283,10 @@ function updateJobQueue(force) {
             const overflow = hasMultiFile && job.config.path_count > webhookBasenames.length
                 ? `<div class="text-muted mt-1">(+${job.config.path_count - webhookBasenames.length} more)</div>`
                 : '';
-            const filesBlock = hasMultiFile
+            let filesBlock = hasMultiFile
                 ? `<strong>Files:</strong><div class="mt-1">${filesList}${overflow}</div>`
                 : '';
+            if (isMarkers) filesBlock = _markersFilesBlock(job);
             // Phase H5: per-server publisher block. Empty for legacy jobs.
             const publishersBlock = _renderPublishersBlock(job);
             html += `
@@ -2217,6 +2302,9 @@ function updateJobQueue(force) {
 
     _disposeBootstrapTooltips(tbody);
     tbody.innerHTML = html;
+    jobs.forEach(function (job) {
+        if (_isMarkersJob(job) && expandedJobFileRows.has(String(job.id))) _loadJobFileList(job);
+    });
 
     // Status badges and ⓘs (the Retry chip's) get their tooltips; ⓘs also get the app-wide ⓘ rule.
     _initBootstrapTooltips(tbody);
