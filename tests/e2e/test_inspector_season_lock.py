@@ -7,6 +7,7 @@ decided times unchanged through ``POST /api/markers/item/markers`` (save = lock 
 
 from __future__ import annotations
 
+import re
 from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
@@ -42,22 +43,35 @@ class TestWholeSeason:
         authed_page.locator("#inspScopeSeason").click()
 
         season = authed_page.locator("#inspSeason")
-        expect(season.locator(".insp-card-title").first).to_have_text("Blood Legacy (2024) · Season 1")
-        expect(season).to_contain_text("10 episodes")
+        expect(season.locator(".insp-season-title")).to_have_text("Season 1 · 10 episodes")
+        expect(season.locator("#inspSeasonSub")).to_have_text(
+            "8 have an intro · 8 have credits · 1 needs review · 9 not on every server yet"
+        )
+        expect(season.locator(".insp-season-head > div:not(.insp-axis)")).to_have_text(
+            ["EP", "INTRO", "CREDITS", "FROM", "SERVERS"]
+        )
+        # One scale for the whole season, to the longest episode; a tick that would touch the end label is left out.
+        expect(season.locator(".insp-season-head .insp-axis span:visible")).to_have_text(
+            ["0:00", "5:00", "10:00", "15:00", "20:00", "28:30"]
+        )
         assert api.season_requests == [fx.EPISODE]
         assert parse_qs(urlparse(authed_page.url).query) == {"path": [fx.EPISODE], "view": ["season"]}
         rows = season.locator("button.insp-season-row")
         expect(rows).to_have_count(10)
         expect(rows.nth(0)).to_have_class("insp-season-row is-current")
-        expect(rows.nth(0)).to_contain_text("Intro 2:45–2:59 · Credits 24:59 → end")
-        expect(rows.nth(1)).to_contain_text("🔒 Locked by you")
-        expect(rows.nth(3)).to_contain_text("Credits")
-        expect(rows.nth(6)).to_contain_text("Not checked yet")
-        expect(rows.nth(9)).to_contain_text("Needs review")
+        expect(rows.nth(0).locator(".insp-season-ep")).to_have_text("E01")
+        expect(rows.nth(0).locator(".insp-season-time")).to_have_text(["2:45 – 2:59", "24:59 → end"])
+        expect(rows.nth(1).locator(".insp-mini-chip.is-locked")).to_have_text("Locked by you")
+        expect(rows.nth(3).locator(".insp-season-time")).to_have_text(["—", "24:53 → end"])
+        expect(rows.nth(6).locator(".insp-season-chips")).to_have_text("Not checked yet")
+        expect(rows.nth(9).locator(".insp-season-time")).to_have_text(["3:03 – 3:17", "Needs review"])
         expect(rows.nth(9).locator(".insp-state-review")).to_have_attribute(
             "title", "Sources disagree: chapters, credits_text"
         )
-        expect(rows.nth(0).locator(".insp-season-chips")).to_contain_text("Audio 9/10")
+        chip = rows.nth(0).locator(".insp-season-chips .insp-mini-chip")
+        expect(chip).to_have_text("Season audio 9/10 +1")
+        expect(chip).to_have_attribute("title", "Season audio 9/10 · Chapters")
+        expect(rows.nth(0).locator(".insp-dot-item")).to_have_text(["P", "J"])
         expect(rows.nth(2).locator(".insp-dot-waiting")).to_have_attribute(
             "title", "Jellyfin: Waiting for Jellyfin to add the file"
         )
@@ -67,8 +81,9 @@ class TestWholeSeason:
         expect(rows.nth(0).locator(".insp-bar-intro")).to_have_count(1)
         expect(rows.nth(0).locator(".insp-bar-credits")).to_have_count(1)
         # The episode view's own cards are away while the season is on show.
-        expect(authed_page.locator("#inspSummaryCard")).to_have_count(0)
-        fx.screenshot(authed_page, "20-whole-season")
+        expect(authed_page.locator("#inspTiles")).to_have_count(0)
+        expect(authed_page.locator("#inspTimeline")).to_have_count(0)
+        fx.screenshot(authed_page, "11-whole-season")
 
     def test_a_row_opens_that_episode(self, authed_page: Page, app_url: str) -> None:
         api = fx.InspectorApi()
@@ -82,7 +97,8 @@ class TestWholeSeason:
         expect(row).to_have_attribute("data-path", target)
         row.click()
 
-        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy (2024) · S01E03")
+        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy")
+        expect(authed_page.locator("#inspTitleSub")).to_have_text("2024 · S01E03")
         expect(authed_page.locator("#inspPath")).to_have_text(target)
         assert parse_qs(urlparse(authed_page.url).query) == {"path": [target]}
         expect(authed_page.locator("#inspScopeEpisode")).to_have_attribute("aria-pressed", "true")
@@ -93,8 +109,10 @@ class TestWholeSeason:
         _open(authed_page, app_url, fx.EPISODE, view="season")
         publish = authed_page.locator("#inspPublishSeason")
         expect(publish).to_have_text("Publish 9 to 2 servers")
-        expect(authed_page.locator("#inspSeasonReady")).to_have_text("9 ready")
-        expect(authed_page.locator("#inspSeasonReview")).to_have_text("1 need review")
+        expect(publish.locator("xpath=following-sibling::button[contains(@class,'info-icon')]")).to_have_attribute(
+            "aria-label", re.compile(r"^Runs Intro & Credits for this season as a job")
+        )
+        expect(authed_page.locator("#inspSeasonReview")).to_have_text("1 needs review")
 
         with authed_page.expect_response(lambda r: r.url.endswith("/api/markers/season/publish")):
             publish.click()
@@ -115,7 +133,9 @@ class TestWholeSeason:
         api = fx.install(authed_page)
         api.season = fx.season_payload(total=60)
         _open(authed_page, app_url, fx.EPISODE, view="season")
-        expect(authed_page.locator("#inspSeason")).to_contain_text("60 episodes (showing the 40 nearest)")
+        expect(authed_page.locator("#inspSeason .insp-season-title")).to_have_text(
+            "Season 1 · 60 episodes (showing the 40 nearest)"
+        )
 
     def test_a_film_has_no_season_toggle(self, authed_page: Page, app_url: str) -> None:
         fx.install(authed_page)
@@ -136,9 +156,11 @@ class TestLock:
         )
         lock.click()
         confirm = authed_page.locator("#inspLockConfirmRow")
-        expect(confirm).to_contain_text("Lock these times? Intro 2:45–2:59 · Credits 24:59 → end")
+        expect(confirm.locator(".insp-confirm-title")).to_have_text(
+            "Lock these times? Intro 2:45 – 2:59 · Credits 24:59 → end"
+        )
         expect(confirm).to_contain_text("they go to Plex and Jellyfin now")
-        fx.screenshot(authed_page, "21-lock-confirm")
+        fx.screenshot(authed_page, "20-lock-confirm")
 
         with authed_page.expect_response(
             lambda r: r.url.endswith("/api/markers/item/markers") and r.request.method == "POST"
@@ -193,11 +215,20 @@ class TestLock:
         expect(unlock.locator("xpath=following-sibling::button[contains(@class,'info-icon')]")).to_have_attribute(
             "aria-label", fx_unlock_tip()
         )
-        expect(authed_page.locator("#inspLocked")).to_contain_text("You set the credits, so later checks keep them.")
-        fx.screenshot(authed_page, "22-locked")
+        expect(authed_page.locator("#inspLocked .insp-ev-found")).to_have_text("Credits 24:59 → end")
+        expect(authed_page.locator("#inspLocked .insp-ev-note")).to_have_text("Locked · later checks keep them")
+        expect(authed_page.locator("#inspLockedChip")).to_have_text("Locked by you")
+        expect(authed_page.locator("#inspTiles [data-tile='found'] .insp-stat-sub")).to_have_text(
+            "From Season audio · Credits set by you"
+        )
+        fx.screenshot(authed_page, "08-locked")
         unlock.click()
-        expect(authed_page.locator("#inspLocked")).to_contain_text("Back to automatic? Your times stay on your servers")
-        fx.screenshot(authed_page, "23-unlock-confirm")
+        confirm = authed_page.locator("#inspUnlockConfirmRow")
+        expect(confirm.locator(".insp-confirm-title")).to_have_text("Back to automatic?")
+        expect(confirm.locator(".insp-small")).to_have_text(
+            "Your times stay on your servers for now; the next check decides again and may move them."
+        )
+        fx.screenshot(authed_page, "21-unlock-confirm")
 
         authed_page.get_by_role("button", name="Keep them locked").click()
         expect(authed_page.locator("#inspUnlockConfirm")).to_have_count(0)

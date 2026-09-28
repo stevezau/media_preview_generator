@@ -1,19 +1,20 @@
 // =========================================================================
-// Inspector: one page for a file's preview frames and its intro & credits (the approved design, boards 1-4).
+// Inspector: one page for a file's preview frames and its intro & credits (the approved design, boards 1-6).
 //
 // Search: GET /api/media/search (every enabled server, merged), then POST /api/inspector/status for each row's
 // preview and Intro & Credits state, and POST /api/inspector/show for a show's seasons and episodes. A path starting
 // with "/" opens that file. Choosing a file folds the results away and sets ?path= so the page can be linked.
 //
 // A file: GET /api/inspector/file (where each server keeps its preview, what it holds, a job working on the file,
-// other versions) and GET /api/markers/item (what was decided, the evidence, what each server shows). Frames come
-// from the preview (GET /api/bif/frame, /api/bif/trickplay/frame); Adjust and "Needs your check" read exact frames one
-// second apart from the video (GET /api/inspector/frames). Saving is POST /api/markers/item/markers (save = lock =
-// publish to every owner); "Back to automatic" is DELETE on the same route. Regenerate preview is POST
-// /api/jobs/manual, Re-detect POST /api/markers/item/redetect. A job on the /jobs socket that works on the open file
-// shows as a live banner, and the file is read again when it ends.
+// other versions) and GET /api/markers/item (what was decided, the evidence, what each server shows). The Timeline is
+// one strip of every preview frame (GET /api/bif/frame, /api/bif/trickplay/frame), drawn only near the viewport, with
+// a row per server underneath on the same scale. Adjust and "Needs your check" read exact frames one second apart
+// from the video (GET /api/inspector/frames). Saving is POST /api/markers/item/markers (save = lock = publish to every
+// owner); "Back to automatic" is DELETE on the same route. Regenerate preview is POST /api/jobs/manual, Re-detect
+// POST /api/markers/item/redetect. A job on the /jobs socket that works on the open file shows as a live banner, and
+// the file is read again when it ends.
 //
-// Every piece of text goes in through textContent. Depends on app.js globals: apiPost, showToast, getCsrfToken,
+// Every piece of text goes in through textContent. Depends on app.js globals: showToast, getCsrfToken,
 // _initBootstrapTooltips, _disposeBootstrapTooltips; window.bootstrap; window.io.
 // =========================================================================
 (function () {
@@ -28,7 +29,6 @@
     const TYPE_PLURALS = { intro: 'intros', credits: 'credits', recap: 'recaps', preview: 'previews' };
     const VENDOR_TILES = { plex: 'P', jellyfin: 'J', emby: 'E' };
     const VENDOR_NAMES = { plex: 'Plex', jellyfin: 'Jellyfin', emby: 'Emby' };
-    const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨'];
     // Each source's name and what it is, in the words of the "How it was decided" card.
     const SOURCES = {
         season_audio: ['Season audio', 'The theme music heard across the season'],
@@ -51,21 +51,38 @@
     const EXACT_COUNT = 7;
     const PICK_COUNT = 14;
     const PICK_STEP_MS = 10000;
-    const CLOSEUP_SIDE = 3;
-    const ENDING_SHARE = 0.12;
+    const ADJUST_COUNT = 8;
+    const ADJUST_BEFORE = 3;
     const MARKERS_JOB = 'intro_credits';
     const ADD_HEAD_MS = 30000;
     const ADD_TAIL_MS = 60000;
+    const ATTENTION_PLANS = ['unknown', 'will_add', 'will_replace', 'will_remove', 'waiting'];
+
+    // Timeline geometry, in pixels: a tile every PITCH, lanes under the frames on the same scale.
+    const PITCH = 152;
+    const TILE_W = 144;
+    const LANE_TOP = 118;
+    const LANE_PITCH = 24;
+    const LANE_H = 18;
+    const STRIP_BARE_H = 106;
+    const STEP_FRAMES = 10;
+    // A file with no preview still gets a strip (its tiles say "No preview"), one place every this long.
+    const NO_PREVIEW_STEP_MS = 10000;
+    // Tiles are kept this many viewport widths past each side; images load once the strip stops for this long.
+    const WINDOW_EXTRA = 0.75;
+    const IMAGE_SETTLE_MS = 120;
+    const GLIDE_SCREENS = 3;
+    // Two edges closer than this are one line on the strip: a server's own marker that matches ours isn't drawn twice.
+    const SAME_EDGE_MS = 2000;
+
     const TIPS = {
         regenerate: 'Makes this file\'s preview again for every server that has it, replacing the one there now. Runs as a job on the Dashboard.',
         redetect: 'Looks this file up again and asks every source afresh. Runs as a job on the Dashboard.',
         adjust: 'Move the intro and credits one second at a time, on frames read straight from the video. Saving sends your times to your servers and keeps them through later checks.',
-        allFrames: 'Every frame of the preview, with intro frames edged blue and credits frames orange. Click one to see it larger.',
-        unlock: 'Lets later checks decide these times again. What your servers show now stays until the next Intro & Credits job.',
         pick: 'Frames one second apart, read from the video. Step ten seconds either way to find the first frame.',
         lock: 'Keep these times exactly as they are. Later checks won\'t change them, and your servers get them now.',
         unlockHeader: 'Let later checks set these times again. What your servers show now stays until the next Intro & Credits job.',
-        scope: 'Intros are found by comparing a season\'s episodes, so the whole season is the natural place to check and publish them.',
+        scope: 'Intros usually sit at the same spot in every episode of a season, so seeing them side by side makes an odd one stand out. Click an episode to open it.',
         publish: 'Runs Intro & Credits for this season as a job: decided episodes go to every server that doesn\'t show them yet, the rest are checked again.',
         versions: 'The server keeps these files under one item. Each has its own preview; Plex shows one set of markers for all of them.',
     };
@@ -86,9 +103,6 @@
         item: null,
         itemError: '',
         loadSeq: 0,
-        view: 'timeline',
-        allStep: 1,
-        allIndex: 0,
         adjust: null,
         review: {},
         confirmUnlock: false,
@@ -103,6 +117,9 @@
         job: null,
     };
     const exactCache = new Map();
+    const exactDone = new Map();
+    let timeline = null;
+    let big = null;
     let jobsSocket = null;
     let searchTimer = null;
     let reloadTimer = null;
@@ -119,11 +136,23 @@
         return node;
     }
 
+    function icon(name) {
+        const i = el('i', 'bi bi-' + name);
+        i.setAttribute('aria-hidden', 'true');
+        return i;
+    }
+
     function button(text, className, onClick, tip) {
-        const b = el('button', className || 'btn btn-outline-secondary', text);
+        const b = el('button', className || 'btn insp-btn', text);
         b.type = 'button';
         if (onClick) b.addEventListener('click', onClick);
         if (tip) b.dataset.tip = tip;
+        return b;
+    }
+
+    function iconButton(iconName, text, className, onClick) {
+        const b = button('', className, onClick);
+        b.append(icon(iconName), document.createTextNode(text));
         return b;
     }
 
@@ -143,6 +172,12 @@
         const wrap = el('span', 'd-inline-flex align-items-center');
         wrap.append(node, infoIcon(tip));
         return wrap;
+    }
+
+    function dot(kind) {
+        const d = el('span', 'insp-dot is-' + kind);
+        d.setAttribute('aria-hidden', 'true');
+        return d;
     }
 
     function clock(ms) {
@@ -173,12 +208,17 @@
         return `${(n / (1024 * 1024)).toFixed(1)} MB`;
     }
 
-    function when(iso) {
+    function day(iso) {
         if (!iso) return '';
         const d = new Date(iso);
         if (Number.isNaN(d.getTime())) return '';
-        const date = d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-        const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    }
+
+    function when(iso) {
+        const date = day(iso);
+        if (!date) return '';
+        const time = new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
         return `${date}, ${time}`;
     }
 
@@ -205,11 +245,20 @@
     }
 
     function rangeText(seg, duration) {
-        return toEnd(seg, duration) ? `${clock(seg.start_ms)} → end` : `${clock(seg.start_ms)}–${clock(segmentEnd(seg, duration))}`;
+        return toEnd(seg, duration) ? `${clock(seg.start_ms)} → end` : `${clock(seg.start_ms)} – ${clock(segmentEnd(seg, duration))}`;
     }
 
     function pct(ms, duration) {
         return Math.max(0, Math.min(100, (ms / duration) * 100));
+    }
+
+    function clamp(n, lo, hi) {
+        return Math.max(lo, Math.min(hi, n));
+    }
+
+    // Intro and recap are drawn blue, credits and preview amber.
+    function tone(type) {
+        return START_TYPES.indexOf(type) !== -1 ? 'intro' : 'credits';
     }
 
     async function getJson(url) {
@@ -392,18 +441,18 @@
             const titleCell = el('div');
             titleCell.style.minWidth = '0';
             titleCell.append(el('div', 'insp-row-title', titleWithYear(r)), el('div', 'insp-row-meta', metaLine(r, status)));
-            let preview;
+            let previewCell;
             let markers;
             if (r.kind === 'show') {
-                preview = ['', ''];
+                previewCell = ['', ''];
                 markers = [state.openShow === index ? 'Pick an episode below' : 'Pick an episode', 'insp-state-muted'];
             } else {
-                preview = previewText(status);
+                previewCell = previewText(status);
                 markers = markersText(status);
             }
             row.append(
                 titleCell,
-                el('div', 'insp-cell-preview ' + preview[1], preview[0]),
+                el('div', 'insp-cell-preview ' + previewCell[1], previewCell[0]),
                 el('div', 'insp-cell-markers ' + markers[1], markers[0]),
                 el('i', 'bi ' + (r.kind === 'show' && state.openShow === index ? 'bi-chevron-down' : 'bi-chevron-right'))
             );
@@ -479,7 +528,7 @@
         seasons.setAttribute('aria-label', 'Seasons');
         data.seasons.forEach(function (season) {
             const active = season.season === state.showSeason[index];
-            const b = button(season.label, 'btn btn-sm btn-outline-secondary' + (active ? ' active' : ''), function () {
+            const b = button(season.label, 'btn insp-btn' + (active ? ' active' : ''), function () {
                 state.showSeason[index] = season.season;
                 renderResults();
             });
@@ -520,10 +569,11 @@
         $('inspFolded').hidden = !folded;
         $('inspFile').hidden = !folded;
         $('inspShowResultsText').textContent = state.query && !state.query.startsWith('/')
-            ? `Back to the results for “${state.query}”` : 'New search';
+            ? `Results for “${state.query}”` : 'New search';
     }
 
     function showSearch(push) {
+        closeBig();
         state.path = '';
         state.bifOnly = '';
         state.file = null;
@@ -535,6 +585,7 @@
     }
 
     function resetFileState() {
+        closeBig();
         state.file = null;
         state.item = null;
         state.itemError = '';
@@ -545,10 +596,10 @@
         state.locking = false;
         state.season = null;
         state.seasonError = '';
-        state.view = 'timeline';
-        state.allIndex = 0;
         state.job = null;
+        timeline = null;
         exactCache.clear();
+        exactDone.clear();
     }
 
     function openFile(path, options) {
@@ -629,7 +680,6 @@
                     interval_ms: d.frame_interval_ms, file_size: d.file_size, created_at: d.created_at,
                 },
             };
-            state.view = 'all';
         }
         render();
     }
@@ -653,6 +703,21 @@
         return p ? (p.interval_ms || (duration() && p.frame_count ? Math.round(duration() / p.frame_count) : 0)) : 0;
     }
 
+    function stripStep() {
+        return interval() || NO_PREVIEW_STEP_MS;
+    }
+
+    // A preview whose file length isn't known has no times (e.g. Jellyfin trickplay with no stated interval on a file
+    // no server gave a length for): its frames are still shown, by number.
+    function lengthUnknown() {
+        const p = preview();
+        return !duration() && !!(p && p.frame_count);
+    }
+
+    function frameLabel(index) {
+        return lengthUnknown() ? `Frame ${(index + 1).toLocaleString()}` : clock(index * stripStep());
+    }
+
     function frameUrl(index) {
         const p = preview();
         if (!p) return '';
@@ -667,11 +732,8 @@
         return `/api/bif/frame?path=${encodeURIComponent(p.path)}&index=${i}`;
     }
 
-    function frameIndexAt(ms) {
-        const p = preview();
-        const step = interval();
-        if (!p || !step) return 0;
-        return Math.max(0, Math.min(p.frame_count - 1, Math.round(ms / step)));
+    function fileWord() {
+        return state.file && state.file.kind === 'episode' ? 'episode' : 'film';
     }
 
     function decision(type) {
@@ -709,6 +771,10 @@
         return !!(state.item && state.item.known && Object.values(state.item.decisions || {}).some(function (d) { return d && d.status; }));
     }
 
+    function sortedCurrent(server) {
+        return (Array.isArray(server.current) ? server.current : []).slice().sort(function (a, b) { return a.start_ms - b.start_ms; });
+    }
+
     function serverMarkers() {
         const out = [];
         servers().forEach(function (s) {
@@ -717,78 +783,142 @@
         return out.sort(function (a, b) { return a.marker.start_ms - b.marker.start_ms; });
     }
 
+    // Every marker a server made itself (not one this app sent), each with the key its band, line and chip share.
+    function ownMarkers() {
+        const out = [];
+        servers().forEach(function (s) {
+            sortedCurrent(s).forEach(function (m, i) {
+                if (!m.ours) out.push({ server: s, marker: m, key: `own-${s.server_id}-${i}` });
+            });
+        });
+        return out.sort(function (a, b) { return a.marker.start_ms - b.marker.start_ms; });
+    }
+
+    function attention() {
+        if (!isChecked()) return [];
+        return servers().filter(function (s) { return s.error || ATTENTION_PLANS.indexOf(s.plan) !== -1; });
+    }
+
+    function serverDot(s) {
+        if (s.error || !Array.isArray(s.current) || s.plan === 'unknown') return 'bad';
+        if (!isChecked()) return (s.current || []).some(function (m) { return !m.ours; }) ? 'own' : 'none';
+        if (s.plan === 'up_to_date') return 'ok';
+        if (s.plan && s.plan.indexOf('keeps_') === 0) return 'own';
+        if (ATTENTION_PLANS.indexOf(s.plan) !== -1) return 'wait';
+        return 'none';
+    }
+
+    // What a server that shows nothing gives viewers, in the words its row on the strip and its row on the card share.
+    function emptyText(s) {
+        if (!s.markers_enabled) return 'Intro & Credits is off';
+        if (!isChecked()) return `Nothing here yet · check this ${fileWord()} first`;
+        const dur = duration();
+        const wanted = decidedTypes().filter(function (t) { return (s.can_show || []).indexOf(t) !== -1; });
+        if (wanted.length && s.plan === 'will_add') {
+            return `Nothing yet · the next job adds ${joinWith(wanted.map(function (t) { return `${TYPE_WORDS[t]} ${rangeText(decided(t), dur)}`; }), 'and')}`;
+        }
+        if (s.plan === 'waiting') return 'Nothing yet · waiting for its other versions to agree';
+        return 'Nothing yet';
+    }
+
+    function splitTitle(title) {
+        const match = /^(.*?)\s*\((\d{4})\)\s*(?:·\s*(.+))?$/.exec(title || '');
+        if (!match || !match[1]) return { main: title || '', sub: '' };
+        return { main: match[1], sub: [match[2], match[3]].filter(Boolean).join(' · ') };
+    }
+
     // ------------------------------------------------------------------ render
 
     function render() {
         const root = $('inspFile');
+        if (timeline) timeline.keepScroll();
         untooltip(root);
         const parts = [];
         if (state.bifOnly) {
-            parts.push(header(state.file ? state.file.title : state.bifOnly.split('/').pop(), state.bifOnly, []));
+            parts.push(header(state.file ? state.file.title : state.bifOnly.split('/').pop(), state.bifOnly, [], state.file && !state.file.error ? ['Preview file'] : []));
         } else {
             const f = state.file || {};
             const title = state.titleHint || f.title || state.path.split('/').pop();
-            parts.push(header(title, state.path, state.file && !state.file.error && f.exists !== false && f.in_library ? actions() : []));
-        }
-        const body = el('div', 'd-flex flex-column gap-4');
-        body.id = 'inspBody';
-        if (!state.file) {
-            body.appendChild(loadingCard());
-        } else if (state.file.error) {
-            body.appendChild(messageCard('Couldn\'t open this file', state.file.error, 'danger'));
-        } else if (state.bifOnly) {
-            body.appendChild(factsCard());
-            body.appendChild(wholeFileCard());
-        } else if (state.file.exists === false) {
-            body.appendChild(goneCard());
-        } else if (!state.file.in_library || state.file.exists === null) {
-            body.appendChild(messageCard('Not in any library',
-                'No server has a library that holds this path, so the Inspector has nothing to compare and nothing here '
-                + 'is sent anywhere. Check the path, or the libraries on the Servers page.', 'secondary'));
-        } else {
-            if (state.file.versions && state.file.versions.length > 1) body.appendChild(versionsBar());
-            if (state.file.kind === 'episode') body.appendChild(scopeToggle());
-            const banner = el('div');
-            banner.id = 'inspJobBanner';
-            body.appendChild(banner);
-            renderJobBanner(banner);
-            if (state.scope === 'season') {
-                body.appendChild(seasonCard());
-                parts.push(body);
-                root.replaceChildren.apply(root, parts);
-                tooltips(root);
-                return;
+            const ready = state.file && !state.file.error && f.exists !== false && f.in_library;
+            if (ready) {
+                const banner = el('div');
+                banner.id = 'inspJobBanner';
+                parts.push(banner);
+                renderJobBanner(banner);
             }
-            reviewTypes().forEach(function (type) { body.appendChild(reviewPanel(type)); });
-            body.appendChild(summaryCard());
-            body.appendChild(wholeFileCard());
-            const ending = endingCard();
-            if (ending) body.appendChild(ending);
-            const closeups = closeupCards();
-            if (closeups) body.appendChild(closeups);
-            if (state.adjust) body.appendChild(adjustBar());
-            const lower = el('div', 'insp-grid-2');
-            lower.append(evidenceCard(), serversCard());
-            body.appendChild(lower);
+            parts.push(header(title, state.path, ready ? actions() : [], ready ? headChips() : []));
         }
-        parts.push(body);
+        if (!state.file) {
+            parts.push(loadingCard());
+        } else if (state.file.error) {
+            parts.push(messageCard('Couldn\'t open this file', state.file.error, 'bad'));
+        } else if (state.bifOnly) {
+            parts.push(statTiles([previewStat()]));
+            parts.push(timelineCard());
+        } else if (state.file.exists === false) {
+            parts.push(goneCard());
+        } else if (!state.file.in_library || state.file.exists === null) {
+            parts.push(messageCard('Not in any library',
+                'No server has a library that holds this path, so the Inspector has nothing to compare and nothing here '
+                + 'is sent anywhere. Check the path, or the libraries on the Servers page.', 'muted'));
+        } else {
+            if (state.confirmLock && lockableTypes().length) parts.push(lockConfirmRow());
+            if (state.confirmUnlock && lockedTypes().length) parts.push(unlockConfirmRow());
+            if (state.file.versions && state.file.versions.length > 1) parts.push(versionsBar());
+            if (state.file.kind === 'episode') parts.push(scopeToggle());
+            if (state.scope === 'season') {
+                parts.push(seasonCard());
+            } else {
+                reviewTypes().forEach(function (type) { parts.push(reviewPanel(type)); });
+                parts.push(statTiles([serversStat(), foundStat(), previewStat(), checkedStat()]));
+                parts.push(timelineCard());
+                const lower = el('div', 'insp-grid-2');
+                let left;
+                if (!state.item) left = itemErrorCard();
+                else if (!isChecked()) left = notCheckedCard();
+                else left = evidenceCard();
+                lower.append(left, serversCard());
+                parts.push(lower);
+            }
+        }
         root.replaceChildren.apply(root, parts);
+        if (timeline && timeline.node.isConnected) timeline.mount();
+        tidyAxes(root);
         tooltips(root);
-        requestAnimationFrame(layoutAllLabels);
     }
 
-    function header(title, path, buttons) {
+    function header(title, path, buttons, chips) {
         const head = el('div', 'insp-head');
         const text = el('div', 'insp-head-text');
-        text.append(el('div', 'insp-crumb', 'Tools › Inspector'));
-        const h1 = el('h1', 'insp-title', title);
+        text.appendChild(el('div', 'insp-crumb', 'Tools › Inspector'));
+        const parts = splitTitle(title);
+        const titleRow = el('div', 'insp-titlerow');
+        const h1 = el('h1', 'insp-title', parts.main);
         h1.id = 'inspTitle';
-        text.appendChild(h1);
+        titleRow.appendChild(h1);
+        if (parts.sub) {
+            const sub = el('div', 'insp-title-sub', parts.sub);
+            sub.id = 'inspTitleSub';
+            titleRow.appendChild(sub);
+        }
+        text.appendChild(titleRow);
+        if (chips.length) {
+            const row = el('div', 'insp-head-chips');
+            row.id = 'inspChips';
+            chips.forEach(function (c) { row.appendChild(typeof c === 'string' ? el('span', 'insp-chip', c) : c); });
+            text.appendChild(row);
+        }
         if (path) {
+            const pathRow = el('div', 'insp-pathrow');
             const p = el('div', 'insp-path', path);
             p.id = 'inspPath';
             p.title = path;
-            text.appendChild(p);
+            const copy = button('', 'insp-icon-btn', function () { copyPath(path); });
+            copy.setAttribute('aria-label', 'Copy file path');
+            copy.title = 'Copy file path';
+            copy.appendChild(icon('copy'));
+            pathRow.append(p, copy);
+            text.appendChild(pathRow);
         }
         head.appendChild(text);
         if (buttons.length) {
@@ -799,9 +929,52 @@
         return head;
     }
 
-    function actionButton(text, className, handler, tip, id) {
+    function headChips() {
+        const chips = [state.file.kind === 'episode' ? 'Episode' : 'Film'];
+        const dur = duration();
+        if (dur) {
+            const c = el('span', 'insp-chip insp-mono', clock(dur));
+            c.title = 'Length';
+            chips.push(c);
+        }
+        if (state.file.quality) chips.push(state.file.quality);
+        if (lockedTypes().length) {
+            const lock = el('span', 'insp-chip is-locked');
+            lock.id = 'inspLockedChip';
+            lock.append(icon('lock-fill'), document.createTextNode('Locked by you'));
+            chips.push(lock);
+        }
+        return chips;
+    }
+
+    async function copyPath(path) {
+        let copied = false;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(path);
+                copied = true;
+            }
+        } catch (e) {
+            copied = false;
+        }
+        if (!copied) {
+            // Plain http on a LAN has no clipboard API: a selected text area and the copy command still work there.
+            const area = el('textarea');
+            area.value = path;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            try { copied = document.execCommand('copy'); } catch (e) { copied = false; }
+            area.remove();
+        }
+        toast('File path', copied ? 'Copied to the clipboard.' : 'Couldn\'t copy it: select the path and copy it by hand.', copied ? 'success' : 'warning');
+    }
+
+    function actionButton(iconName, text, className, handler, tip, id) {
         const wrap = el('span', 'd-inline-flex align-items-center');
-        const b = button(text, className, handler);
+        const b = iconName ? iconButton(iconName, text, className, handler) : button(text, className, handler);
         b.id = id;
         if (state.busy) b.disabled = true;
         wrap.append(b, infoIcon(tip));
@@ -810,26 +983,26 @@
 
     function actions() {
         const list = [];
-        list.push(actionButton('Regenerate preview', 'btn btn-outline-secondary', regenerate, TIPS.regenerate, 'inspRegenerate'));
+        list.push(actionButton('arrow-clockwise', 'Regenerate preview', 'btn insp-btn', regenerate, TIPS.regenerate, 'inspRegenerate'));
         const analysed = !!(state.item && state.item.known && state.item.duration_ms);
         if (!isChecked()) {
-            list.push(actionButton('Check intro & credits now', 'btn btn-insp-primary', redetect, TIPS.redetect, 'inspRedetect'));
+            list.push(actionButton('', 'Check intro & credits now', 'btn insp-btn-primary', redetect, TIPS.redetect, 'inspRedetect'));
             return list;
         }
-        list.push(actionButton('Re-detect intro & credits', 'btn btn-outline-secondary', redetect, TIPS.redetect, 'inspRedetect'));
+        list.push(actionButton('search', 'Re-detect intro & credits', 'btn insp-btn', redetect, TIPS.redetect, 'inspRedetect'));
         if (state.scope === 'season') return list;
         if (analysed && lockedTypes().length) {
-            const b = actionButton('Back to automatic', 'btn btn-outline-secondary', askUnlock, TIPS.unlockHeader, 'inspUnlock');
+            const b = actionButton('unlock', 'Back to automatic', 'btn insp-btn', askUnlock, TIPS.unlockHeader, 'inspUnlock');
             if (state.adjust || state.locking) b.querySelector('button').disabled = true;
             list.push(b);
         } else if (analysed && lockableTypes().length) {
-            const b = actionButton(state.locking ? 'Locking…' : 'Lock', 'btn btn-outline-secondary', askLock, TIPS.lock, 'inspLock');
+            const b = actionButton('lock', state.locking ? 'Locking…' : 'Lock', 'btn insp-btn', askLock, TIPS.lock, 'inspLock');
             if (state.adjust || state.locking) b.querySelector('button').disabled = true;
             list.push(b);
         }
         if (analysed && !reviewTypes().length) {
             const label = state.adjust ? 'Adjusting…' : 'Adjust';
-            const b = actionButton(label, 'btn btn-insp-primary', startAdjust, TIPS.adjust, 'inspAdjust');
+            const b = actionButton('', label, 'btn insp-btn-primary', startAdjust, TIPS.adjust, 'inspAdjust');
             if (state.adjust || state.locking) b.querySelector('button').disabled = true;
             list.push(b);
         }
@@ -854,7 +1027,7 @@
         state.confirmUnlock = true;
         state.confirmLock = false;
         render();
-        const row = $('inspLocked');
+        const row = $('inspUnlockConfirmRow');
         if (row) row.scrollIntoView({ block: 'nearest' });
     }
 
@@ -886,36 +1059,49 @@
         }
     }
 
-    function lockConfirmRow() {
-        const types = lockableTypes();
-        const dur = duration();
-        const row = el('div', 'insp-confirm-inline mt-3');
-        row.id = 'inspLockConfirmRow';
-        const names = receivers(types);
-        const listed = types.map(function (t) { return `${TYPE_LABELS[t]} ${rangeText(decided(t), dur)}`; }).join(' · ');
-        const text = el('div');
-        text.append(el('div', 'fw-semibold', `Lock these times? ${listed}`),
-            el('div', 'insp-small', `Later checks won't change them, and they go to ${names.length ? joinWith(names, 'and') : 'your servers'} now, the same way Save sends them.`));
-        const buttons = el('div', 'd-flex gap-2 flex-wrap');
-        const yes = button(`Lock and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn btn-sm btn-insp-primary', lockNow);
-        yes.id = 'inspLockConfirm';
-        const no = button('Leave them as they are', 'btn btn-sm btn-outline-secondary', function () { state.confirmLock = false; render(); });
-        buttons.append(yes, no);
-        row.append(text, buttons);
+    function confirmBar(id, title, text, buttons) {
+        const row = el('div', 'insp-confirm-bar');
+        row.id = id;
+        const words = el('div');
+        words.append(el('div', 'insp-confirm-title', title), el('div', 'insp-small', text));
+        const acts = el('div', 'insp-confirm-actions');
+        buttons.forEach(function (b) { acts.appendChild(b); });
+        row.append(words, acts);
         return row;
     }
 
+    function lockConfirmRow() {
+        const types = lockableTypes();
+        const dur = duration();
+        const names = receivers(types);
+        const listed = types.map(function (t) { return `${TYPE_LABELS[t]} ${rangeText(decided(t), dur)}`; }).join(' · ');
+        const to = names.length ? joinWith(names, 'and') : 'your servers';
+        const yes = button(`Lock and send to ${to}`, 'btn insp-btn-primary', lockNow);
+        yes.id = 'inspLockConfirm';
+        const no = button('Leave them as they are', 'btn insp-btn', function () { state.confirmLock = false; render(); });
+        return confirmBar('inspLockConfirmRow', `Lock these times? ${listed}`,
+            `Later checks won't change them, and they go to ${to} now, the same way Save sends them.`, [no, yes]);
+    }
+
+    function unlockConfirmRow() {
+        const yes = button('Go back to automatic', 'btn insp-btn-danger', unlock);
+        yes.id = 'inspUnlockConfirm';
+        const no = button('Keep them locked', 'btn insp-btn', function () { state.confirmUnlock = false; render(); });
+        return confirmBar('inspUnlockConfirmRow', 'Back to automatic?',
+            'Your times stay on your servers for now; the next check decides again and may move them.', [no, yes]);
+    }
+
     function loadingCard() {
-        const card = el('div', 'insp-card d-flex align-items-center gap-2');
+        const card = el('div', 'insp-card insp-loading');
         card.id = 'inspLoading';
         card.append(el('span', 'spinner-border spinner-border-sm'), el('span', '', 'Reading this file…'));
         return card;
     }
 
     function messageCard(title, text, tone) {
-        const card = el('div', `insp-card border-${tone || 'secondary'}`);
+        const card = el('div', `insp-card insp-message is-${tone || 'muted'}`);
         card.dataset.state = title;
-        card.append(el('div', 'fw-semibold fs-5 mb-1', title), el('div', 'insp-small fs-6', text));
+        card.append(el('div', 'insp-message-title', title), el('div', 'insp-message-text', text));
         return card;
     }
 
@@ -924,9 +1110,9 @@
         const card = messageCard('Gone from disk',
             'This file isn\'t on disk any more: it was probably replaced or deleted. '
             + (known ? 'Intro & Credits still has what it found for it at this path. ' : '')
-            + 'Search for the title to find the file it has now.', 'warning');
+            + 'Search for the title to find the file it has now.', 'warn');
         card.id = 'inspGone';
-        const back = button('Search for it', 'btn btn-outline-secondary mt-3', function () {
+        const back = button('Search for it', 'btn insp-btn mt-3', function () {
             const t = (state.file && state.file.title) || '';
             $('inspQuery').value = t.split(' · ')[0].replace(/\s*\(\d{4}\)\s*$/, '');
             showSearch(true);
@@ -939,15 +1125,19 @@
     function versionsBar() {
         const bar = el('div', 'insp-versions');
         bar.id = 'inspVersions';
-        bar.appendChild(withInfo(el('span', 'fw-medium', `This item has ${state.file.versions.length} versions:`), TIPS.versions));
+        bar.appendChild(el('span', 'insp-versions-text', `This ${fileWord()} has ${state.file.versions.length} files`));
+        const seg = el('div', 'insp-seg');
+        seg.setAttribute('role', 'group');
+        seg.setAttribute('aria-label', 'Files of this item');
         state.file.versions.forEach(function (v) {
-            const b = button(v.label, 'btn btn-sm btn-outline-secondary' + (v.current ? ' active' : ''), function () {
+            const b = button(v.current ? `${v.label} · this one` : v.label, 'insp-seg-btn' + (v.current ? ' active' : ''), function () {
                 if (!v.current) openFile(v.path, {});
             });
             b.title = v.path;
             b.setAttribute('aria-pressed', v.current ? 'true' : 'false');
-            bar.appendChild(b);
+            seg.appendChild(b);
         });
+        bar.appendChild(withInfo(seg, TIPS.versions));
         return bar;
     }
 
@@ -961,213 +1151,37 @@
             return;
         }
         target.hidden = false;
-        const box = el('div', 'alert alert-info d-flex align-items-center gap-2 mb-0 py-2');
+        const box = el('div', 'insp-banner');
         box.setAttribute('role', 'status');
         const running = job.status === 'running';
-        if (running) box.appendChild(el('span', 'spinner-border spinner-border-sm'));
-        else box.appendChild(el('i', 'bi bi-hourglass-split'));
+        box.appendChild(running ? el('span', 'spinner-border spinner-border-sm insp-banner-icon') : icon('hourglass-split'));
         const what = job.kind === MARKERS_JOB ? 'Intro & Credits' : 'Preview';
         const pctText = running && job.percent ? ` · ${Math.round(job.percent)}%` : '';
-        box.appendChild(el('span', '', `${running ? 'Working on this file' : 'Queued for this file'}: ${what} job “${job.name || job.id}”${pctText}`));
-        const link = el('a', 'ms-auto', 'Open on the Dashboard');
+        box.appendChild(el('span', 'insp-banner-text', `${running ? 'Working on this file' : 'Queued for this file'}: ${what} job “${job.name || job.id}”${pctText}`));
+        const link = el('a', 'insp-banner-link', 'Open on the Dashboard');
         link.href = '/?job=' + encodeURIComponent(job.id);
         box.appendChild(link);
         target.replaceChildren(box);
     }
 
-    // ------------------------------------------------------------------ season
+    // ------------------------------------------------------------------ tiles
 
-    const CHIP_NAMES = {
-        chapters: 'Chapters', theintrodb: 'TheIntroDB', introdb: 'IntroDB', skipdb: 'SkipDB', season_audio: 'Audio',
-        season_audio_previous: 'Previous season', credits_text: 'Credit text', user: 'Your marker',
-    };
-    const DOT_WORDS = {
-        ok: 'shows our markers', waiting: 'waiting', failed: 'failed', skipped: 'skipped', none: 'nothing sent yet',
-        off: 'Intro & Credits is off',
-    };
-    // Matches markers.audio.season.MAX_GROUP_EPISODES: a folder with more episodes is capped to the nearest this many.
-    const MAX_GROUP_EPISODES = 40;
-
-    function scopeToggle() {
-        const row = el('div', 'd-flex align-items-center gap-2');
-        const seg = el('div', 'insp-seg');
-        seg.setAttribute('role', 'group');
-        seg.setAttribute('aria-label', 'Show this episode or the whole season');
-        [['episode', 'This episode', 'inspScopeEpisode'], ['season', 'Whole season', 'inspScopeSeason']].forEach(function (opt) {
-            const on = state.scope === opt[0];
-            const b = button(opt[1], 'btn' + (on ? ' active' : ''), function () { setScope(opt[0]); });
-            b.id = opt[2];
-            b.setAttribute('aria-pressed', on ? 'true' : 'false');
-            seg.appendChild(b);
-        });
-        row.appendChild(withInfo(seg, TIPS.scope));
-        return row;
+    function statTiles(tiles) {
+        const grid = el('div', 'insp-stats');
+        grid.id = 'inspTiles';
+        tiles.forEach(function (t) { grid.appendChild(t); });
+        return grid;
     }
 
-    function setScope(scope) {
-        if (state.scope === scope) return;
-        state.scope = scope;
-        state.adjust = null;
-        state.confirmLock = false;
-        state.confirmUnlock = false;
-        setUrl(fileParams(), false);
-        if (scope === 'season') loadSeason();
-        render();
+    function stat(key, label, title, sub, tone) {
+        const tile = el('div', 'insp-stat');
+        tile.dataset.tile = key;
+        const head = el('div', 'insp-stat-title' + (tone ? ' is-' + tone : ''));
+        if (typeof title === 'string') head.textContent = title;
+        else head.appendChild(title);
+        tile.append(el('div', 'insp-stat-label', label), head, el('div', 'insp-stat-sub', sub));
+        return tile;
     }
-
-    async function loadSeason() {
-        const seq = ++state.seasonSeq;
-        const path = state.path;
-        state.season = null;
-        state.seasonError = '';
-        render();
-        const res = await getJson('/api/markers/season?path=' + encodeURIComponent(path)).catch(function (e) {
-            return { ok: false, status: 0, data: { error: e.message } };
-        });
-        if (seq !== state.seasonSeq || state.path !== path) return;
-        if (res.ok) state.season = res.data;
-        else state.seasonError = (res.data && res.data.error) || `HTTP ${res.status}`;
-        if (state.scope === 'season') render();
-    }
-
-    function seasonTimes(ep) {
-        const dur = ep.duration_ms;
-        const parts = [];
-        ['intro', 'credits'].forEach(function (t) {
-            const d = ep[t] || {};
-            if (d.status === 'decided' && d.marker) parts.push(`${TYPE_LABELS[t]} ${rangeText(d.marker, dur)}`);
-        });
-        if (ep.needs_review) return ['Needs review', 'insp-state-review'];
-        if (!ep.known) return ['Not checked yet', 'insp-state-muted'];
-        if (!parts.length) return ['Nothing found', 'insp-state-muted'];
-        return [parts.join(' · '), ''];
-    }
-
-    function seasonLane(ep, scale) {
-        const lane = el('div', 'insp-season-lane');
-        if (!ep.duration_ms || !scale) {
-            lane.appendChild(el('div', 'insp-small ps-2', ep.known ? 'Length not known yet' : ''));
-            return lane;
-        }
-        const track = el('div', 'insp-season-track');
-        track.style.width = `${pct(ep.duration_ms, scale)}%`;
-        lane.appendChild(track);
-        ['intro', 'credits'].forEach(function (t) {
-            const d = ep[t] || {};
-            if (d.status !== 'decided' || !d.marker) return;
-            const m = d.marker;
-            const bar = el('div', 'insp-bar insp-bar-' + t);
-            bar.style.left = `${pct(m.start_ms, scale)}%`;
-            bar.style.width = `${Math.max(0.4, pct(segmentEnd(m, ep.duration_ms) - m.start_ms, scale))}%`;
-            bar.title = `${TYPE_LABELS[t]} ${rangeText(m, ep.duration_ms)}`;
-            lane.appendChild(bar);
-        });
-        return lane;
-    }
-
-    function seasonDots(ep, servers) {
-        const dots = el('div', 'insp-dots');
-        servers.forEach(function (server) {
-            const st = (ep.servers || {})[server.server_id] || { state: 'none', message: '' };
-            const dot = el('span', 'insp-dot insp-dot-' + st.state);
-            dot.title = `${server.server_name}: ${st.message || DOT_WORDS[st.state] || st.state}`;
-            dot.setAttribute('role', 'img');
-            dot.setAttribute('aria-label', dot.title);
-            dots.appendChild(dot);
-        });
-        return dots;
-    }
-
-    function seasonCard() {
-        const card = el('div', 'insp-card');
-        card.id = 'inspSeason';
-        if (state.seasonError) {
-            card.append(el('div', 'fw-semibold', 'Couldn\'t load this season'), el('div', 'insp-small', state.seasonError));
-            return card;
-        }
-        const payload = state.season;
-        if (!payload) {
-            card.append(el('span', 'spinner-border spinner-border-sm me-2'), el('span', '', 'Loading the season…'));
-            return card;
-        }
-        const servers = payload.servers || [];
-        const episodes = payload.episodes || [];
-        const counts = payload.counts || {};
-        const on = servers.filter(function (s) { return s.markers_enabled; }).length;
-        const head = el('div', 'd-flex justify-content-between align-items-start flex-wrap gap-2 mb-3');
-        const titles = el('div');
-        const show = String(payload.show || '').replace(/\s*\{[a-z]+-[^}]*\}/gi, '').trim();
-        titles.appendChild(el('div', 'insp-card-title', `${show} · ${payload.season || ''}`));
-        const total = counts.total_episodes || counts.episodes || 0;
-        titles.appendChild(el('div', 'insp-small mt-1', total > MAX_GROUP_EPISODES
-            ? `${total} episodes (showing the ${MAX_GROUP_EPISODES} nearest)` : `${total} episodes`));
-        const acts = el('div', 'd-flex align-items-center gap-2 flex-wrap');
-        const ready = el('span', 'insp-chip', `${counts.ready || 0} ready`);
-        ready.id = 'inspSeasonReady';
-        acts.appendChild(ready);
-        if (counts.needs_review) {
-            const review = el('span', 'insp-chip insp-state-review', `${counts.needs_review} need review`);
-            review.id = 'inspSeasonReview';
-            acts.appendChild(review);
-        }
-        const publish = button(state.publishing ? 'Queueing…' : `Publish ${counts.ready || 0} to ${on} server${on === 1 ? '' : 's'}`,
-            'btn btn-insp-primary', publishSeason);
-        publish.id = 'inspPublishSeason';
-        publish.disabled = state.publishing || !counts.ready || !on;
-        acts.appendChild(withInfo(publish, TIPS.publish));
-        head.append(titles, acts);
-        card.appendChild(head);
-
-        const scale = Math.max.apply(null, [0].concat(episodes.map(function (e) { return e.duration_ms || 0; })));
-        const grid = el('div', 'insp-season');
-        const top = el('div', 'insp-season-row insp-season-head');
-        top.append(el('div', '', 'EP'), el('div', '', scale ? `INTRO & CREDITS · 0:00 – ${clock(scale)}, ONE SCALE` : 'INTRO & CREDITS'),
-            el('div', '', 'TIMES'), el('div', '', 'SOURCES'), el('div', '', servers.map(function (s) { return s.server_name; }).join(' · ')));
-        grid.appendChild(top);
-        episodes.forEach(function (ep) {
-            const row = el('button', 'insp-season-row' + (ep.path === state.path ? ' is-current' : ''));
-            row.type = 'button';
-            row.dataset.path = ep.path;
-            row.dataset.episode = ep.episode || ep.name;
-            row.setAttribute('aria-label', `Open ${ep.episode || ep.name}`);
-            const times = seasonTimes(ep);
-            const timesCell = el('div', times[1], times[0]);
-            if (ep.needs_review && ep.review_reason) timesCell.title = ep.review_reason;
-            const chips = el('div', 'insp-season-chips');
-            (ep.evidence || []).forEach(function (chip) {
-                const name = CHIP_NAMES[chip.source] || chip.source;
-                chips.appendChild(el('span', 'insp-mini-chip', chip.label ? `${name} ${chip.label}` : name));
-            });
-            if (['intro', 'credits'].some(function (t) { return ep[t] && ep[t].marker && ep[t].marker.locked; })) {
-                chips.appendChild(el('span', 'insp-mini-chip is-locked', '🔒 Locked by you'));
-            }
-            row.append(el('div', 'fw-semibold', ep.episode || ep.name), seasonLane(ep, scale), timesCell, chips, seasonDots(ep, servers));
-            row.addEventListener('click', function () { openFile(ep.path, { scope: 'episode' }); });
-            grid.appendChild(row);
-        });
-        card.appendChild(grid);
-        card.appendChild(el('div', 'insp-small mt-2', 'Intro in blue, credits in orange, each episode drawn to one scale. Dots: green = server shows our markers, amber = waiting, red = failed, grey = off, skipped or nothing sent yet. Choose an episode to open it.'));
-        return card;
-    }
-
-    async function publishSeason() {
-        const path = state.path;
-        state.publishing = true;
-        render();
-        try {
-            const data = await sendJson('POST', '/api/markers/season/publish', { path: path });
-            toast('Publish season', 'Queued — see the Dashboard', 'success');
-            if (state.path === path) {
-                state.job = { id: data.job_id, kind: MARKERS_JOB, status: 'pending', name: 'Publish season', percent: 0 };
-            }
-        } catch (e) {
-            toast('Publish season', `Couldn't queue it: ${e.message}`, 'danger');
-        }
-        state.publishing = false;
-        if (state.path === path) render();
-    }
-
-    // ---------------------------------------------------------------- summary
 
     function typePhrase(types) {
         const words = types.map(function (t) { return TYPE_WORDS[t]; });
@@ -1204,132 +1218,120 @@
         });
     }
 
-    function summarySentence() {
-        const node = el('div', 'insp-sentence');
-        node.id = 'inspSummary';
+    function serversStat() {
+        const label = 'ON YOUR SERVERS';
+        const list = servers();
+        if (!state.item) return stat('servers', label, 'Couldn\'t read', 'What your servers show couldn\'t be read just now', 'warn');
+        if (!list.length) return stat('servers', label, 'No server', 'No server has this file in a library', 'muted');
+        if (!isChecked()) {
+            const own = list.filter(function (s) { return (s.current || []).some(function (m) { return !m.ours; }); });
+            const rest = list.filter(function (s) { return own.indexOf(s) === -1; }).map(serverName);
+            const later = rest.length ? `${joinWith(rest, 'and')} ${rest.length === 1 ? 'gets' : 'get'} ours once this ${fileWord()} is checked`
+                : `Checking this ${fileWord()} decides ours`;
+            if (own.length === 1) return stat('servers', label, `${serverName(own[0])}'s own only`, later);
+            if (own.length > 1) return stat('servers', label, 'Their own only', later);
+            return stat('servers', label, 'Nothing shown yet', `Your servers get ours once this ${fileWord()} is checked`, 'muted');
+        }
+        if (!decidedTypes().length) {
+            return stat('servers', label, 'Nothing to send yet', reviewTypes().length ? 'Waiting for your check above' : 'Nothing was decided for this file', 'muted');
+        }
+        const sentences = serverSentences().join(' ');
+        const need = attention();
+        if (need.length) return stat('servers', label, `${need.length} need${need.length === 1 ? 's' : ''} attention`, sentences, 'warn');
+        const ours = list.filter(function (s) { return s.plan === 'up_to_date'; }).length;
+        return stat('servers', label, `${ours} of ${list.length} show${ours === 1 ? 's' : ''} ours`, sentences);
+    }
+
+    function timeSpan(type, ms) {
+        return el('span', 'insp-mono insp-t-' + tone(type), clock(ms));
+    }
+
+    function foundStat() {
+        const label = 'WE FOUND';
+        if (!state.item) return stat('found', label, 'Couldn\'t read', state.itemError || 'Intro & Credits couldn\'t be read for this file', 'warn');
+        if (!isChecked()) return stat('found', label, 'Not checked yet', `Check this ${fileWord()} to decide ours`, 'muted');
+        const types = decidedTypes();
+        const review = reviewTypes();
+        const reviewNote = review.length ? `The ${typePhrase(review)} need${review.length === 1 && review[0] !== 'credits' ? 's' : ''} your check above` : '';
+        if (!types.length) {
+            if (review.length) return stat('found', label, 'Needs your check', reviewNote, 'warn');
+            return stat('found', label, 'Nothing found', 'No intro or credits were found. Adjust adds them by hand.', 'muted');
+        }
         const dur = duration();
-        const bits = [];
-        const intro = decided('intro');
-        const credits = decided('credits');
-        if (intro) bits.push(['Skip Intro runs ', `${clock(intro.start_ms)} – ${clock(segmentEnd(intro, dur))}`, 'insp-t-intro']);
-        if (credits) {
-            const t = toEnd(credits, dur) ? clock(credits.start_ms) : `${clock(credits.start_ms)} – ${clock(credits.end_ms)}`;
-            bits.push([toEnd(credits, dur) ? 'Skip Credits starts at ' : 'Skip Credits runs ', t, 'insp-t-credits']);
-        }
-        ['recap', 'preview'].forEach(function (t) {
+        const lines = el('div', 'insp-stat-lines');
+        types.forEach(function (t) {
             const m = decided(t);
-            if (m) bits.push([`${TYPE_LABELS[t]} `, rangeText(m, dur), 'insp-t-intro']);
+            const line = el('div');
+            line.dataset.type = t;
+            line.append(`${TYPE_LABELS[t]} `, timeSpan(t, m.start_ms));
+            if (toEnd(m, dur)) line.append(' → end');
+            else line.append(' – ', timeSpan(t, segmentEnd(m, dur)));
+            lines.appendChild(line);
         });
-        if (!bits.length) {
-            const review = reviewTypes();
-            if (review.length) node.textContent = `The ${typePhrase(review)} need${review.length === 1 && review[0] !== 'credits' ? 's' : ''} your check above.`;
-            else node.textContent = 'No intro or credits were found for this file. Adjust adds them by hand.';
-            return node;
+        const locked = lockedTypes();
+        let sub;
+        if (locked.length === types.length) {
+            sub = 'Set by you · later checks keep it';
+        } else {
+            const names = [];
+            types.filter(function (t) { return locked.indexOf(t) === -1; }).forEach(function (t) {
+                (decided(t).decided_by || []).forEach(function (s) {
+                    const name = (SOURCES[s] || [s])[0];
+                    if (names.indexOf(name) === -1) names.push(name);
+                });
+            });
+            sub = names.length ? `From ${joinWith(names, 'and')}` : '';
+            if (locked.length) sub += `${sub ? ' · ' : ''}${capitalise(typePhrase(locked))} set by you`;
         }
-        bits.forEach(function (bit, i) {
-            if (i > 0) node.append(i === bits.length - 1 ? ' and ' : ', ');
-            node.append(bit[0]);
-            node.appendChild(el('span', bit[2], bit[1]));
-        });
-        node.append('.');
-        serverSentences().forEach(function (s) { node.append(' ' + s); });
-        return node;
+        if (reviewNote) sub += `${sub ? ' · ' : ''}${reviewNote}`;
+        return stat('found', label, lines, sub);
     }
 
-    function notCheckedText() {
-        const shown = serverMarkers();
-        const keep = servers().filter(function (s) { return s.keeps_server_markers && s.markers_enabled && (s.current || []).length; });
-        const parts = [];
-        if (shown.length) {
-            const byServer = {};
-            shown.forEach(function (x) {
-                const n = serverName(x.server);
-                byServer[n] = byServer[n] || [];
-                byServer[n].push(x.marker);
-            });
-            const said = Object.keys(byServer).map(function (n) {
-                const ms = byServer[n];
-                const types = ms.map(function (m) { return m.type; }).filter(function (t, i, all) { return all.indexOf(t) === i; });
-                return `${n} shows ${ms.length} ${typePhrase(types)} marker${ms.length === 1 ? '' : 's'} today`;
-            });
-            parts.push(`${joinWith(said, 'and')}, drawn in grey on the frames below so you can see where they land.`);
-        } else if (servers().every(function (s) { return Array.isArray(s.current); })) {
-            parts.push('No server shows intro or credits markers for this file yet.');
-        }
-        parts.push(`Checking the ${state.file && state.file.kind === 'episode' ? 'episode' : 'film'} decides its own.`);
-        keep.forEach(function (s) {
-            const vendor = VENDOR_NAMES[s.server_type] || serverName(s);
-            parts.push(`With “Keep ${vendor}'s” on, ${serverName(s)}'s markers stay as they are.`);
-        });
-        return parts.join(' ');
+    function timelineSlots(step) {
+        const dur = duration();
+        return dur ? Math.floor((dur - 1) / step) + 1 : 0;
     }
 
-    function factsChips() {
-        const chips = el('div', 'insp-chips');
-        chips.id = 'inspFacts';
+    function previewPartial() {
+        const p = preview();
+        const step = interval();
+        return !!(p && step && duration() && p.frame_count < timelineSlots(step) - 2);
+    }
+
+    function previewStat() {
+        const label = 'PREVIEW';
         const p = preview();
         const dur = duration();
-        if (p) {
-            if (p.created_at) chips.appendChild(el('span', 'insp-chip', `Preview made ${when(p.created_at)}`));
-            const step = interval();
-            const parts = [`${Number(p.frame_count).toLocaleString()} frames`];
-            if (step) parts.push(`one every ${seconds(step)}`);
-            const covers = step ? p.frame_count * step : 0;
-            if (covers) parts.push(`covers ${clock(covers)}`);
-            chips.appendChild(el('span', 'insp-chip', parts.join(' · ')));
-            if (p.file_size) chips.appendChild(el('span', 'insp-chip', bytes(p.file_size)));
-        } else if (!state.bifOnly) {
-            const chip = el('span', 'insp-chip', 'No preview yet');
-            chip.id = 'inspNoPreview';
-            chips.appendChild(chip);
+        if (!p) return stat('preview', label, 'No preview yet', 'Regenerate preview to make one', 'warn');
+        const step = interval();
+        const covers = step ? p.frame_count * step : 0;
+        if (previewPartial()) {
+            return stat('preview', label, `Stops at ${clock(covers)}`, `Covers ${clock(covers)} of ${clock(dur)} · Regenerate preview to finish it`, 'warn');
         }
-        if (!p && dur) chips.appendChild(el('span', 'insp-chip', `Runs ${clock(dur)}`));
+        const title = `${Number(p.frame_count).toLocaleString()} frames${step ? ` · every ${seconds(step)}` : ''}`;
+        const sub = [p.created_at ? `Made ${day(p.created_at)}` : '', bytes(p.file_size), covers ? `covers ${clock(covers)}` : '']
+            .filter(Boolean).join(' · ');
+        return stat('preview', label, title, sub);
+    }
+
+    function checkedStat() {
+        const label = 'INTRO & CREDITS CHECKED';
+        if (!state.item) return stat('checked', label, 'Unknown', 'Intro & Credits couldn\'t be read', 'muted');
+        if (!isChecked()) {
+            const own = servers().filter(function (s) { return (s.current || []).some(function (m) { return !m.ours; }); }).map(serverName);
+            return stat('checked', label, 'Never', own.length
+                ? `${joinWith(own, 'and')} show${own.length === 1 ? 's its' : ' their'} own markers meanwhile` : 'Nothing is shown meanwhile', 'muted');
+        }
         const checkedAt = ((state.item && state.item.evidence) || []).map(function (e) { return e.fetched_at; }).filter(Boolean).sort().pop();
-        if (checkedAt) chips.appendChild(el('span', 'insp-chip', `Intro & Credits checked ${when(checkedAt)}`));
-        return chips;
-    }
-
-    function factsCard() {
-        const card = el('div', 'insp-card');
-        card.appendChild(factsChips());
-        return card;
-    }
-
-    function unlockControls() {
-        const locked = lockedTypes();
-        if (!locked.length) return null;
-        const row = el('div', 'd-flex align-items-center gap-2 flex-wrap mt-3');
-        row.id = 'inspLocked';
-        row.appendChild(el('i', 'bi bi-lock-fill'));
-        row.appendChild(el('span', '', `You set the ${typePhrase(locked)}, so later checks keep ${locked.length === 1 && locked[0] !== 'credits' ? 'it' : 'them'}.`));
-        if (state.confirmUnlock) {
-            row.appendChild(el('span', 'insp-small', 'Back to automatic? Your times stay on your servers for now; the next check decides again and may move them.'));
-            const yes = button('Go back to automatic', 'btn btn-sm btn-outline-danger', unlock);
-            yes.id = 'inspUnlockConfirm';
-            const no = button('Keep them locked', 'btn btn-sm btn-outline-secondary', function () { state.confirmUnlock = false; render(); });
-            row.append(yes, no);
-        }
-        return row;
-    }
-
-    function summaryCard() {
-        const card = el('div', 'insp-card');
-        card.id = 'inspSummaryCard';
-        if (!state.item) {
-            card.appendChild(el('div', 'fw-semibold', 'Intro & Credits couldn\'t be read for this file'));
-            if (state.itemError) card.appendChild(el('div', 'insp-small', state.itemError));
-        } else if (!isChecked()) {
-            card.dataset.mode = 'unchecked';
-            card.append(el('div', 'fw-semibold fs-5', 'Not checked by Intro & Credits yet'), el('div', 'mt-1', notCheckedText()));
-        } else {
-            card.dataset.mode = 'checked';
-            card.appendChild(summarySentence());
-        }
-        card.appendChild(factsChips());
-        const unlockRow = unlockControls();
-        if (unlockRow) card.appendChild(unlockRow);
-        if (state.confirmLock && lockableTypes().length) card.appendChild(lockConfirmRow());
-        return card;
+        const parts = [];
+        // Intro and credits are always named ("No intro · credits found"); a recap or preview only when there is one.
+        TYPES.forEach(function (t) {
+            const d = decision(t);
+            if (d.status === 'decided') parts.push(`${TYPE_WORDS[t]} found`);
+            else if (d.status === 'needs_review') parts.push(`${TYPE_WORDS[t]} need${t === 'credits' ? '' : 's'} your check`);
+            else if (t === 'intro' || t === 'credits') parts.push(`no ${TYPE_WORDS[t]}`);
+        });
+        return stat('checked', label, checkedAt ? when(checkedAt) : 'Checked', capitalise(parts.join(' · ')));
     }
 
     // --------------------------------------------------------------- timeline
@@ -1339,312 +1341,1014 @@
         return steps.find(function (s) { return total / s <= 6; }) || 3600e3;
     }
 
-    function axis(start, end) {
-        const node = el('div', 'insp-axis');
-        const span = end - start;
-        const step = niceStep(span);
-        const first = Math.ceil(start / step) * step;
+    function axis(end, className) {
+        const node = el('div', className || 'insp-axis');
+        const step = niceStep(end);
         const add = function (ms, alignRight) {
             const s = el('span', '', clock(ms));
             if (alignRight) s.style.right = '0';
-            else s.style.left = `${pct(ms - start, span)}%`;
+            else s.style.left = `${pct(ms, end)}%`;
             node.appendChild(s);
         };
-        add(start, false);
-        for (let t = first === start ? first + step : first; t < end - step * 0.6; t += step) add(t, false);
+        add(0, false);
+        for (let t = step; t < end - step * 0.6; t += step) add(t, false);
         add(end, true);
         return node;
     }
 
-    function strip(start, end, count, tall) {
-        const node = el('div', 'insp-strip' + (tall ? ' is-tall' : ''));
+    // The last tick before the end label is left out when the two would touch (it depends on the width drawn at).
+    function tidyAxes(root) {
+        root.querySelectorAll('.insp-axis').forEach(function (node) {
+            const spans = node.children;
+            if (spans.length < 3) return;
+            const end = spans[spans.length - 1];
+            const before = spans[spans.length - 2];
+            before.hidden = false;
+            if (before.getBoundingClientRect().right + 8 > end.getBoundingClientRect().left) before.hidden = true;
+        });
+    }
+
+    function timelineKey() {
         const p = preview();
-        const span = end - start;
-        for (let i = 0; i < count; i++) {
-            const t = start + (span * (i + 0.5)) / count;
-            const img = el('img');
-            img.loading = 'lazy';
-            img.alt = `Frame at ${clock(t)}`;
-            img.src = frameUrl(frameIndexAt(t));
-            img.title = clock(t);
-            node.appendChild(img);
+        return JSON.stringify({
+            path: state.path || state.bifOnly,
+            dur: duration(),
+            p: p ? [p.path, p.kind, p.frame_count, p.interval_ms, p.server_id] : null,
+            item: !!state.item,
+            checked: isChecked(),
+            d: TYPES.map(function (t) { const m = decided(t); return m ? [m.start_ms, m.end_ms] : null; }),
+            r: reviewTypes(),
+            s: servers().map(function (s) { return [s.server_id, s.server_name, s.error, s.markers_enabled, s.plan, s.can_show, s.current]; }),
+        });
+    }
+
+    function timelineCard() {
+        const card = el('div', 'insp-card insp-timeline-card');
+        card.id = 'inspTimeline';
+        if (!duration() && !lengthUnknown()) {
+            const head = el('div', 'insp-tl-head');
+            head.appendChild(el('div', 'insp-card-title', 'Timeline'));
+            card.append(head, el('div', 'insp-empty-strip', 'This file\'s length isn\'t known yet, so there is no timeline. Checking its intro & credits reads it.'));
+            return card;
         }
-        if (!p) node.hidden = true;
-        return node;
-    }
-
-    function band(seg, start, end, className, dur) {
-        const b = el('div', 'insp-band ' + className);
-        const span = end - start;
-        const from = Math.max(seg.start_ms, start);
-        const to = Math.min(segmentEnd(seg, dur), end);
-        b.style.left = `${pct(from - start, span)}%`;
-        b.style.width = `${Math.max(0, pct(to - start, span) - pct(from - start, span))}%`;
-        return b;
-    }
-
-    function laneRow(grid, name, strong, node) {
-        const label = el('div', 'insp-lane-name' + (strong ? ' is-strong' : ''), name);
-        grid.append(label, node);
-    }
-
-    function lane(items, start, end, dur, note) {
-        const node = el('div', 'insp-lane');
-        const span = end - start;
-        if (note) {
-            node.appendChild(el('div', 'insp-lane-note', note));
-            return node;
+        const key = timelineKey();
+        if (!timeline || timeline.key !== key) {
+            const same = timeline && timeline.path === (state.path || state.bifOnly) && timeline.numbered === lengthUnknown();
+            const keepT = same ? timeline.nowT() : null;
+            timeline = makeTimeline(key, keepT);
         }
-        items.forEach(function (item) {
-            const seg = item.seg;
-            const from = Math.max(seg.start_ms, start);
-            const to = Math.min(segmentEnd(seg, dur), end);
-            if (to < start || from > end) return;
-            const bar = el('div', 'insp-bar ' + item.className);
-            bar.style.left = `${pct(from - start, span)}%`;
-            bar.style.width = `${Math.max(0, pct(to - start, span) - pct(from - start, span))}%`;
-            node.appendChild(bar);
-            if (item.label) {
-                const label = el('div', 'insp-lane-label', item.label);
-                label.dataset.at = String(pct(from - start, span));
-                label.dataset.until = String(pct(to - start, span));
-                if (item.inside) label.dataset.inside = '1';
-                node.appendChild(label);
-            }
-        });
-        node.dataset.layout = '1';
-        return node;
+        card.appendChild(timeline.node);
+        if (state.adjust) card.appendChild(adjustPanel());
+        return card;
     }
 
-    // Labels in a lane never overlap. Each label tries, in order: inside its bar (a bar that runs to the end, when the
-    // label fits), just after the bar, just before it, then a little further right of the label before it; the first
-    // place clear of the labels already on the row wins. When nothing on the first row is clear it drops to a second.
-    const MAX_SHIFT_PX = 160;
-    const GAP_PX = 8;
-
-    function layoutLabels(laneNode) {
-        const width = laneNode.clientWidth;
-        if (!width) return;
-        const labels = Array.prototype.slice.call(laneNode.querySelectorAll(':scope > .insp-lane-label'));
-        labels.sort(function (a, b) { return Number(a.dataset.at) - Number(b.dataset.at); });
-        const rowRight = [-Infinity, -Infinity];
-        let usedSecond = false;
-        labels.forEach(function (label) {
-            label.classList.remove('is-inside', 'is-row2');
-            const w = label.offsetWidth;
-            const at = (Number(label.dataset.at) / 100) * width;
-            const until = (Number(label.dataset.until) / 100) * width;
-            const options = [];
-            if (label.dataset.inside && until - at >= w + GAP_PX) options.push({ left: at + 4, inside: true });
-            options.push({ left: until + 6 }, { left: at - 6 - w });
-            let placed = null;
-            for (let row = 0; row < 2 && !placed; row++) {
-                const clear = function (left) { return left >= 0 && left + w <= width && left >= rowRight[row] + GAP_PX; };
-                const hit = options.find(function (o) { return clear(o.left); });
-                if (hit) placed = { row: row, left: hit.left, inside: !!hit.inside };
-                else {
-                    const shifted = rowRight[row] + GAP_PX;
-                    if (clear(shifted) && shifted - until <= MAX_SHIFT_PX) placed = { row: row, left: shifted };
-                }
-            }
-            if (!placed) placed = { row: 1, left: Math.max(0, Math.min(at, width - w)) };
-            rowRight[placed.row] = placed.left + w;
-            if (placed.row === 1) {
-                usedSecond = true;
-                label.classList.add('is-row2');
-            }
-            if (placed.inside) label.classList.add('is-inside');
-            label.style.left = `${placed.left}px`;
-        });
-        laneNode.classList.toggle('has-row2', usedSecond);
+    function foundLane(dur) {
+        const lane = { key: 'found', name: 'We found', dot: 'ours', strong: true, bands: [], note: null };
+        if (!state.item) {
+            lane.dot = 'bad';
+            lane.note = { text: 'Couldn\'t read Intro & Credits for this file', cls: 'is-bad' };
+        } else if (!isChecked()) {
+            lane.dot = 'none';
+            lane.note = { text: 'Not checked yet', cls: 'is-muted' };
+        } else if (!decidedTypes().length) {
+            lane.note = reviewTypes().length ? { text: 'Needs your check', cls: 'is-warn' } : { text: 'Nothing found', cls: 'is-muted' };
+        } else {
+            lane.bands = decidedTypes().map(function (t) {
+                const m = decided(t);
+                const text = `${TYPE_LABELS[t]} ${rangeText(m, dur)}`;
+                return { start: m.start_ms, end: segmentEnd(m, dur), text: text, aria: `We found: ${text}`, cls: `is-ours is-${tone(t)}`, key: t };
+            });
+        }
+        return lane;
     }
 
-    function layoutAllLabels() {
-        document.querySelectorAll('#inspFile [data-layout="1"]').forEach(layoutLabels);
-    }
-
-    function decidedLaneItems(dur) {
-        return decidedTypes().map(function (t) {
-            const m = decided(t);
-            const label = toEnd(m, dur) ? `${TYPE_LABELS[t]} ${clock(m.start_ms)} → end` : `${TYPE_LABELS[t]} ${clock(m.start_ms)}–${clock(m.end_ms)}`;
-            return { seg: m, className: 'insp-bar-' + t, label: label, inside: TO_END_TYPES.indexOf(t) !== -1 };
-        });
-    }
-
-    function sameAsDecided(server) {
-        return server.plan === 'up_to_date' || (server.plan && server.plan.indexOf('keeps_') === 0 && !(server.current || []).length);
-    }
-
-    function serverLane(server, start, end, dur, numbered) {
-        const current = Array.isArray(server.current) ? server.current : null;
-        if (server.error || current === null) return lane([], start, end, dur, 'Couldn\'t read what it shows now');
+    function serverLane(s, dur) {
+        const name = serverName(s);
+        const lane = { key: s.server_id, serverId: s.server_id, name: name, dot: serverDot(s), strong: false, bands: [], note: null };
+        const current = Array.isArray(s.current) ? s.current : null;
+        if (s.error || current === null) {
+            lane.note = { text: 'Couldn\'t read what it shows now', cls: 'is-bad' };
+            return lane;
+        }
         if (!current.length) {
-            if (!server.markers_enabled) return lane([], start, end, dur, 'Nothing here · Intro & Credits is off for it');
-            const wanted = decidedTypes().filter(function (t) { return (server.can_show || []).indexOf(t) !== -1; });
-            if (wanted.length) return lane([], start, end, dur, `Nothing yet · the next job adds ${typePhrase(wanted)}`);
-            return lane([], start, end, dur, 'Nothing yet');
+            lane.note = { text: emptyText(s), cls: 'is-muted' };
+            return lane;
         }
-        const same = isChecked() && sameAsDecided(server);
-        const sorted = current.slice().sort(function (a, b) { return a.start_ms - b.start_ms; });
-        const items = sorted.map(function (m, i) {
-            let label = null;
-            if (same) label = i === 0 ? 'Same as decided' : null;
-            else {
-                const n = numbered ? `${CIRCLED[i] || i + 1} ` : '';
-                label = `${n}${TYPE_LABELS[m.type] || m.type} ${rangeText(m, dur)}${m.stale ? ' (made for an earlier file)' : ''}`;
-            }
-            return { seg: m, className: 'insp-bar-server', label: label };
+        lane.bands = sortedCurrent(s).map(function (m, i) {
+            const text = `${TYPE_LABELS[m.type] || m.type} ${rangeText(m, dur)}${m.stale ? ' (made for an earlier file)' : ''}`;
+            return {
+                start: m.start_ms,
+                end: segmentEnd(m, dur),
+                text: text,
+                aria: `${name}: ${m.ours ? 'our ' : ''}${text}`,
+                cls: m.ours ? `is-tint is-${tone(m.type)}` : 'is-own',
+                key: m.ours ? m.type : `own-${s.server_id}-${i}`,
+            };
         });
-        return lane(items, start, end, dur, null);
+        return lane;
     }
 
-    function nearEndMarkers(dur) {
-        return serverMarkers().filter(function (x) { return x.marker.start_ms >= dur * (1 - ENDING_SHARE); });
-    }
-
-    function wholeFileCard() {
-        const card = el('div', 'insp-card');
-        card.id = 'inspWholeFile';
-        const dur = duration();
-        const top = el('div', 'd-flex justify-content-between align-items-center gap-2 flex-wrap mb-3');
-        const kind = state.file && state.file.kind === 'episode' ? 'EPISODE' : 'FILM';
-        top.appendChild(el('div', 'insp-card-title', dur ? `Whole ${kind.toLowerCase()} · 0:00 – ${clock(dur)}` : `Whole ${kind.toLowerCase()}`));
-        if (preview()) {
-            const seg = el('div', 'insp-seg');
-            seg.setAttribute('role', 'group');
-            seg.setAttribute('aria-label', 'Show the timeline or every frame');
-            const tl = button('Timeline', 'btn' + (state.view === 'timeline' ? ' active' : ''), function () { state.view = 'timeline'; render(); });
-            tl.id = 'inspViewTimeline';
-            tl.setAttribute('aria-pressed', state.view === 'timeline' ? 'true' : 'false');
-            const all = button('All frames', 'btn' + (state.view === 'all' ? ' active' : ''), function () { state.view = 'all'; render(); });
-            all.id = 'inspViewAll';
-            all.setAttribute('aria-pressed', state.view === 'all' ? 'true' : 'false');
-            seg.append(tl, all);
-            top.appendChild(withInfo(seg, TIPS.allFrames));
+    function edgeLines(dur) {
+        const lines = [];
+        if (isChecked()) {
+            decidedTypes().forEach(function (t) {
+                const m = decided(t);
+                const cls = `is-ours is-${tone(t)}`;
+                lines.push({ t: m.start_ms, label: `${TYPE_LABELS[t]} start · ${clock(m.start_ms)}`, cls: cls, key: t });
+                if (!toEnd(m, dur)) lines.push({ t: m.end_ms, label: `${TYPE_LABELS[t]} end · ${clock(m.end_ms)}`, cls: cls, key: t });
+            });
         }
-        card.appendChild(top);
-        if (state.view === 'all' && preview()) {
-            card.appendChild(allFrames());
-            return card;
-        }
-        if (!dur) {
-            card.appendChild(el('div', 'insp-empty-strip', 'This file\'s length isn\'t known yet, so there is no timeline. Checking its intro & credits reads it.'));
-            return card;
-        }
-        const grid = el('div', 'insp-timeline');
-        const checked = isChecked();
-        if (checked && decidedTypes().length) {
-            const labels = lane(decidedLaneItems(dur).map(function (x) {
-                return { seg: { start_ms: x.seg.start_ms, end_ms: x.seg.start_ms + 1 }, className: 'd-none', label: x.label.replace(' → end', '') };
-            }), 0, dur, dur, null);
-            labels.classList.add('bg-transparent');
-            laneRow(grid, '', false, labels);
-        }
-        const wrap = el('div', 'insp-strip-wrap');
-        wrap.id = 'inspFilmstrip';
-        if (preview()) {
-            wrap.appendChild(strip(0, dur, Math.max(8, Math.min(24, Math.round(((wrap.clientWidth || 1100) / 70))) || 16), false));
-            if (checked) {
-                decidedTypes().forEach(function (t) {
-                    wrap.appendChild(band(decided(t), 0, dur, START_TYPES.indexOf(t) !== -1 ? 'insp-band-intro' : 'insp-band-credits', dur));
-                });
-            } else {
-                serverMarkers().forEach(function (x) { wrap.appendChild(band(x.marker, 0, dur, 'insp-band-server', dur)); });
+        const ours = lines.slice();
+        const near = function (t) { return ours.some(function (l) { return Math.abs(l.t - t) < SAME_EDGE_MS; }); };
+        ownMarkers().forEach(function (x) {
+            const name = serverName(x.server);
+            const word = TYPE_WORDS[x.marker.type] || x.marker.type;
+            if (!near(x.marker.start_ms)) lines.push({ t: x.marker.start_ms, label: `${name} ${word} · ${clock(x.marker.start_ms)}`, cls: 'is-own', key: x.key });
+            if (!toEnd(x.marker, dur) && !near(x.marker.end_ms)) {
+                lines.push({ t: x.marker.end_ms, label: `${name} ${word} end · ${clock(x.marker.end_ms)}`, cls: 'is-own', key: x.key });
             }
-        } else {
-            const empty = el('div', 'insp-empty-strip');
-            empty.id = 'inspNoPreviewStrip';
-            empty.append(el('i', 'bi bi-image'), el('span', '', 'No preview yet, so there are no frames to draw here. Regenerate preview makes one; the close-ups below read frames straight from the video.'));
-            wrap.appendChild(empty);
+        });
+        return lines.sort(function (a, b) { return a.t - b.t; });
+    }
+
+    function jumpChips(dur) {
+        const chips = [];
+        if (isChecked()) {
+            // One waiting for your check isn't "none": the panels above ask about it.
+            ['intro', 'credits'].forEach(function (t) {
+                if (!decided(t) && decision(t).status !== 'needs_review') {
+                    chips.push({ disabled: true, label: `No ${TYPE_WORDS[t]}`, dot: tone(t), title: `No ${TYPE_WORDS[t]} in this ${fileWord()}` });
+                }
+            });
+            decidedTypes().slice().sort(function (a, b) { return decided(a).start_ms - decided(b).start_ms; }).forEach(function (t) {
+                chips.push({ key: t, label: TYPE_LABELS[t], time: decided(t).start_ms, dot: tone(t) });
+            });
         }
-        laneRow(grid, 'Preview frames', false, wrap);
-        laneRow(grid, '', false, axis(0, dur));
-        if (checked) laneRow(grid, 'Decided', true, lane(decidedLaneItems(dur), 0, dur, dur, decidedTypes().length ? null : 'Nothing decided'));
-        servers().forEach(function (s) {
-            let node = serverLane(s, 0, dur, dur, false);
-            if (!checked) {
-                const near = nearEndMarkers(dur).filter(function (x) { return x.server === s; });
-                if (near.length > 1) {
-                    node = lane(near.map(function (x) { return { seg: x.marker, className: 'insp-bar-server', label: null }; }), 0, dur, dur, null);
-                    const n = el('div', 'insp-lane-label', `${near.length} ${typePhrase([near[0].marker.type])} markers near the end · zoomed below`);
-                    n.dataset.at = String(pct(near[0].marker.start_ms, dur));
-                    n.dataset.until = n.dataset.at;
-                    node.appendChild(n);
+        ownMarkers().forEach(function (x) {
+            chips.push({ key: x.key, label: serverName(x.server), time: x.marker.start_ms, dot: 'own', title: `${serverName(x.server)}'s own ${TYPE_WORDS[x.marker.type] || x.marker.type} ${rangeText(x.marker, dur)}` });
+        });
+        return chips;
+    }
+
+    function ownTagAt(t, dur) {
+        const own = ownMarkers().find(function (x) { return t >= x.marker.start_ms && t < segmentEnd(x.marker, dur); });
+        return own ? `${serverName(own.server)}'s own ${TYPE_WORDS[own.marker.type] || own.marker.type} here` : '';
+    }
+
+    // The words under the strip for the time at its centre line: ours, a server's own, or the story in between.
+    function tagAt(t) {
+        if (state.bifOnly || !state.item) return ['', ''];
+        const dur = duration();
+        if (isChecked()) {
+            const type = decidedTypes().find(function (ty) { const m = decided(ty); return t >= m.start_ms && t < segmentEnd(m, dur); });
+            if (type) return [oursTag(type, t, dur), 'is-' + tone(type)];
+        }
+        const own = ownTagAt(t, dur);
+        if (own) return [own, 'is-own'];
+        return isChecked() ? ['Story', 'is-muted'] : ['Not checked yet', 'is-muted'];
+    }
+
+    function oursTag(type, t, dur) {
+        const label = TYPE_LABELS[type];
+        const able = enabledOwners(type);
+        if (!able.length) return label;
+        const covers = function (s) {
+            return (s.current || []).some(function (m) { return m.type === type && t >= m.start_ms && t < segmentEnd(m, dur); });
+        };
+        const missing = able.filter(function (s) { return !covers(s); });
+        if (!missing.length) return `${label} on every server`;
+        for (const s of missing) {
+            const own = sortedCurrent(s).find(function (m) { return m.type === type && !m.ours && m.start_ms > t; });
+            if (own) return `${label} · ${serverName(s)} starts at ${clock(own.start_ms)}`;
+        }
+        return label;
+    }
+
+    function timelineTip(step, numbered) {
+        if (numbered) return 'Every preview frame in order, by number. Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.';
+        const head = preview() ? `Every preview frame in order, one every ${seconds(step)}.` : 'This file has no preview yet, so each tile is a place a frame will go.';
+        const rows = state.bifOnly ? '' : ' Each row below shows what that server gives viewers.';
+        return `${head} Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.${rows}`;
+    }
+
+    // One strip of every preview frame, windowed: only the tiles near the viewport exist, and their images load once
+    // the strip stops. Lanes, bands and edge lines are few, so they are drawn once in strip coordinates.
+    function makeTimeline(key, keepT) {
+        const p = preview();
+        const frames = p ? p.frame_count : 0;
+        // With no length the strip counts in frames: one unit a frame, and the "duration" is the frame count.
+        const numbered = lengthUnknown();
+        const dur = numbered ? frames : duration();
+        const step = numbered ? 1 : stripStep();
+        let count = numbered ? frames : timelineSlots(step);
+        // A preview a frame or two off the file's length is a whole preview, not a partial one.
+        if (frames && (Math.abs(frames - count) <= 2 || frames > count)) count = frames;
+        const width = count * PITCH - (PITCH - TILE_W);
+        const xOf = function (t) { return (t / step) * PITCH + TILE_W / 2; };
+        const plain = state.bifOnly || numbered;
+        const lanes = plain ? [] : [foundLane(dur)].concat(servers().map(function (s) { return serverLane(s, dur); }));
+        const height = lanes.length ? LANE_TOP + (lanes.length - 1) * LANE_PITCH + LANE_H : STRIP_BARE_H;
+        const lines = plain ? [] : edgeLines(dur);
+        const chips = plain ? [] : jumpChips(dur);
+
+        const tl = {
+            key: key,
+            path: state.path || state.bifOnly,
+            numbered: numbered,
+            step: step,
+            frames: frames,
+            count: count,
+            pad: 0,
+            vw: 0,
+            mounted: false,
+            saved: null,
+            active: '',
+            nowIndex: -1,
+            // Where a smooth scroll is heading, so steps pressed during it add up.
+            target: null,
+            tiles: new Map(),
+        };
+
+        const node = el('div', 'insp-tl');
+        tl.node = node;
+
+        // Head: title, range, legend, jump chips.
+        const head = el('div', 'insp-tl-head');
+        const titleRow = el('div', 'insp-tl-title');
+        const range = numbered ? `${frames.toLocaleString()} frames` : `0:00 – ${clock(dur)}`;
+        titleRow.append(el('div', 'insp-card-title', 'Timeline'), el('div', 'insp-tl-range insp-mono', range), infoIcon(timelineTip(step, numbered)));
+        if (!plain) {
+            const legend = el('div', 'insp-legend');
+            const oursKey = el('span', 'insp-legend-item');
+            const tones = lanes[0].bands.map(function (b) { return b.cls.indexOf('is-intro') !== -1 ? 'intro' : 'credits'; })
+                .filter(function (v, i, all) { return all.indexOf(v) === i; });
+            (tones.length ? tones : ['credits']).forEach(function (t) { oursKey.appendChild(el('span', 'insp-swatch is-' + t)); });
+            oursKey.append('ours');
+            const ownKey = el('span', 'insp-legend-item');
+            ownKey.append(el('span', 'insp-swatch is-own'), 'a server\'s own');
+            legend.append(oursKey, ownKey);
+            titleRow.appendChild(legend);
+        }
+        head.appendChild(titleRow);
+        const jumps = el('div', 'insp-jumps');
+        jumps.id = 'inspJumps';
+        if (chips.length) {
+            jumps.appendChild(el('span', 'insp-jumps-label', 'Jump to'));
+            chips.forEach(function (c) {
+                const b = el('button', 'insp-jump' + (c.disabled ? ' is-off' : ''));
+                b.type = 'button';
+                b.appendChild(el('span', 'insp-jump-dot is-' + c.dot));
+                b.append(c.label);
+                if (c.title) b.title = c.title;
+                if (c.disabled) {
+                    b.disabled = true;
+                } else {
+                    b.dataset.jump = c.key;
+                    b.appendChild(el('span', 'insp-mono insp-jump-time', clock(c.time)));
+                    b.addEventListener('click', function () { tl.goTo(c.time, c.key, true); });
+                }
+                jumps.appendChild(b);
+            });
+        }
+        head.appendChild(jumps);
+        node.appendChild(head);
+        if (numbered) {
+            const note = el('div', 'insp-tl-note', 'This file\'s length isn\'t known yet, so frames are shown by number.');
+            note.id = 'inspLengthNote';
+            node.appendChild(note);
+        }
+
+        // Overview bar: thumbnails, our bands, the viewport box, the "now" bubble, and the axis.
+        const ovRow = el('div', 'insp-tl-row');
+        ovRow.appendChild(el('div', 'insp-tl-gutter'));
+        const ovCol = el('div', 'insp-ov');
+        const bubbleRow = el('div', 'insp-ov-bubble-row');
+        const bubble = el('div', 'insp-ov-bubble insp-mono');
+        bubble.id = 'inspOvNow';
+        bubbleRow.appendChild(bubble);
+        const bar = el('button', 'insp-ov-bar');
+        bar.type = 'button';
+        bar.id = 'inspOverview';
+        bar.setAttribute('aria-label', `Jump to this point in the ${state.bifOnly ? 'preview' : fileWord()}`);
+        const thumbs = el('span', 'insp-ov-thumbs');
+        bar.appendChild(thumbs);
+        if (!numbered && isChecked()) {
+            decidedTypes().forEach(function (t) {
+                const m = decided(t);
+                const band = el('span', 'insp-ov-band is-' + tone(t));
+                band.style.left = `${pct(m.start_ms, dur)}%`;
+                band.style.width = `${Math.max(0.3, pct(segmentEnd(m, dur), dur) - pct(m.start_ms, dur))}%`;
+                bar.appendChild(band);
+            });
+        }
+        const box = el('span', 'insp-ov-box');
+        bar.appendChild(box);
+        bar.addEventListener('click', function (e) {
+            const r = bar.getBoundingClientRect();
+            tl.goTo(clamp((e.clientX - r.left) / r.width, 0, 1) * dur, null, true);
+        });
+        ovCol.append(bubbleRow, bar);
+        if (!numbered) ovCol.appendChild(axis(dur, 'insp-axis insp-ov-axis'));
+        ovRow.appendChild(ovCol);
+        node.appendChild(ovRow);
+
+        // Readout: the time at the centre line, which preview frame it is, and what is there.
+        const readRow = el('div', 'insp-tl-row insp-readout-row');
+        readRow.appendChild(el('div', 'insp-tl-gutter'));
+        const readout = el('div', 'insp-readout');
+        const now = el('div', 'insp-readout-left');
+        const nowTime = el('div', 'insp-readout-time insp-mono');
+        nowTime.id = 'inspNow';
+        const frameText = el('div', 'insp-readout-frame');
+        frameText.id = 'inspFrameText';
+        const tag = el('div', 'insp-readout-tag');
+        tag.id = 'inspNowTag';
+        now.append(nowTime, frameText, tag);
+        const nav = el('div', 'insp-readout-nav');
+        const back = button('', 'insp-round-btn', function () { tl.stepBy(-STEP_FRAMES); });
+        back.appendChild(icon('chevron-left'));
+        back.setAttribute('aria-label', `Back ${STEP_FRAMES} frames`);
+        back.title = `Back ${STEP_FRAMES} frames`;
+        const fwd = button('', 'insp-round-btn', function () { tl.stepBy(STEP_FRAMES); });
+        fwd.appendChild(icon('chevron-right'));
+        fwd.setAttribute('aria-label', `Forward ${STEP_FRAMES} frames`);
+        fwd.title = `Forward ${STEP_FRAMES} frames`;
+        nav.append(el('span', 'insp-readout-hint', frames ? 'Click a frame to see it large' : ''), back, fwd);
+        readout.append(now, nav);
+        readRow.appendChild(readout);
+        node.appendChild(readRow);
+
+        // The strip, with the lane names beside it.
+        const stripRow = el('div', 'insp-tl-row insp-strip-row');
+        const names = el('div', 'insp-tl-gutter insp-lane-names');
+        names.style.height = `${height + 12}px`;
+        lanes.forEach(function (lane, k) {
+            const n = el('div', 'insp-lane-name' + (lane.strong ? ' is-strong' : ''));
+            n.style.top = `${LANE_TOP + k * LANE_PITCH}px`;
+            n.dataset.lane = lane.key;
+            n.append(dot(lane.dot), el('span', '', lane.name));
+            n.title = lane.name;
+            names.appendChild(n);
+        });
+        stripRow.appendChild(names);
+        const wrap = el('div', 'insp-strip-wrap');
+        wrap.style.height = `${height + 12}px`;
+        const scroller = el('div', 'insp-strip');
+        scroller.id = 'inspStrip';
+        scroller.tabIndex = 0;
+        scroller.setAttribute('aria-label', 'Preview frames, in order');
+        const content = el('div', 'insp-strip-content');
+        content.style.height = `${height}px`;
+        const inner = el('div', 'insp-strip-inner');
+        inner.style.width = `${width}px`;
+        inner.style.height = `${height}px`;
+
+        const bandNodes = [];
+        lanes.forEach(function (lane, k) {
+            const laneNode = el('div', 'insp-lane');
+            laneNode.style.top = `${LANE_TOP + k * LANE_PITCH}px`;
+            laneNode.dataset.lane = lane.key;
+            if (lane.serverId) laneNode.dataset.serverId = lane.serverId;
+            if (lane.note) {
+                const note = el('div', 'insp-lane-note ' + lane.note.cls);
+                note.appendChild(el('span', '', lane.note.text));
+                laneNode.appendChild(note);
+            }
+            lane.bands.forEach(function (b) {
+                const left = xOf(b.start);
+                const right = Math.min(width, xOf(b.end));
+                const band = el('button', 'insp-band ' + b.cls);
+                band.type = 'button';
+                band.style.left = `${left}px`;
+                band.style.width = `${Math.max(6, right - left)}px`;
+                band.title = b.aria;
+                band.setAttribute('aria-label', b.aria);
+                band.dataset.key = b.key;
+                band.appendChild(el('span', 'insp-band-text', b.text));
+                band.addEventListener('click', function () { tl.goTo(b.start, b.key, true); });
+                bandNodes.push(band);
+                laneNode.appendChild(band);
+            });
+            inner.appendChild(laneNode);
+        });
+
+        const tilesLayer = el('div', 'insp-tiles');
+        inner.appendChild(tilesLayer);
+        tilesLayer.addEventListener('click', function (e) {
+            const hit = e.target.closest('.insp-tl-img');
+            if (hit) openBig(Number(hit.parentNode.dataset.index));
+        });
+
+        const lineNodes = [];
+        lines.forEach(function (line) {
+            const n = el('div', 'insp-edge ' + line.cls);
+            n.style.left = `${xOf(line.t)}px`;
+            n.style.height = `${height}px`;
+            n.dataset.key = line.key;
+            n.appendChild(el('div', 'insp-edge-rule'));
+            const flag = el('div', 'insp-edge-flag', line.label);
+            n.appendChild(flag);
+            n.title = line.label;
+            lineNodes.push(n);
+            inner.appendChild(n);
+        });
+
+        content.appendChild(inner);
+        scroller.appendChild(content);
+        const centre = el('div', 'insp-centre');
+        centre.setAttribute('aria-hidden', 'true');
+        wrap.append(scroller, centre);
+        stripRow.appendChild(wrap);
+        node.appendChild(stripRow);
+
+        tl.nowT = function () {
+            return tl.nowIndex >= 0 ? tl.nowIndex * step : (keepT !== null && keepT !== undefined ? keepT : 0);
+        };
+
+        tl.keepScroll = function () {
+            if (node.isConnected) tl.saved = scroller.scrollLeft;
+        };
+
+        function centreIndex() {
+            const x = scroller.scrollLeft + tl.vw / 2 - tl.pad - TILE_W / 2;
+            return clamp(Math.round(x / PITCH), 0, count - 1);
+        }
+
+        function layout(t) {
+            tl.vw = scroller.clientWidth || 1152;
+            tl.pad = Math.max(0, Math.round(tl.vw / 2 - PITCH / 2));
+            content.style.width = `${width + tl.pad * 2}px`;
+            inner.style.left = `${tl.pad}px`;
+            scroller.scrollLeft = Math.max(0, tl.pad + xOf(t) - tl.vw / 2);
+        }
+
+        // Flags on the strip never cover each other: one that would is left out (its line stays, named by its title).
+        function layoutFlags() {
+            let right = -Infinity;
+            lineNodes.forEach(function (n) {
+                const flag = n.querySelector('.insp-edge-flag');
+                flag.hidden = false;
+                const left = parseFloat(n.style.left) + 6;
+                if (left < right + 6) flag.hidden = true;
+                else right = left + flag.offsetWidth;
+            });
+        }
+
+        // Each thumbnail is the frame at its own place on the bar; past the end of a short preview there is none.
+        function buildThumbs() {
+            if (!frames || thumbs.childElementCount) return;
+            const k = clamp(Math.round(tl.vw / 56), 8, 24);
+            for (let i = 0; i < k; i++) {
+                const index = Math.floor((((i + 0.5) / k) * dur) / step);
+                if (index >= frames) {
+                    thumbs.appendChild(el('span', 'insp-ov-gap'));
+                    continue;
+                }
+                const img = el('img');
+                img.alt = '';
+                img.draggable = false;
+                img.src = frameUrl(index);
+                thumbs.appendChild(img);
+            }
+        }
+
+        function makeTile(i) {
+            const t = i * step;
+            const wrapTile = el('div', 'insp-tl-frame');
+            wrapTile.style.left = `${i * PITCH}px`;
+            wrapTile.dataset.index = String(i);
+            if (i < frames) {
+                const b = el('button', 'insp-tl-img');
+                b.type = 'button';
+                b.setAttribute('aria-label', `See frame ${numbered ? i + 1 : clock(t)} large`);
+                const img = el('img');
+                img.alt = '';
+                img.draggable = false;
+                img.dataset.src = frameUrl(i);
+                b.appendChild(img);
+                wrapTile.appendChild(b);
+            } else {
+                wrapTile.appendChild(el('div', 'insp-tl-none', 'No preview'));
+            }
+            wrapTile.appendChild(el('div', 'insp-tl-time insp-mono', frameLabel(i)));
+            return wrapTile;
+        }
+
+        function windowTiles() {
+            const left = scroller.scrollLeft - tl.pad;
+            const extra = tl.vw * WINDOW_EXTRA;
+            const first = Math.max(0, Math.floor((left - extra) / PITCH));
+            const last = Math.min(count - 1, Math.ceil((left + tl.vw + extra) / PITCH));
+            tl.tiles.forEach(function (n, i) {
+                if (i < first || i > last) {
+                    n.remove();
+                    tl.tiles.delete(i);
+                }
+            });
+            for (let i = first; i <= last; i++) {
+                if (!tl.tiles.has(i)) {
+                    const n = makeTile(i);
+                    tilesLayer.appendChild(n);
+                    tl.tiles.set(i, n);
                 }
             }
-            node.dataset.serverId = s.server_id || '';
-            laneRow(grid, `${serverName(s)} now`, false, node);
+        }
+
+        function loadImages() {
+            tl.tiles.forEach(function (n) {
+                const img = n.querySelector('img');
+                if (img && !img.getAttribute('src')) img.src = img.dataset.src;
+            });
+        }
+
+        let settleTimer = null;
+        let frameRequested = false;
+
+        function update() {
+            frameRequested = false;
+            if (!node.isConnected) return;
+            windowTiles();
+            const idx = centreIndex();
+            if (idx !== tl.nowIndex) {
+                const old = tl.tiles.get(tl.nowIndex);
+                if (old) old.classList.remove('is-now');
+                tl.nowIndex = idx;
+            }
+            const cur = tl.tiles.get(idx);
+            if (cur) cur.classList.add('is-now');
+            const t = idx * step;
+            nowTime.textContent = frameLabel(idx);
+            bubble.textContent = frameLabel(idx);
+            const every = numbered ? '' : ` · one every ${seconds(step)}`;
+            frameText.textContent = idx < frames
+                ? `preview frame ${(idx + 1).toLocaleString()} of ${frames.toLocaleString()}${every}`
+                : 'no preview frame here';
+            const tg = numbered ? ['', ''] : tagAt(t);
+            tag.textContent = tg[0];
+            tag.className = 'insp-readout-tag ' + tg[1];
+            // The overview: the bubble over the centre time, the box over what the strip shows.
+            const barW = bar.clientWidth || 1;
+            bubble.style.left = `${clamp((t / dur) * barW, 32, Math.max(32, barW - 32))}px`;
+            const from = Math.max(0, ((scroller.scrollLeft - tl.pad - TILE_W / 2) / PITCH) * step);
+            const to = Math.min(dur, ((scroller.scrollLeft + tl.vw - tl.pad - TILE_W / 2) / PITCH) * step);
+            box.style.left = `${pct(from, dur)}%`;
+            box.style.width = `${Math.max(0, pct(to, dur) - pct(from, dur))}%`;
+            clearTimeout(settleTimer);
+            settleTimer = setTimeout(function () {
+                tl.target = null;
+                loadImages();
+            }, IMAGE_SETTLE_MS);
+        }
+
+        function schedule() {
+            if (frameRequested) return;
+            frameRequested = true;
+            requestAnimationFrame(update);
+        }
+
+        function setActive(k) {
+            tl.active = k || '';
+            node.querySelectorAll('[data-jump]').forEach(function (b) { b.classList.toggle('is-active', !!k && b.dataset.jump === k); });
+            bandNodes.concat(lineNodes).forEach(function (n) { n.classList.toggle('is-active', !!k && n.dataset.key === k); });
+        }
+
+        // A move of a few screens glides; a far jump (the overview bar, a chip across the film) lands at once, since
+        // gliding past thousands of frames shows nothing and takes seconds.
+        tl.goTo = function (t, k, smooth) {
+            const left = Math.max(0, tl.pad + xOf(t) - tl.vw / 2);
+            const glide = smooth && Math.abs(left - scroller.scrollLeft) <= tl.vw * GLIDE_SCREENS;
+            tl.target = glide ? clamp(Math.round(t / step), 0, count - 1) : null;
+            if (glide) scroller.scrollTo({ left: left, behavior: 'smooth' });
+            else scroller.scrollLeft = left;
+            if (k !== null && k !== undefined) setActive(k);
+            schedule();
+        };
+
+        tl.showFrame = function (i) {
+            tl.goTo(i * step, null, true);
+        };
+
+        tl.stepBy = function (n) {
+            const from = tl.target !== null ? tl.target : centreIndex();
+            tl.goTo(clamp(from + n, 0, count - 1) * step, null, true);
+        };
+
+        tl.relayout = function () {
+            if (!node.isConnected || !tl.mounted) return;
+            const t = centreIndex() * step;
+            layout(t);
+            layoutFlags();
+            update();
+        };
+
+        tl.mount = function () {
+            if (!tl.mounted) {
+                let t = keepT;
+                let k = null;
+                if (t === null || t === undefined) {
+                    const first = lines.find(function (l) { return l.cls.indexOf('is-ours') !== -1; }) || lines[0];
+                    t = first ? first.t : 0;
+                    k = first ? first.key : null;
+                }
+                layout(t);
+                buildThumbs();
+                layoutFlags();
+                if (k) setActive(k);
+                tl.mounted = true;
+                update();
+                loadImages();
+                return;
+            }
+            if (scroller.clientWidth && scroller.clientWidth !== tl.vw) {
+                tl.relayout();
+                return;
+            }
+            if (tl.saved !== null) scroller.scrollLeft = tl.saved;
+            layoutFlags();
+            update();
+        };
+
+        scroller.addEventListener('scroll', schedule, { passive: true });
+
+        // A vertical wheel moves the strip sideways; at either end it scrolls the page as usual.
+        scroller.addEventListener('wheel', function (e) {
+            if (e.shiftKey || Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
+            const unit = e.deltaMode === 1 ? 40 : (e.deltaMode === 2 ? tl.vw : 1);
+            const delta = e.deltaY * unit;
+            const max = scroller.scrollWidth - scroller.clientWidth;
+            if ((delta < 0 && scroller.scrollLeft <= 0) || (delta > 0 && scroller.scrollLeft >= max - 1)) return;
+            scroller.scrollLeft += delta;
+            e.preventDefault();
+        }, { passive: false });
+
+        // Click and drag moves the strip; a drag never counts as a click on the frame or band under the pointer.
+        let drag = null;
+        let swallowClick = false;
+        const onMove = function (e) {
+            if (!drag) return;
+            const dx = e.clientX - drag.x;
+            if (!drag.moved && Math.abs(dx) > 4) {
+                drag.moved = true;
+                scroller.classList.add('is-dragging');
+            }
+            if (drag.moved) scroller.scrollLeft = drag.left - dx;
+        };
+        const onUp = function () {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            if (drag && drag.moved) {
+                swallowClick = true;
+                scroller.classList.remove('is-dragging');
+                setTimeout(function () { swallowClick = false; }, 0);
+            }
+            drag = null;
+        };
+        scroller.addEventListener('pointerdown', function (e) {
+            if (e.button !== 0 || e.pointerType !== 'mouse') return;
+            drag = { x: e.clientX, left: scroller.scrollLeft, moved: false };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onUp);
         });
-        card.appendChild(grid);
-        return card;
-    }
-
-    function endingCard() {
-        const dur = duration();
-        if (!dur || isChecked() || !preview()) return null;
-        const near = nearEndMarkers(dur);
-        if (!near.length) return null;
-        const first = Math.min.apply(null, near.map(function (x) { return x.marker.start_ms; }));
-        const start = Math.max(0, Math.floor((first - 60000) / 60000) * 60000);
-        const card = el('div', 'insp-card');
-        card.id = 'inspEnding';
-        card.appendChild(el('div', 'insp-card-title mb-3', `Ending, zoomed · ${clock(start)} – ${clock(dur)} (end of file)`));
-        const grid = el('div', 'insp-timeline');
-        const wrap = el('div', 'insp-strip-wrap');
-        wrap.appendChild(strip(start, dur, 12, true));
-        near.forEach(function (x) { wrap.appendChild(band(x.marker, start, dur, 'insp-band-server', dur)); });
-        laneRow(grid, 'Preview frames', false, wrap);
-        laneRow(grid, '', false, axis(start, dur));
-        const counts = {};
-        near.forEach(function (x) {
-            const name = serverName(x.server);
-            counts[name] = (counts[name] || 0) + 1;
-            const n = counts[name];
-            const len = toEnd(x.marker, dur) ? '' : ` (${seconds(segmentEnd(x.marker, dur) - x.marker.start_ms)})`;
-            const label = `${TYPE_LABELS[x.marker.type] || x.marker.type} ${rangeText(x.marker, dur)}${len}`;
-            laneRow(grid, `${name} ${CIRCLED[n - 1] || n}`, false, lane([{ seg: x.marker, className: 'insp-bar-server', label: label, inside: toEnd(x.marker, dur) }], start, dur, dur, null));
+        scroller.addEventListener('click', function (e) {
+            if (!swallowClick) return;
+            e.stopPropagation();
+            e.preventDefault();
+        }, true);
+        scroller.addEventListener('keydown', function (e) {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                tl.goTo((centreIndex() + (e.key === 'ArrowLeft' ? -1 : 1)) * step, null, false);
+            }
         });
-        card.appendChild(grid);
-        return card;
+
+        return tl;
     }
 
-    // --------------------------------------------------------------- close-ups
+    // ------------------------------------------------------------ frame dialog
 
-    function frameTile(src, t, options) {
-        const opts = options || {};
-        const tile = el(opts.onPick ? 'button' : 'div', 'insp-frame' + (opts.ringed ? ' is-ringed' : ''));
-        if (opts.onPick) {
-            tile.type = 'button';
-            tile.setAttribute('aria-label', `Frame at ${clock(t)}${opts.pickLabel ? ': ' + opts.pickLabel : ''}`);
-            tile.addEventListener('click', function () { opts.onPick(t); });
-        }
-        tile.dataset.t = String(t);
-        if (src) {
-            const img = el('img');
-            img.alt = `Frame at ${clock(t)}`;
-            img.src = src;
-            img.loading = 'lazy';
-            tile.appendChild(img);
-        } else {
-            tile.appendChild(el('span', 'insp-frame-missing'));
-        }
-        tile.appendChild(el('span', '', clock(t)));
-        return tile;
+    function frameDialog() {
+        let d = $('inspFrameDialog');
+        if (d) return d;
+        d = el('dialog', 'insp-dialog');
+        d.id = 'inspFrameDialog';
+        d.setAttribute('aria-labelledby', 'inspBigTime');
+        const head = el('div', 'insp-dialog-head');
+        const title = el('div', 'insp-dialog-title');
+        const time = el('div', 'insp-mono insp-dialog-time');
+        time.id = 'inspBigTime';
+        const text = el('div', 'insp-dialog-text');
+        text.id = 'inspBigText';
+        const tag = el('div', 'insp-readout-tag');
+        tag.id = 'inspBigTag';
+        title.append(time, text, tag);
+        const close = button('', 'insp-round-btn is-plain', closeBig);
+        close.setAttribute('aria-label', 'Close');
+        close.appendChild(icon('x-lg'));
+        head.append(title, close);
+        const img = el('img', 'insp-dialog-img');
+        img.id = 'inspBigImg';
+        img.alt = '';
+        const foot = el('div', 'insp-dialog-foot');
+        const prev = iconButton('chevron-left', 'Previous', 'btn insp-btn', function () { stepBig(-1); });
+        prev.id = 'inspBigPrev';
+        const next = button('Next', 'btn insp-btn', function () { stepBig(1); });
+        next.appendChild(icon('chevron-right'));
+        next.id = 'inspBigNext';
+        foot.append(prev, el('div', 'insp-dialog-hint', '← → step · Esc closes'), next);
+        d.append(head, img, foot);
+        d.addEventListener('keydown', function (e) {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                stepBig(e.key === 'ArrowLeft' ? -1 : 1);
+            }
+        });
+        d.addEventListener('click', function (e) { if (e.target === d) closeBig(); });
+        d.addEventListener('close', function () { big = null; });
+        $('inspector').appendChild(d);
+        return d;
     }
 
-    // Preview frames on both sides of an edge: the frame at or after the edge is the first one of the segment.
-    function previewFramesAround(edge, cutClass) {
-        const row = el('div', 'insp-frames');
-        const step = interval();
-        const first = Math.ceil(edge / step);
-        const count = preview().frame_count;
-        for (let i = first - CLOSEUP_SIDE; i < first; i++) {
-            if (i >= 0) row.appendChild(frameTile(frameUrl(i), i * step));
-        }
-        row.appendChild(el('div', 'insp-cut ' + (cutClass || '')));
-        for (let i = first; i < first + CLOSEUP_SIDE && i < count; i++) row.appendChild(frameTile(frameUrl(i), i * step));
+    function openBig(index) {
+        const p = preview();
+        if (!p || !p.frame_count) return;
+        big = clamp(index, 0, p.frame_count - 1);
+        const d = frameDialog();
+        updateBig();
+        if (!d.open) d.showModal();
+    }
+
+    function stepBig(delta) {
+        const p = preview();
+        if (big === null || !p) return;
+        const next = clamp(big + delta, 0, p.frame_count - 1);
+        if (next === big) return;
+        big = next;
+        updateBig();
+        if (timeline) timeline.showFrame(big);
+    }
+
+    function updateBig() {
+        const p = preview();
+        const step = stripStep();
+        const t = big * step;
+        const numbered = lengthUnknown();
+        const img = $('inspBigImg');
+        img.src = frameUrl(big);
+        img.alt = numbered ? `Preview frame ${big + 1}` : `Preview frame at ${clock(t)}`;
+        $('inspBigTime').textContent = frameLabel(big);
+        $('inspBigText').textContent = `preview frame ${(big + 1).toLocaleString()} of ${Number(p.frame_count).toLocaleString()}`;
+        const tg = numbered ? ['', ''] : tagAt(t);
+        const tag = $('inspBigTag');
+        tag.textContent = tg[0];
+        tag.className = 'insp-readout-tag ' + tg[1];
+        $('inspBigPrev').disabled = big <= 0;
+        $('inspBigNext').disabled = big >= p.frame_count - 1;
+    }
+
+    function closeBig() {
+        const d = $('inspFrameDialog');
+        if (d && d.open) d.close();
+        big = null;
+    }
+
+    // ------------------------------------------------------------------ season
+
+    const CHIP_NAMES = {
+        chapters: 'Chapters', theintrodb: 'TheIntroDB', introdb: 'IntroDB', skipdb: 'SkipDB', season_audio: 'Season audio',
+        season_audio_previous: 'Previous season', credits_text: 'Credit text', user: 'Your marker',
+    };
+    const DOT_WORDS = {
+        ok: 'shows our markers', waiting: 'waiting', failed: 'failed', skipped: 'skipped', none: 'nothing sent yet',
+        off: 'Intro & Credits is off',
+    };
+    // Matches markers.audio.season.MAX_GROUP_EPISODES: a folder with more episodes is capped to the nearest this many.
+    const MAX_GROUP_EPISODES = 40;
+
+    function scopeToggle() {
+        const row = el('div', 'insp-scope');
+        const seg = el('div', 'insp-seg');
+        seg.setAttribute('role', 'group');
+        seg.setAttribute('aria-label', 'Show this episode or the whole season');
+        [['episode', 'This episode', 'inspScopeEpisode'], ['season', 'Whole season', 'inspScopeSeason']].forEach(function (opt) {
+            const on = state.scope === opt[0];
+            const b = button(opt[1], 'insp-seg-btn' + (on ? ' active' : ''), function () { setScope(opt[0]); });
+            b.id = opt[2];
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            seg.appendChild(b);
+        });
+        row.appendChild(withInfo(seg, TIPS.scope));
         return row;
     }
+
+    function setScope(scope) {
+        if (state.scope === scope) return;
+        state.scope = scope;
+        state.adjust = null;
+        state.confirmLock = false;
+        state.confirmUnlock = false;
+        closeBig();
+        setUrl(fileParams(), false);
+        if (scope === 'season') loadSeason();
+        render();
+    }
+
+    async function loadSeason() {
+        const seq = ++state.seasonSeq;
+        const path = state.path;
+        state.season = null;
+        state.seasonError = '';
+        render();
+        const res = await getJson('/api/markers/season?path=' + encodeURIComponent(path)).catch(function (e) {
+            return { ok: false, status: 0, data: { error: e.message } };
+        });
+        if (seq !== state.seasonSeq || state.path !== path) return;
+        if (res.ok) state.season = res.data;
+        else state.seasonError = (res.data && res.data.error) || `HTTP ${res.status}`;
+        if (state.scope === 'season') render();
+    }
+
+    function seasonCell(ep, type) {
+        const d = ep[type] || {};
+        if (d.status === 'decided' && d.marker) return el('div', `insp-mono insp-season-time insp-t-${tone(type)}`, rangeText(d.marker, ep.duration_ms));
+        if (d.status === 'needs_review') {
+            const cell = el('div', 'insp-season-time insp-state-review', 'Needs review');
+            if (ep.review_reason) cell.title = ep.review_reason;
+            return cell;
+        }
+        return el('div', 'insp-season-time insp-state-muted', '—');
+    }
+
+    function seasonLane(ep, scale) {
+        const lane = el('div', 'insp-season-lane');
+        if (!ep.duration_ms || !scale) {
+            lane.appendChild(el('div', 'insp-season-unknown', ep.known ? 'Length not known yet' : ''));
+            return lane;
+        }
+        const track = el('div', 'insp-season-track');
+        track.style.width = `${pct(ep.duration_ms, scale)}%`;
+        lane.appendChild(track);
+        ['intro', 'credits'].forEach(function (t) {
+            const d = ep[t] || {};
+            if (d.status !== 'decided' || !d.marker) return;
+            const m = d.marker;
+            const bar = el('div', 'insp-bar insp-bar-' + t);
+            bar.style.left = `${pct(m.start_ms, scale)}%`;
+            bar.style.width = `${Math.max(0.4, pct(segmentEnd(m, ep.duration_ms) - m.start_ms, scale))}%`;
+            bar.title = `${TYPE_LABELS[t]} ${rangeText(m, ep.duration_ms)}`;
+            lane.appendChild(bar);
+        });
+        return lane;
+    }
+
+    function seasonFrom(ep) {
+        const chips = el('div', 'insp-season-chips');
+        const decidedAny = ['intro', 'credits'].some(function (t) { return ep[t] && ep[t].status === 'decided'; });
+        if (!ep.known) {
+            chips.appendChild(el('span', 'insp-mini-chip is-muted', 'Not checked yet'));
+        } else if ((ep.evidence || []).length) {
+            const names = ep.evidence.map(function (c) {
+                const name = CHIP_NAMES[c.source] || c.source;
+                return c.label ? `${name} ${c.label}` : name;
+            });
+            const chip = el('span', 'insp-mini-chip' + (/^season_audio/.test(ep.evidence[0].source) ? ' is-audio' : ''), names[0]);
+            if (names.length > 1) {
+                chip.appendChild(el('span', 'insp-mini-more', ` +${names.length - 1}`));
+                chip.title = names.join(' · ');
+            }
+            chips.appendChild(chip);
+        } else if (!decidedAny && !ep.needs_review) {
+            chips.appendChild(el('span', 'insp-mini-chip is-muted', 'Nothing found'));
+        }
+        if (['intro', 'credits'].some(function (t) { return ep[t] && ep[t].marker && ep[t].marker.locked; })) {
+            const lock = el('span', 'insp-mini-chip is-locked');
+            lock.append(icon('lock-fill'), document.createTextNode('Locked by you'));
+            chips.appendChild(lock);
+        }
+        return chips;
+    }
+
+    function seasonDots(ep, list) {
+        const dots = el('div', 'insp-dots');
+        list.forEach(function (server) {
+            const st = (ep.servers || {})[server.server_id] || { state: 'none', message: '' };
+            const item = el('span', 'insp-dot-item');
+            const d = el('span', 'insp-dot insp-dot-' + st.state);
+            d.title = `${server.server_name}: ${st.message || DOT_WORDS[st.state] || st.state}`;
+            d.setAttribute('role', 'img');
+            d.setAttribute('aria-label', d.title);
+            item.append(d, el('span', 'insp-dot-letter', VENDOR_TILES[String(server.server_type || '').toLowerCase()] || server.server_name.charAt(0)));
+            dots.appendChild(item);
+        });
+        return dots;
+    }
+
+    function seasonSummary(episodes, list, counts) {
+        const node = el('div', 'insp-season-sub');
+        node.id = 'inspSeasonSub';
+        const has = function (t) { return episodes.filter(function (e) { return e[t] && e[t].status === 'decided'; }).length; };
+        const intro = has('intro');
+        const credits = has('credits');
+        node.append(`${intro} ${intro === 1 ? 'has' : 'have'} an intro · ${credits} ${credits === 1 ? 'has' : 'have'} credits`);
+        if (counts.needs_review) {
+            node.append(' · ');
+            const review = el('span', 'insp-state-review', `${counts.needs_review} need${counts.needs_review === 1 ? 's' : ''} review`);
+            review.id = 'inspSeasonReview';
+            node.appendChild(review);
+        }
+        const on = list.filter(function (s) { return s.markers_enabled; });
+        let serversText;
+        if (!on.length) {
+            serversText = 'Intro & Credits is off on every server';
+        } else {
+            const behind = episodes.filter(function (e) {
+                const any = ['intro', 'credits'].some(function (t) { return e[t] && e[t].status === 'decided'; });
+                return any && on.some(function (s) { return ((e.servers || {})[s.server_id] || {}).state !== 'ok'; });
+            }).length;
+            serversText = behind ? `${behind} not on every server yet` : 'every server up to date';
+        }
+        node.append(` · ${serversText}`);
+        return node;
+    }
+
+    function seasonCard() {
+        const card = el('div', 'insp-card insp-season-card');
+        card.id = 'inspSeason';
+        if (state.seasonError) {
+            card.append(el('div', 'insp-message-title', 'Couldn\'t load this season'), el('div', 'insp-small', state.seasonError));
+            return card;
+        }
+        const payload = state.season;
+        if (!payload) {
+            card.classList.add('insp-loading');
+            card.append(el('span', 'spinner-border spinner-border-sm'), el('span', '', 'Loading the season…'));
+            return card;
+        }
+        const list = payload.servers || [];
+        const episodes = payload.episodes || [];
+        const counts = payload.counts || {};
+        const on = list.filter(function (s) { return s.markers_enabled; }).length;
+        const head = el('div', 'insp-season-headrow');
+        const titles = el('div', 'insp-season-titles');
+        const total = counts.total_episodes || counts.episodes || 0;
+        const title = el('div', 'insp-season-title', `${payload.season || ''} · ${total > MAX_GROUP_EPISODES
+            ? `${total} episodes (showing the ${MAX_GROUP_EPISODES} nearest)` : `${total} episode${total === 1 ? '' : 's'}`}`);
+        titles.append(title, seasonSummary(episodes, list, counts));
+        const acts = el('div', 'insp-season-acts');
+        const legend = el('div', 'insp-legend');
+        ['intro', 'credits'].forEach(function (t) {
+            const item = el('span', 'insp-legend-item');
+            item.append(el('span', 'insp-swatch is-' + t), TYPE_LABELS[t]);
+            legend.appendChild(item);
+        });
+        acts.appendChild(legend);
+        const publish = button(state.publishing ? 'Queueing…' : `Publish ${counts.ready || 0} to ${on} server${on === 1 ? '' : 's'}`,
+            'btn insp-btn is-strong', publishSeason);
+        publish.id = 'inspPublishSeason';
+        publish.disabled = state.publishing || !counts.ready || !on;
+        acts.appendChild(withInfo(publish, TIPS.publish));
+        head.append(titles, acts);
+        card.appendChild(head);
+
+        const scale = Math.max.apply(null, [0].concat(episodes.map(function (e) { return e.duration_ms || 0; })));
+        const grid = el('div', 'insp-season');
+        const top = el('div', 'insp-season-row insp-season-head');
+        top.append(el('div', '', 'EP'), scale ? axis(scale, 'insp-axis insp-season-axis') : el('div', '', 'INTRO & CREDITS'),
+            el('div', '', 'INTRO'), el('div', '', 'CREDITS'), el('div', '', 'FROM'), el('div', '', 'SERVERS'));
+        grid.appendChild(top);
+        episodes.forEach(function (ep) {
+            const row = el('button', 'insp-season-row' + (ep.path === state.path ? ' is-current' : ''));
+            row.type = 'button';
+            row.dataset.path = ep.path;
+            row.dataset.episode = ep.episode || ep.name;
+            row.setAttribute('aria-label', `Open ${ep.episode || ep.name}`);
+            row.append(el('div', 'insp-season-ep insp-mono', ep.episode || ep.name), seasonLane(ep, scale),
+                seasonCell(ep, 'intro'), seasonCell(ep, 'credits'), seasonFrom(ep), seasonDots(ep, list));
+            row.addEventListener('click', function () { openFile(ep.path, { scope: 'episode' }); });
+            grid.appendChild(row);
+        });
+        card.appendChild(grid);
+        card.appendChild(el('div', 'insp-small mt-2', 'Each episode is drawn to one scale. Dots: green = the server shows our markers, amber = waiting, red = failed, grey = off, skipped or nothing sent yet. Choose an episode to open it.'));
+        return card;
+    }
+
+    async function publishSeason() {
+        const path = state.path;
+        state.publishing = true;
+        render();
+        try {
+            const data = await sendJson('POST', '/api/markers/season/publish', { path: path });
+            toast('Publish season', 'Queued — see the Dashboard', 'success');
+            if (state.path === path) {
+                state.job = { id: data.job_id, kind: MARKERS_JOB, status: 'pending', name: 'Publish season', percent: 0 };
+            }
+        } catch (e) {
+            toast('Publish season', `Couldn't queue it: ${e.message}`, 'danger');
+        }
+        state.publishing = false;
+        if (state.path === path) render();
+    }
+
+    // ------------------------------------------------------------ exact frames
 
     function exactKey(start, count) {
         return `${state.path}|${start}|${count}`;
@@ -1686,139 +2390,87 @@
         if (!exactCache.has(key)) {
             const params = new URLSearchParams({ path: state.path, start_ms: String(start), count: String(count), width: '320' });
             const promise = limited(function () { return fetchFrames('/api/inspector/frames?' + params.toString()); });
-            promise.catch(function () { exactCache.delete(key); });
+            promise.then(function (frames) { exactDone.set(key, frames); }, function () { exactCache.delete(key); });
             exactCache.set(key, promise);
         }
         return exactCache.get(key);
-    }
-
-    // Exact frames one second apart; the frame at ``edge`` is the first after the cut. ``pick`` makes them buttons.
-    function exactFramesAround(edge, options) {
-        const opts = options || {};
-        const count = opts.count || EXACT_COUNT;
-        const before = opts.before === undefined ? CLOSEUP_SIDE : opts.before;
-        const start = Math.max(0, Math.round(edge / 1000) * 1000 - before * 1000);
-        const row = el('div', 'insp-frames');
-        row.dataset.exact = String(start);
-        const placeholders = function () {
-            const nodes = [];
-            for (let i = 0; i < count; i++) {
-                const t = start + i * 1000;
-                if (opts.cut && t === edgeRounded(edge)) nodes.push(el('div', 'insp-cut ' + (opts.cutClass || '')));
-                nodes.push(frameTile('', t));
-            }
-            return nodes;
-        };
-        row.replaceChildren.apply(row, placeholders());
-        exactFrames(start, count).then(function (frames) {
-            if (!row.isConnected && !document.body.contains(row)) return;
-            const nodes = [];
-            frames.forEach(function (f) {
-                if (opts.cut && f.t_ms === edgeRounded(edge)) nodes.push(el('div', 'insp-cut ' + (opts.cutClass || '')));
-                nodes.push(frameTile(f.src, f.t_ms, {
-                    onPick: opts.onPick,
-                    ringed: opts.ring !== undefined && f.t_ms === edgeRounded(opts.ring),
-                    pickLabel: opts.pickLabel,
-                }));
-            });
-            row.replaceChildren.apply(row, nodes);
-        }).catch(function (e) {
-            row.replaceChildren(el('div', 'insp-small text-warning-emphasis', `Couldn't read frames here: ${e.message}`));
-        });
-        return row;
     }
 
     function edgeRounded(ms) {
         return Math.round(ms / 1000) * 1000;
     }
 
-    function stepNote() {
-        const step = interval();
-        return preview() && step ? `frames every ${seconds(step)}` : 'frames one second apart';
-    }
-
-    function edgeBlock(labelText, edge, cutClass) {
-        const frag = el('div');
-        frag.appendChild(el('div', 'insp-edge-label', labelText));
-        frag.appendChild(preview() && interval() ? previewFramesAround(edge, cutClass) : exactFramesAround(edge, { cut: true, cutClass: cutClass }));
-        return frag;
-    }
-
-    function closeupCard(type, m, dur) {
-        const card = el('div', 'insp-card');
-        card.dataset.closeup = type;
-        const top = el('div', 'd-flex justify-content-between align-items-center gap-2');
-        const isStart = START_TYPES.indexOf(type) !== -1;
-        const range = toEnd(m, dur) ? `${clock(m.start_ms)} → end (${clock(dur)})` : `${clock(m.start_ms)} – ${clock(segmentEnd(m, dur))}`;
-        top.append(el('div', 'insp-closeup-title ' + (isStart ? 'is-intro' : 'is-credits'), `${TYPE_LABELS[type]} · ${range}`), el('div', 'insp-small', stepNote()));
-        card.appendChild(top);
-        const cutClass = isStart ? 'is-intro' : '';
-        card.appendChild(edgeBlock(`Starts at ${clock(m.start_ms)}`, m.start_ms, cutClass));
-        if (!toEnd(m, dur)) card.appendChild(edgeBlock(`Ends at ${clock(m.end_ms)}`, m.end_ms, cutClass));
-        else {
-            const note = el('div', 'insp-card mt-3 py-2');
-            note.style.background = 'var(--insp-raised)';
-            const kind = state.file && state.file.kind === 'episode';
-            note.appendChild(el('div', '', kind ? 'Runs to the end of the file. Skipping credits jumps to the next episode.' : 'Runs to the end of the file.'));
-            const step = interval();
-            const lastBefore = preview() && step ? (Math.ceil(m.start_ms / step) - 1) * step : -1;
-            if (lastBefore >= 0) {
-                note.appendChild(el('div', 'insp-small', `The last story frame is ${clock(lastBefore)}; the ${TYPE_WORDS[type]} start${type === 'credits' ? '' : 's'} on the next frame.`));
-            }
-            card.appendChild(note);
+    function frameTile(src, t, opts) {
+        const tile = el(opts.onPick ? 'button' : 'div', 'insp-frame' + (opts.ringed ? ' is-ringed' : '') + (opts.inside ? ' is-inside is-' + opts.inside : ''));
+        if (opts.onPick) {
+            tile.type = 'button';
+            tile.setAttribute('aria-label', `Frame at ${clock(t)}${opts.pickLabel ? ': ' + opts.pickLabel : ''}`);
+            tile.addEventListener('click', function () { opts.onPick(t); });
         }
-        const hint = m.locked
-            ? 'Set by you: later checks keep these times.'
-            : (state.item && state.item.duration_ms ? 'Adjust moves these edges one second at a time, on frames from the video.' : '');
-        if (hint) card.appendChild(el('div', 'insp-frames-note', hint));
-        return card;
+        tile.dataset.t = String(t);
+        if (src) {
+            const img = el('img');
+            img.alt = `Frame at ${clock(t)}`;
+            img.src = src;
+            tile.appendChild(img);
+        } else {
+            tile.appendChild(el('div', 'insp-frame-missing'));
+        }
+        tile.appendChild(el('span', 'insp-frame-time insp-mono', clock(t)));
+        return tile;
     }
 
-    function serverCloseup(x, n, dur) {
-        const card = el('div', 'insp-card');
-        card.dataset.closeup = 'server';
-        const top = el('div', 'd-flex justify-content-between align-items-center gap-2');
-        top.append(el('div', 'insp-closeup-title', `${serverName(x.server)} ${CIRCLED[n - 1] || n} starts ${clock(x.marker.start_ms)}`), el('div', 'insp-small', stepNote()));
-        card.appendChild(top);
-        const block = edgeBlock(`${TYPE_LABELS[x.marker.type] || x.marker.type} ${rangeText(x.marker, dur)}`, x.marker.start_ms, 'is-server');
-        card.appendChild(block);
-        const own = x.marker.ours ? 'Sent there by this app earlier.' : `${serverName(x.server)}'s own marker${x.marker.stale ? ', made for an earlier file at this path' : ''}.`;
-        card.appendChild(el('div', 'insp-frames-note', own));
-        return card;
+    // A line near the right end of the row puts its flag on its left, so the flag stays inside the row.
+    function markLine(tile, line, after, flip) {
+        const n = el('div', 'insp-adj-line ' + line.cls + (after ? ' is-after' : '') + (flip ? ' is-flip' : ''));
+        n.title = line.label;
+        if (line.label && !line.quiet) n.appendChild(el('div', 'insp-adj-flag', line.label));
+        tile.appendChild(n);
     }
 
-    function closeupCards() {
-        const dur = duration();
-        if (!dur || !state.item) return null;
-        const grid = el('div', 'insp-grid-2');
-        grid.id = 'inspCloseups';
-        if (state.adjust) {
-            adjustTypes().forEach(function (type) { grid.appendChild(adjustCard(type, dur)); });
-            addableTypes().forEach(function (type) { grid.appendChild(addCard(type)); });
-            unadjustableTypes().forEach(function (type) {
-                const card = el('div', 'insp-card');
-                card.dataset.cantAdjust = type;
-                card.appendChild(el('div', 'insp-closeup-title', `${TYPE_LABELS[type]} · ${rangeText(decided(type), dur)}`));
-                card.appendChild(el('div', 'insp-small mt-2', `No server with Intro & Credits on for this file shows ${TYPE_PLURALS[type]}, so there is nothing to send it to and it can't be adjusted here.`));
-                grid.appendChild(card);
+    // Exact frames one second apart from ``edge - before`` s. ``opts``: count, before, onPick (frames become buttons),
+    // ring (the frame ringed), inside (whether a frame is inside the segment, for its colour), tone, and lines: edges
+    // to draw ({t, label, cls}), each on the frame at its time, as a line before that frame.
+    function exactFramesAround(edge, opts) {
+        const count = opts.count || EXACT_COUNT;
+        const before = opts.before === undefined ? ADJUST_BEFORE : opts.before;
+        const start = Math.max(0, edgeRounded(edge) - before * 1000);
+        const row = el('div', 'insp-frames' + (opts.lines ? ' has-lines' : ''));
+        row.dataset.exact = String(start);
+        row.style.setProperty('--insp-frames', String(count));
+        const draw = function (frames, loading) {
+            const nodes = frames.map(function (f) {
+                return frameTile(loading ? '' : f.src, f.t_ms, {
+                    onPick: loading ? null : opts.onPick,
+                    ringed: opts.ring !== undefined && f.t_ms === edgeRounded(opts.ring),
+                    pickLabel: opts.pickLabel,
+                    inside: opts.inside && opts.inside(f.t_ms) ? opts.tone : '',
+                });
             });
-            return grid;
+            (opts.lines || []).forEach(function (line) {
+                const at = edgeRounded(line.t);
+                const i = frames.findIndex(function (f) { return f.t_ms === at; });
+                const last = frames[frames.length - 1];
+                if (i !== -1) markLine(nodes[i], line, false, i >= nodes.length - 2);
+                else if (last && at > last.t_ms && at <= last.t_ms + 1000) markLine(nodes[nodes.length - 1], line, true, true);
+            });
+            row.replaceChildren.apply(row, nodes);
+        };
+        const key = exactKey(start, count);
+        if (exactDone.has(key)) {
+            draw(exactDone.get(key), false);
+            return row;
         }
-        if (isChecked()) {
-            const types = decidedTypes();
-            if (!types.length) return null;
-            types.forEach(function (t) { grid.appendChild(closeupCard(t, decided(t), dur)); });
-            return grid;
-        }
-        const counts = {};
-        const shown = serverMarkers();
-        if (!shown.length) return null;
-        shown.forEach(function (x) {
-            const name = serverName(x.server);
-            counts[name] = (counts[name] || 0) + 1;
-            grid.appendChild(serverCloseup(x, counts[name], dur));
+        const placeholders = [];
+        for (let i = 0; i < count; i++) placeholders.push({ t_ms: start + i * 1000, src: '' });
+        draw(placeholders, true);
+        exactFrames(start, count).then(function (frames) {
+            if (!row.isConnected) return;
+            draw(frames, false);
+        }).catch(function (e) {
+            row.replaceChildren(el('div', 'insp-frames-error', `Couldn't read frames here: ${e.message}`));
         });
-        return grid;
+        return row;
     }
 
     // ------------------------------------------------------------------ adjust
@@ -1849,9 +2501,13 @@
             model[t] = { start: m.start_ms, end: segmentEnd(m, dur), toEnd: TO_END_TYPES.indexOf(t) !== -1 && toEnd(m, dur), changed: false };
         });
         state.adjust = { model: model, saving: false, error: '' };
+        state.confirmLock = false;
+        state.confirmUnlock = false;
         render();
-        const first = document.querySelector('#inspCloseups [data-closeup]');
-        if (first) first.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const first = adjustTypes()[0];
+        if (first && timeline) timeline.goTo(model[first].start, first, true);
+        const panel = $('inspAdjustPanel');
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     function cancelAdjust() {
@@ -1870,28 +2526,49 @@
         render();
     }
 
-    function edgeEditor(type, edge, dur) {
+    function adjustRange(m) {
+        return `${clock(m.start)} → ${m.toEnd ? 'end of file' : clock(m.end)}`;
+    }
+
+    // Where a server's own markers of this type put the same edge, drawn as dashed lines in the same frames.
+    function ownEdges(type, edge, value) {
+        const dur = duration();
+        const out = [];
+        ownMarkers().forEach(function (x) {
+            if (x.marker.type !== type) return;
+            if (edge === 'end' && toEnd(x.marker, dur)) return;
+            const t = edge === 'start' ? x.marker.start_ms : x.marker.end_ms;
+            if (Math.abs(edgeRounded(t) - value) < 1000) return;
+            out.push({ t: t, label: `${serverName(x.server)} · ${clock(t)}`, cls: 'is-own', quiet: Math.abs(edgeRounded(t) - value) <= 2000 });
+        });
+        return out;
+    }
+
+    function edgeRow(type, edge) {
         const m = state.adjust.model[type];
         const value = edge === 'start' ? m.start : m.end;
-        const isStart = START_TYPES.indexOf(type) !== -1;
-        const block = el('div');
-        block.dataset.edge = `${type}-${edge}`;
-        block.appendChild(el('div', 'insp-edge-label', `${edge === 'start' ? 'Starts' : 'Ends'} at ${clock(value)}`));
-        block.appendChild(exactFramesAround(value, {
-            cut: true,
-            cutClass: isStart ? 'is-intro' : '',
+        const word = TYPE_WORDS[type];
+        const row = el('div', 'insp-adjust-edge');
+        row.dataset.edge = `${type}-${edge}`;
+        const lines = [{ t: value, label: `${TYPE_LABELS[type]} ${edge} · ${clock(value)}`, cls: 'is-ours is-' + tone(type) }]
+            .concat(ownEdges(type, edge, value));
+        row.appendChild(exactFramesAround(value, {
+            count: ADJUST_COUNT,
+            before: ADJUST_BEFORE,
             onPick: function (t) { setEdge(type, edge, t); },
-            pickLabel: `set the ${TYPE_WORDS[type]} ${edge} here`,
+            pickLabel: `set the ${word} ${edge} here`,
+            inside: edge === 'start' ? function (t) { return t >= value; } : function (t) { return t < value; },
+            tone: tone(type),
+            lines: lines,
         }));
-        const nudge = el('div', 'insp-nudge');
-        const earlier = button('◀\uFE0E 1 s', 'btn btn-sm btn-outline-secondary', function () { setEdge(type, edge, value - 1000); });
-        earlier.setAttribute('aria-label', `Move the ${TYPE_WORDS[type]} ${edge} one second earlier`);
-        const later = button('1 s ▶\uFE0E', 'btn btn-sm btn-outline-secondary', function () { setEdge(type, edge, value + 1000); });
-        later.setAttribute('aria-label', `Move the ${TYPE_WORDS[type]} ${edge} one second later`);
-        const input = el('input', 'form-control form-control-sm insp-mono');
+        const field = el('div', 'insp-adjust-field');
+        const label = el('label', 'insp-adjust-input');
+        label.append(edge === 'start' ? 'Start time' : 'End time');
+        const input = el('input', 'insp-mono');
         input.type = 'text';
         input.value = clock(value);
         input.setAttribute('aria-label', `${TYPE_LABELS[type]} ${edge} time`);
+        label.appendChild(input);
         const apply = function () {
             const ms = parseClock(input.value);
             if (ms === null) {
@@ -1908,24 +2585,32 @@
                 apply();
             }
         });
-        nudge.append(earlier, later, input, el('span', 'insp-small', 'Click a frame to put the edge there.'));
-        block.appendChild(nudge);
-        return block;
+        const nudge = el('div', 'insp-nudge');
+        const earlier = button('‹ 1s', 'insp-nudge-btn', function () { setEdge(type, edge, value - 1000); });
+        earlier.setAttribute('aria-label', `Move the ${word} ${edge} one second earlier`);
+        const later = button('1s ›', 'insp-nudge-btn', function () { setEdge(type, edge, value + 1000); });
+        later.setAttribute('aria-label', `Move the ${word} ${edge} one second later`);
+        nudge.append(earlier, later);
+        field.append(label, nudge);
+        row.appendChild(field);
+        return row;
     }
 
-    function adjustCard(type, dur) {
+    function adjustSection(type, dur) {
         const m = state.adjust.model[type];
-        const card = el('div', 'insp-card');
-        card.dataset.closeup = type;
-        const isStart = START_TYPES.indexOf(type) !== -1;
-        const range = m.toEnd ? `${clock(m.start)} → end` : `${clock(m.start)} – ${clock(m.end)}`;
-        const top = el('div', 'd-flex justify-content-between align-items-center gap-2');
-        top.append(el('div', 'insp-closeup-title ' + (isStart ? 'is-intro' : 'is-credits'), `${TYPE_LABELS[type]} · ${range}`), el('div', 'insp-small', 'frames one second apart, from the video'));
-        card.appendChild(top);
-        card.appendChild(edgeEditor(type, 'start', dur));
+        const sec = el('div', 'insp-adjust-type');
+        sec.dataset.adjust = type;
+        const head = el('div', 'insp-adjust-type-head');
+        head.append(dot(tone(type)), el('span', '', TYPE_LABELS[type]), el('span', 'insp-mono insp-adjust-range insp-t-' + tone(type), adjustRange(m)));
+        sec.appendChild(head);
+        const starts = el('div', 'insp-adjust-line');
+        starts.append(el('div', 'insp-adjust-label', 'Starts'), edgeRow(type, 'start'));
+        sec.appendChild(starts);
+        const ends = el('div', 'insp-adjust-line');
+        const endBody = el('div', 'insp-adjust-ends');
         if (TO_END_TYPES.indexOf(type) !== -1) {
-            const sw = el('div', 'form-check form-switch mt-3');
-            const input = el('input', 'form-check-input');
+            const sw = el('label', 'insp-toend');
+            const input = el('input');
             input.type = 'checkbox';
             input.id = `inspToEnd-${type}`;
             input.checked = m.toEnd;
@@ -1935,31 +2620,45 @@
                 m.changed = true;
                 render();
             });
-            const label = el('label', 'form-check-label', 'Runs to the end of the file');
-            label.htmlFor = input.id;
-            sw.append(input, label);
-            card.appendChild(sw);
+            sw.append(input, `Runs to the end of the file (${clock(dur)})`);
+            endBody.appendChild(sw);
         }
-        if (!m.toEnd) card.appendChild(edgeEditor(type, 'end', dur));
-        return card;
+        if (!m.toEnd) endBody.appendChild(edgeRow(type, 'end'));
+        ends.append(el('div', 'insp-adjust-label', 'Ends'), endBody);
+        sec.appendChild(ends);
+        return sec;
     }
 
-    function addCard(type) {
-        const card = el('div', 'insp-card d-flex flex-column gap-2');
-        card.dataset.add = type;
-        card.appendChild(el('div', 'insp-closeup-title ' + (type === 'intro' ? 'is-intro' : 'is-credits'), `${TYPE_LABELS[type]} · not found`));
-        card.appendChild(el('div', 'insp-small', `Nothing was found for the ${TYPE_WORDS[type]}. Add one and move its edges to where it really is.`));
-        const b = button(`Add ${TYPE_WORDS[type]}`, 'btn btn-outline-secondary align-self-start', function () {
+    function addRow(type) {
+        const row = el('div', 'insp-adjust-note');
+        row.dataset.add = type;
+        const text = el('div');
+        const title = el('div', 'insp-adjust-note-title');
+        title.append(dot(tone(type)), `${TYPE_LABELS[type]} · not found`);
+        text.append(title, el('div', 'insp-small', `Nothing was found for the ${TYPE_WORDS[type]}. Add one and move its edges to where it really is.`));
+        const b = button(`Add ${TYPE_WORDS[type]}`, 'btn insp-btn', function () {
             const dur = duration();
             // Round starting times, never something a source would answer, so they can't be read as a finding
             // (tests/markers/test_api_markers_edit.py keeps a copy of them: change both together).
             if (type === 'intro') state.adjust.model.intro = { start: 0, end: ADD_HEAD_MS, toEnd: false, changed: true };
             else state.adjust.model.credits = { start: Math.max(0, dur - ADD_TAIL_MS), end: dur, toEnd: true, changed: true };
             render();
+            if (timeline) timeline.goTo(state.adjust.model[type].start, null, true);
         });
         b.id = `inspAdd-${type}`;
-        card.appendChild(b);
-        return card;
+        row.append(text, b);
+        return row;
+    }
+
+    function cantRow(type) {
+        const row = el('div', 'insp-adjust-note');
+        row.dataset.cantAdjust = type;
+        const text = el('div');
+        const title = el('div', 'insp-adjust-note-title');
+        title.append(dot(tone(type)), `${TYPE_LABELS[type]} · ${rangeText(decided(type), duration())}`);
+        text.append(title, el('div', 'insp-small', `No server with Intro & Credits on for this file shows ${TYPE_PLURALS[type]}, so there is nothing to send it to and it can't be adjusted here.`));
+        row.appendChild(text);
+        return row;
     }
 
     function receivers(types) {
@@ -1982,28 +2681,43 @@
         return '';
     }
 
-    function adjustBar() {
+    function adjustPanel() {
+        const dur = duration();
         const types = adjustTypes();
-        const bar = el('div', 'insp-card insp-confirm');
-        bar.id = 'inspAdjustBar';
+        const panel = el('div', 'insp-adjust');
+        panel.id = 'inspAdjustPanel';
+        const head = el('div', 'insp-adjust-head');
+        const title = el('div', 'insp-adjust-title');
+        types.forEach(function (t) { title.appendChild(dot(tone(t))); });
+        title.appendChild(el('span', '', types.length ? `Adjust ${typePhrase(types)}` : 'Adjust'));
+        head.append(title, el('div', 'insp-small', 'Frames from the video, one per second. Click a frame to put the edge there.'));
+        panel.appendChild(head);
+        types.forEach(function (t) { panel.appendChild(adjustSection(t, dur)); });
+        addableTypes().forEach(function (t) { panel.appendChild(addRow(t)); });
+        unadjustableTypes().forEach(function (t) { panel.appendChild(cantRow(t)); });
+
+        const foot = el('div', 'insp-adjust-foot');
         const text = el('div');
         const names = receivers(types);
-        text.append(el('div', 'fw-semibold', types.length ? `Your times: ${types.map(function (t) {
-            const m = state.adjust.model[t];
-            return `${TYPE_WORDS[t]} ${m.toEnd ? clock(m.start) + ' → end' : clock(m.start) + '–' + clock(m.end)}`;
-        }).join(' · ')}` : 'Nothing to save yet'));
-        text.appendChild(el('div', 'insp-small', 'Saving sends them now and keeps them through later checks. You can go back to automatic any time.'));
+        text.appendChild(el('div', 'insp-adjust-summary', types.length
+            ? 'Saving sends your times now and locks them, so later checks keep them. You can go back to automatic any time.'
+            : 'Nothing to save yet'));
         const problem = state.adjust.error || adjustProblem();
-        if (problem) text.appendChild(el('div', 'small text-danger mt-1', problem));
-        const buttons = el('div', 'd-flex gap-2 flex-wrap');
-        const cancel = button('Cancel', 'btn btn-outline-secondary', cancelAdjust);
+        if (problem) {
+            const p = el('div', 'insp-adjust-problem', problem);
+            p.setAttribute('role', 'alert');
+            text.appendChild(p);
+        }
+        const buttons = el('div', 'insp-confirm-actions');
+        const cancel = button('Cancel', 'btn insp-btn', cancelAdjust);
         cancel.id = 'inspAdjustCancel';
-        const save = button(state.adjust.saving ? 'Sending…' : `Save and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn btn-insp-primary', saveAdjust);
+        const save = button(state.adjust.saving ? 'Sending…' : `Save and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn insp-btn-primary', saveAdjust);
         save.id = 'inspAdjustSave';
         save.disabled = state.adjust.saving || !types.length || !!adjustProblem();
         buttons.append(cancel, save);
-        bar.append(text, buttons);
-        return bar;
+        foot.append(text, buttons);
+        panel.appendChild(foot);
+        return panel;
     }
 
     async function saveMarkers(markers, path) {
@@ -2096,8 +2810,7 @@
         });
         const groups = [];
         rows.sort(function (a, b) { return a.start_ms - b.start_ms; }).forEach(function (r) {
-            const key = START_TYPES.indexOf(type) !== -1 ? r.start_ms : r.start_ms;
-            let g = groups.find(function (x) { return Math.abs(x.start - key) <= SAME_ANSWER_MS; });
+            let g = groups.find(function (x) { return Math.abs(x.start - r.start_ms) <= SAME_ANSWER_MS; });
             if (!g) {
                 g = { start: r.start_ms, end: r.end_ms, rows: [] };
                 groups.push(g);
@@ -2136,33 +2849,34 @@
     function reviewPanel(type) {
         const found = candidates(type);
         const rs = reviewState(type);
-        const panel = el('div', 'd-flex flex-column gap-4');
+        const panel = el('div', 'insp-review');
         panel.dataset.review = type;
         const box = el('div', 'insp-review-box');
         const word = TYPE_WORDS[type];
+        const where = `Where ${type === 'credits' ? 'do the credits' : `does the ${word}`} start?`;
         let heading;
         if (found.length >= 2) {
             const spread = found[found.length - 1].start - found[0].start;
-            heading = `Where ${type === 'credits' ? 'do the credits' : `does the ${word}`} start? ${found.length === 2 ? 'Two' : found.length} answers disagree by ${Math.round(spread / 1000)} seconds.`;
+            heading = `${where} ${found.length === 2 ? 'Two' : found.length} answers disagree by ${Math.round(spread / 1000)} seconds.`;
         } else if (found.length === 1) {
-            heading = `Where ${type === 'credits' ? 'do the credits' : `does the ${word}`} start? Only one answer came in, and it can't decide on its own.`;
+            heading = `${where} Only one answer came in, and it can't decide on its own.`;
         } else {
-            heading = `Where ${type === 'credits' ? 'do the credits' : `does the ${word}`} start? Nothing found an answer to check.`;
+            heading = `${where} Nothing found an answer to check.`;
         }
         const names = receivers([type]);
         box.append(el('div', 'insp-review-title', heading),
-            el('div', 'mt-1', `Pick the frame where the ${word} begin${type === 'credits' ? '' : 's'}. Your choice goes to ${names.length ? joinWith(names, 'and') : 'your servers'} and stays, even when the app checks this ${state.file && state.file.kind === 'episode' ? 'episode' : 'film'} again.`));
+            el('div', 'insp-review-text', `Pick the frame where the ${word} begin${type === 'credits' ? '' : 's'}. Your choice goes to ${names.length ? joinWith(names, 'and') : 'your servers'} and stays, even when the app checks this ${fileWord()} again.`));
         panel.appendChild(box);
         if (found.length) {
             const grid = el('div', 'insp-grid-2');
             found.forEach(function (c) {
-                const card = el('div', 'insp-card d-flex flex-column gap-2');
+                const card = el('div', 'insp-card insp-candidate');
                 card.dataset.candidate = String(c.start);
-                card.append(el('div', 'fs-5 fw-semibold insp-mono', clock(c.start)), el('div', 'insp-small fs-6', c.text));
-                card.appendChild(exactFramesAround(c.start, { ring: c.start }));
+                card.append(el('div', 'insp-candidate-time insp-mono', clock(c.start)), el('div', 'insp-candidate-text', c.text));
+                card.appendChild(exactFramesAround(c.start, { count: EXACT_COUNT, before: 3, ring: c.start }));
                 card.appendChild(el('div', 'insp-small', 'Frames one second apart, read from the video. The ringed frame is where this answer starts.'));
                 const chosen = rs.selected !== null && edgeRounded(rs.selected) === edgeRounded(c.start);
-                const b = button(startsWord(type, c.start), chosen ? 'btn btn-insp-primary' : 'btn btn-outline-secondary', function () {
+                const b = button(startsWord(type, c.start), chosen ? 'btn insp-btn-primary' : 'btn insp-btn', function () {
                     rs.selected = c.start;
                     rs.end = c.end;
                     render();
@@ -2173,14 +2887,14 @@
             });
             panel.appendChild(grid);
         }
-        const pick = el('div', 'insp-card');
+        const pick = el('div', 'insp-card insp-pick');
         pick.dataset.pickYourself = type;
-        const top = el('div', 'd-flex justify-content-between align-items-center gap-2 flex-wrap');
-        top.appendChild(withInfo(el('div', 'fw-semibold', found.length ? 'Neither is right? Pick the frame yourself.' : 'Pick the frame yourself.'), TIPS.pick));
+        const top = el('div', 'insp-pick-head');
+        top.appendChild(withInfo(el('div', 'insp-pick-title', found.length ? 'Neither is right? Pick the frame yourself.' : 'Pick the frame yourself.'), TIPS.pick));
         const nav = el('div', 'd-flex gap-2');
-        const back = button('◀\uFE0E 10 s', 'btn btn-sm btn-outline-secondary', function () { rs.pickStart = Math.max(0, rs.pickStart - PICK_STEP_MS); render(); });
+        const back = button('◀︎ 10 s', 'btn insp-btn btn-sm', function () { rs.pickStart = Math.max(0, rs.pickStart - PICK_STEP_MS); render(); });
         back.setAttribute('aria-label', 'Show 10 seconds earlier');
-        const fwd = button('10 s ▶\uFE0E', 'btn btn-sm btn-outline-secondary', function () { rs.pickStart = rs.pickStart + PICK_STEP_MS; render(); });
+        const fwd = button('10 s ▶︎', 'btn insp-btn btn-sm', function () { rs.pickStart = rs.pickStart + PICK_STEP_MS; render(); });
         fwd.setAttribute('aria-label', 'Show 10 seconds later');
         nav.append(back, fwd);
         top.appendChild(nav);
@@ -2195,15 +2909,19 @@
         pick.appendChild(el('div', 'insp-small mt-2', `Click the first frame of the ${word}. You'll see it here before anything is saved.`));
         panel.appendChild(pick);
         if (rs.selected !== null) {
-            const bar = el('div', 'insp-card insp-confirm');
+            const bar = el('div', 'insp-confirm-bar is-card');
             bar.dataset.confirm = type;
             const text = el('div');
-            text.append(el('div', 'fw-semibold', `Selected: ${startsWord(type, rs.selected).toLowerCase()}`),
+            text.append(el('div', 'insp-confirm-title', `Selected: ${startsWord(type, rs.selected).toLowerCase()}`),
                 el('div', 'insp-small', `Saving sends it to ${names.length ? joinWith(names, 'and') : 'your servers'} now and keeps it through future checks. You can go back to automatic any time.`));
-            if (rs.error) text.appendChild(el('div', 'small text-danger mt-1', rs.error));
-            const buttons = el('div', 'd-flex gap-2');
-            const notNow = button('Not now', 'btn btn-outline-secondary', function () { rs.selected = null; rs.error = ''; render(); });
-            const save = button(rs.saving ? 'Sending…' : `Save and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn btn-insp-primary', function () { saveReview(type); });
+            if (rs.error) {
+                const p = el('div', 'insp-adjust-problem', rs.error);
+                p.setAttribute('role', 'alert');
+                text.appendChild(p);
+            }
+            const buttons = el('div', 'insp-confirm-actions');
+            const notNow = button('Not now', 'btn insp-btn', function () { rs.selected = null; rs.error = ''; render(); });
+            const save = button(rs.saving ? 'Sending…' : `Save and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn insp-btn-primary', function () { saveReview(type); });
             save.disabled = !!rs.saving;
             save.dataset.saveReview = type;
             buttons.append(notNow, save);
@@ -2252,7 +2970,7 @@
         const label = TYPE_LABELS[row.type] || row.type;
         if (row.source === 'chapters' && row.label) return `“${row.label}” chapter at ${clock(row.start_ms)}`;
         if (TO_END_TYPES.indexOf(row.type) !== -1) return `${label} at ${clock(row.start_ms)}`;
-        return `${label} ${clock(row.start_ms)}–${clock(segmentEnd(row, dur))}`;
+        return `${label} ${clock(row.start_ms)} – ${clock(segmentEnd(row, dur))}`;
     }
 
     function evidenceNote(row, dur) {
@@ -2276,9 +2994,11 @@
         if (m) {
             const gap = Math.abs(row.start_ms - m.start_ms);
             const agrees = gap <= (START_TYPES.indexOf(row.type) !== -1 ? 5000 : 10000);
-            // "the season audio", "the chapters", but "your times" for the user's own.
+            // "the season audio", "the chapters", but "SkipDB" for a database and "your times" for the user's own.
             const who = (m.decided_by || []).map(function (s) {
-                return s === 'user' ? 'your times' : `the ${(SOURCES[s] || [s])[0].toLowerCase()}`;
+                const name = (SOURCES[s] || [s])[0];
+                if (s === 'user') return 'your times';
+                return /DB$/.test(name) ? name : `the ${name.toLowerCase()}`;
             });
             return {
                 icon: agrees ? 'used' : 'warn',
@@ -2290,13 +3010,43 @@
         return { icon: 'none', text: extra.concat(['Not used']).join(' · ') };
     }
 
+    function evidenceRow(source, iconKind, iconName, name, explains, found, note) {
+        const line = el('div', 'insp-ev');
+        line.dataset.source = source;
+        const badge = el('div', 'insp-ev-icon is-' + iconKind);
+        badge.appendChild(el('i', 'bi ' + iconName));
+        const who = el('div');
+        who.append(el('div', 'insp-ev-name', name), el('div', 'insp-small', explains));
+        const what = el('div');
+        what.append(found, el('div', 'insp-small insp-ev-note', note));
+        line.append(badge, who, what);
+        return line;
+    }
+
+    function lockedRow() {
+        const dur = duration();
+        const locked = lockedTypes();
+        const at = locked.map(function (t) { return decided(t).locked_at; }).filter(Boolean).sort().pop();
+        const found = el('div', 'insp-ev-found');
+        locked.forEach(function (t, i) {
+            if (i) found.append(' · ');
+            const m = decided(t);
+            found.append(`${TYPE_LABELS[t]} `, el('span', 'insp-mono insp-t-' + tone(t), rangeText(m, dur)));
+        });
+        const row = evidenceRow('you', 'locked', 'bi-lock-fill', 'You', at ? `Set by you on ${day(at)}` : 'Set by you', found,
+            `Locked · later checks keep ${locked.length === 1 && locked[0] !== 'credits' ? 'it' : 'them'}`);
+        row.id = 'inspLocked';
+        return row;
+    }
+
     function evidenceCard() {
         const card = el('div', 'insp-card');
         card.id = 'inspEvidence';
-        card.appendChild(el('div', 'insp-card-title mb-2', 'How it was decided'));
+        card.appendChild(el('div', 'insp-card-heading', 'How it was decided'));
+        if (lockedTypes().length) card.appendChild(lockedRow());
         const rows = (state.item && state.item.evidence) || [];
         if (!rows.length) {
-            card.appendChild(el('div', 'insp-small fs-6', isChecked() ? 'No source answered for this file.' : 'Nothing has been asked yet. Check intro & credits asks every source.'));
+            card.appendChild(el('div', 'insp-small insp-empty-note', 'No source answered for this file.'));
             return card;
         }
         const dur = duration();
@@ -2308,25 +3058,69 @@
         sorted.forEach(function (row) {
             const info = SOURCES[row.source] || [row.source, ''];
             const note = evidenceNote(row, dur);
-            const line = el('div', 'insp-ev');
-            line.dataset.source = row.source;
-            const icon = el('div', 'insp-ev-icon');
-            icon.appendChild(el('i', 'bi ' + (note.icon === 'used' ? 'bi-check-lg' : note.icon === 'warn' ? 'bi-exclamation-triangle' : 'bi-dash-lg')));
-            const who = el('div');
             let name = info[0];
             let explains = info[1];
+            const own = row.source === 'server_markers' || row.source === 'server_markers_imported';
             if (row.source === 'server_markers') {
                 name = `${originName(row)}'s own`;
                 explains = `Markers ${originName(row)} made itself`;
             } else if (row.source === 'server_markers_imported') {
                 name = `${originName(row)}'s imported`;
             }
-            who.append(el('div', 'fw-medium', name), el('div', 'insp-small', explains));
-            const found = el('div');
-            found.append(el('div', '', evidenceFound(row, dur)), el('div', 'insp-small', note.text));
-            line.append(icon, who, found);
-            card.appendChild(line);
+            const iconName = note.icon === 'used' ? 'bi-check-lg' : note.icon === 'warn' ? 'bi-exclamation-triangle' : 'bi-dash-lg';
+            const kind = own && note.icon === 'none' ? 'own' : note.icon;
+            card.appendChild(evidenceRow(row.source, kind, iconName, name, explains, el('div', 'insp-ev-found', evidenceFound(row, dur)), note.text));
         });
+        return card;
+    }
+
+    function notCheckedText() {
+        const shown = serverMarkers();
+        const keep = servers().filter(function (s) { return s.keeps_server_markers && s.markers_enabled && (s.current || []).length; });
+        const parts = [];
+        if (shown.length) {
+            const byServer = {};
+            shown.forEach(function (x) {
+                const n = serverName(x.server);
+                byServer[n] = byServer[n] || [];
+                byServer[n].push(x.marker);
+            });
+            const allOwn = shown.every(function (x) { return !x.marker.ours; });
+            const said = Object.keys(byServer).map(function (n) {
+                const ms = byServer[n];
+                const types = ms.map(function (m) { return m.type; }).filter(function (t, i, all) { return all.indexOf(t) === i; });
+                const own = ms.every(function (m) { return !m.ours; });
+                return `${n} shows ${ms.length} ${typePhrase(types)} marker${ms.length === 1 ? '' : 's'}${own ? ' of its own' : ''} today`;
+            });
+            // With no length there are no rows under the strip to draw them in.
+            const drawn = duration() ? `, drawn ${allOwn ? 'in grey ' : ''}on the timeline` : '';
+            parts.push(`${joinWith(said, 'and')}${drawn}.`);
+        } else if (servers().every(function (s) { return Array.isArray(s.current); })) {
+            parts.push('No server shows intro or credits markers for this file yet.');
+        }
+        parts.push(`Checking the ${fileWord()} decides ours.`);
+        keep.forEach(function (s) {
+            const vendor = VENDOR_NAMES[s.server_type] || serverName(s);
+            const others = servers().filter(function (o) { return o !== s && o.markers_enabled; }).map(serverName);
+            parts.push(`With “Keep ${vendor}'s markers” on, ${serverName(s)} keeps its own either way${others.length ? `; ${joinWith(others, 'and')} ${others.length === 1 ? 'gets' : 'get'} ours` : ''}.`);
+        });
+        return parts.join(' ');
+    }
+
+    function notCheckedCard() {
+        const card = el('div', 'insp-card insp-notchecked');
+        card.id = 'inspNotChecked';
+        const b = button('Check intro & credits now', 'btn insp-btn-primary align-self-start', redetect);
+        b.id = 'inspCheckNow';
+        if (state.busy) b.disabled = true;
+        card.append(el('div', 'insp-card-heading', 'Not checked by Intro & Credits yet'), el('div', 'insp-notchecked-text', notCheckedText()), b);
+        return card;
+    }
+
+    function itemErrorCard() {
+        const card = el('div', 'insp-card');
+        card.id = 'inspItemError';
+        card.append(el('div', 'insp-card-heading', 'Intro & Credits couldn\'t be read for this file'), el('div', 'insp-small insp-item-error', state.itemError));
         return card;
     }
 
@@ -2354,126 +3148,97 @@
         return `Preview in place${p.frame_count ? ' · ' + Number(p.frame_count).toLocaleString() + ' frames' : ''}`;
     }
 
+    // What a server shows viewers now, one phrase per kind: "Ours · intro 2:45 – 2:59 and credits 24:59 → end".
+    function markerPhrase(ms, dur) {
+        const byType = [];
+        ms.forEach(function (m) {
+            let g = byType.find(function (x) { return x.type === m.type; });
+            if (!g) { g = { type: m.type, ranges: [] }; byType.push(g); }
+            g.ranges.push(rangeText(m, dur) + (m.stale ? ' (made for an earlier file)' : ''));
+        });
+        return joinWith(byType.map(function (g) { return `${TYPE_WORDS[g.type] || g.type} ${g.ranges.join(', and ')}`; }), 'and');
+    }
+
+    function showsLine(s) {
+        const dur = duration();
+        if (s.error || !Array.isArray(s.current)) return { dot: 'bad', text: 'Couldn\'t read what it shows now', cls: 'is-bad' };
+        const sorted = sortedCurrent(s);
+        if (!sorted.length) return { dot: s.plan === 'will_add' || s.plan === 'waiting' ? 'wait' : 'none', text: emptyText(s), cls: 'is-muted' };
+        const ours = sorted.filter(function (m) { return m.ours; });
+        const own = sorted.filter(function (m) { return !m.ours; });
+        const parts = [];
+        if (ours.length) parts.push(`Ours · ${markerPhrase(ours, dur)}`);
+        if (own.length) parts.push(`${ours.length ? 'its' : 'Its'} own · ${markerPhrase(own, dur)}`);
+        return { dot: own.length ? 'own' : 'ours', text: parts.join(' · '), cls: '' };
+    }
+
     function serversCard() {
         const card = el('div', 'insp-card');
         card.id = 'inspServers';
-        card.appendChild(el('div', 'insp-card-title mb-2', 'On your servers'));
+        const head = el('div', 'insp-servers-head');
+        head.appendChild(el('div', 'insp-card-heading', 'On your servers'));
+        if (state.item && servers().length) {
+            const need = attention();
+            let pill;
+            if (!isChecked()) pill = el('span', 'insp-pill is-muted', 'Not checked yet');
+            else if (need.length) pill = el('span', 'insp-pill is-warn', `${need.length} need${need.length === 1 ? 's' : ''} attention`);
+            else pill = el('span', 'insp-pill is-ok', 'All up to date');
+            pill.id = 'inspServersPill';
+            head.appendChild(pill);
+        }
+        card.appendChild(head);
         const previews = (state.file && state.file.previews) || [];
         const ids = [];
         servers().forEach(function (s) { ids.push(s.server_id); });
         previews.forEach(function (p) { if (ids.indexOf(p.server_id) === -1) ids.push(p.server_id); });
         if (!ids.length) {
-            card.appendChild(el('div', 'insp-small fs-6', 'No server has this file in a library.'));
+            card.appendChild(el('div', 'insp-small insp-empty-note', 'No server has this file in a library.'));
             return card;
         }
+        const locations = [];
         ids.forEach(function (id) {
             const s = servers().find(function (x) { return x.server_id === id; });
             const p = previews.find(function (x) { return x.server_id === id; });
             const type = String((s && s.server_type) || (p && p.server_type) || '').toLowerCase();
+            const name = (s && serverName(s)) || (p && p.server_name) || id;
             const row = el('div', 'insp-server');
             row.dataset.serverId = id;
-            row.append(el('div', 'insp-tile insp-tile-' + type, VENDOR_TILES[type] || '?'), el('div', 'fw-semibold text-break', (s && serverName(s)) || (p && p.server_name) || id));
-            const lines = el('div', 'd-flex flex-column gap-1');
+            row.append(el('div', 'insp-letter insp-letter-' + type, VENDOR_TILES[type] || '?'), el('div', 'insp-server-name', name));
+            const lines = el('div', 'insp-server-body');
             if (s) {
+                const shows = showsLine(s);
+                const line = el('div', 'insp-server-shows ' + shows.cls);
+                line.append(dot(shows.dot), el('span', '', shows.text));
+                lines.appendChild(line);
                 let words = PLAN_WORDS[s.plan] || PLAN_WORDS.unknown;
                 if (s.plan === 'up_to_date' && s.publish_status === 'written') words += ' · sent by this app';
-                lines.appendChild(el('div', '', words));
-                if (s.plan_reason) lines.appendChild(el('div', 'insp-small', s.plan_reason));
-                if (s.error) lines.appendChild(el('div', 'small text-warning-emphasis', s.error));
+                lines.appendChild(el('div', 'insp-server-plan', words));
+                if (s.plan_reason) lines.appendChild(el('div', 'insp-server-note', s.plan_reason));
+                if (s.error) lines.appendChild(el('div', 'insp-server-note is-bad', s.error));
                 if (['failed', 'waiting', 'skipped'].indexOf(s.publish_status) !== -1 && s.publish_message) {
-                    lines.appendChild(el('div', 'insp-small', s.publish_message));
+                    lines.appendChild(el('div', 'insp-server-note', s.publish_message));
                 }
-                if (s.server_type === 'plex' && s.version_count > 1) lines.appendChild(el('div', 'insp-small', 'All versions of this item share one set of markers'));
+                if (s.server_type === 'plex' && s.version_count > 1) lines.appendChild(el('div', 'insp-server-note', 'All versions of this item share one set of markers'));
             }
-            lines.appendChild(el('div', p && p.error ? 'text-warning-emphasis' : '', previewLine(p)));
+            lines.appendChild(el('div', 'insp-server-preview' + (p && p.error ? ' is-bad' : ''), previewLine(p)));
             if (p && p.path) {
-                const det = el('details', 'insp-locations');
-                det.appendChild(el('summary', '', 'File locations'));
                 const what = p.kind === 'trickplay' ? 'Trickplay folder' : (type === 'emby' ? 'Preview (next to the video)' : 'Preview');
-                det.appendChild(el('div', '', `${what}: ${p.path}`));
-                lines.appendChild(det);
+                locations.push({ id: id, text: `${name} · ${what}: ${p.path}` });
             }
             row.appendChild(lines);
             card.appendChild(row);
         });
-        return card;
-    }
-
-    // -------------------------------------------------------------- all frames
-
-    function allFrames() {
-        const p = preview();
-        const wrap = el('div');
-        wrap.id = 'inspAllFrames';
-        const step = interval();
-        const count = p.frame_count;
-        const dur = duration();
-        const view = el('div', 'insp-allframes-view');
-        const big = el('img');
-        big.id = 'inspAllFramesBig';
-        const caption = el('div', 'd-flex align-items-center gap-2');
-        const prev = button('', 'btn btn-sm btn-outline-secondary', function () { selectFrame(state.allIndex - 1); });
-        prev.appendChild(el('i', 'bi bi-chevron-left'));
-        prev.setAttribute('aria-label', 'Previous frame');
-        const next = button('', 'btn btn-sm btn-outline-secondary', function () { selectFrame(state.allIndex + 1); });
-        next.appendChild(el('i', 'bi bi-chevron-right'));
-        next.setAttribute('aria-label', 'Next frame');
-        const label = el('span', 'insp-mono');
-        label.id = 'inspAllFramesLabel';
-        caption.append(prev, label, next);
-        view.append(big, caption);
-        wrap.appendChild(view);
-
-        const controls = el('div', 'd-flex align-items-center gap-2 mb-2 flex-wrap');
-        const select = el('select', 'form-select form-select-sm w-auto');
-        select.id = 'inspAllStep';
-        select.setAttribute('aria-label', 'Show every frame, or every few');
-        [1, 2, 5, 10, 25].forEach(function (n) {
-            const opt = el('option', '', n === 1 ? 'Every frame' : `Every ${n}th`);
-            opt.value = String(n);
-            if (n === state.allStep) opt.selected = true;
-            select.appendChild(opt);
-        });
-        select.addEventListener('change', function () { state.allStep = Number(select.value) || 1; render(); });
-        controls.append(select, el('span', 'insp-small', `${Number(count).toLocaleString()} frames${step ? `, one every ${seconds(step)}` : ''}. Intro frames are edged blue, credits orange.`));
-        wrap.appendChild(controls);
-
-        const grid = el('div', 'insp-allframes');
-        const segs = decidedTypes().map(function (t) { return { type: t, m: decided(t) }; });
-        for (let i = 0; i < count; i += state.allStep) {
-            const t = i * step;
-            const b = el('button');
-            b.type = 'button';
-            b.dataset.index = String(i);
-            const inSeg = segs.find(function (s) { return t >= s.m.start_ms && t < segmentEnd(s.m, dur); });
-            if (inSeg) b.classList.add(START_TYPES.indexOf(inSeg.type) !== -1 ? 'is-intro' : 'is-credits');
-            const img = el('img');
-            img.loading = 'lazy';
-            img.alt = `Frame ${i}`;
-            img.src = frameUrl(i);
-            b.append(img, el('span', '', step ? clock(t) : `#${i}`));
-            b.addEventListener('click', function () { selectFrame(i); });
-            grid.appendChild(b);
+        if (locations.length) {
+            const det = el('details', 'insp-locations');
+            det.appendChild(el('summary', '', 'File locations'));
+            locations.forEach(function (loc) {
+                const line = el('div', 'insp-mono', loc.text);
+                line.dataset.serverId = loc.id;
+                det.appendChild(line);
+            });
+            card.appendChild(det);
         }
-        wrap.appendChild(grid);
-        requestAnimationFrame(function () { selectFrame(state.allIndex); });
-        return wrap;
-    }
-
-    function selectFrame(index) {
-        const p = preview();
-        if (!p) return;
-        const i = Math.max(0, Math.min(index, p.frame_count - 1));
-        state.allIndex = i;
-        const big = $('inspAllFramesBig');
-        if (!big) return;
-        big.src = frameUrl(i);
-        big.alt = `Frame ${i}`;
-        const step = interval();
-        $('inspAllFramesLabel').textContent = `Frame ${i.toLocaleString()} of ${(p.frame_count - 1).toLocaleString()}${step ? ' · ' + clock(i * step) : ''}`;
-        document.querySelectorAll('#inspAllFrames .insp-allframes button.is-active').forEach(function (b) { b.classList.remove('is-active'); });
-        const active = document.querySelector(`#inspAllFrames .insp-allframes button[data-index="${i}"]`);
-        if (active) active.classList.add('is-active');
+        return card;
     }
 
     // ---------------------------------------------------------------- actions
@@ -2617,13 +3382,10 @@
         });
         window.addEventListener('resize', function () {
             clearTimeout(resizeTimer);
-            resizeTimer = setTimeout(layoutAllLabels, 150);
-        });
-        document.addEventListener('keydown', function (e) {
-            if (state.view !== 'all' || !$('inspAllFrames')) return;
-            if (e.target && ['INPUT', 'SELECT', 'TEXTAREA'].indexOf(e.target.tagName) !== -1) return;
-            if (e.key === 'ArrowLeft') { e.preventDefault(); selectFrame(state.allIndex - 1); }
-            if (e.key === 'ArrowRight') { e.preventDefault(); selectFrame(state.allIndex + 1); }
+            resizeTimer = setTimeout(function () {
+                if (timeline) timeline.relayout();
+                tidyAxes($('inspFile'));
+            }, 150);
         });
         tooltips(document.getElementById('inspSearch'));
         loadServers();

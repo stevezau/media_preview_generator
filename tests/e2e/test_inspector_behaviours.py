@@ -1,7 +1,7 @@
 """E2E: the Inspector's behaviours past the happy path — failed and in-flight saves, the re-read after a save, the
 save-result toast, Adjust's switches, refusals and add cards, Back to automatic, Needs your check for every type, the
-header actions failing, the /jobs socket, read failures, a late answer, the servers card and lanes in every plan, the
-evidence notes, search edge cases, a preview-only open, tooltips, and the close-ups' notes and frame reads.
+header actions failing, the /jobs socket, read failures, a late answer, the servers card and rows in every plan, the
+evidence notes, search edge cases, a preview-only open, tooltips, and Adjust's frame reads.
 
 The API is mocked by ``_inspector_fixtures.install``; every write's body is asserted, and every failure is an answer
 the real route gives (a status and an ``error``).
@@ -130,14 +130,15 @@ class TestSaving:
         save = authed_page.locator("#inspAdjustSave")
         with authed_page.expect_response(_is_save):
             save.click()
-        bar = authed_page.locator("#inspAdjustBar")
-        expect(bar.locator(".text-danger")).to_have_text(
+        panel = authed_page.locator("#inspAdjustPanel")
+        expect(panel.locator(".insp-adjust-problem")).to_have_text(
             "Couldn't save: The file changed on disk since this page read it"
         )
         expect(save).to_be_enabled()
         expect(save).to_have_text("Save and send to Plex and Jellyfin")
-        expect(authed_page.locator("[data-edge='intro-start'] .insp-edge-label")).to_have_text("Starts at 2:46")
-        expect(bar).to_contain_text("Your times: intro 2:46–2:59 · credits 24:59 → end")
+        expect(authed_page.locator("[data-edge='intro-start'] input")).to_have_value("2:46")
+        expect(panel.locator("[data-adjust='intro'] .insp-adjust-range")).to_have_text("2:46 → 2:59")
+        expect(panel.locator("[data-adjust='credits'] .insp-adjust-range")).to_have_text("24:59 → end of file")
         sent = {
             "path": fx.EPISODE,
             "markers": [
@@ -151,7 +152,7 @@ class TestSaving:
         del api.answers["save"]
         with authed_page.expect_response(_is_save):
             save.click()
-        expect(authed_page.locator("#inspAdjustBar")).to_have_count(0)
+        expect(authed_page.locator("#inspAdjustPanel")).to_have_count(0)
         assert api.saves == [sent, sent]
 
     def test_a_failed_review_save_keeps_the_choice(self, authed_page: Page, app_url: str) -> None:
@@ -165,7 +166,7 @@ class TestSaving:
         with authed_page.expect_response(_is_save):
             save.click()
         confirm = authed_page.locator("[data-confirm='credits']")
-        expect(confirm.locator(".text-danger")).to_have_text(
+        expect(confirm.locator(".insp-adjust-problem")).to_have_text(
             "Couldn't save: The file changed on disk since this page read it"
         )
         expect(confirm).to_contain_text("Selected: credits start at 1:32:37")
@@ -187,7 +188,7 @@ class TestSaving:
         expect(save).to_be_disabled()
         _wait_until(authed_page, lambda: len(api.saves) == 1)
         api.release_writes()
-        expect(authed_page.locator("#inspAdjustBar")).to_have_count(0)
+        expect(authed_page.locator("#inspAdjustPanel")).to_have_count(0)
         assert len(api.saves) == 1
 
     def test_review_save_in_flight_says_sending_and_waits(self, authed_page: Page, app_url: str) -> None:
@@ -219,14 +220,15 @@ class TestSaving:
         with authed_page.expect_response(_is_save):
             authed_page.locator("#inspAdjustSave").click()
 
-        expect(authed_page.locator("#inspAdjustBar")).to_have_count(0)
-        expect(authed_page.locator("#inspLocked")).to_contain_text(
-            "You set the intro and credits, so later checks keep them."
+        expect(authed_page.locator("#inspAdjustPanel")).to_have_count(0)
+        expect(authed_page.locator("#inspLocked .insp-ev-found")).to_have_text(
+            "Intro 2:45 – 2:59 · Credits 24:59 → end"
         )
-        for t in ("intro", "credits"):
-            expect(authed_page.locator(f"#inspCloseups [data-closeup='{t}'] .insp-frames-note")).to_have_text(
-                "Set by you: later checks keep these times."
-            )
+        expect(authed_page.locator("#inspLocked .insp-ev-note")).to_have_text("Locked · later checks keep them")
+        expect(authed_page.locator("#inspTiles [data-tile='found'] .insp-stat-sub")).to_have_text(
+            "Set by you · later checks keep it"
+        )
+        expect(authed_page.locator("#inspLockedChip")).to_have_text("Locked by you")
         expect(authed_page.locator("#inspAdjust")).to_have_text("Adjust")
         expect(authed_page.locator("#inspUnlock")).to_be_enabled()
         expect(authed_page.locator("#toastTitle")).to_have_text("Saved")
@@ -301,14 +303,11 @@ class TestAdjustEditing:
 
         switch.click()
         # Ten seconds before the end of a 27:36 file.
-        expect(authed_page.locator("[data-edge='credits-end'] .insp-edge-label")).to_have_text("Ends at 27:26")
+        expect(authed_page.locator("[data-edge='credits-end'] input")).to_have_value("27:26")
+        expect(authed_page.locator("[data-edge='credits-end'] .insp-adj-flag")).to_have_text("Credits end · 27:26")
         expect(authed_page.locator("#inspToEnd-credits")).not_to_be_checked()
-        expect(authed_page.locator("#inspCloseups [data-closeup='credits'] .insp-closeup-title")).to_have_text(
-            "Credits · 24:59 – 27:26"
-        )
-        expect(authed_page.locator("#inspAdjustBar")).to_contain_text(
-            "Your times: intro 2:45–2:59 · credits 24:59–27:26"
-        )
+        expect(authed_page.locator("[data-adjust='credits'] .insp-adjust-range")).to_have_text("24:59 → 27:26")
+        expect(authed_page.locator("[data-adjust='intro'] .insp-adjust-range")).to_have_text("2:45 → 2:59")
         with authed_page.expect_response(_is_save):
             authed_page.locator("#inspAdjustSave").click()
         assert api.saves == [
@@ -330,7 +329,7 @@ class TestAdjustEditing:
         end.fill("24:00")
         end.press("Enter")
 
-        expect(authed_page.locator("#inspAdjustBar .text-danger")).to_have_text(
+        expect(authed_page.locator("#inspAdjustPanel .insp-adjust-problem")).to_have_text(
             "The credits have to end after they start."
         )
         expect(authed_page.locator("#inspAdjustSave")).to_be_disabled()
@@ -343,15 +342,17 @@ class TestAdjustEditing:
         start.fill("3:10")
         start.press("Enter")
 
-        bar = authed_page.locator("#inspAdjustBar")
-        expect(authed_page.locator("[data-edge='intro-start'] .insp-edge-label")).to_have_text("Starts at 3:10")
-        expect(bar.locator(".text-danger")).to_have_text("The intro has to end after it starts.")
+        panel = authed_page.locator("#inspAdjustPanel")
+        expect(authed_page.locator("[data-edge='intro-start'] input")).to_have_value("3:10")
+        expect(panel.locator("[data-adjust='intro'] .insp-adjust-range")).to_have_text("3:10 → 2:59")
+        expect(panel.locator(".insp-adjust-problem")).to_have_text("The intro has to end after it starts.")
+        expect(panel.locator(".insp-adjust-problem")).to_have_attribute("role", "alert")
         expect(authed_page.locator("#inspAdjustSave")).to_be_disabled()
 
         end = authed_page.locator("[data-edge='intro-end'] input")
         end.fill("3:20")
         end.press("Enter")
-        expect(bar.locator(".text-danger")).to_have_count(0)
+        expect(panel.locator(".insp-adjust-problem")).to_have_count(0)
         expect(authed_page.locator("#inspAdjustSave")).to_be_enabled()
         assert api.saves == []
 
@@ -366,8 +367,7 @@ class TestAdjustEditing:
 
         expect(field).to_have_class(re.compile(r"\bis-invalid\b"))
         expect(field).to_have_attribute("title", "That isn't a time. Try 1:23 or 0:14.")
-        expect(authed_page.locator("[data-edge='intro-start'] .insp-edge-label")).to_have_text("Starts at 2:45")
-        expect(authed_page.locator("#inspAdjustBar")).to_contain_text("Your times: intro 2:45–2:59")
+        expect(authed_page.locator("[data-adjust='intro'] .insp-adjust-range")).to_have_text("2:45 → 2:59")
         assert api.saves == []
 
     def test_adding_credits_starts_a_minute_before_the_end_and_runs_to_it(
@@ -382,7 +382,7 @@ class TestAdjustEditing:
         expect(authed_page.locator("[data-add='intro']")).to_have_count(0)
         expect(authed_page.locator("[data-add='credits']")).to_contain_text("Credits · not found")
         authed_page.locator("#inspAdd-credits").click()
-        expect(authed_page.locator("[data-edge='credits-start'] .insp-edge-label")).to_have_text("Starts at 26:36")
+        expect(authed_page.locator("[data-edge='credits-start'] input")).to_have_value("26:36")
         expect(authed_page.locator("#inspToEnd-credits")).to_be_checked()
         expect(authed_page.locator("[data-edge='credits-end']")).to_have_count(0)
         with authed_page.expect_response(_is_save):
@@ -406,7 +406,7 @@ class TestAdjustEditing:
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.REVIEW)
         authed_page.locator("#inspAdjust").click()
-        expect(authed_page.locator("#inspCloseups [data-closeup='credits']")).to_be_visible()
+        expect(authed_page.locator("#inspAdjustPanel [data-adjust='credits']")).to_be_visible()
         expect(authed_page.locator("[data-add='intro']")).to_have_count(0)
 
     def test_a_type_no_enabled_server_can_show_gets_no_add_card(self, authed_page: Page, app_url: str) -> None:
@@ -417,14 +417,17 @@ class TestAdjustEditing:
         item["servers"][1]["markers_enabled"] = False
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.EPISODE)
-        expect(authed_page.locator("#inspSummary")).to_have_text(
-            "No intro or credits were found for this file. Adjust adds them by hand."
+        found = authed_page.locator("#inspTiles [data-tile='found']")
+        expect(found.locator(".insp-stat-title")).to_have_text("Nothing found")
+        expect(found.locator(".insp-stat-sub")).to_have_text(
+            "No intro or credits were found. Adjust adds them by hand."
         )
+        expect(authed_page.locator("#inspJumps button:disabled")).to_have_text(["No intro", "No credits"])
         authed_page.locator("#inspAdjust").click()
 
         expect(authed_page.locator("[data-add='credits']")).to_be_visible()
         expect(authed_page.locator("[data-add='intro']")).to_have_count(0)
-        expect(authed_page.locator("#inspAdjustBar .fw-semibold")).to_have_text("Nothing to save yet")
+        expect(authed_page.locator("#inspAdjustPanel .insp-adjust-summary")).to_have_text("Nothing to save yet")
         expect(authed_page.locator("#inspAdjustSave")).to_be_disabled()
 
     def test_with_intro_and_credits_off_everywhere_nothing_can_be_adjusted(
@@ -442,9 +445,9 @@ class TestAdjustEditing:
             "can't be adjusted here."
         )
         expect(authed_page.locator("[data-cant-adjust='credits']")).to_contain_text("shows credits")
-        expect(authed_page.locator("#inspCloseups [data-closeup]")).to_have_count(0)
-        expect(authed_page.locator("#inspCloseups [data-add]")).to_have_count(0)
-        expect(authed_page.locator("#inspAdjustBar .fw-semibold")).to_have_text("Nothing to save yet")
+        expect(authed_page.locator("#inspAdjustPanel [data-adjust]")).to_have_count(0)
+        expect(authed_page.locator("#inspAdjustPanel [data-add]")).to_have_count(0)
+        expect(authed_page.locator("#inspAdjustPanel .insp-adjust-summary")).to_have_text("Nothing to save yet")
         save = authed_page.locator("#inspAdjustSave")
         expect(save).to_be_disabled()
         expect(save).to_have_text("Save and send to your servers")
@@ -457,10 +460,13 @@ class TestAdjustEditing:
         _open(authed_page, app_url, fx.EPISODE)
         authed_page.locator("#inspAdjust").click()
 
-        expect(authed_page.locator("[data-edge='recap-start'] .insp-edge-label")).to_have_text("Starts at 0:00")
-        expect(authed_page.locator("[data-edge='recap-end'] .insp-edge-label")).to_have_text("Ends at 1:00")
+        expect(authed_page.locator("[data-edge='recap-start'] input")).to_have_value("0:00")
+        expect(authed_page.locator("[data-edge='recap-end'] input")).to_have_value("1:00")
         expect(authed_page.locator("[data-cant-adjust='recap']")).to_have_count(0)
-        expect(authed_page.locator("#inspAdjustBar")).to_contain_text("recap 0:00–1:00")
+        expect(authed_page.locator("[data-adjust='recap'] .insp-adjust-range")).to_have_text("0:00 → 1:00")
+        expect(authed_page.locator("#inspAdjustPanel .insp-adjust-title")).to_have_text(
+            "Adjust intro, credits and recap"
+        )
         with authed_page.expect_response(_is_save):
             authed_page.locator("#inspAdjustSave").click()
         assert api.saves == [
@@ -490,7 +496,7 @@ class TestBackToAutomatic:
         authed_page.locator("#inspUnlock").click()
         authed_page.get_by_role("button", name="Keep them locked").click()
         expect(authed_page.locator("#inspUnlockConfirm")).to_have_count(0)
-        expect(authed_page.locator("#inspLocked")).not_to_contain_text("Back to automatic?")
+        expect(authed_page.locator("#inspUnlockConfirmRow")).to_have_count(0)
 
         authed_page.locator("#inspUnlock").click()
         with authed_page.expect_response(_is_unlock):
@@ -499,7 +505,7 @@ class TestBackToAutomatic:
         expect(authed_page.locator("#toastBody")).to_have_text(
             "Couldn't do it: These times changed since the page read them"
         )
-        expect(authed_page.locator("#inspLocked")).to_contain_text("You set the credits, so later checks keep them.")
+        expect(authed_page.locator("#inspLocked .insp-ev-note")).to_have_text("Locked · later checks keep them")
         # One DELETE: "Keep them locked" sent nothing.
         assert api.unlocks == [{"path": fx.EPISODE, "types": ["credits"]}]
         assert api.item_requests == [fx.EPISODE]
@@ -628,7 +634,7 @@ class TestReviewOtherTypes:
         panel = authed_page.locator("[data-review='credits']")
         expect(panel.locator(".insp-review-title")).to_have_text(heading)
         expect(panel.locator("[data-candidate] > .insp-mono")).to_have_text(starts)
-        expect(panel.locator("[data-pick-yourself='credits'] .fw-semibold")).to_have_text(pick_title)
+        expect(panel.locator("[data-pick-yourself='credits'] .insp-pick-title")).to_have_text(pick_title)
         if proposed and proposed["start_ms"] == 5_600_000:
             expect(panel.locator("[data-candidate='5600000']")).to_contain_text("From the credits read on screen")
 
@@ -693,7 +699,7 @@ class TestHeaderActions:
         authed_page.locator("#inspShowResults").click()
         authed_page.locator("#inspQuery").fill(fx.FILM)
         authed_page.locator("#inspQuery").press("Enter")
-        expect(authed_page.locator("#inspTitle")).to_have_text("The Matrix (1999)")
+        expect(authed_page.locator("#inspTitle")).to_have_text("The Matrix")
         url = "/api/jobs/manual" if key == "manual" else "/api/markers/item/redetect"
         with authed_page.expect_response(lambda r: r.url.endswith(url)):
             api.release_writes()
@@ -745,7 +751,7 @@ class TestJobsSocket:
                 ),
             ]
         ]
-        text = authed_page.locator("#inspJobBanner .alert > span:not(.spinner-border)")
+        text = authed_page.locator("#inspJobBanner .insp-banner-text")
         expect(text).to_have_text("Working on this file: Intro & Credits job “Intro & Credits: 1 file” · 42%")
 
         _emit(
@@ -780,7 +786,7 @@ class TestJobsSocket:
         # The re-read would come 500 ms after the event; the edit in progress must survive it.
         authed_page.wait_for_timeout(1200)
         assert api.item_requests == [fx.EPISODE]
-        expect(authed_page.locator("#inspAdjustBar")).to_be_visible()
+        expect(authed_page.locator("#inspAdjustPanel")).to_be_visible()
 
     def test_a_job_on_another_file_is_ignored(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
@@ -829,7 +835,7 @@ class TestJobsSocket:
             {"id": "job-7", "kind": "previews", "status": "running", "library_name": "Nightly scan", **touch},
         )
         banner = authed_page.locator("#inspJobBanner")
-        expect(banner.locator(".alert > span:not(.spinner-border)")).to_have_text(
+        expect(banner.locator(".insp-banner-text")).to_have_text(
             f"Working on this file: Preview job “Nightly scan”{suffix}"
         )
         expect(banner.get_by_role("link", name="Open on the Dashboard")).to_have_attribute("href", "/?job=job-7")
@@ -843,9 +849,13 @@ class TestReadFailures:
         file, _item = fx.checked_episode()
         fx.install(authed_page, _api_with(file, (502, {"error": "Plex timed out"})))
         _open(authed_page, app_url, fx.EPISODE)
-        card = authed_page.locator("#inspSummaryCard")
-        expect(card.locator(".fw-semibold").first).to_have_text("Intro & Credits couldn't be read for this file")
-        expect(card.locator(":scope > .insp-small")).to_have_text("Plex timed out")
+        card = authed_page.locator("#inspItemError")
+        expect(card.locator(".insp-card-heading")).to_have_text("Intro & Credits couldn't be read for this file")
+        expect(card.locator(".insp-item-error")).to_have_text("Plex timed out")
+        expect(authed_page.locator("#inspTiles [data-tile='found'] .insp-stat-sub")).to_have_text("Plex timed out")
+        expect(authed_page.locator("#inspStrip .insp-lane[data-lane='found']")).to_have_text(
+            "Couldn't read Intro & Credits for this file"
+        )
         expect(authed_page.locator("#inspRedetect")).to_have_text("Check intro & credits now")
         expect(authed_page.locator("#inspAdjust")).to_have_count(0)
         expect(authed_page.locator("#inspLock")).to_have_count(0)
@@ -857,7 +867,7 @@ class TestReadFailures:
         card = authed_page.locator('[data-state="Couldn\'t open this file"]')
         expect(card).to_contain_text("Couldn't read the library: database is locked")
         expect(authed_page.locator("#inspRegenerate")).to_have_count(0)
-        expect(authed_page.locator("#inspSummaryCard")).to_have_count(0)
+        expect(authed_page.locator("#inspTiles")).to_have_count(0)
 
     def test_a_late_answer_does_not_replace_the_file_now_open(self, authed_page: Page, app_url: str) -> None:
         api = fx.install(authed_page)
@@ -869,34 +879,33 @@ class TestReadFailures:
         authed_page.locator("#inspShowResults").click()
         authed_page.locator("#inspQuery").fill(fx.EPISODE)
         authed_page.locator("#inspQuery").press("Enter")
-        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy (2024) · S01E01")
-        expect(authed_page.locator("#inspSummary")).to_contain_text("Skip Intro runs 2:45 – 2:59")
+        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy")
+        found = authed_page.locator("#inspTiles [data-tile='found'] [data-type='intro']")
+        expect(found).to_have_text("Intro 2:45 – 2:59")
 
         with authed_page.expect_response(
             lambda r: "/api/inspector/file?" in r.url and parse_qs(urlparse(r.url).query).get("path") == [fx.FILM]
         ):
             api.release_path(fx.FILM)
         authed_page.wait_for_timeout(300)
-        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy (2024) · S01E01")
+        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy")
         expect(authed_page.locator("#inspPath")).to_have_text(fx.EPISODE)
-        expect(authed_page.locator("#inspSummary")).to_contain_text("Skip Intro runs 2:45 – 2:59")
+        expect(found).to_have_text("Intro 2:45 – 2:59")
         assert parse_qs(urlparse(authed_page.url).query) == {"path": [fx.EPISODE]}
 
-    def test_a_file_of_unknown_length_has_no_timeline_adjust_or_close_ups(
-        self, authed_page: Page, app_url: str
-    ) -> None:
+    def test_a_file_of_unknown_length_has_no_timeline_or_adjust(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
         _no_preview(file)
         file["duration_ms"] = None
         item["duration_ms"] = None
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.EPISODE)
-        expect(authed_page.locator("#inspWholeFile")).to_contain_text(
+        expect(authed_page.locator("#inspTimeline .insp-empty-strip")).to_have_text(
             "This file's length isn't known yet, so there is no timeline. Checking its intro & credits reads it."
         )
         expect(authed_page.locator("#inspRedetect")).to_be_visible()
         expect(authed_page.locator("#inspAdjust")).to_have_count(0)
-        expect(authed_page.locator("#inspCloseups")).to_have_count(0)
+        expect(authed_page.locator("#inspStrip")).to_have_count(0)
 
 
 def _plan_cells() -> list[tuple[str, str, str, str, str, str | None]]:
@@ -973,10 +982,10 @@ class TestServersCard:
         _open(authed_page, app_url, fx.EPISODE)
 
         row = authed_page.locator(f"#inspServers .insp-server[data-server-id='{sid}']")
-        expect(row.locator(".d-flex > div").first).to_have_text(card_words)
-        said = f" {sentence}" if sentence else ""
-        expect(authed_page.locator("#inspSummary")).to_have_text(
-            f"Skip Intro runs 2:45 – 2:59 and Skip Credits starts at 24:59.{said} Jellyfin gets them on the next job."
+        expect(row.locator(".insp-server-plan")).to_have_text(card_words)
+        said = f"{sentence} " if sentence else ""
+        expect(authed_page.locator("#inspTiles [data-tile='servers'] .insp-stat-sub")).to_have_text(
+            f"{said}Jellyfin gets them on the next job."
         )
 
     @pytest.mark.parametrize(
@@ -999,9 +1008,7 @@ class TestServersCard:
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.EPISODE)
 
-        expect(authed_page.locator("#inspSummary")).to_have_text(
-            f"Skip Intro runs 2:45 – 2:59 and Skip Credits starts at 24:59. {sentence}"
-        )
+        expect(authed_page.locator("#inspTiles [data-tile='servers'] .insp-stat-sub")).to_have_text(sentence)
 
     def test_reasons_publish_messages_versions_and_file_locations(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
@@ -1058,14 +1065,19 @@ class TestServersCard:
         expect(jf).to_contain_text("Waiting for Jellyfin to add the file")
         # Only Plex keeps one set of markers for every version.
         expect(jf).not_to_contain_text("All versions of this item")
-        jf.locator("summary", has_text="File locations").click()
-        expect(jf.locator("details div")).to_have_text(f"Trickplay folder: {file['previews'][1]['path']}")
 
         emby = authed_page.locator("#inspServers .insp-server[data-server-id='emby-1']")
         expect(emby).to_contain_text("Skipped: Emby shows no recaps")
         expect(emby).to_contain_text("Preview in place · 166 frames")
-        emby.locator("summary", has_text="File locations").click()
-        expect(emby.locator("details div")).to_have_text(f"Preview (next to the video): {emby_bif}")
+        locations = authed_page.locator("#inspServers .insp-locations")
+        locations.locator("summary", has_text="File locations").click()
+        expect(locations.locator("div")).to_have_text(
+            [
+                f"Plex · Preview: {fx.PLEX_BIF}",
+                f"Jellyfin · Trickplay folder: {file['previews'][1]['path']}",
+                f"Emby · Preview (next to the video): {emby_bif}",
+            ]
+        )
 
         plex4k = authed_page.locator("#inspServers .insp-server[data-server-id='plex-2']")
         expect(plex4k).to_contain_text("Intro & credits up to date · sent by this app")
@@ -1077,9 +1089,9 @@ class TestServersCard:
 
 @pytest.mark.e2e
 class TestLanesAndNotChecked:
-    """Items 20-21: server lanes and close-ups in every state, and the not-checked summary's variants."""
+    """Items 20-21: server rows in every state, and the not-checked card's variants."""
 
-    def test_lanes_and_close_ups_say_where_each_marker_came_from(self, authed_page: Page, app_url: str) -> None:
+    def test_rows_say_where_each_marker_came_from(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.unchecked_film()
         item["servers"] = [
             fx.server_row(
@@ -1101,24 +1113,25 @@ class TestLanesAndNotChecked:
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.FILM)
 
-        lanes = authed_page.locator("#inspWholeFile")
-        expect(lanes.locator(".insp-lane[data-server-id='emby-1']")).to_have_text(
-            "Nothing here · Intro & Credits is off for it"
+        lanes = authed_page.locator("#inspStrip")
+        expect(lanes.locator(".insp-lane[data-server-id='emby-1']")).to_have_text("Intro & Credits is off")
+        expect(lanes.locator(".insp-lane[data-server-id='jf-2']")).to_have_text(
+            "Nothing here yet · check this film first"
         )
-        expect(lanes.locator(".insp-lane[data-server-id='jf-2']")).to_have_text("Nothing yet")
-        expect(lanes.locator(".insp-lane[data-server-id='plex-1'] .insp-lane-label")).to_have_text(
-            "Credits 2:09:28 → end (made for an earlier file)"
+        plex = lanes.locator(".insp-lane[data-server-id='plex-1'] .insp-band")
+        expect(plex).to_have_text("Credits 2:09:28 → end (made for an earlier file)")
+        expect(plex).to_have_class(re.compile(r"\bis-own\b"))
+        # Jellyfin's intro was sent there by this app earlier: ours, tinted, not a server's own.
+        jf = lanes.locator(".insp-lane[data-server-id='jf-1'] .insp-band")
+        expect(jf).to_have_text("Intro 1:00 – 1:30")
+        expect(jf).to_have_class(re.compile(r"\bis-tint\b"))
+        expect(authed_page.locator("#inspJumps button")).to_have_text(["Plex2:09:28"])
+        expect(authed_page.locator("#inspServers .insp-server[data-server-id='jf-1'] .insp-server-shows")).to_have_text(
+            "Ours · intro 1:00 – 1:30"
         )
-        expect(lanes.locator(".insp-lane[data-server-id='jf-1'] .insp-lane-label")).to_have_text("Intro 1:00–1:30")
-
-        closeups = authed_page.locator("#inspCloseups [data-closeup='server']")
-        expect(closeups).to_have_count(2)
-        expect(closeups.nth(0).locator(".insp-closeup-title")).to_have_text("Jellyfin ① starts 1:00")
-        expect(closeups.nth(0).locator(".insp-frames-note")).to_have_text("Sent there by this app earlier.")
-        expect(closeups.nth(1).locator(".insp-closeup-title")).to_have_text("Plex ① starts 2:09:28")
-        expect(closeups.nth(1).locator(".insp-frames-note")).to_have_text(
-            "Plex's own marker, made for an earlier file at this path."
-        )
+        expect(
+            authed_page.locator("#inspServers .insp-server[data-server-id='plex-1'] .insp-server-shows")
+        ).to_have_text("Its own · credits 2:09:28 → end (made for an earlier file)")
 
     def test_the_decided_lane_says_nothing_yet_for_a_server_that_shows_none_of_the_decided_types(
         self, authed_page: Page, app_url: str
@@ -1127,21 +1140,21 @@ class TestLanesAndNotChecked:
         item["servers"][1]["can_show"] = ["recap"]
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.EPISODE)
-        expect(authed_page.locator("#inspWholeFile .insp-lane[data-server-id='jf-1']")).to_have_text("Nothing yet")
+        expect(authed_page.locator("#inspStrip .insp-lane[data-server-id='jf-1']")).to_have_text("Nothing yet")
 
     @pytest.mark.parametrize(
         ("servers", "text"),
         [
             (
                 [fx.server_row("plex-1", "Plex", "plex", keeps_server_markers=True, current=[])],
-                "No server shows intro or credits markers for this file yet. Checking the film decides its own.",
+                "No server shows intro or credits markers for this file yet. Checking the film decides ours.",
             ),
             (
                 [
                     fx.server_row("plex-1", "Plex", "plex", current=[]),
                     fx.server_row("jf-1", "Jellyfin", "jellyfin", current=None, error="Couldn't reach Jellyfin"),
                 ],
-                "Checking the film decides its own.",
+                "Checking the film decides ours.",
             ),
             (
                 [
@@ -1165,9 +1178,9 @@ class TestLanesAndNotChecked:
                         ],
                     ),
                 ],
-                "Emby Den shows 1 intro marker today and Emby Loft shows 1 intro marker today, drawn in grey on the "
-                "frames below so you can see where they land. Checking the film decides its own. With “Keep Emby's” "
-                "on, Emby Den's markers stay as they are.",
+                "Emby Den shows 1 intro marker of its own today and Emby Loft shows 1 intro marker of its own today, "
+                "drawn in grey on the timeline. Checking the film decides ours. With “Keep Emby's markers” on, Emby "
+                "Den keeps its own either way.",
             ),
         ],
         ids=["every-server-read-none-shown", "one-server-unread", "emby-keeps-its-own"],
@@ -1177,7 +1190,7 @@ class TestLanesAndNotChecked:
         item["servers"] = servers
         fx.install(authed_page, _api_with(file, item))
         _open(authed_page, app_url, fx.FILM)
-        expect(authed_page.locator("#inspSummaryCard > div.mt-1")).to_have_text(text)
+        expect(authed_page.locator("#inspNotChecked .insp-notchecked-text")).to_have_text(text)
 
 
 @pytest.mark.e2e
@@ -1201,7 +1214,7 @@ class TestEvidenceNotes:
         evidence = authed_page.locator("#inspEvidence")
         cells = [
             (
-                evidence.locator(".insp-ev[data-source='chapters']", has_text="Intro 2:50–3:04"),
+                evidence.locator(".insp-ev[data-source='chapters']", has_text="Intro 2:50 – 3:04"),
                 "Agrees with the season audio, so that answer is kept",
                 "bi-check-lg",
             ),
@@ -1233,22 +1246,19 @@ class TestEvidenceNotes:
             "One of the answers that needs your check"
         )
 
-    @pytest.mark.parametrize(
-        ("make", "path", "text"),
-        [
-            (fx.checked_episode, fx.EPISODE, "No source answered for this file."),
-            (fx.unchecked_film, fx.FILM, "Nothing has been asked yet. Check intro & credits asks every source."),
-        ],
-        ids=["checked", "unchecked"],
-    )
-    def test_an_empty_card_says_why(
-        self, authed_page: Page, app_url: str, make: Callable[[], tuple[dict, dict]], path: str, text: str
-    ) -> None:
-        file, item = make()
+    def test_an_empty_card_says_why(self, authed_page: Page, app_url: str) -> None:
+        file, item = fx.checked_episode()
         item["evidence"] = []
         fx.install(authed_page, _api_with(file, item))
-        _open(authed_page, app_url, path)
-        expect(authed_page.locator("#inspEvidence .insp-small")).to_have_text(text)
+        _open(authed_page, app_url, fx.EPISODE)
+        expect(authed_page.locator("#inspEvidence .insp-empty-note")).to_have_text("No source answered for this file.")
+
+    def test_an_unchecked_file_has_the_not_checked_card_instead(self, authed_page: Page, app_url: str) -> None:
+        file, item = fx.unchecked_film()
+        fx.install(authed_page, _api_with(file, item))
+        _open(authed_page, app_url, fx.FILM)
+        expect(authed_page.locator("#inspNotChecked")).to_be_visible()
+        expect(authed_page.locator("#inspEvidence")).to_have_count(0)
 
 
 @pytest.mark.e2e
@@ -1343,7 +1353,7 @@ class TestSearchEdges:
         authed_page.goto(f"{app_url}/inspector")
         authed_page.locator("#inspQuery").fill("matrix")
         authed_page.locator("#inspResults button.insp-row").first.click()
-        expect(authed_page.locator("#inspTitle")).to_have_text("The Matrix (1999)")
+        expect(authed_page.locator("#inspTitle")).to_have_text("The Matrix")
 
         authed_page.go_back()
         expect(authed_page.locator("#inspSearch")).to_be_visible()
@@ -1352,7 +1362,7 @@ class TestSearchEdges:
         assert urlparse(authed_page.url).query == ""
 
         authed_page.go_forward()
-        expect(authed_page.locator("#inspTitle")).to_have_text("The Matrix (1999)")
+        expect(authed_page.locator("#inspTitle")).to_have_text("The Matrix")
         expect(authed_page.locator("#inspSearch")).to_be_hidden()
 
 
@@ -1375,10 +1385,22 @@ class TestPreviewOnly:
 
         expect(authed_page.locator("#inspTitle")).to_have_text("index-sd.bif")
         expect(authed_page.locator("#inspPath")).to_have_text(fx.PLEX_BIF)
-        expect(authed_page.locator("#inspAllFrames .insp-allframes button")).to_have_count(40)
-        expect(authed_page.locator("#inspAllFramesLabel")).to_have_text("Frame 0 of 39 · 0:00")
+        expect(authed_page.locator("#inspChips")).to_have_text("Preview file")
+        expect(authed_page.locator("#inspTiles .insp-stat")).to_have_count(1)
+        expect(authed_page.locator("#inspTiles [data-tile='preview'] .insp-stat-title")).to_have_text(
+            "40 frames · every 2 s"
+        )
+        expect(authed_page.locator("#inspNow")).to_have_text("0:00")
+        expect(authed_page.locator("#inspFrameText")).to_have_text("preview frame 1 of 40 · one every 2 s")
+        expect(authed_page.locator("#inspNowTag")).to_have_text("")
+        # No rows, no chips: a bare preview file has nothing of Intro & Credits to show.
+        expect(authed_page.locator("#inspStrip .insp-lane")).to_have_count(0)
+        expect(authed_page.locator("#inspJumps button")).to_have_count(0)
         expect(authed_page.locator(".insp-actions")).to_have_count(0)
-        expect(authed_page.locator("#inspSummaryCard")).to_have_count(0)
+        authed_page.locator("#inspStrip .insp-tl-frame[data-index='3'] .insp-tl-img").click()
+        expect(authed_page.locator("#inspBigTime")).to_have_text("0:06")
+        expect(authed_page.locator("#inspBigText")).to_have_text("preview frame 4 of 40")
+        fx.screenshot(authed_page, "22-bif-only")
         assert api.item_requests == []
         assert api.file_requests == []
 
@@ -1392,7 +1414,7 @@ class TestPreviewOnly:
 
 @pytest.mark.e2e
 class TestTooltipsAndFrames:
-    """Item 26: info icons on every header action and toggle, tooltips disposed on re-render, and frame stepping."""
+    """Item 26: info icons on every header action, toggle and the timeline, and tooltips disposed on re-render."""
 
     def test_every_header_action_and_toggle_has_an_info_icon(self, authed_page: Page, app_url: str) -> None:
         fx.install(authed_page)
@@ -1406,83 +1428,32 @@ class TestTooltipsAndFrames:
         for label, word in zip(labels, words, strict=True):
             assert word in label
         toggles = authed_page.locator("span:has(> .insp-seg) > .info-icon")
-        expect(toggles).to_have_count(2)
-        for i in range(2):
-            assert (toggles.nth(i).get_attribute("aria-label") or "").strip()
+        expect(toggles).to_have_count(1)
+        expect(toggles).to_have_attribute("aria-label", re.compile(r"^Intros usually sit at the same spot"))
+        expect(authed_page.locator("#inspTimeline .insp-tl-title .info-icon")).to_have_attribute(
+            "aria-label", re.compile(r"Each row below shows what that server gives viewers\.$")
+        )
 
     def test_a_tooltip_open_during_a_re_render_is_removed(self, authed_page: Page, app_url: str) -> None:
         fx.install(authed_page)
         _open(authed_page, app_url, fx.EPISODE)
-        authed_page.locator("#inspWholeFile .info-icon").hover()
+        authed_page.locator("#inspTimeline .insp-tl-title .info-icon").hover()
         tooltip = authed_page.locator(".tooltip")
         expect(tooltip).to_have_count(1)
-        expect(tooltip).to_contain_text("Every frame of the preview")
+        expect(tooltip).to_contain_text("Every preview frame in order")
         shown = tooltip.get_attribute("id")
         assert shown
-        # A click that doesn't move the mouse: the icon under it is replaced by the re-render. (Chrome may show the
-        # new icon's own tooltip, since it lands under the cursor; the old one must be gone.)
-        authed_page.locator("#inspViewAll").dispatch_event("click")
-        expect(authed_page.locator("#inspAllFrames")).to_be_visible()
+        # A click that doesn't move the mouse re-renders the page; the tooltip open on it must go with it.
+        authed_page.locator("#inspLock").dispatch_event("click")
+        expect(authed_page.locator("#inspLockConfirmRow")).to_be_visible()
         expect(authed_page.locator(f"#{shown}")).to_have_count(0)
         authed_page.mouse.move(0, 0)
         expect(tooltip).to_have_count(0)
 
-    def test_previous_and_next_frame_buttons_step(self, authed_page: Page, app_url: str) -> None:
-        fx.install(authed_page)
-        _open(authed_page, app_url, fx.EPISODE)
-        authed_page.locator("#inspViewAll").click()
-        grid = authed_page.locator("#inspAllFrames .insp-allframes button")
-        label = authed_page.locator("#inspAllFramesLabel")
-        grid.nth(100).click()
-        expect(label).to_have_text("Frame 100 of 827 · 3:20")
-
-        authed_page.get_by_role("button", name="Next frame").click()
-        expect(label).to_have_text("Frame 101 of 827 · 3:22")
-        authed_page.get_by_role("button", name="Previous frame").click()
-        authed_page.get_by_role("button", name="Previous frame").click()
-        expect(label).to_have_text("Frame 99 of 827 · 3:18")
-        expect(grid.nth(99)).to_have_class(re.compile(r"\bis-active\b"))
-
-        grid.nth(0).click()
-        authed_page.get_by_role("button", name="Previous frame").click()
-        expect(label).to_have_text("Frame 0 of 827 · 0:00")
-        assert "index=0" in (authed_page.locator("#inspAllFramesBig").get_attribute("src") or "")
-
 
 @pytest.mark.e2e
-class TestCloseupDetail:
-    """Item 27: the runs-to-the-end note, a failing frame read, and a busy one asked again."""
-
-    @pytest.mark.parametrize(
-        ("kind", "first_line", "last_frame"),
-        [
-            (
-                "episode",
-                "Runs to the end of the file. Skipping credits jumps to the next episode.",
-                "The last story frame is 24:58; the credits start on the next frame.",
-            ),
-            (
-                "film",
-                "Runs to the end of the file.",
-                "The last story frame is 1:32:35; the credits start on the next frame.",
-            ),
-        ],
-    )
-    def test_credits_to_the_end_say_where_the_story_stops(
-        self, authed_page: Page, app_url: str, kind: str, first_line: str, last_frame: str
-    ) -> None:
-        if kind == "episode":
-            file, item = fx.checked_episode()
-        else:
-            file, item = fx.review_film()
-            item["decisions"]["credits"] = fx.decision(
-                "decided", fx.marker("credits", 5_557_000, None, ["credits_text"])
-            )
-        fx.install(authed_page, _api_with(file, item))
-        _open(authed_page, app_url, file["canonical_path"])
-        note = authed_page.locator("#inspCloseups [data-closeup='credits'] .insp-card")
-        expect(note.locator(":scope > div").nth(0)).to_have_text(first_line)
-        expect(note.locator(":scope > div").nth(1)).to_have_text(last_frame)
+class TestAdjustFrames:
+    """Item 27: Adjust's frame reads, failing and asked again."""
 
     def test_a_failing_frame_read_says_why(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
@@ -1490,7 +1461,8 @@ class TestCloseupDetail:
         api.frames_error = (500, {"error": "ffmpeg couldn't seek in this file"})
         fx.install(authed_page, api)
         _open(authed_page, app_url, fx.EPISODE)
-        expect(authed_page.locator("#inspCloseups [data-closeup='intro'] .insp-frames").first).to_have_text(
+        authed_page.locator("#inspAdjust").click()
+        expect(authed_page.locator("[data-edge='intro-start'] .insp-frames")).to_have_text(
             "Couldn't read frames here: ffmpeg couldn't seek in this file"
         )
 
@@ -1500,11 +1472,12 @@ class TestCloseupDetail:
         api.frames_busy = {162_000: 1}
         fx.install(authed_page, api)
         _open(authed_page, app_url, fx.EPISODE)
-        first = authed_page.locator("#inspCloseups [data-closeup='intro'] .insp-frames").first
-        expect(first.locator(".insp-frame img")).to_have_count(7)
+        authed_page.locator("#inspAdjust").click()
+        first = authed_page.locator("[data-edge='intro-start'] .insp-frames")
+        expect(first.locator(".insp-frame img")).to_have_count(8)
         expect(first).not_to_contain_text("Couldn't read frames")
         asks = [r for r in api.frame_requests if r["start_ms"] == 162_000]
-        assert asks == [{"path": fx.EPISODE, "start_ms": 162_000, "count": 7}] * 2
+        assert asks == [{"path": fx.EPISODE, "start_ms": 162_000, "count": 8}] * 2
 
 
 @pytest.mark.e2e
@@ -1516,7 +1489,7 @@ class TestSeasonExtras:
     ) -> None:
         api = fx.install(authed_page)
         _open(authed_page, app_url, fx.EPISODE)
-        expect(authed_page.locator("#inspSummary")).to_be_visible()
+        expect(authed_page.locator("#inspTiles")).to_be_visible()
         assert api.season_requests == []
 
         authed_page.locator("#inspScopeSeason").click()
@@ -1533,7 +1506,7 @@ class TestSeasonExtras:
         api.answers["season"] = (500, {"error": "Couldn't list the season folder"})
         _open(authed_page, app_url, fx.EPISODE, view="season")
         season = authed_page.locator("#inspSeason")
-        expect(season.locator(".fw-semibold")).to_have_text("Couldn't load this season")
+        expect(season.locator(".insp-message-title")).to_have_text("Couldn't load this season")
         expect(season.locator(".insp-small")).to_have_text("Couldn't list the season folder")
 
     def test_a_refused_publish_says_why(self, authed_page: Page, app_url: str) -> None:

@@ -52,7 +52,9 @@ def screenshot(page: Page, name: str) -> None:
     if not SCREENSHOT_DIR:
         return
     Path(SCREENSHOT_DIR).mkdir(parents=True, exist_ok=True)
-    page.wait_for_timeout(300)
+    # The design's canvas width; the page lays the strip out again for it before the picture is taken.
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.wait_for_timeout(500)
     page.screenshot(path=str(Path(SCREENSHOT_DIR) / f"{name}.png"), full_page=True)
 
 
@@ -359,6 +361,128 @@ def review_film() -> tuple[dict, dict]:
     return file, item
 
 
+FILM_CREDITS_MS = 7_765_000
+EMBY_FILM_BIF = f"{os.path.dirname(FILM)}/The Matrix (1999) {{imdb-tt0133093}} - [Bluray-2160p]-320-10.bif"
+LONG_FILM = "/data/movies/The Long Film (2020)/The Long Film (2020) - [Bluray-1080p].mkv"
+LONG_FILM_MS = 10_800_000
+
+
+def checked_film() -> tuple[dict, dict]:
+    """Board 5: The Matrix, checked. SkipDB puts the credits at 2:09:25; Plex keeps its own two credits markers, and
+    Jellyfin and Emby show ours."""
+    file, item = unchecked_film()
+    jf_dir = f"{os.path.dirname(FILM)}/trickplay/The Matrix (1999)/320 - 10x10"
+    file["known"] = True
+    file["previews"] += [
+        _preview_row(
+            "jf-1",
+            "Jellyfin",
+            "jellyfin",
+            path=jf_dir,
+            sheets_dir=jf_dir,
+            exists=True,
+            frame_count=818,
+            interval_ms=10_000,
+            tile_width=10,
+            tile_height=10,
+        ),
+        _preview_row("emby-1", "Emby", "emby", path=EMBY_FILM_BIF, exists=True, frame_count=818, interval_ms=10_000),
+    ]
+    credits = _marker("credits", FILM_CREDITS_MS, FILM_MS, ["skipdb"])
+    ours = [{"type": "credits", "start_ms": FILM_CREDITS_MS, "end_ms": None, "ours": True, "stale": False}]
+    item.update(
+        known=True,
+        duration_ms=FILM_MS,
+        is_movie=True,
+        decisions={
+            "intro": _type("disabled", reason="films have no intro"),
+            "credits": _type("decided", credits),
+            "recap": _type("disabled", reason="detection off"),
+            "preview": _type("disabled", reason="detection off"),
+        },
+        evidence=[
+            _evidence("chapters", None, None, None, detail="Chapter names inside the file"),
+            _evidence("skipdb", "credits", FILM_CREDITS_MS, None),
+            _evidence("server_markers", "credits", 7_680_000, 7_710_000, origin="plex-1"),
+            _evidence("server_markers", "credits", 7_768_000, None, origin="plex-1"),
+        ],
+    )
+    item["servers"][0].update(plan="keeps_plex", markers_enabled=True)
+    item["servers"] += [
+        _server(
+            "jf-1", "Jellyfin", "jellyfin", current=copy.deepcopy(ours), plan="up_to_date", publish_status="written"
+        ),
+        _server("emby-1", "Emby", "emby", current=copy.deepcopy(ours), plan="up_to_date", publish_status="written"),
+    ]
+    return file, item
+
+
+def mixed_film() -> tuple[dict, dict]:
+    """Board 5 with the servers mixed: Jellyfin couldn't be read, and Emby gets ours on the next job."""
+    file, item = checked_film()
+    item["servers"][1].update(
+        current=None,
+        plan="unknown",
+        publish_status=None,
+        error="Couldn't read this server's Intro & Credits state (ConnectionError)",
+    )
+    item["servers"][2].update(current=[], plan="will_add", publish_status=None)
+    return file, item
+
+
+def long_film() -> tuple[dict, dict]:
+    """A three-hour film with a preview frame every 2 s (5,400 frames): the strip must stay light on it."""
+    preview = _preview_row(
+        "plex-1",
+        "Plex",
+        "plex",
+        path="/plex/Media/localhost/d/longfilm.bundle/Contents/Indexes/index-sd.bif",
+        exists=True,
+        frame_count=5400,
+        interval_ms=2000,
+        file_size=60_000_000,
+        created_at="2026-09-01T10:00:00+00:00",
+    )
+    file = {
+        "canonical_path": LONG_FILM,
+        "exists": True,
+        "in_library": True,
+        "known": True,
+        "title": "The Long Film (2020)",
+        "kind": "movie",
+        "quality": "1080p",
+        "duration_ms": LONG_FILM_MS,
+        "previews": [preview],
+        "preview": dict(preview),
+        "versions": [],
+        "job": None,
+    }
+    credits = _marker("credits", 10_500_000, LONG_FILM_MS, ["chapters"])
+    item = {
+        "known": True,
+        "canonical_path": LONG_FILM,
+        "duration_ms": LONG_FILM_MS,
+        "is_movie": True,
+        "decisions": {
+            "intro": _type("disabled"),
+            "credits": _type("decided", credits),
+            "recap": _type("disabled"),
+            "preview": _type("disabled"),
+        },
+        "evidence": [_evidence("chapters", "credits", 10_500_000, None, label="Credits")],
+        "servers": [
+            _server(
+                "plex-1",
+                "Plex",
+                "plex",
+                current=[{"type": "credits", "start_ms": 10_500_000, "end_ms": None, "ours": True, "stale": False}],
+                plan="up_to_date",
+            )
+        ],
+    }
+    return file, item
+
+
 # Public names for the builders above, for tests that assemble their own payloads.
 decision = _type
 marker = _marker
@@ -587,6 +711,8 @@ class InspectorApi:
     frames_error: tuple[int, dict] | None = None
     file_requests: list[str] = field(default_factory=list)
     item_requests: list[str] = field(default_factory=list)
+    # GET /api/bif/frame and /api/bif/trickplay/frame: the frame index of every image the page asked for.
+    image_requests: list[int] = field(default_factory=list)
     search_requests: list[dict] = field(default_factory=list)
 
     def release(self) -> None:
@@ -623,7 +749,9 @@ def default_kinds(path: str) -> list[tuple[int, int, str]]:
     if path == EPISODE:
         return [(165_000, 179_000, "title"), (1_499_000, EPISODE_MS + 1, "credits")]
     if path == FILM:
-        return [(7_680_000, 7_710_000, "credits"), (7_768_000, FILM_MS + 1, "credits")]
+        return [(7_680_000, 7_710_000, "credits"), (FILM_CREDITS_MS, FILM_MS + 1, "credits")]
+    if path == LONG_FILM:
+        return [(10_500_000, LONG_FILM_MS + 1, "credits")]
     if path == REVIEW:
         return [(5_557_000, REVIEW_MS + 1, "credits")]
     return []
@@ -771,6 +899,7 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
             _fulfill_json(route, {"path": path, "start_ms": start, "step_ms": 1000, "frames": frames})
         elif p == "/api/bif/frame" or p == "/api/bif/trickplay/frame":
             index = int(q.get("index", "0"))
+            api.image_requests.append(index)
             files = {f: file for f, file in api.files.items() if isinstance(file, dict)}
             path = next(
                 (f for f, file in files.items() if (file.get("preview") or {}).get("path") == q.get("path")), ""
