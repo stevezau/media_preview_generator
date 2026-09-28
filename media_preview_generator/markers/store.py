@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import NamedTuple
 
 from loguru import logger
@@ -238,6 +239,17 @@ _SCHEMA = (
         duration_ms INTEGER NOT NULL,
         seen_at TEXT NOT NULL,
         PRIMARY KEY (file_id, type))""",
+    # The versions of the answers that decided a ``replaced_decisions`` row's marker, per deciding source (JSON
+    # ``{source: version}``), kept aside with it: the carry-over drops a marker only content detectors decided once a
+    # newer version of them read the new file and found nothing. ``seen_at`` is the row's own: a row a build without
+    # this table wrote (one from before it, or a rollback) matches none (``carry_over`` bounds its versions by what
+    # such builds had). A separate table, so a markers.db from before it only gains it.
+    """CREATE TABLE IF NOT EXISTS replaced_versions (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        seen_at TEXT NOT NULL,
+        versions TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (file_id, type))""",
     # A file another episode's season step couldn't probe, with the identity it had then: it isn't probed again (up to
     # a 60 s ffprobe on a checking thread) until that identity changes or the entry is old. Not tied to a file row: an
     # unreadable file never gets one.
@@ -343,7 +355,7 @@ _SCHEMA = (
 # it replaced, and the version re-run's records predate what it read and decided with its older detectors and rules
 # (emptied, the start check lists those files again). No schema bump: that would make the older build refuse
 # markers.db, and a rollback would have to put back a copy from before the upgrade.
-_STALE_AFTER_AN_OLDER_BUILD = ("season_pair_runs", "replaced_decisions", "version_reruns")
+_STALE_AFTER_AN_OLDER_BUILD = ("season_pair_runs", "replaced_decisions", "replaced_versions", "version_reruns")
 
 # Ordered migrations: _MIGRATIONS[v] holds the statements that take an existing database from schema
 # version v to v+1. `_SCHEMA` is CREATE TABLE IF NOT EXISTS only, so a column added there alone never
@@ -479,6 +491,8 @@ class PreviousDecision(NamedTuple):
         duration_ms: The replaced file's length.
         seen_at: When the replaced file was last stored (``files.updated_at``, an ISO time): the latest one counts.
         decided_by: The sources that decided the marker (empty without one).
+        versions: The stored version of each deciding source's answer (``evidence_versions``); None when the
+            snapshot was kept aside by a build that didn't keep versions (``replaced_versions``).
     """
 
     type: MarkerType
@@ -486,6 +500,7 @@ class PreviousDecision(NamedTuple):
     duration_ms: int
     seen_at: str
     decided_by: tuple[str, ...] = ()
+    versions: Mapping[str, int] | None = None
 
 
 # The statuses of a decision of ours (a type turned off, or left to a server's own marker, is none).
@@ -841,12 +856,14 @@ class MarkerStore:
         return judged
 
     def _keep_replaced_decisions(self, conn: sqlite3.Connection, row: sqlite3.Row) -> None:
-        """Keep aside what a file's decisions were before its identity changes (``replaced_decisions``). An identity
-        of unknown length has nothing to compare a new one with; one never decided leaves the earlier snapshot, the
-        last decision made at this path; and "no marker" leaves a marker kept aside from a file of another length
-        (a run over a half-copied file reads a wrong length and finds nothing)."""
+        """Keep aside what a file's decisions were before its identity changes (``replaced_decisions``), with the
+        versions of the answers that decided them (``replaced_versions``). An identity of unknown length has nothing to
+        compare a new one with; one never decided leaves the earlier snapshot, the last decision made at this path; and
+        "no marker" leaves a marker kept aside from a file of another length (a run over a half-copied file reads a
+        wrong length and finds nothing). Runs before the identity's answers and their versions are cleared."""
         if not row["duration_ms"]:
             return
+        stored = self._answer_versions(conn, row["id"])
         for mtype, marker, decided_by in self._judged(conn, row["id"]):
             if marker is None:
                 held = conn.execute(
@@ -861,6 +878,21 @@ class MarkerStore:
                 "seen_at) VALUES (?,?,?,?,?,?,?)",
                 (row["id"], mtype, start, end, json.dumps(list(decided_by)), row["duration_ms"], row["updated_at"]),
             )
+            versions = {source: stored[source] for source in decided_by if source in stored}
+            conn.execute(
+                "INSERT OR REPLACE INTO replaced_versions (file_id, type, seen_at, versions) VALUES (?,?,?,?)",
+                (row["id"], mtype, row["updated_at"], json.dumps(versions, sort_keys=True)),
+            )
+
+    @staticmethod
+    def _answer_versions(conn: sqlite3.Connection, file_id: int) -> dict[str, int]:
+        """A file's stored answer version per source (the file's own answers: those under no server's origin)."""
+        return {
+            r["source"]: r["version"]
+            for r in conn.execute(
+                "SELECT source, version FROM evidence_versions WHERE file_id=? AND origin=''", (file_id,)
+            )
+        }
 
     def moved_here(self, rec: FileRecord) -> bool:
         """Whether a file's identity (size and mtime) is another path's row too: it was moved here from there (a
@@ -885,8 +917,10 @@ class MarkerStore:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT type, start_ms, end_ms, decided_by, duration_ms, seen_at FROM replaced_decisions "
-                "WHERE file_id=? ORDER BY type",
+                "SELECT r.type, r.start_ms, r.end_ms, r.decided_by, r.duration_ms, r.seen_at, v.versions "
+                "FROM replaced_decisions r LEFT JOIN replaced_versions v "
+                "ON v.file_id = r.file_id AND v.type = r.type AND v.seen_at = r.seen_at "
+                "WHERE r.file_id=? ORDER BY r.type",
                 (file_id,),
             ).fetchall()
         return [
@@ -896,6 +930,7 @@ class MarkerStore:
                 r["duration_ms"],
                 r["seen_at"],
                 tuple(json.loads(r["decided_by"])),
+                None if r["versions"] is None else MappingProxyType(json.loads(r["versions"])),
             )
             for r in rows
         ]
@@ -936,8 +971,16 @@ class MarkerStore:
             if row is None or not row["duration_ms"]:
                 return []
             judged = self._judged(self._conn, file_id)
+            stored = self._answer_versions(self._conn, file_id)
         return [
-            PreviousDecision(MarkerType(mtype), marker, row["duration_ms"], row["updated_at"], decided_by)
+            PreviousDecision(
+                MarkerType(mtype),
+                marker,
+                row["duration_ms"],
+                row["updated_at"],
+                decided_by,
+                MappingProxyType({source: stored[source] for source in decided_by if source in stored}),
+            )
             for mtype, marker, decided_by in sorted(judged, key=lambda j: j[0])
         ]
 
@@ -1021,11 +1064,13 @@ class MarkerStore:
         types: Iterable[MarkerType],
         version: int,
         version_step: int = 0,
+        checks_others: bool = False,
     ) -> list[str]:
         """Canonical paths of the files with an answer stored under ``sources`` from a version older than ``version``
-        that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``) or that
-        an undecided type of ``types`` was decided without (Needs review, no evidence), sorted; files marked missing,
-        and files already taken for ``detector`` at ``version`` (``record_version_reruns``), are left out.
+        that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``; with
+        ``checks_others``, whatever decided it) or that an undecided type of ``types`` was decided without (Needs
+        review, no evidence), sorted; files marked missing, and files already taken for ``detector`` at ``version``
+        (``record_version_reruns``), are left out.
 
         Args:
             detector: The name its re-runs are recorded under.
@@ -1034,6 +1079,7 @@ class MarkerStore:
             version: Its version now.
             version_step: A stored version is compared modulo this; 0 compares it whole (credit text stores the
                 user's window above its version).
+            checks_others: Its answer checks what other sources decided (``versions.AnswerVersion.checks_others``).
 
         Returns:
             The paths.
@@ -1052,8 +1098,8 @@ class MarkerStore:
                 f"WHERE f.missing_since IS NULL AND v.source IN ({in_sources}) AND d.type IN ({in_types}) "
                 "AND (CASE WHEN ? > 0 THEN v.version % ? ELSE v.version END) < ? "
                 "AND (r.version IS NULL OR r.version < ?) "
-                "AND (d.status IN (?, ?) OR (d.status = ? AND m.locked = 0 AND EXISTS "
-                f"(SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN ({in_sources})))) "
+                "AND (d.status IN (?, ?) OR (d.status = ? AND m.locked = 0 AND (? OR EXISTS "
+                f"(SELECT 1 FROM json_each(m.decided_by) WHERE json_each.value IN ({in_sources}))))) "
                 "ORDER BY f.canonical_path",
                 (
                     detector,
@@ -1066,21 +1112,26 @@ class MarkerStore:
                     DecisionStatus.NEEDS_REVIEW.value,
                     DecisionStatus.NO_EVIDENCE.value,
                     DecisionStatus.DECIDED.value,
+                    int(checks_others),
                     *names,
                 ),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
-    def files_decided_under_older_rules(self, detector: str, version: int) -> list[str]:
+    def files_decided_under_older_rules(
+        self, detector: str, version: int, *, carried_by: str | None = None
+    ) -> list[str]:
         """Canonical paths of the files not recorded as decided under ``version`` of the decision rules (``detector``
         in ``version_reruns``) with a type those rules could decide differently from what is stored, sorted: an
         unlocked type with a stored answer of its type, decided, in Needs review, not found (its answers failed a
-        check a rule may have changed) or left to the servers' own markers; not one whose detection is off. Files
-        marked missing are left out.
+        check a rule may have changed) or left to the servers' own markers, or one holding a marker carried over from
+        a replaced file (``carried_by`` among its deciding sources: the carry-over is a rule too); not one whose
+        detection is off. Files marked missing are left out.
 
         Args:
             detector: The name the rules' version is recorded under.
             version: The rules' version now.
+            carried_by: ``Marker.decided_by`` of a carried marker (``carry_over.CARRIED_OVER``); None lists none.
 
         Returns:
             The paths.
@@ -1092,8 +1143,9 @@ class MarkerStore:
                 "LEFT JOIN markers m ON m.file_id = d.file_id AND m.type = d.type "
                 "LEFT JOIN version_reruns r ON r.file_id = d.file_id AND r.detector = ? "
                 "WHERE f.missing_since IS NULL AND (r.version IS NULL OR r.version < ?) AND COALESCE(m.locked, 0) = 0 "
-                "AND EXISTS (SELECT 1 FROM evidence e WHERE e.file_id = d.file_id AND e.type = d.type)",
-                (detector, version),
+                "AND (EXISTS (SELECT 1 FROM evidence e WHERE e.file_id = d.file_id AND e.type = d.type) "
+                "OR EXISTS (SELECT 1 FROM json_each(COALESCE(m.decided_by, '[]')) WHERE json_each.value = ?))",
+                (detector, version, carried_by),
             ).fetchall()
         found = {
             r["canonical_path"]

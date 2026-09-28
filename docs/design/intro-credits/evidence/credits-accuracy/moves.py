@@ -20,7 +20,7 @@ kinds = Counter()
 rows = []
 for key, b in base.items():
     w = work.get(key)
-    if w is None:
+    if w is None or b.get("kept_own") or w.get("kept_own"):  # every server keeps its own: never published
         continue
     mb = b["marker"] if b["status"] == "decided" else None
     mw = w["marker"] if w["status"] == "decided" else None

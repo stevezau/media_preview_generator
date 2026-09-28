@@ -1101,6 +1101,7 @@ def credits_text_spec() -> LocalDetectorSpec:
         detect=detect_credits_text,
         version=CREDITS_TEXT_VERSION,
         version_of=credits_answer_version,
+        version_step=_WINDOW_VERSION_STEP,
         due=credits_text_due,
         needs_worker=credits_text_needs_worker,
         failed_here=credits_text_failed_here,

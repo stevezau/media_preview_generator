@@ -402,7 +402,7 @@ class TestSeasonAudio:
         spec = _spec()
         assert (spec.source, spec.types) == (Source.SEASON_AUDIO, frozenset({MarkerType.INTRO}))
         # An answer is stored under the step's version and the end-picture check's past its first (10 + 2 × 1000).
-        assert (season.SEASON_AUDIO_VERSION, season.end_picture.CHECK_VERSION, spec.version) == (10, 3, 2010)
+        assert (season.SEASON_AUDIO_VERSION, season.end_picture.CHECK_VERSION, spec.version) == (10, 4, 3010)
         # Pairs keep the runs version they were matched under: v10 changed how the runs are picked from, not the runs.
         assert season.PAIR_RUNS_VERSION == 9
         assert spec.stored_sources == {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}

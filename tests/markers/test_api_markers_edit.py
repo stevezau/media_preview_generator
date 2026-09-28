@@ -515,7 +515,7 @@ class TestUnlock:
 # Adding a marker by hand (phase 4, built 2026-09-21 to the answers relayed with the go-ahead)
 # ---------------------------------------------------------------------------
 
-# The starting times the Inspector's Adjust puts down for a marker it adds (``inspector.js`` ``addCard``), in this
+# The starting times the Inspector's Adjust puts down for a marker it adds (``inspector.js`` ``addRow``), in this
 # route's body shape. ``end_ms: None`` is how "runs to the end of the file" is sent, which is what the credits seed
 # turns the switch on for. These are a copy, not the source: ``TestAdjust`` in tests/e2e/test_inspector.py adds one
 # through the page, so change both files together.

@@ -24,9 +24,11 @@ from .speed import online_time_scale
 # release's intro beside season audio; spec §5.5 rules 2, 3, 6 and 14). 2: the 2026-09-27 rules (credit text moves a
 # credits chapter's start to the roll it reads, and wins a credits start from an online answer more than 5 s from it;
 # season audio checks an intro chapter an online answer ends inside; a lone online answer kept through a rule change
-# goes once a detector reading the file has found nothing to agree with it; spec §5.5 rules 3, 4 and 16).
+# goes once a detector reading the file has found nothing to agree with it; spec §5.5 rules 3, 4 and 16). 3: the
+# 2026-09-28 carry-over (a replaced file's marker only content detectors decided isn't carried to a file they read now
+# and found nothing in; spec §5.5 rule 15): the version re-run lists the files holding a carried marker too.
 DECIDE_RULES = "decide_rules"
-DECIDE_RULES_VERSION = 2
+DECIDE_RULES_VERSION = 3
 # A decided type whose published marker today's rules would put in Needs review or leave without one keeps it, until new
 # or changed evidence contradicts it (``keep_published``); the reason starts with this.
 KEPT_BEFORE_RULE_CHANGE = "kept: published before a rule change"

@@ -235,27 +235,28 @@ and credits are on each server.
   film several servers have is one row. Each row says whether the preview is ready (and how many frames it has) and
   what Intro & Credits has for it: **Intro + credits**, **Credits set**, **Not checked yet** or **Needs review**. A TV
   show opens in place: pick the season, then the episode, each with its own state. A path starting with `/` opens that
-  file directly. Choosing a file folds the results away; **Back to the results** brings them back.
+  file directly. Choosing a file folds the results away; **Results for “…”** brings them back.
 - **Links.** `/inspector?path=<file>` opens a file, so the page can be linked and bookmarked. The eye button on a job's
   file rows (including a filter to **Needs review**) opens the Inspector on that file. The old `/bif-viewer` address
   redirects here.
-- **The file.** A sentence says what happens, e.g. "Skip Intro runs 2:45 – 2:59 and Skip Credits starts at 24:59. Plex
-  has both. Jellyfin gets them on the next job." Below it: when the preview was made, how many frames it has and how
-  far apart, and its size. **Whole episode** (or film) is a strip of the preview's frames with the intro in blue and
-  the credits in orange, and one row for what was decided and one for what each server shows now. The close-ups show
-  the frames either side of each edge. **How it was decided** lists every source, what it found and whether it was
-  used. **On your servers** says, per server, the intro & credits state and the preview state; **File locations**
-  opens to the preview's path (Plex's bundle BIF, Emby's BIF next to the video, Jellyfin's trickplay folder).
-- **All frames** swaps the strip for every frame of the preview, intro frames edged blue and credits orange; click one
-  (or use the arrow keys) to see it larger.
-- **A file not checked yet** shows the markers each server has today in grey, with the end of the film zoomed when
-  they sit there, and a close-up of each. **Check intro & credits now** checks it.
+- **The file.** Four tiles sum it up: what your servers show, what the app found, the preview (how many frames, how
+  far apart, and where it stops if it is shorter than the video), and when Intro & Credits last checked it.
+- **Timeline.** One strip of every preview frame, each labelled with its time. Scroll it, drag it, use **‹ ›** to step
+  ten frames, or click the bar above it to jump; **Jump to** goes straight to the intro, the credits or a server's own
+  markers. Under the strip, on the same scale, **We found** shows the app's intro (blue) and credits (orange), then one
+  row per server shows what that server gives viewers: ours tinted, a server's own markers outlined in grey. Click a
+  frame to see it large; **←** / **→** step and **Esc** closes. Places the preview doesn't cover say **No preview**.
+- **How it was decided** lists every source, what it found and whether it was used. **On your servers** says, per
+  server, what it shows, its intro & credits state and its preview; **File locations** opens to each preview's path
+  (Plex's bundle BIF, Emby's BIF next to the video, Jellyfin's trickplay folder).
+- **A file not checked yet** is the same page: the rows show what each server has today, and **Check intro & credits
+  now** checks it.
 - **Regenerate preview** rebuilds the preview for every server that has the file (a job on the Dashboard);
   **Re-detect intro & credits** asks every source again. While a job works on the file, a bar says so and shows its
   progress; the page reads the file again when the job ends.
-- **States.** A file with no preview says so, and its close-ups read frames straight from the video. A path in no
-  server's library says **Not in any library**; a file that has gone says **Gone from disk**. A server that can't be
-  reached marks only its own row. A Plex item with several versions shows a switch between them.
+- **States.** A path in no server's library says **Not in any library**; a file that has gone says **Gone from
+  disk**. A server that can't be reached marks only its own row. An item with several files shows a switch between
+  them.
 
 **Exact frames.** Preview frames are 2 to 10 seconds apart, too coarse to put an edge on, so Adjust and **Needs your
 check** read frames one second apart straight from the video. Only a file the app already knows is read (one in a
@@ -756,7 +757,9 @@ whose markers relied on the older version are read again once, without you start
 checks, and a Low-priority **Intro & Credits: re-checking files after an update** job runs behind your previews,
 100 files at a time with 30 minutes between batches, so a large library doesn't keep your GPU busy for days. It takes
 the files still on disk whose marker was decided with the older version's answer, or is still in Needs review or not
-found beside one; a marker decided by other sources is left as it is until that file's next job. Each file is read
+found beside one. On-screen credit text and season audio also check markers other sources decided (a "Credits" or
+"Intro" chapter, an online database's times), so a better version of either reads those files again too; any other
+marker decided by other sources is left as it is until that file's next job. Each file is read
 again once per update, restarts included. Locked markers are never touched. Cancelling a batch stops it: the files
 it hadn't reached are taken by a later batch, from the next start. An update that changes how the answers are weighed
 against each other goes through the same batches: every file with a marker that isn't locked, one in Needs review, or
@@ -769,7 +772,10 @@ stays, and the job log adds "kept: published before a rule change", until a new 
 new release has no chapters, say). When the new file is the same length as the one it replaced (within a second) and
 no source finds anything for a marker type in it, the marker you had keeps its place, as Plex's own markers do; the
 job log says "from the file it replaced". Anything the new file's own sources find, even an answer that only puts the
-marker in Needs review, is used instead, and a file of another length is decided from scratch.
+marker in Needs review, is used instead, and a file of another length is decided from scratch. A marker that only
+season audio or on-screen credit text found isn't kept when a newer version of that same check, from an update, read
+the new file and found nothing there: the update passed the old answer over. The same version finding nothing on the
+new file keeps it, since another release of the episode can sound or look different enough.
 
 ### Needs review
 
@@ -846,10 +852,10 @@ order its episodes arrived in.
 Open the file in the [Inspector](#inspector) (**Tools → Inspector**). **Adjust** appears once a job has checked the
 file and read its length.
 
-- **Adjust** turns each close-up into an editor on frames read straight from the video, one second apart. Click the
-  frame where an edge belongs, step it with **◀ 1 s** / **1 s ▶**, or type the time. Credits (and a preview) can run to
-  the end of the file or end earlier. **Save and send to …** saves; **Cancel** throws the edit away. Only two things
-  are refused: a marker outside the file, and one that ends before it starts.
+- **Adjust** opens under the Timeline with frames read straight from the video, one second apart, around each edge.
+  Click the frame where an edge belongs, step it with **‹ 1s** / **1s ›**, or type the time. Credits (and a preview)
+  can run to the end of the file or end earlier. **Save and send to …** saves; **Cancel** throws the edit away. Only
+  two things are refused: a marker outside the file, and one that ends before it starts.
 - **Add a marker where nothing was found.** In Adjust, an intro or credits nothing was found for has **Add intro** or
   **Add credits**. It starts from times that are round on purpose, so they can't be mistaken for something the app
   found: an intro from 0:00 to 0:30, credits the last 60 seconds. Move its edges to where it really is.

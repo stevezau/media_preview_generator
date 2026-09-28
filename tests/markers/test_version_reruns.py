@@ -94,8 +94,9 @@ class TestTheDetectors:
         # stay current, and a new check makes every season audio answer older.
         assert SEASON_AUDIO_ANSWER_VERSION == SEASON_AUDIO_VERSION + (end_picture.CHECK_VERSION - 1) * 1_000
         # Season audio v10 (v9 speed by ear, v10 a season on every disk and the picking rules of §14 2026-09-27) with
-        # check 3 (2 the one scaler, 3 the end card), spec §14 2026-09-25.
-        assert (SEASON_AUDIO_VERSION, end_picture.CHECK_VERSION, SEASON_AUDIO_ANSWER_VERSION) == (10, 3, 2010)
+        # check 4 (2 the one scaler, 3 the end card, 4 a flat frame beside one that isn't compared by correlation),
+        # spec §14 2026-09-25 and 2026-09-28.
+        assert (SEASON_AUDIO_VERSION, end_picture.CHECK_VERSION, SEASON_AUDIO_ANSWER_VERSION) == (10, 4, 3010)
 
 
 class TestFilesToReadAgain:
@@ -124,17 +125,61 @@ class TestFilesToReadAgain:
     @pytest.mark.parametrize(
         ("decided_by", "locked", "version"),
         [
-            (("chapters",), False, CREDITS_TEXT_VERSION - 1),  # decided without it: its next run reads it anyway
+            (("chapters",), True, CREDITS_TEXT_VERSION - 1),  # the user's own
             (("credits_text", "chapters"), True, CREDITS_TEXT_VERSION - 1),  # the user's own
             (("credits_text", "chapters"), False, CREDITS_TEXT_VERSION),  # current
             (("credits_text", "chapters"), False, CREDITS_TEXT_VERSION + 1),  # newer (a downgrade): not older
         ],
-        ids=["decided-by-others", "locked", "current", "newer"],
+        ids=["locked-chapter", "locked", "current", "newer"],
     )
     def test_not_listed(self, store, decided_by, locked, version):
         rec = _file(store, "/tv/A/S01/e1.mkv")
         _answer(store, rec, Source.CREDITS_TEXT, version)
         _decided(store, rec, T.CREDITS, decided_by, locked=locked)
+
+        assert versions.files_to_read_again(store, _settings()) == {}
+
+    @pytest.mark.parametrize(
+        ("decided_by", "mtype", "source", "answer_version", "detector", "version"),
+        [
+            # A credits chapter credit text kept: its next version may move it (spec §5.5 rule 3). sflix's 10 Things
+            # I Hate About You kept version 6's answer beside its chapter after version 7 shipped (2026-09-28).
+            (("chapters",), T.CREDITS, Source.CREDITS_TEXT, CREDITS_TEXT_VERSION - 1, "credits_text",
+             CREDITS_TEXT_VERSION),
+            # An online start credit text agreed with: its next version may win the start (rule 4).
+            (("introdb", "server_markers"), T.CREDITS, Source.CREDITS_TEXT, CREDITS_TEXT_VERSION - 1, "credits_text",
+             CREDITS_TEXT_VERSION),
+            # An intro chapter or a lone online intro beside season audio's answer (rules 4 and 16).
+            (("chapters",), T.INTRO, Source.SEASON_AUDIO, SEASON_AUDIO_ANSWER_VERSION - 1, "season_audio",
+             SEASON_AUDIO_ANSWER_VERSION),
+            (("skipdb",), T.INTRO, Source.SEASON_AUDIO_PREVIOUS, SEASON_AUDIO_ANSWER_VERSION - 1, "season_audio",
+             SEASON_AUDIO_ANSWER_VERSION),
+        ],
+        ids=["credits-chapter", "credits-online", "intro-chapter", "intro-online-previous-season"],
+    )  # fmt: skip
+    def test_a_detector_reading_the_file_lists_a_type_other_sources_decided(
+        self, store, decided_by, mtype, source, answer_version, detector, version
+    ):
+        rec = _file(store, "/tv/A/S01/e1.mkv")
+        _answer(store, rec, source, answer_version)
+        _decided(store, rec, mtype, decided_by)
+
+        assert versions.files_to_read_again(store, _settings()) == {"/tv/A/S01/e1.mkv": {detector: version}}
+
+    @pytest.mark.parametrize(
+        ("source", "origin", "version"),
+        [
+            (Source.SERVER_MARKERS, "plex-1", READER_VERSION - 1),
+            (Source.CHAPTERS, "", CHAPTER_RULES_VERSION - 1),
+            (Source.INTRODB, "", PARSER_VERSIONS[Source.INTRODB] - 1),
+        ],
+        ids=["server-markers", "chapters", "online"],
+    )
+    def test_a_reader_lists_only_types_resting_on_it(self, store, source, origin, version):
+        # Chapters, servers' markers and online answers leave a type other sources decided to the file's next run.
+        rec = _file(store, "/tv/A/S01/e1.mkv")
+        _answer(store, rec, source, version, origin=origin)
+        _decided(store, rec, T.INTRO, ("season_audio",))
 
         assert versions.files_to_read_again(store, _settings()) == {}
 
@@ -168,8 +213,8 @@ class TestFilesToReadAgain:
             "/movies/B/b.mkv": {"chapters": CHAPTER_RULES_VERSION},
         }
 
-    # Production's season audio versions (audit copy, 2026-09-25), and v9's answers under check 3.
-    @pytest.mark.parametrize("stored", [4, 5, 7, 2009])
+    # Production's season audio versions (audit copies, 2026-09-25 and 2026-09-28): v9's and v10's under check 3.
+    @pytest.mark.parametrize("stored", [4, 5, 7, 2009, 2010])
     @pytest.mark.parametrize("decided", [True, False], ids=["decided-by-season-audio", "needs-review"])
     def test_a_season_audio_answer_from_before_todays_check_is_listed(self, store, stored, decided):
         # Its end pictures were compared on each vendor's scaler without the end card (check 1): the re-run makes the
@@ -181,7 +226,7 @@ class TestFilesToReadAgain:
         else:
             _undecided(store, rec, T.INTRO, DecisionStatus.NEEDS_REVIEW)
 
-        assert versions.files_to_read_again(store, _settings()) == {"/tv/A/S01/e1.mkv": {"season_audio": 2010}}
+        assert versions.files_to_read_again(store, _settings()) == {"/tv/A/S01/e1.mkv": {"season_audio": 3010}}
 
     def test_a_file_resting_on_two_older_answers_is_listed_once_for_both(self, store):
         rec = _credits_text_file(store, "/tv/A/S01/e1.mkv", decided_by=("credits_text", "server_markers"))
@@ -245,13 +290,26 @@ class TestDecideRules:
         )
         return rec
 
-    def test_the_2026_09_27_rules_are_version_2(self):
+    def test_the_2026_09_28_rules_are_version_3(self):
         # Version 1 (2026-09-25): SkipDB never decides alone, credit text checks a credits chapter SkipDB disagrees
         # with, online credits may end up to 5 s past the file, another release's intro beside season audio. Version 2
         # (2026-09-27): credit text moves a credits chapter's start and wins an online start over 5 s from it, season
         # audio checks an intro chapter an online answer ends inside, and a lone online answer kept through a rule change
-        # goes once a detector reading the file found nothing to agree (spec §5.5 rules 3, 4, 16).
-        assert (DECIDE_RULES, DECIDE_RULES_VERSION) == ("decide_rules", 2)
+        # goes once a detector reading the file found nothing to agree (spec §5.5 rules 3, 4, 16). Version 3
+        # (2026-09-28): a replaced file's marker only content detectors decided isn't carried to a file they read now
+        # and found nothing in (rule 15).
+        assert (DECIDE_RULES, DECIDE_RULES_VERSION) == ("decide_rules", 3)
+
+    @pytest.mark.parametrize(
+        ("decided_by", "listed"), [(("carried_over",), True), (("season_audio",), False)], ids=["carried", "own"]
+    )
+    def test_a_marker_carried_over_is_listed_without_an_answer_of_its_type(self, store, decided_by, listed):
+        # The carry-over is one of the rules, and a carried marker has no answer of its type by definition: Small
+        # Prophets S01E05 kept season audio v9's logo stretch this way (sflix, 2026-09-28).
+        rec = _file(store, self.PATH)
+        _decided(store, rec, T.INTRO, decided_by)
+
+        assert versions.files_to_read_again(store, _settings()) == (self.DUE if listed else {})
 
     @pytest.mark.parametrize(
         ("status", "reason", "locked", "listed"),

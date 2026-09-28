@@ -8,15 +8,16 @@ Strategy:
     * Generate a tiny real BIF on disk inside the seeded ``plex_config_folder``
       so the backend's allow-list accepts it (``_validate_bif_path`` requires
       paths under ``plex_config_folder`` OR a server's media root).
-    * Open /inspector?bif=<path>, which shows the preview's All frames view.
-    * Assert the big frame <img> actually loads JPEG bytes
+    * Open /inspector?bif=<path>, which shows the preview's frames on the Timeline strip.
+    * Assert the strip's <img>s actually load JPEG bytes
       (naturalWidth > 0 from a successful image decode).
-    * Pick another frame from the grid, assert the src changes.
+    * Open a frame large, step to another, assert the big frame's src changes and loads.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import struct
 from pathlib import Path
 
@@ -179,49 +180,43 @@ class TestInspectorWithRealFrames:
         info = info_resp.json()
         assert info["frame_count"] == 5, f"BIF metadata wrong: {info}"
 
-        # Now drive the UI: the Inspector opens a bare preview file on its All frames view.
+        # Now drive the UI: the Inspector opens a bare preview file on its Timeline strip.
         page.goto(f"{app_url}/inspector?bif={bif_path}")
         page.wait_for_load_state("domcontentloaded")
 
-        expect(page.locator("#inspAllFrames")).to_be_visible(timeout=5000)
-        expect(page.locator("#inspAllFrames .insp-allframes button")).to_have_count(5, timeout=3000)
-        expect(page.locator("#inspAllFramesLabel")).to_have_text("Frame 0 of 4 · 0:00")
+        tiles = page.locator("#inspStrip .insp-tl-frame")
+        expect(tiles).to_have_count(5, timeout=5000)
+        expect(page.locator("#inspFrameText")).to_have_text("preview frame 1 of 5 · one every 1 s")
+        first = tiles.nth(0).locator("img")
+        expect(first).to_have_attribute("src", re.compile(r"/api/bif/frame\?path=.*&index=0$"), timeout=3000)
 
-        preview = page.locator("#inspAllFramesBig")
-        first_src = preview.get_attribute("src")
-        assert first_src and "/api/bif/frame" in first_src and "index=0" in first_src, (
-            f"#inspAllFramesBig src not pointing at backend frame endpoint: {first_src!r}"
-        )
-
-        # The browser must actually decode the JPEG (not error). naturalWidth>0
-        # is the canonical "image loaded" signal — without this the test would
-        # pass even if the backend served an empty body or a broken JPEG.
+        # The browser must actually decode the JPEGs (not error). naturalWidth>0 is the canonical "image loaded"
+        # signal — without this the test would pass even if the backend served an empty body or a broken JPEG.
         page.wait_for_function(
-            "() => { const img = document.getElementById('inspAllFramesBig');"
-            "        return img && img.complete && img.naturalWidth > 0; }",
+            "() => { const imgs = Array.from(document.querySelectorAll('#inspStrip .insp-tl-frame img'));"
+            "        return imgs.length === 5 && imgs.every(img => img.complete && img.naturalWidth > 0); }",
             timeout=5000,
         )
 
-        # Pick frame 3 from the grid and assert the big frame follows.
-        page.locator("#inspAllFrames .insp-allframes button[data-index='3']").click()
+        # Open frame 3 large, then step to frame 4: the big frame follows and loads each time.
+        page.locator("#inspStrip .insp-tl-frame[data-index='3'] .insp-tl-img").click()
+        big = page.locator("#inspBigImg")
+        expect(big).to_have_attribute("src", re.compile(r"index=3$"))
         page.wait_for_function(
-            "() => { const img = document.getElementById('inspAllFramesBig');"
-            "        return img && img.src.includes('index=3'); }",
-            timeout=2000,
-        )
-        new_src = preview.get_attribute("src")
-        assert new_src != first_src, f"Picking a frame did not change the big frame — still {first_src!r}."
-        page.wait_for_function(
-            "() => { const img = document.getElementById('inspAllFramesBig');"
+            "() => { const img = document.getElementById('inspBigImg');"
             "        return img && img.complete && img.naturalWidth > 0; }",
             timeout=3000,
         )
-        # Every grid thumbnail is a real decoded frame too.
+        first_src = big.get_attribute("src")
+        page.keyboard.press("ArrowRight")
+        expect(big).to_have_attribute("src", re.compile(r"index=4$"))
+        assert big.get_attribute("src") != first_src
         page.wait_for_function(
-            "() => Array.from(document.querySelectorAll('#inspAllFrames .insp-allframes img'))"
-            "        .every(img => img.complete && img.naturalWidth > 0)",
-            timeout=5000,
+            "() => { const img = document.getElementById('inspBigImg');"
+            "        return img && img.complete && img.naturalWidth > 0; }",
+            timeout=3000,
         )
+        expect(page.locator("#inspBigNext")).to_be_disabled()
 
     def test_real_backend_serves_jpeg_bytes_for_each_frame(
         self,

@@ -317,10 +317,12 @@ After an update that raises a detector's or reader's version (credit text, seaso
 the server-marker reader, chapter rules, an online parser), every start queues **Intro & Credits: re-checking
 files after an update** (Low priority, source `version_rerun`) while a file is left: an ordinary Intro & Credits job
 over at most 100 files still on disk where an unlocked decided type rests on an older answer, or a type that answer
-covers is in Needs review or not found. It also takes files whose one-version Plex item still shows times within
+covers is in Needs review or not found. Credit text and season audio check what other sources decided (a credits
+chapter or an online start, an intro chapter or a lone online intro), so their older answer lists an unlocked decided
+type whatever decided it. It also takes files whose one-version Plex item still shows times within
 2 s of an older decision, and, after an update that changes the decision rules, every file not yet decided under
 them with an unlocked type that has a stored answer (decided, Needs review, not found, or kept as the server's own;
-not a type whose detection is off): each run that decides a file records the rules version it used (`decide_rules` in
+not a type whose detection is off) or a marker carried over from a file it replaced: each run that decides a file records the rules version it used (`decide_rules` in
 `version_reruns`). A marker such a run's new rules alone would move to Needs review (or leave out) stays while
 a server has it and no new or changed answer disagrees, its reason starting "kept: published before a rule change". The next batch is queued 30 minutes after one completes; after a cancelled or failed batch
 the next start queues one. A job keeps its batch in its config (`version_rerun_files`, removed when it ends) so a job

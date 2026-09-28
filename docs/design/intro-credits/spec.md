@@ -341,7 +341,9 @@ must have the quorum, as today, and the silence guard then runs on it (`season.g
   audio v8, check version 2; §14 2026-09-25). Each fingerprint time moves to its file's audio start
   (`probe.stream_starts`: the first audio stream's
   start minus the container's; an HBO Max release's audio starts 0.976 s in). Two frames match when their correlation
-  is above 0.6, or, both flat (σ < 4), when their mean brightness is within 12; a pair's share is the matching part of
+  is above 0.6, or, both flat (σ < 4), when their mean brightness is within 12 (a flat frame beside one that isn't is
+  compared by correlation too, check version 4: a dark card sits on either side of the line in two releases; a frame
+  of one grey level matches no picture); a pair's share is the matching part of
   the instants with a frame in both, or 1 when the last 1.5 s (3 instants) all match on pictures that aren't flat (the
   same end card after shots that differ: an anime opening re-cut in later episodes, Tomb Raider King S01E12; a shared
   fade to black is no card; §14 2026-09-25), and the cluster passes when the median share is at least 75 %. A pair with
@@ -1131,7 +1133,19 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     server can't name the item), a marker carried before stays: "can't tell" never takes one off the servers. A source that read the new file and found nothing gives no candidate
     and doesn't stop the carry-over: none of them tells an intro that isn't there from one it missed (no intro
     chapter, a season match its guards passed over, no crowd entry, no roll found), and what does tell another cut,
-    the length, is checked instead. Any candidate of the type, even one failing sanity or leaving the type in review,
+    the length, is checked instead. The exception (decide rules version 3, 2026-09-28): a marker only the detectors
+    that read the content decided (season audio, credit text; servers' confirming markers aside) isn't carried when
+    each of them read the new file at a **newer** version than the one that decided the replaced file's marker, and
+    found nothing, its answer today's verdict on the file (`pipeline._read_now`, rule 16's too: at its version now,
+    with something to compare it with, and not due again, so a "nothing" whose read again failed or was cancelled
+    doesn't count): the detector's own update passed the old answer over. Small Prophets S01E05 and E06 on sflix
+    kept season audio version 9's 0–12 s logo stretch after version 10, which passes it over, found nothing on the
+    same files. The same version finding nothing is rule 15's own case (another encode of the episode) and still
+    carries, as does a marker whose deciding version isn't known. The versions are kept aside with the snapshot
+    (`replaced_versions`, matched on its `seen_at`) or read from a replaced file gone from disk; a snapshot a build
+    without them kept aside (82dc2bc and before, or a rollback to one) was decided at most at season audio 2010 and
+    credit text 8, the version #327 may ship without the table (`carry_over.VERSIONS_BEFORE_THEY_WERE_KEPT`). Tomb Raider King's and RuPaul's carried markers came
+    from chapters and still carry. Any candidate of the type, even one failing sanity or leaving the type in review,
     is the new file's own evidence and wins. The carried marker is clamped to the new file's end, dropped when it
     would overlap the file's own intro/recap or credits/preview more than rules 9–10 allow, and decided by
     `carried_over` alone ("carried over from the file it replaced (same length)"; the job log and summary name "the
@@ -1223,7 +1237,9 @@ markers(file_id, type, start_ms, end_ms, decided_by, locked, updated_at)   -- de
 publish_state(file_id, server_id, item_id, markers_hash, status, message, verified_at)
 ```
 - File identity = path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers (what was
-  decided is kept aside first, `replaced_decisions`, for the carry-over of §5.5 rule 15).
+  decided is kept aside first, `replaced_decisions`, with the versions of the answers that decided it,
+  `replaced_versions`, for the carry-over of §5.5 rule 15; no schema bump: a build without the second table leaves
+  it unread, and a row it writes has no versions matched to its `seen_at`).
 - `markers` is the single source of truth; servers are projections of it. `publish_state` is per `server_id`, so two
   Plex servers are tracked independently.
 
@@ -1286,16 +1302,23 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    with each answer (credit text, season audio with its end-picture check, the server-marker reader, chapters, the
    online parsers). On every start the app compares the stored versions with today's and lists the files, still on
    disk, where an unlocked decided type rests on an older answer or a type it answers is undecided (Needs review, no
-   evidence) beside one; a type decided by other sources waits for the file's own next run, as before. Also listed:
+   evidence) beside one. The two detectors that read the file, credit text and season audio, check what other sources
+   decided (§5.5 rules 3, 4 and 16), so their older answer lists an unlocked decided type whatever decided it
+   (`AnswerVersion.checks_others`): sflix's 10 Things I Hate About You kept credit text version 6's answer beside
+   its credits chapter after version 7, which moves that chapter, shipped, because nothing else runs a movie again
+   (2026-09-28; §14 "Live after #320–#325"). For the chapter, server-marker and online readers a type decided by other
+   sources waits for the file's own next run. Also listed:
    files whose one-version Plex item still shows times an older publish rule kept (§6.3), and **files decided under
    older decision rules**: the rules of §5.5 carry a version (`decide.DECIDE_RULES_VERSION`, recorded as
    `decide_rules` in `version_reruns` by every run that decides a file), and a file not recorded under today's is
    listed when an unlocked type has a stored answer of its type the rules could decide differently (decided, Needs
-   review, not found because its answers failed a check, or kept as the servers' own; not detection off). Its run
+   review, not found because its answers failed a check, or kept as the servers' own; not detection off), or holds a
+   marker carried over from a replaced file (rule 15 is one of the rules, and a carried marker has no answer of its
+   type). Its run
    decides again from what is stored and asks only what is due or from an older version, as any run does (a credits
    chapter rule 3 holds for credit text has it read, §5.5); a marker it had sent to a server stays where today's rules
    would leave its type in Needs review or without a marker, until an answer disagrees with it (§5.5 rule 16).
-   Version 1 is the 2026-09-25 rules (§14 "Decision rules"). Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
+   Version 1 is the 2026-09-25 rules (§14 "Decision rules"), 2 the 2026-09-27 ones, 3 the 2026-09-28 carry-over. Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
    so rule 3's chapter waits for it (`pipeline._answered_at_this_version`), unless that read fails on the file as
    it is (a decode error or a timeout), which ends the wait. They run as ordinary Intro &
    Credits jobs at LOW priority on the worker pool ("Intro & Credits: re-checking files after an update"), at most
@@ -3629,8 +3652,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   verdict set credits wrong 10 → 8 of 88 (tuning 6 → 4 of 61, held out 4 → 4 of 27), skipping story 2 → 1; intros 4 of 51
   wrong before and after, no intro moved in the replay; the Plex comparison 12 → 7 of 81 wrong (Plex's own 8 of 80),
   skipping story 2 → 1 (Plex's 8). The replay of sflix's copy moved 7 credits starts more than 5 s, each onto the first
-  card or the show's end logo. Harness: §5.4 version 7. `CREDITS_TEXT_VERSION` 7: every stored credit text answer is
-  read again once (912 files on sflix's disks), which also re-reads 10 Things against its chapter. Lab: phase 1 16 of
+  card or the show's end logo. Harness: §5.4 version 7. `CREDITS_TEXT_VERSION` 7 (what it reached live: §14
+  2026-09-28). Lab: phase 1 16 of
   16, no row worse than #320's run; phase 3 row 6 (a cancel at pickup) fails on `dev` too, 4 of 6 traced trials there
   (the README).
 - 2026-09-27 · **A season on every disk, a second opening, a bumper, the window's end** (season audio v10, §5.3;
@@ -3669,3 +3692,31 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Cost on a CPU worker: +8–18 s CPU on 1080p (+55 s on 4K HEVC) where the start is on black, +42–71 s where it is
   prose. The approved intro window (half the episode, up to 20 minutes) and cap (300 s) are held on
   `fix/intro-window-cap`: they add new wrong answers on the library chapter set (§0).
+- 2026-09-28 · **Live against the harness after #320–#325** (§6.2 step 3, §5.5 rule 15, §5.3 end picture; decide
+  rules version 3, end-picture check version 4; `evidence/live-vs-harness/`). The audit after sflix's re-check
+  contradicted the harnesses:
+  - **10 Things I Hate About You kept credit text version 6**: the version re-run listed a file only when a decided type
+    rested on the older answer, and its credits rest on the chapter credit text checks. #320 reached such files only
+    through its decide-rules pass; #324 bumped credit text alone. Credit text and season audio, which check what other
+    sources decided, now list every unlocked decided type beside their older answer (161 more files on sflix). Read on
+    sflix's Intel iGPU, version 7 moves the chapter to 5573.6 s as storage's P5000 does.
+  - **The credits replay** started from the database before #320 and re-read every file; it now starts from the live
+    copy the change lands on, reads only what the tree's re-run lists, models the carry-over and leaves out types kept
+    as Plex's own. From the copy before #323 it predicts what went live (1133 files listed, the three published moves,
+    10 Things unmoved).
+  - **Small Prophets S01E05/E06** got season audio v9's 0–12 s logo stretch back through the carry-over after v10 found
+    nothing on the same files: a marker only content detectors decided isn't carried to a replacement a newer version
+    of them read and found nothing in (the same version finding nothing still carries: rule 15's own case). Their
+    snapshots predate versions being kept with them, so they count as at most season audio 2010.
+  - Season audio's or credit text's "nothing" counts as a verdict on the file (the carry-over and rule 16) only while
+    it isn't due again: one whose read again failed is from before the season changed.
+  - **Game of Thrones S08E06** lost its intro when the cross-disk group moved the end 0.43 s onto a near-black card that
+    one release shows just above the flat line and another just under it: such a pair is compared by correlation now.
+  - Not changed: Homicide Hunter S06E01/E03 (a 20-episode group; 5 and 4 of 19 support, under the quorum), Somebody
+    Somewhere S03E03 (#320's lone-online rule, which also took off S03E07's wrong intro), Westworld S04E05/E06,
+    Stargate Atlantis S01E10 and Stuart Fails S01E01 (held since 2026-09-25/26), The Floor S05E06 (the pre-#323 tree
+    answers the same: a per-round sting at 6 of 11) and Killer Cases S03E04 (the same answer since version 5).
+  Measured with the corrected replay on sflix's copy of 2026-09-28: five published markers change (the four above and
+  House of the Dragon S02E03 gaining 0:06–1:46.6, frame-checked). Baseline answer key: credits wrong 10 → 9 of 88
+  (skips story 3 → 2; held out 4 → 4), Plex comparison 10 → 9 of 81; fresh sample (seed 20260929) published wrong
+  11 of 78 → 10 of 77 (held out 2 → 2), Game of Thrones S08E06 back. Season audio's four truth sets: no answer changes.

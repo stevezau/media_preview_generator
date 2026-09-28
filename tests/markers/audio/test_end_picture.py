@@ -46,10 +46,23 @@ class TestFramesAlike:
         dark = np.full((ep.FRAME_H, ep.FRAME_W), 16.0, dtype=np.float32)
         assert ep.frames_alike(dark, dark + difference) is alike
 
-    def test_a_flat_frame_never_matches_a_textured_one(self):
+    def test_a_frame_of_one_grey_level_never_matches_a_textured_one(self):
         flat = np.full((ep.FRAME_H, ep.FRAME_W), 128.0, dtype=np.float32)
         assert ep.frames_alike(flat, _textured(4)) is False
         assert ep.frames_alike(_textured(4), flat) is False
+
+    @pytest.mark.parametrize("other_std", [4.8, 12.0])
+    def test_a_flat_frame_beside_one_that_isnt_is_compared_by_correlation(self, other_std):
+        # Game of Thrones S08E06 against E04 (another release): "Directed by" on black at σ 4.4-4.8 against 3.2, a
+        # correlation of 1.00, called different while one side sat under the flat line (sflix, 2026-09-28).
+        card = _textured(5)
+        card = (card - card.mean()) / card.std()
+        faint, stronger = 16.0 + 3.2 * card, 16.0 + other_std * card
+        assert float(faint.std()) < ep.FLAT_STD <= float(stronger.std())
+        assert ep.frames_alike(faint, stronger) is True
+        assert ep.frames_alike(stronger, faint) is True
+        noise = 16.0 + 3.2 * (lambda z: (z - z.mean()) / z.std())(_textured(6))
+        assert ep.frames_alike(noise, stronger) is False  # black with noise: no picture in common
 
 
 class TestVerdict:
