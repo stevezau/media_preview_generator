@@ -1,34 +1,41 @@
 """Plain-words job log lines for Intro & Credits: what each source answered, what was decided and what was sent where.
 
-Every line is its own log record, with its own time and level. A file's run ends in a block: a header naming the file
-and what it's checked for, one line per source, what was decided, one line per server and how long it took, then a
-done line — written together so another file's block or a worker's pickup line can't land inside it
-(``write_lines``)::
+Every line is its own log record, logged the moment that step happens -- not batched until the file finishes. A
+worker's pickup line names the file and what it's checked for in one line; every line after that for the same file
+starts with its short title and " · ", so lines from several workers (or the checking thread and a worker) can
+interleave in the log and still be read one file at a time (``titled``)::
 
-    32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
-      Chapters: "Credits" chapter at 2:00:11–2:03:39
-      SkipDB: no entry
-      Credit text: credits start at 2:00:14 (keeps the "Credits" chapter at 2:00:11; saved earlier)
-      Plex's own markers: none
-      Decided: credits 2:00:11–2:03:39, from the "Credits" chapter
-      Sent to Plex: credits 2:00:11–2:03:39
-    32 Frames: A 9/11 Mystery (2026): done in 0.5 s, no worker needed
+    GPU Worker 2 (Intel UHD 770) picked up: Accused S04E05, checking intro and credits
+    Accused S04E05 · Checking chapters… none
+    Accused S04E05 · Checking IntroDB… intro 0:41–1:12 (asked now)
+    Accused S04E05 · Checking season audio… intro 0:41–1:12 (same theme found in 9 of 10 episodes)
+    Accused S04E05 · Reading credit text on the GPU (Intel UHD 770)…
+    Accused S04E05 · Credit text: credits start at 41:48 (13 s)
+    Accused S04E05 · Checking Plex's own markers… none (asked now)
+    Accused S04E05 · Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
+    Accused S04E05 · [Plex] Added intro 0:41–1:12 and credits 41:48–43:10
+    GPU Worker 2 (Intel UHD 770) completed: Accused S04E05 (success, 26 s)
 
-A file a GPU or CPU worker runs is announced first by the worker's own line (``pickup_line``), logged when the worker
-starts it: "GPU Worker 2 (Intel UHD 770) picked up Accused S04E05". Its block still opens with its own header once the
-worker finishes it, so another file's pickup line or block landing between the two can never split one file's lines. A
-file whose answer didn't change and whose servers are up to date logs one line (``compact_line``). A Season job logs
-one line per season instead of one per unchanged episode (``season_line``), a job deciding files again after the update
-one line instead of one per unchanged file (``decide_again_line``), the weekly online re-check one line instead of one
-per file nothing new was found for (``online_recheck_line``); every job starts with ``start_line`` and ends with a
-totals line (``totals_line``).
+A file with no worker (everything decided on the checking thread) opens with its own line instead of a pickup line
+("Accused S04E05: checking intro and credits") and ends with "Accused S04E05 · done in 0.5 s" rather than a worker's
+"completed" line. A step that reads the file itself (a credit-text read, a season-audio fingerprint) logs a
+"Reading … on the GPU/CPU…" line when it starts and its result as its own line when it finishes; a fallback, a retry
+or an error is logged live too, with the reason.
+
+Every file gets the same lines, whatever it did: an unchanged file, a Season job's unchanged episode, a decide-again
+job's unchanged file and a weekly online re-check's file with nothing new all log every source's check too -- a
+source's own answer this job didn't ask for again shows the stored answer with "saved <date>" it was last stored
+(``_saved_note``), and a source not read or not asked always says why. A Season job (and a TheIntroDB recheck)
+additionally counts its episodes into one line per season after every episode's lines (``season_line``), a job
+deciding files again after the update into one line (``decide_again_line``), the weekly online re-check into one
+line (``online_recheck_line``); every job starts with ``start_line`` and ends with a totals line (``totals_line``),
+after every file's lines and summary line.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import threading
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -69,27 +76,22 @@ SOURCE_LABELS: dict[Source, str] = {
     Source.SERVER_MARKERS_IMPORTED: "server markers",
     Source.USER: "your edits",
 }
-# How a source's own line starts.
-_LINE_LABELS: dict[Source, str] = {
-    Source.CHAPTERS: "Chapters",
+# How a source's own line names it, mid-sentence after "Checking " (a proper noun keeps its own capitals).
+_CHECKING_LABEL: dict[Source, str] = {
+    Source.CHAPTERS: "chapters",
     Source.THEINTRODB: "TheIntroDB",
     Source.INTRODB: "IntroDB",
     Source.SKIPDB: "SkipDB",
-    Source.SEASON_AUDIO: "Season audio",
-    Source.SEASON_AUDIO_PREVIOUS: "Last season's audio",
-    Source.CREDITS_TEXT: "Credit text",
+    Source.SEASON_AUDIO: "season audio",
+    Source.SEASON_AUDIO_PREVIOUS: "last season's audio",
+    Source.CREDITS_TEXT: "credit text",
 }
-# The order the source lines are in, whatever the user's order (the servers' own markers stand for one line per
-# server). "Last season's audio" follows season audio when the file has that answer.
-SOURCE_LINE_ORDER: tuple[Source, ...] = (
-    Source.CHAPTERS,
-    Source.THEINTRODB,
-    Source.INTRODB,
-    Source.SKIPDB,
-    Source.SEASON_AUDIO,
-    Source.CREDITS_TEXT,
-    Source.SERVER_MARKERS,
-)
+# The two local detectors that read the file itself for long enough to get their own "Reading … on the GPU/CPU…"
+# start line and a separate result line, rather than one "Checking …" line.
+_READING_LABEL: dict[Source, str] = {
+    Source.CREDITS_TEXT: "credit text",
+    Source.SEASON_AUDIO: "season audio",
+}
 # Sources that describe TV episodes only: a film's block leaves them out (its first line says films get credits only).
 EPISODE_ONLY_SOURCES = frozenset({Source.INTRODB, Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS})
 # Sources that read the file itself ("not read") rather than being asked ("not asked"), and the types each can answer.
@@ -98,8 +100,6 @@ _READS_FILE: dict[Source, frozenset[MarkerType]] = {
     Source.SEASON_AUDIO_PREVIOUS: frozenset({MarkerType.INTRO}),
     Source.CREDITS_TEXT: frozenset({MarkerType.CREDITS}),
 }
-# Sources whose line says where and how long this job's read took (``RunNotes.reads``).
-_READ_SHOWN = frozenset({Source.CREDITS_TEXT})
 # What a source that looked and found nothing answered.
 _EMPTY_ANSWER = {
     Source.CHAPTERS: "none",
@@ -112,14 +112,27 @@ _EMPTY_ANSWER = {
 }
 # The pipeline's note for a source skipped because the types it answers were already decided; its line says how.
 ALREADY_DECIDED = "not needed (already decided)"
-# An answer this file's run used without asking the source (stored by an earlier run, or by a sibling's season step).
+# An answer this file's run used without asking the source (stored by an earlier run, or by a sibling's season step),
+# when the source's rows don't say when (``_saved_note`` prefers the stored date).
 SAVED = "saved earlier"
-INDENT = "  "
+# A source's own answer this job asked for and got, when nothing more specific (a read's time and device) says so.
+ASKED_NOW = "asked now"
+# A server's stored answer this job cleared without asking the server (an older reader's answer, dropped once the
+# server shows our markers: ``_drop_older_reader_answer``). The server was never contacted, so this never says
+# "asked now".
+DROPPED_NOW = "dropped now"
 _SEP = " · "
+_DOT = " · "
 # The decision reason of a type a chapter decides alone (``decide._chapter_decision``).
 _CHAPTER_RULE = "chapters"
 # Release tags and ids in a folder or file name ("{tvdb-275274}", "[imdbid-tt0944947]", "[1080p]").
 _TAG_RE = re.compile(r"[\{\[][^\}\]]*[\}\]]")
+# A resolution or cut a file's own name gives ("Heat (1995) - [Bluray-1080p]…", "…2160p…", "…Extended…"): the only
+# tell-apart a job log line can afford for two copies of the same film sharing a title -- data already in the path,
+# never a lookup.
+_VERSION_TAG_RE = re.compile(
+    r"\b(2160p|1080p|720p|480p|4K|UHD|Extended|Director'?s Cut|Unrated|Remastered)\b", re.IGNORECASE
+)
 # A release group after the tags ("…[h264]-cinepth"): dropped with them.
 _GROUP_RE = re.compile(r"(?<=[\]\}])-[^\s\[\]\{\}()]+$")
 # Separators left behind once the tags are gone ("(2026) - -", "--").
@@ -127,17 +140,13 @@ _SEPARATOR_RUN_RE = re.compile(r"\s*-(?:\s*-)+\s*")
 # A release year in a file or folder name ("Heat (1995)").
 _YEAR_RE = re.compile(r"\(((?:19|20)\d\d)\)")
 # A worker's display name without its device ("GPU Worker 2 (Intel UHD 770)" → "GPU Worker 2").
-_DEVICE_RE = re.compile(r"\s*\([^()]*\)$")
+_DEVICE_RE = re.compile(r"\s*\(([^()]*)\)$")
 # How a job that logs one line per season names itself there: a Season job, or the job that checks files TheIntroDB's
 # used-up daily budget refused again after the reset.
 SEASON_RECHECK_LABEL = "Season re-check"
 BUDGET_RECHECK_LABEL = "TheIntroDB recheck"
 # A marker carried over from a replaced file names no source (``carry_over.CARRIED_OVER``; web/static/js/app.js too).
 CARRIED_OVER_LABEL = "the file it replaced"
-
-# Held while a block of lines is logged, so a block's records are consecutive (another file's block or a worker's
-# pickup line waits for it).
-_WRITE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -149,26 +158,43 @@ class RunNotes:
         unanswered: Sources asked this job whose answer couldn't be stored, with what happened ("unavailable (HTTP
             503)", "no answer this time (…)").
         not_asked: Why a source wasn't asked (``ALREADY_DECIDED``, "not read (every server keeps its own credits)").
+        server_not_read: Why a server's own markers were never read for this file at all ("this server shows our
+            markers"), keyed by server id; consulted only when the file has no evidence row for that server.
         title: How the log names the file (``file_title``); "" until a stage needs it.
-        types: The types the file is checked for, once a stage knew them (the worker's pickup line names them).
+        types: The types the file is checked for, once a stage knew them (the pickup line names them).
         is_episode: Whether the file was checked as a TV episode, once a stage knew it.
         started: When the stage that finishes the file started (``PipelineContext.monotonic``).
         worker: The display name of the worker running that stage; "" on a checking thread.
         cpu_rerun: Whether that stage is a GPU worker's rerun of the file on the CPU.
-        reads: Per local detector this job ran, where and how long it read the file ("read on the GPU in 13 s").
+        sent_before: Per server id, what we last published there before this run's write (``None`` when we never
+            published there at all, so a written status falls back to what the server's own evidence says it had).
+        start_logged: Whether the file's own start line (no worker) was already written this attempt, so a retry on
+            the same checking thread doesn't announce it twice.
+        logged_sources: Each ``(source, origin)`` (origin: a server's id for its own markers, else "") a line was
+            already logged for this run, whether its own line or its read (``reading_line``/``read_result_line``): a
+            worker picking up where the checking thread left off, with nothing new to say about a source, doesn't
+            repeat its line (a source actually re-read this stage marks the key itself, live, so a genuine change is
+            never held back by it -- it's simply never checked against this set in the first place).
+        dropped: Each ``(Source.SERVER_MARKERS, server_id)`` whose stored answer this run cleared without asking the
+            server (``_drop_older_reader_answer``): its line says "dropped now", never "asked now" -- the server was
+            never contacted.
         logged: Whether the file's lines were written.
     """
 
     asked: set[tuple[Source, str]] = field(default_factory=set)
     unanswered: dict[Source, str] = field(default_factory=dict)
     not_asked: dict[Source, str] = field(default_factory=dict)
+    server_not_read: dict[str, str] = field(default_factory=dict)
     title: str = ""
     types: frozenset[MarkerType] | None = None
     is_episode: bool | None = None
     started: float | None = None
     worker: str = ""
     cpu_rerun: bool = False
-    reads: dict[Source, str] = field(default_factory=dict)
+    sent_before: dict[str, tuple[Marker, ...] | None] = field(default_factory=dict)
+    start_logged: bool = False
+    logged_sources: set[tuple[Source, str]] = field(default_factory=set)
+    dropped: set[tuple[Source, str]] = field(default_factory=set)
     logged: bool = False
 
     def answered(self, source: Source, origin: str = "") -> None:
@@ -181,29 +207,75 @@ class RunNotes:
         self.asked.add((source, origin))
         self.unanswered.pop(source, None)
         self.not_asked.pop(source, None)
+        # A fresh answer, even to a key an earlier stage of this run already logged a line for (``logged_sources``):
+        # the line that answer earns isn't held back as a repeat of one that no longer describes it.
+        self.logged_sources.discard((source, origin))
+
+    def dropped_evidence(self, source: Source, origin: str = "") -> None:
+        """Record that ``source``'s stored evidence was cleared this job without asking it (``origin``'s server was
+        never contacted): the opposite of :meth:`answered`, so its line says "dropped now", not "asked now".
+
+        Args:
+            source: The source.
+            origin: A server's id for its markers, else "".
+        """
+        self.dropped.add((source, origin))
+        self.not_asked.pop(source, None)
+        self.logged_sources.discard((source, origin))
 
 
 @dataclass(frozen=True)
 class ServerResult:
-    """One server's row for one file, with our markers it shows now, which types it keeps as its own, and which of those
-    this file decided (so ours of that type wasn't written there)."""
+    """One server's row for one file, with our markers it shows now, which types it keeps as its own, which of those
+    this file decided (so ours of that type wasn't written there), and what it held before this run's write.
+
+    Attributes:
+        had_is_ours: Whether ``had`` is our own last-published record (``notes.sent_before``), so a type missing
+            from it now really was removed; False when it's a fallback (the server's own evidence, read this run or
+            saved), which was never ours to call removed in the first place -- a type only there is simply left out.
+    """
 
     row: Mapping
     ours: tuple[Marker, ...] = ()
     kept: frozenset[MarkerType] = frozenset()
     withheld: frozenset[MarkerType] = frozenset()
+    had: tuple[Marker, ...] | None = None
+    had_is_ours: bool = True
+
+
+def write_line(text: str, level: str = "INFO") -> None:
+    """Log one line as its own record.
+
+    Args:
+        text: The line.
+        level: Its level.
+    """
+    logger.log(level, "{}", text)
 
 
 def write_lines(lines: Iterable[str], level: str = "INFO") -> None:
-    """Log each line as its own record, all of them consecutively: another thread's block waits until they're written.
+    """Log each of several lines as its own record, in order.
 
     Args:
-        lines: The lines, in order (a detail line starts with ``INDENT``).
+        lines: The lines, in order.
         level: Their level.
     """
-    with _WRITE_LOCK:
-        for line in lines:
-            logger.log(level, "{}", line)
+    for line in lines:
+        write_line(line, level)
+
+
+def titled(title: str, text: str) -> str:
+    """A line after a file's first, named so it can be told apart from another file's or worker's line interleaved
+    with it in the log.
+
+    Args:
+        title: The file's title (``file_title``).
+        text: The line's own content.
+
+    Returns:
+        E.g. ``Accused S04E05 · Checking chapters… none``.
+    """
+    return f"{title}{_DOT}{text}"
 
 
 def clock(ms: int) -> str:
@@ -241,26 +313,6 @@ def duration(seconds: float) -> str:
         return f"{minutes} min {secs} s" if secs else f"{minutes} min"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} h {minutes} min" if minutes else f"{hours} h"
-
-
-def read_phrase(on_gpu: bool, seconds: float, fallback: str = "", *, gpu_read_nothing: bool = False) -> str:
-    """Where and how long a local detector read the file.
-
-    Args:
-        on_gpu: Whether it read on the worker's GPU.
-        seconds: How long it took.
-        fallback: What a step of it fell back to the CPU for, as the detector reported it; "" when none did.
-        gpu_read_nothing: Whether the GPU read no frames and the detector read the file again on the CPU.
-
-    Returns:
-        E.g. ``read on the GPU in 13 s``, ``read on the GPU in 20 s; credit text detection on the CPU: …`` or ``read on
-        the CPU after the GPU read nothing (40 s in all)``.
-    """
-    if gpu_read_nothing:
-        # Whatever the CPU found, this says it: a GPU fallback's own reason would only repeat it.
-        return f"read on the CPU after the GPU read nothing ({duration(seconds)} in all)"
-    text = f"read on the {'GPU' if on_gpu else 'CPU'} in {duration(seconds)}"
-    return f"{text}; {_lower_first(fallback)}" if fallback else text
 
 
 def _span(start_ms: int, end_ms: int | None) -> str:
@@ -352,6 +404,20 @@ def path_year(canonical_path: str) -> str | None:
     return None
 
 
+def version_tag(canonical_path: str) -> str | None:
+    """A resolution or cut a file's own name gives, when its job log title needs a short tell-apart from another
+    file in the same job that resolved to the same title (two copies of one film, say).
+
+    Args:
+        canonical_path: The file's local path.
+
+    Returns:
+        E.g. ``"1080p"``; None when the name gives none.
+    """
+    found = _VERSION_TAG_RE.search(os.path.basename(canonical_path))
+    return found.group(1) if found else None
+
+
 def season_of(canonical_path: str) -> tuple[str, str]:
     """The season a Season job's summary line groups an episode under, and the episode's short name.
 
@@ -387,55 +453,71 @@ def checking_phrase(types: Collection[MarkerType], *, is_episode: bool) -> str:
     return f"checking {_types(types)}" + ("" if is_episode else " (films get credits only)")
 
 
-def pickup_line(worker: str, title: str) -> str:
-    """The line a worker logs when it starts a file, before its block: what it's checked for is named on the block's
-    own header once the worker finishes it, so this line doesn't repeat it.
-
-    Args:
-        worker: The worker's display name.
-        title: The file's title (``file_title``).
-
-    Returns:
-        E.g. ``GPU Worker 2 (Intel UHD 770) picked up Accused S04E05``.
-    """
-    return f"{worker} picked up {title}"
+def worker_device(worker: str) -> str:
+    """The device a worker's display name carries in parentheses ("GPU Worker 2 (Intel UHD 770)" → "Intel UHD 770");
+    "" for a worker name with none (a CPU worker, or a checking thread's "" name)."""
+    found = _DEVICE_RE.search(worker)
+    return found.group(1) if found else ""
 
 
-def head_line(title: str, types: Collection[MarkerType], *, is_episode: bool) -> str:
-    """The first line of a file's block, naming it and what it's checked for.
+def file_start_line(title: str, types: Collection[MarkerType], *, is_episode: bool, worker: str = "") -> str:
+    """The first line naming a file: a worker's pickup line naming what it's checked for too, or (with no worker) the
+    file's own line, logged live as the checking begins rather than once the file finishes.
 
     Args:
         title: The file's title (``file_title``).
         types: The types the file is checked for.
         is_episode: Whether it is checked as a TV episode.
+        worker: The display name of the worker running it; "" for a checking thread.
 
     Returns:
-        E.g. ``32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)``.
+        E.g. ``GPU Worker 2 (Intel UHD 770) picked up: Accused S04E05, checking intro and credits`` or ``32 Frames: A
+        9/11 Mystery (2026): checking credits (films get credits only)``.
     """
-    return f"{title}: {checking_phrase(types, is_episode=is_episode)}"
+    phrase = checking_phrase(types, is_episode=is_episode)
+    if worker:
+        return f"{worker} picked up: {title}, {phrase}"
+    return f"{title}: {phrase}"
 
 
-def done_line(
-    title: str, seconds: float | None, *, worker: str = "", cpu_rerun: bool = False, failed: bool = False
+def worker_completed_line(
+    worker: str, title: str, seconds: float | None, *, status: str, reason: str = "", cpu_rerun: bool = False
 ) -> str:
-    """The last line of a file's block.
+    """The line a worker logs when it finishes a file, matching the preview log's own "completed" line.
 
     Args:
+        worker: The worker's display name.
         title: The file's title.
-        seconds: How long the stage that finished it took; None when unknown.
-        worker: The display name of the worker that ran it; "" for a checking thread.
+        seconds: How long the worker's stage took; None when unknown.
+        status: ``success``, ``failed`` or ``skipped``.
+        reason: Why it failed or was skipped; "" for success.
         cpu_rerun: Whether it was a GPU worker's rerun on the CPU.
-        failed: Whether the file failed.
 
     Returns:
-        E.g. ``Accused S04E05: done in 25 s on GPU Worker 2`` or ``Heat (1995): done in 0.5 s, no worker needed``.
+        E.g. ``GPU Worker 2 (Intel UHD 770) completed: Accused S04E05 (success, 26 s)`` or ``GPU Worker 1 completed:
+        Heat (1995) (failed: Plex refused the write, 3 s)``.
+    """
+    detail = f": {reason}" if reason else ""
+    took = f", {duration(seconds)}" if seconds is not None else ""
+    rerun = ", rerun on the CPU" if cpu_rerun else ""
+    return f"{worker} completed: {title} ({status}{detail}{rerun}{took})"
+
+
+def done_line(seconds: float | None, *, failed: bool = False, nothing_sent: bool = False) -> str:
+    """The last line of a file run on no worker (a checking thread alone decided everything).
+
+    Args:
+        seconds: How long it took; None when unknown.
+        failed: Whether the file failed.
+        nothing_sent: Whether nothing was written to any server this run (``nothing_was_sent``).
+
+    Returns:
+        E.g. ``done in 0.5 s``, ``failed after 3 s`` or ``done in 0.5 s (nothing new to send)``.
     """
     took = "" if seconds is None else f" {'after' if failed else 'in'} {duration(seconds)}"
-    text = f"{title}: {'failed' if failed else 'done'}{took}"
-    if worker:
-        text += f" on {_DEVICE_RE.sub('', worker)}" + (", rerun on the CPU" if cpu_rerun else "")
-    elif not failed:
-        text += ", no worker needed"
+    text = f"{'failed' if failed else 'done'}{took}"
+    if nothing_sent and not failed:
+        text += " (nothing new to send)"
     return text
 
 
@@ -557,7 +639,7 @@ def _shown(decisions: Mapping[MarkerType, TypeDecision], types: Collection[Marke
 def decided_line(
     decisions: Mapping[MarkerType, TypeDecision], types: Collection[MarkerType], rows: Iterable[EvidenceRow] = ()
 ) -> str:
-    """The block's line of what was decided per type, and why.
+    """The line of what was decided per type, and why, logged once every source has had its turn.
 
     Args:
         decisions: The file's decisions.
@@ -565,11 +647,11 @@ def decided_line(
         rows: The file's stored evidence, for the chapter names.
 
     Returns:
-        E.g. ``  Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)``.
+        E.g. ``Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)``.
     """
     names = chapter_names(rows)
     parts = [type_phrase(decision, names) for decision in _shown(decisions, types)]
-    return f"{INDENT}Decided: {_SEP.join(parts) or 'nothing to detect for this file'}"
+    return f"Decided: {_SEP.join(parts) or 'nothing to detect for this file'}"
 
 
 def review_note(decisions: Mapping[MarkerType, TypeDecision], types: Collection[MarkerType]) -> str:
@@ -601,6 +683,10 @@ def _lower_first(text: str) -> str:
     return text[:1].lower() + text[1:]
 
 
+def _upper_first(text: str) -> str:
+    return text[:1].upper() + text[1:] if text else text
+
+
 def _server_name(row: Mapping) -> str:
     return str(row.get("server_name") or row.get("server_id") or "a server")
 
@@ -620,16 +706,82 @@ def _kept_phrase(result: ServerResult, name: str) -> str:
     return text
 
 
-def sent_line(result: ServerResult) -> str:
-    """What happened on one server for one file.
+def _by_type(markers: tuple[Marker, ...] | None) -> dict[MarkerType, Marker] | None:
+    return None if markers is None else {m.type: m for m in markers}
+
+
+def _written_phrase(result: ServerResult, name: str) -> str:
+    """What a written status says: added, replaced (old → new), unchanged or removed, per type, grouped by which it
+    was.
+
+    ``result.had`` is the server's prior value: our own last-published record (``RunNotes.sent_before``) when we've
+    published there before -- ``result.had_is_ours`` True, so a type it's missing now really was removed, and a span
+    that matches it is really unchanged -- else the server's own markers as its evidence read this run or saved says
+    (a type it shows that we never sent isn't ours to call removed, so it's simply left out; a span that happens to
+    match it is this type's first send, "added … (same as …'s own)", not "unchanged"), else None when neither is
+    known.
+    """
+    new_by_type = {m.type: m for m in result.ours}
+    if not new_by_type and not result.kept:
+        return "Cleared our markers"
+    had_by_type = _by_type(result.had)
+    if had_by_type is not None:
+        # A type the server keeps its own of was never ours to write: its prior value isn't a removal, it's
+        # ``_kept_phrase``'s to describe.
+        had_by_type = {t: m for t, m in had_by_type.items() if t not in result.kept}
+    order = list(MarkerType)
+    all_types = sorted({*new_by_type, *(had_by_type or {})}, key=order.index)
+    added, added_same, replaced, unchanged, removed, unread = [], [], [], [], [], []
+    for mtype in all_types:
+        new = new_by_type.get(mtype)
+        had = (had_by_type or {}).get(mtype)
+        if new is not None and had is not None:
+            if (had.start_ms, had.end_ms) != (new.start_ms, new.end_ms):
+                replaced.append(f"{mtype.value} {_span(had.start_ms, had.end_ms)} → {_span(new.start_ms, new.end_ms)}")
+            elif result.had_is_ours:
+                unchanged.append(f"{mtype.value} {_span(new.start_ms, new.end_ms)}")
+            else:
+                # The span matches only because it's the server's own markers, never ours before now (decided from
+                # them, say): this is the type's first send, not a write that changed nothing.
+                added_same.append(f"{mtype.value} {_span(new.start_ms, new.end_ms)}")
+        elif new is not None:
+            entry = f"{mtype.value} {_span(new.start_ms, new.end_ms)}"
+            (unread if had_by_type is None else added).append(entry)
+        elif result.had_is_ours:
+            removed.append(mtype.value)
+        # else: only the server's own evidence shows this type -- never ours to send, so never ours to call removed
+    if unchanged and not (added or added_same or replaced or removed or unread):
+        # A WRITTEN row only happens when the write really changed the server (a basis mismatch): every type
+        # matching what we last sent means it must have drifted since (a Plex rescan dropping markers, say), and
+        # this write restored it -- neither "added" (nothing's new) nor merely "unchanged" (bytes were sent).
+        return _upper_first(f"restored {_and(unchanged)}")
+    parts = []
+    if added:
+        parts.append(f"added {_and(added)}")
+    if added_same:
+        parts.append(f"added {_and(added_same)} (same as {name}'s own)")
+    if replaced:
+        parts.append(f"replaced {_and(replaced)}")
+    if unchanged:
+        parts.append(f"unchanged {_and(unchanged)}")
+    if removed:
+        holds = "it no longer holds" if len(removed) == 1 else "they no longer hold"
+        parts.append(f"removed {_and(removed)} ({holds})")
+    if unread:
+        parts.append(f"sent {_and(unread)} (what {name} had before wasn't read)")
+    return _upper_first("; ".join(parts))
+
+
+def server_result_line(result: ServerResult) -> str:
+    """What happened on one server for one file, in the preview log's ``[<server>] …`` style.
 
     Args:
-        result: The server's row, our markers it shows now and the types it keeps as its own.
+        result: The server's row, our markers it shows now, the types it keeps as its own and what it held before.
 
     Returns:
-        E.g. ``  Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10``, ``  Sent to Plex: already up to date (…)``,
-        ``  Sent to Plex: kept Plex's own credits``, ``  Sent to Plex: failed (…)`` or ``  Sent to Plex: not in Plex's
-        library yet (…)``.
+        E.g. ``[Plex] Added intro 0:41–1:12 and credits 41:48–43:10``, ``[Plex] Replaced credits 24:30 → 24:59``,
+        ``[Plex] Removed intro (it no longer holds)``, ``[Plex] Already up to date (…)``, ``[Plex] Kept Plex's own
+        credits``, ``[Plex] Failed (…)`` or ``[Plex] Not in Plex's library yet (…)``.
     """
     row = result.row
     name = _server_name(row)
@@ -638,7 +790,7 @@ def sent_line(result: ServerResult) -> str:
     ours = _markers(result.ours)
     kept = _kept_phrase(result, name) if result.kept else ""
     if status == ServerStatus.WRITTEN.value:
-        text = ours or "cleared our markers"
+        text = _written_phrase(result, name)
     elif status in (ServerStatus.UP_TO_DATE.value, ServerStatus.NEEDS_REVIEW.value, ServerStatus.NONE.value):
         text = f"already up to date ({ours})" if ours else ("" if kept else "nothing to send")
     elif status == ServerStatus.WAITING.value:
@@ -653,7 +805,9 @@ def sent_line(result: ServerResult) -> str:
         text = f"skipped ({message})"
     else:
         text = f"failed ({message})"
-    return f"{INDENT}Sent to {name}: {'; '.join(part for part in (text, kept) if part)}"
+    parts = [part for part in (text, kept) if part]
+    body = "; ".join(parts)
+    return f"[{name}] {_upper_first(body)}"
 
 
 def _skip_reason(label: str, detail: str) -> str:
@@ -766,143 +920,177 @@ class _SourceView:
     chapters: Mapping[MarkerType, Mapping[int, str]]
 
 
-def _source_line(source: Source, view: _SourceView) -> tuple[str, bool]:
-    """A source's line and whether it answered (this job, or saved earlier); False when it wasn't asked."""
-    label = _LINE_LABELS[source]
+def _saved_note(rows: Iterable[EvidenceRow]) -> str:
+    """When a reused answer was last stored, from its rows' own ``fetched_at`` (their date; ``SAVED`` when none say)."""
+    dates = [r.fetched_at[:10] for r in rows if r.fetched_at]
+    return f"saved {max(dates)}" if dates else SAVED
+
+
+def make_source_view(
+    rows: list[EvidenceRow],
+    notes: RunNotes,
+    skipped: Mapping[Source, str],
+    decisions: Mapping[MarkerType, TypeDecision],
+    types: Collection[MarkerType],
+) -> _SourceView:
+    """The state one source's (or one server's) line is built from, fetched fresh so it sees this run's own writes.
+
+    Args:
+        rows: The file's stored evidence (``MarkerStore.evidence_rows``), read again after each source answers.
+        notes: What this job has done with each source for the file so far.
+        skipped: Sources the file is checked without for the whole job's reason, with the answer that stopped them.
+        decisions: The file's decisions so far.
+        types: The types detected for the file.
+
+    Returns:
+        The view.
+    """
+    return _SourceView(rows, notes, skipped, decisions, types, chapter_names(rows))
+
+
+def source_line(source: Source, view: _SourceView) -> str:
+    """One enabled source's line, right when it has its turn: what it answered (this job or reused), or why it wasn't.
+
+    Args:
+        source: The source (not ``Source.SERVER_MARKERS``: see ``server_source_line``).
+        view: The file's current state (``make_source_view``).
+
+    Returns:
+        E.g. ``Checking chapters… "Credits" chapter at 2:00:11–2:03:39``, ``Checking SkipDB… no entry (asked now)`` or
+        ``Checking credit text… not read (a chapter named Credits is used as-is)``.
+    """
+    label = _CHECKING_LABEL[source]
     notes = view.notes
     if source in view.skipped:
-        return f"{INDENT}{label}: skipped ({_skip_reason(label, view.skipped[source])})", True
+        return f"Checking {label}… skipped ({_skip_reason(label, view.skipped[source])})"
     if source in notes.unanswered:
-        return f"{INDENT}{label}: {notes.unanswered[source]}", True
+        return f"Checking {label}… {notes.unanswered[source]}"
     own = [r for r in view.rows if r.source is source and r.origin == ""]
     if own:
-        if (source, "") not in notes.asked:
-            extras = [SAVED]
-        else:
-            extras = [notes.reads[source]] if source in _READ_SHOWN and source in notes.reads else []
-        return f"{INDENT}{label}: {_answer(own, _EMPTY_ANSWER.get(source, 'none'), extras, view.chapters)}", True
+        extras = [ASKED_NOW] if (source, "") in notes.asked else [_saved_note(own)]
+        return f"Checking {label}… {_answer(own, _EMPTY_ANSWER.get(source, 'none'), extras, view.chapters)}"
     note = notes.not_asked.get(source)
     if note == ALREADY_DECIDED:
         note = _already_decided(source, view.decisions, view.types, view.chapters)
-    return f"{INDENT}{label}: {note or ('not read' if source in _READS_FILE else 'not asked')}", False
+    reason = note or ("not read" if source in _READS_FILE else "not asked")
+    return f"Checking {label}… {reason}"
 
 
-def _server_line(server_id: str, name: str, view: _SourceView, server_details: Mapping[str, str]) -> tuple[str, bool]:
+def reading_line(source: Source, *, on_gpu: bool, device: str = "") -> str:
+    """The line logged right before a long local read starts (a credit-text read, a season-audio fingerprint).
+
+    Args:
+        source: ``Source.CREDITS_TEXT`` or ``Source.SEASON_AUDIO``.
+        on_gpu: Whether it reads on the worker's GPU.
+        device: The GPU's name, when known; "" for the CPU or when it isn't known.
+
+    Returns:
+        E.g. ``Reading credit text on the GPU (Intel UHD 770)…`` or ``Reading season audio on the CPU…``.
+    """
+    where = f"GPU ({device})" if on_gpu and device else ("GPU" if on_gpu else "CPU")
+    return f"Reading {_READING_LABEL[source]} on the {where}…"
+
+
+def _read_result_note(seconds: float, fallback: str = "", *, gpu_read_nothing: bool = False) -> str:
+    """The parenthesised note a read's result line ends with: just the time it took (the start line already said
+    where), unless a step fell back to the CPU or the GPU read nothing and it was read again there."""
+    if gpu_read_nothing:
+        return f"read on the CPU after the GPU read nothing ({duration(seconds)} in all)"
+    return f"{duration(seconds)}; {_lower_first(fallback)}" if fallback else duration(seconds)
+
+
+def read_result_line(
+    source: Source,
+    unanswered: str | None,
+    rows: list[EvidenceRow],
+    chapters: Mapping[MarkerType, Mapping[int, str]],
+    *,
+    seconds: float,
+    fallback: str = "",
+    gpu_read_nothing: bool = False,
+) -> str:
+    """A long local read's result, logged as its own line once it finishes.
+
+    Args:
+        source: ``Source.CREDITS_TEXT`` or ``Source.SEASON_AUDIO``.
+        unanswered: Why it had no answer to store this time; None when it did.
+        rows: This source's own evidence rows (``origin == ""``), for the answer's own words.
+        chapters: The file's chapter names, for credit text's own chapter check.
+        seconds: How long the read took.
+        fallback: What a step of it fell back to the CPU for; "" when none did.
+        gpu_read_nothing: Whether the GPU read no frames and it was read again on the CPU.
+
+    Returns:
+        E.g. ``Credit text: credits start at 41:48 (13 s)`` or ``Credit text: the file ends before its stated length
+        (10:00 of 22:01 readable)``.
+    """
+    label = "Credit text" if source is Source.CREDITS_TEXT else "Season audio"
+    if unanswered is not None:
+        return f"{label}: {unanswered}"
+    note = _read_result_note(seconds, fallback, gpu_read_nothing=gpu_read_nothing)
+    return f"{label}: {_answer(rows, _EMPTY_ANSWER[source], [note], chapters)}"
+
+
+def last_seasons_audio_line(view: _SourceView) -> str | None:
+    """ "Last season's audio" follows season audio's own line when the file has that answer; None when it doesn't.
+
+    Args:
+        view: The file's current state.
+
+    Returns:
+        The line, or None.
+    """
+    if not any(r.source is Source.SEASON_AUDIO_PREVIOUS for r in view.rows):
+        return None
+    return source_line(Source.SEASON_AUDIO_PREVIOUS, view)
+
+
+def server_source_line(server_id: str, name: str, view: _SourceView, server_details: Mapping[str, str]) -> str:
+    """One server's own-markers line, right when it has its turn.
+
+    Args:
+        server_id: The server's id.
+        name: The server's display name.
+        view: The file's current state.
+        server_details: Plain words for a server's stored detail that says its markers weren't usable.
+
+    Returns:
+        E.g. ``Checking Plex's own markers… none (asked now)``, ``Checking Plex's own markers… not read (this server
+        shows our markers)`` or ``Checking Plex's imported markers… intro 0:41–1:12 (saved 2026-09-25)``.
+    """
     own = [r for r in view.rows if r.source in SERVER_SOURCES and r.origin == server_id]
     if not own:
-        return f"{INDENT}{name}'s own markers: not read", False
+        reason = view.notes.server_not_read.get(server_id, "not due this run")
+        return f"Checking {name}'s own markers… not read ({reason})"
     imported = any(r.source is Source.SERVER_MARKERS_IMPORTED for r in own)
     label = f"{name}'s imported markers" if imported else f"{name}'s own markers"
-    extras = [] if (Source.SERVER_MARKERS, server_id) in view.notes.asked else [SAVED]
+    key = (Source.SERVER_MARKERS, server_id)
+    if key in view.notes.asked:
+        extras = [ASKED_NOW]
+    elif key in view.notes.dropped:
+        extras = [DROPPED_NOW]
+    else:
+        extras = [_saved_note(own)]
     unusable = next((server_details[r.detail] for r in own if r.detail in server_details), None)
     if unusable:
-        return f"{INDENT}{label}: {_with_notes(unusable, extras)}", True
-    return f"{INDENT}{label}: {_answer(own, 'none', extras)}", True
+        return f"Checking {label}… {_with_notes(unusable, extras)}"
+    return f"Checking {label}… {_answer(own, 'none', extras)}"
 
 
-def source_lines(
-    enabled: Iterable[str],
-    rows: list[EvidenceRow],
-    servers: Iterable[tuple[str, str]],
-    notes: RunNotes,
-    skipped: Mapping[Source, str],
-    server_details: Mapping[str, str],
-    *,
-    decisions: Mapping[MarkerType, TypeDecision],
-    types: Collection[MarkerType],
-    is_episode: bool,
-) -> list[str]:
-    """One line per enabled source for one file: first the sources that answered (this job or saved earlier), then the
-    ones that weren't asked and why, each group in ``SOURCE_LINE_ORDER``. A film leaves out the sources that only
-    describe TV episodes.
+def nothing_was_sent(rows: Iterable[Mapping]) -> bool:
+    """Whether every one of a file's server rows already had nothing new to send (the done line then says so).
 
-    Args:
-        enabled: The enabled sources' ids (``GlobalMarkersSettings.ordered_enabled_sources``).
-        rows: The file's stored evidence (``MarkerStore.evidence_rows``).
-        servers: ``(id, name)`` of every server that has the file (their markers are read whatever their Intro &
-            Credits switch says).
-        notes: What this job did with each source for the file.
-        skipped: Sources the file was checked without for the whole job's reason, with the answer that stopped them.
-        server_details: Plain words for a server's stored detail that says its markers weren't usable.
-        decisions: The file's decisions, for why a source wasn't needed.
-        types: The types detected for the file.
-        is_episode: Whether the file was checked as a TV episode.
-
-    Returns:
-        E.g. ``['  Chapters: "Credits" chapter at 2:00:11–2:03:39', "  SkipDB: no entry", "  Plex's own markers: none",
-        "  Credit text: not read (a chapter named Credits is used as-is)"]``.
-    """
-    on: set[Source] = set()
-    for source_id in enabled:
-        try:
-            on.add(Source(source_id))
-        except ValueError:
-            continue
-    view = _SourceView(rows, notes, skipped, decisions, types, chapter_names(rows))
-    answered: list[str] = []
-    not_asked: list[str] = []
-    for source in SOURCE_LINE_ORDER:
-        if source not in on or (not is_episode and source in EPISODE_ONLY_SOURCES):
-            continue
-        if source is Source.SERVER_MARKERS:
-            lines = [_server_line(sid, name, view, server_details) for sid, name in servers]
-        else:
-            lines = [_source_line(source, view)]
-            if source is Source.SEASON_AUDIO and any(r.source is Source.SEASON_AUDIO_PREVIOUS for r in rows):
-                lines.append(_source_line(Source.SEASON_AUDIO_PREVIOUS, view))
-        for line, has_answer in lines:
-            (answered if has_answer else not_asked).append(line)
-    return [*answered, *not_asked]
-
-
-def _compact_server(result: ServerResult) -> str:
-    name = _server_name(result.row)
-    ours = _types(m.type for m in result.ours)
-    text = f"{name} already has our {ours}" if ours else f"nothing sent to {name}"
-    if result.kept:
-        text += f"; {name} keeps its own {_types(result.kept)}"
-    return text
-
-
-def compact_line(
-    title: str,
-    servers: Iterable[ServerResult],
-    decisions: Mapping[MarkerType, TypeDecision],
-    types: Collection[MarkerType],
-) -> str:
-    """The one line of a file whose answer didn't change and whose servers are up to date.
-
-    Args:
-        title: The file's title.
-        servers: Each server's result for the file.
-        decisions: The file's decisions.
-        types: The types detected for the file.
-
-    Returns:
-        E.g. ``Accused S04E05: unchanged, Plex already has our intro and credits``.
-    """
-    parts = [_compact_server(result) for result in servers]
-    note = review_note(decisions, types)
-    shown = _shown(decisions, types)
-    if note:
-        parts.append(f"still needs review ({note})")
-    elif shown and all(d.status is DecisionStatus.NO_EVIDENCE for d in shown):
-        parts.append("nothing found")
-    return f"{title}: unchanged, {'; '.join(parts) or 'nothing to send'}"
-
-
-def is_unchanged_result(rows: Iterable[Mapping]) -> bool:
-    """Whether a file's server rows say nothing was written and nothing is pending (a file whose answer also didn't
-    change gets ``compact_line``).
+    A waiting, failed or skipped row is something unsettled, not simply "nothing new": this is only true when
+    every row is ``ServerStatus.UP_TO_DATE`` or ``ServerStatus.NONE`` (including no rows at all).
 
     Args:
         rows: The file's server rows.
 
     Returns:
-        True when every row is up to date, in review or had nothing to send.
+        True when every row is ``ServerStatus.UP_TO_DATE`` or ``ServerStatus.NONE``.
     """
-    quiet = (ServerStatus.UP_TO_DATE.value, ServerStatus.NEEDS_REVIEW.value, ServerStatus.NONE.value)
-    return all(row.get("status") in quiet for row in rows)
+    settled = (ServerStatus.UP_TO_DATE.value, ServerStatus.NONE.value)
+    return all(row.get("status") in settled for row in rows)
 
 
 def kept_types(decisions: Mapping[MarkerType, TypeDecision], item_kept: Iterable[MarkerType]) -> frozenset[MarkerType]:

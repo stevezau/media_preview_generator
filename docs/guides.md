@@ -1196,10 +1196,10 @@ header once the worker finishes it, so another file's pickup line or block can n
 [07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
 [07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)
 [07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
-[07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39
-[07:37:23] INFO -   SkipDB: no entry
-[07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU in 9 s)
-[07:37:23] INFO -   Plex's own markers: none
+[07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39 (asked now)
+[07:37:23] INFO -   SkipDB: no entry (asked now)
+[07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU (NVIDIA GeForce RTX 3060) in 9 s)
+[07:37:23] INFO -   Plex's own markers: none (asked now)
 [07:37:23] INFO -   Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)
 [07:37:23] INFO -   Sent to Plex: credits 1:59:32–2:03:39
 [07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1
@@ -1211,23 +1211,38 @@ A TV episode:
 ```
 [09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05
 [09:13:05] INFO - Accused S04E05: checking intro and credits
-[09:13:05] INFO -   Chapters: none
-[09:13:05] INFO -   IntroDB: intro 0:41–1:12
-[09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes)
-[09:13:05] INFO -   Credit text: credits start at 41:48 (read on the GPU in 13 s)
-[09:13:05] INFO -   Plex's own markers: none
+[09:13:05] INFO -   Chapters: none (asked now)
+[09:13:05] INFO -   IntroDB: intro 0:41–1:12 (asked now)
+[09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; read on the CPU in 0 s)
+[09:13:05] INFO -   Credit text: credits start at 41:48 (read on the GPU (Intel UHD 770) in 13 s)
+[09:13:05] INFO -   Plex's own markers: none (asked now)
 [09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
 [09:13:05] INFO -   Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10
 [09:13:05] INFO - Accused S04E05: done in 25 s on GPU Worker 2
+```
+
+An unchanged file, re-checked later, logs the same full block again -- every source's line says its answer was
+reused ("saved 2026-09-25") instead of asked, and the done line ends "(nothing new to send)" when nothing was:
+
+```
+[14:02:10] INFO - Accused S04E05: checking intro and credits
+[14:02:10] INFO -   Chapters: none (saved 2026-09-25)
+[14:02:10] INFO -   IntroDB: intro 0:41–1:12 (saved 2026-09-25)
+[14:02:10] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; saved 2026-09-25)
+[14:02:10] INFO -   Credit text: credits start at 41:48 (saved 2026-09-25)
+[14:02:10] INFO -   Plex's own markers: none (saved 2026-09-25)
+[14:02:10] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
+[14:02:10] INFO -   Sent to Plex: already up to date (intro 0:41–1:12 · credits 41:48–43:10)
+[14:02:10] INFO - Accused S04E05: done in 0 s, no worker needed (nothing new to send)
 ```
 
 - A movie is named by its title on your media server, an episode by its show and `SxxEyy`.
 - One line per source you turned on: what it answered, or why it wasn't asked ("not read (already decided)", "skipped
   (daily limit reached, resets 00:00 UTC)", "skipped (no data for this show; asked again after \<date\>)", "not read
   (every server keeps its own credits)"). The sources that answered come first, then the ones that weren't asked. A
-  film leaves out IntroDB and season audio, which describe TV episodes only. **(saved earlier)** means the answer was
-  stored before (by an earlier run, or while the job checked another episode of the season) and was used without
-  asking again. Times are `m:ss`, or `h:mm:ss` past an hour.
+  film leaves out IntroDB and season audio, which describe TV episodes only. An answer this job asked for says
+  **(asked now)**; one it reused says **(saved \<date\>)**, the day it was last stored (by an earlier run, or while
+  the job checked another episode of the season). Times are `m:ss`, or `h:mm:ss` past an hour.
 - **Decided** gives each type and why: the chapter it came from, the sources that agree, "kept Plex's own", or "needs
   review" / "nothing found" with the reason. When the file's own frames or audio corrected a chapter or an online
   answer, it says so: "moved to the first credit card by credit text", "start from credit text", or an intro chapter
@@ -1244,13 +1259,12 @@ A TV episode:
 - A file a newer one replaced in its folder gets one line: "Blood Legacy (2024) S01E05: Skipped: replaced by a newer
   file (…)".
 
-A file whose result didn't change and whose servers are up to date gets one line instead, e.g. "Accused S04E05:
-unchanged, Plex already has our intro and credits". A **Season: …** job logs blocks only for episodes whose result
-changed, and one line per season for the rest: "Season re-check, Brave New World S01 (3 episodes): no change,
-E01/E03/E04 still need review (credits from credit text only)". A **TheIntroDB recheck** job does the same for its
-episodes ("TheIntroDB recheck, Brave New World S01 (3 episodes): no change"), and logs each movie on its own. Every
-job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found · TheIntroDB
-skipped for 3 files".
+Every file gets this full block, whatever it did: a file whose result didn't change and whose servers are up to date
+logs it too, not a one-line summary. A **Season: …** job (and a **TheIntroDB recheck**) additionally counts each
+episode into its own season's totals, logged once every episode's block is: "Season re-check, Brave New World S01 (3
+episodes): no change, E01/E03/E04 still need review (credits from credit text only)" ("TheIntroDB recheck, Brave New
+World S01 (3 episodes): no change" for a recheck), and logs each movie on its own. Every job ends with a totals line,
+e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found · TheIntroDB skipped for 3 files".
 
 Job log times are the container's local time (its `TZ`, or the `/etc/localtime` you mounted), the same clock as the
 app's own log.

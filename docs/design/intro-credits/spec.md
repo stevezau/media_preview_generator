@@ -1634,12 +1634,16 @@ Show a mockup and confirm wording before building each screen.
    enabled source (the ones that answered, then the ones not asked, each group in a fixed order: chapters, online
    sources, season audio, credit text, each server's own markers; a film leaves out IntroDB and season audio), "
    Decided: …" with each type's reason, one "  Sent to <server>: …" line per server, and "<title>: done in 25 s on GPU
-   Worker 2" (or "…, no worker needed"). Detail lines carry their two-space indent in the message; a line with both a
-   reason and "(saved earlier)" joins them inside one bracket (`_with_notes`) rather than stacking two. A file that
-   failed gets its block at WARNING with the reason. A file whose answer didn't change and whose servers are up to
-   date gets one line ("Accused S04E05: unchanged, Plex already has our intro and credits"), as do the Season,
-   decide-again and online re-check summaries and the totals line, so a 100-file re-check logs about 100 lines. An
-   episode is named "Show SxxEyy" from its path
+   Worker 2" (or "…, no worker needed"; "… (nothing new to send)" when no server row is `WRITTEN`,
+   `nothing_was_sent`). Detail lines carry their two-space indent in the message; a source's own line says whether
+   this job asked it ("asked now") or reused an earlier answer ("saved 2026-09-25", the day `EvidenceRow.fetched_at`
+   was last stored, `_saved_note`); a line with both a reason and that note joins them inside one bracket
+   (`_with_notes`) rather than stacking two. A file that failed gets its block at WARNING with the reason. Every file
+   gets this full block, whatever it did: a file whose answer didn't change and whose servers are up to date logs it
+   too (its sources' lines all say "saved …"), not a one-line summary -- so does a Season job's unchanged episode, a
+   decide-again job's unchanged file and the weekly online re-check's file with nothing new. The Season, decide-again
+   and online re-check jobs still add their own one-line-per-season (or one-line) totals after every file's block, and
+   every job still ends with the totals line. An episode is named "Show SxxEyy" from its path
    and never looks anything up. A film is named by its server's title: from the external ids answer the run already
    has (it carries the title and year), else the title this process kept (`titles.TITLE_CACHE`, an LRU of 20,000
    paths), else the title a library listing gave the item (the year from the file name). Only a film its server was
@@ -1647,8 +1651,9 @@ Show a mockup and confirm wording before building each screen.
    outside any publisher or Plex database lock, waited for at most 2 s, every exception caught, at most 4 in flight
    (more skip at once). The file counts as asked when the lookup starts, so a decide-again, version re-run or Season
    job over thousands of stored films asks each at most once per process; a late answer is kept for later jobs.
-   Without a title, the file name without tags and release group. Credit text says where it read and how long ("read on the GPU in
-   13 s", with a step's CPU fallback reason); season audio says how many of the episodes compared share the theme. The
+   Without a title, the file name without tags and release group. Credit text and season audio (whichever ran this job) say where
+   they read and how long, the GPU's name when known ("read on the GPU (NVIDIA TITAN RTX) in 13 s", with a step's CPU
+   fallback reason); season audio also says how many of the episodes compared share the theme. The
    end-picture check has no line of its own: it only gates season audio's answer and stores nothing. The publishers'
    "now shows N marker(s) of ours" lines moved to DEBUG, since "Sent to" says it. A file a newer one replaced
    (`FileOutcome.SOURCE_GONE`) gets one line, "<title>: Skipped: replaced by a newer file (…)", and `_not_on_disk`'s

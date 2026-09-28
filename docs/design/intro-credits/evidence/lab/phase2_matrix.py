@@ -1484,8 +1484,11 @@ def row_12_plex_p3_p4() -> dict:
     finally:
         set_detect(intro=True, credits=True)
     restore_rick, _ = run_job({"file_paths": [rick], "library_name": "Phase 2 row 12 restore Rick"})
-    restore_e02, _ = run_job({"file_paths": [e02], "library_name": "Phase 2 row 12 restore E02"})
-    steps["end"] = {"rick": p1.plex_served(rick_item), "e02": p1.plex_served(e02_item)}  # fmt: skip
+    # P4's season intro detection also redoes E01 and E03 and drops our intro rows there, so the whole season is
+    # written back (as row 13 does for Rick and Morty); phase 1 row 2 reads all three again in phase 3 row 11.
+    restore_synth, _ = run_job({"file_paths": [p1.SYNTH_SEASON], "library_name": "Phase 2 row 12 restore Synth season"})
+    synth_served = {episode: p1.plex_served(plex_item(p1.synth_path(episode))) for episode in p1.SYNTH_TRUTH}
+    steps["end"] = {"rick": p1.plex_served(rick_item), "synth": synth_served}  # fmt: skip
 
     def types(served: list[dict]) -> list[str]:
         return sorted(m["type"] for m in served)
@@ -1501,8 +1504,8 @@ def row_12_plex_p3_p4() -> dict:
         "P3: Plex's forced credits detection added credits": any(m["type"] == "credits" for m in steps["P3 1 Plex own credits"]["served"]),
         "P3: Plex serves our intro and its credits": bool(p3_both),
         "P4: removing our intro deleted the pv:intros key": "pv:intros" in steps["P4 0 before"]["keys"] and "pv:intros" not in steps["P4 1 intro removed"]["keys"],
-        "end: Rick S01E01 and Synth S01E02 written back (restore)": restore_rick["status"] == restore_e02["status"] == "completed"
-        and p1.same_markers({"mlab-plex": steps["end"]["e02"]}, {"mlab-plex": p1.truth_everywhere(2)["mlab-plex"]})["mlab-plex"],
+        "end: Rick S01E01 and every Synth S01 episode written back (restore)": restore_rick["status"] == restore_synth["status"] == "completed"
+        and all(p1.same_markers({"mlab-plex": served}, {"mlab-plex": p1.truth_everywhere(episode)["mlab-plex"]})["mlab-plex"] for episode, served in synth_served.items()),
     }  # fmt: skip
     notes = [
         f"P3 [index] with our intro + Plex's credits: {[(r['index'], r['text'], r['start']) for r in steps['P3 2 our intro only']['rows']]}",
@@ -1683,39 +1686,101 @@ def _answers(base: str) -> bool:
         return False
 
 
-SEASON_VIEW_SCRIPT = """
+# The Inspector (/inspector, #331): the search's scope set to mlab-plex, the show opened in place, and the episode
+# picked by its file from the show's seasons (each show row and season is tried until its card turns up), then the
+# page is left once the file has loaded. Shared by rows 16 and 26.
+INSPECTOR_OPEN_EPISODE = """
+async def open_episode(pg, query, episode):
+    await pg.goto(f"{APP}/inspector")
+    await pg.wait_for_function("() => document.querySelector('#inspScope option[value=mlab-plex]')", timeout=20000)
+    await pg.select_option("#inspScope", "mlab-plex")
+    await pg.fill("#inspQuery", query)
+    shows = pg.locator('#inspResults button.insp-row[data-kind="show"]', has_text=query)
+    await shows.first.wait_for(timeout=30000)
+    card = pg.locator(f'.insp-episode[data-path="{episode}"]')
+    for i in range(await shows.count()):
+        await shows.nth(i).click()
+        await pg.wait_for_function("() => { const p = document.querySelector('.insp-show'); return p && !p.innerText.includes('Reading the show') }", timeout=30000)
+        seasons = pg.locator(".insp-show .insp-seasons button")
+        for j in range(await seasons.count()):
+            await seasons.nth(j).click()
+            if await card.count():
+                await card.click()
+                await pg.locator("#inspTiles").wait_for(timeout=30000)
+                return
+    raise RuntimeError(f"no episode card for {episode} under any show row for {query!r}")
+"""
+
+
+SEASON_VIEW_SCRIPT = (
+    """
 import asyncio, json, sys
 from playwright.async_api import async_playwright
 APP, SHOT, EPISODE = sys.argv[1], sys.argv[2], sys.argv[3]
+"""
+    + INSPECTOR_OPEN_EPISODE
+    + """
 async def main():
     out = {}
     async with async_playwright() as p:
         b = await p.chromium.launch(); pg = await b.new_page(viewport={"width": 1500, "height": 1100})
         await pg.goto(f"{APP}/login"); await pg.fill("#token", sys.stdin.read().strip()); await pg.keyboard.press("Enter")
-        await pg.wait_for_timeout(3000); await pg.goto(f"{APP}/bif-viewer")
-        await pg.wait_for_function("() => document.querySelector('#serverSelect option[value=mlab-plex]')", timeout=20000)
-        await pg.select_option("#serverSelect", "mlab-plex")
-        await pg.fill("#searchInput", "Synth Chapters"); await pg.click("#searchBtn")
-        result = pg.locator(f'.result-item[data-media-file="{EPISODE}"]')
-        await result.first.wait_for(timeout=30000); await result.first.click()
-        await pg.click("#inspectorMarkersTabBtn"); await pg.wait_for_timeout(2000)
-        await pg.click("label[for='markersViewSeason']")
-        body = pg.locator("#markersSeasonBody")
-        await pg.wait_for_function("() => { const b = document.querySelector('#markersSeasonBody'); return b && b.innerText && !b.innerText.includes('Loading') }", timeout=30000)
+        await pg.wait_for_timeout(3000)
+        await open_episode(pg, "Synth Chapters", EPISODE)
+        await pg.click("#inspScopeSeason")
+        await pg.locator("#inspSeason button.insp-season-row").first.wait_for(timeout=30000)
         await pg.wait_for_timeout(1500)
-        text = lambda sel: body.locator(sel).first.inner_text()
-        out["title"] = await text(".mk-season-title"); out["sub"] = await text(".mk-season-sub")
-        out["ready"] = await text(".mk-season-ready")
-        out["publish"] = await text("#markersSeasonPublishBtn")
-        out["rows"] = await pg.evaluate("() => Array.from(document.querySelectorAll('#markersSeasonBody tr[data-episode]')).map(r => [r.dataset.episode, Array.from(r.querySelectorAll('.mk-dot')).map(d => d.className + ' | ' + (d.title || ''))])")
+        text = lambda sel: pg.locator(sel).first.inner_text()
+        # The page names the show in its header and the season in the Season card.
+        out["show"] = await text("#inspTitle"); out["show_sub"] = await text("#inspTitleSub")
+        out["title"] = await text("#inspSeason .insp-season-title"); out["sub"] = await text("#inspSeasonSub")
+        out["publish"] = await text("#inspPublishSeason")
+        out["rows"] = await pg.evaluate("() => Array.from(document.querySelectorAll('#inspSeason button.insp-season-row')).map(r => [r.dataset.episode, Array.from(r.querySelectorAll('.insp-dot')).map(d => d.className + ' | ' + (d.title || ''))])")
         await pg.screenshot(path=SHOT, full_page=True)
-        await pg.click("#markersSeasonPublishBtn"); await pg.wait_for_timeout(3000)
+        await pg.click("#inspPublishSeason"); await pg.wait_for_timeout(3000)
         out["toast"] = await pg.evaluate("() => (document.getElementById('toastBody') || {}).innerText || ''")
         await pg.screenshot(path=SHOT.replace('.png', '-published.png'), full_page=True)
         await b.close()
     print(json.dumps(out))
 asyncio.run(main())
 """
+)
+
+
+def season_view_page_checks(seen: dict, api: dict) -> dict:
+    """Row 16's checks of what the Season view showed, against the Season data the app served for it.
+
+    Args:
+        seen: What SEASON_VIEW_SCRIPT read from the page.
+        api: ``GET /api/markers/season`` for the same episode.
+
+    Returns:
+        Each check's name and whether it held.
+    """
+    ready = api["counts"]["ready"]
+    total = api["counts"].get("total_episodes") or api["counts"]["episodes"]
+    decided = {
+        t: sum(1 for e in api["episodes"] if (e.get(t) or {}).get("status") == "decided") for t in ("intro", "credits")
+    }
+
+    def has(n: int) -> str:
+        return "has" if n == 1 else "have"
+
+    counted = (
+        f"{decided['intro']} {has(decided['intro'])} an intro · {decided['credits']} {has(decided['credits'])} credits"
+    )
+    dots_ok = all(
+        all("insp-dot-ok" in d for d in dots)
+        for ep, dots in seen["rows"]
+        if next(e for e in api["episodes"] if e["episode"] == ep)["intro"]["status"] == "decided"
+    )
+    return {
+        "header Synth Chapters · 2021 · S01E01": seen["show"] == "Synth Chapters" and seen["show_sub"] == "2021 · S01E01",
+        f"Season card Season 1 · {total} episodes": seen["title"] == f"Season 1 · {total} episodes",
+        f"Publish {ready} to 5 servers": seen["publish"] == f"Publish {ready} to 5 servers" and ready > 0,
+        f"the Season card counts {counted}": seen["sub"].startswith(counted),
+        "every decided episode's five dots green": dots_ok and all(len(d) == 5 for _, d in seen["rows"]),
+    }  # fmt: skip
 
 
 @row(16)
@@ -1745,21 +1810,18 @@ def row_16_season_view() -> dict:
         timeout=60,
     )
     job = p1.wait_job(job["id"], timeout=900)
-    ready = api["counts"]["ready"]
-    dots_ok = all(
-        all("mk-dot-ok" in d for d in dots)
-        for ep, dots in seen["rows"]
-        if next(e for e in api["episodes"] if e["episode"] == ep)["intro"]["status"] == "decided"
-    )
     checks = {
-        "title Synth Chapters (2021) · Season 1": seen["title"] == "Synth Chapters (2021) · Season 1",
-        f"Publish {ready} to 5 servers": seen["publish"] == f"Publish {ready} to 5 servers" and ready > 0,
-        f"{ready} ready": seen["ready"] == f"{ready} ready",
-        "every decided episode's five dots green": dots_ok and all(len(d) == 5 for _, d in seen["rows"]),
+        **season_view_page_checks(seen, api),
         "Publish queued the named job at NORMAL": job["priority"] == 2,
         "it completed": job["status"] == "completed",
     }
-    notes = [f"page {seen}", f"api counts {api['counts']}; job {job['id'][:8]} {job['status']} {job['progress'].get('outcome')}", f"screenshots {shot}"]  # fmt: skip
+    notes = [
+        "expectation changed (2026-09-28, Inspector #331): the page names the show in its header (Synth Chapters, "
+        "2021 · S01E01) and the season in the Season card (Season 1 · N episodes); the ready count is read from "
+        "Publish's own label (\"{ready} ready\" is gone), and the Season card's line counting decided intros and "
+        "credits is checked against the Season data",
+        f"page {seen}", f"api counts {api['counts']}; job {job['id'][:8]} {job['status']} {job['progress'].get('outcome')}", f"screenshots {shot}",
+    ]  # fmt: skip
     return checks_result(16, "Season view in the real app", checks, {"seen": seen, "api": api, "job": job}, notes)
 
 
@@ -2458,54 +2520,60 @@ def row_25_locked_marker_through_emby_publisher() -> dict:
     )
 
 
-SEASON_EDIT_SCRIPT = """
+SEASON_EDIT_SCRIPT = (
+    """
 import asyncio, json, sys
 from playwright.async_api import async_playwright
 APP, SHOT, EPISODE, LABEL, START, END = sys.argv[1:7]
+"""
+    + INSPECTOR_OPEN_EPISODE
+    + """
+async def season_row(pg):
+    await pg.click("#inspScopeSeason")
+    row = pg.locator(f'#inspSeason button.insp-season-row[data-episode="{LABEL}"]')
+    await row.wait_for(timeout=30000)
+    return row
 async def main():
     out = {}
     async with async_playwright() as p:
         b = await p.chromium.launch(); pg = await b.new_page(viewport={"width": 1500, "height": 1100})
         await pg.goto(f"{APP}/login"); await pg.fill("#token", sys.stdin.read().strip()); await pg.keyboard.press("Enter")
-        await pg.wait_for_timeout(3000); await pg.goto(f"{APP}/bif-viewer")
-        await pg.wait_for_function("() => document.querySelector('#serverSelect option[value=mlab-plex]')", timeout=20000)
-        await pg.select_option("#serverSelect", "mlab-plex")
-        await pg.fill("#searchInput", "Synth Chapters"); await pg.click("#searchBtn")
-        result = pg.locator(f'.result-item[data-media-file="{EPISODE}"]')
-        await result.first.wait_for(timeout=30000); await result.first.click()
-        await pg.click("#inspectorMarkersTabBtn"); await pg.wait_for_timeout(2000)
-        await pg.click("label[for='markersViewSeason']")
-        await pg.wait_for_function("() => { const b = document.querySelector('#markersSeasonBody'); return b && b.innerText && !b.innerText.includes('Loading') }", timeout=30000)
-        row = pg.locator(f'#markersSeasonBody tr[data-episode="{LABEL}"]')
+        await pg.wait_for_timeout(3000)
+        await open_episode(pg, "Synth Chapters", EPISODE)
+        row = await season_row(pg)
         out["before"] = " ".join((await row.inner_text()).split())
-        await row.locator(".mk-season-action").get_by_role("button", name="Edit", exact=True).click()
-        await pg.wait_for_selector(".mk-edit-actions", timeout=15000)
-        strip = pg.locator('.mk-edit-strip[data-edit-type="intro"]')
-        await strip.locator(".mk-time").nth(0).fill(START)
-        await strip.locator(".mk-time").nth(1).fill(END)
-        out["pending"] = " ".join((await pg.locator(".mk-edit-pending").inner_text()).split())
+        # A Season row opens its episode, where Adjust edits it (the Inspector has no editor inside the Season card).
+        await row.click()
+        await pg.locator("#inspAdjust").wait_for(timeout=30000)
+        await pg.click("#inspAdjust")
+        await pg.locator("#inspAdjustPanel").wait_for(timeout=15000)
+        start = pg.locator('[data-edge="intro-start"] input')
+        await start.fill(START); await start.press("Enter")
+        end = pg.locator('[data-edge="intro-end"] input')
+        await end.fill(END); await end.press("Enter")
+        out["pending"] = " ".join((await pg.locator('[data-adjust="intro"] .insp-adjust-range').inner_text()).split())
         async with pg.expect_response(lambda r: r.url.endswith("/api/markers/item/markers") and r.request.method == "POST", timeout=30000) as saved:
-            await pg.locator(".mk-edit-actions .mk-edit-save").click()
+            await pg.click("#inspAdjustSave")
         response = await saved.value
         out["save_status"] = response.status
         await pg.wait_for_timeout(2500)
-        await pg.click("label[for='markersViewSeason']")
-        await pg.wait_for_function("() => { const b = document.querySelector('#markersSeasonBody'); return b && b.innerText && !b.innerText.includes('Loading') }", timeout=30000)
+        row = await season_row(pg)
         await pg.wait_for_timeout(1500)
-        row = pg.locator(f'#markersSeasonBody tr[data-episode="{LABEL}"]')
         out["after"] = " ".join((await row.inner_text()).split())
-        out["dots"] = await row.evaluate("r => Array.from(r.querySelectorAll('.mk-dot')).map(d => d.className + ' | ' + (d.title || ''))")
-        out["chips"] = await row.evaluate("r => Array.from(r.querySelectorAll('.mk-chip')).map(c => c.innerText.trim())")
+        out["dots"] = await row.evaluate("r => Array.from(r.querySelectorAll('.insp-dot')).map(d => d.className + ' | ' + (d.title || ''))")
+        out["chips"] = await row.evaluate("r => Array.from(r.querySelectorAll('.insp-mini-chip')).map(c => c.innerText.trim())")
         await pg.screenshot(path=SHOT, full_page=True)
         await b.close()
     print(json.dumps(out))
 asyncio.run(main())
 """
+)
 
 
 @row(26)
 def row_26_season_view_edit_a_row() -> dict:
-    """Season view -> Edit a row -> save: the row and its per-server dots update, and every server shows the edit."""
+    """Season view -> a row -> Adjust -> save: the row and its per-server dots update, and every server shows the
+    edit."""
     import phase4_matrix as p4
 
     p1.SHOTS.mkdir(parents=True, exist_ok=True)
@@ -2542,7 +2610,7 @@ def row_26_season_view_edit_a_row() -> dict:
             episode["intro"]["marker"]["start_ms"], episode["intro"]["marker"]["end_ms"], episode["intro"]["marker"]["locked"]
         ) == (*intro_edit, True),
         "every per-server dot is green (written), one per server": len(seen["dots"]) == len(ALL_MARKER_SERVERS)
-        and all("mk-dot-ok" in dot for dot in seen["dots"]),
+        and all("insp-dot-ok" in dot for dot in seen["dots"]),
         "markers.db holds the edited intro locked": after["stored"]["intro"] == (*intro_edit, 1),
         "the credits the editor saved with it start where they were detected": stored_credits is not None
         and stored_credits[0] == credits_truth[0],
@@ -2553,7 +2621,12 @@ def row_26_season_view_edit_a_row() -> dict:
             any(t == "credits" and s == stored_credits[0] for t, s, _ in rows) for rows in after["served"].values()
         ),
     }  # fmt: skip
-    notes = [f"before {seen['before']!r}; pending {seen['pending']!r}; after {seen['after']!r}", f"chips {seen['chips']}", f"screenshot {shot}"]  # fmt: skip
+    notes = [
+        "expectation changed (2026-09-28, Inspector #331): a Season row opens its episode and Adjust edits it there "
+        "(the Season card has no editor of its own); the row, its dots and its chips are read from the Season card "
+        "again after the save, with the same checks",
+        f"before {seen['before']!r}; pending {seen['pending']!r}; after {seen['after']!r}", f"chips {seen['chips']}", f"screenshot {shot}",
+    ]  # fmt: skip
     return checks_result(26, "Season view: Edit a row, save, the row and its dots update", checks, {"seen": seen, "api": episode, "after": after}, notes)  # fmt: skip
 
 

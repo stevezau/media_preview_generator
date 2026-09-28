@@ -1057,7 +1057,8 @@ class TestCreditTextOnTheWorkers:
             setup.effects["gpu"] = frames.GpuDecodeError("the GPU decoded no frames from S01E01.mkv")
         job = self._run(engine, setup)
         logs = engine.jm.get_logs(job.id)
-        # Every entry is one record: its own time and level, then its message (a detail line keeps its indent).
+        # Every entry is one record: its own time and level, then its message. A line after the file's first starts
+        # with its title and " · ", so it can be told apart from another file's or worker's line interleaved with it.
         stamped = [re.fullmatch(r"\[\d\d:\d\d:\d\d\] (INFO|WARNING|ERROR) - (.*)", line) for line in logs]
         assert all(stamped), logs
         messages = [match.group(2) for match in stamped]
@@ -1066,20 +1067,30 @@ class TestCreditTextOnTheWorkers:
         # One start line replaces the runner's, the job manager's and the dispatcher's.
         assert messages[0] == f"Intro & Credits job {job.id[:8]} started: 1 file, manual run"
         assert not [m for m in messages if m.startswith(("Started job", "Dispatcher: submitted"))]
-        start = messages.index(f"{worker} picked up {episode}")
-        end = next(n for n, m in enumerate(messages) if m.startswith(f"{episode}: done in "))
-        read_on = "the CPU" if rerun else "the GPU"
-        # The file's lines (its own header first) are written together as it finishes; the worker's own GPU fallback
-        # warning comes before.
-        block = messages[end - 4 : end]
-        assert block[0] == f"{episode}: checking credits"
-        assert [line.split(":", 1)[0] for line in block[1:]] == ["  Credit text", "  Decided", "  Sent to PLEX-1"]
-        assert re.fullmatch(rf"  Credit text: none found \(read on {read_on} in [\d.]+ s\)", block[1]), block
-        assert block[2:] == ["  Decided: credits nothing found", "  Sent to PLEX-1: nothing to send"]
-        assert start < end - 4
+        reading = [f"{episode} · Reading credit text on the GPU (Test GPU)…"]
+        if rerun:
+            reading.append(
+                f"{worker} couldn't process {setup.path} on the GPU and is retrying on CPU. "
+                "Reason: the GPU decoded no frames from S01E01.mkv"
+            )
+            reading.append(f"{episode} · Reading credit text on the CPU…")
+        start = messages.index(f"{episode}: checking credits")
+        assert messages[start : start + 3 + len(reading)] == [
+            f"{episode}: checking credits",
+            f"{episode} · Checking chapters… none (asked now)",
+            f"{worker} picked up: {episode}, checking credits",
+            *reading,
+        ]
+        assert re.fullmatch(rf"{re.escape(episode)} · Credit text: none found \([\d.]+ s\)", messages[-6]), messages
+        assert messages[-5:-3] == [
+            f"{episode} · Decided: credits nothing found",
+            f"{episode} · [PLEX-1] Nothing to send",
+        ]
         assert re.fullmatch(
-            rf"{re.escape(episode)}: done in [\d.]+ s on GPU Worker 1" + (", rerun on the CPU" if rerun else ""),
-            messages[end],
+            rf"{re.escape(worker)} completed: {re.escape(episode)} \(success"
+            + (", rerun on the CPU" if rerun else "")
+            + r", [\d.]+ s\)",
+            messages[-3],
         )
         # The totals come after the file's lines, however the job log's queue was drained; the job manager's own
         # completion line stays last.
@@ -1087,7 +1098,6 @@ class TestCreditTextOnTheWorkers:
             "Done: 1 file · 0 sent to PLEX-1 · 0 need review · 1 nothing found",
             f"Job {job.id} completed successfully",
         ]
-        assert end < len(messages) - 2
 
     def test_a_file_cut_short_is_no_gpu_fallback_and_is_not_read_again(self, engine, setup, monkeypatch):
         # Production, 2026-09-26: 14 of 19 GPU->CPU fallbacks were files cut short, the GPU blamed for each.
@@ -1109,7 +1119,10 @@ class TestCreditTextOnTheWorkers:
         assert job.status is JobStatus.COMPLETED and job.error is None
         assert _outcome(engine.jm, job.id) == {"markers_none": 1}
         assert self._released(engine)
-        assert f"INFO -   Credit text: {cut_short}" in [line.split("] ", 1)[1] for line in engine.jm.get_logs(job.id)]
+        episode = "Rick and Morty (2013) S01E01"
+        assert f"INFO - {episode} · Credit text: {cut_short}" in [
+            line.split("] ", 1)[1] for line in engine.jm.get_logs(job.id)
+        ]
 
         # The next scan of the same file: no worker, no decode.
         again = self._run(engine, setup)
@@ -1117,10 +1130,13 @@ class TestCreditTextOnTheWorkers:
         assert measured == [DURATION / 1000 - frames.EPISODE_TAIL_S]
         assert again.status is JobStatus.COMPLETED and _outcome(engine.jm, again.id) == {"markers_none": 1}
         assert any(cut_short in line for line in engine.jm.get_logs(again.id))
-        # Nothing changed since, so the file's one line says so.
-        assert "INFO - Rick and Morty (2013) S01E01: unchanged, nothing sent to PLEX-1; nothing found" in [
-            line.split("] ", 1)[1] for line in engine.jm.get_logs(again.id)
-        ]
+        # Nothing changed since, so the file still gets its full lines, not a decode.
+        messages = [line.split("] ", 1)[1] for line in engine.jm.get_logs(again.id)]
+        assert f"INFO - {episode}: checking credits" in messages
+        assert f"INFO - {episode} · Credit text: {cut_short}" in messages
+        assert f"INFO - {episode} · Decided: credits nothing found" in messages
+        assert f"INFO - {episode} · [PLEX-1] Nothing to send" in messages
+        assert f"INFO - {episode} · done in 0 s (nothing new to send)" in messages
         assert detector.credits_text_failed_here(rec, SimpleNamespace(store=setup.store)) is True
 
     def test_a_gpu_that_misses_frames_the_cpu_reads_is_a_gpu_fallback(self, engine, setup, monkeypatch):
@@ -1144,10 +1160,10 @@ class TestCreditTextOnTheWorkers:
         assert self._released(engine)
         import re
 
-        credit_text = [line for line in engine.jm.get_logs(job.id) if "INFO -   Credit text: " in line]
+        credit_text = [line for line in engine.jm.get_logs(job.id) if "· Credit text: " in line]
         assert len(credit_text) == 1, credit_text
         assert re.search(
-            r"INFO -   Credit text: none found \(read on the CPU after the GPU read nothing \([\d.]+ s in all\)\)$",
+            r"· Credit text: none found \(read on the CPU after the GPU read nothing \([\d.]+ s in all\)\)$",
             credit_text[0],
         ), credit_text
 

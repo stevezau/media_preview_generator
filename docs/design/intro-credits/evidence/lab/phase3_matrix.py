@@ -601,6 +601,35 @@ def row_01_capability() -> dict:
     return checks_result(1, "Credit text capability and the Settings row", premise, checks, {"seen": seen})
 
 
+# The Inspector (/inspector, #331) for row 2, run after `APP, MOVIE = ...`. Plex titles the movie "Synth Credits" (the
+# year is its own field) and the search returns both movies, so each Film row is opened in turn until the page's file
+# is MOVIE: the row is picked by its file, not by being first.
+INSPECTOR_CREDIT_TEXT_STEPS = """\
+        await pg.goto(APP + "/inspector")
+        await pg.wait_for_function("() => document.querySelector('#inspScope option[value=mlab-plex]')", timeout=20000)
+        await pg.select_option("#inspScope", "mlab-plex")
+        await pg.fill("#inspQuery", "Synth Credits")
+        films = pg.locator('#inspResults button.insp-row[data-kind="movie"]', has_text="Synth Credits")
+        await films.first.wait_for(timeout=30000)
+        opened = ""
+        for i in range(await films.count()):
+            await films.nth(i).click()
+            opened = await pg.evaluate("() => new URLSearchParams(location.search).get('path') || ''")
+            if opened == MOVIE:
+                break
+            await pg.click("#inspShowResults")
+            await films.first.wait_for(timeout=30000)
+        if opened != MOVIE:
+            raise RuntimeError(f"no Film row for 'Synth Credits' opens {MOVIE}")
+        await pg.locator("#inspTiles").wait_for(timeout=30000)
+        row = pg.locator('#inspEvidence .insp-ev[data-source="credits_text"]')
+        await row.wait_for(timeout=30000)
+        band = pg.locator('#inspStrip .insp-lane[data-lane="found"] .insp-band', has_text="Credits").first
+        await band.wait_for(timeout=30000)
+        print(json.dumps({"we_found": await band.inner_text(), "credit_text_row": " ".join((await row.inner_text()).split())}))
+"""
+
+
 @row(2)
 def row_02_credit_text_alone() -> dict:
     """Credit text alone decides credits (Q1; the app's only rules since 2026-09-24, spec §5.5 rule 6): published to all
@@ -616,24 +645,14 @@ def row_02_credit_text_alone() -> dict:
     evidence["decision"] = payload["decisions"]["credits"]
     evidence["servers"] = {sid: p2.inspector_server(MOVIE, sid) for sid in p2.ALL_MARKER_SERVERS}
     evidence["inspector"] = screenshot(
-        '        await pg.goto("' + p1.APP + '/bif-viewer")\n'
-        "        await pg.wait_for_function(\"() => document.querySelector('#serverSelect option[value=mlab-plex]')\", timeout=20000)\n"
-        '        await pg.select_option("#serverSelect", "mlab-plex")\n'
-        # Plex titles the movie "Synth Credits" (the year is its own field), and the search returns both movies:
-        # the row is picked by its file, not by being first.
-        '        await pg.fill("#searchInput", "Synth Credits"); await pg.click("#searchBtn")\n'
-        "        hit = pg.locator('.result-item[data-media-file=\"" + MOVIE + "\"]').first\n"
-        "        await hit.wait_for(timeout=30000)\n"
-        "        await hit.click(); await pg.click('#inspectorMarkersTabBtn')\n"
-        "        await pg.wait_for_timeout(3000)\n"
-        '        lane = pg.locator(\'.mk-window[data-window="ending"] .mk-lane[data-lane="Credit text"]\').first\n'
-        "        print(json.dumps(await lane.inner_text()))",
+        f"        APP, MOVIE = {p1.APP!r}, {MOVIE!r}\n" + INSPECTOR_CREDIT_TEXT_STEPS,
         p1.SHOTS / "p3-row02-inspector.png",
     )
     rows = evidence["evidence"]
     start = rows[0]["start_ms"] if rows else None
     end = rows[0]["end_ms"] if rows else None
     marker = evidence["decision"].get("marker") or {}
+    page = evidence["inspector"].get("page") or {}
 
     def mss(ms: int) -> str:
         return f"{ms // 60_000}:{ms // 1000 % 60:02d}"
@@ -661,10 +680,15 @@ def row_02_credit_text_alone() -> dict:
            and abs(m["start_ms"] - start) <= 1_000
            and "Emby skips to the end of the file" in ((evidence["servers"][sid] or {}).get("publish_message") or "")
            for sid in p2.EMBY_SERVERS},
-        "Inspector's Credit text lane shows start-end": start is not None and end is not None
-        and any(f"{mss(start + d)}–{mss(end + e)}" in str(evidence.get("inspector", {}).get("page")) for d in (-1000, 0, 1000) for e in (-1000, 0, 1000)),
+        "Inspector shows the credit text's start-end (We found) and its Credit text row is used for the credits": start is not None and end is not None
+        and any(f"{mss(start + d)} – {mss(end + e)}" in page.get("we_found", "") for d in (-1000, 0, 1000) for e in (-1000, 0, 1000))
+        and any(f"Credits at {mss(start + d)}" in page.get("credit_text_row", "") for d in (-1000, 0, 1000))
+        and "Used for the credits" in page.get("credit_text_row", ""),
     }  # fmt: skip
     notes = [
+        "expectation changed (2026-09-28, Inspector #331): the Inspector has no lane per source; the credit text's "
+        "start-end is read from the We found band (credits are decided by credit text alone, with its end, per the "
+        "decision check), and the Credit text evidence row must show the same start and say it was used for the credits",
         "expectation changed (2026-09-27 lab matrices update): the row's High half (credit text alone Needs review, "
         "nothing published) is gone with the removed publish_when (schema 16); in its place a posted High must be "
         "ignored and the lone answer still publish; the Medium half's checks are unchanged",
