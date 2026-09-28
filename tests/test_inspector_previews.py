@@ -355,13 +355,15 @@ class TestFilePreviews:
             owners.append((cfg, hanging, _matches(cfg.id, "1")))
         started = time.monotonic()
         try:
-            rows = file_previews(video, owners, timeout_s=0.3)
+            rows = file_previews(video, owners, timeout_s=0.5)
         finally:
             release.set()
         elapsed = time.monotonic() - started
 
         assert [r["error"] != "" for r in rows] == [True, True, True]
-        assert elapsed < 0.6
+        # Waited together ≈ one timeout (0.5 s); one after another would be 1.5 s. The gap leaves room for a
+        # loaded CI runner (0.3 s / < 0.6 s measured 0.70 s there).
+        assert elapsed < 1.2
 
     def test_a_server_that_timed_out_rests_then_is_asked_again(self, video, monkeypatch):
         from media_preview_generator.inspector import previews
