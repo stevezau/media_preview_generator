@@ -477,6 +477,49 @@ _version_cache_lock = threading.Lock()
 _VERSION_CACHE_TTL = 3600  # seconds
 
 
+def _installed_build() -> dict:
+    """Identify the running build from env vars and package metadata alone (no network).
+
+    Returns:
+        Dict with current_version and install_type, plus the GIT_BRANCH / GIT_SHA they came
+        from (empty when unset or left at the Dockerfile's "unknown" default).
+    """
+    from ...utils import is_docker_environment
+    from ...version_check import get_current_version, parse_version
+
+    git_branch_raw = (os.environ.get("GIT_BRANCH") or "").strip()
+    git_sha_raw = (os.environ.get("GIT_SHA") or "").strip()
+
+    # Dockerfile ARG defaults are the literal string "unknown".
+    is_local_docker = git_branch_raw == "unknown" and git_sha_raw == "unknown"
+    git_branch = "" if git_branch_raw == "unknown" else git_branch_raw
+    git_sha = "" if git_sha_raw == "unknown" else git_sha_raw
+
+    if is_local_docker:
+        # Local Docker build (Dockerfile defaults, not CI)
+        install_type, current_version = "local_docker", "local build"
+    elif git_branch.lower().startswith("pr-") and git_sha:
+        install_type, current_version = "pr_build", f"PR-{git_branch.split('-', 1)[1]}"
+    elif git_branch and git_sha:
+        # CI Docker build: a version tag (e.g. 3.4.1) is a release image, any other branch a dev image.
+        try:
+            parse_version(git_branch)
+            install_type, current_version = "docker", git_branch.lstrip("v")
+        except ValueError:
+            install_type, current_version = "dev_docker", f"{git_branch}@{git_sha[:7]}"
+    else:
+        # Non-Docker: source checkout or pip install
+        install_type = "source" if not is_docker_environment() else "docker"
+        current_version = get_current_version()
+
+    return {
+        "current_version": current_version,
+        "install_type": install_type,
+        "git_branch": git_branch,
+        "git_sha": git_sha,
+    }
+
+
 def _get_version_info() -> dict:
     """Build version info, using a 1-hour TTL cache for the GitHub API call.
 
@@ -495,64 +538,22 @@ def _get_version_info() -> dict:
         ):
             return _version_cache["result"]
 
-    from ...utils import is_docker_environment
-    from ...version_check import (
-        get_branch_head_sha,
-        get_current_version,
-        get_latest_github_release,
-        parse_version,
-    )
+    from ...version_check import get_branch_head_sha, get_latest_github_release, parse_version
 
-    git_branch_raw = (os.environ.get("GIT_BRANCH") or "").strip()
-    git_sha_raw = (os.environ.get("GIT_SHA") or "").strip()
-
-    # Dockerfile ARG defaults are the literal string "unknown".
-    is_local_docker = git_branch_raw == "unknown" and git_sha_raw == "unknown"
-    git_branch = "" if git_branch_raw == "unknown" else git_branch_raw
-    git_sha = "" if git_sha_raw == "unknown" else git_sha_raw
-
+    build = _installed_build()
+    install_type = build["install_type"]
+    current_version = build["current_version"]
     update_available = False
-    latest_version = None
 
-    if is_local_docker:
-        # Local Docker build (Dockerfile defaults, not CI)
-        install_type = "local_docker"
-        current_version = "local build"
+    if install_type in ("local_docker", "pr_build"):
+        # Reference the latest release only: these builds never show the update banner.
         latest_version = get_latest_github_release()
-
-    elif git_branch.lower().startswith("pr-") and git_sha:
-        # PR CI build -- show "PR-123", reference the latest release, no update banner
-        install_type = "pr_build"
-        pr_num = git_branch.split("-", 1)[1]
-        current_version = f"PR-{pr_num}"
-        latest_version = get_latest_github_release()
-
-    elif git_branch and git_sha:
-        # CI Docker build -- distinguish release tags from dev branches
-        try:
-            parse_version(git_branch)
-            # GIT_BRANCH is a version tag (e.g. 3.4.1) -- release image
-            install_type = "docker"
-            current_version = git_branch.lstrip("v")
-            latest_version = get_latest_github_release()
-            if latest_version:
-                try:
-                    update_available = parse_version(latest_version) > parse_version(current_version)
-                except ValueError:
-                    logger.debug("Could not compare versions for update check")
-        except ValueError:
-            # GIT_BRANCH is a branch name (e.g. dev) -- dev image
-            install_type = "dev_docker"
-            current_version = f"{git_branch}@{git_sha[:7]}"
-            head_sha = get_branch_head_sha(git_branch)
-            if head_sha and not head_sha.startswith(git_sha):
-                update_available = True
-            latest_version = f"{git_branch}@{head_sha[:7]}" if head_sha else None
-
+    elif install_type == "dev_docker":
+        head_sha = get_branch_head_sha(build["git_branch"])
+        if head_sha and not head_sha.startswith(build["git_sha"]):
+            update_available = True
+        latest_version = f"{build['git_branch']}@{head_sha[:7]}" if head_sha else None
     else:
-        # Non-Docker: source checkout or pip install
-        install_type = "source" if not is_docker_environment() else "docker"
-        current_version = get_current_version()
         latest_version = get_latest_github_release()
         if latest_version:
             try:
@@ -572,6 +573,28 @@ def _get_version_info() -> dict:
         _version_cache["fetched_at"] = time.monotonic()
 
     return result
+
+
+def navbar_version_info() -> dict:
+    """The version every page's navbar shows, built without waiting on GitHub.
+
+    Reads the last cached check whatever its age: it only flags a newer release, and the
+    startup pre-warm, the Dashboard and Settings refresh it. Until the first check lands it
+    falls back to the installed version with no update flag.
+
+    Returns:
+        Dict with label (``v3.4.1``, ``dev@a9c8177``, ``PR-12``, ``local build``),
+        update_available, and latest_version.
+    """
+    with _version_cache_lock:
+        cached = _version_cache["result"]
+    info = cached or {**_installed_build(), "latest_version": None, "update_available": False}
+    current = info["current_version"] or "unknown"
+    return {
+        "label": f"v{current}" if current[:1].isdigit() else current,
+        "update_available": bool(info["update_available"]),
+        "latest_version": info["latest_version"],
+    }
 
 
 @api.route("/system/version")

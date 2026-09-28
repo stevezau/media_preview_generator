@@ -763,8 +763,7 @@ html[data-bs-theme="light"] .navbar {
         font-size: 1.05rem;
     }
 
-    /* "Sponsor this project" is the longest label in the Help menu, so without a
-     * floor it sets the menu width and ends up only ~8px from the trailing
+    /* Without a floor the Help menu's longest label sets the menu width and ends up only ~8px from the trailing
      * external-link glyph while every other row gets 20-49px. Pin a min-width so
      * the whole menu breathes instead of hugging its longest item.
      *
@@ -776,27 +775,129 @@ html[data-bs-theme="light"] .navbar {
     }
 }
 
-/* Sponsor heart — GitHub Sponsors pink, fixed in both themes because it's a
+/* Ko-fi coffee cup — the docs site's pink, fixed in both themes because it's a
  * brand colour, not a semantic one. Declared on the icon itself so it survives
  * the utility-icon hover rule above, which forces brand orange onto the parent
  * <a> with !important; an inherited colour would lose, an own colour wins. */
-.sponsor-heart {
+.sponsor-cup {
     color: #db61a2;
 }
 
-a:hover > .sponsor-heart,
-a:focus-visible > .sponsor-heart,
-.dropdown-item:hover > .sponsor-heart {
+a:hover > .sponsor-cup,
+a:focus-visible > .sponsor-cup,
+.dropdown-item:hover > .sponsor-cup {
     color: #bf3989;
 }
 
+/* Star — gold, as on the docs site. */
+.navbar-star {
+    color: var(--plex-orange);
+}
+
 @media (prefers-reduced-motion: no-preference) {
-    #sponsorLinkBtn .sponsor-heart {
+    #sponsorLinkBtn .sponsor-cup,
+    #navStarBtn .navbar-star {
         transition: transform 0.15s ease;
     }
-    #sponsorLinkBtn:hover .sponsor-heart {
+    #sponsorLinkBtn:hover .sponsor-cup,
+    #navStarBtn:hover .navbar-star {
         transform: scale(1.15);
     }
+}
+
+/* Desktop Star: a small outlined pill with its word, like the docs nav, so it doesn't read as
+ * "favourite this page". In the phone menu it is a plain labelled row like its neighbours. */
+@media (min-width: 992px) {
+    .navbar .nav-item > #navStarBtn {
+        height: 30px;
+        margin: 4px 0.25rem;
+        padding: 0 0.6rem !important;
+        gap: 0.35rem;
+        border: 1px solid var(--bs-border-color);
+        border-radius: var(--radius-sm);
+        font-size: 0.85rem;
+        color: var(--bs-body-color) !important;
+    }
+    .navbar .nav-item > #navStarBtn:hover,
+    .navbar .nav-item > #navStarBtn:focus-visible {
+        background-color: var(--surface-2, rgba(255, 255, 255, 0.08));
+        border-color: var(--plex-orange);
+    }
+}
+
+/* Words drop before anything structural as the bar narrows, as on the docs site, so the desktop
+ * bar stays one row from 992px up. Below 1400px the Star pill keeps its outline and loses its
+ * word; below 1200px the main links lose their icons, Logout its word, and links some padding.
+ * Every icon-only control still has an aria-label and a title. */
+.navbar-star-word {
+    display: none;
+}
+@media (min-width: 1400px) {
+    .navbar-star-word {
+        display: inline;
+    }
+}
+@media (min-width: 992px) and (max-width: 1399.98px) {
+    .navbar .nav-item > #navStarBtn {
+        width: 30px;
+        justify-content: center;
+        padding: 0 !important;
+    }
+}
+@media (min-width: 992px) and (max-width: 1199.98px) {
+    .navbar-nav.me-auto .nav-link > .bi:first-child,
+    .navbar-logout-word {
+        display: none;
+    }
+    .navbar .nav-link {
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+    }
+}
+
+/* The running version, stacked under the wordmark (see base.html). The wordmark's line box is
+ * tightened so wordmark + version fit the height the brand had alone, keeping the bar 57px. */
+.navbar-brand-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    margin-right: 1rem;
+}
+.navbar-brand-group .navbar-brand {
+    margin-right: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    line-height: 1.25;
+}
+.navbar-version {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    max-width: 100%;
+    /* Under the wordmark, past the 26px mark and its .me-2 gap. */
+    margin-left: calc(26px + 0.5rem);
+    font-size: 0.72rem;
+    line-height: 1.2;
+    color: var(--bs-secondary-color);
+    text-decoration: none;
+    white-space: nowrap;
+}
+.navbar-version:hover,
+.navbar-version:focus-visible {
+    color: var(--plex-orange);
+    text-decoration: underline;
+}
+#navVersionText {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.navbar-version-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--plex-orange);
 }
 
 /* Notification bell dropdown in the top-right navbar. */

@@ -24,11 +24,31 @@ With this endpoint:
 from __future__ import annotations
 
 import os
+import time
 
-from flask import jsonify
+from flask import jsonify, request
 from loguru import logger
 
 from . import api
+
+
+@api.route("/__test/version-cache", methods=["POST"])
+def __test_version_cache():
+    """Replace the cached update check with the posted result. Test-only.
+
+    The navbar's update dot comes from this cache, and the real check asks GitHub, so e2e tests
+    pin the answer here instead.
+    """
+    if not os.environ.get("MPG_TEST_RESET"):
+        return jsonify({"error": "test reset is disabled"}), 403
+
+    from . import api_system
+
+    result = request.get_json(force=True)
+    with api_system._version_cache_lock:  # noqa: SLF001
+        api_system._version_cache["result"] = result  # noqa: SLF001
+        api_system._version_cache["fetched_at"] = time.monotonic()  # noqa: SLF001
+    return jsonify(result), 200
 
 
 @api.route("/__test/reset", methods=["POST"])

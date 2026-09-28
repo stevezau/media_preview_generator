@@ -909,6 +909,12 @@ def create_app(config_dir: str | None = None) -> Flask:
     app.register_blueprint(api)
     app.register_blueprint(webhooks_bp)
 
+    @app.context_processor
+    def _inject_navbar_version() -> dict:
+        from .routes.api_system import navbar_version_info
+
+        return {"navbar_version": navbar_version_info()}
+
     _load_history_from_disk()
 
     _install_csrf_protection(app)

@@ -1,6 +1,6 @@
-"""Sponsor link wiring: navbar heart, Help menu item, and FUNDING.yml.
+"""Support link wiring: navbar coffee cup, Help menu item, Star button, and FUNDING.yml.
 
-The sponsors handle is duplicated across three files (base.html twice,
+The Ko-fi handle is duplicated across three files (base.html twice,
 .github/FUNDING.yml once). These tests pin them together so renaming the
 account in one place fails loudly instead of shipping a dead link.
 """
@@ -15,7 +15,8 @@ import pytest
 
 from media_preview_generator.web.settings_manager import get_settings_manager
 
-SPONSOR_URL = "https://github.com/sponsors/stevezau"
+SPONSOR_URL = "https://ko-fi.com/stevezau"
+STAR_URL = "https://github.com/stevezau/media_preview_generator"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -71,7 +72,7 @@ class _AnchorCollector(HTMLParser):
     """Collects each <a> with its attributes, descendant <i> classes, and text.
 
     The icon classes matter as much as the href: every rule in the sponsor CSS
-    is keyed on ``.sponsor-heart``, so a link that renders without that class is
+    is keyed on ``.sponsor-cup``, so a link that renders without that class is
     a silently broken feature, not a cosmetic nit.
     """
 
@@ -97,10 +98,14 @@ class _AnchorCollector(HTMLParser):
             self._open.text = f"{self._open.text} {data.strip()}".strip()
 
 
-def _sponsor_anchors(html: str) -> list[_Anchor]:
+def _anchors_to(html: str, href: str) -> list[_Anchor]:
     parser = _AnchorCollector()
     parser.feed(html)
-    return [a for a in parser.anchors if a.attrs.get("href") == SPONSOR_URL]
+    return [a for a in parser.anchors if a.attrs.get("href") == href]
+
+
+def _sponsor_anchors(html: str) -> list[_Anchor]:
+    return _anchors_to(html, SPONSOR_URL)
 
 
 @pytest.fixture
@@ -111,14 +116,18 @@ def dashboard_html(authenticated_client) -> str:
 
 
 class TestSponsorLinksInNavbar:
-    def test_renders_both_navbar_heart_and_help_menu_item(self, dashboard_html):
-        """Two entry points: the always-visible heart and the Help dropdown."""
+    def test_renders_both_navbar_cup_and_help_menu_item(self, dashboard_html):
+        """Two entry points: the always-visible coffee cup and the Help dropdown."""
         anchors = _sponsor_anchors(dashboard_html)
 
-        assert len(anchors) == 2, f"expected navbar heart + Help menu item, got {len(anchors)}"
+        assert len(anchors) == 2, f"expected navbar cup + Help menu item, got {len(anchors)}"
 
         ids = {a.attrs.get("id", "") for a in anchors}
-        assert "sponsorLinkBtn" in ids, "navbar heart anchor is missing its id"
+        assert "sponsorLinkBtn" in ids, "navbar cup anchor is missing its id"
+
+    def test_no_link_still_points_at_github_sponsors(self, dashboard_html):
+        """Ko-fi replaced GitHub Sponsors as the one place to chip in."""
+        assert "github.com/sponsors" not in dashboard_html
 
     @pytest.mark.parametrize("attr,expected", [("target", "_blank"), ("rel", "noopener noreferrer")])
     def test_every_sponsor_link_opens_safely_in_a_new_tab(self, dashboard_html, attr, expected):
@@ -131,32 +140,32 @@ class TestSponsorLinksInNavbar:
                 f"sponsor link {anchor.attrs.get('id') or anchor.attrs} has {attr}={anchor.attrs.get(attr)!r}"
             )
 
-    def test_every_sponsor_link_carries_the_styled_heart_icon(self, dashboard_html):
-        """All sponsor CSS keys on .sponsor-heart — losing the class kills the styling."""
+    def test_every_sponsor_link_carries_the_styled_cup_icon(self, dashboard_html):
+        """All sponsor CSS keys on .sponsor-cup — losing the class kills the styling."""
         anchors = _sponsor_anchors(dashboard_html)
         assert anchors, "no sponsor links rendered at all"
 
         for anchor in anchors:
-            assert anchor.has_icon("bi", "bi-heart-fill", "sponsor-heart"), (
+            assert anchor.has_icon("bi", "bi-cup-hot-fill", "sponsor-cup"), (
                 f"sponsor link {anchor.attrs.get('id') or anchor.attrs} is missing its "
-                f"bi-heart-fill/sponsor-heart icon; got {anchor.icon_classes}"
+                f"bi-cup-hot-fill/sponsor-cup icon; got {anchor.icon_classes}"
             )
 
     def test_every_sponsor_link_is_labelled_in_text_not_just_an_icon(self, dashboard_html):
         """The Help row and the mobile drawer row both need a visible label."""
         for anchor in _sponsor_anchors(dashboard_html):
-            assert "Sponsor this project" in anchor.text, (
+            assert anchor.text == "Buy me a coffee", (
                 f"sponsor link {anchor.attrs.get('id') or anchor.attrs} has text {anchor.text!r}"
             )
 
-    def test_navbar_heart_is_labelled_for_screen_readers(self, dashboard_html):
-        """The desktop heart is icon-only, so it needs an accessible name."""
-        heart = next(a for a in _sponsor_anchors(dashboard_html) if a.attrs.get("id") == "sponsorLinkBtn")
+    def test_navbar_cup_is_labelled_for_screen_readers(self, dashboard_html):
+        """The desktop cup is icon-only, so it needs an accessible name."""
+        cup = next(a for a in _sponsor_anchors(dashboard_html) if a.attrs.get("id") == "sponsorLinkBtn")
 
-        assert heart.attrs.get("aria-label") == "Sponsor this project on GitHub"
-        assert heart.attrs.get("title") == "Sponsor this project"
+        assert cup.attrs.get("aria-label") == "Buy me a coffee on Ko-fi"
+        assert cup.attrs.get("title") == "Buy me a coffee on Ko-fi"
 
-    def test_heart_renders_on_every_page_not_just_the_dashboard(self, authenticated_client):
+    def test_cup_renders_on_every_page_not_just_the_dashboard(self, authenticated_client):
         """It lives in base.html, so a page that overrides blocks must keep it."""
         response = authenticated_client.get("/settings")
         assert response.status_code == 200
@@ -164,11 +173,25 @@ class TestSponsorLinksInNavbar:
         assert len(_sponsor_anchors(response.get_data(as_text=True))) == 2
 
 
+class TestStarButton:
+    def test_star_opens_the_repo_in_a_new_tab_with_its_name(self, dashboard_html):
+        """There is no URL that stars a repo, so Star opens the repo page where GitHub's button is."""
+        star = next(a for a in _anchors_to(dashboard_html, STAR_URL) if a.attrs.get("id") == "navStarBtn")
+
+        assert star.attrs.get("aria-label") == "Star Media Preview Generator on GitHub"
+        assert star.attrs.get("title") == "Star Media Preview Generator on GitHub"
+        assert star.attrs.get("target") == "_blank"
+        assert star.attrs.get("rel") == "noopener noreferrer"
+        assert star.has_icon("bi", "bi-star-fill", "navbar-star")
+        # Desktop word, then the phone menu's longer label (CSS shows one of them).
+        assert star.text == "Star Star on GitHub"
+
+
 class TestFundingConfig:
     def test_funding_yml_targets_the_same_account_as_the_ui(self):
-        """GitHub reads FUNDING.yml from the default branch to render the ♥ button."""
+        """GitHub reads FUNDING.yml from the default branch to render the repo's Sponsor button."""
         funding = REPO_ROOT / ".github" / "FUNDING.yml"
-        assert funding.is_file(), "FUNDING.yml is missing — the repo ♥ Sponsor button won't render"
+        assert funding.is_file(), "FUNDING.yml is missing — the repo Sponsor button won't render"
 
         handle = SPONSOR_URL.rsplit("/", 1)[-1]
         # Match active directives only — a raw substring search would also pass on a
@@ -178,6 +201,6 @@ class TestFundingConfig:
             for line in funding.read_text().splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
-        assert f"github: [{handle}]" in directives, (
-            f"FUNDING.yml must actively declare '{handle}' to match the in-app sponsor links; got {directives}"
+        assert f"ko_fi: {handle}" in directives, (
+            f"FUNDING.yml must actively declare '{handle}' to match the in-app Ko-fi links; got {directives}"
         )

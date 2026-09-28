@@ -61,6 +61,8 @@ After setup completes, you'll land on the dashboard. You can add additional serv
 3. Get your authentication token using [Authentication Token](getting-started.md#authentication-token)
 4. Enter the token to log in
 
+The version you're running shows under the app's name in the top bar, on every page. An orange dot beside it means a newer version is out; click the version for the release notes.
+
 ### Dashboard Features
 
 **Connection Status** — shows every configured server (Plex, Emby, Jellyfin):

@@ -43,9 +43,22 @@
     <!-- Navigation -->
     <nav class="navbar navbar-expand-lg border-bottom sticky-top">
         <div class="container-fluid">
-            <a class="navbar-brand" href="{{ url_for('main.index') }}">
-                <img class="navbar-brand-mark me-2" src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="26" height="26">Media Preview Generator
-            </a>
+            <div class="navbar-brand-group">
+                <a class="navbar-brand" href="{{ url_for('main.index') }}">
+                    <img class="navbar-brand-mark me-2" src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="26" height="26">Media Preview Generator
+                </a>
+                {# The running build, stacked under the wordmark so it costs the crowded bar no width. The dot
+                   comes from the last cached update check: rendering never waits on GitHub. #}
+                {% set version_note = 'Version ' ~ navbar_version.latest_version ~ ' is available' if navbar_version.update_available else 'Release notes' %}
+                <a class="navbar-version" id="navVersion"
+                   href="https://github.com/stevezau/media_preview_generator/releases/latest"
+                   target="_blank" rel="noopener noreferrer"
+                   data-bs-toggle="tooltip" data-bs-placement="bottom" title="{{ version_note }}"
+                   aria-label="Version {{ navbar_version.label }}. {{ version_note }}, opens in a new tab">
+                    <span id="navVersionText">{{ navbar_version.label }}</span>
+                    {%- if navbar_version.update_available %}<span class="navbar-version-dot" id="navVersionDot" aria-hidden="true"></span>{% endif %}
+                </a>
+            </div>
             <!-- The standard ``.navbar-toggler-icon`` SVG is just three
                  horizontal bars; the close affordance got muddled when
                  it was just a rotated hamburger. Use Bootstrap Icons —
@@ -269,9 +282,9 @@
                             <li><hr class="dropdown-divider"></li>
                             <li>
                                 <a class="dropdown-item d-flex align-items-center"
-                                   href="https://github.com/sponsors/stevezau"
+                                   href="https://ko-fi.com/stevezau"
                                    target="_blank" rel="noopener noreferrer">
-                                    <i class="bi bi-heart-fill me-2 sponsor-heart"></i>Sponsor this project
+                                    <i class="bi bi-cup-hot-fill me-2 sponsor-cup"></i>Buy me a coffee
                                     <i class="bi bi-box-arrow-up-right ms-auto small text-muted" aria-label="Opens in a new tab"></i>
                                 </a>
                             </li>
@@ -286,16 +299,27 @@
                         </ul>
                     </li>
                     <li class="nav-item">
-                        {# Sponsor heart sits between Help and the theme toggle so it reads as a
-                           utility affordance, not a nag. Styled by #sponsorLinkBtn in style.css,
-                           which opts it into the same 38px circular hover treatment as the bell
-                           and theme toggle (desktop) / full-width labelled row (mobile). #}
+                        {# The coffee cup and Star match the docs site's nav (docs/_includes/nav.html): a cup
+                           says what a click does where a heart didn't. Both sit between Help and the theme
+                           toggle so they read as utilities, not a nag. #sponsorLinkBtn gets the 38px circle
+                           of the bell and theme toggle on desktop and a labelled row in the phone menu. #}
                         <a class="nav-link btn btn-link d-flex align-items-center" id="sponsorLinkBtn"
-                           href="https://github.com/sponsors/stevezau"
+                           href="https://ko-fi.com/stevezau"
                            target="_blank" rel="noopener noreferrer"
-                           aria-label="Sponsor this project on GitHub" title="Sponsor this project">
-                            <i class="bi bi-heart-fill sponsor-heart"></i>
-                            <span class="d-lg-none ms-2">Sponsor this project</span>
+                           aria-label="Buy me a coffee on Ko-fi" title="Buy me a coffee on Ko-fi">
+                            <i class="bi bi-cup-hot-fill sponsor-cup" aria-hidden="true"></i>
+                            <span class="d-lg-none ms-2">Buy me a coffee</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        {# "Star" opens the repo, where GitHub's own Star button is: no URL stars a repo. #}
+                        <a class="nav-link btn btn-link d-flex align-items-center" id="navStarBtn"
+                           href="https://github.com/stevezau/media_preview_generator"
+                           target="_blank" rel="noopener noreferrer"
+                           aria-label="Star Media Preview Generator on GitHub" title="Star Media Preview Generator on GitHub">
+                            <i class="bi bi-star-fill navbar-star" aria-hidden="true"></i>
+                            <span class="navbar-star-word">Star</span>
+                            <span class="d-lg-none ms-2">Star on GitHub</span>
                         </a>
                     </li>
                     <li class="nav-item">
@@ -309,8 +333,8 @@
                         {# A POST with the page's token: a plain link would let any page sign the user out. #}
                         <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                            <button type="submit" class="nav-link w-100 text-start" id="navLogoutBtn">
-                                <i class="bi bi-box-arrow-right me-1"></i>Logout
+                            <button type="submit" class="nav-link w-100 text-start" id="navLogoutBtn" aria-label="Logout" title="Logout">
+                                <i class="bi bi-box-arrow-right me-1" aria-hidden="true"></i><span class="navbar-logout-word">Logout</span>
                             </button>
                         </form>
                     </li>
