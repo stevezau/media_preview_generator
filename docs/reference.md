@@ -1137,6 +1137,7 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
 | GET | `/api/jobs` | List all jobs |
 | POST | `/api/jobs` | Create new job |
 | GET | `/api/jobs/{id}` | Get job details |
+| GET | `/api/jobs/{id}/file-list` | The job's first files for its row on the Jobs page (`?limit=`, default 10, max 50): `{"files": [{"title", "name", "path"}], "total": N}`, the files it was given first, then the files it has run. `404` for an unknown id. |
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
 | POST | `/api/jobs/{id}/pause` | Intro & Credits job: pauses that job only (`200` with the job; `409` `{"error": "Only running jobs can be paused"}` when it isn't running). Preview job: global pause (delegates to `/api/processing/pause`). `404` for an unknown id. |
 | POST | `/api/jobs/{id}/resume` | Intro & Credits job: resumes that job only (`200` with the job plus `processing_paused`, true while **Pause all** still holds it; `409` `{"error": "Only running jobs can be resumed"}` when it isn't running). Preview job: global resume (delegates to `/api/processing/resume`). `404` for an unknown id. |
@@ -1156,11 +1157,15 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
       "total_items": 100,
       "completed_items": 45,
       "created_at": "2024-01-15T10:30:00Z",
-      "started_at": "2024-01-15T10:30:05Z"
+      "started_at": "2024-01-15T10:30:05Z",
+      "library_names": ["Movies"]
     }
   ]
 }
 ```
+
+`library_names` is only in this list: the libraries a job covers, from the libraries it was started on or else the
+libraries holding the files it lists (empty when it names neither).
 
 #### POST /api/jobs
 

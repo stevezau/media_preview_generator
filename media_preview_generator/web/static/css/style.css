@@ -2584,3 +2584,14 @@ html[data-bs-theme="light"] #logsContent {
     float: none;
     margin-left: 0;
 }
+/* Jobs queue: the ↳ of a follow-up explains itself on hover, and an Intro & Credits row's file list keeps each file to
+ * one line, its title before its file name. */
+.job-follow-arrow {
+    cursor: help;
+}
+.job-file-list .job-file {
+    max-width: 100%;
+}
+.job-file-list .job-file-title {
+    color: var(--bs-body-color);
+}

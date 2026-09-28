@@ -170,25 +170,44 @@ def _serve_jobs(page: Page, jobs_ref: dict) -> None:
     )
 
 
+def _serve_file_lists(page: Page, file_lists: dict, asked: list[str]) -> None:
+    """GET /api/jobs/<id>/file-list answers ``file_lists[id]`` (no files by default) and records each id asked."""
+
+    def handler(route: Route) -> None:
+        job_id = route.request.url.split("/api/jobs/", 1)[1].split("/", 1)[0]
+        asked.append(job_id)
+        _fulfill_json(route, file_lists.get(job_id, {"files": [], "total": 0}))
+
+    page.route("**/api/jobs/*/file-list*", handler)
+
+
 @pytest.fixture
 def dashboard(authed_page: Page, app_url: str):
-    """Dashboard with two servers' libraries, and a ``load(jobs, processing_paused=False)`` helper."""
+    """Dashboard with two servers' libraries, and a ``load(jobs, processing_paused=False, file_lists=None)`` helper."""
     mock_dashboard_defaults(authed_page)
     mock_media_servers_status(authed_page, servers=_SERVERS)
     authed_page.route("**/api/libraries", lambda r: _fulfill_json(r, {"libraries": _LIBRARIES}))
     jobs_ref: dict = {"jobs": []}
     state = {"paused": False}
+    file_lists: dict = {}
+    asked: list[str] = []
     _serve_jobs(authed_page, jobs_ref)
+    _serve_file_lists(authed_page, file_lists, asked)
     authed_page.route("**/api/processing/state", lambda r: _fulfill_json(r, {"paused": state["paused"]}))
 
-    def load(jobs: list[dict] | None = None, processing_paused: bool = False) -> Page:
+    def load(
+        jobs: list[dict] | None = None, processing_paused: bool = False, file_lists_by_id: dict | None = None
+    ) -> Page:
         jobs_ref["jobs"] = list(jobs or [])
         state["paused"] = processing_paused
+        file_lists.clear()
+        file_lists.update(file_lists_by_id or {})
         authed_page.goto(f"{app_url}/")
         authed_page.wait_for_load_state("domcontentloaded")
         return authed_page
 
     load.jobs_ref = jobs_ref  # type: ignore[attr-defined]
+    load.file_lists_asked = asked  # type: ignore[attr-defined]
     return load
 
 
@@ -507,6 +526,11 @@ def _row_ids(page: Page) -> list[str]:
     return page.locator("#jobQueue tr.job-row").evaluate_all("rows => rows.map(r => r.id.replace('job-row-', ''))")
 
 
+def _tooltip(locator) -> str:
+    # Bootstrap moves ``title`` to ``data-bs-original-title`` once the tooltip is set up.
+    return locator.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+
+
 @pytest.mark.e2e
 class TestQueueRows:
     def test_follow_up_renders_under_its_preview_job_with_the_markers_breakdown(self, dashboard) -> None:
@@ -519,8 +543,9 @@ class TestQueueRows:
 
         assert _row_ids(page) == [other["id"], preview["id"], follower["id"]]
         row = page.locator(f"#job-row-{follower['id']}")
-        expect(row).to_contain_text("↳")
-        expect(row).to_contain_text("follows e64567e1")
+        expect(row.locator(".job-follow-arrow")).to_have_text("↳")
+        assert _tooltip(row.locator(".job-follow-arrow")) == "Runs after preview job e64567e1 finishes its first try"
+        expect(row).not_to_contain_text("follows")
         expect(row.locator(".job-kind-badge")).to_have_text("Intro & Credits")
         expect(page.locator(f"#job-row-{preview['id']} .job-kind-badge")).to_have_text("Previews")
 
@@ -726,10 +751,10 @@ class TestQueueRows:
         expect(row.locator("[data-explain-template]")).to_have_count(0)
         expect(row.locator("[data-scheduled-at]")).to_have_text(re.compile(r"^Retry starting in 4\d s$"))
         expect(row.locator('button[aria-label="Retry now"]')).to_have_count(1)
-        follows = row.locator(".job-follows")
-        expect(follows).to_have_text("follows e64567e1")
-        tooltip = follows.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
-        assert tooltip == "Starts after preview job e64567e1's first try"
+        expect(row.locator(".job-follows")).to_have_count(0)
+        arrow = row.locator(".job-follow-arrow")
+        assert _tooltip(arrow) == "Runs after preview job e64567e1 finishes its first try"
+        assert arrow.get_attribute("aria-label") == "Runs after preview job e64567e1 finishes its first try"
 
     def test_a_follow_up_whose_retries_ended_has_no_retry_chip(self, dashboard) -> None:
         preview = _preview_job()
@@ -829,6 +854,168 @@ class TestQueueRows:
         assert ticked == "Next attempt in 10 min", ticked
         expect(retry_card).to_contain_text("Backing off after a failure — will try again automatically.")
         expect(retry_card).to_contain_text("Waiting to retry")
+
+
+_EPISODES = [f"/data/tv/Rick and Morty (2013)/Season 01/Rick.and.Morty.S01E{i:02d}.1080p.mkv" for i in range(1, 13)]
+
+
+def _file_list(paths: list[str], shown: int = 10) -> dict:
+    """What GET /api/jobs/<id>/file-list answers (web/job_details.job_file_list) for these episodes."""
+    files = [
+        {"title": f"Rick and Morty (2013) S01E{i + 1:02d}", "name": path.rsplit("/", 1)[1], "path": path}
+        for i, path in enumerate(paths[:shown])
+    ]
+    return {"files": files, "total": len(paths)}
+
+
+def _version_rerun_job() -> dict:
+    return _markers_job(
+        "cccccccc-0000-4000-8000-000000000011",
+        library_name="Intro & Credits: Re-checking 1,568 files after the app update · batch 3 of 16",
+        status="pending",
+        started_at=None,
+        completed_at=None,
+        publishers=[],
+        config={
+            "kind": "intro_credits",
+            "source": "version_rerun",
+            "libraries": [],
+            "file_paths": [],
+            "follows_job_id": None,
+            "force": False,
+            "version_rerun": True,
+            "version_rerun_counts": {"total": 1568, "batch": 3, "batch_size": 100},
+        },
+        progress={"percent": 0, "outcome": None},
+    )
+
+
+@pytest.mark.e2e
+class TestRowFilesAndLibraries:
+    def test_an_intro_and_credits_row_lists_its_files_by_title_and_name_and_counts_the_rest(self, dashboard) -> None:
+        job = _markers_job(
+            library_name="Intro & Credits · 12 files",
+            publishers=[],
+            config={"kind": "intro_credits", "source": "sonarr", "libraries": [], "file_paths": _EPISODES},
+            library_names=["TV Shows"],
+        )
+        page = dashboard([job], file_lists_by_id={job["id"]: _file_list(_EPISODES)})
+        row = page.locator(f"#job-row-{job['id']}")
+        expect(row).to_be_visible(timeout=5000)
+
+        toggle = page.locator(f"#job-files-toggle-{job['id']}")
+        assert toggle.get_attribute("title") == "Show files"
+        toggle.click()
+        files = page.locator(f"#job-file-list-{job['id']}")
+        expect(files.locator(".job-file")).to_have_text(
+            [f"Rick and Morty (2013) S01E{i:02d} Rick.and.Morty.S01E{i:02d}.1080p.mkv" for i in range(1, 11)]
+        )
+        expect(files.locator(".job-file-title").first).to_have_text("Rick and Morty (2013) S01E01")
+        expect(files.locator(".job-file-name").first).to_have_text("Rick.and.Morty.S01E01.1080p.mkv")
+        expect(files.locator(".job-file-more")).to_have_text("and 2 more")
+        assert files.locator(".job-file").first.get_attribute("title") == _EPISODES[0]
+
+    def test_a_one_file_follow_up_with_no_publishers_yet_still_opens_to_its_file(self, dashboard) -> None:
+        follower = _markers_job(publishers=[], status="pending", completed_at=None, progress={"outcome": None})
+        paths = follower["config"]["file_paths"]
+        page = dashboard([follower], file_lists_by_id={follower["id"]: _file_list(paths)})
+        page.locator(f"#job-files-toggle-{follower['id']}").click()
+
+        files = page.locator(f"#job-file-list-{follower['id']}")
+        expect(files.locator(".job-file")).to_have_text(["Rick and Morty (2013) S01E01 e01.mkv"])
+        expect(files.locator(".job-file-more")).to_have_count(0)
+        assert dashboard.file_lists_asked == [follower["id"]]
+
+    def test_a_job_that_lists_its_files_when_it_runs_says_so(self, dashboard) -> None:
+        job = _version_rerun_job()
+        page = dashboard([job])
+        page.locator(f"#job-files-toggle-{job['id']}").click()
+
+        expect(page.locator(f"#job-file-list-{job['id']}")).to_have_text("Files: listed when the job runs")
+
+    def test_a_row_shows_the_library_it_covers_left_of_its_title(self, dashboard) -> None:
+        follower = _markers_job(library_names=["TV Shows"])
+        preview = _job(
+            "dddddddd-0000-4000-8000-000000000012",
+            library_name="Sonarr: Rick and Morty",
+            config={"source": "sonarr", "webhook_basenames": ["e01.mkv"]},
+            library_names=["TV Shows", "Anime", "Kids"],
+        )
+        page = dashboard([follower, preview])
+        tag = page.locator(f"#job-row-{follower['id']} .job-library-tag")
+        expect(tag).to_have_text("TV Shows")
+        assert _tooltip(tag) == "Library: TV Shows"
+        # First in the row, before the kind badge and the title.
+        classes = (
+            page.locator(f"#job-row-{follower['id']} td")
+            .nth(1)
+            .locator("div > *")
+            .evaluate_all("els => els.map(e => e.classList[e.classList.length - 1])")
+        )
+        assert classes[:3] == ["job-library-tag", "job-kind-badge", "fw-medium"]
+        many = page.locator(f"#job-row-{preview['id']} .job-library-tag")
+        expect(many).to_have_text("3 libraries")
+        assert _tooltip(many) == "Libraries: TV Shows, Anime, Kids"
+
+    @pytest.mark.parametrize(
+        ("library_name", "library_names", "tags"),
+        [
+            ("TV Shows", ["TV Shows"], []),  # a library scan's title already names its library
+            ("Intro & Credits: TV Shows", ["TV Shows"], []),  # so does a scheduled Intro & Credits scan's
+            ("Movies", ["Movies", "4K Movies"], ["Movies · 4K Movies"]),
+            ("All Libraries", [], []),  # a whole-server scan names none
+        ],
+        ids=["preview-title-is-the-library", "markers-title-is-the-library", "two-libraries", "none-known"],
+    )
+    def test_the_tag_is_left_out_where_the_title_already_says_it(
+        self, dashboard, library_name, library_names, tags
+    ) -> None:
+        kind = "intro_credits" if library_name.startswith("Intro") else "previews"
+        job = _job(
+            "eeeeeeee-0000-4000-8000-000000000013",
+            library_name=library_name,
+            kind=kind,
+            config={"kind": kind},
+            library_names=library_names,
+        )
+        page = dashboard([job])
+        row = page.locator(f"#job-row-{job['id']}")
+        expect(row).to_be_visible(timeout=5000)
+        if tags:
+            expect(row.locator(".job-library-tag")).to_have_text(tags)
+        else:
+            expect(row.locator(".job-library-tag")).to_have_count(0)
+
+    def test_the_re_check_after_an_update_says_how_far_along_it_is_and_what_it_is(self, dashboard) -> None:
+        job = _version_rerun_job()
+        page = dashboard([job])
+        row = page.locator(f"#job-row-{job['id']}")
+        expect(row.locator("td").nth(1).locator(".fw-medium")).to_have_text(
+            "Re-checking 1,568 files after the app update · batch 3 of 16", timeout=5000
+        )
+        info = row.locator(".job-rerun-info")
+        assert _tooltip(info) == (
+            "After an update, files whose intro or credits were found by an older version are checked again, "
+            "100 at a time, at low priority."
+        )
+        info.hover()
+        expect(page.locator(".tooltip")).to_have_text(
+            "After an update, files whose intro or credits were found by an older version are checked again, "
+            "100 at a time, at low priority.",
+            timeout=3000,
+        )
+
+    def test_the_follow_ups_arrow_explains_itself_on_hover(self, dashboard) -> None:
+        preview = _preview_job()
+        follower = _markers_job()
+        page = dashboard([follower, preview])
+        arrow = page.locator(f"#job-row-{follower['id']} .job-follow-arrow")
+        expect(arrow).to_be_visible(timeout=5000)
+
+        arrow.hover()
+        expect(page.locator(".tooltip")).to_have_text(
+            "Runs after preview job e64567e1 finishes its first try", timeout=3000
+        )
 
 
 # What markers/source_counts.py stores on a job: files per marker type and source group.
