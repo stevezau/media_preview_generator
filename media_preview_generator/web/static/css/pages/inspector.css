@@ -1452,10 +1452,16 @@ button.insp-row:focus-visible,
     font-size: 11px;
 }
 
+/* An edge line that lands on a frame's own time passes behind its label, not through the digits. */
 .insp-tl-time {
+    position: relative;
+    z-index: 1;
+    width: fit-content;
+    margin: 0 auto;
+    padding: 0 4px;
+    background: var(--insp-card);
     font-size: 11px;
     font-weight: 500;
-    text-align: center;
     color: var(--insp-faint);
 }
 
