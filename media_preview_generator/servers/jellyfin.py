@@ -2389,9 +2389,8 @@ class JellyfinServer(EmbyApiClient):
                         "label": "Jellyfin's daily 'Generate Trickplay Images' task",
                         "docs_anchor": "scheduled-trickplay",
                         "tooltip": (
-                            "You have the Bridge plugin installed — this app already registers "
-                            "trickplay instantly. The daily task just re-does the work and slows "
-                            "library scans. Recommend disabling it."
+                            "The Bridge plugin already registers trickplay instantly, so this daily task only "
+                            "repeats the work. Recommend disabling it."
                         ),
                         "explanation": (
                             sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin <em>is</em> "

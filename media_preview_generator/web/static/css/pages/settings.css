@@ -124,3 +124,52 @@ html {
 .markers-key-input {
     max-width: 14rem;
 }
+
+/* How it decides: the four steps every file goes through, in a row when there's room. */
+.markers-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 0.75rem;
+}
+.markers-step {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.5rem;
+    background: var(--bs-tertiary-bg);
+}
+.markers-step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 50%;
+    background: var(--plex-orange);
+    color: #1b1405;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+.markers-step-title {
+    font-weight: 600;
+}
+.markers-step-text {
+    font-size: 0.875rem;
+    color: var(--bs-secondary-color);
+}
+.markers-outcomes dt {
+    font-weight: 600;
+}
+.markers-outcomes dd {
+    margin-left: 1.5rem;
+}
+
+.markers-advanced-toggle .collapse-chevron {
+    display: inline-block;
+    transition: transform 0.15s ease;
+}
+.markers-advanced-toggle[aria-expanded="true"] .collapse-chevron {
+    transform: rotate(90deg);
+}

@@ -150,7 +150,9 @@ class TestCheckedEpisode:
         found = authed_page.locator("#inspStrip .insp-lane[data-lane='found']")
         expect(found.locator(".insp-band")).to_have_text(["Intro 2:45 – 2:59", "Credits 24:59 → end"])
         plex = authed_page.locator("#inspStrip .insp-lane[data-server-id='plex-1']")
-        expect(plex.locator(".insp-band.is-tint")).to_have_text(["Intro 2:45 – 2:59", "Credits 24:59 → end"])
+        expect(plex.locator(".insp-band.is-tint")).to_have_text(
+            ["Ours · Intro 2:45 – 2:59", "Ours · Credits 24:59 → end"]
+        )
         jf = authed_page.locator("#inspStrip .insp-lane[data-server-id='jf-1']")
         expect(jf).to_have_text("Nothing yet · the next job adds intro 2:45 – 2:59 and credits 24:59 → end")
 

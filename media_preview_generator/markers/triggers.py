@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -28,6 +29,7 @@ from .job_runner import (
     ONLINE_RECHECK,
     ONLINE_RECHECK_SOURCE,
     VERSION_RERUN,
+    VERSION_RERUN_COUNTS,
     VERSION_RERUN_SOURCE,
     sent_by_a_sender,
     server_pin,
@@ -49,7 +51,7 @@ _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
 DECIDE_AGAIN_JOB_NAME = "Intro & Credits: Needs review and waiting files, decided again"
 ONLINE_RECHECK_JOB_NAME = "Intro & Credits: weekly online re-check"
-VERSION_RERUN_JOB_NAME = "Intro & Credits: re-checking files after an update"
+VERSION_RERUN_JOB_NAME = "Intro & Credits: Re-checking {total} after the app update · batch {batch} of {batches}"
 ONLINE_RECHECK_EVERY = timedelta(days=7)
 # The timer that queues the next weekly online re-check (``schedule_online_recheck``), replaced under its lock.
 _online_recheck_timer: threading.Timer | None = None
@@ -133,6 +135,7 @@ def create_intro_credits_job(
     decide_again: bool = False,
     online_recheck: bool = False,
     version_rerun: bool = False,
+    version_rerun_counts: Mapping[str, int] | None = None,
     server_id: str | None = None,
 ) -> Job:
     """Create and start an Intro & Credits job.
@@ -165,6 +168,8 @@ def create_intro_credits_job(
             (``job_runner._items_for_online_recheck``) instead of libraries or paths.
         version_rerun: Take the next batch of files to re-check after an update when the job runs
             (``job_runner._items_to_read_again``) instead of libraries or paths.
+        version_rerun_counts: For a version re-run: where its batch stands in the whole re-check
+            (``job_runner.VERSION_RERUN_COUNTS``).
         server_id: Publish to this server only (``job_runner.server_pin``): the pin of the preview job it follows, as
             ``jobs.worker.resolve_per_item_pin`` resolved it, or of the job whose retry or check it is. None = every
             server with Intro & Credits on.
@@ -191,6 +196,8 @@ def create_intro_credits_job(
         config[ONLINE_RECHECK] = True
     if version_rerun:
         config[VERSION_RERUN] = True
+    if version_rerun_counts:
+        config[VERSION_RERUN_COUNTS] = dict(version_rerun_counts)
     if server_id:
         config["server_id"] = server_id
     if chain_attempt:
@@ -678,17 +685,58 @@ def submit_decide_again() -> str | None:
     return job.id
 
 
-def submit_version_reruns(delay_s: int = 0) -> str | None:
+def version_rerun_counts(listed: int, after: Mapping[str, object] | None = None) -> dict[str, int]:
+    """Where the next batch of the re-check after an update stands: the next batch of the re-check ``after`` belongs
+    to, or the first batch of a new one over the ``listed`` files.
+
+    Args:
+        listed: The files due to be read again now.
+        after: The counts of the batch that just ran (``job_runner.VERSION_RERUN_COUNTS``); None for a first batch.
+
+    Returns:
+        ``{"total", "batch", "batch_size"}``.
+    """
+    previous = after if isinstance(after, Mapping) else {}
+    try:
+        total = int(previous.get("total") or 0)
+        batch = int(previous.get("batch") or 0) + 1
+    except (TypeError, ValueError):
+        total = 0
+    if total <= 0:
+        return {"total": listed, "batch": 1, "batch_size": BATCH_FILES}
+    return {"total": total, "batch": batch, "batch_size": BATCH_FILES}
+
+
+def version_rerun_job_name(counts: Mapping[str, int]) -> str:
+    """The queue title of a batch of the re-check after an update.
+
+    Args:
+        counts: ``version_rerun_counts``.
+
+    Returns:
+        E.g. ``Intro & Credits: Re-checking 1,568 files after the app update · batch 1 of 16``. A batch past the count
+        the first batch worked out (files still due after their batch) is its own last one.
+    """
+    total = int(counts["total"])
+    batch = int(counts["batch"])
+    batches = max(batch, math.ceil(total / max(1, int(counts["batch_size"]))))
+    files = f"{total:,} file" if total == 1 else f"{total:,} files"
+    return VERSION_RERUN_JOB_NAME.format(total=files, batch=batch, batches=batches)
+
+
+def submit_version_reruns(delay_s: int = 0, after: Mapping[str, object] | None = None) -> str | None:
     """Queue the job that reads again the next batch of files whose answers rest on an older detector version.
 
     Called on every start (``web.app._read_again_after_detector_updates``) and when a batch has run
     (``job_runner._queue_next_batch``, with ``versions.BATCH_GAP`` as ``delay_s``). It is an ordinary Intro & Credits
     job at LOW priority, behind previews: it takes at most ``versions.BATCH_FILES`` files still on disk when it runs,
     and a run asks again only what is due or from an older version, as on any run. While one waits or runs, that job is
-    returned instead.
+    returned instead. Its name says how far along the whole re-check is (``version_rerun_job_name``).
 
     Args:
         delay_s: Seconds the job waits before it takes a slot (the gap between batches).
+        after: The counts of the batch that just ran (``job_runner.VERSION_RERUN_COUNTS``), so this batch goes on
+            counting; None on a start, which begins a new count unless a batch waits or runs.
 
     Returns:
         The job's id; None when Intro & Credits is off on every server or no file is left to read again.
@@ -706,11 +754,13 @@ def submit_version_reruns(delay_s: int = 0) -> str | None:
             cfg = job.config or {}
             if job.kind == JOB_KIND_INTRO_CREDITS and cfg.get(VERSION_RERUN) and not is_live_retry_chain(cfg):
                 return job.id
+        counts = version_rerun_counts(len(due), after)
         job = create_intro_credits_job(
-            library_name=VERSION_RERUN_JOB_NAME,
+            library_name=version_rerun_job_name(counts),
             priority=PRIORITY_LOW,
             source=VERSION_RERUN_SOURCE,
             version_rerun=True,
+            version_rerun_counts=counts,
             retry_delay_s=int(delay_s),
         )
     by_detector: dict[str, int] = {}
@@ -720,11 +770,12 @@ def submit_version_reruns(delay_s: int = 0) -> str | None:
     logger.info(
         "{} file(s) rest on an answer from an older detector version, were decided under older rules, or show times an "
         "older publish rule kept ({}); "
-        "read again {} at a time (job {})",
+        "read again {} at a time (job {}: {})",
         len(due),
         ", ".join(f"{detector} {count}" for detector, count in sorted(by_detector.items())),
         BATCH_FILES,
         job.id[:8],
+        job.library_name.removeprefix("Intro & Credits: "),
     )
     return job.id
 

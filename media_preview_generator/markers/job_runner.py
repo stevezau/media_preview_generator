@@ -116,6 +116,9 @@ ONLINE_RECHECK = "online_recheck"
 VERSION_RERUN_SOURCE = "version_rerun"
 VERSION_RERUN = "version_rerun"
 VERSION_RERUN_FILES = "version_rerun_files"
+# Where a batch stands in the whole re-check, for its name: ``{"total", "batch", "batch_size"}``, the total being the
+# files listed when the first batch was queued. Each batch passes it on to the next (``_queue_next_batch``).
+VERSION_RERUN_COUNTS = "version_rerun_counts"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
@@ -1515,7 +1518,7 @@ def _queue_next_batch(jm, job_id: str, cfg: dict) -> None:
             return
         from .triggers import submit_version_reruns
 
-        submit_version_reruns(delay_s=int(BATCH_GAP.total_seconds()))
+        submit_version_reruns(delay_s=int(BATCH_GAP.total_seconds()), after=cfg.get(VERSION_RERUN_COUNTS))
     except Exception as exc:
         logger.warning(
             "Couldn't queue the next batch of files to re-check after an update: {}; the next start does", exc

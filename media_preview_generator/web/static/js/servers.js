@@ -2341,14 +2341,11 @@
         // GitHub URL that 404'd on private forks / unpushed branches.
         const tooltip = check.tooltip || '';
         const explanationHtml = check.explanation || '';
-        const hasMore = !!explanationHtml;
-        const tooltipText = hasMore && tooltip
-            ? `${tooltip} — click for details`
-            : tooltip;
+        // "Click for more." and .info-icon-more come from _applyInfoIconAffordance once _explanationHtml is set below.
         const infoIcon = (tooltip || explanationHtml)
-            ? `<button type="button" class="info-icon${hasMore ? ' info-icon-more' : ''} ms-1" `
+            ? `<button type="button" class="info-icon ms-1" `
                 + `data-bs-toggle="tooltip" data-bs-placement="top" `
-                + `title="${escapeAttr(tooltipText || 'Click for details')}" `
+                + `title="${escapeAttr(tooltip)}" `
                 + `data-explain-title="${escapeAttr(check.label || tooltip || 'About this check')}" `
                 + `aria-label="Explain ${escapeAttr(check.label || '')}">`
                 + `<i class="bi bi-info-circle"></i></button>`

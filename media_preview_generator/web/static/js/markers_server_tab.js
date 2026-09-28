@@ -71,8 +71,11 @@
 
     // ---------- status block ---------------------------------------------------
 
-    function infoIcon(title) {
-        return `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${esc(title)}"><i class="bi bi-info-circle"></i></button>`;
+    // `detailHtml` (authored literal HTML) makes a click open it in the info modal; _initBootstrapTooltips (below, on
+    // render) adds "Click for more." and the pointer, as for every other ⓘ.
+    function infoIcon(title, detailHtml) {
+        const detail = detailHtml ? ` data-explain-html="${esc(detailHtml)}"` : '';
+        return `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${esc(title)}"${detail}><i class="bi bi-info-circle"></i></button>`;
     }
 
     function badge(tone, text, extraClass) {
@@ -171,15 +174,23 @@
                 ? badge('bad', `✕ network share${details.fs_type ? ` (${details.fs_type})` : ''}`)
                 : badge('ok', '✓ local disk');
             const whereTip = agent
-                ? 'The folder of Plex\'s library database, as the agent on the Plex machine sees it. Markers are written straight into this database, so it has to be on a local disk of that machine.'
-                : 'The folder of Plex\'s library database, as this app sees it. Markers are written straight into this database, so it has to be on a local disk of the machine Plex runs on: a database on a network share can\'t be written safely.';
+                ? 'The folder of Plex\'s library database, as the agent on the Plex machine sees it.'
+                : 'The folder of Plex\'s library database, as this app sees it.';
+            const whereDetail = agent
+                ? '<p>Markers are written straight into this database, so it has to be on a local disk of that machine.</p>'
+                : '<p>Markers are written straight into this database, so it has to be on a local disk of the machine Plex runs on: a database on a network share can\'t be written safely.</p>';
             rows.push(kvRow(
                 agent ? 'Database location (on the Plex machine)' : 'Database location',
-                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}${infoIcon(whereTip)}`,
+                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}${infoIcon(whereTip, whereDetail)}`,
             ));
         }
         const detectionOn = plexDetectionOn(details.detection);
-        const detectionTip = infoIcon('Whether Plex finds intros and credits itself (Plex settings → Library → Generate intro / credits video markers). When on, Plex can analyse a file again and replace our markers; "When Plex has its own markers" below decides what happens then.');
+        const detectionTip = infoIcon(
+            'Whether Plex finds intros and credits itself.',
+            '<p>The setting is in Plex settings → Library → <em>Generate intro / credits video markers</em>.</p>'
+                + '<p>When on, Plex can analyse a file again and replace our markers; "When Plex has its own markers" below '
+                + 'decides what happens then.</p>',
+        );
         if (detectionOn === true) {
             const keepsPlex = ((status.settings || {}).plex || {}).on_plex_redetect === 'keep_plex';
             const outcome = keepsPlex ? "it can replace ours; Plex's are kept" : 'it can replace ours; we put them back';

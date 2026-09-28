@@ -204,7 +204,7 @@
             <div class="card-body">
                 <h4 class="card-title mb-3">Libraries to monitor
                     <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                            title="Server-level scope — which libraries this app is allowed to touch on this server. Filters apply to every job type (webhook, scheduled, manual). For a one-off run against a different subset, use the New Job button on the Dashboard."><i class="bi bi-info-circle"></i></button>
+                            title="Which libraries this app may touch on this server, for every kind of job." data-explain-title="Libraries to monitor" data-explain-template="infoSetupLibrariesTpl"><i class="bi bi-info-circle"></i></button>
                 </h4>
                 <p class="text-muted mb-3">Tick the libraries this app should monitor on this server. Tick none to monitor all.</p>
 
@@ -273,7 +273,7 @@
                 </div>
 
                 <h5 class="mb-2">Media path mapping (optional)
-                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only needed when your media server and this app see the same files at different paths. If both mount your media at the same place (the most common case), leave this empty."><i class="bi bi-info-circle"></i></button>
+                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only needed when your media server and this app see the same files at different paths; otherwise leave it empty."><i class="bi bi-info-circle"></i></button>
                 </h5>
                 <div class="alert alert-info py-2 mb-3 small" role="alert">
                     Only needed if your media server and this app see the same files at different paths.
@@ -298,7 +298,7 @@
                                 <th class="small fw-normal text-muted">Path on Apps (Sonarr, Radarr, Webhooks)
                                     <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                             data-bs-toggle="tooltip" data-bs-placement="top"
-                                            title="For Sonarr/Radarr/Tdarr webhooks that send a different path than your server reports — click for details"
+                                            title="For Sonarr/Radarr/Tdarr webhooks that send a different path than your server reports."
                                             data-explain-title="Webhook path mapping"
                                             data-explain-template="infoWebhookPathTpl"
                                             aria-label="Explain webhook path mapping">
@@ -331,7 +331,7 @@
                                 <tr>
                                     <th class="small fw-normal">Path or pattern</th>
                                     <th class="small fw-normal" style="width: 160px;">Match type
-                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Path prefix: skips anything under that folder (e.g. '/Trailers' skips every file under any folder called Trailers). Regex: matches the full file path against a regular expression — for advanced patterns."><i class="bi bi-info-circle"></i></button>
+                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Path prefix skips everything under a folder; Regex matches the full file path." data-explain-title="Exclude paths" data-explain-template="infoExcludeTypeTpl"><i class="bi bi-info-circle"></i></button>
                                     </th>
                                     <th style="width: 38px;"></th>
                                 </tr>
@@ -384,7 +384,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="cpuThreads" class="form-label">
                             CPU Workers
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many items the CPU processes at the same time, in addition to any GPU workers. Each worker keeps one job busy at a time. Set to 0 to disable CPU processing entirely."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many files the CPU works on at once, on top of any GPU workers. 0 turns CPU processing off."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control has-stepper" id="cpuThreads"
                                min="0" max="{{ max_cpu_threads }}" value="1">
@@ -403,7 +403,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailInterval" class="form-label">
                             Thumbnail Interval
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Seconds between thumbnails in the preview strip. Smaller = smoother scrubbing in your player, but bigger BIF files and longer to generate. Default 2s works well for most setups; raise to 5–10s if you don't need fine scrubbing and want faster jobs."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Seconds between thumbnails in the preview strip. Default 2 s suits most setups." data-explain-title="Thumbnail interval" data-explain-template="infoSetupThumbnailIntervalTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <div class="input-group">
                             <input type="number" class="form-control has-stepper" id="thumbnailInterval"
@@ -414,7 +414,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailQuality" class="form-label">
                             Thumbnail Quality
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better, like FFmpeg&#39;s -q:v (2 = sharpest and largest, 10 = blurriest and smallest; 1 behaves the same as 2). Default 4 looks fine at typical scrubbing sizes. Lower it if thumbs look blocky on a 4K display; raise it to shrink BIF files."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better: 2 is sharpest, 10 is smallest. Default 4." data-explain-title="Thumbnail quality" data-explain-template="infoThumbnailQualityTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="thumbnailQuality"
                                value="4" min="1" max="10">
@@ -491,6 +491,16 @@
     </div>
 </div>
 
+
+<!-- ⓘ details: each opens in #globalInfoModal from the ⓘ whose data-explain-template names it. -->
+<template id="infoSetupLibrariesTpl">
+    <p>Server-level scope — which libraries this app is allowed to touch on this server. Filters apply to every job type (webhook, scheduled, manual).</p>
+    <p>For a one-off run against a different subset, use the New Job button on the Dashboard.</p>
+</template>
+<template id="infoSetupThumbnailIntervalTpl">
+    <p>Smaller = smoother scrubbing in your player, but bigger BIF files and longer to generate.</p>
+    <p>Raise it to 5–10 s if you don't need fine scrubbing and want faster jobs.</p>
+</template>
 {% endblock %}
 
 {% block scripts %}

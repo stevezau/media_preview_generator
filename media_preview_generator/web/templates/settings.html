@@ -54,7 +54,7 @@
                         Max concurrent jobs: <strong><span id="maxConcurrentJobsValue">3</span></strong>
                         <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                 data-bs-toggle="tooltip" data-bs-placement="top"
-                                title="What counts + tuning guidance — click for details"
+                                title="How many jobs can run at the same time."
                                 data-explain-title="Max concurrent jobs"
                                 data-explain-template="infoMaxConcurrentJobsTpl"
                                 aria-label="Explain max concurrent jobs">
@@ -72,7 +72,7 @@
 
                 <div class="mb-3">
                     <label for="incomingJobPriority" class="form-label">Incoming job priority
-                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Priority given to jobs this app creates for itself when new media lands — webhook deliveries (Sonarr/Radarr/Plex/Emby/Jellyfin) and Recently Added sweeps. High lets a new episode jump ahead of a running full-library regeneration, both in the queue and file-by-file. Schedules with their own priority set keep it."><i class="bi bi-info-circle"></i></button>
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Priority for jobs started when new media lands: webhooks and Recently Added sweeps." data-explain-title="Incoming job priority" data-explain-template="infoIncomingPriorityTpl"><i class="bi bi-info-circle"></i></button>
                     </label>
                     <select class="form-select" id="incomingJobPriority" style="max-width: 14rem;">
                         <option value="1">High</option>
@@ -120,7 +120,7 @@
                 <h6 class="mb-2 mt-4">Retry policy
                     <button type="button" class="info-icon ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
-                            title="Global retry defaults for every job — webhook, scheduled, manual, recently-added. A file that can't be found on the media server (still indexing, transient API error) is retried this many times with this delay before being marked failed."><i class="bi bi-info-circle"></i></button>
+                            title="How every job retries a file the media server can't find yet." data-explain-title="Retry policy" data-explain-template="infoRetryPolicyTpl"><i class="bi bi-info-circle"></i></button>
                 </h6>
                 <p class="form-text mt-0 mb-3">
                     Applies to all job types — webhook, scheduled, manual reprocess, and recently-added scans.
@@ -140,7 +140,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="webhookRetryDelay" class="form-label">
                             Initial retry delay: <strong><span id="retryDelayValue">30</span>s</strong>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Sets the pace of the retry schedule rather than one fixed wait. Every wait is multiplied by this value ÷ 30. Values under 15 s act as 15 s. Retries after the fifth wait 1 h each (at 30 s)."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Sets the pace of the retry schedule rather than one fixed wait." data-explain-title="Initial retry delay" data-explain-template="infoRetryDelayTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="webhookRetryDelay" min="10" max="300" step="5" value="30">
                         <div class="form-text">
@@ -202,7 +202,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="cpuThreads" class="form-label">
                             CPU Workers
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many items the CPU processes at the same time, in addition to any GPU workers. Each worker keeps one job busy at a time. Set to 0 to disable CPU processing entirely."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many files the CPU works on at once, on top of any GPU workers. 0 turns CPU processing off."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control has-stepper" id="cpuThreads"
                                min="0" max="{{ max_cpu_threads }}" value="1">
@@ -222,7 +222,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="scanWorkers" class="form-label">
                             Files checked at once
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="During a full library scan, how many files are checked in parallel for an existing preview. Checking is light disk work and does NOT add FFmpeg/GPU load — only the GPU and CPU worker counts above control how many previews generate at once. Higher values speed up the &quot;skip already-done files&quot; sweep on large libraries; lower it if a single spinning HDD struggles. 0 = Auto."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many files a full scan checks at once for an existing preview. 0 = Auto." data-explain-title="Files checked at once" data-explain-template="infoScanWorkersTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control has-stepper" id="scanWorkers"
                                min="0" max="256" value="0" placeholder="Auto">
@@ -236,7 +236,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailInterval" class="form-label">
                             Thumbnail Interval
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Seconds between thumbnails. Lower numbers give finer scrubbing in your player. Videos already contain 'snapshot' frames stored at intervals — when those are closer together than your interval, we reuse them (fast). When they're further apart, we fully decode the video to produce unique thumbnails (correct, but slower for that file). We check each file automatically and pick the right path."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Seconds between thumbnails. Lower gives finer scrubbing in your player." data-explain-title="Thumbnail interval" data-explain-template="infoThumbnailIntervalTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <div class="input-group">
                             <input type="number" class="form-control has-stepper" id="thumbnailInterval"
@@ -279,7 +279,7 @@
                         <label for="thumbnailQuality" class="form-label">
                             Thumbnail Quality: <span id="qualityValue">4</span>
                             <small class="text-muted fw-normal">(lower = sharper)</small>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better, like FFmpeg&#39;s -q:v (2 = sharpest and largest, 10 = blurriest and smallest; 1 behaves the same as 2). Default 4 looks fine at typical scrubbing sizes. Lower it if thumbs look blocky on a 4K display; raise it to shrink BIF files."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better: 2 is sharpest, 10 is smallest. Default 4." data-explain-title="Thumbnail quality" data-explain-template="infoThumbnailQualityTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="thumbnailQuality"
                                min="1" max="10" value="4">
@@ -298,7 +298,7 @@
                             HDR Tone Mapping
                             <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                     data-bs-toggle="tooltip" data-bs-placement="top"
-                                    title="How HDR brightness is mapped to SDR — click for details"
+                                    title="How HDR brightness is mapped to SDR."
                                     data-explain-title="HDR Tone Mapping"
                                     data-explain-template="tonemapHelpTpl"
                                     aria-label="Explain HDR Tone Mapping">
@@ -357,7 +357,7 @@
                 <h6 class="mb-2">Smart caching across servers
                     <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
-                            title="How cache reuse works across servers — click for details"
+                            title="How cache reuse works across servers."
                             data-explain-title="Smart caching across servers"
                             data-explain-template="infoSmartCachingTpl"
                             aria-label="Explain smart caching">
@@ -423,7 +423,7 @@
                             <input class="form-check-input" type="checkbox" id="frameReuseEnabled" checked>
                             <label class="form-check-label" for="frameReuseEnabled">
                                 Enable smart caching
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="On: results from one server's webhook are reused if another server's webhook fires for the same file within the cache window. Off: each webhook runs FFmpeg from scratch."><i class="bi bi-info-circle"></i></button>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="On: another server's webhook for the same file reuses the result within the cache window. Off: every webhook runs FFmpeg."><i class="bi bi-info-circle"></i></button>
                             </label>
                         </div>
                         <div class="form-text">
@@ -504,7 +504,7 @@
 
                     <div>
                         <div class="d-flex justify-content-between align-items-baseline gap-2 mb-2">
-                            <h6 class="mb-0" id="markersSourcesLabel">Where evidence comes from</h6>
+                            <h6 class="mb-0"><span id="markersSourcesLabel">Where we check</span><button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The places we look for intro and credits times, in the order they&#39;re asked."><i class="bi bi-info-circle"></i></button></h6>
                             <span class="small text-muted">drag to reorder</span>
                         </div>
                         <!-- Order is the order sources are checked and which one's times win. Reordered by the grip
@@ -514,7 +514,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Chapters inside the file</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Streaming releases often name chapters Intro, Title Sequence or End Credits. About 1 in 9 seasons in a sampled library."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Chapters named Intro, End Credits and so on, inside the file itself. Used on their own unless two other sources agree on different times."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Free · exact when present</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -529,7 +529,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: TheIntroDB</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="When it has data: intros 35 of 43 right, credits 23 right / 4 wrong. Has data for about 1 in 4 TV episodes and 1 in 100 movies. Works without a key (500 lookups a day); your own free key raises that. Used without the site's written permission — keys can be revoked."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A community database of intro and credits times, for TV and movies. Used when another source agrees with it." data-explain-title="TheIntroDB" data-explain-template="infoTheIntroDbTpl"><i class="bi bi-info-circle"></i></button>
                                     <div class="d-flex align-items-center gap-2 mt-1">
                                         <!-- new-password: stops a browser password manager filling this app's login into it. -->
                                         <input type="password" class="form-control form-control-sm markers-key-input" id="markersTheIntroDbKey"
@@ -550,7 +550,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: IntroDB.app</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intros 26 of 43 right, credits 17 right / 4 wrong on a verified set. Agreement with TheIntroDB counts as one vote because its data looks partly copied."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A community database of intro and credits times. Used when another source agrees with it."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">No key needed · TV only</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -565,7 +565,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Online: SkipDB</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only answers matched to the length of your file are used. Intros 16 of 43 right on a verified set, so it only counts once another source agrees."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A community database of skip times, matched to your file&#39;s length. Used when another source agrees with it."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Free lookups · matched to your file's length</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -580,7 +580,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Matching audio across a season</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 missed (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro on its own when nothing else answers. When another source disagrees, the episode goes to Needs review. A server's own intro marker doesn't count as a second source for it."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season&#39;s episodes share, so shows no database has still get intros. Used on its own unless another source disagrees."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
                                     <div class="small text-muted">Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
@@ -597,7 +597,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">On-screen credit text</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early on 1, missed 3. It can publish credits on its own."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Reads the credit roll on screen near the end of the file. Used on its own for credits, and to correct a credits chapter&#39;s start."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
                                     <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
@@ -614,7 +614,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Markers already on your servers</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex's own markers are sometimes wrong (for example ~80 s late on South Park S01), so they can only confirm another source."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intro and credits markers your servers already have. Used only to confirm another source, never on their own."><i class="bi bi-info-circle"></i></button>
                                     <div class="small text-muted">Second opinion, never copied as-is</div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -626,31 +626,106 @@
                                 </div>
                             </li>
                         </ol>
-                        <!-- Each sentence mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium"); change both together. -->
-                        <p class="small text-muted mt-3 mb-0" id="markersHowItDecides">
-                            <strong>How it decides:</strong> sources are asked in the order above. Chapters in the file
-                            decide on their own, unless two other sources agree on something different or an intro
-                            chapter is far longer than the rest of its season's; on-screen credit text moves a credits
-                            chapter's start to the first credit card when the chapter is off it. An online database's
-                            answer is
-                            published once an independent source agrees with it: on-screen credits, season audio,
-                            another database, or a server's own marker (IntroDB and TheIntroDB count as one). A single
-                            answer decides alone only when it checks your own file: on-screen credit text for credits,
-                            or season audio for intros (so a show no online database has still gets them). If
-                            sources disagree, or the only answer can't decide alone, the file goes to Needs review so
-                            you can pick.
-                        </p>
                     </div>
                 </div>
 
-                <div class="mt-3">
-                    <button class="btn btn-sm btn-link px-0" type="button" data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false" aria-controls="markersAdvanced" id="markersAdvancedToggle">
-                        <i class="bi bi-chevron-right me-1"></i>Advanced
+                <!-- Each card, and the modal's detail below, mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium")
+                     and pipeline.py's source order; change both together. -->
+                <section class="mt-4" id="markersHowItDecides" aria-labelledby="markersHowItDecidesLabel">
+                    <h6 class="mb-1" id="markersHowItDecidesLabel">How it decides</h6>
+                    <p class="small text-muted mb-3">Every file goes through the same four steps. Each marker type (intro,
+                        credits) is decided on its own, so one can be sent while the other waits for your check.</p>
+                    <ol class="markers-steps list-unstyled mb-2">
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">1</span>
+                            <div class="markers-step-title">Ask the sources, in your order</div>
+                            <div class="markers-step-text">The list under <strong>Where we check</strong>. Once a type is settled by anything other than chapters alone or season audio alone, the rest are skipped as “not needed”. Your servers&#39; own markers are always read.</div>
+                        </li>
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">2</span>
+                            <div class="markers-step-title">Check who agrees</div>
+                            <div class="markers-step-text">Two answers agree when intro ends are within 5&nbsp;s or credits starts within 10&nbsp;s. When sources agree, the one higher in your order supplies the times.</div>
+                        </li>
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">3</span>
+                            <div class="markers-step-title">Decide</div>
+                            <div class="markers-step-text">A marker is sent when a chapter isn&#39;t contradicted, when two independent sources agree, or when a source that reads the file answers and nothing disagrees. Everything else needs your check.</div>
+                        </li>
+                        <li class="markers-step">
+                            <span class="markers-step-num" aria-hidden="true">4</span>
+                            <div class="markers-step-title">Send to your servers</div>
+                            <div class="markers-step-text">Each server gets the decided markers. With <strong>Keep Plex&#39;s</strong> or <strong>Keep Emby&#39;s</strong> on, that server&#39;s own marker of a type stays, unless it&#39;s impossible for the file (outside it, or under 3&nbsp;s).</div>
+                        </li>
+                    </ol>
+                    <button type="button" class="btn btn-link btn-sm px-0 info-modal-link" id="markersHowItDecidesMore"
+                            data-explain-title="How decisions are made" data-explain-template="markersDecisionsTpl">
+                        <i class="bi bi-info-circle me-1" aria-hidden="true"></i>See how decisions are made
                     </button>
+                </section>
+
+                <!-- "See how decisions are made": opens in #globalInfoModal. Same source of truth as the cards above. -->
+                <template id="markersDecisionsTpl">
+                    <h6>Who can decide alone</h6>
+                    <table class="table table-sm align-middle mb-1 markers-decide-alone">
+                        <tbody>
+                            <tr><td>Chapters in the file</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone</span></td></tr>
+                            <tr><td>On-screen credit text</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone</span></td></tr>
+                            <tr><td>Season audio</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone, intros only</span></td></tr>
+                            <tr><td>IntroDB / TheIntroDB</td><td class="text-end"><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Needs a second source</span></td></tr>
+                            <tr><td>SkipDB</td><td class="text-end"><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Needs a second source</span></td></tr>
+                            <tr><td>Your servers&#39; markers</td><td class="text-end"><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Needs a second source</span></td></tr>
+                        </tbody>
+                    </table>
+                    <p class="small text-muted">IntroDB and TheIntroDB count as one source. A plugin&#39;s imported copy of
+                        IntroDB or SkipDB counts as that database, not as a second opinion.</p>
+
+                    <h6 class="mt-4">The three outcomes</h6>
+                    <dl class="markers-outcomes">
+                        <dt><i class="bi bi-circle-fill text-success me-2" aria-hidden="true"></i>Decided and sent</dt>
+                        <dd>A chapter nobody contradicts · two independent sources agree · one file-reading source
+                            answers and nothing disagrees.</dd>
+                        <dt><i class="bi bi-circle-fill text-warning me-2" aria-hidden="true"></i>Needs your check</dt>
+                        <dd>Two agreeing sources contradict a chapter · two agreeing groups conflict · the only answer
+                            can&#39;t decide alone · sources disagree · an intro overlaps a recap by more than 5&nbsp;s, or a
+                            preview overlaps credits by more than 10&nbsp;s. You pick on real frames in the Inspector; the
+                            other type is still sent.</dd>
+                        <dt><i class="bi bi-circle-fill text-secondary me-2" aria-hidden="true"></i>Nothing found</dt>
+                        <dd>No source answered, or every answer failed the sanity checks: an intro starting after 35% of
+                            the file or running to its end, credits before the last 25%.</dd>
+                    </dl>
+
+                    <h6 class="mt-4">Rules that surprise people</h6>
+                    <ul class="mb-0 markers-surprises">
+                        <li><strong>Credit text moves a “Credits” chapter</strong> to the first credit card, unless another source agrees with the chapter.</li>
+                        <li><strong>Credits with no end run to the end of the file.</strong> Online credits that overshoot the end by up to 5&nbsp;s are cut there.</li>
+                        <li><strong>Season audio plus one more source</strong> overrides an intro chapter they both end inside.</li>
+                        <li><strong>A server&#39;s own marker can only move credits later,</strong> never lengthen them.</li>
+                        <li><strong>Your locks and adjustments always win,</strong> even over a type that&#39;s turned off or “Keep Plex&#39;s”.</li>
+                        <li><strong>A replaced file of the same length keeps the old marker</strong> only when nothing answers for that type, and not when a newer check read the new file and found nothing.</li>
+                        <li><strong>After an app update,</strong> files decided by an older version are checked again, 100 at a time, at low priority. A sent marker stays while one of its sources still agrees.</li>
+                    </ul>
+                </template>
+
+                <template id="infoTheIntroDbTpl">
+                    <p>Works without a key: 500 lookups a day. Your own free key raises that.</p>
+                    <p>It&#39;s used without the site&#39;s written permission, so keys can be revoked. It&#39;s off by
+                        default.</p>
+                    <p>IntroDB.app and TheIntroDB count as one source, so they can&#39;t confirm each other.</p>
+                </template>
+
+                <div class="markers-advanced border-top mt-4 pt-3">
+                    <h6 class="mb-0">
+                        <button class="btn btn-link p-0 text-reset text-decoration-none fw-semibold markers-advanced-toggle" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false"
+                                aria-controls="markersAdvanced" id="markersAdvancedToggle">
+                            <i class="bi bi-chevron-right collapse-chevron me-1" aria-hidden="true"></i>Advanced
+                        </button>
+                    </h6>
+                    <p class="small text-muted mt-1 mb-0">Only change this if you know what you&#39;re doing.</p>
                     <div class="collapse" id="markersAdvanced">
-                        <div class="card card-body mt-2">
+                        <div class="pt-3">
                             <h6 class="mb-3">Where to look for credits
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far from the end of a file to search for the credit roll. Automatic fits nearly every library. Raise it only if credits are being missed because they start earlier than this. A longer window takes longer to decode for every file."><i class="bi bi-info-circle"></i></button>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Automatic starts with the last 7½ minutes of an episode and 15 of a film, and reads back 2 minutes at a time while the credits are already rolling at that window&#39;s start."><i class="bi bi-info-circle"></i></button>
                             </h6>
                             <div class="markers-opt mb-3">
                                 <label for="markersCreditsWindowTv">TV episodes</label>
@@ -675,7 +750,7 @@
                 <div class="row mb-3">
                     <div class="col-md-6 mb-3">
                         <label for="logLevel" class="form-label">Log Level
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How chatty the app's logs are. DEBUG = everything (verbose, useful for diagnosing issues). INFO = normal. WARNING/ERROR = only problems. Click 'Apply Log Level Now' to switch without restarting."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How chatty the logs are: DEBUG = everything, INFO = normal, WARNING/ERROR = only problems."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <select class="form-select" id="logLevel">
                             <option value="DEBUG">DEBUG</option>
@@ -728,7 +803,7 @@
                 <div class="row mb-3">
                     <div class="col-md-3 mb-3">
                         <label for="jobHistoryDays" class="form-label">Keep History For
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Completed / failed / cancelled jobs older than this are deleted along with their per-job log files. Lower values reclaim disk space sooner; higher values let you scroll further back."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finished jobs older than this are deleted, along with their log files."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <div class="input-group">
                             <input type="number" class="form-control has-stepper" id="jobHistoryDays" min="1" max="365" value="30">
@@ -893,6 +968,29 @@
         </div>
     </div>
 </div>
+
+<!-- ⓘ details: each opens in #globalInfoModal from the ⓘ whose data-explain-template names it. -->
+<template id="infoIncomingPriorityTpl">
+    <p>Priority given to jobs this app creates for itself when new media lands — webhook deliveries (Sonarr/Radarr/Plex/Emby/Jellyfin) and Recently Added sweeps.</p>
+    <p>High lets a new episode jump ahead of a running full-library regeneration, both in the queue and file-by-file. Schedules with their own priority set keep it.</p>
+</template>
+<template id="infoRetryPolicyTpl">
+    <p>Global retry defaults for every job — webhook, scheduled, manual, recently-added.</p>
+    <p>A file that can't be found on the media server (still indexing, transient API error) is retried this many times with this delay before being marked failed.</p>
+</template>
+<template id="infoRetryDelayTpl">
+    <p>Every wait is multiplied by this value ÷ 30. Values under 15 s act as 15 s.</p>
+    <p>Retries after the fifth wait 1 h each (at 30 s).</p>
+</template>
+<template id="infoScanWorkersTpl">
+    <p>During a full library scan, how many files are checked in parallel for an existing preview.</p>
+    <p>Checking is light disk work and does <strong>not</strong> add FFmpeg/GPU load — only the GPU and CPU worker counts control how many previews generate at once.</p>
+    <p>Higher values speed up the "skip already-done files" sweep on large libraries; lower it if a single spinning HDD struggles.</p>
+</template>
+<template id="infoThumbnailIntervalTpl">
+    <p>Videos already contain 'snapshot' frames stored at intervals. When those are closer together than your interval, we reuse them (fast).</p>
+    <p>When they're further apart, we fully decode the video to produce unique thumbnails (correct, but slower for that file). We check each file automatically and pick the right path.</p>
+</template>
 {% endblock %}
 
 {% block scripts %}

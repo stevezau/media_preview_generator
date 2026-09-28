@@ -85,8 +85,8 @@ LOCAL_DB_TODO_AGENT = (
 AGENT_LABEL_OK = "The Plex marker agent is connected"
 AGENT_RECOMMENDED = "connected"
 AGENT_TOOLTIP = (
-    "A Plex on another machine is written by the Plex marker agent's container running beside it. Without the "
-    "agent answering, no intro or credits marker reaches this server."
+    "A Plex on another machine is written by the Plex marker agent running beside it; without it, no marker reaches "
+    "this server."
 )
 # Connection state (``publishers.plex_remote.AGENT_*``) → this row's label, ``current`` and reason. An unknown state
 # reads as "can't be reached", the same fallback the Edit tab's badge uses (``markers_server_tab.js AGENT_BADGES``).
@@ -177,8 +177,7 @@ DETECTION_LABEL_OK_LIBRARIES = "Plex's own detection doesn't reach your Intro & 
 DETECTION_LABEL_KEEP = "Keeping Plex's own markers: its detection can stay on"
 DETECTION_REASON = "Plex settings → Library → Generate intro and credits video markers → Never."
 DETECTION_TOOLTIP = (
-    "Plex finds markers itself in a library only when its server setting and that library's own setting are both "
-    "on. When it does, it overwrites ours; the next Intro & Credits run puts them back."
+    "Plex finds markers itself only in libraries where its server setting and the library's own setting are both on."
 )
 DETECTION_EXPLANATION = (
     "<p><strong>What it checks:</strong> whether Plex's own intro and credits detection reaches the libraries Intro "

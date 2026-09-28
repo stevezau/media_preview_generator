@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 from collections.abc import Callable
 
@@ -224,7 +225,7 @@ class TestIntroCreditsSettings:
             )
             expect(switch).to_be_enabled()
 
-    def test_credit_text_is_switchable_and_explains_its_numbers(self, authed_page: Page, app_url: str) -> None:
+    def test_credit_text_is_switchable_and_says_when_it_is_used(self, authed_page: Page, app_url: str) -> None:
         captured = _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
         row = authed_page.locator("#markersSourceList .markers-source[data-id='credits_text']")
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
@@ -233,15 +234,12 @@ class TestIntroCreditsSettings:
             "Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without "
             "a GPU up to about 2 min"
         )
-        # The numbers are the app's own reported GPU run on the 80 (evidence/eval/phase3-harness.md): 63 within 10 s,
-        # 1 more than 30 s early, 3 with no answer. "missed" is the no-answer count, never the 8 late answers.
         tooltip = row.locator(".info-icon").evaluate(
             "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
         )
         assert tooltip == (
-            "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at "
-            "the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early "
-            "on 1, missed 3. It can publish credits on its own."
+            "Reads the credit roll on screen near the end of the file. Used on its own for credits, and to correct a "
+            "credits chapter's start."
         )
         row.locator(".markers-source-enabled").click()
         sent = _wait_for_post(
@@ -307,7 +305,7 @@ class TestIntroCreditsSettings:
         expect(row.locator(".markers-source-enabled")).to_be_enabled()
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
 
-    def test_season_audio_is_switchable_and_explains_its_numbers(self, authed_page: Page, app_url: str) -> None:
+    def test_season_audio_is_switchable_and_says_when_it_is_used(self, authed_page: Page, app_url: str) -> None:
         captured = _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
         row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
         switch = row.locator(".markers-source-enabled")
@@ -320,10 +318,8 @@ class TestIntroCreditsSettings:
             "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
         )
         assert tooltip == (
-            "Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 "
-            "missed (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro on its own when nothing "
-            "else answers. When another source disagrees, the episode goes to Needs review. A server's own intro "
-            "marker doesn't count as a second source for it."
+            "Finds the theme tune a season's episodes share, so shows no database has still get intros. Used on its own "
+            "unless another source disagrees."
         )
 
         switch.click()
@@ -376,71 +372,135 @@ class TestIntroCreditsSettings:
         expect(row.locator(".markers-source-enabled")).to_be_enabled()
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
 
-    def test_how_it_decides_sits_under_the_sources(self, authed_page: Page, app_url: str) -> None:
-        # The "Publish when" High/Medium choice was removed (2026-09-24); this note says what the rules do instead.
+    def test_where_we_check_says_what_each_source_is_without_benchmark_numbers(
+        self, authed_page: Page, app_url: str
+    ) -> None:
         _open_settings(authed_page, app_url, _default_markers())
-        note = authed_page.locator("#markersSourceList + #markersHowItDecides")
-        expect(note).to_be_visible()
-        expect(note).to_have_text(
-            "How it decides: sources are asked in the order above. "
-            "Chapters in the file decide on their own, unless two other sources agree on something different or an "
-            "intro chapter is far longer than the rest of its season's; on-screen credit text moves a credits "
-            "chapter's start to the first credit card when the chapter is off it. "
-            "An online database's answer is published once an independent source agrees with it: on-screen credits, "
-            "season audio, another database, or a server's own marker (IntroDB and TheIntroDB count as one). "
-            "A single answer decides alone only when it checks your own file: on-screen credit text for credits, "
-            "or season audio for intros (so a show no online database has still gets them). "
-            "If sources disagree, or the only answer can't decide alone, the file goes to Needs review so you can pick."
+        expect(authed_page.locator("#markersSourcesLabel")).to_have_text("Where we check")
+        expect(authed_page.locator("#section-markers")).not_to_contain_text("Where evidence comes from")
+        tips = authed_page.locator("#markersSourceList .markers-source").evaluate_all(
+            """rows => Object.fromEntries(rows.map((row) => {
+                const icon = row.querySelector('.info-icon');
+                return [row.dataset.id, icon.getAttribute('data-bs-original-title') || icon.getAttribute('title')];
+            }))"""
+        )
+        # Each says what the source is and when it's used, per markers/decide.py at "medium".
+        assert tips == {
+            "chapters": (
+                "Chapters named Intro, End Credits and so on, inside the file itself. Used on their own unless two "
+                "other sources agree on different times."
+            ),
+            "theintrodb": (
+                "A community database of intro and credits times, for TV and movies. Used when another source agrees "
+                "with it. Click for more."
+            ),
+            "introdb": "A community database of intro and credits times. Used when another source agrees with it.",
+            "skipdb": (
+                "A community database of skip times, matched to your file's length. Used when another source agrees "
+                "with it."
+            ),
+            "season_audio": (
+                "Finds the theme tune a season's episodes share, so shows no database has still get intros. Used on "
+                "its own unless another source disagrees."
+            ),
+            "credits_text": (
+                "Reads the credit roll on screen near the end of the file. Used on its own for credits, and to "
+                "correct a credits chapter's start."
+            ),
+            "server_markers": (
+                "Intro and credits markers your servers already have. Used only to confirm another source, never on "
+                "their own."
+            ),
+        }
+        benchmark = re.compile(r"\d+ (of|right|wrong|missed)|verified set|tested alone|sampled", re.IGNORECASE)
+        assert not [tip for tip in tips.values() if benchmark.search(tip)]
+
+    def test_theintrodb_detail_keeps_the_key_and_permission_notes(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        authed_page.locator("#markersSourceList .markers-source[data-id='theintrodb'] .info-icon").click()
+        expect(authed_page.locator("#globalInfoModal")).to_be_visible(timeout=5000)
+        body = authed_page.locator("#globalInfoBody")
+        expect(body).to_contain_text("500 lookups a day")
+        expect(body).to_contain_text("without the site's written permission")
+        expect(body).to_contain_text("IntroDB.app and TheIntroDB count as one source")
+
+    def test_how_it_decides_shows_four_steps(self, authed_page: Page, app_url: str) -> None:
+        from media_preview_generator.markers.decide import CREDITS_START_TOLERANCE_MS, INTRO_END_TOLERANCE_MS
+
+        _open_settings(authed_page, app_url, _default_markers())
+        section = authed_page.locator("#section-markers #markersHowItDecides")
+        expect(section).to_be_visible()
+        expect(section.locator("h6")).to_have_text("How it decides")
+        expect(section.locator(".markers-step-num")).to_have_text(["1", "2", "3", "4"])
+        expect(section.locator(".markers-step-title")).to_have_text(
+            ["Ask the sources, in your order", "Check who agrees", "Decide", "Send to your servers"]
+        )
+        agree = section.locator(".markers-step").nth(1).inner_text().replace("\xa0", " ")
+        assert f"intro ends are within {INTRO_END_TOLERANCE_MS // 1000} s" in agree
+        assert f"credits starts within {CREDITS_START_TOLERANCE_MS // 1000} s" in agree
+        decide = section.locator(".markers-step").nth(2).inner_text()
+        assert "two independent sources agree" in decide
+
+    def test_see_how_decisions_are_made_opens_the_three_blocks(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        link = authed_page.locator("#markersHowItDecides #markersHowItDecidesMore")
+        expect(link).to_have_text("See how decisions are made")
+        link.click()
+        expect(authed_page.locator("#globalInfoModal")).to_be_visible(timeout=5000)
+        expect(authed_page.locator("#globalInfoTitle")).to_have_text("How decisions are made")
+        expect(authed_page.locator("#globalInfoBody h6")).to_have_text(
+            ["Who can decide alone", "The three outcomes", "Rules that surprise people"]
+        )
+        expect(authed_page.locator("#globalInfoBody .markers-outcomes dt")).to_have_text(
+            ["Decided and sent", "Needs your check", "Nothing found"]
         )
 
-    def test_how_it_decides_names_the_sources_that_decide_alone(self, authed_page: Page, app_url: str) -> None:
-        # Checked against the decision rules over every source × marker type, not a copy of the string: the list
-        # drifted once (credit text left out). A new source fails here until it is mapped below.
+    def test_who_can_decide_alone_matches_the_decision_rules(self, authed_page: Page, app_url: str) -> None:
+        # Checked against the decision rules over every source × marker type, not a copy of the strings: a list like
+        # this drifted once (credit text left out). A new source fails here until it is mapped below.
         from media_preview_generator.markers.decide import _may_decide_alone
         from media_preview_generator.markers.models import Candidate, MarkerType, Source
 
-        phrases = {
-            Source.CHAPTERS: "chapters",
-            Source.THEINTRODB: "TheIntroDB",
-            Source.INTRODB: "IntroDB",
-            Source.SKIPDB: "SkipDB",
-            Source.SEASON_AUDIO: "audio",
-            Source.SEASON_AUDIO_PREVIOUS: "previous season",
-            Source.CREDITS_TEXT: "credit text",
+        rows = {
+            "Chapters in the file": {Source.CHAPTERS},
+            "On-screen credit text": {Source.CREDITS_TEXT},
+            "Season audio": {Source.SEASON_AUDIO},
+            "IntroDB / TheIntroDB": {Source.INTRODB, Source.THEINTRODB},
+            "SkipDB": {Source.SKIPDB},
+            "Your servers' markers": {Source.SERVER_MARKERS, Source.SERVER_MARKERS_IMPORTED},
         }
-        not_in_the_tooltip = {
+        not_in_the_table = {
             Source.USER: "a marker you locked isn't detection evidence; a lock always wins",
-            Source.SERVER_MARKERS: "markers already on a server only ever confirm (its own row says so)",
-            Source.SERVER_MARKERS_IMPORTED: "an importer plugin's copy counts as its database's source, never alone",
+            Source.SEASON_AUDIO_PREVIOUS: "last season's audio is a hint, not a source in Where we check; never alone",
         }
-        assert set(Source) == phrases.keys() | not_in_the_tooltip.keys()
+        assert set(Source) == set().union(*rows.values()) | not_in_the_table.keys()
         # The types a source can answer at all, where that's fewer than every type (spec §5.4: credit text).
         answers = {Source.CREDITS_TEXT: {MarkerType.CREDITS}}
-        qualifiers = {
-            frozenset({MarkerType.CREDITS}): "for credits",
-            frozenset({MarkerType.INTRO}): "for intros",
-            frozenset({MarkerType.INTRO, MarkerType.RECAP}): "for intros and recaps",
-        }
 
         _open_settings(authed_page, app_url, _default_markers())
-        note = authed_page.locator("#markersHowItDecides").inner_text()
-        # "A single answer decides alone only when it checks your own file: A for x, or B for y. If sources …"
-        accepted = note.split("A single answer decides alone only when it checks your own file: ", 1)[1].split(". ")[0]
-        items = [item.removeprefix("or ") for item in accepted.split(", ")]
-
-        for source, phrase in phrases.items():
-            decides = {
-                mtype
-                for mtype in answers.get(source, set(MarkerType))
-                if _may_decide_alone(Candidate(type=mtype, start_ms=0, end_ms=None, source=source))
-            }
-            if source is Source.CHAPTERS:  # a sentence of their own
-                assert decides == set(MarkerType) and "Chapters in the file decide on their own" in note
-                continue
-            named = [item for item in items if phrase in item]
-            assert bool(named) is bool(decides), (source, accepted)
-            if decides:
-                assert qualifiers[frozenset(decides)] in named[0], (source, named)
+        table = dict(
+            authed_page.evaluate(
+                """() => Array.from(document.getElementById('markersDecisionsTpl').content.querySelectorAll('tr'))
+                    .map((tr) => [tr.cells[0].textContent.trim(), tr.cells[1].textContent.trim()])"""
+            )
+        )
+        assert table.keys() == rows.keys()
+        for label, sources in rows.items():
+            for source in sources:
+                answerable = answers.get(source, set(MarkerType))
+                decides = {
+                    mtype
+                    for mtype in answerable
+                    if _may_decide_alone(Candidate(type=mtype, start_ms=0, end_ms=None, source=source))
+                }
+                if decides == answerable:
+                    expected = "Alone"
+                elif decides == {MarkerType.INTRO}:
+                    expected = "Alone, intros only"
+                else:
+                    assert not decides, (source, decides)
+                    expected = "Needs a second source"
+                assert table[label] == expected, (label, source)
 
     def test_intros_toggle_tooltip_names_season_audio_as_live(self, authed_page: Page, app_url: str) -> None:
         # Season audio shipped before this feature; the tooltip must not still call it "(soon)".
@@ -499,6 +559,10 @@ class TestIntroCreditsSettings:
         _open_settings(authed_page, app_url, _default_markers())
         toggle = authed_page.locator("#markersAdvancedToggle")
         expect(toggle).to_have_text("Advanced")
+        expect(authed_page.locator("h6:has(> #markersAdvancedToggle)")).to_be_visible()
+        expect(authed_page.locator(".markers-advanced > p")).to_have_text(
+            "Only change this if you know what you're doing."
+        )
         expect(toggle).to_have_attribute("aria-expanded", "false")
         expect(authed_page.locator("#markersAdvanced")).not_to_be_visible()
         expect(authed_page.locator("#markersCreditsWindowTv")).not_to_be_visible()
@@ -533,9 +597,9 @@ class TestIntroCreditsSettings:
         icon = authed_page.locator("#markersAdvanced h6 .info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
-            "How far from the end of a file to search for the credit roll. Automatic fits nearly every library. "
-            "Raise it only if credits are being missed because they start earlier than this. A longer window takes "
-            "longer to decode for every file."
+            # frames.EPISODE_TAIL_S / MOVIE_TAIL_S, and detector.find_credits's steps of rule_j.READ_BEFORE_TAIL_S.
+            "Automatic starts with the last 7½ minutes of an episode and 15 of a film, and reads back 2 minutes at a "
+            "time while the credits are already rolling at that window's start."
         )
 
     def test_changing_the_tv_window_sends_exactly_that(self, authed_page: Page, app_url: str) -> None:

@@ -4019,7 +4019,7 @@ class TestVersionRerunJob:
 
         env.dispatcher.submit_items.assert_not_called()
         taken.record_taken.assert_called_once_with(env.ctx.store, self.BATCH)
-        taken.submit_version_reruns.assert_called_once_with(delay_s=int(BATCH_GAP.total_seconds()))
+        taken.submit_version_reruns.assert_called_once_with(delay_s=int(BATCH_GAP.total_seconds()), after=None)
 
     def test_the_batch_leaves_the_jobs_config_once_it_ends(self, env, taken):
         # Only a revive needs it, and the config ships in every job payload.
@@ -4046,8 +4046,19 @@ class TestVersionRerunJob:
         self._ends(env, status, config)
         job_runner.run_intro_credits_job("j1")
 
-        expected = [call(delay_s=int(BATCH_GAP.total_seconds()))] if queued else []
+        expected = [call(delay_s=int(BATCH_GAP.total_seconds()), after=None)] if queued else []
         assert taken.submit_version_reruns.call_args_list == expected
+
+    def test_the_next_batch_goes_on_counting_from_this_ones_counts(self, env, taken):
+        # The name of the next batch ("batch 4 of 16") comes from where this one stood in the whole re-check.
+        from media_preview_generator.markers.versions import BATCH_GAP
+
+        counts = {"total": 1568, "batch": 3, "batch_size": 100}
+        env.job.config = {**self.CONFIG, job_runner.VERSION_RERUN_COUNTS: counts}
+        self._ends(env, "COMPLETED")
+        job_runner.run_intro_credits_job("j1")
+
+        taken.submit_version_reruns.assert_called_once_with(delay_s=int(BATCH_GAP.total_seconds()), after=counts)
 
     def test_a_cancelled_batch_queues_no_next_one(self, env, taken):
         env.job.config = dict(self.CONFIG)

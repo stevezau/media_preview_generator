@@ -241,6 +241,25 @@ def _save_and_get_put(page: Page, captured: dict) -> dict:
 
 @pytest.mark.e2e
 class TestPlexTab:
+    def test_intro_and_credits_is_the_third_tab(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server()
+        status = _status(server, "ready", "Written into this Plex server's database", _plex_ready_details())
+        _mock_server_page(authed_page, server, status)
+        _open_tab(authed_page, app_url, server, tab="general")
+
+        tabs = authed_page.locator("#editServerModal .nav-tabs .nav-link")
+        expect(tabs.nth(6)).to_be_visible()  # Webhook & Scanner, un-hidden once the vendor is known
+        assert tabs.evaluate_all("els => els.map((el) => el.dataset.bsTarget)") == [
+            "#edit-tab-general",
+            "#edit-tab-health",
+            "#edit-tab-markers",
+            "#edit-tab-libraries",
+            "#edit-tab-paths",
+            "#edit-tab-excludes",
+            "#edit-tab-automation",
+        ]
+        expect(tabs.nth(2)).to_have_text("Intro & Credits")
+
     def test_ready_status_renders(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server()
         status = _status(server, "ready", "Written into this Plex server's database", _plex_ready_details())
@@ -320,22 +339,28 @@ class TestPlexTab:
         block = authed_page.locator("#markersStatusBlock")
         expect(block.locator(".markers-detection")).to_have_text(badge, timeout=5000)
 
-        def tip_of(label: str) -> str:
+        def icon_of(label: str):
             value = block.locator(".markers-kv-label", has_text=label).locator("xpath=following-sibling::div[1]")
             icon = value.locator(".info-icon")
             expect(icon).to_have_count(1)
+            return icon
+
+        def tip_of(label: str) -> str:
+            icon = icon_of(label)
             return icon.get_attribute("data-bs-original-title") or icon.get_attribute("title")
 
-        assert tip_of("Plex's own detection") == (
-            "Whether Plex finds intros and credits itself (Plex settings → Library → Generate intro / credits video "
-            'markers). When on, Plex can analyse a file again and replace our markers; "When Plex has its own '
-            'markers" below decides what happens then.'
-        )
+        def detail_of(label: str) -> str:
+            return icon_of(label).get_attribute("data-explain-html")
+
+        # Short hover; the rest is the ⓘ's detail, which a click opens.
+        assert tip_of("Plex's own detection") == "Whether Plex finds intros and credits itself. Click for more."
+        assert "Generate intro / credits video markers" in detail_of("Plex's own detection")
+        assert '"When Plex has its own markers" below decides what happens then.' in detail_of("Plex's own detection")
         assert tip_of("Database location") == (
-            "The folder of Plex's library database, as this app sees it. Markers are written straight into this "
-            "database, so it has to be on a local disk of the machine Plex runs on: a database on a network share "
-            "can't be written safely."
+            "The folder of Plex's library database, as this app sees it. Click for more."
         )
+        assert "a database on a network share can't be written safely" in detail_of("Database location")
+        expect(icon_of("Database location")).to_have_class(re.compile(r"\binfo-icon-more\b"))
 
     def test_ready_plex_whose_plex_pass_couldnt_be_checked_shows_the_warning(
         self, authed_page: Page, app_url: str
@@ -369,12 +394,11 @@ class TestPlexTab:
         expect(group.locator("#markersRedetectKeep")).to_have_attribute("value", "keep_plex")
         icon = group.locator(".info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
-        assert tooltip == (
-            "Plex can show intro and credits markers of its own, from its detection (for example Analyze on an item). "
-            "Before we publish: 'Use ours' writes ours over them; 'Keep Plex's' leaves them and writes ours only for "
-            "the types Plex has none of. After we publish, Plex's detection can replace ours: 'Use ours' writes ours "
-            "again on the next Intro & Credits job that checks the file; 'Keep Plex's' keeps Plex's until you switch "
-            "to 'Use ours' or Plex removes them."
+        assert tooltip == "Which markers win when Plex has intro or credits markers of its own. Click for more."
+        icon.click()
+        expect(authed_page.locator("#globalInfoTitle")).to_have_text("When Plex has its own markers", timeout=5000)
+        expect(authed_page.locator("#globalInfoBody")).to_contain_text(
+            "'Keep Plex's' keeps Plex's until you switch to 'Use ours' or Plex removes them."
         )
 
     def test_flip_then_cancel_unticks_switch_and_sends_nothing(self, authed_page: Page, app_url: str) -> None:
@@ -1126,13 +1150,10 @@ class TestEmbyTab:
         expect(group.locator("#markersEmbyRedetectRestore")).to_be_checked()
         icon = group.locator(".info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
-        assert tooltip == (
-            "Emby can show intro and credits markers of its own, from its intro detection (Emby Premiere) or another "
-            "plugin. Before we publish: 'Use ours' writes ours over them; 'Keep Emby's' leaves them and writes ours "
-            "only for the types Emby has none of. After we publish, Emby's detection can replace ours: 'Use ours' "
-            "writes ours again on the next Intro & Credits job that checks the file; 'Keep Emby's' keeps Emby's until "
-            "you switch to 'Use ours' or Emby removes them."
-        )
+        assert tooltip == "Which markers win when Emby has intro or credits markers of its own. Click for more."
+        detail = authed_page.locator("#infoEmbyOwnMarkersTpl").evaluate("tpl => tpl.content.textContent")
+        assert "from its intro detection (Emby Premiere) or another plugin" in detail
+        assert "'Keep Emby's' keeps Emby's until you switch to 'Use ours' or Emby removes them." in detail
 
     @pytest.mark.parametrize(
         ("stored", "click", "sent"), [("restore", "Keep", "keep_emby"), ("keep_emby", "Restore", "restore")]
@@ -1194,8 +1215,8 @@ class TestLibrariesTabIntroCreditsColumn:
         icon = header.locator(".info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
-            "Which libraries get intro and credits markers on this server, whatever their Previews switch says. "
-            "Sports libraries start off: no online source covers sports and detection isn't reliable there."
+            "Libraries that get intro and credits markers here, whatever their Previews switch says. Sports libraries "
+            "start off."
         )
         for lib_id in ("1", "2", "3"):
             expect(_lib_toggle(authed_page, lib_id)).to_be_visible()

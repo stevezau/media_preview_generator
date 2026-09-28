@@ -214,3 +214,12 @@
     full scheduled scan can also delay incremental updates — look at Plex's
     own Activity panel for in-progress library tasks.</p>
 </template>
+
+<template id="infoThumbnailQualityTpl">
+    <p>Works like FFmpeg's <code>-q:v</code>: 2 = sharpest and largest, 10 = blurriest and smallest; 1 behaves the same as 2.</p>
+    <p>Default 4 looks fine at typical scrubbing sizes. Lower it if thumbs look blocky on a 4K display; raise it to shrink BIF files.</p>
+</template>
+<template id="infoExcludeTypeTpl">
+    <p><strong>Path prefix</strong> skips anything under that folder (e.g. <code>/Trailers</code> skips every file under any folder called Trailers).</p>
+    <p><strong>Regex</strong> matches the full file path against a regular expression — for advanced patterns.</p>
+</template>
