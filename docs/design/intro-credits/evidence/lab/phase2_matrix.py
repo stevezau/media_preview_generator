@@ -1484,8 +1484,11 @@ def row_12_plex_p3_p4() -> dict:
     finally:
         set_detect(intro=True, credits=True)
     restore_rick, _ = run_job({"file_paths": [rick], "library_name": "Phase 2 row 12 restore Rick"})
-    restore_e02, _ = run_job({"file_paths": [e02], "library_name": "Phase 2 row 12 restore E02"})
-    steps["end"] = {"rick": p1.plex_served(rick_item), "e02": p1.plex_served(e02_item)}  # fmt: skip
+    # P4's season intro detection also redoes E01 and E03 and drops our intro rows there, so the whole season is
+    # written back (as row 13 does for Rick and Morty); phase 1 row 2 reads all three again in phase 3 row 11.
+    restore_synth, _ = run_job({"file_paths": [p1.SYNTH_SEASON], "library_name": "Phase 2 row 12 restore Synth season"})
+    synth_served = {episode: p1.plex_served(plex_item(p1.synth_path(episode))) for episode in p1.SYNTH_TRUTH}
+    steps["end"] = {"rick": p1.plex_served(rick_item), "synth": synth_served}  # fmt: skip
 
     def types(served: list[dict]) -> list[str]:
         return sorted(m["type"] for m in served)
@@ -1501,8 +1504,8 @@ def row_12_plex_p3_p4() -> dict:
         "P3: Plex's forced credits detection added credits": any(m["type"] == "credits" for m in steps["P3 1 Plex own credits"]["served"]),
         "P3: Plex serves our intro and its credits": bool(p3_both),
         "P4: removing our intro deleted the pv:intros key": "pv:intros" in steps["P4 0 before"]["keys"] and "pv:intros" not in steps["P4 1 intro removed"]["keys"],
-        "end: Rick S01E01 and Synth S01E02 written back (restore)": restore_rick["status"] == restore_e02["status"] == "completed"
-        and p1.same_markers({"mlab-plex": steps["end"]["e02"]}, {"mlab-plex": p1.truth_everywhere(2)["mlab-plex"]})["mlab-plex"],
+        "end: Rick S01E01 and every Synth S01 episode written back (restore)": restore_rick["status"] == restore_synth["status"] == "completed"
+        and all(p1.same_markers({"mlab-plex": served}, {"mlab-plex": p1.truth_everywhere(episode)["mlab-plex"]})["mlab-plex"] for episode, served in synth_served.items()),
     }  # fmt: skip
     notes = [
         f"P3 [index] with our intro + Plex's credits: {[(r['index'], r['text'], r['start']) for r in steps['P3 2 our intro only']['rows']]}",
