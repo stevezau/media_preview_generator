@@ -597,8 +597,9 @@ class TestIntroCreditsSettings:
         icon = authed_page.locator("#markersAdvanced h6 .info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
-            "Automatic starts with the last 7½ minutes of a TV episode and 15 minutes of a film, and looks further "
-            "back on its own when chapters or an online source point earlier."
+            # frames.EPISODE_TAIL_S / MOVIE_TAIL_S, and detector.find_credits's steps of rule_j.READ_BEFORE_TAIL_S.
+            "Automatic starts with the last 7½ minutes of an episode and 15 of a film, and reads back 2 minutes at a "
+            "time while the credits are already rolling at that window's start."
         )
 
     def test_changing_the_tv_window_sends_exactly_that(self, authed_page: Page, app_url: str) -> None:

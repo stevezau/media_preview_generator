@@ -19,8 +19,8 @@ SCRIPTS = sorted((WEB / "static" / "js").glob("*.js"))
 
 ICON_TAG = re.compile(r'<(?:button|i|span|a)\b[^>]*class="[^"]*\binfo-icon\b[^"]*"[^>]*>', re.S)
 TITLE = re.compile(r'\btitle="([^"]*)"')
-# The longest hover allowed: about two lines of a wide tooltip. The longest today is the owner-approved credits
-# window text in Settings › Intro & Credits › Advanced (165 characters).
+# The longest hover allowed: about two lines of a wide tooltip. The longest today is the credits window text in
+# Settings › Intro & Credits › Advanced (170 characters).
 MAX_HINT = 170
 
 
