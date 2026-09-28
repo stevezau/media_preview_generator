@@ -81,6 +81,10 @@ def _allowed_bif_roots() -> list[str]:
         for entry in get_settings_manager().get("media_servers") or []:
             if not isinstance(entry, dict) or entry.get("enabled") is False:
                 continue
+            # A Plex server writes its BIFs under its own config folder, which can differ from the global one.
+            server_plex_folder = str((entry.get("output") or {}).get("plex_config_folder") or "").strip()
+            if entry.get("type") == "plex" and server_plex_folder:
+                roots.add(os.path.normpath(server_plex_folder))
             mappings = entry.get("path_mappings") or []
             local_prefixes = {
                 str(m.get("local_prefix") or "").strip()
@@ -1034,7 +1038,6 @@ def trickplay_info():
     comes from the same string so a single Jellyfin-format directory
     is enough for the viewer to render any frame.
     """
-    import re
 
     from ...servers import ServerRegistry
     from ..settings_manager import get_settings_manager
@@ -1059,79 +1062,12 @@ def trickplay_info():
     if not os.path.isdir(resolved):
         return jsonify({"error": "Sheet directory does not exist"}), 400
 
-    # Parse "<width> - <tileW>x<tileH>" from the directory name (the same
-    # convention Jellyfin's TrickplayManager.GetTrickplayDirectory uses).
-    dir_name = os.path.basename(resolved.rstrip("/"))
-    match = re.match(r"^\s*(\d+)\s*-\s*(\d+)x(\d+)\s*$", dir_name)
-    if not match:
-        return jsonify({"error": f"Sheet directory name doesn't match '<width> - <tileW>x<tileH>': {dir_name!r}"}), 400
-    # match.group(1) is the resolution width — currently unused by the
-    # response (the viewer reads thumb_w/thumb_h measured off the sheet)
-    # but the regex still has to match it to validate the sub-dir name.
-    tile_w = int(match.group(2))
-    tile_h = int(match.group(3))
-    if tile_w < 1 or tile_h < 1:
-        # /trickplay/frame divides pos_in_sheet by frames_per_sheet; guard
-        # against a 0 in either dimension producing a ZeroDivisionError.
-        return jsonify({"error": f"Invalid tile geometry {tile_w}x{tile_h}"}), 400
-    frames_per_sheet = tile_w * tile_h
+    from ...inspector.previews import trickplay_sheet_info
 
-    sheet_files = sorted(
-        (f for f in os.listdir(resolved) if f.endswith(".jpg") and f.split(".")[0].isdigit()),
-        key=lambda f: int(f.split(".")[0]),
-    )
-    sheet_count = len(sheet_files)
-    if sheet_count == 0:
-        return jsonify({"error": "No tile sheets found in directory"}), 400
-
-    # Measure the LAST sheet to count tiles in it (the last sheet may be
-    # partial); all earlier sheets are full at frames_per_sheet.
-    last_sheet_path = os.path.join(resolved, sheet_files[-1])
     try:
-        from PIL import Image as _Image
-
-        with _Image.open(last_sheet_path) as img:
-            sheet_pixel_w, sheet_pixel_h = img.size
-    except Exception as exc:
-        return jsonify({"error": f"Could not measure last sheet: {exc}"}), 400
-
-    thumb_w = sheet_pixel_w // tile_w if tile_w else 0
-    thumb_h = sheet_pixel_h // tile_h if tile_h else 0
-    # Last sheet's filled-tile count: scan top-to-bottom for the first
-    # row that's all-black (sentinel rows in our packing). Fall back to
-    # frames_per_sheet for a fully-packed sheet.
-    last_sheet_tiles = frames_per_sheet
-    try:
-        from PIL import Image as _Image
-
-        with _Image.open(last_sheet_path) as img:
-            for i in range(frames_per_sheet - 1, -1, -1):
-                row = i // tile_w
-                col = i % tile_w
-                tile_box = (col * thumb_w, row * thumb_h, (col + 1) * thumb_w, (row + 1) * thumb_h)
-                tile = img.crop(tile_box)
-                # All-black tile = empty slot.
-                if tile.getbbox() is not None:
-                    last_sheet_tiles = i + 1
-                    break
-            else:
-                last_sheet_tiles = 0
-    except Exception:
-        # Fall back to assuming the last sheet is full.
-        pass
-    thumb_count = (sheet_count - 1) * frames_per_sheet + last_sheet_tiles
-
-    sheets = []
-    for n in range(sheet_count):
-        sheet_path = os.path.join(resolved, f"{n}.jpg")
-        sheets.append(
-            {
-                "index": n,
-                "path": sheet_path,
-                "exists": os.path.isfile(sheet_path),
-                "size_bytes": os.path.getsize(sheet_path) if os.path.isfile(sheet_path) else 0,
-            }
-        )
+        info = trickplay_sheet_info(resolved)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     # The viewer reads frame_interval_ms from this response. We don't
     # know it from disk (Jellyfin tracks it in its DB) so we default to
@@ -1142,16 +1078,9 @@ def trickplay_info():
     return jsonify(
         {
             "manifest_path": resolved,  # kept for API compat; this is now the sheet-dir path
-            "tile_width": tile_w,
-            "tile_height": tile_h,
-            "thumb_width": thumb_w,
-            "thumb_height": thumb_h,
-            "thumbnail_count": thumb_count,
+            **{k: info[k] for k in ("tile_width", "tile_height", "thumb_width", "thumb_height", "thumbnail_count")},
             "interval_ms": interval_ms,
-            "frames_per_sheet": frames_per_sheet,
-            "sheet_count": sheet_count,
-            "sheets_dir": resolved,
-            "sheets": sheets,
+            **{k: info[k] for k in ("frames_per_sheet", "sheet_count", "sheets_dir", "sheets")},
         }
     )
 

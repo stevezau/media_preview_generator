@@ -821,7 +821,8 @@ def _try_reuse_existing_bif(
                 # previews from the *previous* version of the file. Pass.
                 continue
             try:
-                bif_interval_ms = read_bif_metadata(candidate_str).frame_interval_ms
+                # The header's own field, as this app writes it: a BIF another writer left at 0 there never matches.
+                bif_interval_ms = read_bif_metadata(candidate_str).header_interval_ms
             except Exception as exc:
                 logger.warning(
                     "BIF reuse: could not read the header of {} ({}: {}); falling back to FFmpeg.",

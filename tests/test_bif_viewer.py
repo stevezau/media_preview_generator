@@ -297,10 +297,16 @@ class TestBifViewerPage:
         assert resp.status_code == 302
         assert "/login" in resp.headers.get("Location", "")
 
-    def test_renders_when_authenticated(self, authed_client):
-        resp = authed_client.get("/bif-viewer")
+    def test_old_address_redirects_to_the_inspector_when_authenticated(self, authed_client):
+        # The Preview Inspector and its Intro & Credits tab are one Inspector page now.
+        resp = authed_client.get("/bif-viewer?bif=/plex/x.bif", follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/inspector?bif=%2Fplex%2Fx.bif")
+
+    def test_inspector_renders_when_authenticated(self, authed_client):
+        resp = authed_client.get("/inspector")
         assert resp.status_code == 200
-        assert b"Preview Inspector" in resp.data
+        assert b'id="inspQuery"' in resp.data
 
 
 # ---------------------------------------------------------------------------

@@ -226,6 +226,44 @@ The Triggers tab includes:
 
 The legacy `/webhooks` and `/schedules` URLs still work — they 302-redirect to the Triggers and Schedules tabs on the new page.
 
+### Inspector
+
+**Tools → Inspector** (`/inspector`) shows one film or episode on one page: its preview frames, and where its intro
+and credits are on each server.
+
+- **Search.** Type a title and results appear as you type, from every server (or the one picked in the dropdown). A
+  film several servers have is one row. Each row says whether the preview is ready (and how many frames it has) and
+  what Intro & Credits has for it: **Intro + credits**, **Credits set**, **Not checked yet** or **Needs review**. A TV
+  show opens in place: pick the season, then the episode, each with its own state. A path starting with `/` opens that
+  file directly. Choosing a file folds the results away; **Back to the results** brings them back.
+- **Links.** `/inspector?path=<file>` opens a file, so the page can be linked and bookmarked. The eye button on a job's
+  file rows (including a filter to **Needs review**) opens the Inspector on that file. The old `/bif-viewer` address
+  redirects here.
+- **The file.** A sentence says what happens, e.g. "Skip Intro runs 2:45 – 2:59 and Skip Credits starts at 24:59. Plex
+  has both. Jellyfin gets them on the next job." Below it: when the preview was made, how many frames it has and how
+  far apart, and its size. **Whole episode** (or film) is a strip of the preview's frames with the intro in blue and
+  the credits in orange, and one row for what was decided and one for what each server shows now. The close-ups show
+  the frames either side of each edge. **How it was decided** lists every source, what it found and whether it was
+  used. **On your servers** says, per server, the intro & credits state and the preview state; **File locations**
+  opens to the preview's path (Plex's bundle BIF, Emby's BIF next to the video, Jellyfin's trickplay folder).
+- **All frames** swaps the strip for every frame of the preview, intro frames edged blue and credits orange; click one
+  (or use the arrow keys) to see it larger.
+- **A file not checked yet** shows the markers each server has today in grey, with the end of the film zoomed when
+  they sit there, and a close-up of each. **Check intro & credits now** checks it.
+- **Regenerate preview** rebuilds the preview for every server that has the file (a job on the Dashboard);
+  **Re-detect intro & credits** asks every source again. While a job works on the file, a bar says so and shows its
+  progress; the page reads the file again when the job ends.
+- **States.** A file with no preview says so, and its close-ups read frames straight from the video. A path in no
+  server's library says **Not in any library**; a file that has gone says **Gone from disk**. A server that can't be
+  reached marks only its own row. A Plex item with several versions shows a switch between them.
+
+**Exact frames.** Preview frames are 2 to 10 seconds apart, too coarse to put an edge on, so Adjust and **Needs your
+check** read frames one second apart straight from the video. Only a file the app already knows is read (one in a
+server's library that Intro & Credits has seen, or that a server lists), with ffmpeg on the CPU at low priority, at
+most two at a time, and each read stops after 30 seconds. HDR10 and HLG frames are tone-mapped like the previews;
+Dolby Vision Profile 5 frames aren't, so their colours look off. The frames are kept in a size-capped folder under the
+system temp folder; nothing is written next to your media.
+
 ### Production Server
 
 The Docker image runs the web interface for you — there's nothing to configure. The dashboard updates in real time over WebSocket; long-running jobs survive the default proxy timeouts. If you're running the app outside Docker (or just curious how the container is wired internally — gunicorn settings, single-worker rationale, WebSocket transport), see [CONTRIBUTING.md → Architecture](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md#architecture).
@@ -805,30 +843,34 @@ order its episodes arrived in.
 
 ### Adjusting, adding and locking markers
 
-Open it from **Tools → Intro & Credits** (the same page as Tools → Preview Inspector, opened on its Intro & Credits tab), search for a title and open a file. The Intro & Credits tab has three buttons for setting a marker yourself. Adjust stays greyed out until a job
-has read the file's length.
+Open the file in the [Inspector](#inspector) (**Tools → Inspector**). **Adjust** appears once a job has checked the
+file and read its length.
 
-- **Adjust** opens the editor on the timeline. Drag the handle at each edge of a marker, or type the times. **Save and
-  publish to N servers** saves; **Cancel** throws the edit away. A time that looks odd (an intro shorter or longer than
-  most, credits that don't run to the end) gets a warning and is still saved. Only two things are refused: a marker
-  outside the file, and one that ends before it starts.
-- **Add a marker where nothing was found.** On a file where no source found a marker, Adjust still opens. A type with
-  no marker shows **Add intro**, **Add credits**, **Add recap** or **Add preview** where its bar would be. It puts a
-  marker on the timeline at a starting time that is round on purpose, so it can't be mistaken for something the app
-  found: an intro or recap from 0:00 to 0:30, credits the last 60 seconds, a preview the last 30. Drag it to where it
-  really is. **Remove** takes back a marker you added before you save it.
+- **Adjust** turns each close-up into an editor on frames read straight from the video, one second apart. Click the
+  frame where an edge belongs, step it with **◀ 1 s** / **1 s ▶**, or type the time. Credits (and a preview) can run to
+  the end of the file or end earlier. **Save and send to …** saves; **Cancel** throws the edit away. Only two things
+  are refused: a marker outside the file, and one that ends before it starts.
+- **Add a marker where nothing was found.** In Adjust, an intro or credits nothing was found for has **Add intro** or
+  **Add credits**. It starts from times that are round on purpose, so they can't be mistaken for something the app
+  found: an intro from 0:00 to 0:30, credits the last 60 seconds. Move its edges to where it really is.
+- **Needs your check.** When the sources disagree on a type, or the only answer can't decide alone, the Inspector asks
+  you: each answer is shown with where it came from and seven frames around it, one second apart (the ringed frame is
+  where it starts), with a button such as **Credits start at 1:32:37**. **Neither is right? Pick the frame yourself**
+  shows fourteen frames a second apart; **◀ 10 s** / **10 s ▶** move along. Choosing shows **Selected: …** with
+  **Save and send to …** and **Not now**.
 - **Saving locks.** There is no adjusted-but-unlocked marker. A saved marker is locked and published straight away to
   every server that has the file and has Intro & Credits on. Detection and later jobs leave it alone.
-- **Lock** on its own locks the times the app already decided, unchanged, and publishes them. Once anything on the file
-  is locked the same button reads **Unlock**. It asks first, then drops the lock. Your times stay on the servers for
-  now; the next check decides those types again and may move them, and **Re-detect** does that straight away. Unlock
-  publishes nothing.
+- **Lock** (beside Adjust) locks the times the app already decided, unchanged, and publishes them. It lists the times
+  and where they go first (**Lock and send to …** / **Leave them as they are**); a type no server with Intro & Credits
+  on could show is left out.
+- **Back to automatic** replaces Lock once anything on the file is locked. It asks first, then drops the lock. Your
+  times stay on the servers for now; the next check decides those types again and may move them, and **Re-detect**
+  does that straight away. It publishes nothing.
 - **Your marker wins over "Keep Plex's" and "Keep Emby's".** See [Plex](#plex-writing-straight-into-plexs-database)
   and [Emby](#emby-the-media-preview-bridge-for-emby-plugin) for the row message.
-- **Recap and preview** stay editable, with a note per server: only Jellyfin shows them. Where a server can't show a
-  type the editor says so ("Only Jellyfin shows recaps. Plex has no recap marker, so this one won't reach it.") and
-  leaves that type out of the save when no server with Intro & Credits on could show it. **Emby and credits:** an edited credits
-  *end* is accepted, but Emby's Skip Credits always skips to the end of the file, and the editor says so.
+- **Recap and preview** a job decided stay editable in Adjust; only Jellyfin shows them. **Emby and credits:** an
+  edited credits *end* is accepted, but Emby's Skip Credits always skips to the end of the file, and the message after
+  saving says so.
 
 A save is one web request, so it is bounded. Your times are saved and locked before any server is contacted, so a
 server that fails can't lose your edit. Each call to a server waits at most 8 seconds, and Plex's database waits at most
@@ -842,21 +884,22 @@ a server that hasn't added the file to its library yet. Saving again before it s
 
 ### Season view in the Inspector
 
-For a TV episode, the Inspector's Intro & Credits tab has a **This episode** / **Whole season** switch. **Whole
-season** lists the season's episodes (the same group season audio uses) with each one's intro and credits, the
-sources behind them, and one dot per server. A season of more than 40 episodes lists the 40 nearest, and the header
-says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own records, so a whole season loads at
-once; **This episode** stays the place for what a server shows right now. An episode in **Needs review** has a
-**Review** button (its tooltip gives the reason) that opens that episode. Every row also has an **Edit** button that
-opens that episode in the marker editor; once you save there, that row shows your times and its 🔒 lock the next time
-you open **Whole season**.
+For a TV episode, the [Inspector](#inspector) has a **This episode** / **Whole season** switch. **Whole season** lists
+the season's episodes (the same group season audio uses), each with its intro (blue) and credits (orange) drawn on one
+shared scale, the times, the sources behind them, a 🔒 when you locked one, and one dot per server (green: shows our
+markers, amber: waiting, red: failed, grey: off, skipped or nothing sent yet). A season of more than 40 episodes lists
+the 40 nearest, and the header says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own
+records, so a whole season loads at once; **This episode** stays the place for what a server shows right now. An
+episode in **Needs review** says so (hover for the reason). Choosing a row opens that episode.
 
 **Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
 (or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
 and the rest are checked again. Clicking it again while that job is still queued or running reuses it. N (and
 **N ready**) counts the episodes with at least one decided marker, since the job sends those even when another type
 of the same episode is in Needs review; **N need review** counts the episodes with any type in review, recaps and
-previews included. The header names the show and season the way the job does.
+previews included.
+
+Searching for a show also lists every episode of a season with its state, right in the search results.
 
 ### Plex: writing straight into Plex's database
 
@@ -988,9 +1031,7 @@ of that type **and** they agree within 2 seconds. A newly added version that has
 hides that item's markers on Plex until it catches up — precision first. Jellyfin and Emby versions each get their
 own markers.
 
-In the Preview Inspector, the Intro & Credits tab shows the version you clicked. When that version's file isn't on
-this app's disk (the other version is, say, or a path mapping is missing), the tab says **"This version's file isn't on
-this disk"** instead of showing another version's markers.
+The Inspector shows the version you opened, with a switch to the item's other versions that are on this app's disk.
 
 ### Checking the servers still show them
 
