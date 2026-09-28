@@ -1481,6 +1481,7 @@ function _serverBadge(item) {
         recently_added: { cls: 'bg-secondary',      label: 'Recently Added' },
         scheduled_recently_added: { cls: 'bg-secondary', label: 'Scheduled scan' },
         theintrodb_recheck: { cls: 'bg-secondary',  label: 'TheIntroDB recheck' },
+        version_rerun: { cls: 'bg-secondary',       label: 'App update' },
     };
     if (src && triggerPalette[src]) {
         const t = triggerPalette[src];

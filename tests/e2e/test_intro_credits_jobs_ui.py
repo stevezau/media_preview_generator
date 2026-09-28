@@ -993,6 +993,9 @@ class TestRowFilesAndLibraries:
         expect(row.locator("td").nth(1).locator(".fw-medium")).to_have_text(
             "Re-checking 1,568 files after the app update · batch 3 of 16", timeout=5000
         )
+        # Its source stays "version_rerun" for machines; the row says it in words.
+        expect(row.locator(".badge", has_text="App update")).to_have_count(1)
+        expect(row).not_to_contain_text("version_rerun")
         info = row.locator(".job-rerun-info")
         assert _tooltip(info) == (
             "After an update, files whose intro or credits were found by an older version are checked again, "
