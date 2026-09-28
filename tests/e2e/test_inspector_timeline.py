@@ -83,13 +83,23 @@ class TestCheckedFilm:
         expect(authed_page.locator(".insp-lane-names .insp-lane-name")).to_have_text(
             ["We found", "Plex", "Jellyfin", "Emby"]
         )
-        expect(_lane(authed_page, "found").locator(".insp-band")).to_have_text(["Credits 2:09:25 → end"])
-        expect(_lane(authed_page, "found").locator(".insp-band")).to_have_class(re.compile(r"\bis-ours\b"))
-        expect(_lane(authed_page, "plex-1").locator(".insp-band")).to_have_text(
-            ["Credits 2:08:00 – 2:08:30", "Credits 2:09:28 → end"]
-        )
-        expect(_lane(authed_page, "plex-1").locator(".insp-band").first).to_have_class(re.compile(r"\bis-own\b"))
-        expect(_lane(authed_page, "jf-1").locator(".insp-band")).to_have_class(re.compile(r"\bis-tint\b"))
+        # "We found" needs no word of whose it is; each server's band says whose marker it shows.
+        found = _lane(authed_page, "found").locator(".insp-band")
+        expect(found).to_have_text(["Credits 2:09:25 → end"])
+        expect(found).to_have_class(re.compile(r"\bis-ours\b"))
+        assert found.get_attribute("aria-label") == "We found: Credits 2:09:25 → end"
+        plex = _lane(authed_page, "plex-1").locator(".insp-band")
+        expect(plex).to_have_text(["Plex's own · Credits 2:08:00 – 2:08:30", "Plex's own · Credits 2:09:28 → end"])
+        expect(plex.first).to_have_class(re.compile(r"\bis-own\b"))
+        assert plex.first.get_attribute("aria-label") == "Plex's own · Credits 2:08:00 – 2:08:30"
+        assert plex.first.get_attribute("title") == "Plex's own · Credits 2:08:00 – 2:08:30"
+        jellyfin = _lane(authed_page, "jf-1").locator(".insp-band")
+        expect(jellyfin).to_have_text(["Ours · Credits 2:09:25 → end"])
+        expect(jellyfin).to_have_class(re.compile(r"\bis-tint\b"))
+        assert jellyfin.get_attribute("aria-label") == "Jellyfin: Ours · Credits 2:09:25 → end"
+        assert jellyfin.get_attribute("title") == "Jellyfin: Ours · Credits 2:09:25 → end"
+        # The legend stays.
+        expect(authed_page.locator("#inspTimeline .insp-legend-item")).to_have_text(["ours", "a server's own"])
         # Opened on our credits: the strip's centre is the credits' start, with its flag and Plex's beside it.
         expect(authed_page.locator("#inspNow")).to_have_text("2:09:26")
         expect(authed_page.locator("#inspFrameText")).to_have_text("preview frame 3,884 of 4,089 · one every 2 s")
@@ -161,6 +171,88 @@ class TestCheckedFilm:
         assert abs(_seconds(authed_page.locator("#inspNow").inner_text()) - fx.FILM_MS / 4000) <= 10
         expect(authed_page.locator("#inspOvNow")).to_have_text(authed_page.locator("#inspNow").inner_text())
         expect(authed_page.locator("#inspNowTag")).to_have_text("Story")
+
+    @staticmethod
+    def _record_bar_clicks(page: Page) -> None:
+        # Whether each click that reaches the page from the bar was taken as a jump (not swallowed after a drag).
+        page.evaluate(
+            """() => {
+                window.__barClicks = [];
+                document.addEventListener('click', (e) => {
+                    if (e.target.closest('#inspOverview')) window.__barClicks.push(!e.defaultPrevented);
+                });
+            }"""
+        )
+
+    def test_dragging_along_the_overview_bar_scrubs_the_strip_and_is_not_a_click(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        fx.install(authed_page, _api_with(fx.checked_film()))
+        _open(authed_page, app_url, fx.FILM)
+        self._record_bar_clicks(authed_page)
+        bar = authed_page.locator("#inspOverview")
+        bar.scroll_into_view_if_needed()
+        box = bar.bounding_box()
+        assert box
+        y = box["y"] + box["height"] / 2
+        now = authed_page.locator("#inspNow")
+
+        authed_page.mouse.move(box["x"] + box["width"] * 0.25, y)
+        authed_page.mouse.down()
+        authed_page.mouse.move(box["x"] + box["width"] * 0.4, y, steps=6)
+        # The strip follows the pointer before the button is let go: two fifths of 2:16:18, within a pixel and a frame.
+        expect(now).not_to_have_text("2:09:26")
+        authed_page.wait_for_timeout(200)
+        assert abs(_seconds(now.inner_text()) - fx.FILM_MS * 0.4 / 1000) <= 10
+        expect(bar).to_have_class(re.compile(r"\bis-scrubbing\b"))
+        authed_page.mouse.move(box["x"] + box["width"] * 0.5, y, steps=6)
+        authed_page.mouse.up()
+
+        authed_page.wait_for_timeout(200)
+        assert abs(_seconds(now.inner_text()) - fx.FILM_MS * 0.5 / 1000) <= 10
+        expect(bar).not_to_have_class(re.compile(r"\bis-scrubbing\b"))
+        assert authed_page.evaluate("window.__barClicks") == [False]
+        expect(authed_page.locator("#inspFrameDialog")).not_to_be_visible()
+
+        # A plain click afterwards still jumps.
+        authed_page.mouse.click(box["x"] + box["width"] * 0.25, y)
+        authed_page.wait_for_timeout(700)
+        assert abs(_seconds(now.inner_text()) - fx.FILM_MS * 0.25 / 1000) <= 10
+        assert authed_page.evaluate("window.__barClicks") == [False, True]
+
+    def test_a_touch_drag_along_the_overview_bar_scrubs_too(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page, _api_with(fx.checked_film()))
+        _open(authed_page, app_url, fx.FILM)
+        bar = authed_page.locator("#inspOverview")
+        bar.scroll_into_view_if_needed()
+        assert bar.evaluate("el => getComputedStyle(el).touchAction") == "pan-y"
+        box = bar.bounding_box()
+        assert box
+        # A finger's pointer events (Playwright's touchscreen only taps).
+        bar.evaluate(
+            """(el, [x0, x1, y]) => {
+                const at = (type, x) => new PointerEvent(type, {
+                    pointerId: 7, pointerType: 'touch', isPrimary: true, clientX: x, clientY: y, bubbles: true,
+                });
+                el.dispatchEvent(at('pointerdown', x0));
+                for (let i = 1; i <= 6; i++) el.dispatchEvent(at('pointermove', x0 + ((x1 - x0) * i) / 6));
+                el.dispatchEvent(at('pointerup', x1));
+            }""",
+            [box["x"] + box["width"] * 0.1, box["x"] + box["width"] * 0.75, box["y"] + box["height"] / 2],
+        )
+
+        authed_page.wait_for_timeout(200)
+        assert abs(_seconds(authed_page.locator("#inspNow").inner_text()) - fx.FILM_MS * 0.75 / 1000) <= 10
+        expect(bar).not_to_have_class(re.compile(r"\bis-scrubbing\b"))
+
+    def test_the_timeline_info_says_the_bar_can_be_dragged(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page, _api_with(fx.checked_film()))
+        _open(authed_page, app_url, fx.FILM)
+        expect(authed_page.locator("#inspTimeline .insp-tl-title .info-icon")).to_have_attribute(
+            "aria-label",
+            "Every preview frame in order, one every 2 s. Scroll or drag the strip, or click or drag along the bar "
+            "above it to jump. Click a frame to see it large. Each row below shows what that server gives viewers.",
+        )
 
     def test_dragging_moves_the_strip_and_is_not_a_click(self, authed_page: Page, app_url: str) -> None:
         fx.install(authed_page, _api_with(fx.checked_film()))
@@ -281,7 +373,7 @@ class TestNotChecked:
         expect(_lane(authed_page, "found")).to_have_text("Not checked yet")
         expect(_lane(authed_page, "found").locator(".insp-band")).to_have_count(0)
         expect(_lane(authed_page, "plex-1").locator(".insp-band")).to_have_text(
-            ["Credits 2:08:00 – 2:08:30", "Credits 2:09:28 → end"]
+            ["Plex's own · Credits 2:08:00 – 2:08:30", "Plex's own · Credits 2:09:28 → end"]
         )
         # Nothing of ours to jump to, and no "No intro" before anything was checked.
         expect(authed_page.locator("#inspJumps button")).to_have_text(["Plex2:08:00", "Plex2:09:28"])

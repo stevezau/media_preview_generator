@@ -1108,6 +1108,13 @@ button.insp-row:focus-visible,
     overflow: hidden;
     background: var(--insp-sunk);
     cursor: pointer;
+    user-select: none;
+    /* A sideways touch drag scrubs along the bar; an up or down one still scrolls the page. */
+    touch-action: pan-y;
+}
+
+.insp-ov-bar.is-scrubbing {
+    cursor: grabbing;
 }
 
 .insp-ov-thumbs {
