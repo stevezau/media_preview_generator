@@ -117,6 +117,10 @@ ALREADY_DECIDED = "not needed (already decided)"
 SAVED = "saved earlier"
 # A source's own answer this job asked for and got, when nothing more specific (a read's time and device) says so.
 ASKED_NOW = "asked now"
+# A server's stored answer this job cleared without asking the server (an older reader's answer, dropped once the
+# server shows our markers: ``_drop_older_reader_answer``). The server was never contacted, so this never says
+# "asked now".
+DROPPED_NOW = "dropped now"
 _SEP = " · "
 _DOT = " · "
 # The decision reason of a type a chapter decides alone (``decide._chapter_decision``).
@@ -171,6 +175,9 @@ class RunNotes:
             worker picking up where the checking thread left off, with nothing new to say about a source, doesn't
             repeat its line (a source actually re-read this stage marks the key itself, live, so a genuine change is
             never held back by it -- it's simply never checked against this set in the first place).
+        dropped: Each ``(Source.SERVER_MARKERS, server_id)`` whose stored answer this run cleared without asking the
+            server (``_drop_older_reader_answer``): its line says "dropped now", never "asked now" -- the server was
+            never contacted.
         logged: Whether the file's lines were written.
     """
 
@@ -187,6 +194,7 @@ class RunNotes:
     sent_before: dict[str, tuple[Marker, ...] | None] = field(default_factory=dict)
     start_logged: bool = False
     logged_sources: set[tuple[Source, str]] = field(default_factory=set)
+    dropped: set[tuple[Source, str]] = field(default_factory=set)
     logged: bool = False
 
     def answered(self, source: Source, origin: str = "") -> None:
@@ -201,6 +209,18 @@ class RunNotes:
         self.not_asked.pop(source, None)
         # A fresh answer, even to a key an earlier stage of this run already logged a line for (``logged_sources``):
         # the line that answer earns isn't held back as a repeat of one that no longer describes it.
+        self.logged_sources.discard((source, origin))
+
+    def dropped_evidence(self, source: Source, origin: str = "") -> None:
+        """Record that ``source``'s stored evidence was cleared this job without asking it (``origin``'s server was
+        never contacted): the opposite of :meth:`answered`, so its line says "dropped now", not "asked now".
+
+        Args:
+            source: The source.
+            origin: A server's id for its markers, else "".
+        """
+        self.dropped.add((source, origin))
+        self.not_asked.pop(source, None)
         self.logged_sources.discard((source, origin))
 
 
@@ -1044,7 +1064,13 @@ def server_source_line(server_id: str, name: str, view: _SourceView, server_deta
         return f"Checking {name}'s own markers… not read ({reason})"
     imported = any(r.source is Source.SERVER_MARKERS_IMPORTED for r in own)
     label = f"{name}'s imported markers" if imported else f"{name}'s own markers"
-    extras = [ASKED_NOW] if (Source.SERVER_MARKERS, server_id) in view.notes.asked else [_saved_note(own)]
+    key = (Source.SERVER_MARKERS, server_id)
+    if key in view.notes.asked:
+        extras = [ASKED_NOW]
+    elif key in view.notes.dropped:
+        extras = [DROPPED_NOW]
+    else:
+        extras = [_saved_note(own)]
     unusable = next((server_details[r.detail] for r in own if r.detail in server_details), None)
     if unusable:
         return f"Checking {label}… {_with_notes(unusable, extras)}"

@@ -1094,10 +1094,11 @@ class TestASourceOfferedAgain:
         messages = _messages(job_log)
         # The "not needed" line logs first, from the stored (still agreeing) evidence -- IntroDB isn't asked yet.
         assert f"{EPISODE} · Checking IntroDB… not asked (already decided)" in messages
-        # Plex's stored answer, read by an older reader, is dropped rather than re-read this run.
+        # Plex's stored answer, read by an older reader, is dropped without ever contacting Plex this run: its line
+        # says "dropped now", not "asked now" (which would claim a contact that never happened).
         assert (
             f"{EPISODE} · Checking Plex's own markers… not used (read by an older version; it shows our markers "
-            "now; asked now)" in messages
+            "now; dropped now)" in messages
         )
         # Intro goes back to review (only one online source, unconfirmed): IntroDB is asked for real, and its own
         # fresh answer logs its own line -- not suppressed as a repeat of the "not needed" line already logged.

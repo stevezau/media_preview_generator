@@ -2058,7 +2058,7 @@ def _read_server_markers(
     *,
     first_read_only: bool,
     notes: RunNotes | None = None,
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     """Store each owning server's current markers for the file as evidence, when they are due.
 
     Args:
@@ -2074,14 +2074,16 @@ def _read_server_markers(
             were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
             is never read, nor a Plex or Emby item that may show ours (another version's, or a type kept as the
             server's own); an answer from such a Plex server or item stored before ``PLEX_CHECKED_SINCE`` stops
-            counting (``_drop_older_reader_answer``).
+            counting (``_drop_older_reader_answer``) -- the server itself is never contacted for that.
         notes: The file's run notes, so a server never read at all for this file says why (``server_not_read``); None
             when nothing logs this run (``publish_now``'s own use of this function).
 
     Returns:
-        The ids of the servers whose answer was stored.
+        ``(asked, dropped)``: the ids of the servers actually contacted this run, and of the servers whose stored
+        answer was cleared without contacting them (``_drop_older_reader_answer``).
     """
-    read: set[str] = set()
+    asked: set[str] = set()
+    dropped: set[str] = set()
     for owner in servers.owning:
         cfg = owner.config
         published = ctx.store.get_publish_state(rec.id, cfg.id)
@@ -2090,7 +2092,7 @@ def _read_server_markers(
             if notes is not None:
                 notes.server_not_read[cfg.id] = "this server shows our markers"
             if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id):
-                read.add(cfg.id)
+                dropped.add(cfg.id)
             continue
         if (
             not refresh
@@ -2110,7 +2112,7 @@ def _read_server_markers(
             if notes is not None:
                 notes.server_not_read[cfg.id] = "another version of this item shows our markers"
             if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
-                read.add(cfg.id)
+                dropped.add(cfg.id)
             continue
         found = servers.markers(owner, item_id, rec.duration_ms)
         if found is None:
@@ -2128,7 +2130,7 @@ def _read_server_markers(
                     version=READER_VERSION,
                     also_replaces=SERVER_SOURCES - {Source.SERVER_MARKERS},
                 )
-                read.add(cfg.id)
+                asked.add(cfg.id)  # servers.markers() above did contact it -- it just had nothing usable to give
             elif ctx.recheck_empty_server_markers:
                 # The stored answer stays, but the re-read counts: a read that always fails (another cut on a Plex
                 # item, a server that can't serve markers) stops being asked after the last backoff step too.
@@ -2139,7 +2141,7 @@ def _read_server_markers(
             if notes is not None:
                 notes.server_not_read[cfg.id] = "another version of this item shows our markers"
             if cfg.type is ServerType.PLEX and _drop_older_reader_answer(ctx, rec, cfg.id, OURS_ON_ITEM_DETAIL):
-                read.add(cfg.id)
+                dropped.add(cfg.id)
             continue
         source, found, detail = _counted_as(ctx, owner, found)
         if found and cfg.type is ServerType.PLEX:
@@ -2159,8 +2161,8 @@ def _read_server_markers(
             version=READER_VERSION,
             also_replaces=SERVER_SOURCES - {source},
         )
-        read.add(cfg.id)
-    return read
+        asked.add(cfg.id)
+    return asked, dropped
 
 
 def _drop_older_reader_answer(
@@ -3403,10 +3405,13 @@ def _attempt(
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
-            for server_id in _read_server_markers(
+            asked_servers, dropped_servers = _read_server_markers(
                 ctx, rec, servers, refresh, first_read_only=first_read_only, notes=notes
-            ):
+            )
+            for server_id in asked_servers:
                 notes.answered(Source.SERVER_MARKERS, server_id)
+            for server_id in dropped_servers:
+                notes.dropped_evidence(Source.SERVER_MARKERS, server_id)
         else:
             here = [spec for spec in ctx.local_detectors if spec.source is source]
             pending = [spec for spec in here if _detector_pending(ctx, rec, spec, decisions, types, refresh=refresh)]
