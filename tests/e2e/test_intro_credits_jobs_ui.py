@@ -238,9 +238,12 @@ class TestStartJobModalIntroCredits:
         expect(page.locator("#jobPriority")).to_have_value("3")
         tip = page.locator("#jobKindMarkersInfo.info-icon")
         assert (tip.get_attribute("data-bs-original-title") or tip.get_attribute("title")) == (
-            "Finds Skip Intro / Skip Credits markers for the chosen libraries and sends them to every server with "
-            "Intro & Credits turned on. Runs at low priority by default (change it under Priority below) on the same "
-            "workers as previews."
+            "Finds Skip Intro and Skip Credits markers for the chosen libraries and sends them to your servers. "
+            "Click for more."
+        )
+        detail = page.locator("#infoJobKindMarkersTpl").evaluate("tpl => tpl.content.textContent")
+        assert "Runs at low priority by default (change it under Priority below) on the same workers as previews." in (
+            " ".join(detail.split())
         )
 
         page.locator("#jobKindPreviews").check()
@@ -358,9 +361,11 @@ class TestStartJobModalIntroCredits:
         expect(page.locator("#jobPriority")).to_have_value("3")
         tip = page.locator("#jobMarkersCheckServersInfo.info-icon")
         assert (tip.get_attribute("data-bs-original-title") or tip.get_attribute("title")) == (
-            "Checks that every server with Intro & Credits on still shows the markers this app sent, and sends them again "
-            "where they're missing or changed (unless that server is set to keep its own). Covers all servers and libraries."
+            "Checks your servers still show the markers this app sent, and resends any missing or changed. "
+            "Click for more."
         )
+        detail = " ".join(page.locator("#infoJobCheckServersTpl").evaluate("tpl => tpl.content.textContent").split())
+        assert "(unless that server is set to keep its own). Covers all servers and libraries." in detail
         page.locator("#jobPriority").select_option("2")
         with page.expect_request("**/api/markers/reconcile"):
             _start_button(page).click()
@@ -863,10 +868,13 @@ class TestDecidedByCounts:
 
         icon = detail.locator(".marker-sources .info-icon")
         tip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
-        assert tip.startswith("How many files each source decided in this job.")
-        assert "Markers that need review, and files that failed or weren't checked, aren't counted." in tip
+        assert tip == "How many files each source decided in this job. Click for more."
         icon.hover()
         expect(detail.page.locator(".tooltip")).to_contain_text("How many files each source decided", timeout=3000)
+        icon.click()
+        expect(detail.page.locator("#globalInfoBody")).to_contain_text(
+            "Markers that need review, and files that failed or weren't checked, aren't counted.", timeout=5000
+        )
 
     def test_three_sources_name_two_and_more_than_five_groups_add_up_under_other(self, dashboard) -> None:
         sources = {

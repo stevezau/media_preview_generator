@@ -78,11 +78,11 @@
     const TIPS = {
         regenerate: 'Makes this file\'s preview again for every server that has it, replacing the one there now. Runs as a job on the Dashboard.',
         redetect: 'Looks this file up again and asks every source afresh. Runs as a job on the Dashboard.',
-        adjust: 'Move the intro and credits one second at a time, on frames read straight from the video. Saving sends your times to your servers and keeps them through later checks.',
+        adjust: 'Move the intro and credits one second at a time on the video\'s frames. Saving sends them to your servers and keeps them.',
         pick: 'Frames one second apart, read from the video. Step ten seconds either way to find the first frame.',
         lock: 'Keep these times exactly as they are. Later checks won\'t change them, and your servers get them now.',
         unlockHeader: 'Let later checks set these times again. What your servers show now stays until the next Intro & Credits job.',
-        scope: 'Intros usually sit at the same spot in every episode of a season, so seeing them side by side makes an odd one stand out. Click an episode to open it.',
+        scope: 'Intros usually sit at the same spot in every episode, so an odd one stands out side by side. Click an episode to open it.',
         publish: 'Runs Intro & Credits for this season as a job: decided episodes go to every server that doesn\'t show them yet, the rest are checked again.',
         versions: 'The server keeps these files under one item. Each has its own preview; Plex shows one set of markers for all of them.',
     };
@@ -156,7 +156,9 @@
         return b;
     }
 
-    function infoIcon(title) {
+    // `detailHtml` (authored literal HTML, never file or server data) makes a click open it in the info modal;
+    // app.js's _applyInfoIconAffordance then adds "Click for more." and the pointer, as for every other ⓘ.
+    function infoIcon(title, detailHtml) {
         const b = el('button', 'info-icon ms-1');
         b.type = 'button';
         b.tabIndex = 0;
@@ -165,6 +167,8 @@
         b.title = title;
         b.setAttribute('aria-label', title);
         b.appendChild(el('i', 'bi bi-info-circle'));
+        if (detailHtml) b._explanationHtml = detailHtml;
+        if (typeof window._applyInfoIconAffordance === 'function') window._applyInfoIconAffordance(b);
         return b;
     }
 
@@ -1524,11 +1528,14 @@
         return label;
     }
 
+    // The hover says what the strip is; how to move around it is the ⓘ's detail.
+    const TIMELINE_HOW_TO = '<p>Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.</p>';
+
     function timelineTip(step, numbered) {
-        if (numbered) return 'Every preview frame in order, by number. Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.';
+        if (numbered) return 'Every preview frame in order, by number.';
         const head = preview() ? `Every preview frame in order, one every ${seconds(step)}.` : 'This file has no preview yet, so each tile is a place a frame will go.';
         const rows = state.bifOnly ? '' : ' Each row below shows what that server gives viewers.';
-        return `${head} Scroll or drag the strip, or click the bar above it to jump. Click a frame to see it large.${rows}`;
+        return `${head}${rows}`;
     }
 
     // One strip of every preview frame, windowed: only the tiles near the viewport exist, and their images load once
@@ -1576,7 +1583,7 @@
         const head = el('div', 'insp-tl-head');
         const titleRow = el('div', 'insp-tl-title');
         const range = numbered ? `${frames.toLocaleString()} frames` : `0:00 – ${clock(dur)}`;
-        titleRow.append(el('div', 'insp-card-title', 'Timeline'), el('div', 'insp-tl-range insp-mono', range), infoIcon(timelineTip(step, numbered)));
+        titleRow.append(el('div', 'insp-card-title', 'Timeline'), el('div', 'insp-tl-range insp-mono', range), infoIcon(timelineTip(step, numbered), TIMELINE_HOW_TO));
         if (!plain) {
             const legend = el('div', 'insp-legend');
             const oursKey = el('span', 'insp-legend-item');

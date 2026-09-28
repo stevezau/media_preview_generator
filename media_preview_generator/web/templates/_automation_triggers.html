@@ -303,7 +303,7 @@
                 <div class="form-check form-switch mb-3">
                     <input class="form-check-input" type="checkbox" id="webhookEnabled" checked>
                     <label class="form-check-label" for="webhookEnabled">Enable webhook processing
-                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Master switch for every incoming webhook (Sonarr, Radarr, Custom, and the per-server Plex Direct webhook). Turn off to pause everything without losing your individual settings."><i class="bi bi-info-circle"></i></button>
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Master switch for every incoming webhook. Turn it off to pause them all without losing their settings."><i class="bi bi-info-circle"></i></button>
                     </label>
                     <div class="form-text">Master switch for all incoming webhooks. Turn off to pause without touching any individual settings.</div>
                 </div>
@@ -313,7 +313,7 @@
                         Delay before processing: <strong><span id="delayValue">60</span>s</strong>
                         <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                 data-bs-toggle="tooltip" data-bs-placement="top"
-                                title="Debounce window + batching — click for details"
+                                title="How long to wait for more imports before processing them as one batch."
                                 data-explain-title="Webhook batching delay"
                                 data-explain-template="infoBatchDelayTpl"
                                 aria-label="Explain batching delay">
@@ -371,7 +371,7 @@
 
                 <div class="mb-3">
                     <label for="webhookSecret" class="form-label">Webhook Secret
-                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Optional shared secret used to authenticate webhook calls instead of your main API token. Useful when Sonarr/Radarr can't send custom headers. Click 'Generate' for a fresh random value."><i class="bi bi-info-circle"></i></button>
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Optional secret webhooks can send instead of your API token, for when Sonarr/Radarr can't send custom headers."><i class="bi bi-info-circle"></i></button>
                     </label>
                     <div class="input-group">
                         <input type="password" class="form-control" id="webhookSecret" placeholder="Optional — falls back to API token">

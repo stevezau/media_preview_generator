@@ -1687,10 +1687,11 @@ const MARKER_SOURCE_NAMES = {
 };
 const MARKER_SOURCE_TYPE_LABELS = { intro: 'Intro', credits: 'Credits', recap: 'Recap', preview: 'Preview' };
 const MARKER_SOURCE_GROUPS_SHOWN = 5;
-const MARKER_SOURCES_TIP = 'How many files each source decided in this job. A file counts once per marker type, '
-    + 'under the sources its marker came from; a marker a chapter set counts as chapters. Markers already on your '
-    + 'servers are named only when they were the second opinion one source needed. Markers that need review, and files '
-    + 'that failed or weren\'t checked, aren\'t counted.';
+const MARKER_SOURCES_TIP = 'How many files each source decided in this job.';
+const MARKER_SOURCES_DETAIL = '<p>A file counts once per marker type, under the sources its marker came from; a marker a '
+    + 'chapter set counts as chapters.</p><p>Markers already on your servers are named only when they were the second '
+    + 'opinion one source needed.</p><p>Markers that need review, and files that failed or weren\'t checked, aren\'t '
+    + 'counted.</p>';
 
 function _markerSourceGroupLabel(group) {
     const names = String(group).split('+').map(function (id) { return MARKER_SOURCE_NAMES[id] || id; });
@@ -1724,7 +1725,8 @@ function _renderMarkerSources(sources) {
     if (!lines.length) return '';
     return `<div class="mt-2 marker-sources"><strong class="me-1">Decided by</strong>`
         + `<button type="button" class="info-icon align-baseline" tabindex="0" data-bs-toggle="tooltip" `
-        + `data-bs-placement="top" title="${escapeHtmlAttr(MARKER_SOURCES_TIP)}" aria-label="What these counts mean">`
+        + `data-bs-placement="top" title="${escapeHtmlAttr(MARKER_SOURCES_TIP)}" aria-label="What these counts mean" `
+        + `data-explain-title="Decided by" data-explain-html="${escapeHtmlAttr(MARKER_SOURCES_DETAIL)}">`
         + `<i class="bi bi-info-circle"></i></button>`
         + `<div class="small text-muted mt-1">${lines.join('')}</div></div>`;
 }
@@ -1896,10 +1898,11 @@ function _renderRetryChip(job) {
     return ' <span class="badge bg-warning text-dark ms-1 d-inline-flex align-items-center" '
         + 'title="Auto-retrying — click ⓘ for details">'
         + '<i class="bi bi-arrow-clockwise me-1"></i>Retry ' + attempt + '/' + max
-        + ' <button type="button" class="info-icon info-icon-more btn btn-link p-0 ms-1 align-baseline text-dark"'
+        + ' <button type="button" class="info-icon btn btn-link p-0 ms-1 align-baseline text-dark"'
+        + ' data-bs-toggle="tooltip" data-bs-placement="top"'
         + ' data-explain-template="' + _pickRetryInfoTpl(job) + '"'
         + ' data-explain-title="Why this file is auto-retrying"'
-        + ' title="What is this? — click for details"'
+        + ' title="Why this file is being tried again."'
         + ' aria-label="About retry chain">'
         + '<i class="bi bi-info-circle"></i></button>'
         + '</span>';
@@ -2215,10 +2218,8 @@ function updateJobQueue(force) {
     _disposeBootstrapTooltips(tbody);
     tbody.innerHTML = html;
 
-    // Initialize Bootstrap tooltips on status badges
-    tbody.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function (el) {
-        new bootstrap.Tooltip(el);
-    });
+    // Status badges and ⓘs (the Retry chip's) get their tooltips; ⓘs also get the app-wide ⓘ rule.
+    _initBootstrapTooltips(tbody);
 
     // Start the 1Hz ticker when ANY live countdown is on the page —
     // retry (`data-scheduled-at`) OR webhook debounce
@@ -4527,8 +4528,53 @@ async function checkConfigHealth() {
 window.checkConfigHealth = checkConfigHealth;
 
 /**
+ * App-wide ⓘ rule. Every info icon uses the `.info-icon` class:
+ *   - hover shows one short sentence (its `title`);
+ *   - when a detail is attached, the hover text ends with "Click for more.", the icon gets `.info-icon-more`
+ *     (pointer cursor + chevron) and a click opens the shared #globalInfoModal;
+ *   - with no detail, a click does nothing and the cursor stays default.
+ *
+ * A detail is attached by any of: a `_explanationHtml` DOM property (set by JS), `data-explain-template="<id>"`
+ * naming a `<template>`, or a `data-explain-html` attribute. Authors write only the short sentence; the suffix
+ * and the class come from `_applyInfoIconAffordance`, so an ⓘ can't say "click" when a click does nothing.
+ */
+const INFO_ICON_MORE_HINT = 'Click for more.';
+// Hand-written variants of the hint from before the helper owned it; stripped so it is never doubled.
+const INFO_ICON_HINT_SUFFIX_RE = /\s*(?:[—–-]\s*)?click for (?:more|details)\.?\s*$/i;
+
+function _infoIconDetailHtml(el) {
+    if (el._explanationHtml) return el._explanationHtml;
+    const tplId = el.dataset.explainTemplate;
+    if (tplId) {
+        const tpl = document.getElementById(tplId);
+        if (tpl && tpl.innerHTML.trim()) return tpl.innerHTML;
+    }
+    return el.dataset.explainHtml || '';
+}
+
+function _infoIconHint(el) {
+    // Bootstrap moves `title` into `data-bs-original-title` once a tooltip exists.
+    const text = el.getAttribute('data-bs-original-title') ?? el.getAttribute('title') ?? '';
+    return text.replace(INFO_ICON_HINT_SUFFIX_RE, '').trim();
+}
+
+function _applyInfoIconAffordance(el) {
+    const hasDetail = !!_infoIconDetailHtml(el);
+    el.classList.toggle('info-icon-more', hasDetail);
+    let hint = _infoIconHint(el);
+    if (hasDetail) {
+        if (hint && !/[.!?]$/.test(hint)) hint += '.';
+        hint = hint ? `${hint} ${INFO_ICON_MORE_HINT}` : INFO_ICON_MORE_HINT;
+    }
+    const attr = el.hasAttribute('data-bs-original-title') ? 'data-bs-original-title' : 'title';
+    if ((el.getAttribute(attr) || '') !== hint) el.setAttribute(attr, hint);
+}
+window._applyInfoIconAffordance = _applyInfoIconAffordance;
+
+/**
  * Initialise Bootstrap tooltips on every `[data-bs-toggle="tooltip"]`
- * element under ``scope`` (defaults to the whole document). Safe to
+ * element under ``scope`` (defaults to the whole document), after
+ * applying the ⓘ rule above to every `.info-icon` there. Safe to
  * call multiple times — Bootstrap's `Tooltip.getInstance(el)` short-
  * circuits if a tooltip already exists for the element.
  *
@@ -4537,6 +4583,9 @@ window.checkConfigHealth = checkConfigHealth;
  */
 function _initBootstrapTooltips(scope) {
     const root = scope || document;
+    const icons = Array.from(root.querySelectorAll('.info-icon'));
+    if (root.classList && root.classList.contains('info-icon')) icons.push(root);
+    icons.forEach(_applyInfoIconAffordance);
     if (typeof bootstrap === 'undefined' || !bootstrap.Tooltip) return;
     root.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => {
         if (!bootstrap.Tooltip.getInstance(el)) {
@@ -4555,26 +4604,6 @@ function _disposeBootstrapTooltips(scope) {
     });
 }
 
-/**
- * App-wide info-icon (ⓘ) unified behaviour.
- *
- * Every info icon in the app uses the `.info-icon` class, which:
- *   1. Shows a Bootstrap tooltip on hover (short one-liner from `title`).
- *   2. Opens a shared #globalInfoModal on click when a rich explanation
- *      is available — either via `data-explain-template="tpl-id"` pointing
- *      at a sibling `<template>` element, OR via `_explanationHtml` set
- *      on the element by JS (readiness card's dynamic path).
- *
- * ⓘs with only a tooltip (no rich explanation) are still clickable buttons,
- * but clicking them is a no-op — the tooltip IS the answer.
- *
- * The affordance that "this one has more": templates mark ⓘs-with-modal
- * with a `.info-icon-more` class that adds a chevron-right glyph. Plus the
- * tooltip text on those ⓘs usually ends with "— click for details".
- *
- * This handler is delegated to the document so dynamic re-renders
- * (readiness card re-probes, library refreshes) need zero extra wiring.
- */
 function _openGlobalInfoModal({ title, html, docsHref }) {
     const modalEl = document.getElementById('globalInfoModal');
     if (!modalEl || typeof bootstrap === 'undefined' || !bootstrap.Modal) return;
@@ -4606,35 +4635,16 @@ function _openGlobalInfoModal({ title, html, docsHref }) {
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
 }
 
+// `.info-modal-link` is a text link ("See how decisions are made") that opens a detail the same way an ⓘ does.
 document.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('.info-icon');
+    const btn = ev.target.closest('.info-icon, .info-modal-link');
     if (!btn) return;
-    // Resolve the rich HTML body from three possible sources, in order:
-    //   1. `_explanationHtml` DOM property (set by JS for dynamic rows)
-    //   2. <template> sibling referenced by data-explain-template
-    //   3. data-explain-html attribute (short one-shot payloads)
-    // If none produce content, the click is a no-op and the tooltip
-    // (if any) is the only affordance — by design.
-    let html = btn._explanationHtml || '';
-    if (!html) {
-        const tplId = btn.dataset.explainTemplate;
-        if (tplId) {
-            const tpl = document.getElementById(tplId);
-            if (tpl && tpl.content) html = tpl.innerHTML;
-        }
-    }
-    if (!html) html = btn.dataset.explainHtml || '';
+    // XSS contract: see _openGlobalInfoModal — detail HTML is authored, never built from user data.
+    const html = _infoIconDetailHtml(btn);
     if (!html) return;
     ev.preventDefault();
-    // Bootstrap 5 moves the original `title=` attribute into
-    // `data-bs-original-title` once the tooltip is initialised, so fall
-    // back to BOTH — the live `title=` still works on ⓘ buttons that
-    // haven't had their tooltip activated yet (e.g. freshly rendered).
     _openGlobalInfoModal({
-        title: btn.dataset.explainTitle
-            || btn.getAttribute('title')
-            || btn.getAttribute('data-bs-original-title')
-            || 'About this setting',
+        title: btn.dataset.explainTitle || _infoIconHint(btn) || 'About this setting',
         html,
         docsHref: btn.dataset.explainDocs || '',
     });

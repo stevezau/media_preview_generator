@@ -54,7 +54,7 @@
                         Max concurrent jobs: <strong><span id="maxConcurrentJobsValue">3</span></strong>
                         <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                 data-bs-toggle="tooltip" data-bs-placement="top"
-                                title="What counts + tuning guidance — click for details"
+                                title="How many jobs can run at the same time."
                                 data-explain-title="Max concurrent jobs"
                                 data-explain-template="infoMaxConcurrentJobsTpl"
                                 aria-label="Explain max concurrent jobs">
@@ -72,7 +72,7 @@
 
                 <div class="mb-3">
                     <label for="incomingJobPriority" class="form-label">Incoming job priority
-                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Priority given to jobs this app creates for itself when new media lands — webhook deliveries (Sonarr/Radarr/Plex/Emby/Jellyfin) and Recently Added sweeps. High lets a new episode jump ahead of a running full-library regeneration, both in the queue and file-by-file. Schedules with their own priority set keep it."><i class="bi bi-info-circle"></i></button>
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Priority for jobs started when new media lands: webhooks and Recently Added sweeps." data-explain-title="Incoming job priority" data-explain-template="infoIncomingPriorityTpl"><i class="bi bi-info-circle"></i></button>
                     </label>
                     <select class="form-select" id="incomingJobPriority" style="max-width: 14rem;">
                         <option value="1">High</option>
@@ -120,7 +120,7 @@
                 <h6 class="mb-2 mt-4">Retry policy
                     <button type="button" class="info-icon ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
-                            title="Global retry defaults for every job — webhook, scheduled, manual, recently-added. A file that can't be found on the media server (still indexing, transient API error) is retried this many times with this delay before being marked failed."><i class="bi bi-info-circle"></i></button>
+                            title="How every job retries a file the media server can't find yet." data-explain-title="Retry policy" data-explain-template="infoRetryPolicyTpl"><i class="bi bi-info-circle"></i></button>
                 </h6>
                 <p class="form-text mt-0 mb-3">
                     Applies to all job types — webhook, scheduled, manual reprocess, and recently-added scans.
@@ -140,7 +140,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="webhookRetryDelay" class="form-label">
                             Initial retry delay: <strong><span id="retryDelayValue">30</span>s</strong>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Sets the pace of the retry schedule rather than one fixed wait. Every wait is multiplied by this value ÷ 30. Values under 15 s act as 15 s. Retries after the fifth wait 1 h each (at 30 s)."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Sets the pace of the retry schedule rather than one fixed wait." data-explain-title="Initial retry delay" data-explain-template="infoRetryDelayTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="webhookRetryDelay" min="10" max="300" step="5" value="30">
                         <div class="form-text">
@@ -202,7 +202,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="cpuThreads" class="form-label">
                             CPU Workers
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many items the CPU processes at the same time, in addition to any GPU workers. Each worker keeps one job busy at a time. Set to 0 to disable CPU processing entirely."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many files the CPU works on at once, on top of any GPU workers. 0 turns CPU processing off."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control has-stepper" id="cpuThreads"
                                min="0" max="{{ max_cpu_threads }}" value="1">
@@ -222,7 +222,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="scanWorkers" class="form-label">
                             Files checked at once
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="During a full library scan, how many files are checked in parallel for an existing preview. Checking is light disk work and does NOT add FFmpeg/GPU load — only the GPU and CPU worker counts above control how many previews generate at once. Higher values speed up the &quot;skip already-done files&quot; sweep on large libraries; lower it if a single spinning HDD struggles. 0 = Auto."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many files a full scan checks at once for an existing preview. 0 = Auto." data-explain-title="Files checked at once" data-explain-template="infoScanWorkersTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control has-stepper" id="scanWorkers"
                                min="0" max="256" value="0" placeholder="Auto">
@@ -236,7 +236,7 @@
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailInterval" class="form-label">
                             Thumbnail Interval
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Seconds between thumbnails. Lower numbers give finer scrubbing in your player. Videos already contain 'snapshot' frames stored at intervals — when those are closer together than your interval, we reuse them (fast). When they're further apart, we fully decode the video to produce unique thumbnails (correct, but slower for that file). We check each file automatically and pick the right path."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Seconds between thumbnails. Lower gives finer scrubbing in your player." data-explain-title="Thumbnail interval" data-explain-template="infoThumbnailIntervalTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <div class="input-group">
                             <input type="number" class="form-control has-stepper" id="thumbnailInterval"
@@ -279,7 +279,7 @@
                         <label for="thumbnailQuality" class="form-label">
                             Thumbnail Quality: <span id="qualityValue">4</span>
                             <small class="text-muted fw-normal">(lower = sharper)</small>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better, like FFmpeg&#39;s -q:v (2 = sharpest and largest, 10 = blurriest and smallest; 1 behaves the same as 2). Default 4 looks fine at typical scrubbing sizes. Lower it if thumbs look blocky on a 4K display; raise it to shrink BIF files."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better: 2 is sharpest, 10 is smallest. Default 4." data-explain-title="Thumbnail quality" data-explain-template="infoThumbnailQualityTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="thumbnailQuality"
                                min="1" max="10" value="4">
@@ -298,7 +298,7 @@
                             HDR Tone Mapping
                             <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                     data-bs-toggle="tooltip" data-bs-placement="top"
-                                    title="How HDR brightness is mapped to SDR — click for details"
+                                    title="How HDR brightness is mapped to SDR."
                                     data-explain-title="HDR Tone Mapping"
                                     data-explain-template="tonemapHelpTpl"
                                     aria-label="Explain HDR Tone Mapping">
@@ -357,7 +357,7 @@
                 <h6 class="mb-2">Smart caching across servers
                     <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
-                            title="How cache reuse works across servers — click for details"
+                            title="How cache reuse works across servers."
                             data-explain-title="Smart caching across servers"
                             data-explain-template="infoSmartCachingTpl"
                             aria-label="Explain smart caching">
@@ -423,7 +423,7 @@
                             <input class="form-check-input" type="checkbox" id="frameReuseEnabled" checked>
                             <label class="form-check-label" for="frameReuseEnabled">
                                 Enable smart caching
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="On: results from one server's webhook are reused if another server's webhook fires for the same file within the cache window. Off: each webhook runs FFmpeg from scratch."><i class="bi bi-info-circle"></i></button>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="On: another server's webhook for the same file reuses the result within the cache window. Off: every webhook runs FFmpeg."><i class="bi bi-info-circle"></i></button>
                             </label>
                         </div>
                         <div class="form-text">
@@ -675,7 +675,7 @@
                 <div class="row mb-3">
                     <div class="col-md-6 mb-3">
                         <label for="logLevel" class="form-label">Log Level
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How chatty the app's logs are. DEBUG = everything (verbose, useful for diagnosing issues). INFO = normal. WARNING/ERROR = only problems. Click 'Apply Log Level Now' to switch without restarting."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How chatty the logs are: DEBUG = everything, INFO = normal, WARNING/ERROR = only problems."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <select class="form-select" id="logLevel">
                             <option value="DEBUG">DEBUG</option>
@@ -728,7 +728,7 @@
                 <div class="row mb-3">
                     <div class="col-md-3 mb-3">
                         <label for="jobHistoryDays" class="form-label">Keep History For
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Completed / failed / cancelled jobs older than this are deleted along with their per-job log files. Lower values reclaim disk space sooner; higher values let you scroll further back."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finished jobs older than this are deleted, along with their log files."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <div class="input-group">
                             <input type="number" class="form-control has-stepper" id="jobHistoryDays" min="1" max="365" value="30">
@@ -893,6 +893,29 @@
         </div>
     </div>
 </div>
+
+<!-- ⓘ details: each opens in #globalInfoModal from the ⓘ whose data-explain-template names it. -->
+<template id="infoIncomingPriorityTpl">
+    <p>Priority given to jobs this app creates for itself when new media lands — webhook deliveries (Sonarr/Radarr/Plex/Emby/Jellyfin) and Recently Added sweeps.</p>
+    <p>High lets a new episode jump ahead of a running full-library regeneration, both in the queue and file-by-file. Schedules with their own priority set keep it.</p>
+</template>
+<template id="infoRetryPolicyTpl">
+    <p>Global retry defaults for every job — webhook, scheduled, manual, recently-added.</p>
+    <p>A file that can't be found on the media server (still indexing, transient API error) is retried this many times with this delay before being marked failed.</p>
+</template>
+<template id="infoRetryDelayTpl">
+    <p>Every wait is multiplied by this value ÷ 30. Values under 15 s act as 15 s.</p>
+    <p>Retries after the fifth wait 1 h each (at 30 s).</p>
+</template>
+<template id="infoScanWorkersTpl">
+    <p>During a full library scan, how many files are checked in parallel for an existing preview.</p>
+    <p>Checking is light disk work and does <strong>not</strong> add FFmpeg/GPU load — only the GPU and CPU worker counts control how many previews generate at once.</p>
+    <p>Higher values speed up the "skip already-done files" sweep on large libraries; lower it if a single spinning HDD struggles.</p>
+</template>
+<template id="infoThumbnailIntervalTpl">
+    <p>Videos already contain 'snapshot' frames stored at intervals. When those are closer together than your interval, we reuse them (fast).</p>
+    <p>When they're further apart, we fully decode the video to produce unique thumbnails (correct, but slower for that file). We check each file automatically and pick the right path.</p>
+</template>
 {% endblock %}
 
 {% block scripts %}

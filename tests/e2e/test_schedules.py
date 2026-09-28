@@ -331,10 +331,13 @@ class TestScheduleIntroCredits:
         expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_hidden()
         info = authed_page.locator("#scheduleMarkersCheckServersInfo.info-icon")
         assert (info.get_attribute("data-bs-original-title") or info.get_attribute("title")) == (
-            "Checks that every server with Intro & Credits on still shows the markers this app sent, and sends them again "
-            "where they're missing or changed (unless that server is set to keep its own). "
-            "Covers all servers and libraries. Low priority unless you pick otherwise."
+            "Checks your servers still show the markers this app sent, and resends any missing or changed. "
+            "Click for more."
         )
+        detail = " ".join(
+            authed_page.locator("#infoScheduleCheckServersTpl").evaluate("tpl => tpl.content.textContent").split()
+        )
+        assert "Covers all servers and libraries. Low priority unless you pick otherwise." in detail
         # A library pick left from before doesn't block the save: Check servers has no libraries.
         authed_page.evaluate("document.getElementById('scheduleLibraryAll').checked = false")
         _save_schedule(authed_page, "/api/schedules")

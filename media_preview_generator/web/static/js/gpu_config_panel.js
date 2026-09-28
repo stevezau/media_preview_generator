@@ -106,9 +106,9 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
                     </div>
                     <div class="col-md-4 gpu-settings-${deviceId}" ${enabled ? '' : 'style="opacity:0.5;pointer-events:none"'}>
                         <label class="form-label form-label-sm mb-1">Workers
-                            <i class="bi bi-info-circle text-muted ms-1" style="cursor: help;"
-                               data-bs-toggle="tooltip" data-bs-placement="top"
-                               title="How many items this GPU processes at the same time. More workers = faster overall, but each worker uses GPU memory. Start with 1 and increase if your GPU can handle it."></i>
+                            <button type="button" class="info-icon ms-1" tabindex="0"
+                                    data-bs-toggle="tooltip" data-bs-placement="top"
+                                    title="How many files this GPU works on at once. Each one uses GPU memory, so start with 1."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control form-control-sm gpu-workers has-stepper"
                                data-device="${safeDevice}" min="1" max="16"
@@ -116,9 +116,9 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
                     </div>
                     <div class="col-md-4 gpu-settings-${deviceId}" ${enabled ? '' : 'style="opacity:0.5;pointer-events:none"'}>
                         <label class="form-label form-label-sm mb-1">FFmpeg Threads
-                            <i class="bi bi-info-circle text-muted ms-1" style="cursor: help;"
-                               data-bs-toggle="tooltip" data-bs-placement="top"
-                               title="Limits how many CPU cores FFmpeg uses per worker for tasks like decoding and filtering. Lower values free up CPU for other workers. Set to 0 to let FFmpeg decide automatically."></i>
+                            <button type="button" class="info-icon ms-1" tabindex="0"
+                                    data-bs-toggle="tooltip" data-bs-placement="top"
+                                    title="CPU cores FFmpeg may use per worker for decoding and filtering. Lower values leave more for other workers."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="number" class="form-control form-control-sm gpu-ffmpeg-threads has-stepper"
                                data-device="${safeDevice}" min="0" max="32"
@@ -131,9 +131,7 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
         container.appendChild(card);
     });
 
-    container.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
-        new bootstrap.Tooltip(el);
-    });
+    if (typeof window._initBootstrapTooltips === 'function') window._initBootstrapTooltips(container);
     // Apply −/+ stepper buttons to the per-GPU Workers + FFmpeg Threads
     // inputs. Safe no-op if the helper isn't loaded (older pages).
     if (window.MPGShared && window.MPGShared.attachSteppersTo) {

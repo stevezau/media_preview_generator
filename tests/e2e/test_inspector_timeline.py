@@ -74,8 +74,10 @@ class TestCheckedFilm:
         timeline = authed_page.locator("#inspTimeline")
         expect(timeline.locator(".insp-tl-range")).to_have_text("0:00 – 2:16:18")
         expect(timeline.locator(".insp-tl-title .info-icon")).to_have_attribute(
-            "aria-label", re.compile(r"^Every preview frame in order, one every 2 s\. Scroll or drag the strip")
+            "aria-label", re.compile(r"^Every preview frame in order, one every 2 s\.")
         )
+        # How to move around the strip is the ⓘ's detail, so the hover says "Click for more.".
+        expect(timeline.locator(".insp-tl-title .info-icon")).to_have_class(re.compile(r"\binfo-icon-more\b"))
         expect(authed_page.locator("#inspJumps button")).to_have_text(
             ["No intro", "Credits2:09:25", "Plex2:08:00", "Plex2:09:28"]
         )
