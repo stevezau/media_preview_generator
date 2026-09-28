@@ -20,11 +20,17 @@ SETTINGS_HTML = Path(__file__).resolve().parent.parent / "media_preview_generato
 
 
 def _retry_delay_copy() -> str:
-    """Return the retry-delay label, tooltip and hint text from settings.html."""
+    """Return the retry-delay label, tooltip, hint and the ⓘ's detail (what a click opens) from settings.html."""
     text = SETTINGS_HTML.read_text(encoding="utf-8")
     match = re.search(r'<label for="webhookRetryDelay".*?<div class="form-text">.*?</div>', text, re.DOTALL)
     assert match, "settings.html: retry-delay block not found — update the scope regex"
-    return " ".join(match.group(0).split())
+    copy = match.group(0)
+    detail_id = re.search(r'data-explain-template="([^"]+)"', copy)
+    if detail_id:
+        detail = re.search(rf'<template id="{detail_id.group(1)}">.*?</template>', text, re.DOTALL)
+        assert detail, f"settings.html: the retry-delay ⓘ names {detail_id.group(1)}, which doesn't exist"
+        copy += detail.group(0)
+    return " ".join(copy.split())
 
 
 def _as_words(seconds: int) -> str:
