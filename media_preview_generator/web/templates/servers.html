@@ -68,6 +68,11 @@
                             <span class="ms-1 d-none" id="editHealthTabMarker" aria-hidden="true"></span>
                         </button>
                     </li>
+                    <li class="nav-item" id="editTabMarkersLi">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-markers" type="button">
+                            <i class="bi bi-skip-forward me-1"></i>Intro &amp; Credits
+                        </button>
+                    </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-libraries" type="button">
                             <i class="bi bi-collection-play me-1"></i>Libraries
@@ -83,17 +88,11 @@
                             <i class="bi bi-slash-circle me-1"></i>Exclude paths
                         </button>
                     </li>
-                    <!-- Plex-only: hidden via JS for non-Plex servers. Surfaces the
-                         existing global Plex Direct webhook + Recently Added Scanner
-                         controls without duplicating their full implementation. -->
+                    <!-- Starts hidden; openEditModal un-hides it for every server type
+                         once the server's vendor is known. -->
                     <li class="nav-item d-none" id="editTabAutomationLi">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-automation" type="button">
                             <i class="bi bi-lightning-charge me-1"></i>Webhook &amp; Scanner
-                        </button>
-                    </li>
-                    <li class="nav-item" id="editTabMarkersLi">
-                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-markers" type="button">
-                            <i class="bi bi-skip-forward me-1"></i>Intro &amp; Credits
                         </button>
                     </li>
                 </ul>
