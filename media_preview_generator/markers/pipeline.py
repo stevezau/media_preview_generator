@@ -3466,25 +3466,27 @@ def _attempt(
                         notes.answered(stored)
                 else:
                     notes.unanswered[spec.source] = _detector_unanswered(unanswered)
-                evidence_now = ctx.store.evidence_rows(rec.id)
-                own_rows = [r for r in evidence_now if r.source is source and r.origin == ""]
                 seconds = ctx.monotonic() - read_started
                 fallback = fell_back[0] if fell_back else ""
                 gpu_read_nothing = CPU_RECHECK_PHASE in phases
-                _log_live(
-                    lambda s=source, r=own_rows, e=evidence_now, sec=seconds, fb=fallback, gn=gpu_read_nothing: titled(
+
+                def _read_result_line(s=source, sec=seconds, fb=fallback, gn=gpu_read_nothing):
+                    evidence_now = ctx.store.evidence_rows(rec.id)
+                    own_rows = [r for r in evidence_now if r.source is s and r.origin == ""]
+                    return titled(
                         title,
                         read_result_line(
                             s,
                             notes.unanswered.get(s),
-                            r,
-                            chapter_names(e),
+                            own_rows,
+                            chapter_names(evidence_now),
                             seconds=sec,
                             fallback=fb,
                             gpu_read_nothing=gn,
                         ),  # fmt: skip
                     )
-                )
+
+                _log_live(_read_result_line)
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
                 # Its Reading/result lines already said this: a later stage's "already decided" render of the same
@@ -3733,19 +3735,20 @@ def _note_title(
 ) -> str:
     """The file's title for its job log lines, found once per job (``job_log.file_title``). Never raises.
 
-    An episode is named from its path, with no lookup -- already distinct (``SxxEyy``), so never claimed. Anything
-    else by its server's title: from the answer this run already has, then the title this process kept
-    (``titles.TITLE_CACHE``), then the title its library listing gave (the year from its file name); only when the
-    file's server was never asked this process, one ask of a publishing owner whose item id this run already knows
-    (``title_asks``: never a search for one). Without a title, its file name. A second file of this job that resolves
-    to the same title (two copies of one film) gets a short tell-apart (``_claim_title``). Called once the run's
-    decisions are made (its log lines, or its hand-off to a worker), outside any publisher's or Plex database's lock.
+    An episode is named from its path, with no lookup; anything else by its server's title: from the answer this
+    run already has, then the title this process kept (``titles.TITLE_CACHE``), then the title its library listing
+    gave (the year from its file name); only when the file's server was never asked this process, one ask of a
+    publishing owner whose item id this run already knows (``title_asks``: never a search for one). Without a
+    title, its file name. A second file of this job that resolves to the same title -- two copies of one film, or
+    two versions of one episode (``SxxEyy`` alone doesn't tell them apart) -- gets a short tell-apart
+    (``_claim_title``). Called once the run's decisions are made (its log lines, or its hand-off to a worker),
+    outside any publisher's or Plex database's lock.
     """
     if notes.title:
         return notes.title
     path = item.canonical_path
     if ids.is_episode or ids_from_path(path).is_episode:
-        notes.title = display_name(path)
+        notes.title = _claim_title(ctx, display_name(path), path)
         return notes.title
     try:
         answer = servers.answered_title()

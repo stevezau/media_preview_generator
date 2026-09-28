@@ -695,9 +695,11 @@ def _written_phrase(result: ServerResult, name: str) -> str:
     was.
 
     ``result.had`` is the server's prior value: our own last-published record (``RunNotes.sent_before``) when we've
-    published there before -- ``result.had_is_ours`` True, so a type it's missing now really was removed -- else the
-    server's own markers as its evidence read this run or saved says (a type it shows that we never sent isn't ours
-    to call removed, so it's simply left out), else None when neither is known.
+    published there before -- ``result.had_is_ours`` True, so a type it's missing now really was removed, and a span
+    that matches it is really unchanged -- else the server's own markers as its evidence read this run or saved says
+    (a type it shows that we never sent isn't ours to call removed, so it's simply left out; a span that happens to
+    match it is this type's first send, "added … (same as …'s own)", not "unchanged"), else None when neither is
+    known.
     """
     new_by_type = {m.type: m for m in result.ours}
     if not new_by_type and not result.kept:
@@ -709,22 +711,26 @@ def _written_phrase(result: ServerResult, name: str) -> str:
         had_by_type = {t: m for t, m in had_by_type.items() if t not in result.kept}
     order = list(MarkerType)
     all_types = sorted({*new_by_type, *(had_by_type or {})}, key=order.index)
-    added, replaced, unchanged, removed, unread = [], [], [], [], []
+    added, added_same, replaced, unchanged, removed, unread = [], [], [], [], [], []
     for mtype in all_types:
         new = new_by_type.get(mtype)
         had = (had_by_type or {}).get(mtype)
         if new is not None and had is not None:
-            if (had.start_ms, had.end_ms) == (new.start_ms, new.end_ms):
+            if (had.start_ms, had.end_ms) != (new.start_ms, new.end_ms):
+                replaced.append(f"{mtype.value} {_span(had.start_ms, had.end_ms)} → {_span(new.start_ms, new.end_ms)}")
+            elif result.had_is_ours:
                 unchanged.append(f"{mtype.value} {_span(new.start_ms, new.end_ms)}")
             else:
-                replaced.append(f"{mtype.value} {_span(had.start_ms, had.end_ms)} → {_span(new.start_ms, new.end_ms)}")
+                # The span matches only because it's the server's own markers, never ours before now (decided from
+                # them, say): this is the type's first send, not a write that changed nothing.
+                added_same.append(f"{mtype.value} {_span(new.start_ms, new.end_ms)}")
         elif new is not None:
             entry = f"{mtype.value} {_span(new.start_ms, new.end_ms)}"
             (unread if had_by_type is None else added).append(entry)
         elif result.had_is_ours:
             removed.append(mtype.value)
         # else: only the server's own evidence shows this type -- never ours to send, so never ours to call removed
-    if unchanged and not (added or replaced or removed or unread):
+    if unchanged and not (added or added_same or replaced or removed or unread):
         # A WRITTEN row only happens when the write really changed the server (a basis mismatch): every type
         # matching what we last sent means it must have drifted since (a Plex rescan dropping markers, say), and
         # this write restored it -- neither "added" (nothing's new) nor merely "unchanged" (bytes were sent).
@@ -732,6 +738,8 @@ def _written_phrase(result: ServerResult, name: str) -> str:
     parts = []
     if added:
         parts.append(f"added {_and(added)}")
+    if added_same:
+        parts.append(f"added {_and(added_same)} (same as {name}'s own)")
     if replaced:
         parts.append(f"replaced {_and(replaced)}")
     if unchanged:
