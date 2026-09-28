@@ -3,11 +3,15 @@
 The app here runs as a ``dev`` image (``GIT_BRANCH=dev``, ``GIT_SHA=a9c8177…``) so the version text is exact, with
 its GitHub calls sent to a dead proxy so they fail fast. Each test then pins the cached update check through the
 test-only ``/api/__test/version-cache`` endpoint, which is what the navbar reads.
+
+The layout tests run twice: in this machine's font and in DejaVu Sans, a wide font a Linux browser falls back to
+(the CI runner's fonts wrapped a bar that fit here). One row and no sideways scroll must hold in both.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import urllib.request
 from collections.abc import Generator
@@ -22,6 +26,8 @@ REPO = "https://github.com/stevezau/media_preview_generator"
 RELEASES = "https://github.com/stevezau/media_preview_generator/releases/latest"
 DESKTOP = {"width": 1440, "height": 900}
 PHONE = {"width": 390, "height": 844}
+WIDE_FONT = '* { font-family: "DejaVu Sans", sans-serif !important; }'
+FONTS = ["page-font", "wide-font"]
 
 NO_UPDATE = {
     "current_version": "dev@a9c8177",
@@ -87,11 +93,16 @@ def dev_page(page: Page, context: BrowserContext, dev_cookie: dict) -> Page:
     return page
 
 
-def _open(page: Page, app: str, check: dict, viewport: dict, path: str = "/") -> None:
+def _open(page: Page, app: str, check: dict, viewport: dict, path: str = "/", font: str = "page-font") -> None:
     _call(f"{app}/api/__test/version-cache", check)
     page.set_viewport_size(viewport)
     page.goto(f"{app}{path}")
     expect(page.locator("nav.navbar")).to_be_visible()
+    if font == "wide-font":
+        page.add_style_tag(content=WIDE_FONT)
+        assert "DejaVu Sans" in page.evaluate(
+            "() => getComputedStyle(document.querySelector('.navbar-brand')).fontFamily"
+        )
 
 
 def _box(page: Page, selector: str) -> dict:
@@ -163,22 +174,51 @@ class TestDesktop:
         _no_sideways_scroll(dev_page, DESKTOP)
         _stays_pinned(dev_page)
 
-    @pytest.mark.parametrize("width", [992, 1200, 1400])
-    def test_narrower_desktops_drop_words_not_rows(self, dev_page: Page, dev_app: str, width: int) -> None:
+    @pytest.mark.parametrize("font", FONTS)
+    @pytest.mark.parametrize("width", [1200, 1280, 1400, 1440])
+    def test_the_full_bar_is_one_row_with_room_to_spare(
+        self, dev_page: Page, dev_app: str, width: int, font: str
+    ) -> None:
         viewport = {"width": width, "height": 900}
-        _open(dev_page, dev_app, NO_UPDATE, viewport)
+        _open(dev_page, dev_app, NO_UPDATE, viewport, font=font)
 
+        expect(dev_page.locator(".navbar-toggler")).to_be_hidden()
         assert _box(dev_page, "nav.navbar")["height"] == 57
-        star = dev_page.locator("#navStarBtn")
-        expect(star).to_be_visible()
+        main_links = _box(dev_page, "#navbarNav .navbar-nav.me-auto")
+        utilities = _box(dev_page, "#navbarNav .navbar-nav-utility")
+        assert main_links["y"] == utilities["y"]
+        # A clear margin, not a fit that one font wider tips into two rows.
+        assert utilities["x"] - (main_links["x"] + main_links["width"]) >= 40
+        logout = _box(dev_page, "#navLogoutBtn")
+        assert logout["x"] + logout["width"] <= width
+        # Below 1400px Star keeps its outline and the main links keep their words, dropping the extras.
+        star_word = dev_page.locator("#navStarBtn .navbar-star-word")
+        link_icon = dev_page.locator("#navbarNav .navbar-nav.me-auto .nav-link > .bi").first
         if width >= 1400:
-            expect(star.locator(".navbar-star-word")).to_be_visible()
+            expect(star_word).to_be_visible()
+            expect(link_icon).to_be_visible()
         else:
-            expect(star.locator(".navbar-star-word")).to_be_hidden()
-        logout = dev_page.locator("#navLogoutBtn")
-        expect(logout).to_have_attribute("aria-label", "Logout")
-        assert _box(dev_page, "#navLogoutBtn")["x"] + _box(dev_page, "#navLogoutBtn")["width"] <= width
+            expect(star_word).to_be_hidden()
+            expect(link_icon).to_be_hidden()
+        expect(dev_page.locator("#navStarBtn")).to_be_visible()
         _no_sideways_scroll(dev_page, viewport)
+        _stays_pinned(dev_page)
+
+    @pytest.mark.parametrize("font", FONTS)
+    @pytest.mark.parametrize("width", [992, 1100])
+    def test_below_1200_the_links_move_into_the_menu(self, dev_page: Page, dev_app: str, width: int, font: str) -> None:
+        viewport = {"width": width, "height": 900}
+        _open(dev_page, dev_app, NO_UPDATE, viewport, font=font)
+
+        expect(dev_page.locator(".navbar-toggler")).to_be_visible()
+        expect(dev_page.locator("#navStarBtn")).to_be_hidden()
+        assert _box(dev_page, "nav.navbar")["height"] == 61
+        _no_sideways_scroll(dev_page, viewport)
+
+        dev_page.locator(".navbar-toggler").click()
+        expect(dev_page.locator("#navbarNav.show")).to_be_visible()
+        expect(dev_page.locator("#navStarBtn")).to_have_text("Star on GitHub", use_inner_text=True)
+        expect(dev_page.locator("#sponsorLinkBtn")).to_have_text("Buy me a coffee", use_inner_text=True)
 
     def test_help_menu_offers_the_same_coffee_link(self, dev_page: Page, dev_app: str) -> None:
         _open(dev_page, dev_app, NO_UPDATE, DESKTOP)
@@ -216,8 +256,24 @@ class TestUpdateDot:
 
 @pytest.mark.e2e
 class TestPhone:
-    def test_version_on_the_bar_and_coffee_and_star_in_the_menu(self, dev_page: Page, dev_app: str) -> None:
-        _open(dev_page, dev_app, NO_UPDATE, PHONE)
+    @pytest.mark.parametrize("font", FONTS)
+    @pytest.mark.parametrize("width", [320, 360, 390])
+    def test_brand_version_and_menu_button_share_one_row(
+        self, dev_page: Page, dev_app: str, width: int, font: str
+    ) -> None:
+        viewport = {"width": width, "height": 844}
+        _open(dev_page, dev_app, NO_UPDATE, viewport, font=font)
+
+        nav, toggler = _box(dev_page, "nav.navbar"), _box(dev_page, ".navbar-toggler")
+        assert nav["height"] == 61
+        assert toggler["x"] + toggler["width"] <= width
+        assert toggler["y"] + toggler["height"] <= nav["height"]
+        expect(dev_page.locator("#navVersionText")).to_be_visible()
+        _no_sideways_scroll(dev_page, viewport)
+
+    @pytest.mark.parametrize("font", FONTS)
+    def test_version_on_the_bar_and_coffee_and_star_in_the_menu(self, dev_page: Page, dev_app: str, font: str) -> None:
+        _open(dev_page, dev_app, NO_UPDATE, PHONE, font=font)
 
         expect(dev_page.locator("#navVersionText")).to_be_visible()
         expect(dev_page.locator("#navVersionText")).to_have_text("dev@a9c8177")
@@ -238,6 +294,10 @@ class TestPhone:
         expect(coffee).to_be_visible()
         expect(coffee).to_have_text("Buy me a coffee", use_inner_text=True)
         expect(coffee).to_have_attribute("href", KOFI)
+        # notifications.js fills the bell row's label; it once found it by its breakpoint class.
+        expect(dev_page.locator("#notificationBellLabel")).to_have_text(
+            re.compile(r"^(No new notifications|1 notification|\d+ notifications)$")
+        )
         drawer = _box(dev_page, "#navbarNav")
         for selector in ("#navStarBtn", "#sponsorLinkBtn"):
             row = _box(dev_page, selector)

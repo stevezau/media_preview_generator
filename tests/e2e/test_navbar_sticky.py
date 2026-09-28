@@ -95,7 +95,7 @@ def test_navbar_stays_at_the_top_when_the_page_scrolls(
     # A pinned navbar must not bring back sideways scrolling at phone width.
     assert authed_page.evaluate("() => document.documentElement.scrollWidth") == viewport["width"]
     if viewport == PHONE:
-        # No frosted blur below lg (it would trap the menu drawer), so the bar is opaque or the page shows through.
+        # No frosted blur below xl (it would trap the menu drawer), so the bar is opaque or the page shows through.
         bg = authed_page.evaluate("() => getComputedStyle(document.querySelector('nav.navbar')).backgroundColor")
         assert bg == "rgb(15, 15, 26)"
 

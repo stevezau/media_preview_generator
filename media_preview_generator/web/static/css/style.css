@@ -401,14 +401,17 @@ html[data-bs-theme="light"] .card-header {
  * + small label-above-number layout that's easier to scan at a glance.
  * Each tile is its own touch target; on mobile they stack 2-up.
  * ────────────────────────────────────────────────────────────────────── */
+/* minmax(0, 1fr), not 1fr: a plain 1fr column can't shrink below its longest label, so with a
+ * wide font (DejaVu Sans) "CANCELLED" pushed the dashboard ~20px past a 992px window. */
 .kpi-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.5rem;
 }
-@media (max-width: 575.98px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 575.98px) { .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 .kpi-tile {
+    min-width: 0;
     background: var(--surface-1);
     border: 1px solid var(--surface-border);
     border-radius: var(--radius);
@@ -424,6 +427,9 @@ html[data-bs-theme="light"] .card-header {
     color: var(--bs-secondary-color);
     margin-bottom: 0.15rem;
     font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .kpi-tile .kpi-value {
@@ -729,12 +735,12 @@ html[data-bs-theme="light"] .navbar {
  * instead of bare text links. Matches the .icon-btn-group treatment used
  * inside tables.
  *
- * Desktop-only — on mobile (≤ 991.98px) the same buttons collapse INTO
+ * Desktop-only — below 1200px the same buttons collapse INTO
  * the hamburger menu and take full-row treatment with text labels (see
  * the ``.navbar-nav-utility`` block in the mobile media query below). The
  * 38×38 circle is the wrong shape for an accordion row.
  */
-@media (min-width: 992px) {
+@media (min-width: 1200px) {
     .navbar .nav-item > #notificationBellBtn,
     .navbar .nav-item > #themeToggleBtn,
     .navbar .nav-item > #sponsorLinkBtn {
@@ -767,7 +773,7 @@ html[data-bs-theme="light"] .navbar {
      * external-link glyph while every other row gets 20-49px. Pin a min-width so
      * the whole menu breathes instead of hugging its longest item.
      *
-     * Desktop-only: below 992px this same <ul> renders as a full-width accordion
+     * Desktop-only: below 1200px this same <ul> renders as a full-width accordion
      * row inside the offcanvas drawer (min(82vw, 360px)), where a forced 15rem
      * would overflow horizontally on a ~320px viewport. */
     .dropdown-menu[aria-labelledby="helpMenuBtn"] {
@@ -807,7 +813,7 @@ a:focus-visible > .sponsor-cup,
 
 /* Desktop Star: a small outlined pill with its word, like the docs nav, so it doesn't read as
  * "favourite this page". In the phone menu it is a plain labelled row like its neighbours. */
-@media (min-width: 992px) {
+@media (min-width: 1200px) {
     .navbar .nav-item > #navStarBtn {
         height: 30px;
         margin: 4px 0.25rem;
@@ -825,10 +831,10 @@ a:focus-visible > .sponsor-cup,
     }
 }
 
-/* Words drop before anything structural as the bar narrows, as on the docs site, so the desktop
- * bar stays one row from 992px up. Below 1400px the Star pill keeps its outline and loses its
- * word; below 1200px the main links lose their icons, Logout its word, and links some padding.
- * Every icon-only control still has an aria-label and a title. */
+/* Extras drop before anything structural as the bar narrows, as on the docs site. Below 1400px
+ * the Star pill keeps its outline and loses its word (it still has an aria-label and a title),
+ * and the main links lose their icons but keep their words. That leaves ~60px spare at 1200px
+ * even in DejaVu Sans, a wide font Linux falls back to; below 1200px the bar is the phone menu. */
 .navbar-star-word {
     display: none;
 }
@@ -837,21 +843,14 @@ a:focus-visible > .sponsor-cup,
         display: inline;
     }
 }
-@media (min-width: 992px) and (max-width: 1399.98px) {
+@media (min-width: 1200px) and (max-width: 1399.98px) {
     .navbar .nav-item > #navStarBtn {
         width: 30px;
         justify-content: center;
         padding: 0 !important;
     }
-}
-@media (min-width: 992px) and (max-width: 1199.98px) {
-    .navbar-nav.me-auto .nav-link > .bi:first-child,
-    .navbar-logout-word {
+    .navbar-nav.me-auto .nav-link > .bi:first-child {
         display: none;
-    }
-    .navbar .nav-link {
-        padding-left: 0.5rem !important;
-        padding-right: 0.5rem !important;
     }
 }
 
@@ -862,13 +861,30 @@ a:focus-visible > .sponsor-cup,
     flex-direction: column;
     align-items: flex-start;
     min-width: 0;
+    max-width: 100%;
     margin-right: 1rem;
 }
+/* max-width + ellipsis: on a 320px phone with a wide font the wordmark alone is wider than the
+ * row, and would otherwise scroll the page sideways. */
 .navbar-brand-group .navbar-brand {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
     margin-right: 0;
     padding-top: 0;
     padding-bottom: 0;
     line-height: 1.25;
+}
+/* A phone row leaves the wordmark ~240-330px beside the hamburger; at the desktop size it only
+ * fits the widest phones, so it steps down (and with the width on the smallest) before the
+ * ellipsis has to cut it. */
+@media (max-width: 575.98px) {
+    .navbar-brand-group {
+        margin-right: 0.5rem;
+    }
+    .navbar-brand-group .navbar-brand {
+        font-size: min(1.05rem, 4.9vw);
+    }
 }
 .navbar-version {
     display: inline-flex;
@@ -1251,7 +1267,7 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
  * vertical stack, the right-side utility cluster (Notifications / Help /
  * Theme / Logout) used to render as bare icons with no labels. Pre-fix
  * the user opened the menu and saw 3 mystery glyphs in a row before
- * Logout. The template now ships a ``d-lg-none`` text label inside each
+ * Logout. The template now ships a ``d-xl-none`` text label inside each
  * utility button; this CSS makes those rows align with the primary nav
  * (Dashboard / Servers / …) so everything reads as one consistent menu.
  *
@@ -1259,7 +1275,7 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
  * Tools, Help, Notifications) render flush to the left so they look
  * like an inline accordion instead of a popover detached from the row.
  * ────────────────────────────────────────────────────────────────────── */
-@media (max-width: 991.98px) {
+@media (max-width: 1199.98px) {
     /* The navbar uses ``backdrop-filter: saturate(1.8) blur(14px)``
      * for the frosted-glass look on desktop, but ``backdrop-filter``
      * establishes a fixed-positioning containing block — meaning any
@@ -1279,6 +1295,13 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
     }
     html[data-bs-theme="light"] nav.navbar.sticky-top {
         background-color: #fff;
+    }
+
+    /* One row: only the brand and the hamburger are in flow here (the menu is the fixed drawer),
+     * so the brand shrinks and ellipsizes rather than pushing the hamburger onto a second row
+     * of a pinned bar. */
+    nav.navbar > .container-fluid {
+        flex-wrap: nowrap;
     }
 
     /* Hamburger toggle — opens the offcanvas drawer. Single ≡ glyph;

@@ -39,8 +39,7 @@ function renderNotifications(notifications) {
     var list = document.getElementById('notificationList');
     var empty = document.getElementById('notificationEmpty');
     var badge = document.getElementById('notificationBellBadge');
-    var bellBtn = document.getElementById('notificationBellBtn');
-    var mobileLabel = bellBtn ? bellBtn.querySelector('.d-lg-none') : null;
+    var mobileLabel = document.getElementById('notificationBellLabel');
     if (!list) return;
 
     // Wipe previous entries but keep the 'empty' placeholder at the top.

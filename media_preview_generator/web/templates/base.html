@@ -41,7 +41,7 @@
 <body>
     {% if request.endpoint != 'main.login' %}
     <!-- Navigation -->
-    <nav class="navbar navbar-expand-lg border-bottom sticky-top">
+    <nav class="navbar navbar-expand-xl border-bottom sticky-top">
         <div class="container-fluid">
             <div class="navbar-brand-group">
                 <a class="navbar-brand" href="{{ url_for('main.index') }}">
@@ -70,12 +70,14 @@
                     aria-controls="navbarNav" aria-expanded="false" aria-label="Open navigation menu">
                 <i class="bi bi-list navbar-toggler-glyph" aria-hidden="true"></i>
             </button>
-            <!-- ``offcanvas offcanvas-end offcanvas-lg`` makes this menu
+            <!-- ``offcanvas offcanvas-end offcanvas-xl`` makes this menu
                  slide in from the right (like a native iOS drawer) on
-                 viewports below ``lg``, while staying as a regular
-                 inline navbar at ``lg`` and up. Bootstrap 5.2+ handles
-                 the responsive switch for us. -->
-            <div class="offcanvas offcanvas-end offcanvas-lg" tabindex="-1" id="navbarNav"
+                 viewports below ``xl`` (1200px), while staying as a regular
+                 inline navbar at ``xl`` and up. Bootstrap 5.2+ handles
+                 the responsive switch for us. ``xl``, not ``lg``: with wider
+                 fonts than ours (a Linux box falling back to DejaVu Sans) the
+                 full bar doesn't fit below 1200px and wraps or scrolls sideways. -->
+            <div class="offcanvas offcanvas-end offcanvas-xl" tabindex="-1" id="navbarNav"
                  aria-labelledby="navbarOffcanvasLabel">
                 <div class="offcanvas-header border-bottom">
                     <h5 class="offcanvas-title" id="navbarOffcanvasLabel">
@@ -189,7 +191,7 @@
                          column of unlabelled icons after the primary links and
                          can't tell which is what. Hidden on desktop where the
                          right-aligned cluster naturally separates them. -->
-                    <li class="nav-item d-lg-none">
+                    <li class="nav-item d-xl-none">
                         <hr class="dropdown-divider my-2">
                     </li>
                     <li class="nav-item dropdown notification-bell-wrapper">
@@ -208,7 +210,7 @@
                                  label inline below `lg` so it matches the rest
                                  of the menu. Desktop hides it (icon + tooltip
                                  is enough where horizontal space is tight). -->
-                            <span class="d-lg-none ms-2">Notifications</span>
+                            <span class="d-xl-none ms-2" id="notificationBellLabel">Notifications</span>
                             <span class="position-absolute translate-middle badge rounded-pill bg-danger d-none"
                                   id="notificationBellBadge"
                                   style="top: 35%; left: 70%; font-size: 0.65rem;">
@@ -244,7 +246,7 @@
                                 aria-label="Help and report an issue"
                                 title="Help / Report an issue">
                             <i class="bi bi-question-circle"></i>
-                            <span class="d-lg-none ms-2">Help &amp; feedback</span>
+                            <span class="d-xl-none ms-2">Help &amp; feedback</span>
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="helpMenuBtn">
                             <li>
@@ -308,7 +310,7 @@
                            target="_blank" rel="noopener noreferrer"
                            aria-label="Buy me a coffee on Ko-fi" title="Buy me a coffee on Ko-fi">
                             <i class="bi bi-cup-hot-fill sponsor-cup" aria-hidden="true"></i>
-                            <span class="d-lg-none ms-2">Buy me a coffee</span>
+                            <span class="d-xl-none ms-2">Buy me a coffee</span>
                         </a>
                     </li>
                     <li class="nav-item">
@@ -319,22 +321,22 @@
                            aria-label="Star Media Preview Generator on GitHub" title="Star Media Preview Generator on GitHub">
                             <i class="bi bi-star-fill navbar-star" aria-hidden="true"></i>
                             <span class="navbar-star-word">Star</span>
-                            <span class="d-lg-none ms-2">Star on GitHub</span>
+                            <span class="d-xl-none ms-2">Star on GitHub</span>
                         </a>
                     </li>
                     <li class="nav-item">
                         <button type="button" class="nav-link btn btn-link d-flex align-items-center" id="themeToggleBtn"
                                 aria-label="Toggle dark/light theme" title="Toggle dark/light theme">
                             <i class="bi bi-moon-stars-fill" id="themeToggleIcon"></i>
-                            <span class="d-lg-none ms-2" id="themeToggleLabel">Switch to light theme</span>
+                            <span class="d-xl-none ms-2" id="themeToggleLabel">Switch to light theme</span>
                         </button>
                     </li>
                     <li class="nav-item">
                         {# A POST with the page's token: a plain link would let any page sign the user out. #}
                         <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                            <button type="submit" class="nav-link w-100 text-start" id="navLogoutBtn" aria-label="Logout" title="Logout">
-                                <i class="bi bi-box-arrow-right me-1" aria-hidden="true"></i><span class="navbar-logout-word">Logout</span>
+                            <button type="submit" class="nav-link w-100 text-start" id="navLogoutBtn">
+                                <i class="bi bi-box-arrow-right me-1"></i>Logout
                             </button>
                         </form>
                     </li>
@@ -496,11 +498,11 @@
                 if (link.matches('[data-bs-toggle="dropdown"]')) return;
                 var href = link.getAttribute('href') || '';
                 if (href === '' || href === '#') return;
-                // Only dismiss on viewports below the navbar-expand-lg
-                // breakpoint (992px). At lg+ the offcanvas isn't really
+                // Only dismiss on viewports below the navbar-expand-xl
+                // breakpoint (1200px). At xl+ the offcanvas isn't really
                 // an offcanvas — it renders inline as a regular navbar
                 // and there's nothing to hide.
-                if (window.innerWidth >= 992) return;
+                if (window.innerWidth >= 1200) return;
                 var instance = window.bootstrap.Offcanvas.getInstance(offcanvasEl)
                     || new window.bootstrap.Offcanvas(offcanvasEl);
                 instance.hide();
