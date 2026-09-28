@@ -110,7 +110,9 @@ E04 1.0, E02 0.5) is the same either way, but the rule only ever removed a right
 
 After review of #330 (HIGH: the carry-over dropped a marker when the same version found nothing; MED: a due answer
 whose read failed counted as a verdict): the replay of today's copy and both samples give the same numbers as above;
-the re-check lists the same 1410 files.
+the re-check lists the same 1410 files. Merged with dev's credit text 8 (#327), which re-reads every credit text
+answer, sflix's re-check lists 1410 files: decide rules 1373, season audio 1107, credit text 1332 (863 resting on credit
+text, 346 decided by other sources, which this branch adds, and 123 undecided).
 
 ## Scripts
 
