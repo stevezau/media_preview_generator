@@ -447,6 +447,27 @@ def _validate_server_payload(
             logger.warning("Server {!r} had an unreadable Intro & Credits block; saved with Intro & Credits off", name)
         markers_block = default_server_markers(type_value)
 
+    from ...loudness.settings import default_server_loudness, validate_server_loudness
+
+    # Plex only: other servers keep no loudness block (a posted one is ignored, like the Edit dialog's {}).
+    loudness_block = None
+    if type_value == "plex":
+        stored_loudness = base.get("loudness")
+        if "loudness" in data:
+            # Patch semantics like markers: a field the client leaves out keeps its stored value.
+            posted = data.get("loudness")
+            both_dicts = isinstance(stored_loudness, dict) and isinstance(posted, dict)
+            loudness_block, err = validate_server_loudness(
+                {**stored_loudness, **posted} if both_dicts else posted, type_value, markers_block
+            )
+            if err:
+                return None, err
+        elif isinstance(stored_loudness, dict):
+            # Carried forward unvalidated, like markers: readers fall back to off for a block that no longer validates.
+            loudness_block = copy.deepcopy(stored_loudness)
+        else:
+            loudness_block = default_server_loudness()
+
     err = _validate_path_mappings(path_mappings or [])
     if err:
         return None, err
@@ -481,6 +502,8 @@ def _validate_server_payload(
         "health_dismissals": list(health_dismissals or []),
         "markers": markers_block,
     }
+    if loudness_block is not None:
+        entry["loudness"] = loudness_block
 
     # Sanity-check the result: server_config_from_dict applies its own
     # validation rules (type, library shapes). Catch unsupported types

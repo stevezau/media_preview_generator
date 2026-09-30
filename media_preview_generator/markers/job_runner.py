@@ -941,7 +941,7 @@ def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
         return {**(latest.config or {}), FILES_SEALED: True}
 
 
-def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool]) -> bool:
+def wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool]) -> bool:
     """Hold a retry job until it is due. Runs before the gate, so waiting costs no slot.
 
     Returns:
@@ -1075,6 +1075,9 @@ def build_items(
     registry,
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: Callable[..., None] | None = None,
+    enabled: Callable[[ServerConfig], bool] = lambda cfg: load_server(cfg.markers, cfg.type.value).enabled,
+    libraries: Callable[[ServerConfig], list] = marker_libraries,
+    label: str = "Intro & Credits",
 ) -> tuple[list[ProcessableItem], list[str], dict[str, str]]:
     """Files for a job: explicit paths (webhook, manual, Inspector) or library enumeration.
 
@@ -1083,6 +1086,9 @@ def build_items(
         registry: The job's ``ServerRegistry``.
         cancel_check: True once the job is cancelled (stops enumeration).
         progress_callback: ``(current, total, message)`` for the enumeration banner.
+        enabled: Whether the feature is on for a server (default: Intro & Credits' ``markers.enabled``).
+        libraries: The libraries the feature goes to on a server.
+        label: The feature's name, for warnings and the enumeration banner.
 
     Returns:
         Items sorted by season folder then path (a season's episodes run together), warnings for the job, and for
@@ -1136,16 +1142,16 @@ def build_items(
                 if requested:
                     warnings.append(f"Skipped {name}: {name} is disabled")
                 continue
-            if not load_server(cfg.markers, cfg.type.value).enabled:
+            if not enabled(cfg):
                 if requested:
-                    warnings.append(f"Skipped {name}: Intro & Credits is turned off on {name}")
+                    warnings.append(f"Skipped {name}: {label} is turned off on {name}")
                 continue
-            allowed = [lib.id for lib in marker_libraries(cfg)]
+            allowed = [lib.id for lib in libraries(cfg)]
             if cfg.id in requested:
                 names = {lib.id: lib.name for lib in cfg.libraries}
                 ids = [lid for lid in requested[cfg.id] if lid in allowed]
                 warnings.extend(
-                    f"Skipped {names.get(lid) or lid}: Intro & Credits isn't on for it"
+                    f"Skipped {names.get(lid) or lid}: {label} isn't on for it"
                     for lid in requested[cfg.id]
                     if lid not in allowed
                 )
@@ -1165,7 +1171,7 @@ def build_items(
                 progress_callback=progress_callback,
             ),
             cancel_check=cancel_check,
-            label="Intro & Credits",
+            label=label,
             progress_callback=progress_callback,
         )
         items = [item for _cfg, item in pairs]
@@ -1223,7 +1229,7 @@ def _in_flight(job_id: str) -> bool:
         return job_id in _inflight_jobs
 
 
-def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check: Callable[[], bool]) -> bool:
+def wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check: Callable[[], bool]) -> bool:
     """Hold a webhook follow-up until its preview job has finished.
 
     Priority alone can't order them: users can set incoming preview jobs to Normal or Low, and then this job
@@ -1275,7 +1281,7 @@ def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_chec
         time.sleep(_POLL_S)
 
 
-def _hold_pause_from_before_restart(job_id: str, cancel_check: Callable[[], bool]) -> bool:
+def hold_pause_from_before_restart(job_id: str, cancel_check: Callable[[], bool]) -> bool:
     """Keep a job paused before a restart paused, holding no slot, until it is resumed.
 
     The pause and resume routes only act on running jobs, so the job is marked running and paused again. A pause from
@@ -1441,7 +1447,7 @@ def _log_summary(jm, job_id: str, outcome: dict[str, int], ctx: PipelineContext)
         logger.warning("Couldn't write the summary of Intro & Credits job {}: {}", job_id, type(exc).__name__)
 
 
-def _complete(
+def finish_job(
     jm,
     job_id: str,
     outcome: dict[str, int],
@@ -1525,7 +1531,7 @@ def _queue_next_batch(jm, job_id: str, cfg: dict) -> None:
         )
 
 
-def _wait_releasing_slot_while_paused(
+def wait_releasing_slot_while_paused(
     tracker,
     *,
     job_id: str,
@@ -1562,11 +1568,11 @@ def _wait_releasing_slot_while_paused(
                 slot["held"] = True
 
 
-def _freeze_check(jm, job_id: str) -> Callable[[], bool]:
+def job_freeze_check(jm, job_id: str) -> Callable[[], bool]:
     """The job's ``PipelineContext.freeze_check``: True while its running files' ffmpeg must stop where it is, as
     previews' does -- all processing paused (Pause all, quiet hours) or this job paused by its schedule's stop time
     (``PAUSED_BY_SCHEDULE``). A pause of this job by hand is not one: it gives the job's slot back and lets the running
-    file finish (:func:`_wait_releasing_slot_while_paused`).
+    file finish (:func:`wait_releasing_slot_while_paused`).
     """
 
     def frozen() -> bool:
@@ -1604,7 +1610,7 @@ def _cancel_check_releasing_slot_while_paused(
 ) -> Callable[[], bool]:
     """A cancel check for work done on the job's own thread (Check servers' read-back): it doesn't return while the
     job or all processing is paused, and gives the job's gate slot back while this job is paused on its own, taking a
-    slot again on resume (``_wait_releasing_slot_while_paused``).
+    slot again on resume (``wait_releasing_slot_while_paused``).
 
     Returns:
         The check: True once the job is cancelled.
@@ -1635,6 +1641,37 @@ def _cancel_check_releasing_slot_while_paused(
         return True
 
     return check
+
+
+def worker_cards(jm) -> Callable[[list], None]:
+    """The dispatcher's ``worker_callback`` for a kind's runner: keeps the dashboard's worker cards current."""
+
+    def update(workers_list) -> None:
+        keys = set()
+        for w in workers_list:
+            key = f"{w['worker_type']}_{w['worker_id']}"
+            keys.add(key)
+            remaining = w.get("remaining_time")
+            jm.update_worker_status(
+                key,
+                WorkerStatus(
+                    worker_id=w["worker_id"],
+                    worker_type=w["worker_type"],
+                    worker_name=w["worker_name"],
+                    status=w["status"],
+                    current_title=w.get("current_title", ""),
+                    library_name=w.get("library_name", ""),
+                    progress_percent=w.get("progress_percent", 0),
+                    speed=w.get("speed", "0.0x"),
+                    eta=_format_eta(float(remaining)) if isinstance(remaining, int | float) and remaining > 0 else "",
+                    ffmpeg_started=bool(w.get("ffmpeg_started", False)),
+                    current_phase=w.get("current_phase", "") or "",
+                ),
+            )
+        jm.prune_worker_statuses(keys)
+        jm.emit_worker_statuses()
+
+    return update
 
 
 def run_intro_credits_job(job_id: str) -> None:
@@ -1705,15 +1742,15 @@ def run_intro_credits_job(job_id: str) -> None:
     try:
         with failure_scope(job_id):
             try:
-                if not _wait_for_preceding_job(job_id, cfg.get("follows_job_id"), cancel_check):
+                if not wait_for_preceding_job(job_id, cfg.get("follows_job_id"), cancel_check):
                     jm.add_log(job_id, "WARNING - Job cancelled while waiting for its preview job")
                     jm.cancel_job(job_id)
                     return
-                if not _wait_for_retry_time(job_id, cfg, cancel_check):
+                if not wait_for_retry_time(job_id, cfg, cancel_check):
                     jm.add_log(job_id, "WARNING - Job cancelled while waiting to retry")
                     jm.cancel_job(job_id)
                     return
-                if job.paused and not _hold_pause_from_before_restart(job_id, cancel_check):
+                if job.paused and not hold_pause_from_before_restart(job_id, cancel_check):
                     jm.add_log(job_id, "WARNING - Job cancelled while paused")
                     jm.cancel_job(job_id)
                     return
@@ -1753,32 +1790,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         job_id, percent=percent, processed_items=current, total_items=total, current_item=message
                     )
 
-                def worker_callback(workers_list):
-                    keys = set()
-                    for w in workers_list:
-                        key = f"{w['worker_type']}_{w['worker_id']}"
-                        keys.add(key)
-                        remaining = w.get("remaining_time")
-                        jm.update_worker_status(
-                            key,
-                            WorkerStatus(
-                                worker_id=w["worker_id"],
-                                worker_type=w["worker_type"],
-                                worker_name=w["worker_name"],
-                                status=w["status"],
-                                current_title=w.get("current_title", ""),
-                                library_name=w.get("library_name", ""),
-                                progress_percent=w.get("progress_percent", 0),
-                                speed=w.get("speed", "0.0x"),
-                                eta=_format_eta(float(remaining))
-                                if isinstance(remaining, int | float) and remaining > 0
-                                else "",
-                                ffmpeg_started=bool(w.get("ffmpeg_started", False)),
-                                current_phase=w.get("current_phase", "") or "",
-                            ),
-                        )
-                    jm.prune_worker_statuses(keys)
-                    jm.emit_worker_statuses()
+                worker_callback = worker_cards(jm)
 
                 config = load_config()
                 # A job following a pinned preview job (and its retries and checks) publishes where the previews did.
@@ -1804,7 +1816,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 )
                 ctx.busy_writes_retried = _retry_follows(cfg)
                 ctx.retry_file_cap = MAX_RETRY_FILES
-                ctx.freeze_check = _freeze_check(jm, job_id)
+                ctx.freeze_check = job_freeze_check(jm, job_id)
                 sweep_configs = list(registry.configs())
                 listing = None
                 if cfg.get("reconcile"):
@@ -1906,7 +1918,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                 if not items:
                     jm.set_job_outcome(job_id, carried)
-                    _complete(jm, job_id, carried, warnings, ctx)
+                    finish_job(jm, job_id, carried, warnings, ctx)
                     _settle_decide_again(jm, job_id, cfg)
                     _queue_next_batch(jm, job_id, cfg)
                     if chain_head:
@@ -2007,7 +2019,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 current = live_priority()
                 if tracker.priority != current:
                     dispatcher.update_job_priority(job_id, current)
-                _wait_releasing_slot_while_paused(
+                wait_releasing_slot_while_paused(
                     tracker,
                     job_id=job_id,
                     slot=slot,
@@ -2040,7 +2052,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 # file still waiting keeps its item and is listed again by a later run.
                 retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
-                _complete(
+                finish_job(
                     jm,
                     job_id,
                     outcome,

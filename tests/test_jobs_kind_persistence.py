@@ -1,11 +1,17 @@
 import sqlite3
 
-from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS, parse_job_kind
+from media_preview_generator.job_kinds import (
+    JOB_KIND_INTRO_CREDITS,
+    JOB_KIND_LOUDNESS,
+    JOB_KIND_PREVIEWS,
+    parse_job_kind,
+)
 from media_preview_generator.web.jobs import JobManager, JobStorage
 
 
 def test_parse_job_kind_defaults_to_previews():
     assert parse_job_kind("intro_credits") == JOB_KIND_INTRO_CREDITS
+    assert parse_job_kind("loudness") == JOB_KIND_LOUDNESS
     assert parse_job_kind(None) == JOB_KIND_PREVIEWS
     assert parse_job_kind("bogus") == JOB_KIND_PREVIEWS
 

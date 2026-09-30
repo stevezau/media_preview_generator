@@ -86,6 +86,9 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 - **Jellyfin.** Jellyfin 10.11 or 12.0, with the Media Preview Bridge plugin (the one trickplay uses).
 - **Emby.** Emby 4.9 or 4.10, with the Media Preview Bridge for Emby plugin. Skip Intro needs Emby Premiere; Skip Credits doesn't.
 
+**Plex loudness**
+- **Normalize Loudness sooner.** Runs Plex's own loudness analysis of each audio track on the same workers and stores it in Plex, instead of waiting for Plex to reach each track one at a time. Off until you [turn it on](https://mediapreviewgenerator.dev/plex-loudness-normalization/) for a Plex server.
+
 ## Where it fits
 
 It sits next to Sonarr, Radarr and Tdarr and takes over the media server's own preview job. Once it

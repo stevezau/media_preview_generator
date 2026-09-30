@@ -14,7 +14,11 @@ from typing import Any
 
 JOB_KIND_PREVIEWS = "previews"
 JOB_KIND_INTRO_CREDITS = "intro_credits"
-JOB_KINDS: tuple[str, ...] = (JOB_KIND_PREVIEWS, JOB_KIND_INTRO_CREDITS)
+JOB_KIND_LOUDNESS = "loudness"
+JOB_KINDS: tuple[str, ...] = (JOB_KIND_PREVIEWS, JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS)
+# Kinds with their own runner and their own pause (a job pause of theirs is the user's, kept across Pause all and a
+# restart); preview jobs pause through the global flag.
+SELF_PAUSED_KINDS: frozenset[str] = frozenset({JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS})
 # A webhook preview job's config key (or start override) asking for the Intro & Credits job that follows it. The batch
 # sets it when it opens, so a job revived after a restart during the debounce still asks; the preview runner queues the
 # follow-up once and takes the key off (``markers.triggers.submit_pending_follow_up``).

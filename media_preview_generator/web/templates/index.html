@@ -330,6 +330,11 @@
                                 <label class="form-check-label ms-1" for="jobKindMarkers">Intro &amp; Credits</label>
                                 <button type="button" class="info-icon ms-1" id="jobKindMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds Skip Intro and Skip Credits markers for the chosen libraries and sends them to your servers." data-explain-title="Intro &amp; Credits job" data-explain-template="infoJobKindMarkersTpl"><i class="bi bi-info-circle"></i></button>
                             </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobKind" id="jobKindLoudness" value="loudness" onchange="onJobKindChange()">
+                                <label class="form-check-label ms-1" for="jobKindLoudness">Plex loudness</label>
+                                <button type="button" class="info-icon ms-1" id="jobKindLoudnessInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Runs Plex's loudness analysis of each audio track in the chosen libraries and stores it in Plex, for Normalize Loudness. Libraries need Loudness on (server settings)."><i class="bi bi-info-circle"></i></button>
+                            </div>
                         </div>
                         <div class="mt-2 ms-4" id="jobMarkersModeGroup" hidden><div class="d-flex flex-wrap gap-3">
                             <div class="form-check mb-0">
@@ -641,6 +646,11 @@
                                 <option value="markers_skipped" data-kind="intro_credits">Skipped</option>
                                 <option value="markers_none" data-kind="intro_credits">No markers found</option>
                                 <option value="markers_no_owners" data-kind="intro_credits">No server with Intro &amp; Credits on</option>
+                                <option value="loudness_written" data-kind="loudness">Loudness written</option>
+                                <option value="loudness_up_to_date" data-kind="loudness">Up to date</option>
+                                <option value="loudness_not_in_library" data-kind="loudness">Not in Plex yet</option>
+                                <option value="loudness_waiting" data-kind="loudness">Waiting for Plex</option>
+                                <option value="loudness_no_owners" data-kind="loudness">No server with Loudness on</option>
                                 <option value="failed">Failed</option>
                                 <option value="no_media_parts" data-kind="previews">No media parts</option>
                                 <option value="skipped_excluded" data-kind="previews">Excluded</option>

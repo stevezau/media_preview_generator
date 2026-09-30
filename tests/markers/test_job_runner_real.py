@@ -1357,7 +1357,7 @@ class TestACancelStopsTheFileWheneverItLands:
         monkeypatch.setattr(job_runner, "build_context", build_context)
         monkeypatch.setattr(job_runner, "run_detector_checks", lambda *args, **kwargs: None)
         # Every decode loop asks the job's freeze check once per poll: a poll held there hasn't looked at the cancel.
-        monkeypatch.setattr(job_runner, "_freeze_check", lambda jm, job_id: frozen)
+        monkeypatch.setattr(job_runner, "job_freeze_check", lambda jm, job_id: frozen)
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
         monkeypatch.setattr(pipeline, "log_pickup", log_pickup)
         monkeypatch.setattr(pipeline, "probe_media", probe)

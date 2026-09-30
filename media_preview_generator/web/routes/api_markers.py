@@ -38,6 +38,65 @@ def _parse_job_priority(raw: object) -> int | None:
     return None
 
 
+def job_title(label: str, library_name: str | None, libraries: list, resolved_paths: list) -> str:
+    """A started job's title: the one sent, else ``<label>: N files``, ``<label>: N libraries`` or all libraries."""
+    if (library_name or "").strip():
+        return library_name.strip()
+    if resolved_paths:
+        count = len(resolved_paths)
+        return f"{label}: {count} file{'' if count == 1 else 's'}"
+    if libraries:
+        count = len(libraries)
+        return f"{label}: {count} librar{'y' if count == 1 else 'ies'}"
+    return f"{label}: all libraries"
+
+
+def parse_job_request():
+    """Read a "start a job" body: ``libraries`` or ``file_paths``, ``priority`` and ``library_name``.
+
+    Returns:
+        ``((libraries, resolved_paths, priority, library_name, data), None)``, or ``(None, response)`` for an invalid
+        body or an unwritable config directory.
+    """
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return None, blocked
+    data = request.get_json(silent=True)
+    if data is None:
+        # get_json answers None both for no body and for a body it can't read (no JSON content type, a trailing
+        # comma); only an empty body means "every library".
+        if request.content_length or request.get_data(cache=True):
+            return None, (jsonify({"error": "The request body must be JSON"}), 400)
+        data = {}
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "The request body must be a JSON object"}), 400)
+    libraries = data.get("libraries") or []
+    file_paths = data.get("file_paths") or []
+    if not isinstance(libraries, list) or not all(
+        isinstance(x, dict) and str(x.get("server_id") or "").strip() and str(x.get("library_id") or "").strip()
+        for x in libraries
+    ):
+        return None, (jsonify({"error": "libraries must be a list of {server_id, library_id}"}), 400)
+    if not isinstance(file_paths, list) or not all(isinstance(p, str) and p.strip() for p in file_paths):
+        return None, (jsonify({"error": "file_paths must be a list of paths"}), 400)
+    if libraries and file_paths:
+        return None, (jsonify({"error": "Choose libraries or file_paths, not both"}), 400)
+    priority = _parse_job_priority(data["priority"]) if "priority" in data else PRIORITY_LOW
+    if priority is None:
+        return None, (jsonify({"error": "priority must be 1, 2, 3, high, normal or low"}), 400)
+    library_name = data.get("library_name")
+    if library_name is not None and not isinstance(library_name, str):
+        return None, (jsonify({"error": "library_name must be a string"}), 400)
+    resolved_paths = []
+    for raw in file_paths:
+        resolved = _safe_resolve_within(raw.strip(), MEDIA_ROOT)
+        if resolved is None:
+            return None, (jsonify({"error": f"Path is outside allowed media root: {raw.strip()}"}), 400)
+        resolved_paths.append(resolved)
+    libraries = [{"server_id": str(x["server_id"]), "library_id": str(x["library_id"])} for x in libraries]
+    return (libraries, resolved_paths, priority, library_name, data), None
+
+
 @api.route("/markers/jobs", methods=["POST"])
 @api_token_required
 def create_marker_job():
@@ -52,55 +111,15 @@ def create_marker_job():
     """
     from ...markers.triggers import create_intro_credits_job
 
-    blocked = _config_unwritable_response()
-    if blocked is not None:
-        return blocked
-    data = request.get_json(silent=True)
-    if data is None:
-        # get_json answers None both for no body and for a body it can't read (no JSON content type, a trailing
-        # comma); only an empty body means "every library".
-        if request.content_length or request.get_data(cache=True):
-            return jsonify({"error": "The request body must be JSON"}), 400
-        data = {}
-    if not isinstance(data, dict):
-        return jsonify({"error": "The request body must be a JSON object"}), 400
-    libraries = data.get("libraries") or []
-    file_paths = data.get("file_paths") or []
-    if not isinstance(libraries, list) or not all(
-        isinstance(x, dict) and str(x.get("server_id") or "").strip() and str(x.get("library_id") or "").strip()
-        for x in libraries
-    ):
-        return jsonify({"error": "libraries must be a list of {server_id, library_id}"}), 400
-    if not isinstance(file_paths, list) or not all(isinstance(p, str) and p.strip() for p in file_paths):
-        return jsonify({"error": "file_paths must be a list of paths"}), 400
-    if libraries and file_paths:
-        return jsonify({"error": "Choose libraries or file_paths, not both"}), 400
-    priority = _parse_job_priority(data["priority"]) if "priority" in data else PRIORITY_LOW
-    if priority is None:
-        return jsonify({"error": "priority must be 1, 2, 3, high, normal or low"}), 400
-    library_name = data.get("library_name")
-    if library_name is not None and not isinstance(library_name, str):
-        return jsonify({"error": "library_name must be a string"}), 400
-    resolved_paths = []
-    for raw in file_paths:
-        resolved = _safe_resolve_within(raw.strip(), MEDIA_ROOT)
-        if resolved is None:
-            return jsonify({"error": f"Path is outside allowed media root: {raw.strip()}"}), 400
-        resolved_paths.append(resolved)
-
-    if resolved_paths:
-        count = len(resolved_paths)
-        default_name = f"Intro & Credits: {count} file{'' if count == 1 else 's'}"
-    elif libraries:
-        count = len(libraries)
-        default_name = f"Intro & Credits: {count} librar{'y' if count == 1 else 'ies'}"
-    else:
-        default_name = "Intro & Credits: all libraries"
+    parsed, error = parse_job_request()
+    if error is not None:
+        return error
+    libraries, resolved_paths, priority, library_name, data = parsed
     job = create_intro_credits_job(
-        library_name=(library_name or "").strip() or default_name,
+        library_name=job_title("Intro & Credits", library_name, libraries, resolved_paths),
         priority=priority,
         source="manual",
-        libraries=[{"server_id": str(x["server_id"]), "library_id": str(x["library_id"])} for x in libraries],
+        libraries=libraries,
         file_paths=resolved_paths,
         force=_param_to_bool(data.get("force"), False),
     )

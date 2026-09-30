@@ -1792,7 +1792,7 @@ class TestRestart:
             after.request_resume(job.id, only_paused_by_schedule=True)  # the schedule's next start
 
         monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
-        assert job_runner._hold_pause_from_before_restart(job.id, lambda: False) is True
+        assert job_runner.hold_pause_from_before_restart(job.id, lambda: False) is True
         assert held == [(JobStatus.RUNNING, True, True)]
         assert not after.get_job(job.id).paused
 

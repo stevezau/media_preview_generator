@@ -19,7 +19,7 @@ from flask_wtf.csrf import CSRFProtect
 from loguru import logger
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
+from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS
 from .auth import log_token_on_startup
 from .jobs import JobStatus, get_job_manager
 from .scheduler import get_schedule_manager
@@ -431,8 +431,8 @@ def _warn_unhealthy_media_mounts(media_servers: list) -> list[dict[str, str]]:
     return issues
 
 
-def _fail_unrevived_intro_credits_jobs() -> None:
-    """Settle the Intro & Credits jobs a restart left behind and didn't revive.
+def _fail_unrevived_own_runner_jobs() -> None:
+    """Settle the Intro & Credits and Plex loudness jobs a restart left behind and didn't revive.
 
     Left PENDING they would block their schedule and absorb webhook follow-ups for good. A Season job among them passes
     on the episodes other jobs had handed it. Its own failure is logged and never stops the revived jobs from starting.
@@ -448,6 +448,15 @@ def _fail_unrevived_intro_credits_jobs() -> None:
             "pending until a later restart settles them or you cancel them on the dashboard; until then their "
             "schedules skip every run (a leftover Check servers job blocks every Check servers run) and new webhook "
             "follow-ups for the same files can be folded into them instead of running",
+            type(exc).__name__,
+            exc,
+        )
+    try:
+        get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_LOUDNESS)
+    except Exception as exc:
+        logger.warning(
+            "Couldn't mark the Plex loudness jobs left over from before the restart as failed ({}: {}); cancel them on "
+            "the dashboard",
             type(exc).__name__,
             exc,
         )
@@ -489,7 +498,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         )
         if not auto_requeue_enabled:
             logger.info("Auto-requeue on restart is disabled")
-            _fail_unrevived_intro_credits_jobs()
+            _fail_unrevived_own_runner_jobs()
             _fail_unrevived_preview_jobs()
             return
 
@@ -515,7 +524,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
                 if job.kind == JOB_KIND_PREVIEWS and job.status is JobStatus.PENDING
             }
         revived = [*revived, *job_manager.requeue_interrupted_followers(kept)]
-        _fail_unrevived_intro_credits_jobs()
+        _fail_unrevived_own_runner_jobs()
         if not paused:
             # While paused, the older ones are jobs the pause is holding (a webhook queued during a long pause
             # isn't re-sent), so they stay PENDING and Resume starts them, as it would have without the restart.

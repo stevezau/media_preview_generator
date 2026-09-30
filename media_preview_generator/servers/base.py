@@ -804,3 +804,5 @@ class ServerConfig:
     server_identity: str | None = None
     # Intro & Credits per-server block (spec §8); validated by markers.settings.validate_server.
     markers: dict[str, Any] = field(default_factory=dict)
+    # Plex loudness per-server block; validated by loudness.settings.validate_server_loudness.
+    loudness: dict[str, Any] = field(default_factory=dict)

@@ -53,6 +53,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - [Previews on Sonarr or Radarr import](https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/): webhooks, the 60 s quiet period, retries
 - [HDR and Dolby Vision previews](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/): tone mapping and the Profile 5 caveat
 - [Skip Intro and Skip Credits](https://mediapreviewgenerator.dev/skip-intro-credits/): what each server needs, how intros and credits are found, Needs review, limits
+- [Plex loudness](https://mediapreviewgenerator.dev/plex-loudness-normalization/): Plex's loudness analysis on this app's workers, for Normalize Loudness
 - [Guides and troubleshooting](https://mediapreviewgenerator.dev/guides/): web UI, webhooks, schedules, HDR, CPU fallback
 - [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/): every server setting that decides whether previews show up
 - [Multi-server](https://mediapreviewgenerator.dev/multi-server/): output formats, webhook routing, retries, the Jellyfin plugin

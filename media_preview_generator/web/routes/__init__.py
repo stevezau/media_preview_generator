@@ -20,6 +20,7 @@ from . import (  # noqa: E402
     api_inspector,  # noqa: F401
     api_jobs,  # noqa: F401
     api_libraries,  # noqa: F401
+    api_loudness,  # noqa: F401
     api_markers,  # noqa: F401
     api_plex,  # noqa: F401
     api_plex_webhook,  # noqa: F401

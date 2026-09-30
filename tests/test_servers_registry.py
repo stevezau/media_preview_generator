@@ -139,6 +139,7 @@ class TestServerConfigRoundTrip:
             "output": {"adapter": "plex_bundle", "frame_interval": 5},
             "server_identity": "machine-uuid-xyz",
             "markers": {"enabled": True, "library_ids": ["1"]},
+            "loudness": {"enabled": False, "library_ids": None},
         }
 
         # Forward direction: dict -> ServerConfig -> dict must equal input.

@@ -23,6 +23,7 @@ Complete reference for all configuration options and REST API endpoints.
 - [Web Interface Settings](#web-interface-settings)
 - [Webhook Settings](#webhook-settings)
 - [Intro & Credits](#intro--credits)
+- [Plex loudness](#plex-loudness)
 - [Path Mappings](#path-mappings)
 - [REST API](#rest-api)
 - [WebSocket Events](#websocket-events)
@@ -789,6 +790,41 @@ or low"}`. `503` when the config directory isn't writable (checked before the bo
 > [Servers](#servers-beyond-the-basics-in-multi-media-server-endpoints)).
 
 ---
+
+## Plex loudness
+
+Plex's loudness analysis run on this app's workers ([Plex loudness](plex-loudness-normalization.md)). Plex servers only;
+off until turned on per server.
+
+### Per-server settings (`media_servers[].loudness`)
+
+| Key | Type | Notes |
+|---|---|---|
+| `enabled` | bool | Default `false`. Turning it on needs the server's Plex database write confirmed (`markers.plex.db_write_confirmed_at`), and no Plex marker agent (`markers.plex.agent.enabled`). |
+| `library_ids` | array of strings \| `null` | Libraries it goes to. `null` = every movie and TV library; a list is taken literally (music included). |
+
+### Job kind `loudness`
+
+Same `Job` row, queue, priorities, pause and cancel as the other kinds (see [Jobs Endpoints](#jobs-endpoints)). `config`
+holds `kind` (`"loudness"`), `source`, `libraries` (`[{"server_id", "library_id"}]`; empty with no `file_paths` = every
+library loudness goes to), `file_paths`, `follows_job_id` (the preview job a webhook follow-up waits for) and, for a
+follow-up, `server_id`. File outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `loudness_written` | At least one audio track was analysed and stored, or the item marked analysed. |
+| `loudness_up_to_date` | Plex already has loudness for every track, and the item is marked analysed, or the file has no audio track. |
+| `loudness_no_owners` | No Plex server with loudness on has the file in a chosen library. |
+| `loudness_not_in_library` | Plex hasn't added the file yet; a retry job (`retry_attempt`, up to 3, 15 min × attempt later) checks it again. |
+| `loudness_waiting` | Plex's database couldn't be written just then (Plex restarting or busy); the retry job checks it again. |
+| `skipped_file_not_found` | The file isn't on disk. A webhook's file is checked again by the retry job. |
+| `failed` | A track couldn't be analysed or written (the reason names the track). |
+
+### Plex loudness Endpoints
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/loudness/jobs` | Start a job. Body: `libraries` or `file_paths` (inside `MEDIA_ROOT`), `priority` (1-3 or high/normal/low, default low), `library_name`. `201` with the job. |
 
 ## Path Mappings
 

@@ -1309,6 +1309,7 @@
                 general: 'edit-tab-general',
                 health: 'edit-tab-health',
                 markers: 'edit-tab-markers',
+                loudness: 'edit-tab-loudness',
             };
             const paneId = tabMap[openTab] || 'edit-tab-general';
             const activeTab = document.querySelector(`#editServerModal [data-bs-target="#${paneId}"]`);
@@ -1353,6 +1354,7 @@
         renderEditPathMappings(server.path_mappings || []);
         renderEditExcludePaths(server.exclude_paths || []);
         if (window.loadMarkersTab) window.loadMarkersTab(server);
+        if (window.loadLoudnessTab) window.loadLoudnessTab(server);
         $('#editServerResult').className = 'd-none';
         $('#editServerResult').innerHTML = '';
 
@@ -1366,7 +1368,7 @@
     function renderEditLibraries(libraries) {
         const list = $('#editLibraryList');
         if (!libraries.length) {
-            list.innerHTML = '<tr><td colspan="3" class="text-muted">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</td></tr>';
+            list.innerHTML = '<tr><td colspan="4" class="text-muted">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</td></tr>';
             return;
         }
         list.innerHTML = libraries.map((lib, idx) => {
@@ -1390,6 +1392,7 @@
                     </div>
                 </td>
                 <td class="text-center markers-lib-col markers-lib-cell d-none"></td>
+                <td class="text-center loudness-lib-col loudness-lib-cell d-none"></td>
             </tr>`;
         }).join('');
     }
@@ -1658,6 +1661,7 @@
             }
         }
         if (window.readMarkersFromForm) payload.markers = window.readMarkersFromForm(server);
+        if (window.readLoudnessFromForm) payload.loudness = window.readLoudnessFromForm(server);
 
         const r = await api('PUT', `/api/servers/${encodeURIComponent(server.id)}`, payload);
         saveBtn.disabled = false;
@@ -3412,6 +3416,7 @@
             if (fresh.ok && fresh.data) {
                 renderEditLibraries(fresh.data.libraries || []);
                 if (window.renderMarkersLibraryColumn) window.renderMarkersLibraryColumn();
+                if (window.renderLoudnessLibraryColumn) window.renderLoudnessLibraryColumn();
                 // D23 — sync the cached server payload so saveEditedServer
                 // sees the freshly-fetched libraries, not the stale [] it
                 // captured at modal open. Without this, ticking checkboxes

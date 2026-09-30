@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from loguru import logger
 
-from ..job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
+from ..job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..servers.ownership import webhook_path_candidates
@@ -487,17 +487,73 @@ def submit_pending_follow_up(preview_job_id: str, overrides: dict | None = None)
                 )
                 for path in paths
             ]
-            return submit_follow_ups(
+            queued = submit_follow_ups(
                 preview_job_id=preview_job_id,
                 items=items,
                 source=str(request.get("source") or "webhook"),
                 pin=server_pin(request),
             )
+            _submit_loudness_follow_up(
+                preview_job_id, queued, paths, str(request.get("source") or "webhook"), server_pin(request)
+            )
+            return queued
         finally:
             live = jm.get_job(preview_job_id)
             added = set((live.config or {}).get("webhook_paths") or []) - set(paths) if live is not None else set()
             if not added:
                 jm.merge_job_config(preview_job_id, {}, remove=(INTRO_CREDITS_FOLLOW_UP,))
+
+
+def _submit_loudness_follow_up(
+    preview_job_id: str, intro_job_ids: list[str], paths: list[str], source: str, pin: str | None
+) -> None:
+    """Queue the Plex loudness job for a webhook preview job's files, when any server has loudness on. Never raises:
+    a failure here must not cost the files their Intro & Credits follow-up.
+
+    It waits for the files' Intro & Credits follow-up when one was queued (``intro_job_ids``), else for the preview
+    job: previews, then Intro & Credits, then loudness, at the same priority.
+    """
+    try:
+        from ..loudness.job import create_loudness_job
+        from ..loudness.settings import loudness_enabled_anywhere
+
+        configs = _server_configs()
+        if not paths or not loudness_enabled_anywhere(configs):
+            return
+        # A preview pinned to Jellyfin or Emby says nothing about which Plex has the file: keep only a Plex pin.
+        pinned = next((cfg for cfg in configs if cfg.id == pin), None)
+        if pinned is None or not loudness_enabled_anywhere([pinned]):
+            pin = None
+        jm = get_job_manager()
+        # Called again when the preview job's batch grew, or the file came in again: only paths no loudness follow-up
+        # has queued yet.
+        queued = {
+            path
+            for other in [*jm.get_pending_jobs(), *jm.get_running_jobs()]
+            if other.kind == JOB_KIND_LOUDNESS and (other.config or {}).get("follows_job_id")
+            for path in (other.config or {}).get("file_paths") or []
+        }
+        rest = [path for path in paths if path not in queued]
+        if not rest:
+            return
+        preview = jm.get_job(preview_job_id)
+        if len(rest) == len(paths) and preview is not None and preview.library_name:
+            name = f"Plex loudness · {preview.library_name}"
+        elif len(rest) == 1:
+            name = f"Plex loudness · {os.path.basename(rest[0])}"
+        else:
+            name = f"Plex loudness · {len(rest)} files"
+        create_loudness_job(
+            library_name=name,
+            # As Intro & Credits: Normal (ahead of a Low library backfill), Low only when the preview job is Low.
+            priority=max(PRIORITY_NORMAL, preview.priority) if preview is not None else PRIORITY_NORMAL,
+            source=source,
+            file_paths=rest,
+            follows_job_id=next(iter(intro_job_ids), preview_job_id),
+            server_id=pin,
+        )
+    except Exception as exc:
+        logger.warning("Couldn't queue the Plex loudness job for preview job {}: {}", preview_job_id[:8], exc)
 
 
 def submit_redetect(path: str) -> str:

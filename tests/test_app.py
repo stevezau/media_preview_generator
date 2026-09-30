@@ -461,6 +461,7 @@ class TestRequeueInterruptedOnStartup:
         # preview ones would be started by the next resume.
         assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
             ("intro_credits",),
+            ("loudness",),
             ("previews",),
         ]
         mock_start_job.assert_not_called()
@@ -483,6 +484,7 @@ class TestRequeueInterruptedOnStartup:
         mock_get_job_manager.return_value.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=45)
         assert [c.args for c in mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.call_args_list] == [
             ("intro_credits",),
+            ("loudness",),
             ("previews",),
         ]
         mock_start_job.assert_called_once_with("job-123", {"foo": "bar"})
@@ -510,7 +512,10 @@ class TestRequeueInterruptedOnStartup:
         mock_start_job.assert_called_once_with("job-456", {})
         # Older preview jobs are held by the pause too: left PENDING for Resume, not settled.
         jm = mock_get_job_manager.return_value
-        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [("intro_credits",)]
+        assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
+            ("intro_credits",),
+            ("loudness",),
+        ]
 
     @pytest.mark.parametrize("auto_requeue", [True, False])
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -540,6 +545,7 @@ class TestRequeueInterruptedOnStartup:
 
         assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
             ("intro_credits",),
+            ("loudness",),
             ("previews",),
         ]
         if auto_requeue:
@@ -572,6 +578,7 @@ class TestRequeueInterruptedOnStartup:
         jm.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=30)
         assert [c.args for c in jm.fail_unrevived_interrupted_jobs.call_args_list] == [
             ("intro_credits",),
+            ("loudness",),
             ("previews",),
         ]
         mock_start_job.assert_not_called()

@@ -1,4 +1,4 @@
--- Schema of tags, taggings, media_parts, media_items, metadata_items from lab Plex Media Server 1.43.4.10903
+-- Schema of tags, taggings, media_parts, media_items, metadata_items, media_streams from lab Plex Media Server 1.43.4.10903
 -- (".schema" read-only). Removed: fts4_*_icu triggers and index_title_sort_icu, which need Plex's ICU build.
 CREATE TABLE "tags" ("id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "metadata_item_id" integer, "tag" varchar(255) COLLATE NOCASE, "tag_type" integer, "user_thumb_url" varchar(255), "user_art_url" varchar(255), "user_music_url" varchar(255), "created_at" dt_integer(8), "updated_at" dt_integer(8), "tag_value" integer, "extra_data" varchar(255), 'key' varchar(255), 'parent_id' integer);
 CREATE INDEX "index_tags_on_tag" ON "tags" ("tag" );
@@ -48,3 +48,8 @@ CREATE INDEX 'index_metadata_items_on_edition_title' ON 'metadata_items' ('editi
 CREATE INDEX 'index_metadata_items_on_slug' ON 'metadata_items' ('slug');
 CREATE INDEX 'index_metadata_items_on_is_adult' ON 'metadata_items' ('is_adult');
 CREATE INDEX 'index_metadata_items_on_metadata_agent_provider_group_id' ON 'metadata_items' ('metadata_agent_provider_group_id');
+-- media_streams: read-only from a production Plex Media Server 1.43.4.10903 (2026-09-29), for the loudness job.
+CREATE TABLE "media_streams" ("id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "stream_type_id" integer, "media_item_id" integer, "url" varchar(255), "codec" varchar(255), "language" varchar(255), "created_at" dt_integer(8), "updated_at" dt_integer(8), "index" integer, "media_part_id" integer, "channels" integer, "bitrate" integer, "url_index" integer, "default" boolean DEFAULT 0, "forced" boolean DEFAULT 0, "extra_data" varchar(255));
+CREATE INDEX "index_media_streams_on_language" ON "media_streams" ("language" );
+CREATE INDEX "index_media_streams_on_media_item_id" ON "media_streams" ("media_item_id" );
+CREATE INDEX "index_media_streams_on_media_part_id" ON "media_streams" ("media_part_id" );

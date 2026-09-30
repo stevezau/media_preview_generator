@@ -64,6 +64,8 @@ nav:
         url: /hdr-dolby-vision-thumbnails/
       - title: Skip Intro and Skip Credits
         url: /skip-intro-credits/
+      - title: Plex loudness
+        url: /plex-loudness-normalization/
   - title: Guides
     url: /guides/
     blurb: The web UI, webhooks, schedules and troubleshooting

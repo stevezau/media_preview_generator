@@ -73,6 +73,11 @@
                             <i class="bi bi-skip-forward me-1"></i>Intro &amp; Credits
                         </button>
                     </li>
+                    <li class="nav-item d-none" id="editTabLoudnessLi">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-loudness" type="button">
+                            <i class="bi bi-volume-up me-1"></i>Loudness
+                        </button>
+                    </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-libraries" type="button">
                             <i class="bi bi-collection-play me-1"></i>Libraries
@@ -460,6 +465,10 @@
                                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
                                                     title="Libraries that get intro and credits markers here, whatever their Previews switch says. Sports libraries start off."><i class="bi bi-info-circle"></i></button>
                                         </th>
+                                        <th scope="col" class="text-center edit-lib-switch-col loudness-lib-col d-none">Loudness
+                                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                    title="Libraries whose audio tracks get Plex's loudness analysis here, whatever their Previews switch says. Movie and TV libraries start on."><i class="bi bi-info-circle"></i></button>
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody id="editLibraryList"></tbody>
@@ -699,6 +708,28 @@
                         </div>
                     </div>
 
+                    <!-- Loudness (Plex only): this server's switch. Filled by loudness_server_tab.js; its library choice is
+                         the Libraries tab's Loudness column. -->
+                    <div class="tab-pane fade" id="edit-tab-loudness">
+                        <div class="markers-opt mb-2">
+                            <div>
+                                <label class="fw-semibold" for="loudnessEnabled">Analyse loudness for this server</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="Runs Plex's own loudness analysis of each audio track on this app's workers and stores it in Plex, so Normalize Loudness doesn't wait for Plex's one-at-a-time job."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Viewers on this server get Normalize Loudness sooner</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="loudnessEnabled">
+                            </div>
+                        </div>
+                        <p class="small text-warning mb-2 d-none" id="loudnessConfirmHint">
+                            Confirm the Plex database write on the Intro &amp; Credits tab first: loudness is written to the same database.
+                        </p>
+                        <p class="small text-muted mb-3" id="loudnessLibrariesPointer">
+                            Choose which libraries get loudness on the <a href="#" class="loudness-libraries-link">Libraries</a> tab once this is on.
+                        </p>
+                    </div>
+
                     <!-- Intro & Credits: this server's switch and status. Filled by markers_server_tab.js; its library
                          choice is the Libraries tab's Intro & Credits column; detection settings shared by every
                          server live in Settings. -->
@@ -890,6 +921,7 @@
 <script src="{{ url_for('static', filename='js/plex_webhook_panel.js') }}"></script>
 <script src="{{ url_for('static', filename='js/servers.js') }}"></script>
 <script src="{{ url_for('static', filename='js/markers_server_tab.js') }}"></script>
+<script src="{{ url_for('static', filename='js/loudness_server_tab.js') }}"></script>
 
 <!-- ⓘ details: each opens in #globalInfoModal from the ⓘ whose data-explain-template names it. -->
 <template id="infoJellyfinOffMediaTpl">

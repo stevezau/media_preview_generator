@@ -248,11 +248,12 @@ class TestPlexTab:
         _open_tab(authed_page, app_url, server, tab="general")
 
         tabs = authed_page.locator("#editServerModal .nav-tabs .nav-link")
-        expect(tabs.nth(6)).to_be_visible()  # Webhook & Scanner, un-hidden once the vendor is known
+        expect(tabs.nth(7)).to_be_visible()  # Webhook & Scanner, un-hidden once the vendor is known
         assert tabs.evaluate_all("els => els.map((el) => el.dataset.bsTarget)") == [
             "#edit-tab-general",
             "#edit-tab-health",
             "#edit-tab-markers",
+            "#edit-tab-loudness",
             "#edit-tab-libraries",
             "#edit-tab-paths",
             "#edit-tab-excludes",
@@ -1195,7 +1196,7 @@ class TestLibrariesTabIntroCreditsColumn:
         _wait_for_status(authed_page)
 
         expect(authed_page.locator("#editLibraryTable thead th")).to_have_text(
-            ["Library", "Previews", "Intro & Credits"]
+            ["Library", "Previews", "Intro & Credits", "Loudness"]
         )
         expect(_previews_toggle(authed_page, "1")).to_be_visible()
         expect(_markers_column_header(authed_page)).to_be_hidden()

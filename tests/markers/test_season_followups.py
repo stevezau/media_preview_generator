@@ -134,7 +134,7 @@ class TestSeasonFollowUpJob:
     def test_season_jobs_run_low_unless_a_webhook_follow_up_asked(
         self, env, monkeypatch, asker, job_priority, expected
     ):
-        monkeypatch.setattr(job_runner, "_wait_for_preceding_job", lambda *args: True)
+        monkeypatch.setattr(job_runner, "wait_for_preceding_job", lambda *args: True)
         env.job.priority = job_priority
         env.job.config = {"file_paths": [ep(S1, 3)], **asker}
         create = self._run(env, [_item(ep(S1, 3))], [ep(S1, 1)])
@@ -404,7 +404,7 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
             env.job.config = {**env.job.config, "file_paths": [ep(S1, 1), ep(S1, 2)]}
             return True
 
-        monkeypatch.setattr(job_runner, "_wait_for_preceding_job", joined_while_waiting)
+        monkeypatch.setattr(job_runner, "wait_for_preceding_job", joined_while_waiting)
         env.ctx.take_followups.return_value = []
         with patch.object(job_runner, "build_items", return_value=([_item(ep(S1, 1))], [], {})) as build:
             job_runner.run_intro_credits_job("j1")
@@ -432,7 +432,7 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
 
     def test_an_episode_joining_while_the_runner_reads_the_files_is_listed(self, env, monkeypatch):
         env.job.config = {"file_paths": [ep(S1, 1)], "follows_job_id": "p1", "source": "plex"}
-        monkeypatch.setattr(job_runner, "_wait_for_preceding_job", lambda *args: True)
+        monkeypatch.setattr(job_runner, "wait_for_preceding_job", lambda *args: True)
         env.ctx.take_followups.return_value = []
         about_to_read = threading.Event()
 

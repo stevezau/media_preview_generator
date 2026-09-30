@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
-from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
+from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS, SELF_PAUSED_KINDS
 from ..job_gate import format_wait_message
 from ..jobs import (
     PRIORITY_NORMAL,
@@ -360,9 +360,9 @@ def resume_running_and_drain_pending() -> None:
 
     jm = get_job_manager()
     for running in jm.get_running_jobs():
-        # A global resume must not clear an Intro & Credits job's own pause; Pause all holds those jobs through
-        # the global flag, which the caller has already cleared.
-        if running.kind == JOB_KIND_INTRO_CREDITS:
+        # A global resume must not clear an Intro & Credits or loudness job's own pause; Pause all holds those jobs
+        # through the global flag, which the caller has already cleared.
+        if running.kind in SELF_PAUSED_KINDS:
             continue
         jm.request_resume(running.id)
     pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
@@ -394,6 +394,11 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
         from ...markers.job_runner import start_intro_credits_job_async
 
         start_intro_credits_job_async(job_id, config_overrides)
+        return
+    if queued is not None and queued.kind == JOB_KIND_LOUDNESS:
+        from ...loudness.job import start_loudness_job_async
+
+        start_loudness_job_async(job_id, config_overrides)
         return
     if config_overrides and INTRO_CREDITS_FOLLOW_UP in config_overrides:
         # Only the saved config asks for the follow-up (a revival passes a copy of it): the job's own writes below
