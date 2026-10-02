@@ -871,11 +871,15 @@ def _missing_on_disk_message(canonical_path: str, sibling_candidates: list[str])
     mounts were probed and none held the file, that's the signal the
     media volume may not be mounted in this container rather than a path
     typo (see project_stale_bindmount_missing_on_disk).
+
+    The advice covers both ways a path gets here, because this function isn't told which: a webhook's new download
+    (often still copying) and a scan's listing (the server still names a file that was deleted or moved).
     """
     base = (
         f"Source video file is missing on disk: {canonical_path}. "
-        "This often happens when a webhook fires before the file finishes copying, or "
-        "when the file was moved/deleted between scan and dispatch."
+        "Either it is still being copied (a new download can be announced before its copy finishes), or "
+        "it was deleted or moved and the media server still lists it — the server drops it after its own "
+        "library scan (Plex: once its trash is emptied)."
     )
     if sibling_candidates:
         base += (

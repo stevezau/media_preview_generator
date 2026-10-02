@@ -39,6 +39,7 @@ from ..web.routes.job_runner import (
     _inflight_jobs,
     _inflight_lock,
     _is_force_fire_now_set,
+    _retry_job_label,
 )
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
@@ -415,11 +416,10 @@ def _queue_retry(
         unchecked = sorted(set(also) - set(paths) - waiting_paths)[: MAX_RETRY_FILES - len(paths)]
         listed = [*paths, *unchecked]
         delay = scaled_backoff_delay(attempt, delay_setting)
-        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         # A retry's own retry joins the same chain; any other job (an old top-level "Retry:" job included) heads one.
         head_id = cfg.get("parent_job_id") or job.id
         retry = create_intro_credits_job(
-            library_name=f"Retry: {base_name}",
+            library_name=_later_job_name("Retry: ", job, listed),
             priority=job.priority,
             source=str(cfg.get("source") or "retry"),
             file_paths=listed,
@@ -450,6 +450,21 @@ def _queue_retry(
     except Exception:
         logger.exception("Could not queue the retry for files job {} found waiting", job.id)
         return []
+
+
+def _later_job_name(prefix: str, job, paths: list[str]) -> str:
+    """Name a retry or verify job after the job it follows, counting the files the later job itself runs.
+
+    Args:
+        prefix: ``"Retry: "`` or ``"Verify: "``.
+        job: The job it follows (a "Retry: " or "Verify: " prefix of its own is dropped, so they never stack).
+        paths: The files the later job is created with.
+
+    Returns:
+        The later job's name: a trailing "N files" of the followed job's name becomes this job's own count.
+    """
+    followed = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
+    return prefix + _retry_job_label(followed, paths).removeprefix("Retry: ")
 
 
 def _sent_paths(files: set[str], sender_paths: dict[str, str]) -> list[str]:
@@ -507,9 +522,8 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
                 "them checks them",
             )
         delay = max(MIN_VERIFY_DELAY_S, scaled_backoff_delay(1, delay_setting) * VERIFY_DELAY_FACTOR)
-        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         check = create_intro_credits_job(
-            library_name=f"Verify: {base_name}",
+            library_name=_later_job_name("Verify: ", job, paths),
             priority=job.priority,
             source=str(cfg.get("source") or "verify"),
             file_paths=paths,

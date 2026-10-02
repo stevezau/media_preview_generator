@@ -212,6 +212,58 @@ class TestStartRecentlyAddedJobAsync:
         assert "Recently-added enumeration failed" in (job.error or "")
 
 
+class TestFailedFilesAreListedOnceAtTheEnd:
+    """The job log ends with one list of the files that failed, whichever way the job ran (a full scan's log listed
+    each failed file twice: the orchestrator's list, then the job runner's)."""
+
+    REASON = "FFmpeg exit 234 (no_decoder)"
+
+    def _end_of_run_lines(self, job_id):
+        return [line for line in _jm().get_logs(job_id) if f"{self.REASON} | {EPISODE}" in line]
+
+    def test_a_recently_added_scan(self, app):
+        from media_preview_generator.processing.generator import record_failure
+
+        def scan(config, **kwargs):
+            record_failure(EPISODE, 234, self.REASON, "GPU")
+            return {"generated": 1, "failed": 1}
+
+        with patch(SCAN, side_effect=scan):
+            job_id = _start()
+
+        lines = self._end_of_run_lines(job_id)
+        assert len(lines) == 1, lines
+        assert lines[0].endswith(f"ERROR - 1. [GPU] exit=234 | {self.REASON} | {EPISODE}")
+
+    def test_a_full_scan_of_one_plex_server(self, app):
+        """The one way of running that reaches the orchestrator's own list as well."""
+        from media_preview_generator.processing.generator import record_failure
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.set("media_servers", [s for s in sm.get("media_servers") if s["type"] == "plex"])
+
+        def scan_phase(config, registry, *, totals, aggregate_outcome, **kwargs):
+            record_failure(EPISODE, 234, self.REASON, "GPU")
+            totals.update(processed=2, successful=1, failed=1)
+            aggregate_outcome.update(generated=1, failed=1)
+            return True
+
+        job = _jm().create_job(library_name="TV")
+        with patch(
+            "media_preview_generator.jobs.orchestrator._run_plex_full_scan_phase", side_effect=scan_phase
+        ) as phase:
+            _start_job_async(job.id, {})
+
+        phase.assert_called_once()
+        logs = _jm().get_logs(job.id)
+        assert any("Processing complete" in line for line in logs), logs
+        lines = self._end_of_run_lines(job.id)
+        assert len(lines) == 1, lines
+        assert lines[0].endswith(f"ERROR - 1. [GPU] exit=234 | {self.REASON} | {EPISODE}")
+
+
 class TestFilesAndRetries:
     def test_each_files_result_is_a_row_of_the_job(self, app):
         from media_preview_generator.processing.generator import ProcessingResult, _notify_file_result

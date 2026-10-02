@@ -110,6 +110,21 @@ class TestMissingOnDiskMessage:
         # The diagnosis that would have saved hours: point at the mount.
         assert "mounted inside this container" in msg
 
+    @pytest.mark.parametrize("siblings", [[], ["/data_16tb2/x.mkv"]], ids=["no-siblings", "siblings-probed"])
+    def test_the_advice_is_true_for_a_scan_and_for_a_webhook(self, siblings):
+        """The function isn't told where the path came from: a library scan's 286 missing files were each explained
+        as a webhook arriving early, when the server's own listing still named a file deleted from disk."""
+        msg = _missing_on_disk_message(CANON, siblings)
+        assert msg.startswith(f"Source video file is missing on disk: {CANON}. Either ")
+        # A new download announced before its copy finished (a webhook's usual case).
+        assert "it is still being copied" in msg
+        # A file the server still lists after it was deleted or moved (a scan's usual case).
+        assert "it was deleted or moved and the media server still lists it" in msg
+        assert "the server drops it after its own library scan" in msg
+        assert "webhook fires" not in msg and "between scan and dispatch" not in msg
+        assert "mounted inside this container" in msg
+        assert msg.endswith(" The rest of the queue is unaffected.")
+
     def test_base_message_when_no_siblings_probed(self):
         msg = _missing_on_disk_message(CANON, [])
         assert CANON in msg

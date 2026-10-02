@@ -14,7 +14,7 @@ from loguru import logger
 
 from ..processing.generator import ProcessingResult, clear_failures, log_failure_summary
 from ..servers.ownership import find_owning_servers, webhook_path_candidates
-from .worker import WorkerPool
+from .worker import JOB_LOG_SKIP, WorkerPool
 
 
 # Max cadence for worker-snapshot SocketIO emits during a multi-server
@@ -2084,7 +2084,9 @@ def run_processing(
 
         _maybe_log_path_mapping_misconfig(aggregate_outcome, totals["processed"])
 
-        log_failure_summary()
+        # The app log's copy: the job log gets its failed-files list from the job runner, which every scan mode reaches.
+        with logger.contextualize(**{JOB_LOG_SKIP: True}):
+            log_failure_summary()
 
         return_data = return_data or {}
         return_data["outcome"] = aggregate_outcome

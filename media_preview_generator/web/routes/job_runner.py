@@ -100,7 +100,7 @@ def _file_problem_clauses(failure_count: int, outcome: dict | None, *, retry_sch
     return clauses
 
 
-_FILE_COUNT_NAME = re.compile(r"\d+ files$")
+_FILE_COUNT_NAME = re.compile(r"\d+ files?$")
 
 
 def _retry_job_label(parent_name: str, paths: list[str]) -> str:

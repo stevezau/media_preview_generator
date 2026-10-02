@@ -1138,6 +1138,40 @@ class TestSummaryAndWarnings:
         assert result["outcome"]["skipped_bif_exists"] == 1
         assert result["outcome"]["failed"] == 1
 
+    def test_the_failed_files_list_is_logged_for_the_app_log_only(self, tmp_path):
+        """The job log gets its failed-files list from the job runner at the end of every job; this one, in the
+        same job log, listed each failed file a second time."""
+        from loguru import logger as loguru_logger
+
+        from media_preview_generator.jobs.worker import JOB_LOG_SKIP
+        from media_preview_generator.processing import generator
+
+        failure = {"file": "/data/movies/a.mkv", "exit_code": 234, "reason": "no decoder", "worker_type": "GPU"}
+        outcome = {r.value: 0 for r in ProcessingResult}
+        outcome["failed"] = 1
+        records: list[dict] = []
+        sink_id = loguru_logger.add(lambda message: records.append(message.record), level="DEBUG")
+        try:
+            with (
+                patch(
+                    f"{MODULE}._enumerate_plex_full_scan_items",
+                    return_value=iter([(_make_section("Movies"), [("k1", "M1", "movie")])]),
+                ),
+                patch(f"{MODULE}.WorkerPool") as MockPool,
+                patch(f"{MODULE}.log_failure_summary", generator.log_failure_summary),
+                patch.object(generator, "get_failures", return_value=[failure]),
+            ):
+                MockPool.return_value.process_items_headless.return_value = _pool_result(failed=1, outcome=outcome)
+                run_processing(config=_make_config(tmp_path), selected_gpus=[])
+        finally:
+            loguru_logger.remove(sink_id)
+
+        listed = [r for r in records if r["message"].startswith("Run finished with") or "a.mkv" in r["message"]]
+        assert [r["level"].name for r in listed] == ["WARNING", "WARNING"], [r["message"] for r in records]
+        assert all(r["extra"].get(JOB_LOG_SKIP) is True for r in listed)
+        complete = [r for r in records if r["message"].startswith("Processing complete")]
+        assert len(complete) == 1 and not complete[0]["extra"].get(JOB_LOG_SKIP)
+
     def test_path_mapping_warning_on_all_not_found(self, tmp_path):
         """Warning is logged when every item is skipped_file_not_found."""
         config = _make_config(tmp_path)

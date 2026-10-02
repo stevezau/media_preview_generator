@@ -2095,7 +2095,7 @@ class TestLibraryRetry:
         self._run(["/m/a.mkv"])
         if retried:
             retry_env.create.assert_called_once_with(
-                library_name="Retry: Rick and Morty S01 · 2 files",
+                library_name="Retry: Rick and Morty S01 · 1 file",
                 priority=3,
                 source=source,
                 file_paths=["/m/a.mkv"],
@@ -2598,6 +2598,57 @@ class TestLibraryRetry:
         env.jm.record_file_result.assert_called_once_with(
             "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW], server_messages=True
         )
+
+
+class TestLaterJobNamesCountTheirOwnFiles:
+    """A retry or verify job is named after the job it follows, with the number of files it runs itself
+    ("Retry: Intro & Credits · 7 files" ran 1 file)."""
+
+    @pytest.fixture
+    def create(self, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+
+        settings = {"webhook_retry_count": 3, "webhook_retry_delay": 30}
+        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        env.job.config = {"libraries": [], "source": "sonarr"}
+        create = MagicMock(return_value=MagicMock(id="later-1", config={}))
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        return create
+
+    @pytest.mark.parametrize(
+        ("parent_name", "waiting", "unchecked", "expected"),
+        [
+            ("Intro & Credits · 7 files", ["/m/a.mkv"], [], "Retry: Intro & Credits · 1 file"),
+            ("Intro & Credits · 6 files", ["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"], [], "Retry: Intro & Credits · 3 files"),
+            # The retry also runs a version of the waiting file's item that was never checked: it is a file it runs.
+            ("Intro & Credits · 7 files", ["/m/a.mkv"], ["/m/a - 4k.mkv"], "Retry: Intro & Credits · 2 files"),
+            # A retry's own retry: one prefix, and its own count again.
+            ("Retry: Intro & Credits · 3 files", ["/m/a.mkv"], [], "Retry: Intro & Credits · 1 file"),
+            ("Retry: Intro & Credits · 1 file", ["/m/a.mkv"], ["/m/a - 4k.mkv"], "Retry: Intro & Credits · 2 files"),
+            # A name that isn't a file count is kept.
+            ("Intro & Credits · Pilot", ["/m/a.mkv"], [], "Retry: Intro & Credits · Pilot"),
+        ],
+        ids=["one-of-seven", "three-of-six", "plus-unchecked-version", "retry-of-retry", "retry-grows", "title-kept"],
+    )
+    def test_a_retry_is_named_for_the_files_it_runs(self, env, create, parent_name, waiting, unchecked, expected):
+        env.job.library_name = parent_name
+
+        listed = job_runner._queue_retry(
+            env.job, env.job.config, {job_runner.NOT_ON_DISK: set(waiting)}, {}, also=set(unchecked)
+        )
+
+        kwargs = create.call_args.kwargs
+        assert kwargs["library_name"] == expected
+        assert kwargs["file_paths"] == listed == [*waiting, *unchecked]
+
+    def test_a_verify_job_is_named_for_the_files_it_checks(self, env, create):
+        env.job.library_name = "Intro & Credits · 7 files"
+
+        job_runner._queue_verify(env.job, env.job.config, {"/m/a.mkv", "/m/b.mkv"}, {})
+
+        kwargs = create.call_args.kwargs
+        assert kwargs["library_name"] == "Verify: Intro & Credits · 2 files"
+        assert kwargs["file_paths"] == ["/m/a.mkv", "/m/b.mkv"]
 
 
 class TestRetryChain:
