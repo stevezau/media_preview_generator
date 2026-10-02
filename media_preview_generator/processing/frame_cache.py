@@ -330,15 +330,18 @@ class FrameCache:
             if key != keep:
                 self._remove_slot_if_idle(key)
 
-    def _remove_slot_if_idle(self, key: str) -> None:
+    def _remove_slot_if_idle(self, key: str) -> bool:
         """Remove slot ``key``'s entry and directory unless a dispatcher is using it. Caller holds the lock.
 
         A dispatcher holds the slot's generation lock for as long as it writes or reads those frames, so the slot is
         only removed while this call holds that lock itself; a busy slot is left for a later sweep.
+
+        Returns:
+            False when the slot was in use and left alone.
         """
         in_use = self._generation_lock_for_key(key)
         if not in_use.acquire(blocking=False):
-            return
+            return False
         try:
             if key in self._entries:
                 self._evict(key)
@@ -348,9 +351,13 @@ class FrameCache:
             logger.debug("Frame cache: failed to remove slot {}: {}", key, exc)
         finally:
             in_use.release()
+        return True
 
     def _enforce_caps(self) -> None:
         """Trim oldest entries until under both caps. Caller holds the lock.
+
+        A slot a dispatcher is writing or publishing from is never trimmed (see :meth:`_remove_slot_if_idle`), so
+        the cache can sit over a cap until that dispatcher is done.
 
         Two caps:
         * ``max_entries`` — hard ceiling on number of in-memory entries.
@@ -360,9 +367,10 @@ class FrameCache:
           when ``ttl_seconds`` is set to multiple hours.
         """
         # Entry-count cap.
-        while len(self._entries) > self._max_entries:
-            oldest_key = next(iter(self._entries))
-            self._evict(oldest_key)
+        for key in list(self._entries):
+            if len(self._entries) <= self._max_entries:
+                break
+            self._remove_slot_if_idle(key)
 
         # Disk-size cap. Walk MRU order (insertion-oldest first) and
         # drop until we're under the limit. Stat failures are skipped
@@ -395,9 +403,8 @@ class FrameCache:
         for key in keys_in_order[:-1]:  # skip the most recent entry
             if total <= self._max_disk_bytes:
                 break
-            sz = sizes.get(key, 0)
-            self._evict(key)
-            total -= sz
+            if self._remove_slot_if_idle(key):
+                total -= sizes.get(key, 0)
 
 
 # Singleton accessor so the dispatcher and the worker pool share one cache.

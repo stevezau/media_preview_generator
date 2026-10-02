@@ -752,6 +752,19 @@ class TestDispatchLoopOrdering:
         pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
         dispatcher = JobDispatcher(pool)
 
+        # A file is checked on its own thread before a worker gets it, and workers are idle (truthfully) until
+        # then. Hold the dispatch tick that starts the check until the check has queued the file, so this tick is
+        # the one that assigns it: the ordering under test is assign-then-emit within one tick.
+        start_checks = dispatcher._submit_checks
+
+        def start_checks_and_wait_for_them():
+            start_checks()
+            deadline = time.monotonic() + 10
+            while dispatcher._checks_in_flight and time.monotonic() < deadline:
+                time.sleep(0.001)
+
+        dispatcher._submit_checks = start_checks_and_wait_for_them
+
         worker_snapshots = []
 
         def capture_workers(workers_list):

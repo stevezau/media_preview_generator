@@ -524,11 +524,13 @@ def _migrate_schema(sm) -> None:
 
         from .web.notifications import SCHEMA_MIGRATION_ID
 
-        # Older versions stored a permanent dismissal of this card, which would hide this new notice as well.
+        existing = sm.get("_pending_migration_notice") or {}
+        # Older versions stored a permanent dismissal of this card, which would hide this new notice as well. They
+        # also left the dismissed notice in place: the user has read it, so its notes don't go into the new card.
         dismissed = sm.get("dismissed_notifications")
         if isinstance(dismissed, list) and SCHEMA_MIGRATION_ID in dismissed:
             sm.set("dismissed_notifications", [n for n in dismissed if n != SCHEMA_MIGRATION_ID])
-        existing = sm.get("_pending_migration_notice") or {}
+            existing = {}
         # An unread notice's backup, while still on disk, is the copy that matches the "from" version the card
         # keeps reporting; this boot's snapshot is from a later version.
         earlier_backup = existing.get("backup")

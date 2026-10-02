@@ -2292,8 +2292,13 @@ class TestFilesNotFoundBesideSuccesses:
             retries = _retries_of(jm, job.id)
 
         assert finished.status is JobStatus.COMPLETED
-        assert finished.error == "6 file(s) weren't found on disk. 2 of 115839 item(s) failed (but 115831 succeeded)"
-        assert any(line.endswith("WARNING - 6 file(s) weren't found on disk") for line in logs), logs
+        summary = "2 file(s) failed. 6 file(s) weren't found on disk. 115,831 of 115,839 file(s) were fine"
+        assert finished.error == summary
+        # Said once in the job log, not clause by clause and then again joined.
+        assert [line.split(" - ", 1)[1] for line in logs if "weren't found on disk" in line or "failed" in line] == [
+            summary,
+            f"Job {job.id} completed with warnings: {summary}",
+        ], logs
         assert not any("path mapping" in line for line in logs), logs
         # A scan's own not-found files have no webhook path to resubmit: no retry is queued for them.
         assert retries == []
@@ -2376,6 +2381,9 @@ class TestRetryRunsOnlyTheUnresolvedFiles:
             head_logs
         )
         assert not any("2 path(s)" in line or "path mapping" in line for line in head_logs), head_logs
+        # The job's own log is for its user: job bookkeeping stays out of it (the retry is announced in plain words).
+        assert any("(retry 1 of 3)" in line for line in head_logs), head_logs
+        assert not any("Created job" in line or "chain is active" in line for line in head_logs), head_logs
         assert ends == [("completed", "completed", None, None)]
 
     def test_a_scans_own_not_found_files_do_not_make_its_retry_run_again(self, app, tmp_path, no_retry_wait):
@@ -2586,6 +2594,65 @@ class TestRetryRowPastTheFileResultsCap:
         assert latest[late] == "skipped_bif_exists"
         assert ends == [("completed", "completed", None, None)]
 
+    @pytest.mark.parametrize(
+        ("failed", "not_found", "warning"),
+        [
+            (3, 0, "3 file(s) failed"),
+            (0, 3, "3 file(s) weren't found on disk"),
+            (4, 3, "4 file(s) failed. 3 file(s) weren't found on disk"),
+            (2, 1, "2 file(s) failed. 1 file(s) weren't found on disk"),  # at and under the cap of 2
+        ],
+    )
+    def test_the_chains_leftover_warning_counts_files_whose_rows_the_cap_dropped(
+        self, app, tmp_path, no_retry_wait, failed, not_found, warning
+    ):
+        """The Files panel lists 5,000 rows per outcome; a scan with more failures than that still failed them all."""
+        from media_preview_generator.processing.generator import ProcessingResult, _notify_file_result
+        from media_preview_generator.web.jobs import JobManager, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs["job_id"])
+            if len(run_calls) == 1:
+                _notify_file_result("/data/tv/Old/S01E01.mkv", ProcessingResult.SKIPPED_BIF_EXISTS, "", "Scan")
+                for i in range(failed):
+                    _notify_file_result(f"/data/tv/Bad/S01E0{i}.mkv", ProcessingResult.FAILED, "boom", "[GPU 0]")
+                for i in range(not_found):
+                    _notify_file_result(
+                        f"/data/tv/Gone/S01E0{i}.mkv", ProcessingResult.SKIPPED_FILE_NOT_FOUND, "", "Scan"
+                    )
+                _notify_file_result(
+                    late, ProcessingResult.SKIPPED_NOT_INDEXED, "", "[GPU 0]", servers=_plex_row("skipped_not_indexed")
+                )
+                return {
+                    "outcome": {
+                        "skipped_bif_exists": 1,
+                        "failed": failed,
+                        "skipped_file_not_found": not_found,
+                        "skipped_not_indexed": 1,
+                    }
+                }
+            _notify_file_result(
+                late, ProcessingResult.SKIPPED_BIF_EXISTS, "", "Checking", servers=_plex_row("skipped_output_exists")
+            )
+            return {"outcome": {"skipped_bif_exists": 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            patch.object(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 2),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            with _chain_ends(jm) as ends:
+                _start_job_async(job.id, config_overrides=None)
+
+        assert len(run_calls) == 2, f"the scan plus one retry expected; got {len(run_calls)} runs"
+        assert ends == [("completed", "completed", warning, None)]
+
 
 class TestJobStartedLoggedOnce:
     """Every job log had two "Job started" lines: one when the job took its slot, one when its files began."""
@@ -2608,6 +2675,52 @@ class TestJobStartedLoggedOnce:
             logs = jm.get_logs(job.id) or []
 
         assert len([line for line in logs if line.endswith("INFO - Job started")]) == 1, logs
+
+
+class TestJobCreationIsLoggedForTheAppNotTheJob:
+    """A job that queues a retry creates it on its own thread. That belongs in app.log (a job that never starts leaves
+    no other trace there), not in the Logs panel of the job that queued it."""
+
+    def test_a_retry_queued_by_a_job_is_in_the_app_log_and_in_no_jobs_own_log(self, app, tmp_path, no_retry_wait):
+        from loguru import logger
+
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs["job_id"])
+            jm = get_job_manager()
+            done = len(run_calls) > 1
+            outcome = "skipped_bif_exists" if done else "skipped_not_indexed"
+            row = _plex_row("skipped_output_exists" if done else "skipped_not_indexed")
+            jm.record_file_result(_chain_head_id(jm, kwargs["job_id"]), late, outcome, "", "[GPU 0]", servers=row)
+            return {"outcome": {outcome: 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        app_log: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: app_log.append((m.record["level"].name, m.record["message"])), level="INFO")
+        try:
+            with (
+                app.app_context(),
+                patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            ):
+                jm = get_job_manager()
+                job = jm.create_job(library_name="TV Shows", server_name="Plex", config={})
+                _start_job_async(job.id, config_overrides=None)
+                (retry,) = _retries_of(jm, job.id)
+                job_logs = (jm.get_logs(job.id) or []) + (jm.get_logs(retry.id) or [])
+        finally:
+            logger.remove(sink)
+
+        assert len(run_calls) == 2, f"the scan plus one retry expected; got {len(run_calls)} runs"
+        assert [message for level, message in app_log if level == "INFO" and message.startswith("Created ")] == [
+            f"Created previews job {job.id} for library TV Shows (server=Plex)",
+            f"Created previews job {retry.id} for library Retry: TV Shows (server=Plex)",
+        ]
+        assert job_logs, "the jobs' own logs were captured"
+        assert not [line for line in job_logs if "Created " in line], job_logs
 
 
 class TestDefaultRetryCount:

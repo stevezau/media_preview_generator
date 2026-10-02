@@ -1086,6 +1086,44 @@ class TestSqliteJobsBackend:
         assert jm.get_job(job.id) is None
 
 
+class TestJobCreationLogLine:
+    """app.log's one trace of a job that never starts: an INFO line naming it, kept out of every job's own log."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "line"),
+        [
+            (
+                {"library_name": "Movies", "server_id": "srv-1", "server_name": "Plex"},
+                "Created previews job {id} for library Movies (server=Plex)",
+            ),
+            (
+                {"library_name": "TV Shows", "server_id": "srv-1", "kind": "intro_credits"},
+                "Created intro_credits job {id} for library TV Shows (server=srv-1)",
+            ),
+            ({}, "Created previews job {id} for library (all) (server=(all))"),
+        ],
+        ids=["named-server", "server-id-only", "nothing-named"],
+    )
+    def test_creation_writes_one_info_line_marked_to_stay_out_of_job_logs(self, config_dir, kwargs, line):
+        from loguru import logger
+
+        from media_preview_generator.jobs.worker import JOB_LOG_SKIP
+
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        records: list[dict] = []
+        sink = logger.add(lambda m: records.append(m.record), level="INFO")
+        try:
+            job = jm.create_job(**kwargs)
+        finally:
+            logger.remove(sink)
+            jm.close()
+
+        created = [r for r in records if r["message"].startswith("Created ")]
+        assert [(r["level"].name, r["message"]) for r in created] == [("INFO", line.format(id=job.id))]
+        assert created[0]["extra"].get(JOB_LOG_SKIP) is True
+
+
 class TestRetryPreservesServerIdentity:
     """K1 — retry job spawned by job_runner._spawn_retry_job must inherit the
     parent's server_id/server_name/server_type. Today's bug shows up as
@@ -1387,3 +1425,145 @@ class TestFailUnrevivedInterruptedJobs:
         assert fresh_ic.status is JobStatus.PENDING
         assert jm.fail_unrevived_interrupted_jobs("intro_credits") == []
         assert JobManager(config_dir=config_dir).get_job(stale_ic.id).status is JobStatus.FAILED
+
+
+class _RecordingSocketIO:
+    """Stands in for Flask-SocketIO: records what reaches the browser, in the order it arrives."""
+
+    def __init__(self):
+        import threading
+
+        self.delivered: list[tuple[str, dict]] = []
+        self._changed = threading.Condition()
+        self.before_emit = None
+
+    def emit(self, event, data, namespace=None):
+        assert namespace == "/jobs"
+        if self.before_emit is not None:
+            self.before_emit(event, data)
+        with self._changed:
+            self.delivered.append((event, data))
+            self._changed.notify_all()
+
+    def wait_for(self, count: int, timeout: float = 5.0) -> bool:
+        with self._changed:
+            return self._changed.wait_for(lambda: len(self.delivered) >= count, timeout)
+
+
+class TestLiveEventsArriveInOrder:
+    """The browser shows the last event it got, so a "3/4" delivered after "4/4" leaves the page on 3/4."""
+
+    @pytest.fixture
+    def socketio(self):
+        return _RecordingSocketIO()
+
+    @pytest.fixture
+    def jm(self, config_dir, socketio):
+        os.makedirs(config_dir, exist_ok=True)
+        manager = JobManager(config_dir=config_dir, socketio=socketio)
+        yield manager
+        manager.close()
+
+    def test_a_slow_send_is_not_overtaken_and_does_not_block_the_caller(self, jm, socketio):
+        import threading
+
+        release_first = threading.Event()
+
+        def hold_the_first(event, data):
+            if data["n"] == 1:
+                release_first.wait(5)
+
+        socketio.before_emit = hold_the_first
+
+        jm._emit_event("job_progress", {"n": 1})
+        jm._emit_event("job_progress", {"n": 2})  # returns while the first send is still stuck
+
+        assert not socketio.wait_for(1, timeout=0.3), "the second event went out ahead of the first"
+        release_first.set()
+        assert socketio.wait_for(2)
+        assert [data["n"] for _, data in socketio.delivered] == [1, 2]
+
+    def test_rapid_progress_updates_are_delivered_in_the_order_they_were_made(self, jm, socketio):
+        job = jm.create_job(library_name="Movies")
+        updates = 300
+
+        for done in range(1, updates + 1):
+            jm.update_progress(job.id, processed_items=done, total_items=updates)
+
+        assert socketio.wait_for(updates + 1)  # + job_created
+        progress = [data["progress"]["processed_items"] for name, data in socketio.delivered if name == "job_progress"]
+        assert progress == list(range(1, updates + 1))
+
+    def test_different_event_types_keep_their_order(self, jm, socketio):
+        job = jm.create_job(library_name="Movies")
+        jm.start_job(job.id)
+        jm.update_progress(job.id, processed_items=1, total_items=1)
+        jm.complete_job(job.id)
+
+        assert socketio.wait_for(4)
+        assert [name for name, _ in socketio.delivered] == [
+            "job_created",
+            "job_started",
+            "job_progress",
+            "job_completed",
+        ]
+
+    def test_a_send_that_fails_does_not_stop_the_ones_after_it(self, jm, socketio):
+        def fail_the_first(event, data):
+            if data["n"] == 1:
+                raise RuntimeError("client went away")
+
+        socketio.before_emit = fail_the_first
+
+        jm._emit_event("job_progress", {"n": 1})
+        jm._emit_event("job_progress", {"n": 2})
+
+        assert socketio.wait_for(1)
+        assert [data["n"] for _, data in socketio.delivered] == [2]
+
+    def test_a_sender_that_dies_abnormally_is_replaced_by_the_next_event(self, jm, socketio):
+        import threading
+
+        def kill_the_sender(event, data):
+            if data["n"] == 1:
+                raise SystemExit  # not an Exception: the sender thread ends here
+
+        socketio.before_emit = kill_the_sender
+
+        jm._emit_event("job_progress", {"n": 1})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(t.name == "job-events" for t in threading.enumerate()):
+            time.sleep(0.01)
+        assert not any(t.name == "job-events" for t in threading.enumerate())
+
+        jm._emit_event("job_progress", {"n": 2})
+
+        assert socketio.wait_for(1), "no sender was started for the event after the one that killed it"
+        assert [data["n"] for _, data in socketio.delivered] == [2]
+
+    def test_no_sender_thread_is_left_running_once_everything_is_sent(self, jm, socketio):
+        import threading
+
+        for n in range(20):
+            jm._emit_event("job_progress", {"n": n})
+        assert socketio.wait_for(20)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(t.name == "job-events" for t in threading.enumerate()):
+            time.sleep(0.01)
+        assert not any(t.name == "job-events" for t in threading.enumerate())
+
+        jm._emit_event("job_progress", {"n": 20})  # a later event starts a sender again
+        assert socketio.wait_for(21)
+        assert [data["n"] for _, data in socketio.delivered] == list(range(21))
+
+    def test_an_event_whose_sender_thread_could_not_start_goes_out_with_the_next_one(self, jm, socketio):
+        import threading
+
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+            jm._emit_event("job_progress", {"n": 1})  # must not raise into the processing loop
+
+        jm._emit_event("job_progress", {"n": 2})
+
+        assert socketio.wait_for(2)
+        assert [data["n"] for _, data in socketio.delivered] == [1, 2]

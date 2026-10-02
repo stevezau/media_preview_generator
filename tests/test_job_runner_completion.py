@@ -20,6 +20,7 @@ import pytest
 from media_preview_generator.web.routes.job_runner import (
     _chain_leftover_warning,
     _classify_job_completion,
+    _file_problem_clauses,
     _format_retry_wait_server_label,
     _not_found_message,
     _not_indexed_message,
@@ -479,6 +480,84 @@ class TestNotFoundMessage:
     def test_message(self, nothing_succeeded, retry_scheduled, expected):
         msg = _not_found_message(6, 20, nothing_succeeded=nothing_succeeded, retry_scheduled=retry_scheduled)
         assert msg == expected
+
+
+class TestFileProblemClauses:
+    """A finished job's summary says each count once. Scan f9ced906 ended "2 failed file(s). 286 file(s) weren't found
+    on disk. 2 of 116125 item(s) failed (but 115806 succeeded)": the two failed files twice."""
+
+    PATH_MAPPINGS = "items skipped (file not found locally) — check path mapping configuration"
+    NOTHING_MADE = "item(s) failed; no previews were generated. Check the per-item logs above."
+
+    @pytest.mark.parametrize(
+        ("failure_count", "outcome", "retry_scheduled", "expected"),
+        [
+            (0, {"generated": 3}, False, []),
+            (
+                2,
+                {"generated": 3, "skipped_bif_exists": 5, "failed": 2},
+                False,
+                ["2 file(s) failed", "8 of 10 file(s) were fine"],
+            ),
+            (2, {"failed": 2}, False, [f"2 of 2 {NOTHING_MADE}"]),
+            (0, {"skipped_bif_exists": 14, "skipped_file_not_found": 6}, False, ["6 file(s) weren't found on disk"]),
+            (0, {"skipped_file_not_found": 6}, False, [f"6 of 6 {PATH_MAPPINGS}"]),
+            (
+                0,
+                {"skipped_file_not_found": 6},
+                True,
+                ["6 of 6 items had stale Plex paths — Plex rescan triggered, retry scheduled"],
+            ),
+            (
+                2,
+                {
+                    "generated": 185,
+                    "skipped_bif_exists": 115621,
+                    "skipped_file_not_found": 286,
+                    "skipped_source_gone": 31,
+                    "failed": 2,
+                },
+                False,
+                ["2 file(s) failed", "286 file(s) weren't found on disk", "115,806 of 116,125 file(s) were fine"],
+            ),
+            (
+                0,
+                {"published": 4, "skipped_file_not_found": 1, "failed": 2},
+                True,
+                ["2 file(s) failed", "1 file(s) weren't found on disk", "4 of 7 file(s) were fine"],
+            ),
+            # Nothing made and files not found: the not-found clause says the run made nothing; the files FFmpeg
+            # failed on are still named.
+            (2, {"skipped_file_not_found": 5, "failed": 2}, False, ["2 file(s) failed", f"5 of 7 {PATH_MAPPINGS}"]),
+            (0, {"skipped_file_not_found": 5, "failed": 2}, False, [f"5 of 7 {PATH_MAPPINGS}"]),
+            (2, {"generated": 3}, False, ["2 file(s) failed"]),
+            (2, None, False, ["2 file(s) failed"]),
+            (0, {"published": 3, "failed": 1}, False, ["1 file(s) failed", "3 of 4 file(s) were fine"]),
+            (1, {"published": 3, "failed": 2}, False, ["2 file(s) failed", "3 of 5 file(s) were fine"]),
+            (0, {"skipped_not_indexed": 2, "failed": 1}, False, ["1 file(s) failed", "2 of 3 file(s) were fine"]),
+            (1234, {"published": 1, "failed": 1234}, False, ["1,234 file(s) failed", "1 of 1,235 file(s) were fine"]),
+        ],
+        ids=[
+            "no-problem",
+            "failed",
+            "failed-nothing-made",
+            "not-found",
+            "not-found-nothing-made",
+            "not-found-nothing-made-retry-queued",
+            "failed-and-not-found-with-replaced",
+            "failed-and-not-found-retry-queued",
+            "failed-and-not-found-nothing-made",
+            "item-failures-and-not-found-nothing-made",
+            "ffmpeg-failures-not-in-the-tally",
+            "ffmpeg-failures-no-tally",
+            "item-failures-without-ffmpeg-failures",
+            "tally-is-the-count",
+            "waiting-on-the-server-is-fine",
+            "thousands",
+        ],
+    )
+    def test_each_count_is_said_once(self, failure_count, outcome, retry_scheduled, expected):
+        assert _file_problem_clauses(failure_count, outcome, retry_scheduled=retry_scheduled) == expected
 
 
 class TestRetryJobLabel:

@@ -2590,63 +2590,70 @@ next time an episode of that season is checked.
 ### Reading an Intro & Credits job's log
 
 A job starts with one line saying how many files it checks and why it ran: a follow-up to a preview job, a Season job,
-a re-check after an update, a schedule, or a Re-detect you asked for. Then each file gets a short block: a header
-naming it and what it's checked for, one line per step, each with its own time. A file a GPU or CPU worker read is
-announced first by the worker's own line, written when it picks the file up — its block still opens with its own
-header once the worker finishes it, so another file's pickup line or block can never land inside it. A film whose
-"Credits" chapter credit text checked:
+a re-check after an update, a schedule, or a Re-detect you asked for. Every step of every file is then logged as it
+happens, one line each. A file opens with a line naming it and what it's checked for, and every later line of that
+file starts with its title, so files checked at the same time can share the log and still be read one at a time. When
+a GPU or CPU worker reads the file, the worker's own "picked up" and "completed" lines say so. A film whose credit
+text a GPU worker read:
 
 ```
-[2026-09-25 07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
-[2026-09-25 07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)
-[2026-09-25 07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
-[2026-09-25 07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39 (asked now)
-[2026-09-25 07:37:23] INFO -   SkipDB: no entry (asked now)
-[2026-09-25 07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU (NVIDIA GeForce RTX 3060) in 9 s)
-[2026-09-25 07:37:23] INFO -   Plex's own markers: none (asked now)
-[2026-09-25 07:37:23] INFO -   Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)
-[2026-09-25 07:37:23] INFO -   Sent to Plex: credits 1:59:32–2:03:39
-[2026-09-25 07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1
-[2026-09-25 07:37:23] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
+[2026-10-02 13:49:15] INFO - Intro & Credits job 524d043e started: 1 file, follow-up to preview job 0ea63e4a (Plex webhook)
+[2026-10-02 13:49:15] INFO - Example Movie (2026): checking credits (films get credits only)
+[2026-10-02 13:49:15] INFO - Example Movie (2026) · Checking chapters… none (asked now)
+[2026-10-02 13:49:16] INFO - Example Movie (2026) · Checking SkipDB… no entry (asked now)
+[2026-10-02 13:49:16] INFO - GPU Worker 1 (NVIDIA TITAN RTX) picked up: Example Movie (2026), checking credits (films get credits only)
+[2026-10-02 13:49:16] INFO - Example Movie (2026) · Reading credit text on the GPU (NVIDIA TITAN RTX)…
+[2026-10-02 13:49:21] INFO - Example Movie (2026) · Credit text: credits start at 1:33:27 (5.6 s)
+[2026-10-02 13:49:21] INFO - Example Movie (2026) · Checking Plex's own markers… none (asked now)
+[2026-10-02 13:49:21] INFO - Example Movie (2026) · Decided: credits 1:33:27–1:37:25 (credit text)
+[2026-10-02 13:49:21] INFO - Example Movie (2026) · [Plex] Added credits 1:33:27–1:37:25
+[2026-10-02 13:49:21] INFO - GPU Worker 1 (NVIDIA TITAN RTX) completed: Example Movie (2026) (success, 5.7 s)
+[2026-10-02 13:49:21] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
 ```
 
 A TV episode:
 
 ```
-[2026-09-25 09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05
-[2026-09-25 09:13:05] INFO - Accused S04E05: checking intro and credits
-[2026-09-25 09:13:05] INFO -   Chapters: none (asked now)
-[2026-09-25 09:13:05] INFO -   IntroDB: intro 0:41–1:12 (asked now)
-[2026-09-25 09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; read on the CPU in 0 s)
-[2026-09-25 09:13:05] INFO -   Credit text: credits start at 41:48 (read on the GPU (Intel UHD 770) in 13 s)
-[2026-09-25 09:13:05] INFO -   Plex's own markers: none (asked now)
-[2026-09-25 09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
-[2026-09-25 09:13:05] INFO -   Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10
-[2026-09-25 09:13:05] INFO - Accused S04E05: done in 25 s on GPU Worker 2
+[2026-10-02 14:26:26] INFO - Example Show (2026) S01E04: checking intro and credits
+[2026-10-02 14:26:26] INFO - Example Show (2026) S01E04 · Checking chapters… none (saved 2026-10-02)
+[2026-10-02 14:26:27] INFO - Example Show (2026) S01E04 · Checking IntroDB… no entry (asked now)
+[2026-10-02 14:26:27] INFO - Example Show (2026) S01E04 · Checking SkipDB… no entry (asked now)
+[2026-10-02 14:26:27] INFO - Example Show (2026) S01E04 · Reading season audio on the CPU…
+[2026-10-02 14:26:27] INFO - Example Show (2026) S01E04 · Season audio: intro 2:20–2:50 (same theme found in 4 of 4 episodes; 0 s)
+[2026-10-02 14:26:27] INFO - Example Show (2026) S01E04 · Checking last season's audio… no match (asked now)
+[2026-10-02 14:26:27] INFO - GPU Worker 1 (NVIDIA TITAN RTX) picked up: Example Show (2026) S01E04, checking intro and credits
+[2026-10-02 14:26:28] INFO - Example Show (2026) S01E04 · Reading credit text on the GPU (NVIDIA TITAN RTX)…
+[2026-10-02 14:26:34] INFO - Example Show (2026) S01E04 · Credit text: credits start at 24:20 (5.9 s)
+[2026-10-02 14:26:34] INFO - Example Show (2026) S01E04 · Checking Plex's own markers… none (asked now)
+[2026-10-02 14:26:34] INFO - Example Show (2026) S01E04 · Decided: intro 2:20–2:50 (season audio) · credits 24:20–25:00 (credit text)
+[2026-10-02 14:26:34] INFO - Example Show (2026) S01E04 · [Plex] Added intro 2:20–2:50 and credits 24:20–25:00
+[2026-10-02 14:26:34] INFO - GPU Worker 1 (NVIDIA TITAN RTX) completed: Example Show (2026) S01E04 (success, 6.4 s)
 ```
 
-An unchanged file, re-checked later, logs the same full block again -- every source's line says its answer was
-reused ("saved 2026-09-25") instead of asked, and the done line ends "(nothing new to send)" when nothing was:
+An unchanged file, checked again later, logs every line again. Each source's line says its answer was reused ("saved
+2026-10-02") instead of asked, no worker is needed, and the file's last line ends "(nothing new to send)":
 
 ```
-[2026-09-26 14:02:10] INFO - Accused S04E05: checking intro and credits
-[2026-09-26 14:02:10] INFO -   Chapters: none (saved 2026-09-25)
-[2026-09-26 14:02:10] INFO -   IntroDB: intro 0:41–1:12 (saved 2026-09-25)
-[2026-09-26 14:02:10] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; saved 2026-09-25)
-[2026-09-26 14:02:10] INFO -   Credit text: credits start at 41:48 (saved 2026-09-25)
-[2026-09-26 14:02:10] INFO -   Plex's own markers: none (saved 2026-09-25)
-[2026-09-26 14:02:10] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
-[2026-09-26 14:02:10] INFO -   Sent to Plex: already up to date (intro 0:41–1:12 · credits 41:48–43:10)
-[2026-09-26 14:02:10] INFO - Accused S04E05: done in 0 s, no worker needed (nothing new to send)
+[2026-10-02 13:50:13] INFO - Example Movie (2026): checking credits (films get credits only)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · Checking chapters… none (saved 2026-10-02)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · Checking SkipDB… no entry (saved 2026-10-02)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · Checking credit text… credits start at 1:33:27 (saved 2026-10-02)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · Checking Plex's own markers… none (saved 2026-10-02)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · Decided: credits 1:33:27–1:37:25 (credit text)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · [Plex] Already up to date (credits 1:33:27–1:37:25)
+[2026-10-02 13:50:13] INFO - Example Movie (2026) · done in 0.1 s (nothing new to send)
+[2026-10-02 13:50:13] INFO - Done: 1 file · 0 sent to Plex · 0 need review · 0 nothing found · 1 already up to date
 ```
 
 - A movie is named by its title on your media server, an episode by its show and `SxxEyy`.
-- One line per source you turned on: what it answered, or why it wasn't asked ("not read (already decided)", "skipped
-  (daily limit reached, resets 00:00 UTC)", "skipped (no data for this show; asked again after \<date\>)", "not read
-  (every server keeps its own credits)"). The sources that answered come first, then the ones that weren't asked. A
-  film leaves out IntroDB and season audio, which describe TV episodes only. An answer this job asked for says
-  **(asked now)**; one it reused says **(saved \<date\>)**, the day it was last stored (by an earlier run, or while
-  the job checked another episode of the season). Times are `m:ss`, or `h:mm:ss` past an hour.
+- One "Checking …" line per source you turned on: what it answered, or why it wasn't asked ("not read (already
+  decided)", "skipped (daily limit reached, resets 00:00 UTC)", "skipped (no data for this show; asked again after
+  \<date\>)", "not read (every server keeps its own credits)"). A film leaves out IntroDB and season audio, which
+  describe TV episodes only. An answer this job asked for says **(asked now)**; one it reused says **(saved
+  \<date\>)**, the day it was last stored (by an earlier run, or while the job checked another episode of the season).
+  Times are `m:ss`, or `h:mm:ss` past an hour.
+- Credit text and season audio read the file itself, so they get two lines: "Reading … on the GPU (…)…" or "… on the
+  CPU…" when the read starts, and the answer with how long it took when it ends.
 - **Decided** gives each type and why: the chapter it came from, the sources that agree, "kept Plex's own", or "needs
   review" / "nothing found" with the reason. When the file's own frames or audio corrected a chapter or an online
   answer, it says so: "moved to the first credit card by credit text", "start from credit text", or an intro chapter
@@ -2654,8 +2661,9 @@ reused ("saved 2026-09-25") instead of asked, and the done line ends "(nothing n
 - A file with a "Credits" chapter has credit text read it too. Its line says whether the frames keep the chapter or
   move its start to the first credit card (a chapter is often a few seconds or more off, early on the last shot or
   late in the roll).
-- One **Sent to** line per server: what was sent, "already up to date", "kept Plex's own credits", "failed (…)", or
-  "not in Plex's library yet" (the job tries it again).
+- One line per server, starting with its name: `[Plex] Added credits 1:33:27–1:37:25`, `[Plex] Replaced credits
+  42:02–42:48 → 42:02–42:44`, `[Plex] Already up to date (…)`, `[Plex] Kept Plex's own credits`, `[Plex] Failed (…)`,
+  `[Plex] Waiting (…)`, or `[Plex] Not in Plex's library yet (…)` (the job tries it again).
 - A file that failed has its lines as warnings, with the reason.
 - Credit text says so when the file stops before its stated length ("the file ends before its stated length (27:10 of
   44:02 readable)"), and when the GPU read nothing and the CPU read the ending instead ("read on the CPU after the GPU
@@ -2669,9 +2677,9 @@ reused ("saved 2026-09-25") instead of asked, and the done line ends "(nothing n
 - A file a newer one replaced gets one line: "Blood Legacy (2024) S01E05: Skipped: replaced by a newer
   file (…)".
 
-Every file gets this full block, whatever it did: a file whose result didn't change and whose servers are up to date
-logs it too, not a one-line summary. A **Season: …** job (and a **TheIntroDB recheck**) additionally counts each
-episode into its own season's totals, logged once every episode's block is: "Season re-check, Brave New World S01 (3
+Every file gets all of these lines, whatever it did: a file whose result didn't change and whose servers are up to
+date logs them too, not a one-line summary. A **Season: …** job (and a **TheIntroDB recheck**) additionally counts each
+episode into its own season's totals, logged once every episode's lines are: "Season re-check, Brave New World S01 (3
 episodes): no change, E01/E03/E04 still need review (credits from credit text only)" ("TheIntroDB recheck, Brave New
 World S01 (3 episodes): no change" for a recheck), and logs each movie on its own. Every job ends with a totals line,
 e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found · TheIntroDB skipped for 3 files".

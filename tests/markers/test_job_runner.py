@@ -1933,7 +1933,10 @@ class TestLibraryRetry:
         env.tracker.wait.side_effect = during_wait
         set_cb = MagicMock()
         monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
-        return SimpleNamespace(settings=settings, create=create, results=results)
+        # What the store holds for a file once the job's files have run: None = never decided, as the publisher asks.
+        decided = {}
+        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: decided.get(path))
+        return SimpleNamespace(settings=settings, create=create, results=results, decided=decided)
 
     def _run(self, paths=("/m/a.mkv", "/m/b.mkv"), listing=None):
         from media_preview_generator.markers import reconcile
@@ -2194,6 +2197,115 @@ class TestLibraryRetry:
             "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
             "checks 1 version(s) never checked"
         ) in logs, logs
+
+    # The other version's own row once it was checked: every version is decided and they disagree (no retry code).
+    VERSIONS_DISAGREE_ROW = _row("markers_waiting", VERSIONS_UNCHECKED_ROW["message"], sid="plex-1")
+
+    def test_a_version_this_job_checked_is_neither_listed_again_nor_called_never_checked(self, env, retry_env):
+        # Production (Hawaii Five-0 S07E05, retry 1 of job 36083a12): the waiting file ran on saved answers before the
+        # version it waited for had been read, so its row still named that version. The closing line then said the next
+        # retry "also checks 1 version(s) never checked", and the next retry ran that version a second time.
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        retry_env.results += [
+            ("/m/a.mkv", "markers_waiting", [row]),
+            ("/m/a - h265.mkv", "markers_waiting", [self.VERSIONS_DISAGREE_ROW]),
+        ]
+        retry_env.decided["/m/a - h265.mkv"] = {}
+        self._run(["/m/a.mkv", "/m/a - h265.mkv"])
+        # Only the file whose row came before the other version's check runs again: that run compares the two.
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert "INFO - 1 file(s) not compared with another version yet; retry 1 of 3 in 60s (job retry-1)" in logs, logs
+        assert not any("never checked" in line or "not checked yet" in line for line in logs), logs
+
+    @pytest.mark.parametrize(
+        "other_result",
+        [
+            [],  # in no job: nothing checked it
+            [("/m/a - h265.mkv", "failed", [_row("failed", "ffmpeg exited 1", sid="plex-1")])],  # ran, undecided
+        ],
+        ids=["not-in-the-job", "failed-in-the-job"],
+    )
+    def test_a_version_still_without_a_decision_keeps_its_place_and_the_wording(self, env, retry_env, other_result):
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        retry_env.results += [("/m/a.mkv", "markers_waiting", [row]), *other_result]
+        self._run(["/m/a.mkv", "/m/a - h265.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert (
+            "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
+            "checks 1 version(s) never checked"
+        ) in logs, logs
+
+    def test_only_the_versions_still_unchecked_are_counted_and_listed(self, env, retry_env):
+        # Three versions: one was checked since the waiting file's row, the other still has no decision.
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - 1080p.mkv", "/m/a - h265.mkv"]}
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
+        retry_env.decided["/m/a - 1080p.mkv"] = {}
+        self._run(["/m/a.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert (
+            "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
+            "checks 1 version(s) never checked"
+        ) in logs, logs
+
+    @pytest.mark.parametrize(
+        ("version", "still_unchecked"),
+        [
+            ("decided-with-a-marker", False),
+            ("decided-nothing-to-show", False),
+            ("never-seen", True),
+            ("known-but-undecided", True),
+            ("replaced-since-its-decision", True),
+        ],
+    )
+    def test_a_named_version_is_checked_once_markers_db_has_a_decision_for_the_file_on_disk(
+        self, tmp_path, version, still_unchecked
+    ):
+        # Against a real markers.db: the other tests answer for the store through ``markers_for_path``.
+        waiting_file, other = str(tmp_path / "a.mkv"), tmp_path / "a - h265.mkv"
+        other.write_bytes(b"x")
+        st = os.stat(other)
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        try:
+            if version != "never-seen":
+                identity = FileIdentity(str(other), st.st_size, st.st_mtime_ns)
+                rec = store.upsert_file(identity, duration_ms=1_380_000, season_key=None, is_movie=True)
+            if version not in ("never-seen", "known-but-undecided"):
+                intro = Marker(MarkerType.INTRO, 11_000, 37_000, ("chapters",))
+                decided = TypeDecision(MarkerType.INTRO, DecisionStatus.DECIDED, intro, None, "agreed")
+                nothing = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "nothing found")
+                decision = nothing if version == "decided-nothing-to-show" else decided
+                store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="f")
+            if version == "replaced-since-its-decision":
+                other.write_bytes(b"another file")
+            waiting = {job_runner.VERSIONS_UNCHECKED: {waiting_file}}
+
+            still = job_runner._versions_still_unchecked(store, waiting, {waiting_file: {str(other)}})
+        finally:
+            store.close()
+
+        if still_unchecked:
+            assert still == {str(other)}
+            assert waiting == {job_runner.VERSIONS_UNCHECKED: {waiting_file}}
+        else:
+            assert still == set()
+            assert waiting == {job_runner.VERSIONS_UNCHECKED: set(), job_runner.VERSIONS_NOT_COMPARED: {waiting_file}}
+
+    def test_a_row_that_names_no_version_keeps_waiting_for_an_unchecked_one(self, env, retry_env):
+        # The publisher couldn't tell in time whether the other version is still on disk: it names no file.
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [VERSIONS_UNCHECKED_ROW]))
+        self._run(["/m/a.mkv"])
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1)" in logs, logs
+
+    def test_a_store_that_cant_be_read_leaves_the_named_versions_unchecked(self, env, retry_env, monkeypatch):
+        monkeypatch.setattr(job_runner, "markers_for_path", MagicMock(side_effect=sqlite3.OperationalError("locked")))
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
+        self._run(["/m/a.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
 
     def test_two_versions_that_wait_for_each_other_are_each_listed_once(self, env, retry_env):
         for path, other in (("/m/a.mkv", "/m/a - h265.mkv"), ("/m/a - h265.mkv", "/m/a.mkv")):
@@ -2624,6 +2736,43 @@ class TestRetryChain:
         )
         assert exhausted["reason"] == (
             "1 file(s) still not in a server's library after 3 retries. Check the Files panel for the affected paths."
+        )
+
+    def test_a_retry_that_checked_the_other_version_runs_the_waiting_file_once_more(self, env, chain_env, monkeypatch):
+        # The waiting file's row came before the other version's check in this retry, so nothing has compared the two.
+        self._as_retry(env)
+        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: {})
+        stale = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [stale]))
+        self._run()
+        kwargs = chain_env.create.call_args.kwargs
+        assert (kwargs["file_paths"], kwargs["parent_job_id"], kwargs["retry_attempt"]) == (["/m/a.mkv"], "head-1", 2)
+        assert [c["outcome"] for c in self._chain_calls(env)] == ["running", "scheduled"]
+
+    def test_a_retry_that_finds_the_versions_checked_and_disagreeing_ends_the_chain(self, env, chain_env, monkeypatch):
+        # Every version is decided and they disagree: no retry changes that, so the chain ends with nothing queued.
+        self._as_retry(env, attempt=2)
+        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: {})
+        chain_env.rows.append(
+            ("/m/a.mkv", "markers_waiting", [_row("markers_waiting", VERSIONS_UNCHECKED_ROW["message"], sid="plex-1")])
+        )
+        self._run()
+        chain_env.create.assert_not_called()
+        ended = self._chain_calls(env)[-1]
+        assert (ended["originating_job_id"], ended["outcome"], ended["reason"]) == ("head-1", "completed", None)
+
+    def test_the_last_retry_names_a_file_never_compared_with_its_other_version(self, env, chain_env, monkeypatch):
+        self._as_retry(env, attempt=3)
+        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: {})
+        stale = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [stale]))
+        self._run()
+        chain_env.create.assert_not_called()
+        exhausted = self._chain_calls(env)[-1]
+        assert (exhausted["outcome"], exhausted["reason"]) == (
+            "exhausted",
+            "1 file(s) still not compared with another version after 3 retries. Check the Files panel for the "
+            "affected paths.",
         )
 
     def test_a_chain_head_waiting_on_its_retry_is_not_run_again_when_the_queue_resumes(self, env, chain_env):

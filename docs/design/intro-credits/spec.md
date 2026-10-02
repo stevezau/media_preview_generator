@@ -540,13 +540,16 @@ for any frame under it): the frame keeps its own size because it's already under
 320 setting took effect (C6) — don't "fix" the limit to make it apply.
 **One scaler on every path** (version 4, 2026-09-24 in §14): the decoded frame is scaled whole to 320×180 by the
 nearest pixel (`scale=320:180:flags=neighbor`), after `hwdownload` in the stream's own surface format (NV12 for 8-bit
-4:2:0, P010 for 10-bit; `-extra_hw_frames 8`) on CUDA and VAAPI, and after ffmpeg's own download on any other GPU or
+4:2:0, P010 for 10-bit) on CUDA and VAAPI, and after ffmpeg's own download on any other GPU or
 surface format. Each vendor's own scaler (`scale_cuda`, `scale_vaapi`, swscale's bicubic) blurred text a few pixels
 tall differently, so the same file's credits were found on one vendor and lost on another; this gives bit-identical
 frames on NVIDIA, Intel and the CPU. Season audio's end-picture check reads its frames the same way (§5.3, since
-2026-09-25). AMD is untested (no hardware):
-`-extra_hw_frames 8` and the full-frame `hwdownload` have never run on an AMD GPU's VAAPI; a decode that fails there is
-a GPU failure, read again on the CPU, whose frames are the same.
+2026-09-25). On VAAPI the decode gets `-extra_hw_frames 8`, and a same-size GPU copy (`frames._VAAPI_COPY`,
+`scale_vaapi=out_chroma_location=left`) stands before `hwdownload`, so the download never syncs the decoder's own
+surface: Intel's driver fails that sync now and then (ffmpeg exits 251, "Failed to sync surface"), which sent the read
+to the CPU. The copy changes no pixel: the downloaded frames are the same bytes (§14 2026-10-02). AMD is untested (no
+hardware): `-extra_hw_frames 8`, the GPU copy and the full-frame `hwdownload` have never run on an AMD GPU's VAAPI; a
+decode that fails there is a GPU failure, read again on the CPU, whose frames are the same.
 **Every GPU's credits decode is compared with the CPU's, as a diagnostic** (`markers/credits/decode_check.py`,
 2026-09-25 in §14): with one scaler everywhere an answer depends on the decoder alone, bit-exact against the CPU on
 NVIDIA and Intel VAAPI for H.264 and HEVC (no pixel differed on 8 real files). Once per process per GPU, in the
@@ -1632,30 +1635,32 @@ Show a mockup and confirm wording before building each screen.
    refused, version mismatch, beside a different Plex). Built (phase 4): a `markers` section of the previews-readiness
    envelope, only for a server with Intro & Credits on (one "off" row otherwise, emitted `recommended` + `ok: true`
    because `servers.js _partitionChecks` drops `info` rows); documented in `docs/guides/previews-readiness.md`.
-7. **Job log** (`markers/job_log.py`, owner-approved layout 2026-09-27, header fix 2026-09-27). Every line is its own
-   log record with its own time and level; nothing continues a record on a second line. A job opens with one line,
+7. **Job log** (`markers/job_log.py`). Every line is its own log record with its own time and level, logged the
+   moment that step happens, not held until the file finishes. A job opens with one line,
    `start_line`: "Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)"
    (the trigger in words, `job_runner.trigger_words`; the job manager's "Started job" and the dispatcher's "submitted
-   N items" lines stay in the app log only). A worker announces a file with "GPU Worker 2 (Intel UHD 770) picked up
-   Accused S04E05" (`KindHandlers.pickup_fn`, `pickup_line`; previews keep their own pickup line; the dispatcher's
-   "Dispatch: assigned canonical item …" line — which would only repeat this — logs at DEBUG). When the file
-   finishes, its block is written as consecutive records under one lock (`write_lines`), so another worker's lines, or
-   another file's pickup line, never land inside it: a header naming the file and what it's checked for (`head_line`,
-   always the block's first line, whether or not a worker ran the file — the worker's own pickup line doesn't
-   substitute for it, so a block can never be split across another file's records), then one "  Source: …" line per
-   enabled source (the ones that answered, then the ones not asked, each group in a fixed order: chapters, online
-   sources, season audio, credit text, each server's own markers; a film leaves out IntroDB and season audio), "
-   Decided: …" with each type's reason, one "  Sent to <server>: …" line per server, and "<title>: done in 25 s on GPU
-   Worker 2" (or "…, no worker needed"; "… (nothing new to send)" when no server row is `WRITTEN`,
-   `nothing_was_sent`). Detail lines carry their two-space indent in the message; a source's own line says whether
+   N items" lines stay in the app log only). A worker announces a file with "GPU Worker 2 (Intel UHD 770) picked up:
+   Accused S04E05, checking intro and credits" (`KindHandlers.pickup_fn`, `pipeline.log_pickup`, `file_start_line`;
+   previews keep their own pickup line; the dispatcher's "Dispatch: assigned canonical item …" line — which would only
+   repeat this — logs at DEBUG). A file no worker runs (the checking thread alone decides it) opens with its own line
+   instead, "Accused S04E05: checking intro and credits". Every later line of the file starts with its title and
+   " · " (`titled`), so lines of several workers can interleave and still be read one file at a time: one
+   "Checking <source>… <answer>" line per enabled source (`source_line`, `server_source_line`; a source not read or
+   not asked says why), "Reading credit text on the GPU (Intel UHD 770)…" when a step that reads the file starts and
+   "Credit text: credits start at 41:48 (13 s)" when it ends (`reading_line`, `read_result_line`; season audio the
+   same), "Decided: …" with each type's reason (`decided_line`), and one line per server in the preview log's style,
+   "[Plex] Added intro 0:41–1:12 and credits 41:48–43:10" (`server_result_line`). The file ends with the worker's
+   "GPU Worker 2 (Intel UHD 770) completed: Accused S04E05 (success, 26 s)" (`worker_completed_line`), or with no
+   worker "Accused S04E05 · done in 0.5 s" (`done_line`; "… (nothing new to send)" when no server row is `WRITTEN`,
+   `nothing_was_sent`). A source's own line says whether
    this job asked it ("asked now") or reused an earlier answer ("saved 2026-09-25", the day `EvidenceRow.fetched_at`
    was last stored, `_saved_note`); a line with both a reason and that note joins them inside one bracket
-   (`_with_notes`) rather than stacking two. A file that failed gets its block at WARNING with the reason. Every file
-   gets this full block, whatever it did: a file whose answer didn't change and whose servers are up to date logs it
-   too (its sources' lines all say "saved …"), not a one-line summary -- so does a Season job's unchanged episode, a
-   decide-again job's unchanged file and the weekly online re-check's file with nothing new. The Season, decide-again
-   and online re-check jobs still add their own one-line-per-season (or one-line) totals after every file's block, and
-   every job still ends with the totals line. An episode is named "Show SxxEyy" from its path
+   (`_with_notes`) rather than stacking two. A file that failed ends with its last line at WARNING with the reason.
+   Every file gets these lines, whatever it did: a file whose answer didn't change and whose servers are up to date
+   logs them too (its sources' lines all say "saved …"), not a one-line summary -- so does a Season job's unchanged
+   episode, a decide-again job's unchanged file and the weekly online re-check's file with nothing new. The Season,
+   decide-again and online re-check jobs still add their own one-line-per-season (or one-line) totals after every
+   file's lines, and every job still ends with the totals line. An episode is named "Show SxxEyy" from its path
    and never looks anything up. A film is named by its server's title: from the external ids answer the run already
    has (it carries the title and year), else the title this process kept (`titles.TITLE_CACHE`, an LRU of 20,000
    paths), else the title a library listing gave the item (the year from the file name). Only a film its server was
@@ -1667,9 +1672,9 @@ Show a mockup and confirm wording before building each screen.
    they read and how long, the GPU's name when known ("read on the GPU (NVIDIA TITAN RTX) in 13 s", with a step's CPU
    fallback reason); season audio also says how many of the episodes compared share the theme. The
    end-picture check has no line of its own: it only gates season audio's answer and stores nothing. The publishers'
-   "now shows N marker(s) of ours" lines moved to DEBUG, since "Sent to" says it. A file a newer one replaced
+   "now shows N marker(s) of ours" lines moved to DEBUG, since the server's own line says it. A file a newer one replaced
    (`FileOutcome.SOURCE_GONE`) gets one line, "<title>: Skipped: replaced by a newer file (…)", and `_not_on_disk`'s
-   longer account stays in the app log. A file found cut short reads "  Credit text: the file ends before its stated
+   longer account stays in the app log. A file found cut short reads "Credit text: the file ends before its stated
    length (27:10 of 44:02 readable)"; a tail the GPU read no frames from, read again on the CPU
    (`detector.CPU_RECHECK_PHASE`, also the worker row's phase), reads "read on the CPU after the GPU read nothing
    (40 s in all)".
@@ -3762,3 +3767,21 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     the last 4 lines that say why, 240 characters each), which the rerun otherwise lost.
   - **Retries: 5 by default** (was 3; `retry_queue.DEFAULT_RETRY_COUNT`, shared with previews): with nothing stored
     the waits are 1, 2, 5, 15 and 60 min. A stored count is kept.
+- 2026-10-02 · **After the sflix audit, round two** (§5.4 Frames, §6.3, §7; branch `fix/sflix-audit-2`).
+  - **A VAAPI read downloads a GPU copy, never the decoder's own surface** (§5.4 "One scaler on every path"). On
+    Intel's driver `hwdownload`'s sync of a decoder surface failed now and then ("Failed to sync surface: 1 (operation
+    failed)" or "34 (HW busy now)", ffmpeg exits 251) and the read went to the CPU: 15 of 16 runs on AV1 keyframes, 16
+    of 30 on H.264 once `fps` had dropped surfaces. With a same-size `scale_vaapi` before the download
+    (`frames._VAAPI_COPY`): 0 of 40 each, and the downloaded frames are the same bytes (H.264 8-bit, HEVC and AV1
+    10-bit). Previews never met it: their `scale_vaapi` already stands there. CUDA's chain is as it was.
+  - **A retry's log line names only versions still unchecked** (§6.3). A waiting file, on saved answers, finishes
+    before the version it waits for, which the same job decides seconds later. At the end of the job the versions its
+    row named are looked up again (`job_runner._versions_still_unchecked`): the retry lists, and counts as "never
+    checked", only those still without a decision. A file whose named versions all have one is still retried, since
+    only its own next run compares it with them, and its line reads "not compared with another version yet".
+  - **The Inspector reads a type no run will read again as kept** (§7; `inspect._left_to_servers`). A credits or intro
+    marker resting on a credit text or season audio answer from an older version of that detector is never made
+    again while every server the file's markers go to keeps its own and kept that type at the last publish. The
+    Inspector and the Season view show such a type, unless locked, with the kept status ("kept Plex's own marker"), as
+    a file with no such answer is stored. Worked out when the page is read: the stored decision and what a job
+    publishes don't change.

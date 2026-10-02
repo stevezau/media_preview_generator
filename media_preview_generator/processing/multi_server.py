@@ -52,6 +52,7 @@ from ..servers.ownership import find_library_matches
 from .frame_cache import get_frame_cache
 from .generator import (
     FALLBACK_CODEC,
+    NO_DECODER_SUMMARY,
     CancellationError,
     CodecNotSupportedError,
     _cleanup_temp_directory,
@@ -2035,6 +2036,12 @@ def process_canonical_path(
                     frame_count = 0
         else:
             gen_result = None
+
+        if frame_count == 0 and isinstance(gen_result, tuple) and gen_result[-1] == NO_DECODER_SUMMARY:
+            # Already logged, once, by the FFmpeg run that found it.
+            return MultiServerResult(
+                canonical_path=canonical_path, status=MultiServerStatus.NO_FRAMES, message=NO_DECODER_SUMMARY
+            )
 
         if frame_count == 0:
             # Bake the diagnostic guidance into the message itself, not just

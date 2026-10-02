@@ -202,11 +202,11 @@ class TestSubscription:
 def _wait_for_event(sio_client, event_name: str, timeout: float = 2.0) -> list:
     """Drain receive buffer until *event_name* arrives or *timeout* elapses.
 
-    ``JobManager._emit_event`` spawns a daemon thread per emit (see
-    ``media_preview_generator/web/jobs.py:265-272``) so the SocketIO event
-    arrives asynchronously and can lose a race against ``get_received``
-    — especially under pytest-xdist + coverage where the emit thread gets
-    scheduled unpredictably. Poll instead of read-once.
+    ``JobManager._emit_event`` hands events to a background sender thread,
+    so the SocketIO event arrives asynchronously and can lose a race
+    against ``get_received`` — especially under pytest-xdist + coverage
+    where the sender thread gets scheduled unpredictably. Poll instead of
+    read-once.
     """
     import time as _time
 

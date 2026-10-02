@@ -173,7 +173,9 @@ def plex_server(config: Config):
     from plexapi.server import PlexServer
 
     try:
-        logger.info("{}Connecting to Plex at {}...", _log_prefix(config), config.plex_url)
+        # The address stays out of the job log, which is what a user reads and shares.
+        logger.info("{}Connecting to Plex...", _log_prefix(config))
+        logger.debug("{}Plex address: {}", _log_prefix(config), config.plex_url)
         plex = PlexServer(
             config.plex_url,
             config.plex_token,
@@ -561,22 +563,31 @@ _partial_scan_sent_at: dict[tuple[str, str, str], float] = {}
 _monotonic = time.monotonic
 
 
-def _claim_partial_scan(key: tuple[str, str, str]) -> bool:
-    """Take the one scan request ``key`` gets per cooldown window; False when one was sent (or is being sent) in it."""
+def _claim_partial_scan(key: tuple[str, str, str]) -> float | None:
+    """Take the one scan request ``key`` gets per cooldown window.
+
+    Returns:
+        When the claim was taken (what :func:`_release_partial_scan` gives back); None when a request was sent (or is
+        being sent) in the window.
+    """
     now = _monotonic()
     with _partial_scan_lock:
         for stale in [k for k, sent in _partial_scan_sent_at.items() if now - sent >= _PARTIAL_SCAN_COOLDOWN_S]:
             del _partial_scan_sent_at[stale]
         if key in _partial_scan_sent_at:
-            return False
+            return None
         _partial_scan_sent_at[key] = now
-        return True
+        return now
 
 
-def _release_partial_scan(key: tuple[str, str, str]) -> None:
-    """Give back a claim whose request failed, so the next caller sends one."""
+def _release_partial_scan(key: tuple[str, str, str], claimed_at: float) -> None:
+    """Give back a claim whose request failed, so the next caller sends one.
+
+    Only the caller's own: a request that fails after its window has passed must not take a newer request's claim.
+    """
     with _partial_scan_lock:
-        _partial_scan_sent_at.pop(key, None)
+        if _partial_scan_sent_at.get(key) == claimed_at:
+            del _partial_scan_sent_at[key]
 
 
 def trigger_plex_partial_scan(
@@ -692,7 +703,8 @@ def trigger_plex_partial_scan(
         triggered = False
         for section_key, scan_folder in sorted(scan_targets):
             throttle_key = (plex_url.rstrip("/"), section_key, scan_folder)
-            if not _claim_partial_scan(throttle_key):
+            claimed_at = _claim_partial_scan(throttle_key)
+            if claimed_at is None:
                 logger.debug(
                     "{}Partial scan suppressed for section {}: {} (requested less than {:.0f}s ago)",
                     log_prefix,
@@ -742,7 +754,7 @@ def trigger_plex_partial_scan(
                 )
             finally:
                 if not sent:
-                    _release_partial_scan(throttle_key)
+                    _release_partial_scan(throttle_key, claimed_at)
 
         if triggered:
             scanned.append(unresolved)

@@ -414,14 +414,16 @@ class TestDecodeFrames:
     VAAPI = ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi",
              "-extra_hw_frames", "8"]  # fmt: skip
     NEIGHBOR = "scale=320:180:flags=neighbor,format=nv12"
+    VAAPI_COPY = "scale_vaapi=out_chroma_location=left"
 
     @pytest.mark.parametrize(
         ("gpu", "device", "download_format", "hw_args", "video_filter"),
         [
             ("NVIDIA", "cuda:0", "nv12", CUDA, f"fps=2,hwdownload,format=nv12,{NEIGHBOR}"),
             ("NVIDIA", "cuda:0", "p010le", CUDA, f"fps=2,hwdownload,format=p010le,{NEIGHBOR}"),
-            ("INTEL", "/dev/dri/renderD128", "nv12", VAAPI, f"fps=2,hwdownload,format=nv12,{NEIGHBOR}"),
-            ("AMD", "/dev/dri/renderD128", "p010le", VAAPI, f"fps=2,hwdownload,format=p010le,{NEIGHBOR}"),
+            # On VAAPI the frames fps picked are copied on the GPU before the download (frames.decode_command).
+            ("INTEL", "/dev/dri/renderD128", "nv12", VAAPI, f"fps=2,{VAAPI_COPY},hwdownload,format=nv12,{NEIGHBOR}"),
+            ("AMD", "/dev/dri/renderD128", "p010le", VAAPI, f"fps=2,{VAAPI_COPY},hwdownload,format=p010le,{NEIGHBOR}"),
             # A pixel format the surfaces aren't known in: ffmpeg downloads each frame itself, the same scaler follows.
             ("NVIDIA", "cuda:0", None, ["-hwaccel", "cuda", "-hwaccel_device", "0"], f"fps=2,{NEIGHBOR}"),
             (None, None, "nv12", [], f"fps=2,{NEIGHBOR}"),

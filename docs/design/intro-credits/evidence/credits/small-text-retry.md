@@ -10,7 +10,8 @@ the helper's self-test now checks 640×360 too). Spec §5.4 and §14 2026-09-24.
    `scale_cuda`, `scale_vaapi` and swscale's bicubic each blurred 4–11 px text differently, so answers depended on the
    worker's vendor (80-file rule J: NVIDIA 66 within 10 s, CPU 61, Intel 58). Now the frames are bit-identical: the CPU
    runs below equal the GPU runs file for file, and `test_frames_integration.py` asserts GPU rows == CPU rows (8- and
-   10-bit, 320×180 and 640×360, CUDA; VAAPI in the lab image).
+   10-bit, 320×180 and 640×360, CUDA; VAAPI in the lab image). Since 2026-10-02 a same-size `scale_vaapi` copy
+   stands before `hwdownload` on VAAPI (spec §14): the downloaded frames are the same bytes.
 2. **A tail with no answer at 320×180 is read again at 640×360** (`detector.RETRY_SCALE`). Accused (2020)'s credit
    cards are 4–11 px tall at 640×360 and box nothing at 320×180. The larger reading finds its runs and reads a frame's
    own text without what the 320×180 reading boxed (an epilogue card read again glued onto the roll 13–34 s early on
@@ -203,5 +204,5 @@ The plex host was down for this round; these wait for it:
 - [ ] A 4K tail on Intel VAAPI (a 10-bit HEVC movie): the 320×180 and 640×360 readings' decode times, with
       `-extra_hw_frames 8` and the full-frame `hwdownload`, well inside the decode timeout.
 - [ ] The Intel/VAAPI answers with this code: the 80 (and Accused) with GPU rows equal to the CPU's, as on NVIDIA.
-- AMD VAAPI stays untested (no hardware): `-extra_hw_frames 8` and the full-frame download have never run on an AMD
-  GPU. A decode that fails there is a GPU failure, read again on the CPU with the same frames.
+- AMD VAAPI stays untested (no hardware): `-extra_hw_frames 8`, the GPU copy and the full-frame download have never
+  run on an AMD GPU. A decode that fails there is a GPU failure, read again on the CPU with the same frames.

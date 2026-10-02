@@ -37,7 +37,7 @@ from ..utils import format_display_title, redact_secrets, redacted_traceback
 _job_thread_to_job_id: dict[int, str] = {}
 _job_thread_ids_lock = threading.Lock()
 # Loguru ``extra`` key: a record bound with it stays out of a job's own log (the app log still has it) — a traceback,
-# say, that belongs in the log file but would bury the job's Logs panel. Honoured by the Intro & Credits job log.
+# say, that belongs in the log file but would bury the job's Logs panel. Honoured by both kinds' job logs.
 JOB_LOG_SKIP = "job_log_skip"
 
 

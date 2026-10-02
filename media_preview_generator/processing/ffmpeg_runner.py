@@ -107,6 +107,7 @@ def create_ffmpeg_runner(
     # once per media file, not once per FFmpeg invocation.
     from .generator import (
         FFMPEG_STALL_TIMEOUT_SEC,
+        NO_DECODER_PHRASE,
         CancellationError,
         _crash_signal,
         _diagnose_ffmpeg_exit_code,
@@ -624,17 +625,27 @@ def create_ffmpeg_runner(
         # Error logging (skip generic failure log when we stopped FFmpeg ourselves; already logged above)
         if proc.returncode != 0 and not stalled and not gpu_cant_decode:
             exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode, ffmpeg_output_lines)
-            logger.error(
-                "FFmpeg failed while extracting frames from {} (exit code {}: {}). "
-                "See the FFmpeg stderr lines logged below — they usually point at the cause "
-                "(unsupported codec, broken hardware acceleration, corrupted file, full disk). "
-                "Other files in the queue will keep processing. "
-                "If this happens often on the same file, try toggling hardware acceleration off "
-                "in Settings → Processing Options → GPU Configuration.",
-                video_file,
-                proc.returncode,
-                exit_diagnosis,
-            )
+            no_decoder = exit_diagnosis == "no_decoder"
+            if no_decoder:
+                # The file's only failure line: the caller neither reruns it nor logs it again.
+                logger.error(
+                    "This file's video can't be decoded by any device (an unknown or protected codec, such as an "
+                    "encrypted track), so it is skipped and not retried on the CPU: {}. "
+                    "Other files in the queue will keep processing.",
+                    video_file,
+                )
+            else:
+                logger.error(
+                    "FFmpeg failed while extracting frames from {} (exit code {}: {}). "
+                    "See the FFmpeg stderr lines logged below — they usually point at the cause "
+                    "(unsupported codec, broken hardware acceleration, corrupted file, full disk). "
+                    "Other files in the queue will keep processing. "
+                    "If this happens often on the same file, try toggling hardware acceleration off "
+                    "in Settings → Processing Options → GPU Configuration.",
+                    video_file,
+                    proc.returncode,
+                    exit_diagnosis,
+                )
 
             # Log last few stderr lines at WARNING level so users can diagnose
             # failures without needing DEBUG mode (especially for crashes/signals)
@@ -677,13 +688,6 @@ def create_ffmpeg_runner(
                     output_folder,
                     os.path.isdir(output_folder),
                 )
-            elif exit_diagnosis == "no_decoder":
-                logger.warning(
-                    "FFmpeg has no decoder for the video in {}: it can't be decoded by any device (an unknown or "
-                    "protected codec, such as an encrypted track), so it is not retried on the CPU. "
-                    "Other files in the queue will keep processing.",
-                    video_file,
-                )
             elif exit_diagnosis == "high_exit_non_signal":
                 logger.warning(
                     "FFmpeg crashed with an unusual exit code ({}) while processing {}. "
@@ -693,7 +697,18 @@ def create_ffmpeg_runner(
                     proc.returncode,
                     video_file,
                 )
-            if ffmpeg_output_lines:
+            if no_decoder:
+                # Such a run ends on option warnings and "Error opening …"; the lines naming the video say what it is.
+                about_video = [
+                    line
+                    for line in _without_metadata_tags(ffmpeg_output_lines)
+                    if "Video: " in line or NO_DECODER_PHRASE in line
+                ]
+                tail = about_video[-5:]
+                logger.warning("FFmpeg's last {} stderr lines about the video in {}:", len(tail), video_file)
+                for line in tail:
+                    logger.warning("  {}", line)
+            elif ffmpeg_output_lines:
                 tail = _without_metadata_tags(ffmpeg_output_lines)[-5:]
                 logger.warning(
                     "FFmpeg's last {} stderr lines for {} (these usually identify the cause):",

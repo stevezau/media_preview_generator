@@ -731,6 +731,11 @@ class JobManager:
         self._running_job_ids: set = set()
         self._on_progress_callbacks: list[Callable] = []
 
+        # SocketIO events waiting to be sent, oldest first, and whether a sender thread is draining them.
+        self._pending_events: deque[tuple[str, dict]] = deque()
+        self._pending_events_lock = threading.Lock()
+        self._event_sender_running = False
+
         # Job logs storage (in-memory for running jobs, plus file-backed under _job_logs_dir)
         self._job_logs: dict[str, deque] = {}
         self._max_log_lines = 500
@@ -1064,20 +1069,48 @@ class JobManager:
     def _emit_event(self, event: str, data: dict) -> None:
         """Emit a SocketIO event without blocking the caller.
 
-        Runs the emit in a separate green thread so the processing
-        loop never pauses while data is being sent to clients.
+        Events are queued and sent by one sender thread at a time, so the processing loop never pauses while data
+        is being sent to clients, and clients receive events in the order they were emitted: the page shows the
+        last one it got, so a "3/4" arriving after "4/4" would leave it on 3/4.
         """
         if not self.socketio:
             return
+        with self._pending_events_lock:
+            self._pending_events.append((event, data))
+            if self._event_sender_running:
+                return
+            self._event_sender_running = True
+        try:
+            threading.Thread(target=self._send_pending_events, name="job-events", daemon=True).start()
+        except RuntimeError:
+            # No thread to be had (a process limit, usually brief). The events stay queued; the next one starts
+            # a sender for all of them. Left set, the flag would stop every later event from being sent.
+            with self._pending_events_lock:
+                self._event_sender_running = False
+            logger.debug("Could not start the SocketIO sender thread for {}", event, exc_info=True)
 
-        def _do_emit():
-            try:
-                self.socketio.emit(event, data, namespace="/jobs")
-            except Exception:
-                logger.debug("SocketIO emit failed for {}", event, exc_info=True)
-
-        t = threading.Thread(target=_do_emit, daemon=True)
-        t.start()
+    def _send_pending_events(self) -> None:
+        """Send queued SocketIO events in order; return once the queue is empty."""
+        drained = False
+        try:
+            while True:
+                with self._pending_events_lock:
+                    if not self._pending_events:
+                        # Cleared under the lock that guards the queue, so an event queued after this starts a sender.
+                        self._event_sender_running = False
+                        drained = True
+                        return
+                    event, data = self._pending_events.popleft()
+                try:
+                    self.socketio.emit(event, data, namespace="/jobs")
+                except Exception:
+                    logger.debug("SocketIO emit failed for {}", event, exc_info=True)
+        finally:
+            if not drained:
+                # Ended some other way (an error that isn't an Exception). Left set, the flag would stop every later
+                # event from being sent while the queue grows. Not after a normal end: a new sender may be running.
+                with self._pending_events_lock:
+                    self._event_sender_running = False
 
     def emit_processing_paused_changed(self, paused: bool) -> None:
         """Emit event when global processing pause state changes."""
@@ -1258,8 +1291,13 @@ class JobManager:
             self._jobs[job.id] = job
             self._persist_job(job)
             self._emit_event("job_created", job.to_dict())
-        logger.info(
-            "Created job {} for library {} (server={})",
+        from ..jobs.worker import JOB_LOG_SKIP
+
+        # The app log's one trace of a job that never starts. Kept out of job logs: a job that queues a retry or a
+        # follow-up runs this on its own thread, and its job log is for its user.
+        logger.bind(**{JOB_LOG_SKIP: True}).info(
+            "Created {} job {} for library {} (server={})",
+            job.kind,
             job.id,
             library_name or "(all)",
             server_name or server_id or "(all)",
@@ -2109,6 +2147,7 @@ class JobManager:
                         f"Job {job_id} dispatch finished but chain is active; "
                         f"skipping worker completion update (chain drives lifecycle)"
                     )
+                    log_level = "debug"  # bookkeeping: the job's own log already announced the retry
                 else:
                     job.completed_at = datetime.now(UTC).isoformat()
                     if error:

@@ -40,8 +40,39 @@ from .ownership import apply_inverse_path_mappings
 # importing a season pack) would trigger one full library scan per
 # file — pinning the Jellyfin process for minutes. 60s comfortably
 # covers the typical Jellyfin scan cadence and keeps the publisher
-# retry-loop responsive.
+# retry-loop responsive. Process-wide: server objects are rebuilt per
+# job, and a season pack is one job per file. Keyed by server URL; the
+# value is when the request that started the window was sent.
 _JELLYFIN_FULL_REFRESH_COOLDOWN_S = 60.0
+_full_refresh_lock = threading.Lock()
+_full_refresh_sent_at: dict[str, float] = {}
+_monotonic = time.monotonic
+
+
+def _claim_full_refresh(key: str) -> float | None:
+    """Take the one full refresh ``key`` gets per cooldown window.
+
+    Returns:
+        When the claim was taken (what :func:`_release_full_refresh` gives back); None when a refresh was sent (or is
+        being sent) in the window.
+    """
+    now = _monotonic()
+    with _full_refresh_lock:
+        sent = _full_refresh_sent_at.get(key)
+        if sent is not None and now - sent < _JELLYFIN_FULL_REFRESH_COOLDOWN_S:
+            return None
+        _full_refresh_sent_at[key] = now
+        return now
+
+
+def _release_full_refresh(key: str, claimed_at: float) -> None:
+    """Give back a claim whose request failed, so the next caller sends one.
+
+    Only the caller's own: a request that fails after its window has passed must not take a newer request's claim.
+    """
+    with _full_refresh_lock:
+        if _full_refresh_sent_at.get(key) == claimed_at:
+            del _full_refresh_sent_at[key]
 
 
 class JellyfinServer(EmbyApiClient):
@@ -65,8 +96,6 @@ class JellyfinServer(EmbyApiClient):
 
     def __init__(self, config) -> None:
         super().__init__(config, default_name="Jellyfin")
-        self._last_full_refresh_at = 0.0
-        self._full_refresh_lock = threading.Lock()
         # Per-instance cache of Media Preview Bridge plugin presence —
         # read by the dispatcher to decide whether an item-id lookup is
         # worth paying for (plugin ⇒ ~200ms, no plugin ⇒ ~30s cold).
@@ -277,19 +306,18 @@ class JellyfinServer(EmbyApiClient):
         Without rate-limiting, a webhook burst (Sonarr season-pack
         import) would trigger one full library scan per file — pins
         Jellyfin for minutes and outpaces what a real scan can cover.
+        At most one is sent per server per ``_JELLYFIN_FULL_REFRESH_COOLDOWN_S``,
+        across every caller in the process; a request that fails doesn't count.
         """
-        with self._full_refresh_lock:
-            now = time.monotonic()
-            elapsed = now - self._last_full_refresh_at
-            if elapsed < _JELLYFIN_FULL_REFRESH_COOLDOWN_S:
-                logger.debug(
-                    "Jellyfin /Library/Refresh suppressed for {!r} — last scan {:.0f}s ago, cooldown {:.0f}s",
-                    self.name,
-                    elapsed,
-                    _JELLYFIN_FULL_REFRESH_COOLDOWN_S,
-                )
-                return
-            self._last_full_refresh_at = now
+        throttle_key = (self._config.url or "").rstrip("/")
+        claimed_at = _claim_full_refresh(throttle_key)
+        if claimed_at is None:
+            logger.debug(
+                "Jellyfin /Library/Refresh suppressed for {!r} — requested less than {:.0f}s ago",
+                self.name,
+                _JELLYFIN_FULL_REFRESH_COOLDOWN_S,
+            )
+            return
         try:
             response = self._request("POST", "/Library/Refresh")
             response.raise_for_status()
@@ -298,6 +326,7 @@ class JellyfinServer(EmbyApiClient):
                 self.name,
             )
         except Exception as exc:
+            _release_full_refresh(throttle_key, claimed_at)
             logger.debug("Jellyfin /Library/Refresh failed: {}", exc)
 
     def _uncached_resolve_remote_path_to_item_id(self, remote_path: str) -> str | None:

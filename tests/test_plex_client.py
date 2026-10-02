@@ -63,6 +63,26 @@ class TestPlexServerConnection:
 
     @patch("plexapi.server.PlexServer")
     @patch("requests.Session")
+    def test_job_log_lines_do_not_carry_the_server_address(self, mock_session, mock_plex_server, mock_config):
+        """A job's log (INFO and up) is what a user reads and shares; the address is in app.log at DEBUG."""
+        from loguru import logger
+
+        mock_config.server_display_name = "Plex"
+        lines: list[str] = []
+        sink = logger.add(lambda m: lines.append(str(m).rstrip()), level="DEBUG", format="{level}|{message}")
+        try:
+            plex_server(mock_config)
+        finally:
+            logger.remove(sink)
+
+        assert [line for line in lines if line.startswith("INFO|")] == [
+            "INFO|[Plex] Connecting to Plex...",
+            "INFO|[Plex] Successfully connected to Plex",
+        ]
+        assert f"DEBUG|[Plex] Plex address: {mock_config.plex_url}" in lines
+
+    @patch("plexapi.server.PlexServer")
+    @patch("requests.Session")
     def test_plex_server_connection_failure(self, mock_session, mock_plex_server, mock_config):
         """Test connection error handling."""
         mock_plex_server.side_effect = requests.exceptions.ConnectionError("Connection refused")
@@ -529,6 +549,23 @@ class TestPartialScanThrottle:
         clock[0] += 59.9
         self._scan(self.EP1)
         assert len(plex.scans) == 2
+
+    def test_request_that_fails_after_its_minute_leaves_a_newer_requests_minute_alone(self, plex, clock):
+        def outlive_the_minute_then_fail():
+            # While the first request is still out its minute ends, and another caller's request gets through.
+            plex.before_scan = None
+            clock[0] += 61
+            assert self._scan(self.EP2) == [self.EP2]
+            plex.scan_status = requests.ConnectionError("timed out")
+
+        plex.before_scan = outlive_the_minute_then_fail
+        assert self._scan(self.EP1) == []
+
+        plex.scan_status = 200
+        clock[0] += 1
+        assert self._scan(self.EP1) == [self.EP1]
+        # The one that failed and the newer one; the third is inside the newer one's minute.
+        assert [folder for _url, folder in plex.scans] == [self.SHOW, self.SHOW]
 
     @pytest.mark.parametrize("failure", [500, requests.ConnectionError("plex is down")], ids=["refused", "unreachable"])
     def test_failed_request_does_not_start_the_minute(self, plex, clock, failure):

@@ -55,10 +55,49 @@ def _not_found_message(not_found: int, total: int, *, nothing_succeeded: bool, r
         The job log line and completion message.
     """
     if not nothing_succeeded:
-        return f"{not_found} file(s) weren't found on disk"
+        return f"{not_found:,} file(s) weren't found on disk"
     if retry_scheduled:
         return f"{not_found} of {total} items had stale Plex paths — Plex rescan triggered, retry scheduled"
     return f"{not_found} of {total} items skipped (file not found locally) — check path mapping configuration"
+
+
+def _file_problem_clauses(failure_count: int, outcome: dict | None, *, retry_scheduled: bool) -> list[str]:
+    """What a finished job says about files that failed or weren't on disk, each count once.
+
+    Args:
+        failure_count: FFmpeg failures recorded for the job. Only used when the tally counts no failed file.
+        outcome: The job's per-file outcome tally.
+        retry_scheduled: This job queued a retry for stale paths.
+
+    Returns:
+        The clauses, in the order they're read: failed, not found, how many were fine.
+    """
+    outcome = outcome or {}
+    not_found = outcome.get("skipped_file_not_found", 0)
+    failed = outcome.get("failed", 0)
+    total = sum(outcome.values())
+    nothing_succeeded = count_successes(outcome) == 0
+    # A file still waiting on its server isn't a failure of this run.
+    fine = count_successes(outcome) + outcome.get("skipped_not_indexed", 0)
+    # With files not found and nothing made, the not-found clause already says the run made nothing.
+    tally_failed = failed > 0 and not (not_found > 0 and nothing_succeeded)
+
+    clauses = []
+    if tally_failed and fine == 0:
+        clauses.append(
+            f"{failed} of {total} item(s) failed; no previews were generated. Check the per-item logs above."
+        )
+    elif tally_failed:
+        clauses.append(f"{failed:,} file(s) failed")
+    elif failure_count:
+        clauses.append(f"{failure_count:,} file(s) failed")
+    if not_found > 0:
+        clauses.append(
+            _not_found_message(not_found, total, nothing_succeeded=nothing_succeeded, retry_scheduled=retry_scheduled)
+        )
+    if tally_failed and fine > 0:
+        clauses.append(f"{fine:,} of {total:,} file(s) were fine")
+    return clauses
 
 
 _FILE_COUNT_NAME = re.compile(r"\d+ files$")
@@ -496,7 +535,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
             from ...config import ConfigValidationError, load_config
             from ...jobs.orchestrator import run_processing
-            from ...jobs.worker import is_job_thread_for, register_job_thread
+            from ...jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread
             from ...processing.generator import (
                 _verify_tmp_folder_health,
                 clear_failures,
@@ -542,9 +581,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                 The thread→job_id mapping in worker.py is keyed per job, so
                 a sibling job's worker threads (e.g. a Radarr webhook
                 completing while a manual library scan is winding down)
-                won't leak into this job's log buffer (D5).
+                won't leak into this job's log buffer (D5). A record bound
+                with ``JOB_LOG_SKIP`` is the app log's only.
                 """
-                return is_job_thread_for(record["thread"].id, job_id)
+                return not record["extra"].get(JOB_LOG_SKIP) and is_job_thread_for(record["thread"].id, job_id)
 
             sm = get_settings_manager()
             job_log_level = sm.get("log_level", "INFO").upper()
@@ -1628,7 +1668,15 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                     )
                                 else:
                                     _chain_outcome = "completed"
-                                    _chain_reason = _chain_leftover_warning(len(not_found_on_disk), chain_failed)
+                                    # Rows stop at the per-outcome cap; the head's own tally doesn't. A file past the
+                                    # cap has no row, so no retry ran it: it is still as the head's run left it.
+                                    _head_tally = _chain_parent.progress.outcome or {}
+                                    _row_cap = job_manager._FILE_RESULTS_PER_OUTCOME_CAP
+                                    _chain_reason = _chain_leftover_warning(
+                                        len(not_found_on_disk)
+                                        + max(0, _head_tally.get("skipped_file_not_found", 0) - _row_cap),
+                                        chain_failed + max(0, _head_tally.get("failed", 0) - _row_cap),
+                                    )
 
                                 # Refresh the chain head's publishers snapshot
                                 # from the parent's JSONL. Walks every attempt
@@ -1710,59 +1758,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                     job_id,
                                     f"ERROR - {i}. {wt}exit={f['exit_code']} | {f['reason']} | {f['file']}",
                                 )
-                            error_parts.append(f"{len(failures)} failed file(s)")
 
-                        if outcome:
-                            not_found = outcome.get("skipped_file_not_found", 0)
-                            generated = outcome.get("generated", 0)
-                            outcome_failed = outcome.get("failed", 0)
-                            total_outcome = sum(outcome.values())
-                            nothing_succeeded = count_successes(outcome) == 0
-                            if not_found > 0:
-                                msg = _not_found_message(
-                                    not_found,
-                                    total_outcome,
-                                    nothing_succeeded=nothing_succeeded,
-                                    retry_scheduled=bool(spawned_retry_id and stale_inputs),
-                                )
-                                job_manager.add_log(job_id, f"WARNING - {msg}")
-                                error_parts.append(msg)
-                            # Per-item failures (FFmpeg crashes, adapter errors)
-                            # leave the job-level result as "completed" but the
-                            # item outcome counter records them. Surface them
-                            # so the UI badge reflects "all items failed" jobs
-                            # as Failed, not green-Completed.
-                            #
-                            # "Success" includes both legacy ``generated`` AND
-                            # multi-server ``published`` / ``skipped_output_exists``
-                            # — anything where a publisher actually wrote (or
-                            # confirmed) an output counts. Without this, jobs
-                            # that ran via the multi-server scan would always
-                            # report ``generated == 0`` and trip the all-failed
-                            # branch even when most items succeeded.
-                            #
-                            # Left out when nothing succeeded and files weren't
-                            # found: that message already says the run made nothing.
-                            if outcome_failed > 0 and not (not_found > 0 and nothing_succeeded):
-                                published_total = (
-                                    generated
-                                    + outcome.get("published", 0)
-                                    + outcome.get("skipped_output_exists", 0)
-                                    + outcome.get("skipped_bif_exists", 0)
-                                    + outcome.get("skipped_not_indexed", 0)
-                                )
-                                if published_total == 0:
-                                    msg = (
-                                        f"{outcome_failed} of {total_outcome} item(s) failed; "
-                                        "no previews were generated. Check the per-item logs above."
-                                    )
-                                else:
-                                    msg = (
-                                        f"{outcome_failed} of {total_outcome} item(s) failed "
-                                        f"(but {published_total} succeeded)."
-                                    )
-                                job_manager.add_log(job_id, f"WARNING - {msg}")
-                                error_parts.append(msg)
+                        # Not logged clause by clause: the joined summary below is the job log's one line for them.
+                        error_parts.extend(
+                            _file_problem_clauses(
+                                len(failures), outcome, retry_scheduled=bool(spawned_retry_id and stale_inputs)
+                            )
+                        )
 
                         if spawned_retry_id:
                             error_parts.append(f"{len(retry_paths)} path(s) sent for retry")

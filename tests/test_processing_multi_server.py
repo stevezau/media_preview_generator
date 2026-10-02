@@ -22,6 +22,7 @@ from loguru import logger
 
 from media_preview_generator.bif_reader import read_bif_metadata
 from media_preview_generator.processing.frame_cache import get_frame_cache, reset_frame_cache
+from media_preview_generator.processing.generator import NO_DECODER_SUMMARY
 from media_preview_generator.processing.multi_server import (
     _PUBLISHED_LIKE_STATUSES,
     MultiServerStatus,
@@ -2142,6 +2143,104 @@ class TestNoFrames:
             )
 
         assert result.status is MultiServerStatus.NO_FRAMES
+
+    @pytest.mark.parametrize(
+        ("summary", "message_says", "second_warning"),
+        [
+            (NO_DECODER_SUMMARY, NO_DECODER_SUMMARY, False),
+            ("Conversion failed!", "FFmpeg produced 0 frames", True),
+        ],
+        ids=["no-decoder", "other-cause"],
+    )
+    def test_a_video_no_device_can_decode_is_not_reported_a_second_time(
+        self, mock_config_for_processing, tmp_path, summary, message_says, second_warning
+    ):
+        """The FFmpeg run already logged that file's one failure line; the Files panel shows the same reason."""
+        media_dir = tmp_path / "data" / "movies"
+        media_file = _seed_canonical_file(media_dir)
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="emby-1",
+                    server_type=ServerType.EMBY,
+                    libraries=[Library(id="1", name="Movies", remote_paths=(str(media_dir),), enabled=True)],
+                )
+            ],
+        )
+        warnings: list[str] = []
+        sink = logger.add(lambda m: warnings.append(str(m)), level="WARNING", format="{message}")
+        try:
+            with patch(
+                "media_preview_generator.processing.multi_server.generate_images",
+                return_value=(False, 0, False, 0.1, "0.0x", summary),
+            ):
+                result = process_canonical_path(
+                    canonical_path=str(media_file), registry=registry, config=mock_config_for_processing
+                )
+        finally:
+            logger.remove(sink)
+
+        assert result.status is MultiServerStatus.NO_FRAMES
+        assert message_says in result.message
+        assert any("produced no preview frames" in line for line in warnings) is second_warning, warnings
+
+    @pytest.mark.parametrize("keyframe_gap", [1.0, None], ids=["keyframe", "full-decode"])
+    def test_ffmpegs_own_no_decoder_failure_ends_the_file_without_a_second_report(
+        self, mock_config_for_processing, tmp_path, keyframe_gap
+    ):
+        """The real ``generate_images`` over a fake FFmpeg process: what it returns is what ends the file here."""
+        from media_preview_generator.processing.generator import failure_scope
+        from tests.test_processing_failure_diagnosis import (
+            NO_DECODER_EXIT,
+            NO_DECODER_KEYFRAME_STDERR,
+            NO_DECODER_STDERR,
+        )
+
+        media_dir = tmp_path / "data" / "movies"
+        media_file = _seed_canonical_file(media_dir)
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="emby-1",
+                    server_type=ServerType.EMBY,
+                    libraries=[Library(id="1", name="Movies", remote_paths=(str(media_dir),), enabled=True)],
+                )
+            ],
+        )
+        runs: list[bool] = []
+
+        def popen(args, **kwargs):
+            keyframe_only = "-skip_frame:v" in args
+            runs.append(keyframe_only)
+            kwargs["stderr"].write("\n".join(NO_DECODER_KEYFRAME_STDERR if keyframe_only else NO_DECODER_STDERR) + "\n")
+            kwargs["stderr"].flush()
+            proc = MagicMock(pid=4242, returncode=NO_DECODER_EXIT)
+            proc.poll.return_value = NO_DECODER_EXIT
+            return proc
+
+        track = MagicMock(hdr_format=None, transfer_characteristics=None, duration=2_523_000)
+        warnings: list[str] = []
+        sink = logger.add(lambda m: warnings.append(str(m)), level="WARNING", format="{message}")
+        try:
+            with (
+                failure_scope("no-decoder-job"),
+                patch("media_preview_generator.processing.generator.MediaInfo") as mediainfo,
+                patch(
+                    "media_preview_generator.processing.generator._probe_max_keyframe_gap", return_value=keyframe_gap
+                ),
+                patch("media_preview_generator.processing.ffmpeg_runner.subprocess.Popen", side_effect=popen),
+            ):
+                mediainfo.parse.return_value = MagicMock(video_tracks=[track])
+                result = process_canonical_path(
+                    canonical_path=str(media_file), registry=registry, config=mock_config_for_processing
+                )
+        finally:
+            logger.remove(sink)
+
+        assert runs == [keyframe_gap is not None], "one FFmpeg run, no rerun"
+        assert result.status is MultiServerStatus.NO_FRAMES
+        assert result.message == NO_DECODER_SUMMARY
+        assert not any("produced no preview frames" in line for line in warnings), warnings
 
 
 class TestSourceVanishesDuringGeneration:

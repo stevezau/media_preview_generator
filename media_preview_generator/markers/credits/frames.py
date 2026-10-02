@@ -91,6 +91,13 @@ DOWNLOAD_FORMATS = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", 
 # Intel GPU failed without them. Not on CUDA, where this same full-frame hwdownload ran without them on every measured
 # set (credit text's and the end-picture check's), and each spare is a full-size NVDEC surface.
 EXTRA_HW_FRAMES = 8
+# A same-size GPU copy before ``hwdownload`` on VAAPI, so the download syncs this filter's surface and never the
+# decoder's: on Intel's driver that sync fails now and then ("Failed to sync surface: 1 (operation failed)" or "34 (HW
+# busy now)", ffmpeg exits 251), on AV1 keyframes (15 of 16 runs) and on H.264 once ``fps`` has dropped surfaces (16 of
+# 30); with the copy 0 of 40 each. Previews never met it: ``scale_vaapi`` already stands there. Naming a chroma
+# location only stops ffmpeg passing the surfaces through untouched: the downloaded frames are the same bytes
+# (measured on H.264 8-bit, HEVC and AV1 10-bit).
+_VAAPI_COPY = "scale_vaapi=out_chroma_location=left"
 # The decoder's verdict that the GPU can't decode the file, as previews look for it (``ffmpeg_runner``): a GPU run is
 # stopped at the first one before any frame, instead of failing on every packet to the end of the file.
 _CANT_DECODE = GPU_CANT_DECODE_VERDICT.encode()
@@ -249,7 +256,8 @@ def decode_command(
         scale: Decode frames this many times 320×180 (2: 640×360), on the same scaler.
         download_format: The format of the stream's decoded GPU surfaces (``KeyframeThinning.download_format``). On
             CUDA and VAAPI (``_SURFACE_VENDORS``) the frames then stay surfaces until the filter graph downloads them,
-            after ``fps`` has picked the ones kept; None, or any other GPU, lets ffmpeg download each frame itself.
+            after ``fps`` has picked the ones kept (on VAAPI through ``_VAAPI_COPY``, with or without ``fps``); None,
+            or any other GPU, lets ffmpeg download each frame itself.
         ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (its GPU's entry in ``gpu_config``): ffmpeg's threads
             and filter threads, the flags previews put on a GPU worker's FFmpeg. None or 0, and any decode on the CPU
             (a CPU worker, or a GPU worker's CPU rerun), leave ffmpeg its own thread count, as previews do.
@@ -261,6 +269,8 @@ def decode_command(
     decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
     surfaces = keep_on_gpu and decode.active
     video_filter = _scale_filter(download_format if surfaces else None, scale)
+    if surfaces and gpu != "NVIDIA":
+        video_filter = f"{_VAAPI_COPY},{video_filter}"
     if fps:
         video_filter = f"fps={fps},{video_filter}"
     command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info"]

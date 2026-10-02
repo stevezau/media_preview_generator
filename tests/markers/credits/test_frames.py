@@ -74,7 +74,8 @@ class TestCommand:
 
     def test_vaapi_refine_window_at_1_fps_of_a_10_bit_stream(self):
         # fps=1 picks the frames while they are still GPU surfaces: only those are downloaded, in the stream's own
-        # format (P010 for 10-bit), and the scaler converts to the 8-bit luma text detection reads.
+        # format (P010 for 10-bit), and the scaler converts to the 8-bit luma text detection reads. On VAAPI a GPU
+        # copy stands before the download (test_a_vaapi_download_never_takes_a_decoder_surface).
         cmd, hw = frames.decode_command(
             FF,
             MOVIE,
@@ -89,8 +90,53 @@ class TestCommand:
         assert hw is True
         assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *self.VAAPI,
                        "-ss", "5680.500", "-t", "21.000", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", "fps=1,hwdownload,format=p010le,scale=320:180:flags=neighbor,format=nv12,showinfo",
+                       "-vf", f"fps=1,{self.VAAPI_COPY},hwdownload,format=p010le,"
+                              "scale=320:180:flags=neighbor,format=nv12,showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
+
+    VAAPI_COPY = "scale_vaapi=out_chroma_location=left"
+
+    @pytest.mark.parametrize("fps", [None, 1, 2], ids=["keyframes", "refine", "end-picture"])
+    @pytest.mark.parametrize("download_format", ["nv12", "p010le"], ids=["8-bit", "10-bit"])
+    @pytest.mark.parametrize(("gpu", "device"), [("INTEL", RENDER), ("AMD", "/dev/dri/renderD129")])
+    def test_a_vaapi_download_never_takes_a_decoder_surface(self, gpu, device, download_format, fps):
+        # Production, Intel UHD 770: 54 credit reads fell back to the CPU on ffmpeg's exit 251 (46 H.264, 7 of 7 AV1).
+        # hwdownload's sync of a decoder surface failed there ("Failed to sync surface: 1 (operation failed)" or "34
+        # (HW busy now)"): 15 of 16 runs of an AV1 keyframe pass, 16 of 30 of an H.264 1 fps window. Behind a VAAPI
+        # filter, as in previews, 0 of 40 each, and the frames are the same bytes (H.264 8-bit, HEVC and AV1 10-bit).
+        cmd, hw = frames.decode_command(FF, MOVIE, start_s=5680.5, length_s=21.0, keyframes_only=fps is None, fps=fps,
+                                        gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
+        picked = f"fps={fps}," if fps else ""
+        assert hw is True
+        assert cmd[cmd.index("-vf") + 1] == (
+            f"{picked}{self.VAAPI_COPY},hwdownload,format={download_format},"
+            "scale=320:180:flags=neighbor,format=nv12,showinfo"
+        )
+
+    @pytest.mark.parametrize(
+        ("gpu", "device", "download_format", "fps", "video_filter"),
+        [
+            # CUDA's download never failed this way (1,368 production reads): its chain is as it was.
+            ("NVIDIA", "cuda:0", "nv12", None, "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12"),
+            ("NVIDIA", "cuda:0", "nv12", 1, "fps=1,hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12"),
+            ("NVIDIA", "cuda:0", "p010le", 2,
+             "fps=2,hwdownload,format=p010le,scale=320:180:flags=neighbor,format=nv12"),
+            # Frames ffmpeg downloads itself are never surfaces in the graph: no VAAPI filter could take them.
+            ("INTEL", RENDER, None, None, "scale=320:180:flags=neighbor,format=nv12"),
+            ("INTEL", RENDER, None, 1, "fps=1,scale=320:180:flags=neighbor,format=nv12"),
+            ("AMD", RENDER, None, 1, "fps=1,scale=320:180:flags=neighbor,format=nv12"),
+            ("ARM", RENDER, "nv12", 1, "fps=1,scale=320:180:flags=neighbor,format=nv12"),
+            ("INTEL", None, "nv12", 1, "fps=1,scale=320:180:flags=neighbor,format=nv12"),
+            ("APPLE", None, "nv12", 1, "fps=1,scale=320:180:flags=neighbor,format=nv12"),
+            (None, None, "nv12", 1, "fps=1,scale=320:180:flags=neighbor,format=nv12"),
+        ],
+        ids=["cuda-keyframes", "cuda-refine", "cuda-end-picture-10-bit", "intel-unknown-format-keyframes",
+             "intel-unknown-format", "amd-unknown-format", "other-vaapi-node", "intel-without-device", "apple", "cpu"],
+    )  # fmt: skip
+    def test_no_vaapi_copy_anywhere_else(self, gpu, device, download_format, fps, video_filter):
+        cmd, _ = frames.decode_command(FF, MOVIE, start_s=5680.5, length_s=21.0, keyframes_only=fps is None, fps=fps,
+                                       gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
+        assert cmd[cmd.index("-vf") + 1] == f"{video_filter},showinfo"
 
     @pytest.mark.parametrize(
         ("gpu", "device", "download_format", "hw_args", "hw"),
@@ -139,22 +185,36 @@ class TestCommand:
         cmd, active = frames.decode_command(FF, MOVIE, start_s=12.25, length_s=None, keyframes_only=True, fps=None,
                                             gpu=gpu, gpu_device_path=device, download_format=download_format)  # fmt: skip
         spare = [] if gpu == "NVIDIA" else ["-extra_hw_frames", "8"]
+        copy = "" if gpu == "NVIDIA" else f"{self.VAAPI_COPY},"
         assert active is True
         assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", *hw_args, *spare,
                        "-skip_frame", "nokey", "-ss", "12.250", "-copyts", "-i", MOVIE, *TAIL,
-                       "-vf", f"hwdownload,format={download_format},scale=320:180:flags=neighbor,format=nv12,showinfo",
+                       "-vf", f"{copy}hwdownload,format={download_format},scale=320:180:flags=neighbor,format=nv12,"
+                              "showinfo",
                        "-f", "rawvideo", "-"]  # fmt: skip
 
     @pytest.mark.parametrize(
         ("gpu", "device", "fps", "video_filter"),
         [
             ("NVIDIA", "cuda:0", None, "hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12"),
-            ("INTEL", RENDER, None, "hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12"),
+            (
+                "INTEL",
+                RENDER,
+                None,
+                "scale_vaapi=out_chroma_location=left,hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12",
+            ),
             (None, None, None, "scale=640:360:flags=neighbor,format=nv12"),
             ("NVIDIA", "cuda:0", 1, "fps=1,hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12"),
+            (
+                "INTEL",
+                RENDER,
+                1,
+                "fps=1,scale_vaapi=out_chroma_location=left,hwdownload,format=nv12,"
+                "scale=640:360:flags=neighbor,format=nv12",
+            ),
             (None, None, 1, "fps=1,scale=640:360:flags=neighbor,format=nv12"),
         ],
-        ids=["nvidia", "vaapi", "cpu", "nvidia-refine", "cpu-refine"],
+        ids=["nvidia", "vaapi", "cpu", "nvidia-refine", "vaapi-refine", "cpu-refine"],
     )
     def test_a_scale_of_2_decodes_every_frame_at_640x360(self, gpu, device, fps, video_filter):
         # The larger read of a tail whose 320x180 frames gave no answer: the same command with only the frame's size
@@ -202,6 +262,7 @@ class TestCommand:
                        "-f", "rawvideo", "-"]  # fmt: skip
 
     GPU_DOWNLOAD = "hwdownload,format=nv12,scale=320:180:flags=neighbor,format=nv12"
+    VAAPI_DOWNLOAD = f"{VAAPI_COPY},{GPU_DOWNLOAD}"
     CPU_SCALE = "scale=320:180:flags=neighbor,format=nv12"
 
     @pytest.mark.parametrize(
@@ -209,7 +270,7 @@ class TestCommand:
         [
             (None, None, [], CPU_SCALE),
             ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], GPU_DOWNLOAD),
-            ("INTEL", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi", "-extra_hw_frames", "8"], GPU_DOWNLOAD),
+            ("INTEL", RENDER, ["-hwaccel", "vaapi", "-hwaccel_device", RENDER, "-hwaccel_output_format", "vaapi", "-extra_hw_frames", "8"], VAAPI_DOWNLOAD),
         ],
     )  # fmt: skip
     def test_an_intra_only_keyframe_pass_drops_packets_before_the_decoder(self, gpu, device, hw_args, scale):
@@ -1281,6 +1342,75 @@ class TestAGpuThatCantDecodeTheFile:
             )
         assert type(excinfo.value) is frames.NoDecoderError
         assert str(excinfo.value) == "This file's video can't be decoded by any device (unknown or protected codec)"
+
+    # The keyframe pass on the same kind of file (ffmpeg 8.0.1, this module's own command, an encrypted video track):
+    # nothing takes the bare ``-skip_frame``, so FFmpeg stops at input open, before "no decoder found". Indented as
+    # FFmpeg prints it.
+    KEYFRAME_NO_DECODER = (
+        "[matroska,webm @ 0x5a4da9e2b000] mov FourCC not found encv.\n"
+        "[matroska,webm @ 0x5a4da9e2b000] Unknown/unsupported AVCodecID V_QUICKTIME.\n"
+        "[matroska,webm @ 0x5a4da9e2b000] Could not find codec parameters for stream 0 "
+        "(Video: none (encv / 0x76636E65), none, 1920x1080): unknown codec\n"
+        "Consider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options\n"
+        "Input #0, matroska,webm, from 'Movie.mkv':\n"
+        "  Duration: 00:42:03.18, start: 0.000000, bitrate: 10306 kb/s\n"
+        "  Stream #0:0: Video: none (encv / 0x76636E65), none, 1920x1080, SAR 1:1 DAR 16:9, 23.98 tbr, 1k tbn (default)\n"
+        "    Metadata:\n"
+        "      BPS             : 10242270\n"
+        "  Stream #0:1(eng): Audio: aac (HE-AAC), 48000 Hz, stereo, fltp (default)\n"
+        "  Stream #0:2(eng): Subtitle: subrip (srt), start 4.796000\n"
+        "[in#0/matroska,webm @ 0x5a4da9e2ad40] Codec AVOption skip_frame (Allow frame skipping) is not a decoding "
+        "option.\n"
+        "Error opening input file Movie.mkv.\n"
+        "Error opening input files: Invalid argument\n"
+    )
+    # An audio-only file under the same command: the option is left over too, but there is no video to call undecodable.
+    KEYFRAME_NO_VIDEO = (
+        "Input #0, matroska,webm, from 'Movie.mkv':\n"
+        "  Duration: 00:00:20.02, start: -0.023000, bitrate: 71 kb/s\n"
+        "  Stream #0:0: Audio: aac (LC), 44100 Hz, mono, fltp, start -0.023000\n"
+        "[in#0/matroska,webm @ 0x59eec82c4d40] Codec AVOption skip_frame (Allow frame skipping) is not a decoding "
+        "option.\n"
+        "Error opening input file Movie.mkv.\n"
+        "Error opening input files: Invalid argument\n"
+    )
+    # A video that decodes next to audio FFmpeg has no codec for (its real input listing): the video's decoder takes
+    # the option, so FFmpeg never prints the leftover-option line, and a failure of this run isn't "no decoder".
+    UNKNOWN_AUDIO_ONLY = (
+        "[matroska,webm @ 0x5e20a88a8000] Unknown/unsupported AVCodecID A_ZZZ.\n"
+        "[matroska,webm @ 0x5e20a88a8000] Could not find codec parameters for stream 1 "
+        "(Audio: none, 44100 Hz, 1 channels): unknown codec\n"
+        "Input #0, matroska,webm, from 'Movie.mkv':\n"
+        "  Stream #0:0: Video: h264 (High), yuv420p(tv, progressive), 640x360 [SAR 1:1 DAR 16:9], 24 fps, 24 tbr, 1k tbn\n"
+        "  Stream #0:1: Audio: none, 44100 Hz, mono, start -0.023000\n"
+        "[in#0/matroska,webm @ 0x5e20a88a8d40] Error during demuxing: Input/output error\n"
+    )
+
+    @pytest.mark.parametrize("hw", [True, False], ids=["gpu", "cpu"])
+    def test_a_keyframe_pass_with_no_decoder_for_the_video_is_the_files_failure_on_either_worker(self, hw):
+        with pytest.raises(FrameDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=234, stderr_tail=self.KEYFRAME_NO_DECODER),
+                hw_active=hw,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )
+        assert type(excinfo.value) is frames.NoDecoderError
+        assert str(excinfo.value) == "This file's video can't be decoded by any device (unknown or protected codec)"
+
+    @pytest.mark.parametrize("stderr", ["KEYFRAME_NO_VIDEO", "UNKNOWN_AUDIO_ONLY"])
+    @pytest.mark.parametrize(("hw", "raised"), [(True, GpuDecodeError), (False, FrameDecodeError)], ids=["gpu", "cpu"])
+    def test_a_failure_that_isnt_the_videos_decoder_keeps_the_cpu_rerun(self, stderr, hw, raised):
+        with pytest.raises(FrameDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=234, stderr_tail=getattr(self, stderr)),
+                hw_active=hw,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )
+        assert type(excinfo.value) is raised
 
 
 def _state(pid: int) -> str:

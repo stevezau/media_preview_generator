@@ -165,7 +165,13 @@ _CRASH_SIGNALS = frozenset({signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signa
 
 # FFmpeg's statement that it has no decoder at all for the stream it was asked to decode (previews decode only video).
 # Not "unknown codec": FFmpeg also prints that for audio and subtitle streams of files whose video decodes fine.
-_NO_DECODER_PHRASE = "no decoder found for"
+NO_DECODER_PHRASE = "no decoder found for"
+# A keyframe-only run stops earlier, at input open: with no decoder for any video stream nothing takes
+# ``-skip_frame:v`` (previews) or the bare ``-skip_frame`` (Intro & Credits; only a video decoder takes it, so unknown
+# audio next to a video that decodes never leaves it over), and FFmpeg rejects the leftover option before it gets to
+# say the phrase above. The wording in the brackets depends on the build.
+_KEYFRAME_OPTION_UNUSED_RE = re.compile(r"Codec AVOption skip_frame(?::v)? \(.*\) is not a decoding option")
+_VIDEO_STREAM_LISTED_RE = re.compile(r"^\s*Stream #\S+ Video: ")
 NO_DECODER_SUMMARY = "This file's video can't be decoded by any device (unknown or protected codec)"
 
 # A failure log keeps this many lines from each end: one file's stderr reached 280,594 lines (21 MB).
@@ -511,8 +517,20 @@ class CancellationError(Exception):
 
 
 def video_has_no_decoder(stderr_lines: list[str]) -> bool:
-    """Whether FFmpeg said it has no decoder for the video: no device can decode it, so a CPU rerun fails the same."""
-    return any(_NO_DECODER_PHRASE in line for line in stderr_lines)
+    """Whether FFmpeg said it has no decoder for the video: no device can decode it, so a CPU rerun fails the same.
+
+    Args:
+        stderr_lines: One FFmpeg run's stderr lines, stripped or as printed (a full-decode or a keyframe-only run).
+
+    Returns:
+        True when the file has a video stream and FFmpeg found no decoder for it.
+    """
+    if any(NO_DECODER_PHRASE in line for line in stderr_lines):
+        return True
+    # A file with no video stream leaves the option unused too; that isn't a video nothing can decode.
+    return any(_KEYFRAME_OPTION_UNUSED_RE.search(line) for line in stderr_lines) and any(
+        _VIDEO_STREAM_LISTED_RE.match(line) for line in stderr_lines
+    )
 
 
 def _diagnose_ffmpeg_exit_code(returncode: int, stderr_lines: list[str] | None = None) -> str:
@@ -1945,6 +1963,8 @@ def generate_images(
 
     # A discarded partial run counts as no frames (see _count_usable_frames).
     image_count = _count_usable_frames(rc, stderr_lines)
+    # No other filter chain or device decodes a video FFmpeg has no decoder for: the first run that says so is the last.
+    no_decoder = rc != 0 and video_has_no_decoder(stderr_lines)
 
     # Hardware DV5 path unavailable — retry with software decode + libplacebo.
     #
@@ -1963,7 +1983,13 @@ def generate_images(
     # at ~5-10× (CPU-bound HEVC) — preferable to falling through to the
     # DV-safe fps+scale chain (~1.7× and a green and purple tint).
     did_sw_libplacebo_retry = False
-    if rc != 0 and image_count == 0 and not partial_discarded and (use_vaapi_dv5_path or use_intel_opencl_dv5_path):
+    if (
+        rc != 0
+        and image_count == 0
+        and not partial_discarded
+        and not no_decoder
+        and (use_vaapi_dv5_path or use_intel_opencl_dv5_path)
+    ):
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         did_sw_libplacebo_retry = True
@@ -2010,7 +2036,7 @@ def generate_images(
     # transfer characteristics or RPU parsing failures.
     # On both CPU and GPU, retry once with a DV-safe filter chain that
     # avoids zscale/tonemap/libplacebo entirely.
-    if rc != 0 and image_count == 0 and not partial_discarded:
+    if rc != 0 and image_count == 0 and not partial_discarded and not no_decoder:
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         diag_label = classify_dv_safe_retry_reason(stderr_lines_all, use_libplacebo=use_libplacebo)
@@ -2109,7 +2135,7 @@ def generate_images(
                 f"GPU processing failed ({fallback_reason}) for {video_file} (exit code {rc})", kind=fallback_kind
             )
 
-    if rc != 0 and image_count == 0 and gpu is None:
+    if rc != 0 and image_count == 0 and gpu is None and not no_decoder:
         if _detect_codec_error(rc, stderr_lines):
             logger.warning(
                 "Could not process {} on CPU either (exit code {}). The file is most likely corrupt "
@@ -2166,18 +2192,19 @@ def generate_images(
             if did_dv_safe_retry
             else (" after sw libplacebo retry" if did_sw_libplacebo_retry else (" after retry" if did_retry else ""))
         )
-        logger.error(
-            "FFmpeg produced no preview frames for {}{}. "
-            "Common causes: video file is corrupted, codec is unsupported by your FFmpeg build, "
-            "or hardware acceleration failed silently. Try playing the file in a media player to "
-            "confirm it's intact, then enable Debug logging (Settings → Logging) to see FFmpeg's "
-            "detailed output. The rest of the queue continues; only this file is skipped.",
-            video_file,
-            fallback_suffix,
-        )
-        if video_has_no_decoder(stderr_lines):
+        if no_decoder:
+            # The FFmpeg run already logged the one line that says so.
             error_summary = NO_DECODER_SUMMARY
         else:
+            logger.error(
+                "FFmpeg produced no preview frames for {}{}. "
+                "Common causes: video file is corrupted, codec is unsupported by your FFmpeg build, "
+                "or hardware acceleration failed silently. Try playing the file in a media player to "
+                "confirm it's intact, then enable Debug logging (Settings → Logging) to see FFmpeg's "
+                "detailed output. The rest of the queue continues; only this file is skipped.",
+                video_file,
+                fallback_suffix,
+            )
             error_summary = _extract_ffmpeg_error_summary(stderr_lines_all)
         worker_ctx = "GPU" if gpu is not None else "CPU"
         reason = (

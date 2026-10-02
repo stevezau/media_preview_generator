@@ -2805,6 +2805,37 @@ class TestMigrationNoticeBackupAndDismissal:
         assert [card["id"] for card in active] == [notif.SCHEMA_MIGRATION_ID]
         assert f"<code>{sm.get('_pending_migration_notice')['backup']}</code>" in active[0]["body_html"]
 
+    @pytest.mark.parametrize("kind", ["version_move", "retry_boot"])
+    @pytest.mark.parametrize("earlier_notice", ["dismissed", "unread"])
+    def test_an_earlier_notice_is_merged_into_the_new_one_only_while_it_is_unread(self, tmp_path, kind, earlier_notice):
+        """Older versions dismissed the card by storing its id and left the notice itself in settings.json."""
+        from media_preview_generator.upgrade import _USER_FACING_NOTES, _migrate_schema
+        from media_preview_generator.utils import timestamped_backups
+        from media_preview_generator.web.notifications import SCHEMA_MIGRATION_ID
+
+        earlier_backup = tmp_path / "settings.json.20260101-000000.bak"
+        earlier_backup.write_text('{"_schema_version": 11}')
+        earlier = {"from": 11, "to": 13, "backup": str(earlier_backup), "notes": ["An earlier note."]}
+        dismissals = [SCHEMA_MIGRATION_ID] if earlier_notice == "dismissed" else []
+        sm = self._boot(
+            tmp_path, self._seed(kind, _pending_migration_notice=earlier, dismissed_notifications=dismissals)
+        )
+
+        _migrate_schema(sm)
+
+        notice = sm.get("_pending_migration_notice")
+        this_upgrades_notes = [_USER_FACING_NOTES[14]]
+        if earlier_notice == "unread":
+            assert notice["notes"] == ["An earlier note.", *this_upgrades_notes]
+            assert notice["from"] == 11
+            assert notice["backup"] == str(earlier_backup)
+        else:
+            assert notice["notes"] == this_upgrades_notes
+            assert notice.get("from") == (13 if kind == "version_move" else None)
+            assert notice["backup"] in timestamped_backups(str(sm.settings_file))
+            assert notice["backup"] != str(earlier_backup)
+        assert sm.dismissed_notifications == []
+
     def test_a_migration_that_writes_no_notice_leaves_stored_dismissals_alone(self, tmp_path):
         from media_preview_generator.upgrade import _migrate_schema
         from media_preview_generator.web.notifications import SCHEMA_MIGRATION_ID
