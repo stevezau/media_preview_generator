@@ -42,7 +42,7 @@ from enum import Enum
 from loguru import logger
 
 from ..config import Config
-from .ffmpeg_runner import STALL_WATCHDOG_LINE
+from .ffmpeg_runner import GPU_CANT_DECODE_LINE, STALL_WATCHDOG_LINE
 from .filter_chain import (
     DV5_PATH_INTEL_OPENCL,
     DV5_PATH_LIBPLACEBO,
@@ -162,6 +162,18 @@ FFMPEG_IO_ERROR_EXIT = 251
 # scan. Any other signal (SIGTERM, SIGINT, SIGHUP, the stall watchdog's or an OOM kill's SIGKILL) stopped it from
 # outside, wherever it was. Popen reports a signal as -n; a wrapper shell as 128+n.
 _CRASH_SIGNALS = frozenset({signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE, signal.SIGILL})
+
+# FFmpeg's statement that it has no decoder at all for the stream it was asked to decode (previews decode only video).
+# Not "unknown codec": FFmpeg also prints that for audio and subtitle streams of files whose video decodes fine.
+_NO_DECODER_PHRASE = "no decoder found for"
+NO_DECODER_SUMMARY = "This file's video can't be decoded by any device (unknown or protected codec)"
+
+# A failure log keeps this many lines from each end: one file's stderr reached 280,594 lines (21 MB).
+_FAILURE_LOG_EDGE_LINES = 200
+
+# A container tag as FFmpeg's stream listing prints it: the key padded to 16 columns (or longer, unpadded) before
+# ": ", or the bare ": " that continues a multi-line value.
+_METADATA_TAG_RE = re.compile(r"(?:[^:]{15} |[\w.\-]{16,})?:(?: |$)")
 
 # Why a GPU run is handed to the CPU (``CodecNotSupportedError.kind``); the announcements word each one for the user.
 FALLBACK_CODEC = "codec"
@@ -498,7 +510,12 @@ class CancellationError(Exception):
     pass
 
 
-def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
+def video_has_no_decoder(stderr_lines: list[str]) -> bool:
+    """Whether FFmpeg said it has no decoder for the video: no device can decode it, so a CPU rerun fails the same."""
+    return any(_NO_DECODER_PHRASE in line for line in stderr_lines)
+
+
+def _diagnose_ffmpeg_exit_code(returncode: int, stderr_lines: list[str] | None = None) -> str:
     """Classify FFmpeg exit codes into actionable diagnostics.
 
     Known signal exit codes are explicitly mapped. Values greater than 128
@@ -507,6 +524,9 @@ def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
 
     Args:
         returncode: FFmpeg process exit code
+        stderr_lines: That run's stderr, when the caller has it. It tells a video no device can decode
+            (``no_decoder``) from other failures, and exit 251 from a GPU error (``gpu_error``) from a disk's
+            (``io_error``).
 
     Returns:
         str: Diagnostic classification string
@@ -527,7 +547,12 @@ def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
     if returncode in known_signals:
         return f"signal:{known_signals[returncode]}"
 
+    if stderr_lines and video_has_no_decoder(stderr_lines):
+        return "no_decoder"
+
     if returncode == FFMPEG_IO_ERROR_EXIT:
+        if stderr_lines and not _io_cut_off(returncode, stderr_lines):
+            return "gpu_error"
         return "io_error"
 
     if returncode > 128:
@@ -564,7 +589,8 @@ def _was_interrupted(returncode: int, stderr_lines: list[str]) -> bool:
     accelerator or OpenCL error. Such a run's frames say nothing about how much of the file decodes.
 
     Ended on the file: a non-zero exit of its own, a crash (SIGSEGV, SIGABRT, SIGBUS, SIGFPE or SIGILL, raw or as
-    128+n), or exit 251 from a GPU error. These happen at the same place on every scan.
+    128+n), exit 251 from a GPU error, or a GPU run stopped at the decoder's verdict that it can't decode the file
+    (``GPU_CANT_DECODE_LINE``). These happen at the same place on every scan.
 
     Args:
         returncode: FFmpeg exit code.
@@ -577,6 +603,8 @@ def _was_interrupted(returncode: int, stderr_lines: list[str]) -> bool:
         return False
     if STALL_WATCHDOG_LINE in stderr_lines:
         return True
+    if GPU_CANT_DECODE_LINE in stderr_lines:
+        return False
     if returncode == FFMPEG_IO_ERROR_EXIT:
         return not _detect_hwaccel_runtime_error(stderr_lines)
     if returncode < 0:
@@ -605,6 +633,10 @@ def _gpu_hand_off(
     """
     if rc != 0 and STALL_WATCHDOG_LINE in stderr_lines:
         return FALLBACK_STALL, f"FFmpeg stopped making progress for {FFMPEG_STALL_TIMEOUT_SEC} s"
+    if rc != 0 and GPU_CANT_DECODE_LINE in stderr_lines:
+        return FALLBACK_CODEC, "the GPU can't decode this video's codec"
+    if video_has_no_decoder(stderr_lines):
+        return None
     should_fallback, reason = classify_cpu_fallback_reason(
         rc,
         stderr_lines,
@@ -627,6 +659,30 @@ def _gpu_hand_off(
     if stopped_part_way:
         return FALLBACK_STOPPED_PART_WAY, "GPU run stopped part-way"
     return None
+
+
+def _without_metadata_tags(stderr_lines: list[str]) -> list[str]:
+    """FFmpeg stderr without the container's metadata tags, so an excerpt of its last lines shows the cause.
+
+    A tag block is a ``Metadata:`` line and the tag lines right after it (title, BPS, _STATISTICS_TAGS…).
+
+    Args:
+        stderr_lines: FFmpeg stderr lines, stripped.
+
+    Returns:
+        The lines that aren't part of a tag block, in order.
+    """
+    kept: list[str] = []
+    in_tag_block = False
+    for line in stderr_lines:
+        if line == "Metadata:":
+            in_tag_block = True
+        elif in_tag_block and _METADATA_TAG_RE.match(line):
+            continue
+        else:
+            in_tag_block = False
+            kept.append(line)
+    return kept
 
 
 def _extract_ffmpeg_error_summary(stderr_lines: list[str]) -> str:
@@ -688,11 +744,12 @@ def _extract_ffmpeg_error_summary(stderr_lines: list[str]) -> str:
 
 
 def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: list[str]) -> None:
-    """Save full FFmpeg stderr output to a per-file log for post-mortem debugging.
+    """Save FFmpeg stderr output to a per-file log for post-mortem debugging.
 
     Files are written to {CONFIG_DIR}/logs/ffmpeg_failures/ with a sanitised
     filename derived from the media path.  Old logs are not cleaned automatically
-    — the directory is capped at 500 files (oldest removed first).
+    — the directory is capped at 500 files (oldest removed first).  A long stderr
+    is written as its first and last 200 lines with the count omitted between them.
 
     Args:
         video_file: Path to the media file that failed.
@@ -712,7 +769,15 @@ def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: lis
     log_path = os.path.join(log_dir, f"{timestamp}_{base}.log")
 
     try:
-        exit_diagnosis = _diagnose_ffmpeg_exit_code(returncode)
+        exit_diagnosis = _diagnose_ffmpeg_exit_code(returncode, stderr_lines)
+        kept_lines = stderr_lines
+        omitted = len(stderr_lines) - 2 * _FAILURE_LOG_EDGE_LINES
+        if omitted > 0:
+            kept_lines = [
+                *stderr_lines[:_FAILURE_LOG_EDGE_LINES],
+                f"… {omitted} lines omitted …",
+                *stderr_lines[-_FAILURE_LOG_EDGE_LINES:],
+            ]
         with open(log_path, "w", encoding="utf-8") as fh:
             fh.write(f"file: {video_file}\n")
             fh.write(f"exit_code: {returncode}\n")
@@ -720,7 +785,7 @@ def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: lis
             fh.write(f"signal_killed: {_is_signal_killed(returncode)}\n")
             fh.write(f"lines: {len(stderr_lines)}\n")
             fh.write("-" * 72 + "\n")
-            for line in stderr_lines:
+            for line in kept_lines:
                 fh.write(line + "\n")
         logger.debug("Saved FFmpeg failure log to {}", log_path)
     except OSError:
@@ -1676,7 +1741,7 @@ def generate_images(
     # (discussion #283 — it used to scan the whole file, which cost a full
     # extra read of every file and timed out on large ones).  When the max
     # gap exceeds the interval (plus a small tolerance, see below) we disable
-    # the fast path up front, and log a user-friendly WARN line explaining
+    # the fast path up front, and log a user-friendly INFO line explaining
     # what happened in plain language (no jargon, no FFmpeg flags).
     #
     # Sampling trades a little coverage for a lot of I/O: a sparse stretch
@@ -1705,7 +1770,7 @@ def generate_images(
             gap_limit=gap_limit,
         )
         if max_gap is None:
-            logger.warning(
+            logger.info(
                 "Slow path for '{}': we couldn't read this file's snapshot frame layout. "
                 "To play it safe we'll fully decode the video instead of reusing snapshot "
                 "frames — correct, but slower for this file.",
@@ -1713,7 +1778,7 @@ def generate_images(
             )
             use_skip_initial = False
         elif max_gap > gap_limit:
-            logger.warning(
+            logger.info(
                 "Slow path for '{}': this video stores a fresh snapshot frame every ~{:.1f}s, "
                 "while you've asked for thumbnails every {}s. We'll fully decode the video to "
                 "make each thumbnail unique — correct, but slower for this file.",
@@ -1832,7 +1897,9 @@ def generate_images(
     retry_rc = rc
     retry_stderr_lines = stderr_lines
 
-    if rc != 0 and use_skip_initial:
+    # Not after the decoder said it can't decode the file (on this GPU, or at all): full-frame decode asks the same one.
+    cant_decode = GPU_CANT_DECODE_LINE in stderr_lines or video_has_no_decoder(stderr_lines)
+    if rc != 0 and use_skip_initial and not cant_decode:
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         did_retry = True
@@ -2108,10 +2175,13 @@ def generate_images(
             video_file,
             fallback_suffix,
         )
-        error_summary = _extract_ffmpeg_error_summary(stderr_lines_all)
+        if video_has_no_decoder(stderr_lines):
+            error_summary = NO_DECODER_SUMMARY
+        else:
+            error_summary = _extract_ffmpeg_error_summary(stderr_lines_all)
         worker_ctx = "GPU" if gpu is not None else "CPU"
         reason = (
-            f"FFmpeg exit {rc} ({_diagnose_ffmpeg_exit_code(rc)}){fallback_suffix}"
+            f"FFmpeg exit {rc} ({_diagnose_ffmpeg_exit_code(rc, stderr_lines)}){fallback_suffix}"
             if rc != 0
             else f"0 images{fallback_suffix}"
         )
@@ -2294,6 +2364,12 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
                     )
                     raise
                 f.write(data)
+            f.flush()
+            try:
+                # Without this a power loss soon after can keep the rename and lose the data (a 0-byte BIF).
+                os.fsync(f.fileno())
+            except OSError as exc:
+                logger.debug("fsync failed for {}: {}", tmp_filename, exc)
         _keep_owner_and_mode(tmp_filename, bif_filename)
         os.replace(tmp_filename, bif_filename)
     except BaseException:

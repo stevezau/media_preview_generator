@@ -352,6 +352,34 @@ def _migrate_env_vars(sm) -> None:
 # =========================================================================
 
 
+def _backup_settings_before_migrating(sm) -> str:
+    """Back up settings.json as it is before any migration step saves over it.
+
+    Args:
+        sm: The settings manager about to be migrated.
+
+    Returns:
+        The backup's path, or "" when there is no file yet or the copy failed (a migration never waits on it).
+    """
+    settings_file = getattr(sm, "settings_file", None)
+    if not settings_file or not os.path.isfile(str(settings_file)):
+        return ""
+    from .utils import backup_file
+
+    try:
+        return backup_file(str(settings_file))
+    except OSError as exc:
+        logger.warning(
+            "Could not back up {} before updating your settings to the current format ({}: {}). The update goes "
+            "ahead; there will be no pre-update copy to roll back to. Check the config folder is writable and has "
+            "free space.",
+            settings_file,
+            type(exc).__name__,
+            exc,
+        )
+        return ""
+
+
 def _migrate_schema(sm) -> None:
     """Run incremental schema migrations on settings.
 
@@ -419,13 +447,13 @@ def _migrate_schema(sm) -> None:
         # J3: refuse to boot when settings.json is newer than the binary.
         # Silent acceptance would drop unknown fields on the next save —
         # the exact failure mode that wiped jobs.json on tag-drift.
-        settings_path = getattr(sm, "settings_file", None)
-        bak_path = f"{settings_path}.bak" if settings_path else "<settings>.bak"
+        settings_path = getattr(sm, "settings_file", None) or "settings.json"
         raise SchemaDowngradeError(
             f"settings.json was written by schema v{current} but this binary supports up to "
             f"v{_CURRENT_SCHEMA_VERSION}. Refusing to start (would silently drop fields on next save). "
-            f"Either run a newer build of the app, or restore the previous settings.json "
-            f"(a backup is at {bak_path}) and start the older app version that wrote it."
+            f"Either run a newer build of the app, or restore a settings.json from before the upgrade "
+            f"(the app's backups sit next to it as {settings_path}.<timestamp>.bak) and start the older app "
+            f"version that wrote it."
         )
     # A pending v14 retry has to get past the version gate: the failure that
     # set it happened AFTER _schema_version was already bumped, so `current`
@@ -434,6 +462,7 @@ def _migrate_schema(sm) -> None:
     if current == _CURRENT_SCHEMA_VERSION and not v14_retry:
         return
 
+    bak_path = _backup_settings_before_migrating(sm)
     log_notes: list[str] = []
     user_notes: list[str] = []
 
@@ -493,8 +522,18 @@ def _migrate_schema(sm) -> None:
         # login. Dismissal removes the flag (see notifications.py).
         from datetime import datetime as _dt
 
-        bak_path = f"{getattr(sm, 'settings_file', '')}.bak" if getattr(sm, "settings_file", None) else ""
+        from .web.notifications import SCHEMA_MIGRATION_ID
+
+        # Older versions stored a permanent dismissal of this card, which would hide this new notice as well.
+        dismissed = sm.get("dismissed_notifications")
+        if isinstance(dismissed, list) and SCHEMA_MIGRATION_ID in dismissed:
+            sm.set("dismissed_notifications", [n for n in dismissed if n != SCHEMA_MIGRATION_ID])
         existing = sm.get("_pending_migration_notice") or {}
+        # An unread notice's backup, while still on disk, is the copy that matches the "from" version the card
+        # keeps reporting; this boot's snapshot is from a later version.
+        earlier_backup = existing.get("backup")
+        if isinstance(earlier_backup, str) and os.path.isfile(earlier_backup):
+            bak_path = earlier_backup
         # An existing notice's notes are unread, so merge into it rather than overwrite it —
         # regardless of whether this boot is a real version move or a retry-only boot.
         merged_notes = list(existing.get("notes") or [])
@@ -509,7 +548,7 @@ def _migrate_schema(sm) -> None:
             # produced no notes), omit from/to entirely — the renderer drops
             # the sentence rather than printing "v? to v?".
             if existing:
-                sm.set("_pending_migration_notice", {**existing, "notes": merged_notes})
+                sm.set("_pending_migration_notice", {**existing, "backup": bak_path, "notes": merged_notes})
             else:
                 sm.set(
                     "_pending_migration_notice",

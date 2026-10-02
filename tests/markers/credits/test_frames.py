@@ -310,6 +310,8 @@ def _fake_ffmpeg(
     width: int = 320,
     height: int = 180,
     stderr_tail: str = "",
+    stderr_head: str = "",
+    head_wait_s: float = 0.0,
 ) -> list[str]:
     """A child that writes NV12 frames (Y plane filled with each value) to stdout and showinfo lines to stderr.
 
@@ -317,7 +319,8 @@ def _fake_ffmpeg(
     ``child_pid_file`` spawns a grandchild in the same process group, so the group kill can be asserted;
     ``ignore_sigterm`` stands in for an ffmpeg that won't take a polite signal; ``progress_file`` records how many
     frames have been written, so how far the decoder ran ahead of text detection can be read; ``width`` and ``height``
-    are the frames' size; ``stderr_tail`` is written to stderr after the frames (what ffmpeg says as it exits).
+    are the frames' size; ``stderr_tail`` is written to stderr after the frames (what ffmpeg says as it exits);
+    ``stderr_head`` is written before them, which then wait ``head_wait_s`` (what a decoder says before any frame).
     """
     script = textwrap.dedent(f"""
         import os, signal, subprocess, sys, time
@@ -339,6 +342,9 @@ def _fake_ffmpeg(
                 open({progress_file!r} + ".tmp", "w").write(str(n))
                 os.replace({progress_file!r} + ".tmp", {progress_file!r})
 
+        sys.stderr.write({stderr_head!r})
+        sys.stderr.flush()
+        time.sleep({head_wait_s})
         for i, value in enumerate({frame_values!r}):
             if i < len(pts):
                 line(i)
@@ -592,7 +598,8 @@ class TestRunDecode:
     @pytest.mark.parametrize(
         ("exit_code", "stderr", "message"),
         [
-            (69, AV1_ON_A_GPU_WITHOUT_AV1, "the GPU can't decode this file's AV1 video (ffmpeg exited 69)"),
+            # No exit code after the decoder's verdict: a run stopped at it would say the kill's.
+            (69, AV1_ON_A_GPU_WITHOUT_AV1, "the GPU can't decode this file's AV1 video"),
             (
                 69,
                 "[h264 @ 0x1] Decode error rate 1 exceeds maximum 0.666667\nConversion failed!\n",
@@ -638,6 +645,49 @@ class TestRunDecode:
         with pytest.raises(GpuDecodeError) as excinfo:
             frames.run_decode(command, hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p))
         assert str(excinfo.value) == "ffmpeg was stopped by a signal (exit -9)"
+        assert excinfo.value.stderr_tail == ()
+
+    def test_a_gpu_failure_keeps_ffmpegs_last_lines_that_say_why(self):
+        # Production: 53 Intel reads fell back to the CPU with only the classified reason logged; ffmpeg's own lines
+        # went to DEBUG. Its closing lines (the progress line, "Terminating thread", "Nothing was written",
+        # "Conversion failed!") end every failed run and say nothing.
+        with pytest.raises(GpuDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=69, stderr_tail=self.AV1_ON_A_GPU_WITHOUT_AV1),
+                hw_active=True,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )
+        assert excinfo.value.stderr_tail == (
+            "[av1 @ 0x5c0071e12a80] Hardware is lacking required capabilities",
+            "[av1 @ 0x5c0071e12a80] Failed setup for format cuda: hwaccel initialisation returned error.",
+            "[av1 @ 0x5c0071e12a80] Your platform doesn't support hardware accelerated AV1 decoding.",
+            "[vist#0:0/av1 @ 0x5c0071e10e40] [dec:av1 @ 0x5c0071e12300] Decode error rate 1 exceeds maximum 0.666667",
+        )
+
+    def test_a_long_line_of_ffmpegs_is_cut_and_only_the_last_few_are_kept(self):
+        stderr = "".join(f"[hevc @ 0x1] error {n} " + "x" * 400 + "\n" for n in range(9))
+        with pytest.raises(GpuDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=251, stderr_tail=stderr),
+                hw_active=True,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+            )
+        tail = excinfo.value.stderr_tail
+        assert [line[:21] for line in tail] == [f"[hevc @ 0x1] error {n} " for n in range(5, 9)]
+        assert all(len(line) <= frames.STDERR_LINE_CHARS for line in tail)
+
+    def test_ffmpegs_lines_are_found_on_the_error_a_gpu_failure_was_raised_from(self):
+        failure = GpuDecodeError("ffmpeg exited 251", stderr_tail=("[hevc @ 0x1] Failed to sync surface",))
+        try:
+            raise RuntimeError("the worker's CPU rerun") from failure
+        except RuntimeError as wrapped:
+            assert frames.gpu_failure_lines(wrapped) == ("[hevc @ 0x1] Failed to sync surface",)
+        assert frames.gpu_failure_lines(failure) == ("[hevc @ 0x1] Failed to sync surface",)
+        assert frames.gpu_failure_lines(RuntimeError("no ffmpeg ran")) == ()
+        assert frames.gpu_failure_lines(frames.GpuReadNothingError()) == ()
 
     LONG_REASON = "Invalid data found when processing input" + " while reading the header of the file" * 8
     # showinfo's per-frame lines, the second of which reads as an error to a summary ("unknown").
@@ -1068,6 +1118,169 @@ class TestRunDecode:
             )
         assert type(excinfo.value) is FrameDecodeError
         _assert_gone(pid_file)
+
+
+VERDICT = "Your platform doesn't support hardware accelerated AV1 decoding."
+# The hwaccel line FFmpeg prints for any decoder whose GPU setup failed; healthy H.264/HEVC runs print it and decode on.
+GENERIC_HWACCEL_LINE = "[h264 @ 0x1] Failed setup for format {hwaccel}: hwaccel initialisation returned error.\n"
+VENDORS = [("NVIDIA", "cuda:0", "cuda"), ("INTEL", RENDER, "vaapi"), ("AMD", "/dev/dri/renderD129", "vaapi")]
+
+
+def _cant_decode_lines(hwaccel: str, packets: int = 3) -> str:
+    """What ffmpeg's own AV1 decoder says, once per packet to the end of the file, on a GPU without AV1 decode
+    (ffmpeg 8.0.1 on a Quadro P5000, 2026-10-02: 6 lines a packet, 3,756 lines in 1.5 s; "Hardware is lacking" is
+    NVDEC's own line and is left out)."""
+    packet = (
+        f"[av1 @ 0x58ba5204abc0] Failed setup for format {hwaccel}: hwaccel initialisation returned error.\n"
+        f"[av1 @ 0x58ba5204abc0] {VERDICT}\n"
+        "[av1 @ 0x58ba5204abc0] Failed to get pixel format.\n"
+        "[av1 @ 0x58ba5204abc0] Get current frame error\n"
+        "[vist#0:0/av1 @ 0x58ba520356c0] [dec:av1 @ 0x58ba5204a680] Error submitting packet to decoder: Function not "
+        "implemented\n"
+    )
+    return "  Stream #0:0: Video: av1 (libdav1d) (Main), yuv420p(tv), 1280x720\n" + packet * packets
+
+
+def _hw(gpu: str | None, device: str | None) -> bool:
+    """Whether the worker's own command decodes on the GPU."""
+    return frames.decode_command(
+        FF, MOVIE, start_s=0.0, length_s=None, keyframes_only=True, fps=None, gpu=gpu, gpu_device_path=device
+    )[1]
+
+
+class TestAGpuThatCantDecodeTheFile:
+    """Previews' rule (``ffmpeg_runner``): a GPU run is stopped at the decoder's first verdict that it can't decode the
+    file, before any frame; never a CPU run, never on the generic hwaccel line, never once a frame has arrived."""
+
+    @pytest.mark.parametrize(("gpu", "device", "hwaccel"), VENDORS, ids=[v[0] for v in VENDORS])
+    def test_a_gpu_run_is_stopped_at_the_verdict_and_is_a_gpu_failure(self, gpu, device, hwaccel, tmp_path):
+        # Production: the end-picture check's GPU decode of an AV1 episode failed on every packet to its 120 s timeout
+        # on a TITAN RTX (Person of Interest S02E19, 2026-10-02); the frames after the wait stand for a file walked on.
+        pid_file = tmp_path / "ffmpeg.pid"
+        started = time.monotonic()
+        with pytest.raises(GpuDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([10, 250], ["1", "2"], stderr_head=_cant_decode_lines(hwaccel), head_wait_s=30,
+                             pid_file=str(pid_file)),
+                hw_active=_hw(gpu, device),
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )  # fmt: skip
+        assert time.monotonic() - started < 5
+        assert type(excinfo.value) is GpuDecodeError  # the worker's CPU rerun, not "the GPU read no frames"
+        assert str(excinfo.value) == "the GPU can't decode this file's AV1 video"
+        assert any(VERDICT in line for line in excinfo.value.stderr_tail)
+        _assert_gone(pid_file)
+
+    @pytest.mark.parametrize("linger_s", [0, 30], ids=["ffmpeg-ended-first", "stopped"])
+    def test_the_failure_reads_the_same_whether_ffmpeg_ended_or_was_stopped(self, linger_s):
+        # A short tail ends by itself (exit 69) before the first look at stderr; which comes first is timing.
+        with pytest.raises(GpuDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=69, stderr_tail=TestRunDecode.AV1_ON_A_GPU_WITHOUT_AV1,
+                             linger_s=linger_s),
+                hw_active=True,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )  # fmt: skip
+        assert str(excinfo.value) == "the GPU can't decode this file's AV1 video"
+        assert excinfo.value.stderr_tail == (
+            "[av1 @ 0x5c0071e12a80] Hardware is lacking required capabilities",
+            "[av1 @ 0x5c0071e12a80] Failed setup for format cuda: hwaccel initialisation returned error.",
+            "[av1 @ 0x5c0071e12a80] Your platform doesn't support hardware accelerated AV1 decoding.",
+            "[vist#0:0/av1 @ 0x5c0071e10e40] [dec:av1 @ 0x5c0071e12300] Decode error rate 1 exceeds maximum 0.666667",
+        )
+
+    @pytest.mark.parametrize("said", ["generic", "nothing"])
+    @pytest.mark.parametrize(("gpu", "device", "hwaccel"), VENDORS, ids=[v[0] for v in VENDORS])
+    def test_a_gpu_run_without_the_verdict_runs_on(self, gpu, device, hwaccel, said):
+        # 0.4 s without a frame is four looks at stderr: the generic line alone stops nothing.
+        head = GENERIC_HWACCEL_LINE.format(hwaccel=hwaccel) if said == "generic" else ""
+        rows = frames.run_decode(
+            _fake_ffmpeg([10, 250], ["1", "2"], stderr_head=head, head_wait_s=0.4),
+            hw_active=_hw(gpu, device),
+            pts_offset_s=0.0,
+            detect_boxes=_detector([]),
+        )
+        assert [row[0] for row in rows] == [1.0, 2.0]
+
+    @pytest.mark.parametrize(("gpu", "device", "hwaccel"), VENDORS, ids=[v[0] for v in VENDORS])
+    def test_a_gpu_run_that_already_gave_frames_is_never_stopped(self, gpu, device, hwaccel):
+        rows = frames.run_decode(
+            _fake_ffmpeg([10, 250], ["1", "2"], stderr_tail=_cant_decode_lines(hwaccel), linger_s=0.4),
+            hw_active=_hw(gpu, device),
+            pts_offset_s=0.0,
+            detect_boxes=_detector([]),
+        )
+        assert [row[0] for row in rows] == [1.0, 2.0]
+
+    # One row per thing said: a CPU run's command names no vendor (``decode_command`` with no GPU), on a CPU worker
+    # and on a GPU worker's CPU rerun alike.
+    @pytest.mark.parametrize(
+        "head",
+        [_cant_decode_lines("cuda"), _cant_decode_lines("vaapi"), GENERIC_HWACCEL_LINE.format(hwaccel="cuda"), ""],
+        ids=["verdict-cuda", "verdict-vaapi", "generic", "nothing"],
+    )
+    def test_a_cpu_run_is_never_stopped(self, head):
+        rows = frames.run_decode(
+            _fake_ffmpeg([10, 250], ["1", "2"], stderr_head=head, head_wait_s=0.4),
+            hw_active=_hw(None, None),
+            pts_offset_s=0.0,
+            detect_boxes=_detector([]),
+        )
+        assert [row[0] for row in rows] == [1.0, 2.0]
+
+    @pytest.mark.parametrize("before", [frames._STDERR_PEEK_BYTES - 30, frames._STDERR_PEEK_BYTES + 40_007])
+    def test_the_verdict_is_found_wherever_it_falls_in_what_ffmpeg_wrote(self, before, tmp_path):
+        # Across the edge of one read, and in a later read of the same look.
+        pid_file = tmp_path / "ffmpeg.pid"
+        head = "x" * (before - 1) + "\n" + _cant_decode_lines("cuda")
+        with pytest.raises(GpuDecodeError, match="can't decode this file's AV1 video"):
+            frames.run_decode(
+                _fake_ffmpeg([], [], stderr_head=head, head_wait_s=30, pid_file=str(pid_file)),
+                hw_active=True,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                timeout_s=5,
+            )
+        _assert_gone(pid_file)
+
+    def test_a_verdict_still_being_written_is_found_on_the_next_look(self, tmp_path):
+        said = VERDICT.encode()
+        with open(tmp_path / "stderr", "w+b") as stderr_file:
+            stderr_file.write(b"Stream mapping:\n" + said[:20])
+            stderr_file.flush()
+            found, seen = frames._said_cant_decode(stderr_file, 0)
+            assert found is False
+            stderr_file.write(said[20:] + b"\n")
+            stderr_file.flush()
+            assert frames._said_cant_decode(stderr_file, seen)[0] is True
+            # ffmpeg writes through the same open file: a look must leave its position alone.
+            assert stderr_file.tell() == len(b"Stream mapping:\n" + said + b"\n")
+
+    # What FFmpeg said in production for a video track with no decoder at all (previews' failure log; the output is
+    # this decode's pipe).
+    NO_DECODER = (
+        "[vist#0:0/none @ 0x64271d086700] Decoding requested, but no decoder found for: none\n"
+        "Error opening output file -.\n"
+        "Error opening output files: Invalid argument\n"
+    )
+
+    @pytest.mark.parametrize("hw", [True, False], ids=["gpu", "cpu"])
+    def test_a_video_no_device_can_decode_is_the_files_failure_on_either_worker(self, hw):
+        # Previews' rule: a CPU rerun would fail the same way, so a GPU worker's failure isn't a GpuDecodeError.
+        with pytest.raises(FrameDecodeError) as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([], [], exit_code=234, stderr_tail=self.NO_DECODER),
+                hw_active=hw,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()] * len(p),
+                name="Movie.mkv",
+            )
+        assert type(excinfo.value) is frames.NoDecoderError
+        assert str(excinfo.value) == "This file's video can't be decoded by any device (unknown or protected codec)"
 
 
 def _state(pid: int) -> str:

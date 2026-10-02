@@ -41,8 +41,9 @@ from pathlib import Path
 
 from loguru import logger
 
-#: Bumped whenever the on-disk schema changes. Older schemas are treated
-#: as a miss (forces regen, then writes the new schema). Cheap to bump.
+#: Bumped whenever the on-disk schema changes. A sidecar in another schema
+#: proves nothing either way, so its output is judged like one with no
+#: sidecar (fresh); the next publish rewrites it in the current schema.
 JOURNAL_SCHEMA_VERSION = 1
 
 #: Serialises the read-merge-write of ``.meta`` files. Copies sharing an output
@@ -59,6 +60,18 @@ def _meta_path_for(output: Path) -> Path:
     files.
     """
     return output.with_suffix(output.suffix + ".meta")
+
+
+def _has_content(output: Path) -> bool:
+    """Whether an output is on disk with data in it.
+
+    A 0-byte file is what a power loss leaves when the name reached the disk
+    before the data did; it holds no preview, so it counts as missing.
+    """
+    try:
+        return output.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _fingerprint(source: dict) -> tuple[int, int] | None:
@@ -150,7 +163,14 @@ def write_meta(output_paths: list[Path], canonical_path: str, *, publisher: str 
                 # on the legacy "no .meta = fresh" branch — which would treat
                 # stale outputs as fresh on the next dispatch.
                 tmp_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
-                tmp_path.write_text(json.dumps(payload, separators=(",", ":")))
+                with open(tmp_path, "w") as fh:
+                    fh.write(json.dumps(payload, separators=(",", ":")))
+                    fh.flush()
+                    try:
+                        # Without this a power loss soon after can keep the rename and lose the data (a 0-byte .meta).
+                        os.fsync(fh.fileno())
+                    except OSError as exc:
+                        logger.debug("fsync failed for {}: {}", tmp_path, exc)
                 os.replace(tmp_path, meta_path)
         except OSError as exc:
             # Don't let a read or write failure here mask a successful publish.
@@ -162,7 +182,8 @@ def outputs_fresh_for_source(output_paths: list[Path], canonical_path: str) -> b
 
     "Fresh" semantics:
 
-    * Every entry in ``output_paths`` must exist on disk.
+    * Every entry in ``output_paths`` must exist on disk and hold data; a
+      0-byte output counts as missing whatever its ``.meta`` says.
     * If **no** ``.meta`` sidecars exist at all (legacy outputs from
       before the journal feature shipped), assume fresh — preserves the
       pre-journal skip-if-exists behavior so upgrading the tool doesn't
@@ -183,7 +204,7 @@ def outputs_fresh_for_source(output_paths: list[Path], canonical_path: str) -> b
     if not output_paths:
         return False
 
-    if not all(p.exists() for p in output_paths):
+    if not all(_has_content(p) for p in output_paths):
         return False
 
     try:

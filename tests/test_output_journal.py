@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from media_preview_generator.output.journal import (
     JOURNAL_SCHEMA_VERSION,
     _meta_path_for,
@@ -45,7 +47,7 @@ class TestWriteMeta:
 
     def test_silently_skips_when_source_missing(self, tmp_path):
         out = tmp_path / "a.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         write_meta([out], str(tmp_path / "ghost.mkv"))
         assert not _meta_path_for(out).exists()
 
@@ -53,7 +55,7 @@ class TestWriteMeta:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"data")
         good = tmp_path / "good.bif"
-        good.write_bytes(b"")
+        good.write_bytes(b"bif")
 
         # Make a path whose parent doesn't exist so .meta write fails.
         bad = tmp_path / "subdir-not-created" / "bad.bif"
@@ -69,7 +71,7 @@ class TestOutputsFreshForSource:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         write_meta([out], str(source))
 
         assert outputs_fresh_for_source([out], str(source)) is True
@@ -79,7 +81,7 @@ class TestOutputsFreshForSource:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         write_meta([out], str(source))
 
         # Replace source with different size + new mtime.
@@ -91,7 +93,7 @@ class TestOutputsFreshForSource:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         write_meta([out], str(source))
 
         with source.open("ab") as f:
@@ -109,7 +111,7 @@ class TestOutputsFreshForSource:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         # No write_meta call.
         assert outputs_fresh_for_source([out], str(source)) is True
 
@@ -122,14 +124,14 @@ class TestOutputsFreshForSource:
 
     def test_not_fresh_when_source_missing(self, tmp_path):
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         assert outputs_fresh_for_source([out], str(tmp_path / "ghost.mkv")) is False
 
     def test_handles_corrupt_meta_as_legacy(self, tmp_path):
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         _meta_path_for(out).write_text("not json {")
         # Corrupt meta is ignored entirely; behaves as legacy.
         assert outputs_fresh_for_source([out], str(source)) is True
@@ -139,8 +141,8 @@ class TestOutputsFreshForSource:
         source.write_bytes(b"x" * 100)
         out_a = tmp_path / "a.bif"
         out_b = tmp_path / "b.bif"
-        out_a.write_bytes(b"")
-        out_b.write_bytes(b"")
+        out_a.write_bytes(b"bif")
+        out_b.write_bytes(b"bif")
         # Only out_a stamped.
         write_meta([out_a], str(source))
         assert outputs_fresh_for_source([out_a, out_b], str(source)) is True
@@ -156,8 +158,8 @@ class TestOutputsFreshForSource:
         source.write_bytes(b"x" * 100)
         out_a = tmp_path / "a.bif"
         out_b = tmp_path / "b.bif"
-        out_a.write_bytes(b"")
-        out_b.write_bytes(b"")
+        out_a.write_bytes(b"bif")
+        out_b.write_bytes(b"bif")
         write_meta([out_a, out_b], str(source))
         # Source replaced after stamping.
         source.write_bytes(b"y" * 200)
@@ -184,8 +186,8 @@ class TestOutputsFreshForSource:
         source.write_bytes(b"x" * 100)
         out_a = tmp_path / "a.bif"
         out_b = tmp_path / "b.bif"
-        out_a.write_bytes(b"")
-        out_b.write_bytes(b"")
+        out_a.write_bytes(b"bif")
+        out_b.write_bytes(b"bif")
         # out_a: stamp matches the live source.
         write_meta([out_a], str(source))
         # out_b: hand-write a mismatching .meta with a clearly-wrong
@@ -224,7 +226,7 @@ class TestOutputsFreshForSource:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         # Hand-write a .meta with literal schema=0 (old / unknown version).
         # Production: ``int(data.get("schema", 0)) != JOURNAL_SCHEMA_VERSION
         # → continue`` → no readable .meta → legacy fallback returns True.
@@ -265,7 +267,7 @@ class TestOutputsFreshForSource:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         # Hand-write a partial .meta — has schema + source_mtime, MISSING
         # source_size. The dict.get() default fires → -1 → mismatch.
         _meta_path_for(out).write_text(
@@ -293,7 +295,7 @@ class TestClearMeta:
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
         out = tmp_path / "out.bif"
-        out.write_bytes(b"")
+        out.write_bytes(b"bif")
         write_meta([out], str(source))
         assert _meta_path_for(out).exists()
 
@@ -473,4 +475,109 @@ class TestOutputSharedByCopies:
         write_meta([bif], str(source))
         write_meta([bif], str(source))
 
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["index-sd.bif", "index-sd.bif.meta", "movie.mkv"]
+
+
+class TestEmptyOutputIsNotFresh:
+    """A 0-byte output holds no preview, so it is never fresh.
+
+    A power loss shortly after a publish left 0-byte ``index-sd.bif`` files with 0-byte ``.meta`` next to them; an
+    existence-only check called them fresh on every scan, so they were never rebuilt.
+    """
+
+    @pytest.mark.parametrize("meta", ["no_meta", "empty_meta", "matching_meta"])
+    def test_not_fresh_when_output_is_zero_bytes(self, tmp_path, meta):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 100)
+        out = tmp_path / "index-sd.bif"
+        out.write_bytes(b"real bif")
+        if meta == "matching_meta":
+            write_meta([out], str(source))
+        elif meta == "empty_meta":
+            _meta_path_for(out).write_bytes(b"")
+        out.write_bytes(b"")
+
+        assert outputs_fresh_for_source([out], str(source)) is False
+
+    def test_not_fresh_when_one_of_several_outputs_is_zero_bytes(self, tmp_path):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 100)
+        good_a = tmp_path / "a.bif"
+        empty = tmp_path / "b.bif"
+        good_c = tmp_path / "c.bif"
+        for out in (good_a, empty, good_c):
+            out.write_bytes(b"real bif")
+        write_meta([good_a, empty, good_c], str(source))
+        empty.write_bytes(b"")
+
+        assert outputs_fresh_for_source([good_a, empty, good_c], str(source)) is False
+
+    def test_fresh_when_output_has_data_and_no_meta(self, tmp_path):
+        """Outputs from before the journal existed have no ``.meta``; they must not all regenerate."""
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 100)
+        out = tmp_path / "index-sd.bif"
+        out.write_bytes(b"real bif")
+
+        assert outputs_fresh_for_source([out], str(source)) is True
+
+    def test_fresh_when_output_is_a_bif_with_no_thumbnails(self, tmp_path):
+        """A 72-byte BIF (header and an empty index) is small but complete: only 0 bytes counts as empty."""
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 100)
+        out = tmp_path / "index-sd.bif"
+        out.write_bytes(b"\x89BIF\r\n\x1a\n" + bytes(64))
+
+        assert out.stat().st_size == 72
+        assert outputs_fresh_for_source([out], str(source)) is True
+
+
+class TestMetaForcedToDisk:
+    """The ``.meta`` data is on disk before its name is: a power loss can't leave an empty sidecar in place."""
+
+    def test_fsyncs_the_temp_file_before_renaming_it_into_place(self, tmp_path):
+        from unittest.mock import patch
+
+        from media_preview_generator.output import journal
+
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 100)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fsync(fd):
+            synced = os.fstat(fd)
+            events.append(("fsync", synced.st_ino, synced.st_size))
+            real_fsync(fd)
+
+        def replace(src, dst):
+            events.append(("replace", os.stat(src).st_ino, str(dst)))
+            real_replace(src, dst)
+
+        with patch.object(journal.os, "fsync", side_effect=fsync), patch.object(journal.os, "replace", replace):
+            write_meta([bif], str(source))
+
+        meta = _meta_path_for(bif)
+        written = meta.stat()
+        assert events == [("fsync", written.st_ino, written.st_size), ("replace", written.st_ino, str(meta))]
+        assert written.st_size > 0
+
+    def test_meta_still_written_when_fsync_is_not_supported(self, tmp_path):
+        from unittest.mock import patch
+
+        from media_preview_generator.output import journal
+
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"x" * 100)
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"bif")
+
+        with patch.object(journal.os, "fsync", side_effect=OSError(22, "Invalid argument")) as fsync:
+            write_meta([bif], str(source))
+
+        fsync.assert_called_once()
+        assert json.loads(_meta_path_for(bif).read_text())["source_size"] == 100
+        assert outputs_fresh_for_source([bif], str(source)) is True
         assert sorted(p.name for p in tmp_path.iterdir()) == ["index-sd.bif", "index-sd.bif.meta", "movie.mkv"]

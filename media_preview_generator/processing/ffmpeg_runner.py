@@ -25,6 +25,7 @@ call sites in ``generate_images``' retry cascade don't need to change
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -44,6 +45,17 @@ from .hwaccel import hwaccel_decode_args
 # Added to the stderr lines a run returns when the stall watchdog stopped it: the exit code (-9) alone reads like an OOM
 # kill, and the retry cascade words its CPU hand-off by the real cause (``generator._gpu_hand_off``).
 STALL_WATCHDOG_LINE = "[media_preview_generator] FFmpeg stopped making progress and was stopped by the stall watchdog"
+
+# Added to the stderr lines of a GPU run stopped at the decoder's own verdict that it can't decode the file on this
+# GPU; the retry cascade hands the file to the CPU as an unsupported codec (``generator._gpu_hand_off``).
+GPU_CANT_DECODE_LINE = "[media_preview_generator] The GPU can't decode this video's codec; the GPU run was stopped"
+
+# Printed by FFmpeg decoders that have no software path (its AV1 decoder for GPUs) when the GPU can't decode the file:
+# once per packet to the end of the file, with no frame ever written. Not the generic "hwaccel initialisation returned
+# error": decoders with a software path print that and carry on, or FFmpeg ends the run itself.
+GPU_CANT_DECODE_VERDICT = "Your platform doesn't support hardware accelerated"
+
+_PROGRESS_FRAME_RE = re.compile(r"^frame=\s*(\d+)")
 
 
 def _signal_name(returncode: int) -> str:
@@ -101,6 +113,7 @@ def create_ffmpeg_runner(
         _io_cut_off,
         _is_signal_killed,
         _save_ffmpeg_failure_log,
+        _without_metadata_tags,
         parse_ffmpeg_progress_line,
     )
 
@@ -431,9 +444,34 @@ def create_ffmpeg_runner(
             total_duration = None
             speed_local = "0.0x"
             ffmpeg_output_lines = []
-            line_count = 0
             last_progress_time = time.time()
             stalled = False
+            gpu_cant_decode = False
+            wrote_frame = False
+            stderr_reader = None
+            unfinished_line = ""
+
+            def read_new_stderr(*, process_exited: bool = False) -> list[str]:
+                """The lines FFmpeg has added to its stderr file since the last call, stripped, blank ones dropped.
+
+                Reads on from where the last call stopped (the file can reach tens of MB). A line FFmpeg is still
+                writing is held back until its newline arrives, or the process has exited.
+                """
+                nonlocal stderr_reader, unfinished_line
+                if stderr_reader is None:
+                    if not os.path.exists(output_file):
+                        return []
+                    # errors="replace": FFmpeg can emit non-UTF-8 bytes in stderr (e.g. file
+                    # paths or stream metadata in Latin-1). Strict decode crashed the runner
+                    # mid-loop, surfaced as a misleading "corrupt video file" error to users.
+                    stderr_reader = open(output_file, encoding="utf-8", errors="replace")
+                raw_lines = stderr_reader.readlines()
+                if unfinished_line:
+                    raw_lines = [unfinished_line + (raw_lines[0] if raw_lines else ""), *raw_lines[1:]]
+                    unfinished_line = ""
+                if raw_lines and not process_exited and not raw_lines[-1].endswith("\n"):
+                    *raw_lines, unfinished_line = raw_lines
+                return [line for line in (raw.strip() for raw in raw_lines) if line]
 
             def speed_capture_callback(
                 progress_percent,
@@ -519,25 +557,36 @@ def create_ffmpeg_runner(
                         logger.info("FFmpeg resumed for {} (PID {})", video_file, proc.pid)
                     except (ProcessLookupError, OSError):
                         pass
-                if os.path.exists(output_file):
+                try:
+                    new_lines = read_new_stderr()
+                except OSError:
+                    new_lines = []
+                for line in new_lines:
+                    ffmpeg_output_lines.append(line)
+                    total_duration = parse_ffmpeg_progress_line(line, total_duration, speed_capture_callback)
+                    progress = _PROGRESS_FRAME_RE.match(line)
+                    if progress and int(progress.group(1)) > 0:
+                        wrote_frame = True
+                    elif hw_decode_active and not wrote_frame and GPU_CANT_DECODE_VERDICT in line:
+                        gpu_cant_decode = True
+                if new_lines:
+                    last_progress_time = time.time()
+                if gpu_cant_decode:
+                    # One verdict before any frame is enough: all 68 failed production runs that printed it wrote no
+                    # frame, and FFmpeg itself ends a run at the first such failure for a decoder with a software path.
+                    logger.info(
+                        "The GPU can't decode the video codec of {} — stopping the GPU run now instead of letting "
+                        "FFmpeg fail on every frame to the end of the file.",
+                        video_file,
+                    )
+                    proc.terminate()
                     try:
-                        # errors="replace": FFmpeg can emit non-UTF-8 bytes in stderr (e.g. file
-                        # paths or stream metadata in Latin-1). Strict decode crashed the runner
-                        # mid-loop, surfaced as a misleading "corrupt video file" error to users.
-                        with open(output_file, encoding="utf-8", errors="replace") as f:
-                            lines = f.readlines()
-                            if len(lines) > line_count:
-                                for i in range(line_count, len(lines)):
-                                    line = lines[i].strip()
-                                    if line:
-                                        ffmpeg_output_lines.append(line)
-                                        total_duration = parse_ffmpeg_progress_line(
-                                            line, total_duration, speed_capture_callback
-                                        )
-                                line_count = len(lines)
-                                last_progress_time = time.time()
-                    except OSError:
-                        pass
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    ffmpeg_output_lines.append(GPU_CANT_DECODE_LINE)
+                    break
                 if time.time() - last_progress_time > FFMPEG_STALL_TIMEOUT_SEC:
                     logger.warning(
                         "FFmpeg stopped making progress for {}s while processing {} — killing it. "
@@ -556,31 +605,25 @@ def create_ffmpeg_runner(
                 time.sleep(0.005)
 
             # Process any remaining data
-            if os.path.exists(output_file):
-                try:
-                    with open(output_file, encoding="utf-8", errors="replace") as f:
-                        lines = f.readlines()
-                        if len(lines) > line_count:
-                            for i in range(line_count, len(lines)):
-                                line = lines[i].strip()
-                                if line:
-                                    ffmpeg_output_lines.append(line)
-                                    total_duration = parse_ffmpeg_progress_line(
-                                        line, total_duration, speed_capture_callback
-                                    )
-                except OSError:
-                    pass
+            try:
+                for line in read_new_stderr(process_exited=True):
+                    ffmpeg_output_lines.append(line)
+                    total_duration = parse_ffmpeg_progress_line(line, total_duration, speed_capture_callback)
+            except OSError:
+                pass
         finally:
             # Ensure stderr file handle is always closed
             stderr_fh.close()
+            if stderr_reader is not None:
+                stderr_reader.close()
             try:
                 os.remove(output_file)
             except OSError:
                 pass
 
-        # Error logging (skip generic failure log when we killed due to stall; already logged above)
-        if proc.returncode != 0 and not stalled:
-            exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode)
+        # Error logging (skip generic failure log when we stopped FFmpeg ourselves; already logged above)
+        if proc.returncode != 0 and not stalled and not gpu_cant_decode:
+            exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode, ffmpeg_output_lines)
             logger.error(
                 "FFmpeg failed while extracting frames from {} (exit code {}: {}). "
                 "See the FFmpeg stderr lines logged below — they usually point at the cause "
@@ -634,6 +677,13 @@ def create_ffmpeg_runner(
                     output_folder,
                     os.path.isdir(output_folder),
                 )
+            elif exit_diagnosis == "no_decoder":
+                logger.warning(
+                    "FFmpeg has no decoder for the video in {}: it can't be decoded by any device (an unknown or "
+                    "protected codec, such as an encrypted track), so it is not retried on the CPU. "
+                    "Other files in the queue will keep processing.",
+                    video_file,
+                )
             elif exit_diagnosis == "high_exit_non_signal":
                 logger.warning(
                     "FFmpeg crashed with an unusual exit code ({}) while processing {}. "
@@ -644,7 +694,7 @@ def create_ffmpeg_runner(
                     video_file,
                 )
             if ffmpeg_output_lines:
-                tail = ffmpeg_output_lines[-5:]
+                tail = _without_metadata_tags(ffmpeg_output_lines)[-5:]
                 logger.warning(
                     "FFmpeg's last {} stderr lines for {} (these usually identify the cause):",
                     len(tail),

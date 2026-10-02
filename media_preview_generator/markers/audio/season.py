@@ -1469,7 +1469,8 @@ class _EndPictures:
     no remembered failure, so every share is measured again.
 
     A file ffprobe or ffmpeg couldn't read (``end_picture.ReadFailedError``) is remembered with its identity for a day
-    (``END_PICTURE_RETRY``) and not read for the check meanwhile, by this episode's run or any sibling's. It is never a
+    (``END_PICTURE_RETRY``) and not read for the check meanwhile, by this episode's run or any sibling's; one only the
+    worker's GPU attempt failed on (a timeout) is not remembered, since the CPU hasn't tried it. It is never a
     pass: this episode's own file makes the check unavailable (no season audio answer this time), and a partner has no
     share, so the other partner decides; with no share at all the check is unavailable too. Only a share, or "certainly
     no frames" (None), is cached. A cancel or stalled ffprobes raise ``end_picture.CheckUnavailableError`` with nothing
@@ -1537,7 +1538,9 @@ class _EndPictures:
                         self._shares[key] = self._measure(key, segment, partner, offset_s)
                     except end_picture.ReadFailedError as exc:
                         failed = self._target if exc.path == self._target.canonical_path else partner
-                        self._record_failure(failed)
+                        # A GPU attempt's failure isn't the file's: remembered, it refused the worker's CPU rerun.
+                        if not exc.gpu_attempt:
+                            self._record_failure(failed)
                         if failed is self._target:
                             raise end_picture.CheckUnavailableError(str(exc)) from exc
                         unread = True

@@ -12,6 +12,8 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from media_preview_generator.jobs.worker import Worker
 from media_preview_generator.processing import ProcessingResult
 from media_preview_generator.web.jobs import JobManager, JobProgress
@@ -254,6 +256,22 @@ class TestMisconfigurationDetection:
             fired = _maybe_log_path_mapping_misconfig(
                 self._outcome(generated=50, skipped_file_not_found=10), processed=60
             )
+
+        assert fired is False
+        mock_logger.warning.assert_not_called()
+
+    @pytest.mark.parametrize("success_key", ["generated", "skipped_bif_exists", "published", "skipped_output_exists"])
+    def test_no_warning_when_a_few_not_found_beside_successes(self, success_key):
+        """Nightly scan c091d637: 115,831 previews already existed and 6 files weren't found. Working path mappings
+        found the 115,831, so the "All 6 item(s) … your path mappings are wrong" warning must not fire, whichever
+        success column the other files landed in.
+        """
+        from media_preview_generator.jobs.orchestrator import _maybe_log_path_mapping_misconfig
+
+        outcome = self._outcome(skipped_file_not_found=6)
+        outcome[success_key] = 115831
+        with patch("media_preview_generator.jobs.orchestrator.logger") as mock_logger:
+            fired = _maybe_log_path_mapping_misconfig(outcome, processed=115837)
 
         assert fired is False
         mock_logger.warning.assert_not_called()

@@ -57,6 +57,7 @@ from .outcomes import (
     PLEX_PASS_UNKNOWN,
     READ_BACK_FAILED,
     RETRY_REASON_CODES,
+    UNCHECKED_FILES,
     VERIFY_LATER,
     VERSIONS_UNCHECKED,
     FileOutcome,
@@ -311,7 +312,12 @@ def _end_chain(jm, cfg: dict, waiting: dict[str, set[str]]) -> None:
 
 
 def _queue_retry(
-    job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str], promised: set[str] = frozenset()
+    job,
+    cfg: dict,
+    waiting: dict[str, set[str]],
+    sender_paths: dict[str, str],
+    promised: set[str] = frozenset(),
+    also: set[str] = frozenset(),
 ) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet, that a server could take later, or whose write
     gave up waiting for Plex's busy database (a few minutes later it is usually free).
@@ -331,6 +337,9 @@ def _queue_retry(
         sender_paths: The path each local path was given as (``build_items``); a missing entry is retried as is.
         promised: Local paths whose row said this job tries again (``PipelineContext.busy_promised``, at most
             ``MAX_RETRY_FILES``): taken first when more files wait than a retry job takes.
+        also: Local paths the retry runs as well, while it has room: the versions of a waiting file's Plex item that
+            were never checked (``outcomes.UNCHECKED_FILES``). No job lists them otherwise, so the item would wait for
+            good. They aren't counted as waiting.
 
     Returns:
         The paths the retry job lists (as sent); empty when none was queued.
@@ -365,6 +374,8 @@ def _queue_retry(
         if len(paths) > MAX_RETRY_FILES:
             jm.add_log(job.id, f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} get no retry; {again}")
             paths = paths[:MAX_RETRY_FILES]
+        unchecked = sorted(set(also) - set(paths) - waiting_paths)[: MAX_RETRY_FILES - len(paths)]
+        listed = [*paths, *unchecked]
         delay = scaled_backoff_delay(attempt, delay_setting)
         base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         # A retry's own retry joins the same chain; any other job (an old top-level "Retry:" job included) heads one.
@@ -373,8 +384,8 @@ def _queue_retry(
             library_name=f"Retry: {base_name}",
             priority=job.priority,
             source=str(cfg.get("source") or "retry"),
-            file_paths=paths,
-            item_id_hints=_hints_for(cfg, paths) or None,
+            file_paths=listed,
+            item_id_hints=_hints_for(cfg, listed) or None,
             retry_attempt=attempt,
             retry_delay_s=delay,
             verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
@@ -391,11 +402,13 @@ def _queue_retry(
             next_run_at=retry.config.get("retry_not_before"),
             wait_seconds=delay,
         )
+        checks = f", which also checks {len(unchecked)} version(s) never checked" if unchecked else ""
         jm.add_log(
             job.id,
-            f"INFO - {len(paths)} file(s) {reason}; retry {attempt} of {count} in {delay}s (job {retry.id[:8]})",
+            f"INFO - {len(paths)} file(s) {reason}; retry {attempt} of {count} in {delay}s "
+            f"(job {retry.id[:8]}){checks}",
         )
-        return paths
+        return listed
     except Exception:
         logger.exception("Could not queue the retry for files job {} found waiting", job.id)
         return []
@@ -1924,6 +1937,8 @@ def run_intro_credits_job(job_id: str) -> None:
                 replaced: set[str] = set(replaced_before_restart)
                 unchecked: dict[str, set[str]] = {}
                 gone_items: dict[str, set[tuple[str, str]]] = {}
+                # The versions a waiting file's Plex item never had checked: the retry runs them too.
+                unchecked_versions: set[str] = set()
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that can take the file later, even when another server was written. Check servers
@@ -1934,6 +1949,10 @@ def run_intro_credits_job(job_id: str) -> None:
                         codes &= {PLEX_DB_BUSY, FILE_BUSY}
                     for code in codes:
                         waiting.setdefault(code, set()).add(file_path)
+                    if VERSIONS_UNCHECKED in codes:
+                        for row in servers or []:
+                            if retry_reason(row) == VERSIONS_UNCHECKED:
+                                unchecked_versions.update(row.get(UNCHECKED_FILES) or ())
                     if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
                         waiting.setdefault(NOT_ON_DISK, set()).add(file_path)
                     if any(isinstance(row, dict) and row.get(VERIFY_LATER) for row in servers or []):
@@ -2038,7 +2057,11 @@ def run_intro_credits_job(job_id: str) -> None:
                 # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
                 # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
                 # file still waiting keeps its item and is listed again by a later run.
-                retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
+                retried = (
+                    _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised(), unchecked_versions)
+                    if waiting
+                    else []
+                )
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 _complete(
                     jm,

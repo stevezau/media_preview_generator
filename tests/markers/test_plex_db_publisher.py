@@ -1177,6 +1177,104 @@ class TestAVersionGoneFromDisk:
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == int(written)
         # Only a version still to be checked makes the job try the file again.
         assert pub.last_unchecked_versions is (not written)
+        # The retry runs that version too, at the path that holds it; one on no disk in sight names no path.
+        assert pub.last_unchecked_files == ((str(tmp_path / b_on / "tv" / "B.mkv"),) if b_on else ())
+
+    def test_a_write_with_nothing_unchecked_forgets_the_last_writes_unchecked_files(self, tmp_path, disks):
+        b = tmp_path / "disk1" / "tv" / "B.mkv"
+        b.write_bytes(b"b")
+        db, pub = self._publisher(tmp_path, ("disk1",))
+        path = str(tmp_path / "disk1" / "tv" / "A.mkv")
+        assert _write_one(pub, [INTRO], path=path) == [] and pub.last_unchecked_files == (str(b),)
+        b.unlink()
+        assert _write_one(pub, [INTRO], path=path) == [INTRO]
+        assert pub.last_unchecked_versions is False and pub.last_unchecked_files == ()
+
+    @pytest.mark.parametrize(
+        ("old_disk", "written"),
+        [("mounted", True), ("empty", False), ("not-mounted", False)],
+    )
+    def test_a_replaced_version_whose_season_folder_went_with_it_takes_no_part(self, tmp_path, old_disk, written):
+        # Production (Animal Control S05E01): Sonarr replaced the season's only file on one disk with a file on another,
+        # so the old file's season folder is gone and Plex still lists it. The disk's other folders show it is mounted;
+        # an empty or missing disk root is a disk that dropped, and its version is still waited for.
+        new = tmp_path / "disk1" / "tv" / "Show" / "Season 05" / "E01 - AMZN.mkv"
+        new.parent.mkdir(parents=True)
+        new.write_bytes(b"a")
+        old = tmp_path / "disk2" / "tv" / "Show" / "Season 05" / "E01 - HULU.mkv"
+        if old_disk == "mounted":
+            (tmp_path / "disk2" / "tv" / "Show" / "Season 04").mkdir(parents=True)
+        elif old_disk == "empty":
+            (tmp_path / "disk2").mkdir()
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((str(new), None), (str(old), None)))
+        pub = _publisher(
+            tmp_path,
+            folder,
+            mappings=[
+                {"plex_prefix": str(tmp_path / disk), "local_prefix": str(tmp_path / disk)}
+                for disk in ("disk1", "disk2")
+            ],
+            libraries=[Library("1", "TV Shows", (str(tmp_path / "disk1" / "tv"), str(tmp_path / "disk2" / "tv")))],
+            sibling_markers=lambda _path: None,
+        )
+
+        assert _write_one(pub, [CREDITS_FINAL], path=str(new)) == ([CREDITS_FINAL] if written else [])
+
+        assert _served(db) == ([(T.CREDITS, CREDITS_FINAL.start_ms, CREDITS_FINAL.end_ms)] if written else [])
+        assert pub.last_unchecked_versions is (not written)
+
+    @pytest.mark.parametrize(
+        ("library_folders", "written"),
+        [(("tv", "tv4k"), True), (("tv",), False), ((), False)],
+        ids=["in-a-library", "under-the-path-mapping-only", "no-libraries"],
+    )
+    def test_a_missing_season_folder_is_gone_only_under_a_library_folder(self, tmp_path, library_folders, written):
+        # The path mapping's folder holding entries says nothing about a folder inside it that no library names: that
+        # can be a disk of its own that isn't mounted. Only a library's folder stands in for the missing season folder.
+        media = tmp_path / "media"
+        a = media / "tv" / "Show" / "Season 01" / "A.mkv"
+        a.parent.mkdir(parents=True)
+        a.write_bytes(b"a")
+        (media / "tv4k" / "Other Show").mkdir(parents=True)
+        folder = tmp_path / "Plex Media Server"
+        parts = (("/data/tv/Show/Season 01/A.mkv", None), ("/data/tv4k/Show/Season 01/B.mkv", None))
+        db = _make_db(folder, parts=parts)
+        pub = _publisher(
+            tmp_path,
+            folder,
+            mappings=[{"plex_prefix": "/data", "local_prefix": str(media)}],
+            libraries=[Library("1", "TV Shows", tuple(f"/data/{name}" for name in library_folders))],
+            sibling_markers=lambda _path: None,
+        )
+
+        assert _write_one(pub, [INTRO], path=str(a)) == ([INTRO] if written else [])
+
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == int(written)
+        assert pub.last_unchecked_versions is (not written)
+
+    def test_a_version_under_a_path_mapping_alone_on_a_disk_that_isnt_mounted_is_waited_for(self, tmp_path):
+        # The architecture review's case: /media/tv4k is a disk of its own that isn't mounted and no library names it,
+        # while /media (the path mapping's folder) holds the other libraries.
+        media = tmp_path / "media"
+        a = media / "tv" / "Show" / "Season 01" / "A.mkv"
+        a.parent.mkdir(parents=True)
+        a.write_bytes(b"a")
+        folder = tmp_path / "Plex Media Server"
+        parts = (("/data/tv/Show/Season 01/A.mkv", None), ("/data/tv4k/Show/Season 01/B.mkv", None))
+        db = _make_db(folder, parts=parts)
+        pub = _publisher(
+            tmp_path,
+            folder,
+            mappings=[{"plex_prefix": "/data", "local_prefix": str(media)}],
+            libraries=[Library("1", "TV Shows", ("/data/tv",))],
+            sibling_markers=lambda _path: None,
+        )
+
+        assert _write_one(pub, [INTRO], path=str(a)) == []
+
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+        assert pub.last_unchecked_versions is True
 
     def test_a_version_on_a_disk_whose_mount_went_stale_is_waited_for(self, tmp_path, disks):
         # The architecture review's case: the season folder is on disk1, and disk2 (which really holds B) shows only

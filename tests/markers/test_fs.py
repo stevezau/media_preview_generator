@@ -306,3 +306,112 @@ class TestGoneFromDiskTrustingTheRoot:
 
         monkeypatch.setattr(os, "lstat", lstat)
         assert gone_from_disk([path], roots={path: (str(root),)}, trust_roots=True) is False
+
+
+class TestGoneFromDiskAsAPlexVersion:
+    """A version Plex still lists (``trust_roots`` with ``follow_links``): mounted, non-empty roots stand in for a
+    missing season folder, a dangling link is gone, and a root that is empty or not mounted never makes a file gone.
+
+    Production: Sonarr replaced a season's only file with one on another disk, so the old file's season folder went
+    with it, and its Plex item waited for that version forever.
+    """
+
+    @pytest.fixture
+    def disk(self, tmp_path):
+        root = tmp_path / "disk_a" / "tv"
+        (root / "Show" / "Season 04").mkdir(parents=True)  # the show's other seasons are still on this disk
+        (root / "Other Show").mkdir()
+        return root, root / "Show" / "Season 05" / "ep.mkv"
+
+    @staticmethod
+    def _gone(path, *roots) -> bool:
+        return gone_from_disk(
+            [str(path)], roots={str(path): tuple(map(str, roots))}, trust_roots=True, follow_links=True
+        )
+
+    @pytest.mark.parametrize(
+        ("at_path", "root", "gone"),
+        [
+            ("season-folder-gone", "mounted", True),
+            ("season-folder-gone", "empty", False),
+            ("season-folder-gone", "not-mounted", False),
+            ("file-gone", "mounted", True),
+            ("dangling-link", "mounted", True),
+            ("file-there", "mounted", False),
+            # A folder under an empty or missing root can't exist, so the other three rows have no such cell on one
+            # disk; ``test_another_root_of_the_path_that_looks_unmounted_makes_it_not_gone`` covers them.
+        ],
+    )
+    def test_the_matrix_on_one_disk(self, disk, tmp_path, at_path, root, gone):
+        library, path = disk
+        if at_path != "season-folder-gone":
+            path.parent.mkdir()
+        if at_path == "dangling-link":
+            os.symlink(tmp_path / "rclone" / "ep.mkv", path)
+        elif at_path == "file-there":
+            path.write_bytes(b"x")
+        if root != "mounted":
+            shutil.rmtree(library)
+        if root == "empty":
+            library.mkdir()  # an unmounted disk's mount point
+        assert self._gone(path, library) is gone
+
+    @pytest.mark.parametrize("at_path", ["season-folder-gone", "file-gone", "dangling-link"])
+    @pytest.mark.parametrize("other_root", ["empty", "not-mounted"])
+    def test_another_root_of_the_path_that_looks_unmounted_makes_it_not_gone(self, disk, tmp_path, at_path, other_root):
+        # The path mapping's folder beside the library's: one of the two not holding entries is a disk that dropped.
+        library, path = disk
+        if at_path != "season-folder-gone":
+            path.parent.mkdir()
+        if at_path == "dangling-link":
+            os.symlink(tmp_path / "rclone" / "ep.mkv", path)
+        mapping_root = tmp_path / "mapped"
+        if other_root == "empty":
+            mapping_root.mkdir()
+        assert self._gone(path, mapping_root, library) is False
+
+    def test_a_series_deleted_whole_is_gone(self, disk):
+        library, path = disk
+        shutil.rmtree(library / "Show")
+        assert self._gone(path, library) is True
+
+    def test_an_empty_mount_point_where_the_series_was_is_not_gone(self, disk):
+        library, path = disk
+        shutil.rmtree(library / "Show")
+        (library / "Show").mkdir()  # the series was its own mount, now unmounted
+        assert self._gone(path, library) is False
+
+    def test_the_file_on_another_disk_is_not_gone(self, disk, tmp_path):
+        library, path = disk
+        other = tmp_path / "disk_b" / "tv" / "Show" / "Season 05" / "ep.mkv"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"x")
+        roots = {str(path): (str(library),), str(other): (str(tmp_path / "disk_b" / "tv"),)}
+        assert gone_from_disk(list(roots), roots=roots, trust_roots=True, follow_links=True) is False
+
+    def test_without_roots_a_missing_folder_is_still_not_gone(self, disk):
+        _library, path = disk
+        assert gone_from_disk([str(path)], trust_roots=True, follow_links=True) is False
+
+    @pytest.mark.parametrize("roots", [("/",), ("//",)], ids=["slash", "slashes"])
+    def test_a_root_of_slash_is_never_trusted(self, disk, roots):
+        # A path mapping onto ``/`` (or a library there): ``/`` holds entries whatever is mounted, so a disk that
+        # dropped, mount point and all, would make every file under it look gone.
+        _library, path = disk
+        assert gone_from_disk([str(path)], roots={str(path): roots}, trust_roots=True, follow_links=True) is False
+        path.parent.mkdir()  # its folder shows it gone, as without roots
+        assert gone_from_disk([str(path)], roots={str(path): roots}, trust_roots=True, follow_links=True) is True
+
+    def test_a_root_of_slash_beside_the_librarys_folder_leaves_that_folder_to_stand_in(self, disk):
+        library, path = disk
+        assert self._gone(path, "/", library) is True
+        shutil.rmtree(library)
+        library.mkdir()  # the library's disk dropped
+        assert self._gone(path, "/", library) is False
+
+    def test_marking_files_missing_still_takes_a_dangling_link_for_the_file(self, disk, tmp_path):
+        # ``follow_links`` left out: ``trust_roots`` alone keeps its rule (``missing.py``).
+        library, path = disk
+        path.parent.mkdir()
+        os.symlink(tmp_path / "rclone" / "ep.mkv", path)
+        assert gone_from_disk([str(path)], roots={str(path): (str(library),)}, trust_roots=True) is False

@@ -655,6 +655,153 @@ class TestAtomicJsonSaveWithBackup:
 
         assert ancient.exists()
 
+    # What a deploy script and older app versions leave next to settings.json. They sort AFTER the app's own
+    # digit-led names, so pruning "the oldest by name" used to delete the app's backups first and then these.
+    _FOREIGN_BAKS = ("settings.json.pre-312.bak", "settings.json.pre-upgrade.bak", "settings.json.bak")
+    _OWN_BAKS = tuple(f"settings.json.2026090{day}-120000.bak" for day in range(1, 9))
+
+    def _seed_baks(self, tmp_path, names):
+        target = tmp_path / "settings.json"
+        target.write_text('{"v": "live"}')
+        for name in names:
+            (tmp_path / name).write_text(f'{{"from": "{name}"}}')
+        return target
+
+    def _bak_names(self, tmp_path):
+        return sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".bak"))
+
+    @pytest.mark.parametrize(
+        ("suffix", "is_own"),
+        [
+            (".20260429-211544.bak", True),
+            (".bak", False),  # legacy single backup
+            (".pre-312.bak", False),
+            (".2026042-9211544.bak", False),  # dash in the wrong place
+            (".20260429-21154.bak", False),  # one digit short
+            (".20260429-2115ab.bak", False),
+            (".20260429-211544.old.bak", False),
+            (".20260429-211544.bak.tmp", False),
+        ],
+    )
+    def test_timestamped_backups_lists_only_the_apps_own_names(self, tmp_path, suffix, is_own):
+        from media_preview_generator.utils import timestamped_backups
+
+        target = self._seed_baks(tmp_path, [f"settings.json{suffix}"])
+
+        assert timestamped_backups(str(target)) == ([f"{target}{suffix}"] if is_own else [])
+
+    def test_timestamped_backups_are_oldest_first(self, tmp_path):
+        from media_preview_generator.utils import timestamped_backups
+
+        target = self._seed_baks(tmp_path, reversed(self._OWN_BAKS + self._FOREIGN_BAKS))
+
+        assert timestamped_backups(str(target)) == [str(tmp_path / name) for name in self._OWN_BAKS]
+
+    def test_prune_keeps_the_newest_own_backups_and_never_deletes_foreign_ones(self, tmp_path):
+        from media_preview_generator.utils import _prune_old_backups
+
+        target = self._seed_baks(tmp_path, self._OWN_BAKS + self._FOREIGN_BAKS)
+
+        _prune_old_backups(str(target), keep=3)
+
+        assert self._bak_names(tmp_path) == sorted(self._OWN_BAKS[-3:] + self._FOREIGN_BAKS)
+
+    def test_prune_does_not_count_foreign_backups_towards_the_limit(self, tmp_path):
+        from media_preview_generator.utils import _prune_old_backups
+
+        target = self._seed_baks(tmp_path, self._OWN_BAKS[:2] + self._FOREIGN_BAKS)
+
+        _prune_old_backups(str(target), keep=3)  # 2 own + 3 foreign: 5 files, but only 2 count
+
+        assert self._bak_names(tmp_path) == sorted(self._OWN_BAKS[:2] + self._FOREIGN_BAKS)
+
+    def test_prune_by_age_never_deletes_foreign_backups(self, tmp_path):
+        import time
+
+        from media_preview_generator.utils import _prune_old_backups
+
+        target = self._seed_baks(tmp_path, self._OWN_BAKS[:1] + self._FOREIGN_BAKS)
+        old_mtime = time.time() - (30 * 86400)
+        for name in self._OWN_BAKS[:1] + self._FOREIGN_BAKS:
+            os.utime(str(tmp_path / name), (old_mtime, old_mtime))
+
+        _prune_old_backups(str(target), keep=10, max_age_days=7)
+
+        assert self._bak_names(tmp_path) == sorted(self._FOREIGN_BAKS)
+
+    def test_save_next_to_foreign_backups_keeps_its_own_newest_and_all_foreign_ones(self, tmp_path, monkeypatch):
+        import json as _json
+
+        from media_preview_generator import utils
+
+        monkeypatch.setattr(utils, "_backup_retention", lambda: 3)
+        target = self._seed_baks(tmp_path, self._OWN_BAKS + self._FOREIGN_BAKS)
+
+        utils.atomic_json_save_with_backup(str(target), {"v": "new"})
+
+        own = [name for name in self._bak_names(tmp_path) if name not in self._FOREIGN_BAKS]
+        assert own[:2] == list(self._OWN_BAKS[-2:])
+        assert len(own) == 3, own
+        assert _json.loads((tmp_path / own[2]).read_text()) == {"v": "live"}
+        for name in self._FOREIGN_BAKS:
+            assert (tmp_path / name).read_text() == f'{{"from": "{name}"}}'
+
+    def test_saves_within_one_second_keep_the_file_as_it_was_before_the_first(self, tmp_path, monkeypatch):
+        """A settings migration saves ~7 times in a second; the backup must be the pre-migration file."""
+        import json as _json
+        from datetime import datetime as _real_datetime
+
+        from media_preview_generator import utils
+
+        class _FrozenClock:
+            @staticmethod
+            def now(tz=None):
+                return _real_datetime(2026, 9, 1, 12, 0, 0, tzinfo=tz)
+
+        monkeypatch.setattr(utils, "datetime", _FrozenClock)
+        target = tmp_path / "config.json"
+        target.write_text('{"v": "before"}')
+
+        for v in ("step1", "step2", "after"):
+            utils.atomic_json_save_with_backup(str(target), {"v": v})
+
+        assert _json.loads(target.read_text()) == {"v": "after"}
+        assert self._bak_names(tmp_path) == ["config.json.20260901-120000.bak"]
+        assert _json.loads((tmp_path / "config.json.20260901-120000.bak").read_text()) == {"v": "before"}
+
+    @pytest.mark.parametrize("untouched_days", [0, 30], ids=["just-edited", "untouched-for-a-month"])
+    def test_a_fresh_backup_is_not_pruned_by_age_however_old_the_file_was(self, tmp_path, monkeypatch, untouched_days):
+        """With ``config_backup_max_age_days`` set, the backup of a file last modified before the cutoff was deleted
+        in the same save: the copy carried the file's modified time, and pruning is by the backup's."""
+        import json as _json
+        import pathlib
+
+        from media_preview_generator import utils
+
+        monkeypatch.setattr(utils, "_backup_max_age_days", lambda: 7)
+        target = tmp_path / "config.json"
+        target.write_text('{"v": "before"}')
+        modified = time.time() - untouched_days * 86400
+        os.utime(target, (modified, modified))
+
+        utils.atomic_json_save_with_backup(str(target), {"v": "after"})
+
+        backups = utils.timestamped_backups(str(target))
+        assert len(backups) == 1, "the backup just made was pruned"
+        assert _json.loads(pathlib.Path(backups[0]).read_text()) == {"v": "before"}
+        assert time.time() - os.path.getmtime(backups[0]) < 60  # made now, whenever the file was last modified
+
+    def test_backup_file_returns_the_path_it_wrote(self, tmp_path):
+        from media_preview_generator.utils import backup_file, timestamped_backups
+
+        target = tmp_path / "config.json"
+        target.write_text('{"v": 1}')
+
+        written = backup_file(str(target))
+
+        assert timestamped_backups(str(target)) == [written]
+        assert (tmp_path / os.path.basename(written)).read_text() == '{"v": 1}'
+
     def test_backup_failure_does_not_block_primary_write(self, tmp_path, monkeypatch):
         """If shutil.copy2 raises, the primary write still happens."""
         import json as _json

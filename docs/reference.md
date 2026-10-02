@@ -320,7 +320,7 @@ over at most 100 files still on disk where an unlocked decided type rests on an 
 covers is in Needs review or not found. Credit text and season audio check what other sources decided (a credits
 chapter or an online start, an intro chapter or a lone online intro), so their older answer lists an unlocked decided
 type whatever decided it. It also takes files whose one-version Plex item still shows times within
-2 s of an older decision, and, after an update that changes the decision rules, every file not yet decided under
+2 s of an older decision, files still waiting for their Plex item's other versions (each once), and, after an update that changes the decision rules, every file not yet decided under
 them with an unlocked type that has a stored answer (decided, Needs review, not found, or kept as the server's own;
 not a type whose detection is off) or a marker carried over from a file it replaced: each run that decides a file records the rules version it used (`decide_rules` in
 `version_reruns`). A marker such a run's new rules alone would move to Needs review (or leave out) stays while
@@ -444,7 +444,7 @@ job or retry for a file gone from disk. A cancelled job queues none. The request
 job completes drops them, and the season's next run asks again. Every job that completes, except Season, retry and verify
 jobs, then starts a background cleanup once it has given back its slot (at most one running, and at most one start an
 hour). It checks up to 2,000 fingerprinted files on disk for at most 60 s, those checked longest ago first, and clears
-the cached fingerprints (and the matches made with them) of files gone from a folder that still exists. The app log
+the cached fingerprints (and the matches made with them) of files gone from a folder that still exists, or marked missing for 30 days. The app log
 line, not the job's, is `Cleared the cached audio fingerprints of N file(s) no longer on disk`. Plex/Emby/Jellyfin webhooks arrive one episode at a
 time: an episode whose season folder a webhook follow-up that hasn't read its files yet already covers joins that
 follow-up (renamed "Intro & Credits · N files") while it stays within 500 files, instead of queuing another. A joined
@@ -806,7 +806,7 @@ or low"}`. `503` when the config directory isn't writable (checked before the bo
 | Media server (Plex / Emby / Jellyfin) | `/data/media/Movies/film.mkv` |
 | This Container | `/media/Movies/film.mkv` |
 
-Without mapping, you'll see "Skipping as file not found" errors.
+Without mapping, the app can't find the files and jobs report them as not found.
 
 ### Configuration (Web UI)
 
@@ -1679,7 +1679,7 @@ unless noted.
 | PUT | `/api/settings/log-level` | Change runtime log verbosity (`{"level": "DEBUG"\|"INFO"\|...}`) |
 | POST | `/api/settings/validate-local-path` | Pre-flight a mount/volume path before saving (exists + readable) |
 | POST | `/api/settings/validate-plex-config-folder` | Pre-flight a Plex config folder (looks for `Cache/Media/Metadata`) |
-| GET | `/api/settings/backups` | List rolling settings.json backup snapshots |
+| GET | `/api/settings/backups` | List the backups of each config file (`settings.json`, `schedules.json`, `webhook_history.json`, `setup_state.json`) |
 | POST | `/api/settings/backups/restore` | Restore a prior settings.json snapshot |
 | POST | `/api/setup/skip` | Skip the setup wizard (advanced — saves `setup_complete=true` with minimal state) |
 | POST | `/api/setup/validate-paths` | Pre-flight wizard path fields in bulk |
@@ -1715,8 +1715,8 @@ unless noted.
 | GET | `/api/system/version` | App version + commit SHA + build date |
 | GET | `/api/system/browse` | Folder picker: lists sub-directories of `?path=` (default `/`). `?include_files=1` also returns video files (each entry has `is_dir`); `?show_hidden=1` includes dot-entries. System dirs (`/proc`, `/sys`, …) are denied. |
 | GET | `/api/system/notifications` | In-app notification list (health checks, deprecations, warnings) |
-| POST | `/api/system/notifications/{id}/dismiss` | Session-only dismiss |
-| POST | `/api/system/notifications/{id}/dismiss-permanent` | Persistent dismiss (stored in settings) |
+| POST | `/api/system/notifications/{id}/dismiss` | Dismiss until the next restart |
+| POST | `/api/system/notifications/{id}/dismiss-permanent` | Dismiss for good (stored in settings). `400` for `media_mount_unhealthy` (a media folder that looks empty or unmounted), which can only be dismissed until the next restart. A dismissed **Settings migrated** notice comes back after the next upgrade that changes the settings format |
 | POST | `/api/system/notifications/reset-dismissed` | Clear all permanent dismissals |
 | GET | `/api/system/whats-new` | Release-notes viewer payload (version + changes since last-seen) |
 | POST | `/api/system/whats-new/dismiss` | Mark the current version's notes as seen |

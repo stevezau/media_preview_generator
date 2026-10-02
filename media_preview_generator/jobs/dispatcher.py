@@ -146,6 +146,10 @@ class JobTracker:
         # Throttle timestamps for callbacks
         self._last_progress_update = 0.0
         self._last_worker_update = 0.0
+        # One progress emit at a time (see emit_progress). Taken before _counts_lock and never the other way round.
+        self._progress_emit_lock = threading.Lock()
+        # (completed, total) of the last "Dispatcher progress" log line, so an unchanged count isn't logged again.
+        self._last_logged_progress: tuple[int, int] | None = None
         # Set when all items are done; used by _cleanup_done_trackers
         self._done_at: float | None = None
 
@@ -198,7 +202,6 @@ class JobTracker:
                 if canonical_path:
                     self.failed_paths.append(canonical_path)
             is_done = (self.successful + self.failed) >= self.total_items
-            outcome_snapshot = dict(self.outcome_counts)
 
         # A raising callback must never prevent done_event.set() below — that
         # would strand the job (hang). It also runs in the shared dispatch loop
@@ -208,38 +211,55 @@ class JobTracker:
             if self.on_item_complete:
                 self.on_item_complete(worker_display_name, title, success)
 
-            if self.progress_callback:
-                now = time.time()
-                is_final = is_done
-                if is_final or now - self._last_progress_update >= 0.5:
-                    fraction = 0.0
-                    if self.in_progress_fraction_getter is not None:
-                        try:
-                            fraction = self.in_progress_fraction_getter()
-                        except Exception:
-                            fraction = 0.0
-                    effective = self.completed + fraction
-                    percent = (effective / self.total_items * 100) if self.total_items > 0 else 0
-                    msg = self.progress_message()
-                    # Push the live per-file outcome BEFORE the progress callback
-                    # fires, so the file-level footnote (not found, no media
-                    # parts, …) rides the same throttled job_progress emit
-                    # (progress.outcome used to be set only at completion).
-                    self._push_outcome_snapshot(outcome_snapshot)
-                    self.progress_callback(
-                        self.completed,
-                        self.total_items,
-                        msg,
-                        percent_override=percent,
-                    )
-                    self._last_progress_update = now
+            self.emit_progress(min_interval=0.5, force=is_done)
         except Exception as exc:
             logger.debug("Job {} completion callback raised (ignored): {}", self.job_id, exc)
 
         if is_done:
             self.done_event.set()
 
-    def progress_message(self) -> str:
+    def emit_progress(self, min_interval: float, force: bool = False) -> None:
+        """Send the job's current progress to its callback — the one path for completions and the periodic emit.
+
+        Emits run one at a time and each reads the counts after taking its turn, so a thread that was slow to
+        deliver can't call the callback with an older count ("3/4") after a newer one ("4/4"). What the callback
+        does with the call afterwards (the job manager sends each browser event on its own thread) is its own order.
+
+        Args:
+            min_interval: Skip the emit when the last one was less than this many seconds ago.
+            force: Emit regardless of ``min_interval`` (the job's final completion).
+        """
+        if not self.progress_callback:
+            return
+        with self._progress_emit_lock:
+            now = time.time()
+            if not force and now - self._last_progress_update < min_interval:
+                return
+            # The counts lock is released before the callback runs: a callback is free to read the tracker.
+            with self._counts_lock:
+                completed = self.successful + self.failed
+                outcome_snapshot = dict(self.outcome_counts)
+            fraction = 0.0
+            if self.in_progress_fraction_getter is not None:
+                try:
+                    fraction = self.in_progress_fraction_getter()
+                except Exception:
+                    fraction = 0.0
+            percent = ((completed + fraction) / self.total_items * 100) if self.total_items > 0 else 0
+            # Push the live per-file outcome BEFORE the progress callback
+            # fires, so the file-level footnote (not found, no media
+            # parts, …) rides the same throttled job_progress emit
+            # (progress.outcome used to be set only at completion).
+            self._push_outcome_snapshot(outcome_snapshot)
+            self.progress_callback(
+                completed,
+                self.total_items,
+                self.progress_message(completed),
+                percent_override=percent,
+            )
+            self._last_progress_update = now
+
+    def progress_message(self, completed: int | None = None) -> str:
         """The job banner's text, the same from each completion and from the dispatcher's periodic emit.
 
         Until the first item claims a generation worker, the job is still sweeping the library (for existing previews,
@@ -247,13 +267,18 @@ class JobTracker:
         label the moment generation begins (set in JobDispatcher._assign_tasks). Mirrors the label the multi-server
         scan path showed before the engines merged.
 
+        Args:
+            completed: The count to show, so the text matches the count sent beside it; the live count when omitted.
+
         Returns:
             E.g. "Checking existing previews… 3/10", "Looking up markers… 3/10" or "3/10 completed".
         """
+        if completed is None:
+            completed = self.completed
         if self.generation_started:
-            return f"{self.library_prefix}{self.completed}/{self.total_items} completed"
+            return f"{self.library_prefix}{completed}/{self.total_items} completed"
         check_label = self.handlers.check_label if self.handlers else "Checking existing previews…"
-        return f"{self.library_prefix}{check_label} {self.completed}/{self.total_items}"
+        return f"{self.library_prefix}{check_label} {completed}/{self.total_items}"
 
     def _push_outcome_snapshot(self, outcome: dict[str, int]) -> None:
         """Mirror the live per-file outcome breakdown onto the Job.
@@ -1204,26 +1229,10 @@ class JobDispatcher:
         percentage reflects in-progress work instead of staying at 0%
         until the first file completes.
         """
-        now = time.time()
         with self._trackers_lock:
             active = [t for t in self._trackers.values() if not t.done_event.is_set()]
         for tracker in active:
-            if tracker.progress_callback and now - tracker._last_progress_update >= 3.0:
-                # Include fractional progress from workers actively
-                # processing items for this job.
-                in_progress_fraction = self._get_in_progress_fraction(tracker.job_id)
-                effective = tracker.completed + in_progress_fraction
-                percent = (effective / tracker.total_items * 100) if tracker.total_items > 0 else 0
-                with tracker._counts_lock:
-                    outcome_snapshot = dict(tracker.outcome_counts)
-                tracker._push_outcome_snapshot(outcome_snapshot)
-                tracker.progress_callback(
-                    tracker.completed,
-                    tracker.total_items,
-                    tracker.progress_message(),
-                    percent_override=percent,
-                )
-                tracker._last_progress_update = now
+            tracker.emit_progress(min_interval=3.0)
 
     def _get_in_progress_fraction(self, job_id: str) -> float:
         """Sum fractional progress of workers busy on a specific job.
@@ -1344,14 +1353,12 @@ class JobDispatcher:
         if not active:
             return
         for tracker in active:
-            pct = int(tracker.completed / tracker.total_items * 100) if tracker.total_items > 0 else 0
-            logger.info(
-                "Dispatcher progress: job {} {}/{} ({}%)",
-                tracker.job_id[:8],
-                tracker.completed,
-                tracker.total_items,
-                pct,
-            )
+            completed, total = tracker.completed, tracker.total_items
+            if tracker._last_logged_progress == (completed, total):
+                continue
+            tracker._last_logged_progress = (completed, total)
+            pct = int(completed / total * 100) if total > 0 else 0
+            logger.info("Dispatcher progress: job {} {}/{} ({}%)", tracker.job_id[:8], completed, total, pct)
 
 
 # ---------------------------------------------------------------------------

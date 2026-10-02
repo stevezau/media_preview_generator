@@ -33,18 +33,20 @@ LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention polic
 
 
 def log_clock(moment: datetime | None = None) -> str:
-    """A job log line's time of day in local time (the container's ``TZ``), as app.log writes it.
+    """A job log line's date and time in local time (the container's ``TZ``), as app.log writes it.
+
+    The date is included because a scan can run for days: a time alone can't be placed.
 
     Args:
         moment: The time (now when None); a naive value is read as UTC, the zone every stored time is written in.
 
     Returns:
-        ``HH:MM:SS``.
+        ``YYYY-MM-DD HH:MM:SS``.
     """
     value = moment or datetime.now(UTC)
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    return value.astimezone().strftime("%H:%M:%S")
+    return value.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 # Job config key set while a job's pause came from its schedule's stop time. Only such a pause is resumed by that
@@ -1514,6 +1516,7 @@ class JobManager:
         wait_active: int | None = None,
         wait_cap: int | None = None,
         wait_effective_cap: int | None = None,
+        successes: int = 0,
     ) -> Job | None:
         """Mutate the originating dispatch Job to ADD or UPDATE retry-chain state.
 
@@ -1546,8 +1549,11 @@ class JobManager:
                                     (plus ``wait_effective_cap`` to name the
                                     high-priority reservation).
           * ``"running"``         → status=RUNNING, retry_eta cleared (countdown stops)
-          * ``"completed"``       → status=COMPLETED, completed_at set, error cleared
-          * ``"exhausted"``       → status=FAILED with ``reason`` written to ``error``
+          * ``"completed"``       → status=COMPLETED, completed_at set, ``error`` cleared (or set to
+                                    ``reason``, a warning about files no retry covered; then
+                                    status=FAILED when ``successes`` is 0)
+          * ``"exhausted"``       → ``reason`` written to ``error``; status=FAILED when ``successes``
+                                    is 0, else COMPLETED (a partial result, the amber badge)
 
         Args:
             canonical_path: Source media path (stored on the Job's
@@ -1568,7 +1574,11 @@ class JobManager:
             server_id / server_name / server_type: Late-arriving server
                 attribution. Only applied if the originating Job didn't
                 already have it set.
-            reason: Exhaustion reason (written to ``error`` on outcome="exhausted").
+            reason: Exhaustion reason (written to ``error`` on outcome="exhausted"), or on
+                outcome="completed" a warning to keep on the row (None for a clean finish).
+            successes: On outcome="exhausted", and on outcome="completed" with a ``reason``, how many of
+                the chain's files ended with their preview in place. Red "Failed" is only for a chain
+                where nothing succeeded.
             source: Trigger pill ("sonarr"/"radarr"/"plex"/…); set if
                 not already on the Job.
             originating_job_id: **Required.** UUID of the originating
@@ -1725,13 +1735,14 @@ class JobManager:
                 job.completed_at = None
                 job.error = None
             elif outcome == "completed":
-                job.status = JobStatus.COMPLETED
+                # A leftover warning with no success in the chain is a total failure, as an exhausted chain's is.
+                job.status = JobStatus.FAILED if reason and successes == 0 else JobStatus.COMPLETED
                 job.completed_at = now_iso
                 # A pause (a stop time's included) ends with the chain, as complete_job ends it.
                 self.clear_pause_flag(job.id)
                 job.progress.retry_eta = None
                 job.progress.retry_wait_total = None
-                job.error = None
+                job.error = reason
                 # Refresh the chain's publishers snapshot from the
                 # successful firing's result so the modal's per-server
                 # tiles don't keep rendering the originating dispatch's
@@ -1750,7 +1761,7 @@ class JobManager:
                 if publishers is not None:
                     job.publishers = list(publishers)
             elif outcome == "exhausted":
-                job.status = JobStatus.FAILED
+                job.status = JobStatus.COMPLETED if successes > 0 else JobStatus.FAILED
                 job.completed_at = now_iso
                 self.clear_pause_flag(job.id)
                 job.progress.retry_eta = None
@@ -2456,6 +2467,7 @@ class JobManager:
         worker: str = "",
         servers: list[dict] | None = None,
         server_messages: bool = False,
+        uncapped: bool = False,
     ) -> None:
         """Append a per-file processing result to the job's JSONL file.
 
@@ -2475,6 +2487,9 @@ class JobManager:
             server_messages: Keep each server's own message on its entry when the row's reason doesn't already say
                 it (Intro & Credits: "Keeping Plex's credits"). Preview rows leave it out: their per-server
                 "Published" never matches the "Published to N servers" reason and would grow every row.
+            uncapped: Write the row even when its outcome's bucket is full. For a retry's rows on its chain head:
+                they replace a file's earlier row, and a dropped one leaves the stale row as the file's latest
+                result, which the retry scan then retries until the chain runs out (scan 55b098af).
         """
         path = self._file_results_path(job_id)
 
@@ -2501,11 +2516,12 @@ class JobManager:
                                     rec = json.loads(line)
                                 except json.JSONDecodeError:
                                     continue
-                                # Truncation markers themselves don't
-                                # count toward any outcome's cap — they
-                                # exist outside the user-supplied space.
+                                # Truncation markers don't count toward
+                                # any outcome's cap: they are counted under
+                                # their own ``truncated:<outcome>`` key,
+                                # which says the marker is already written.
                                 rec_outcome = rec.get("outcome", "")
-                                if not rec_outcome or rec_outcome.startswith("truncated"):
+                                if not rec_outcome:
                                     continue
                                 seeded[rec_outcome] = seeded.get(rec_outcome, 0) + 1
                     except OSError as e:
@@ -2514,15 +2530,18 @@ class JobManager:
 
             counts = self._file_result_counts[job_id]
             current = counts.get(outcome, 0)
-            if current >= self._FILE_RESULTS_PER_OUTCOME_CAP:
-                # One-shot per-outcome truncation marker on the boundary
-                # record only; subsequent calls for the same outcome are
-                # silent O(1) returns. Other outcomes keep accepting
-                # rows independently.
-                if current == self._FILE_RESULTS_PER_OUTCOME_CAP:
+            if current >= self._FILE_RESULTS_PER_OUTCOME_CAP and not uncapped:
+                # One-shot per-outcome truncation marker on the first
+                # dropped record only; subsequent calls for the same
+                # outcome are silent O(1) returns. Other outcomes keep
+                # accepting rows independently. Its own key, not the row
+                # count, says it is written: uncapped rows take the count
+                # past the cap without dropping anything.
+                marker_key = f"truncated:{outcome}"
+                if not counts.get(marker_key):
                     marker = {
                         "file": "",
-                        "outcome": f"truncated:{outcome}",
+                        "outcome": marker_key,
                         "reason": (
                             f"per-outcome file-results cap reached for {outcome!r} "
                             f"({self._FILE_RESULTS_PER_OUTCOME_CAP} entries) — later items "
@@ -2530,12 +2549,12 @@ class JobManager:
                             "Aggregate counts in the job summary remain accurate."
                         ),
                         "worker": "",
-                        "ts": datetime.now(UTC).strftime("%H:%M:%S"),
+                        "ts": log_clock(),
                     }
                     try:
                         with open(path, "a") as f:
                             f.write(json.dumps(marker, separators=(",", ":")) + "\n")
-                        counts[outcome] = current + 1
+                        counts[marker_key] = 1
                     except OSError as e:
                         logger.debug("Could not append truncation marker to {}: {}", path, e)
                 return
@@ -2560,7 +2579,7 @@ class JobManager:
             "outcome": outcome,
             "reason": derived_reason,
             "worker": worker,
-            "ts": datetime.now(UTC).strftime("%H:%M:%S"),
+            "ts": log_clock(),
         }
         # Slim per-server attribution — keep the JSONL compact (no
         # canonical_path duplication, no frame_source unless it differs

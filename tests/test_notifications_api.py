@@ -405,3 +405,101 @@ class TestSchemaMigrationNotification:
             assert sm.get("_pending_migration_notice") is None
         finally:
             sm.set("_pending_migration_notice", None)
+
+    @pytest.mark.parametrize(
+        ("route", "notification_id", "flag_cleared", "id_stored"),
+        [
+            # The migration card is a one-shot announcement: either button clears the flag, and neither stores the
+            # id — a stored id would hide the notice of every later migration.
+            ("dismiss", "schema_migration_completed", True, False),
+            ("dismiss-permanent", "schema_migration_completed", True, False),
+            ("dismiss", VULKAN_SOFTWARE_FALLBACK_ID, False, False),
+            ("dismiss-permanent", VULKAN_SOFTWARE_FALLBACK_ID, False, True),
+        ],
+    )
+    def test_dismiss_routes_clear_the_flag_only_for_the_migration_card_and_never_store_its_id(
+        self, client, route, notification_id, flag_cleared, id_stored
+    ):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        notice = {"from": 12, "to": 15, "notes": ["an unread note"]}
+        sm.set("_pending_migration_notice", notice)
+        sm.reset_dismissed_notifications()
+        try:
+            resp = client.post(f"/api/system/notifications/{notification_id}/{route}")
+
+            assert resp.status_code == 200
+            assert resp.get_json()["ok"] is True
+            assert sm.get("_pending_migration_notice") == (None if flag_cleared else notice)
+            assert sm.dismissed_notifications == ([notification_id] if id_stored else [])
+        finally:
+            sm.set("_pending_migration_notice", None)
+            sm.reset_dismissed_notifications()
+
+    def test_card_shows_again_for_a_later_migration_after_a_permanent_dismissal(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.set("_pending_migration_notice", {"from": 12, "to": 15})
+        try:
+            client.post("/api/system/notifications/schema_migration_completed/dismiss-permanent")
+            sm.set("_pending_migration_notice", {"from": 15, "to": 16})
+
+            cards = client.get("/api/system/notifications").get_json()["notifications"]
+
+            migration = [c for c in cards if c["id"] == "schema_migration_completed"]
+            assert len(migration) == 1
+            assert "<strong>v15</strong> to <strong>v16</strong>" in migration[0]["body_html"]
+        finally:
+            sm.set("_pending_migration_notice", None)
+            sm.reset_dismissed_notifications()
+
+    @pytest.mark.parametrize("backup_exists", [True, False])
+    def test_card_names_a_backup_only_while_that_file_is_on_disk(self, client, tmp_path, backup_exists):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        backup = tmp_path / "settings.json.20260901-120000.bak"
+        if backup_exists:
+            backup.write_text("{}")
+        sm = get_settings_manager()
+        sm.set("_pending_migration_notice", {"from": 12, "to": 15, "backup": str(backup)})
+        try:
+            cards = client.get("/api/system/notifications").get_json()["notifications"]
+        finally:
+            sm.set("_pending_migration_notice", None)
+
+        body = next(c["body_html"] for c in cards if c["id"] == "schema_migration_completed")
+        assert (f"<code>{backup}</code>" in body) is backup_exists
+        assert ("backup" in body) is backup_exists
+
+
+class TestMediaMountCardDismissRoutes:
+    """The mount card can be hidden until the next restart, never for good."""
+
+    def test_permanent_dismiss_is_refused_and_stores_nothing(self, client):
+        from media_preview_generator.web.notifications import MEDIA_MOUNT_UNHEALTHY_ID
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.reset_dismissed_notifications()
+
+        resp = client.post(f"/api/system/notifications/{MEDIA_MOUNT_UNHEALTHY_ID}/dismiss-permanent")
+
+        assert resp.status_code == 400
+        assert resp.get_json()["ok"] is False
+        assert sm.dismissed_notifications == []
+
+    def test_session_dismiss_is_accepted_and_stores_nothing(self, client):
+        from media_preview_generator.web.notifications import MEDIA_MOUNT_UNHEALTHY_ID, _session_is_dismissed
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.reset_dismissed_notifications()
+
+        resp = client.post(f"/api/system/notifications/{MEDIA_MOUNT_UNHEALTHY_ID}/dismiss")
+
+        assert resp.status_code == 200
+        assert resp.get_json() == {"ok": True, "id": MEDIA_MOUNT_UNHEALTHY_ID, "persisted": False}
+        assert _session_is_dismissed(MEDIA_MOUNT_UNHEALTHY_ID)
+        assert sm.dismissed_notifications == []

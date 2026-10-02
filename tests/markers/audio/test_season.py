@@ -678,6 +678,56 @@ class TestEndPictureCheck:
             _run(ctx, e2, {"plex-1": ready_publisher()})
             assert audio.compared == [] and store.get_detector_run(rec2.id, Source.SEASON_AUDIO) is None
 
+    @staticmethod
+    def _gpu_times_out(path, cpu_reads):
+        """A share whose GPU attempt times out on ``path``; the CPU attempt after it reads the file or fails too."""
+        attempt = ["gpu"]
+
+        def share(target, partner, *_args):
+            if path in (target, partner):
+                if attempt[0] == "gpu":
+                    raise season.end_picture.ReadFailedError(
+                        path, f"decoding {path} timed out after 120 s", gpu_attempt=True
+                    )
+                if not cpu_reads:
+                    raise season.end_picture.ReadFailedError(path, f"decoding {path} timed out after 120 s")
+            return 1.0
+
+        return attempt, share
+
+    @pytest.mark.parametrize("cpu_reads", [True, False], ids=["cpu-reads-it", "cpu-fails-too"])
+    def test_a_gpu_attempt_that_fails_isnt_held_against_the_files_cpu_rerun(self, store, show, cpu_reads):
+        # Production (Person of Interest S02E19, AV1 on a GPU without an AV1 decoder): the GPU's decode ran to the
+        # 120 s limit, the file was remembered as unreadable, and the worker's CPU rerun a moment later was refused.
+        e1, _e2, _e3 = show(1, 3)
+        clock = [datetime(2026, 9, 13, tzinfo=UTC)]
+        ctx = self._clocked(store, e1, clock)
+        attempt, share = self._gpu_times_out(e1, cpu_reads)
+        with _Audio(points=early_points, share=share) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            rec = store.get_file(e1)
+            identity = FileIdentity(e1, rec.size, rec.mtime_ns)
+            assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None  # no answer from the GPU attempt
+            assert store.end_picture_failed_at(identity) is None  # ... and nothing against the file
+            assert season.season_audio_needs_worker(rec, ctx) is True
+            attempt[0] = "cpu"
+            audio.compared.clear()
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            assert audio.compared  # the CPU read it
+        assert bool(_evidence(store, e1, Source.SEASON_AUDIO)) is cpu_reads
+        assert store.end_picture_failed_at(identity) == (None if cpu_reads else clock[0])
+
+    def test_a_partner_the_gpu_attempt_couldnt_read_isnt_remembered_and_the_other_partner_decides(self, store, show):
+        e1, e2, _e3 = show(1, 3)
+        ctx = _season_ctx(store, e1)
+        _attempt, share = self._gpu_times_out(e2, cpu_reads=True)
+        with _Audio(points=early_points, share=share):
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            assert _evidence(store, e1, Source.SEASON_AUDIO)  # e3's share of 1.0 decides
+            rec2 = store.get_file(e2)
+            assert store.end_picture_failed_at(FileIdentity(e2, rec2.size, rec2.mtime_ns)) is None
+            assert season.season_audio_needs_worker(rec2, ctx) is True  # its own run isn't given up on
+
     def test_no_partner_that_could_be_read_leaves_no_answer(self, store, show):
         e1, e2, e3 = show(1, 3)
         _unreadable_now, share = self._unreadable(e2, e3)

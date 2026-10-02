@@ -401,15 +401,32 @@ class TestOneVersionPlexItemsShowingOtherTimes:
     SHOWN = Marker(T.INTRO, 6_000, 113_000, ("introdb", "season_audio"))
     DECIDED = Marker(T.INTRO, 6_000, 112_075, ("introdb", "season_audio"))
 
+    # The item's files are Plex's own paths (``item_versions``): under another folder than this app's wherever the
+    # server has a path mapping.
     @pytest.mark.parametrize(
         ("shown", "files", "listed"),
         [
-            (SHOWN, ("/plex/a.mkv",), True),
-            (SHOWN, ("/plex/a.mkv", "/plex/b.mkv"), False),  # another version: the agreement keeps it on purpose
-            (DECIDED, ("/plex/a.mkv",), False),
+            (SHOWN, ("/plex/GoT/S03/e4.mkv",), True),
+            (SHOWN, ("/tv/GoT/S03/e4.mkv",), True),
+            (SHOWN, ("P:\\GoT\\S03\\e4.mkv",), True),
+            # Another version: the agreement keeps it on purpose, whichever of the two the file is.
+            (SHOWN, ("/plex/GoT/S03/e4 - 4K.mkv", "/plex/GoT/S03/e4.mkv"), False),
+            (SHOWN, ("/plex/GoT/S03/e4.mkv", "/plex/GoT/S03/e4.remux.mkv"), False),
+            (DECIDED, ("/plex/GoT/S03/e4.mkv",), False),
             (SHOWN, None, False),  # versions not recorded: the next run records them with a write anyway
+            # The item's one file is the file that replaced this one: the times it shows are that file's.
+            (SHOWN, ("/plex/GoT/S03/e4 - HONE.mkv",), False),
         ],
-        ids=["one-version-other-times", "two-versions", "same-times", "versions-unknown"],
+        ids=[
+            "one-version-other-times",
+            "no-path-mapping",
+            "windows-plex-path",
+            "two-versions-second",
+            "two-versions-first",
+            "same-times",
+            "versions-unknown",
+            "replaced-by-another-file",
+        ],
     )
     def test_listed_to_be_published_again(self, store, shown, files, listed):
         self._published(store, "/tv/GoT/S03/e4.mkv", shown, self.DECIDED, files)
@@ -417,13 +434,90 @@ class TestOneVersionPlexItemsShowingOtherTimes:
         expected = {"/tv/GoT/S03/e4.mkv": {versions.PUBLISHED_TIMES: versions.PUBLISHED_TIMES_VERSION}}
         assert versions.files_to_read_again(store, _settings()) == (expected if listed else {})
 
+    def test_a_replaced_file_isnt_listed_and_the_file_that_replaced_it_is_judged_by_its_own_times(self, store):
+        # Production (Knife Edge S02E01): the CAKES file was replaced by the HONE one, whose times its old item now
+        # shows; the CAKES file was listed, wasn't on disk, and its job ran no file ("Re-checking 1 file").
+        files = ("/plex/Knife Edge/S02/e1 - HONE.mkv",)
+        replaced = self._published(store, "/tv/Knife Edge/S02/e1 - CAKES.mkv", self.SHOWN, self.DECIDED, files)
+        hone_decided = Marker(T.INTRO, 7_000, 94_375, ("chapters",))
+        self._published(store, "/tv/Knife Edge/S02/e1 - HONE.mkv", hone_decided, hone_decided, files)
+        assert replaced.missing_since is None
+
+        assert versions.files_to_read_again(store, _settings()) == {}
+
+        # The file that is the item's one version is still listed when the item shows other times than it decided.
+        self._published(store, "/tv/Knife Edge/S02/e1 - HONE.mkv", self.SHOWN, hone_decided, files)
+        assert versions.files_to_read_again(store, _settings()) == {
+            "/tv/Knife Edge/S02/e1 - HONE.mkv": {versions.PUBLISHED_TIMES: versions.PUBLISHED_TIMES_VERSION}
+        }
+
     def test_taken_once(self, store):
-        self._published(store, "/tv/GoT/S03/e4.mkv", self.SHOWN, self.DECIDED, ("/plex/a.mkv",))
+        self._published(store, "/tv/GoT/S03/e4.mkv", self.SHOWN, self.DECIDED, ("/plex/GoT/S03/e4.mkv",))
         store.record_version_reruns(
             [("/tv/GoT/S03/e4.mkv", versions.PUBLISHED_TIMES, versions.PUBLISHED_TIMES_VERSION)]
         )
 
         assert versions.files_to_read_again(store, _settings()) == {}
+
+
+class TestFilesWaitingForOtherVersions:
+    """Until 2026-10-02 a Plex item waited for good for a replaced version whose season folder was gone
+    (``plex_db._where_on_disk``); the retries ran out long ago, so each waiting file is published again once."""
+
+    WAITING = "Waiting for this item's other versions to agree on: credits"
+    TAKEN = {versions.WAITING_VERSIONS: versions.WAITING_VERSIONS_VERSION}
+
+    @staticmethod
+    def _publish(store, path, status, message, server="plex-1"):
+        rec = _file(store, path)
+        store.set_publish_state(rec.id, server, item_id="7", markers=None, status=status, message=message)
+        return rec
+
+    @pytest.mark.parametrize(
+        ("status", "message", "missing", "listed"),
+        [
+            ("waiting", WAITING, False, True),
+            ("waiting", WAITING, True, False),  # gone from disk: nothing to publish
+            ("waiting", "Not in this server's library yet", False, False),  # its own retry and Check servers take it
+            ("written", "1 marker(s)", False, False),
+        ],
+        ids=["waiting-for-versions", "missing-from-disk", "waiting-for-the-library", "published"],
+    )
+    def test_listed_to_be_published_again(self, store, status, message, missing, listed):
+        rec = self._publish(store, "/tv/Animal Control/S05/e1.mkv", status, message)
+        if missing:
+            store.mark_missing(rec)
+
+        expected = {"/tv/Animal Control/S05/e1.mkv": self.TAKEN}
+        assert versions.files_to_read_again(store, _settings()) == (expected if listed else {})
+
+    def test_exactly_the_waiting_files_each_once(self, store):
+        self._publish(store, "/tv/A/S01/e1.mkv", "waiting", self.WAITING)
+        self._publish(store, "/tv/A/S01/e1.mkv", "waiting", self.WAITING, server="plex-2")  # waiting on two servers
+        self._publish(store, "/tv/B/S01/e1.mkv", "waiting", self.WAITING)
+        self._publish(store, "/tv/C/S01/e1.mkv", "written", "1 marker(s)")
+
+        expected = {"/tv/A/S01/e1.mkv": self.TAKEN, "/tv/B/S01/e1.mkv": self.TAKEN}
+        assert versions.files_to_read_again(store, _settings()) == expected
+
+    def test_taken_once_and_still_listed_for_the_decide_again_job(self, store):
+        self._publish(store, "/tv/A/S01/e1.mkv", "waiting", self.WAITING)
+        self._publish(store, "/tv/B/S01/e1.mkv", "waiting", self.WAITING)
+        store.record_version_reruns(
+            [("/tv/A/S01/e1.mkv", versions.WAITING_VERSIONS, versions.WAITING_VERSIONS_VERSION)]
+        )
+
+        assert versions.files_to_read_again(store, _settings()) == {"/tv/B/S01/e1.mkv": self.TAKEN}
+        # The listing without a version (the decide-again job's) is as it was.
+        assert store.files_waiting_for_other_versions() == ["/tv/A/S01/e1.mkv", "/tv/B/S01/e1.mkv"]
+
+    def test_listed_beside_an_older_detector_answer_once_for_both(self, store):
+        rec = _credits_text_file(store, "/tv/A/S01/e1.mkv")
+        store.set_publish_state(rec.id, "plex-1", item_id="7", markers=None, status="waiting", message=self.WAITING)
+
+        assert versions.files_to_read_again(store, _settings()) == {
+            "/tv/A/S01/e1.mkv": {"credits_text": CREDITS_TEXT_VERSION, **self.TAKEN}
+        }
 
 
 class TestNextBatch:

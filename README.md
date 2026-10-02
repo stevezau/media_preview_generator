@@ -92,7 +92,7 @@ for your review.
 - **Webhooks.** Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex (Plex Pass), Emby (Premiere) and Jellyfin, or any JSON with a path. Sonarr, Radarr and the three servers can share one URL.
 - **Schedules.** Recently Added polling, plus cron and interval schedules.
 - **Manual Generation.** Search your servers by title (a whole show, a movie or one episode), or browse the media folders, and make previews for just those.
-- **Retries and skips.** Retries after 1, 2 and 5 minutes by default while a server indexes a new file, and skips files whose previews are current.
+- **Retries and skips.** Retries after 1, 2, 5, 15 and 60 minutes by default while a server indexes a new file, and skips files whose previews are current.
 
 **Every server from one decode**
 - **Each server's own format.** A BIF in Plex's data folder, a BIF next to the video for Emby, and Jellyfin trickplay tiles (next to the video, or in Jellyfin's data folder with the companion plugin).

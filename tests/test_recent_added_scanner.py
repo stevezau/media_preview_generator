@@ -273,6 +273,41 @@ def test_scan_submits_items_missing_bif(mock_schedule, tmp_path, monkeypatch):
 
 
 @patch("media_preview_generator.web.webhooks._schedule_webhook_job")
+def test_scan_submits_items_whose_bif_is_empty(mock_schedule, tmp_path, monkeypatch):
+    """A 0-byte BIF (left by a power loss before its data reached disk) holds no preview, so the item goes through."""
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    mock_schedule.return_value = True
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    plex_config = tmp_path / "plex"
+    plex_config.mkdir()
+    get_settings_manager().set("plex_config_folder", str(plex_config))
+
+    item = _make_item("Lost In A Reset", ["/data/movies/E.mkv"], datetime.now(UTC))
+    item.key = "/library/metadata/77"
+    section = _make_section("Movies", "movie", "1", [item])
+
+    bundle_hash = "cc1234567890abcd"
+    bif_dir = (
+        plex_config / "Media" / "localhost" / bundle_hash[0] / f"{bundle_hash[1:]}.bundle" / "Contents" / "Indexes"
+    )
+    bif_dir.mkdir(parents=True)
+    (bif_dir / "index-sd.bif").write_bytes(b"")
+
+    import xml.etree.ElementTree as ET
+
+    plex = _make_plex([section])
+    plex.query.return_value = ET.fromstring(
+        f'<MediaContainer><MediaPart hash="{bundle_hash}" file="/data/movies/E.mkv"/></MediaContainer>'
+    )
+
+    submitted = scanner.scan_recently_added(1, plex=plex)
+
+    assert submitted == 1
+    mock_schedule.assert_called_once_with("recently_added", "Lost In A Reset", "/data/movies/E.mkv")
+
+
+@patch("media_preview_generator.web.webhooks._schedule_webhook_job")
 def test_scan_logs_history_when_items_submitted(mock_schedule, tmp_path, monkeypatch):
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True

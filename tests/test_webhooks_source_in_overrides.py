@@ -316,10 +316,10 @@ class TestWebhookJobsUseTheGlobalRetryPolicy:
     Intro & Credits retries so the bounds can't drift apart."""
 
     CASES = [
-        ({}, (3, 30)),
+        ({}, (5, 30)),
         ({"webhook_retry_count": 5, "webhook_retry_delay": 120}, (5, 120)),
         ({"webhook_retry_count": 99, "webhook_retry_delay": 1}, (10, 10)),
-        ({"webhook_retry_count": "junk", "webhook_retry_delay": "later"}, (3, 30)),  # hand-edited settings.json
+        ({"webhook_retry_count": "junk", "webhook_retry_delay": "later"}, (5, 30)),  # hand-edited settings.json
     ]
     IDS = ["defaults", "in-range", "clamped", "unreadable"]
 

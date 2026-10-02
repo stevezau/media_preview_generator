@@ -28,7 +28,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 2. **Resolve.** Each path is mapped to what the container sees, then every configured server whose enabled libraries hold the file is found.
 3. **Extract.** One FFmpeg run per file on a GPU worker: hardware decode, key-frame-only decoding when the file allows it, GPU scaling, HDR-to-SDR tone mapping. If the GPU can't decode the file, the same worker retries on the CPU.
 4. **Publish.** Plex: `index-sd.bif` in Plex's data folder. Emby: `<video>-<width>-<interval>.bif` next to the video. Jellyfin 10.10+: trickplay tiles next to the video, or in Jellyfin's data folder with the companion plugin. Each server is then asked to pick them up.
-5. **Retry and skip.** A server that hasn't indexed a new file yet is retried after 1, 2 and 5 minutes by default. A small companion file records each source's size and date, so later triggers skip current previews and redo replaced files.
+5. **Retry and skip.** A server that hasn't indexed a new file yet is retried after 1, 2, 5, 15 and 60 minutes by default. A small companion file records each source's size and date, so later triggers skip current previews and redo replaced files.
 
 ## Key facts
 

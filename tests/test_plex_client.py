@@ -6,12 +6,14 @@ and duplicate filtering.
 """
 
 import os
+import threading
 import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 import requests
 
+from media_preview_generator import plex_client
 from media_preview_generator.config.paths import (
     expand_path_mapping_candidates,
     plex_path_to_local,
@@ -397,6 +399,184 @@ class TestTriggerPlexPartialScan:
                 verify=True,
             ),
         ]
+
+
+class _FakePlex:
+    """Stands in for ``requests.get``: answers the section list and records every scan request."""
+
+    def __init__(self, sections: dict[str, str] | None = None) -> None:
+        self.sections = sections or {"2": "/data/tv"}
+        self.scan_status: int | Exception = 200
+        self.scans: list[tuple[str, str]] = []
+        self.before_scan = None
+        self._lock = threading.Lock()
+
+    def get(self, url, **kwargs):
+        if url.endswith("/library/sections"):
+            response = MagicMock()
+            response.json.return_value = {
+                "MediaContainer": {
+                    "Directory": [
+                        {"key": key, "title": f"Library {key}", "Location": [{"path": path}]}
+                        for key, path in self.sections.items()
+                    ]
+                }
+            }
+            return response
+        with self._lock:
+            self.scans.append((url, kwargs["params"]["path"]))
+        if self.before_scan is not None:
+            self.before_scan()
+        if isinstance(self.scan_status, Exception):
+            raise self.scan_status
+        return MagicMock(status_code=self.scan_status)
+
+
+class TestPartialScanThrottle:
+    """One scan request per (server, section, folder) per minute, across every caller in the process.
+
+    Production: 2,633 partial scans in 3.6 days; 456 of one series folder in 62 minutes, as each of 127 single-file
+    webhook jobs nudged it on arrival, on every retry and after publishing. The request de-duped only within one call.
+    """
+
+    SHOW = "/data/tv/Show"
+    EP1 = "/data/tv/Show/Season 01/Show - S01E01.mkv"
+    EP2 = "/data/tv/Show/Season 02/Show - S02E05.mkv"
+
+    @pytest.fixture
+    def plex(self):
+        fake = _FakePlex()
+        with patch("requests.get", side_effect=fake.get):
+            yield fake
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(plex_client, "_monotonic", lambda: now[0])
+        return now
+
+    @staticmethod
+    def _scan(path: str, *, url: str = "http://plex:32400") -> list[str]:
+        return trigger_plex_partial_scan(plex_url=url, plex_token="token", unresolved_paths=[path])
+
+    @pytest.mark.parametrize("second", [EP1, EP2], ids=["same-file", "another-file-of-the-show"])
+    def test_same_folder_twice_sends_one_request(self, plex, clock, second):
+        first_result = self._scan(self.EP1)
+        clock[0] += 30
+        second_result = self._scan(second)
+
+        assert plex.scans == [("http://plex:32400/library/sections/2/refresh", self.SHOW)]
+        assert first_result == [self.EP1]
+        assert second_result == [second]
+
+    def test_suppressed_request_is_not_logged_as_a_scan(self, plex, clock):
+        from loguru import logger
+
+        self._scan(self.EP1)
+        records: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG")
+        try:
+            self._scan(self.EP2)
+        finally:
+            logger.remove(sink)
+
+        assert [message for level, message in records if level != "DEBUG"] == []
+        assert [message for _level, message in records if "suppressed" in message] == [
+            f"Partial scan suppressed for section 2: {self.SHOW} (requested less than 60s ago)"
+        ]
+
+    def test_different_folder_sends_both(self, plex, clock):
+        self._scan(self.EP1)
+        self._scan("/data/tv/Other Show/Season 01/Other Show - S01E01.mkv")
+
+        assert [folder for _url, folder in plex.scans] == [self.SHOW, "/data/tv/Other Show"]
+
+    def test_same_folder_in_a_different_section_sends_both(self, plex, clock):
+        self._scan(self.EP1)
+        plex.sections = {"7": "/data/tv"}
+        self._scan(self.EP1)
+
+        assert plex.scans == [
+            ("http://plex:32400/library/sections/2/refresh", self.SHOW),
+            ("http://plex:32400/library/sections/7/refresh", self.SHOW),
+        ]
+
+    def test_same_folder_on_a_different_server_sends_both(self, plex, clock):
+        self._scan(self.EP1)
+        self._scan(self.EP1, url="http://other-plex:32400")
+
+        assert plex.scans == [
+            ("http://plex:32400/library/sections/2/refresh", self.SHOW),
+            ("http://other-plex:32400/library/sections/2/refresh", self.SHOW),
+        ]
+
+    def test_same_server_with_and_without_a_trailing_slash_is_one_server(self, plex, clock):
+        self._scan(self.EP1)
+        self._scan(self.EP1, url="http://plex:32400/")
+
+        assert len(plex.scans) == 1
+
+    def test_sends_again_once_the_minute_has_passed(self, plex, clock):
+        self._scan(self.EP1)
+        clock[0] += 59.9
+        self._scan(self.EP1)
+        assert len(plex.scans) == 1
+
+        clock[0] += 0.1
+        assert self._scan(self.EP1) == [self.EP1]
+        assert [folder for _url, folder in plex.scans] == [self.SHOW, self.SHOW]
+
+        clock[0] += 59.9
+        self._scan(self.EP1)
+        assert len(plex.scans) == 2
+
+    @pytest.mark.parametrize("failure", [500, requests.ConnectionError("plex is down")], ids=["refused", "unreachable"])
+    def test_failed_request_does_not_start_the_minute(self, plex, clock, failure):
+        plex.scan_status = failure
+        assert self._scan(self.EP1) == []
+
+        plex.scan_status = 200
+        clock[0] += 1
+        assert self._scan(self.EP1) == [self.EP1]
+        assert [folder for _url, folder in plex.scans] == [self.SHOW, self.SHOW]
+
+    def test_threads_racing_for_one_folder_send_one_request(self, plex, clock):
+        callers = 8
+        barrier = threading.Barrier(callers)
+        results: list[list[str]] = []
+
+        def call_scan() -> None:
+            barrier.wait(timeout=5)
+            results.append(self._scan(self.EP1))
+
+        threads = [threading.Thread(target=call_scan) for _ in range(callers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert plex.scans == [("http://plex:32400/library/sections/2/refresh", self.SHOW)]
+        assert results == [[self.EP1]] * callers
+
+    def test_caller_arriving_while_the_request_is_in_flight_sends_none(self, plex, clock):
+        in_flight, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            in_flight.set()
+            assert release.wait(timeout=5)
+
+        plex.before_scan = hold
+        first = threading.Thread(target=self._scan, args=(self.EP1,))
+        first.start()
+        try:
+            assert in_flight.wait(timeout=5)
+            plex.before_scan = None
+            assert self._scan(self.EP2) == [self.EP2]
+        finally:
+            release.set()
+            first.join(timeout=10)
+
+        assert len(plex.scans) == 1
 
 
 class TestFilterDuplicateLocations:

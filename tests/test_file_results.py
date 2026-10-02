@@ -76,53 +76,41 @@ class TestFileResultRecording:
         jm = JobManager(config_dir=config_dir)
         assert jm.get_file_results("nonexistent") == []
 
-    def test_timestamp_present(self, config_dir):
-        """``ts`` field is present, well-formed, and reflects current UTC time.
-
-        Audit fix — original assertion was just ``assert results[0]["ts"]``
-        which passes for any truthy value (including a stale fixture
-        string, an exception message, or "{}"). Production format at
-        web/jobs.py:1394 is ``datetime.now(UTC).strftime("%H:%M:%S")``
-        — pin the regex shape AND verify the recorded timestamp falls
-        within ±5 seconds of "now" (otherwise a clock-skew or
-        wrong-format regression slips through).
+    def test_timestamp_is_a_local_date_and_time(self, config_dir, monkeypatch):
+        """``ts`` is the full local date and time, the same stamp a job log line carries: a scan that runs past
+        midnight (or for days) must not leave rows whose time alone can't be placed.
         """
-        import re
-        from datetime import datetime
+        import time
 
-        os.makedirs(config_dir, exist_ok=True)
-        jm = JobManager(config_dir=config_dir)
-        job = jm.create_job(library_name="Test")
-        before = datetime.now(UTC)
-        jm.record_file_result(job.id, "/media/a.mkv", "generated")
-        after = datetime.now(UTC)
-        results = jm.get_file_results(job.id)
-        ts = results[0]["ts"]
+        import media_preview_generator.web.jobs as jobs_mod
 
-        assert isinstance(ts, str), f"ts must be a string; got {type(ts).__name__}: {ts!r}"
-        assert re.fullmatch(r"\d{2}:\d{2}:\d{2}", ts), (
-            f"ts must match HH:MM:SS (production format at web/jobs.py:1394); got {ts!r}"
-        )
-        # The recorded HH:MM:SS must fall within the [before, after]
-        # window we bracketed around the call (±1s slack for second-rollover).
-        recorded = datetime.strptime(ts, "%H:%M:%S").time()
-        # Compare on (h, m, s) to avoid date-rollover headaches at
-        # midnight-UTC; also accept ±1 second of slack.
-        before_secs = before.hour * 3600 + before.minute * 60 + before.second
-        after_secs = after.hour * 3600 + after.minute * 60 + after.second
-        recorded_secs = recorded.hour * 3600 + recorded.minute * 60 + recorded.second
-        # Handle midnight wrap by allowing either direction within 5s.
-        delta = min(
-            abs(recorded_secs - before_secs),
-            abs(recorded_secs - after_secs),
-            86400 - abs(recorded_secs - before_secs),
-            86400 - abs(recorded_secs - after_secs),
-        )
-        assert delta <= 5, (
-            f"ts {ts!r} must be within 5s of the recording call; "
-            f"before={before.strftime('%H:%M:%S')}, after={after.strftime('%H:%M:%S')}, "
-            f"delta_seconds={delta}"
-        )
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                moment = datetime(2026, 9, 24, 23, 59, 59, tzinfo=UTC)
+                return moment if tz is not None else moment.astimezone().replace(tzinfo=None)
+
+        monkeypatch.setenv("TZ", "AEST-10")
+        time.tzset()
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+            jm = JobManager(config_dir=config_dir)
+            job = jm.create_job(library_name="Test")
+            monkeypatch.setattr(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 1)
+            with patch.object(jobs_mod, "datetime", FixedClock):
+                jm.record_file_result(job.id, "/media/a.mkv", "generated")
+                jm.record_file_result(job.id, "/media/b.mkv", "generated")
+                jm.add_log(job.id, "INFO - x")
+            row, marker = jm.get_file_results(job.id)
+            log_line = jm.get_logs(job.id)[0]
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+        assert row["ts"] == "2026-09-25 09:59:59"
+        assert marker["outcome"] == "truncated:generated"
+        assert marker["ts"] == "2026-09-25 09:59:59"
+        assert log_line == "[2026-09-25 09:59:59] INFO - x"
 
     def test_malformed_jsonl_lines_skipped(self, config_dir):
         """Corrupt lines in the JSONL file are silently skipped."""
@@ -995,6 +983,67 @@ class TestFileResultsCap:
         assert marker_outcomes == ["truncated:generated", "truncated:skipped_bif_exists"], (
             f"expected one marker per capped outcome; got {marker_outcomes}"
         )
+
+    def test_a_capped_row_leaves_the_files_older_row_as_its_latest(self, config_dir, monkeypatch):
+        """Why retries need ``uncapped``: past the cap a file's new row is dropped, so its older row still reads as
+        its latest result."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Big scan")
+        monkeypatch.setattr(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 3)
+        jm.record_file_result(job.id, "/media/late.mkv", "skipped_not_indexed", "not indexed yet", "GPU 1")
+        for i in range(5):
+            jm.record_file_result(job.id, f"/media/v{i}.mkv", "skipped_bif_exists", "", "GPU 1")
+
+        jm.record_file_result(job.id, "/media/late.mkv", "skipped_bif_exists", "", "GPU 1")
+
+        latest = {r["file"]: r["outcome"] for r in jm.get_file_results(job.id) if r["file"]}
+        assert latest["/media/late.mkv"] == "skipped_not_indexed"
+
+    def test_an_uncapped_row_is_written_past_the_cap(self, config_dir, monkeypatch):
+        """Scan 55b098af: 115,608 previews already existed, so the ``skipped_bif_exists`` rows were capped at 5,000.
+        One file wasn't indexed; retries 2 and 3 found its preview done, but their ``skipped_bif_exists`` row was
+        dropped by the cap, the stale "not indexed" row stayed the file's latest, and the scan ended Failed. A
+        retry's row (``uncapped=True``) must be written whatever the cap, and must not add a second marker.
+        """
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Big scan")
+        monkeypatch.setattr(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 3)
+        jm.record_file_result(job.id, "/media/late.mkv", "skipped_not_indexed", "not indexed yet", "GPU 1")
+        for i in range(5):
+            jm.record_file_result(job.id, f"/media/v{i}.mkv", "skipped_bif_exists", "", "GPU 1")
+
+        jm.record_file_result(job.id, "/media/late.mkv", "skipped_bif_exists", "", "GPU 1", uncapped=True)
+        jm.record_file_result(job.id, "/media/late.mkv", "skipped_bif_exists", "again", "GPU 1", uncapped=True)
+
+        rows = jm.get_file_results(job.id)
+        latest = {r["file"]: (r["outcome"], r["reason"]) for r in rows if r["file"]}
+        assert latest["/media/late.mkv"] == ("skipped_bif_exists", "again")
+        assert [r["outcome"] for r in rows if not r["file"]] == ["truncated:skipped_bif_exists"]
+        assert len(jm.get_file_results(job.id, dedup_by_path=False)) == 1 + 3 + 1 + 2
+
+    @pytest.mark.parametrize("restarted", [False, True], ids=["same-process", "counts-read-back-from-disk"])
+    def test_a_cap_reached_by_an_uncapped_row_still_gets_its_one_marker(self, config_dir, monkeypatch, restarted):
+        """The bucket is exactly full (no row dropped yet, so no marker) when a retry's uncapped row takes the count
+        past the cap. The first row dropped after that still writes the marker, and only that one does."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Big scan")
+        monkeypatch.setattr(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 3)
+        for i in range(3):
+            jm.record_file_result(job.id, f"/media/v{i}.mkv", "skipped_bif_exists", "", "GPU 1")
+        jm.record_file_result(job.id, "/media/late.mkv", "skipped_bif_exists", "", "GPU 1", uncapped=True)
+        assert not any(r["outcome"].startswith("truncated") for r in jm.get_file_results(job.id))
+
+        jm.record_file_result(job.id, "/media/dropped1.mkv", "skipped_bif_exists", "", "GPU 1")
+        if restarted:
+            jm._file_result_counts.clear()
+        jm.record_file_result(job.id, "/media/dropped2.mkv", "skipped_bif_exists", "", "GPU 1")
+
+        rows = jm.get_file_results(job.id, dedup_by_path=False)
+        assert [r["outcome"] for r in rows if not r["file"]] == ["truncated:skipped_bif_exists"]
+        assert [r["file"] for r in rows if r["file"]] == [*(f"/media/v{i}.mkv" for i in range(3)), "/media/late.mkv"]
 
     def test_small_job_writes_no_truncation_marker(self, config_dir):
         """Jobs that stay under cap on every outcome must not write any marker."""

@@ -343,6 +343,69 @@ class TestStateMachine:
         assert "5 attempts" in (job.error or "")
         assert job.progress.retry_eta is None
 
+    @pytest.mark.parametrize(
+        ("successes", "status"),
+        [(0, JobStatus.FAILED), (1, JobStatus.COMPLETED), (115612, JobStatus.COMPLETED)],
+        ids=["nothing-succeeded-red", "one-success-amber", "scan-55b098af-amber"],
+    )
+    def test_outcome_exhausted_is_only_failed_when_nothing_succeeded(self, jm, successes, status):
+        """Scan 55b098af had 115,612 previews in place and one file that ran out of retries, and showed red
+        "Failed". An exhausted chain is a partial result (COMPLETED with the reason as its warning, the amber badge)
+        when any of its files succeeded; red only when none did.
+        """
+        original = _seed_originating_job(jm)
+        reason = "1 file(s) still weren't indexed by the media server after 3 retries"
+        job = jm.upsert_retry_chain_job(
+            canonical_path="",
+            basename="TV Shows",
+            attempt=3,
+            max_attempts=3,
+            next_run_at=None,
+            wait_seconds=None,
+            outcome="exhausted",
+            reason=reason,
+            originating_job_id=original.id,
+            successes=successes,
+        )
+        assert job.status == status
+        assert job.error == reason
+        assert job.completed_at is not None
+        assert job.config["last_outcome"] == "exhausted"
+        assert job.progress.retry_eta is None
+
+    @pytest.mark.parametrize(
+        ("reason", "successes", "status"),
+        [
+            ("1 file(s) failed", 0, JobStatus.FAILED),
+            ("27 file(s) weren't found on disk", 1, JobStatus.COMPLETED),
+            (None, 0, JobStatus.COMPLETED),
+            (None, 1, JobStatus.COMPLETED),
+        ],
+        ids=["leftover-nothing-succeeded-red", "leftover-one-success-amber", "clean-no-count-green", "clean-green"],
+    )
+    def test_outcome_completed_with_a_reason_is_failed_only_when_nothing_succeeded(self, jm, reason, successes, status):
+        """A chain whose retried files all finished can still have files no retry covers (a scan's files that
+        weren't on disk, a file whose retry failed). The reason is kept as the COMPLETED row's warning instead of
+        being wiped to green; when none of the chain's files succeeded the row is red, as an exhausted chain's is.
+        A clean finish passes no reason and is green whatever the count (the Intro & Credits chain passes none)."""
+        original = _seed_originating_job(jm)
+        job = jm.upsert_retry_chain_job(
+            canonical_path="",
+            basename="TV Shows",
+            attempt=1,
+            max_attempts=3,
+            next_run_at=None,
+            wait_seconds=None,
+            outcome="completed",
+            reason=reason,
+            originating_job_id=original.id,
+            successes=successes,
+        )
+        assert job.status == status
+        assert job.error == reason
+        assert job.completed_at is not None
+        assert job.config["last_outcome"] == "completed"
+
     def test_completed_outcome_refreshes_publishers_from_attempt(self, jm):
         """Pin the contract: when a retry chain completes, the chain Job's
         ``publishers`` row MUST be replaced with the firing's per-server

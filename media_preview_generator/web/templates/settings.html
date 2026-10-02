@@ -131,7 +131,7 @@
                         <label for="webhookRetryCount" class="form-label">Retry count
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many times to retry if the media server hasn't indexed the file yet, or if a per-file failure is recoverable. 0 = no retries."><i class="bi bi-info-circle"></i></button>
                         </label>
-                        <input type="number" class="form-control has-stepper" id="webhookRetryCount" min="0" max="10" value="3" style="max-width: 8rem;">
+                        <input type="number" class="form-control has-stepper" id="webhookRetryCount" min="0" max="10" value="5" style="max-width: 8rem;">
                         <div class="form-text">
                             Maximum retry attempts per job. 0 disables retries.
                         </div>
@@ -887,8 +887,8 @@
             </div>
             <div class="card-body">
                 <p class="mb-2">
-                    Each save to a config file (settings, schedules, webhook history) leaves a single rolling
-                    <code>.bak</code> next to it. If the live file ever gets clobbered &mdash; bad release, edit-by-mistake,
+                    Each save to a config file (settings, schedules, webhook history) leaves a timestamped
+                    <code>.bak</code> next to it; the newest ones are kept. If the live file ever gets clobbered &mdash; bad release, edit-by-mistake,
                     truncation by an old container &mdash; you can restore from the most recent backup here.
                 </p>
                 <p class="form-text mt-0 mb-3">
@@ -1211,7 +1211,9 @@ async function loadSettings() {
             : 1;
         document.getElementById('incomingJobPriority').value = String(incomingPriority);
 
-        document.getElementById('webhookRetryCount').value = Math.min(10, Math.max(0, parseInt(settings.webhook_retry_count, 10) || 3));
+        // 0 is a real setting (retries off): only a missing or unreadable count falls back to the default.
+        const retryCount = parseInt(settings.webhook_retry_count, 10);
+        document.getElementById('webhookRetryCount').value = Number.isNaN(retryCount) ? 5 : Math.min(10, Math.max(0, retryCount));
         document.getElementById('webhookRetryDelay').value = settings.webhook_retry_delay || 30;
         document.getElementById('retryDelayValue').textContent = settings.webhook_retry_delay || 30;
 

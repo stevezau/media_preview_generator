@@ -3314,6 +3314,31 @@ class TestPublishFanOut:
         assert row["message"] == "Waiting for this item's other versions to agree on: intro, credits"
         assert row["reason_code"] == "versions_unchecked"
         assert out.outcome_key == FileOutcome.WAITING.value
+        assert "unchecked_files" not in row  # the publisher named none (a fake's default)
+
+    @pytest.mark.parametrize(
+        ("unchecked", "files", "in_row"),
+        [
+            (True, ("/tv/Show/S07/E05 - h265.mkv",), ["/tv/Show/S07/E05 - h265.mkv"]),
+            (True, (), None),  # its disk didn't say in time where the version is
+            (False, ("/tv/Show/S07/E05 - h265.mkv",), None),  # versions that disagree: no retry, nothing to queue
+        ],
+        ids=["unchecked-on-disk", "unchecked-unknown-where", "disagreeing"],
+    )
+    def test_a_row_waiting_for_an_unchecked_version_names_its_file(self, store, media, unchecked, files, in_row):
+        # The job's retry runs the version nothing ever checked, not only the file that waits for it.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+
+        def write(item_id, markers, **kwargs):
+            plex.last_unchecked_versions = unchecked
+            plex.last_unchecked_files = files
+            return []
+
+        plex.write.side_effect = write
+        row = self._decided(store, media, reg, {"plex-1": plex}).publisher_rows[0]
+        assert row["status"] == ServerStatus.WAITING.value
+        assert row.get("unchecked_files") == in_row
 
     @pytest.mark.parametrize("state", [c for c in Capability if c is not Capability.READY], ids=lambda c: c.value)
     def test_every_capability_state_other_than_ready_skips_with_its_message(self, store, media, state):

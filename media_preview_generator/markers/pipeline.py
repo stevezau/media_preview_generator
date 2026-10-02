@@ -39,6 +39,7 @@ from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
 from .carry_over import ReadNow, carry_over, is_carried_over, previous_decisions
 from .credits.detector import CPU_RECHECK_PHASE, CUT_SHORT, credits_text_spec
+from .credits.frames import gpu_failure_lines
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
@@ -71,6 +72,7 @@ from .job_log import (
     done_line,
     file_start_line,
     file_title,
+    gpu_failure_line,
     kept_types,
     last_seasons_audio_line,
     make_source_view,
@@ -117,6 +119,7 @@ from .outcomes import (
     REPLACED_OWN,
     RETRY_REASON_CODES,
     STATE_BY_STATUS,
+    UNCHECKED_FILES,
     VERIFY_LATER,
     VERSIONS_UNCHECKED,
     VERSIONS_WAITING,
@@ -2887,6 +2890,7 @@ def _publish_to(
         kept = publisher.last_kept_types
         replaced_own = publisher.last_replaced_own_types
         unchecked_versions = publisher.last_unchecked_versions
+        unchecked_files = [str(path) for path in publisher.last_unchecked_files] if unchecked_versions else []
         if nothing_to_send and item_row is not None and item_row.status != "written":
             # Nothing was sent: another version's failed write stays on record for its retry (files_of_failed_items).
             version = item_row.version
@@ -2917,17 +2921,18 @@ def _publish_to(
             # yet may be checked (or deleted) later, so the job tries this file again; versions that disagree don't.
             message = with_kept_note(f"{VERSIONS_WAITING}: {', '.join(waiting_for)}", note)
             message = with_sentence(message, override)
-            return _says_override(
-                _finish(
-                    ServerStatus.WAITING,
-                    message,
-                    name=publisher.name,
-                    item_id=item_id,
-                    published=ours,
-                    reason_code=VERSIONS_UNCHECKED if unchecked_versions else None,
-                    kept_types=kept,
-                )
+            row = _finish(
+                ServerStatus.WAITING,
+                message,
+                name=publisher.name,
+                item_id=item_id,
+                published=ours,
+                reason_code=VERSIONS_UNCHECKED if unchecked_versions else None,
+                kept_types=kept,
             )
+            if unchecked_files:
+                row[UNCHECKED_FILES] = unchecked_files
+            return _says_override(row)
         if ours:
             message = f"{len(ours)} marker(s)"
         else:
@@ -3134,15 +3139,15 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
 
 def _not_on_disk(path: str, ctx: PipelineContext) -> ItemOutcome:
     """The outcome of a file not on disk, by previews' rule (``source_replaced_reason``): one a newer file replaced in
-    its folder is gone from disk for good, and its job queues no retry (the newer file is run on its own); any other is
-    not found, and a webhook's job tries it again (it may still be copying in)."""
+    its folder (on any disk of its library) is gone from disk for good, and its job queues no retry (the newer file is
+    run on its own); any other is not found, and a webhook's job tries it again (it may still be copying in)."""
     replaced = source_replaced_reason(path, ctx.registry)
     if replaced is None:
         return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
     # The app log's account; the job's log gets the file's one line (``_log_gone``).
     logger.bind(**{JOB_LOG_SKIP: True}).info(
-        "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); skipping without "
-        "a retry. The newer file gets its own Intro & Credits run from its own webhook or the next scan.",
+        "Source file {} is no longer on disk and a newer file took its place ({}); skipping without a retry. "
+        "The newer file gets its own Intro & Credits run from its own webhook or the next scan.",
         path,
         replaced.removeprefix("Skipped: "),
     )
@@ -3478,19 +3483,30 @@ def _attempt(
                 device = worker_device(notes.worker) if on_gpu else ""
                 _log_live(lambda s=source, g=on_gpu, d=device: titled(title, reading_line(s, on_gpu=g, device=d)))
                 read_started = ctx.monotonic()
-                unanswered = _run_detector(
-                    ctx,
-                    rec,
-                    spec,
-                    gpu=gpu,
-                    gpu_device_path=gpu_device_path,
-                    phase=_noting(phases, phase),
-                    cancel_check=cancel_check,
-                    pause_check=pause_check,
-                    ffmpeg_threads=ffmpeg_threads,
-                    fallback_callback=_noting(fell_back, fallback_callback),
-                    gpu_worker=gpu_worker,
-                )
+                try:
+                    unanswered = _run_detector(
+                        ctx,
+                        rec,
+                        spec,
+                        gpu=gpu,
+                        gpu_device_path=gpu_device_path,
+                        phase=_noting(phases, phase),
+                        cancel_check=cancel_check,
+                        pause_check=pause_check,
+                        ffmpeg_threads=ffmpeg_threads,
+                        fallback_callback=_noting(fell_back, fallback_callback),
+                        gpu_worker=gpu_worker,
+                    )
+                except Exception as exc:
+                    # The worker reruns the file on the CPU and names the reason; what ffmpeg itself said on the GPU
+                    # is lost with this run unless it is logged here.
+                    said = gpu_failure_lines(exc)
+                    if said:
+                        _log_live(
+                            lambda s=source, e=exc, lines=said: titled(title, gpu_failure_line(s, str(e), lines)),
+                            "WARNING",
+                        )
+                    raise
                 if unanswered is None:
                     for stored in spec.stored_sources:
                         notes.answered(stored)

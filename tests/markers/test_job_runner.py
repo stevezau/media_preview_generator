@@ -2181,6 +2181,75 @@ class TestLibraryRetry:
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
         assert f"INFO - 1 file(s) {reason}; retry 1 of 3 in 60s (job retry-1)" in logs, logs
 
+    def test_the_retry_also_lists_the_version_that_was_never_checked(self, env, retry_env):
+        # Production (Hawaii Five-0 S07E05): the retries ran the waiting file again and again, and the version it
+        # waited for was in no job, so nothing ever checked it.
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
+        self._run(["/m/a.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        # One file waits; the version it waits for isn't counted as waiting.
+        assert (
+            "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
+            "checks 1 version(s) never checked"
+        ) in logs, logs
+
+    def test_two_versions_that_wait_for_each_other_are_each_listed_once(self, env, retry_env):
+        for path, other in (("/m/a.mkv", "/m/a - h265.mkv"), ("/m/a - h265.mkv", "/m/a.mkv")):
+            row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": [other]}
+            retry_env.results.append((path, "markers_waiting", [row]))
+        self._run(["/m/a - h265.mkv", "/m/a.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a - h265.mkv", "/m/a.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert "INFO - 2 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1)" in logs
+
+    def test_after_the_last_retry_the_unchecked_version_isnt_counted_as_waiting(self, env, retry_env):
+        env.job.config["retry_attempt"] = 3
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
+        self._run(["/m/a.mkv"])
+        retry_env.create.assert_not_called()
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert (
+            "WARNING - 1 file(s) still with another version not checked after 3 retries; a later job for them tries "
+            "again"
+        ) in logs, logs
+
+    @pytest.mark.parametrize(
+        ("row", "outcome"),
+        [
+            (NOT_IN_LIBRARY_ROW, "markers_waiting"),
+            (PLEX_PASS_UNKNOWN_ROW, "markers_waiting"),
+            (FILE_BUSY_ROW, "markers_waiting"),
+            (PLEX_DB_BUSY_ROW, "failed"),
+        ],
+        ids=["not-indexed", "plex-pass-unknown", "file-busy", "plex-db-busy"],
+    )
+    def test_any_other_retry_lists_only_the_waiting_file(self, env, retry_env, row, outcome):
+        retry_env.results.append(("/m/a.mkv", outcome, [{**row, "unchecked_files": ["/m/a - h265.mkv"]}]))
+        self._run(["/m/a.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
+
+    def test_versions_that_were_checked_and_disagree_queue_nothing(self, env, retry_env):
+        row = _row("markers_waiting", VERSIONS_UNCHECKED_ROW["message"], sid="plex-1")
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [{**row, "unchecked_files": ["/m/a - h265.mkv"]}]))
+        self._run(["/m/a.mkv"])
+        retry_env.create.assert_not_called()
+
+    def test_check_servers_leaves_an_unchecked_version_to_a_later_run(self, env, retry_env):
+        # It retries only a busy write or a busy file; a version not checked isn't its to queue either.
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.job.library_name = reconcile.RECONCILE_JOB_NAME
+        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
+        listing = MagicMock(spec=reconcile.CheckServersListing, items=[_item("/m/a.mkv")], warnings=[])
+        listing.confirmed_gone_items.return_value = set()
+        self._run(listing=listing)
+        retry_env.create.assert_not_called()
+
     def test_all_three_reasons_share_one_retry_and_one_log_line(self, env, retry_env):
         retry_env.results += [
             ("/m/a.mkv", "skipped_file_not_found", []),

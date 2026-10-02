@@ -320,6 +320,9 @@ class MarkerPublisher(ABC):
     # doesn't show waits for that version's first run, not for versions that disagree (the job tries the file again
     # later). False where items have no shared versions (Jellyfin, Emby).
     last_unchecked_versions: bool = False
+    # Set by every ``write``: the local paths, on disk, of those versions (``outcomes.UNCHECKED_FILES``). Empty when a
+    # version's disk didn't say in time whether it holds the file.
+    last_unchecked_files: tuple[str, ...] = ()
 
     @abstractmethod
     def capability(self) -> CapabilityReport:

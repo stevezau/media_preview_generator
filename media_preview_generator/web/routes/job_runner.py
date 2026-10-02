@@ -5,6 +5,8 @@ Separated from route handlers for clarity -- this is the bridge between
 the web layer and the CLI processing pipeline.
 """
 
+import os
+import re
 import threading
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
@@ -12,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from loguru import logger
 
 from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
+from ...jobs.orchestrator import SUCCESS_OUTCOME_KEYS, count_successes
 from ..job_gate import format_wait_message
 from ..jobs import (
     PRIORITY_NORMAL,
@@ -34,6 +37,53 @@ _inflight_lock = threading.Lock()
 # override loop in run_job translates itself. Anything else that names a Config attribute (ffmpeg_path,
 # plex_token, ...) is ignored, since the saved job config is replayed on every start path.
 _CONFIG_ATTRIBUTE_OVERRIDES = frozenset({"regenerate_thumbnails", "sort_by"})
+
+
+def _not_found_message(not_found: int, total: int, *, nothing_succeeded: bool, retry_scheduled: bool) -> str:
+    """What a finished job says about files that weren't on disk.
+
+    Path mappings are only blamed when nothing succeeded: a scan that found 115,831 previews in place and 6 files
+    missing has working mappings (job c091d637).
+
+    Args:
+        not_found: Files that ended ``skipped_file_not_found``.
+        total: Every file the job counted.
+        nothing_succeeded: No file ended with its preview in place.
+        retry_scheduled: This job queued a retry.
+
+    Returns:
+        The job log line and completion message.
+    """
+    if not nothing_succeeded:
+        return f"{not_found} file(s) weren't found on disk"
+    if retry_scheduled:
+        return f"{not_found} of {total} items had stale Plex paths — Plex rescan triggered, retry scheduled"
+    return f"{not_found} of {total} items skipped (file not found locally) — check path mapping configuration"
+
+
+_FILE_COUNT_NAME = re.compile(r"\d+ files$")
+
+
+def _retry_job_label(parent_name: str, paths: list[str]) -> str:
+    """Name a retry job after its parent, counting the files the retry itself runs.
+
+    A parent named for its file count ("8 files", "Manual: 8 files") would otherwise label a 4-file retry
+    "Retry: 8 files". A parent with a real title keeps it.
+
+    Args:
+        parent_name: The parent job's name (a retry's own "Retry: " prefix is dropped, so it never stacks).
+        paths: The files this retry runs.
+
+    Returns:
+        ``"Retry: <name>"``.
+    """
+    name = parent_name.removeprefix("Retry: ")
+    count = "1 file" if len(paths) == 1 else f"{len(paths)} files"
+    if not name:
+        name = os.path.basename(paths[0]) if len(paths) == 1 else count
+    else:
+        name = _FILE_COUNT_NAME.sub(count, name)
+    return f"Retry: {name}"
 
 
 def _classify_job_completion(
@@ -65,16 +115,9 @@ def _classify_job_completion(
     success columns) also trips.
     """
     outcome = outcome or {}
-    success_total = (
-        outcome.get("generated", 0)
-        + outcome.get("published", 0)
-        + outcome.get("skipped_output_exists", 0)
-        + outcome.get("skipped_bif_exists", 0)
-    )
+    success_total = count_successes(outcome)
     has_any_failure = bool(failures) or outcome.get("failed", 0) > 0
-    all_not_found = (
-        outcome.get("generated", 0) == 0 and outcome.get("skipped_file_not_found", 0) > 0 and not spawned_retry_id
-    )
+    all_not_found = success_total == 0 and outcome.get("skipped_file_not_found", 0) > 0 and not spawned_retry_id
     all_items_failed = has_any_failure and success_total == 0
     nothing_resolved = total_paths > 0 and resolved_count == 0 and not spawned_retry_id
     retry_exhausted = is_retry and bool(retry_paths) and not spawned_retry_id
@@ -150,6 +193,27 @@ def _gave_up_text(file_count: int, retries: int) -> str:
         f"{file_count} file(s) still weren't indexed by the media server after {_retries_text(retries)}, so no more "
         "retries are queued. The next scheduled scan will pick them up."
     )
+
+
+def _chain_leftover_warning(not_found: int, failed: int) -> str | None:
+    """What a retry chain that finished still warns about on its head's row.
+
+    A chain re-runs the files waiting on a server and a webhook's missing files. A scan's files that failed or
+    weren't on disk get no retry, so the chain finishing must not wipe them to a green "Completed".
+
+    Args:
+        not_found: Files whose latest result is still ``skipped_file_not_found``.
+        failed: Files whose latest result is still ``failed``.
+
+    Returns:
+        The warning, or None when every file finished.
+    """
+    parts = []
+    if failed:
+        parts.append(f"{failed} file(s) failed")
+    if not_found:
+        parts.append(_not_found_message(not_found, not_found, nothing_succeeded=False, retry_scheduled=False))
+    return _join_error_clauses(parts) or None
 
 
 def _not_indexed_message(count: int, *, is_retry: bool, retry_attempt: int, effective_max: int) -> str:
@@ -947,6 +1011,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         else None
                     ) or job_id
 
+                    # A retry's row replaces the file's earlier one, so the head's per-outcome cap must not drop it.
+                    _is_retry_row = _file_results_target != job_id
+
                     def _file_result_cb(file_path, outcome_str, reason, worker, servers=None):
                         job_manager.record_file_result(
                             _file_results_target,
@@ -955,6 +1022,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             reason,
                             worker,
                             servers=servers,
+                            uncapped=_is_retry_row,
                         )
 
                     # Keyed by job_id so concurrent jobs don't clobber each
@@ -969,7 +1037,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     def _on_dispatch_start():
                         """Transition PENDING -> RUNNING when items are dispatched."""
                         job_manager.start_job(job_id)
-                        job_manager.add_log(job_id, "INFO - Job started")
 
                     def _on_pool_available(pool):
                         """Register pool and reconcile workers with current settings.
@@ -1105,6 +1172,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             upath,
                             unresolved_outcome,
                             f"{unresolved_label} \u2014 {per_path_detail}",
+                            uncapped=_is_retry_row,
                         )
                     is_retry = job_config.get("is_retry", False)
                     retry_attempt = int(job_config.get("retry_attempt", 0))
@@ -1122,12 +1190,14 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # in settings still gets 0 retries everywhere.
                     _cfg_retry_count = job_config.get("webhook_retry_count")
                     if _cfg_retry_count is None:
+                        from ...processing.retry_queue import DEFAULT_RETRY_COUNT
+
                         try:
                             from ..settings_manager import get_settings_manager as _gsm
 
-                            _cfg_retry_count = _gsm().get("webhook_retry_count", 3)
+                            _cfg_retry_count = _gsm().get("webhook_retry_count", DEFAULT_RETRY_COUNT)
                         except Exception:
-                            _cfg_retry_count = 3
+                            _cfg_retry_count = DEFAULT_RETRY_COUNT
                     retry_count = max(0, int(_cfg_retry_count))
                     _cfg_retry_delay = job_config.get("webhook_retry_delay")
                     if _cfg_retry_delay is None:
@@ -1197,10 +1267,17 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # frontend can derive the chain-summary subtitle from
                     # the /attempts response that mirrors this data.
                     pending_by_server: dict[str, int] = {}
+                    # Each file's latest result across the chain, for how the chain head's row ends.
+                    chain_successes = 0
+                    chain_failed = 0
                     for fr in job_manager.get_file_results(_retry_scan_target, dedup_by_path=True):
                         file_path = fr.get("file")
                         if not file_path:
                             continue
+                        if fr.get("outcome") in SUCCESS_OUTCOME_KEYS:
+                            chain_successes += 1
+                        elif fr.get("outcome") == "failed":
+                            chain_failed += 1
                         if fr.get("outcome") == "skipped_file_not_found":
                             not_found_on_disk.append(file_path)
                         else:
@@ -1219,23 +1296,33 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     all_scan_paths = list(unresolved_paths) + not_found_on_disk
 
                     # For retries, start with unresolved webhook paths and add
-                    # original webhook paths when files were not found on disk
-                    # (we can't reverse-map stale Plex paths back to webhook
-                    # paths, so resubmit the originals — already-processed
-                    # items will be skipped as bif_exists). Pending-registration
+                    # the webhook path of each file that wasn't found on disk
+                    # (resubmitted as the webhook sent it, so it resolves again
+                    # from scratch and keeps its item-id hint). Pending-registration
                     # paths are appended directly (already the canonical path
                     # on disk; the fast path in process_canonical_path skips
                     # files whose outputs+sidecars are fresh).
+                    #
+                    # A not-found file this job didn't dispatch has no webhook
+                    # path and isn't resubmitted: a scan's own not-found files,
+                    # which its retry reads in the chain head's rows, used to
+                    # make that retry resubmit every path it had (55b098af).
                     #
                     # webhook_paths lives on the JOB's config dict, not on
                     # global settings — older code read settings.get(...)
                     # which would silently inherit stale paths from any
                     # past job that ever wrote the key globally.
+                    input_by_canonical: dict[str, str] = resolution.get("input_by_canonical") or {}
+                    webhook_inputs = job_config.get("webhook_paths") or []
+                    stale_inputs: list[str] = []
+                    for nf in not_found_on_disk:
+                        wp = input_by_canonical.get(nf) or (nf if nf in webhook_inputs else None)
+                        if wp and wp not in stale_inputs:
+                            stale_inputs.append(wp)
                     retry_paths = list(unresolved_paths)
-                    if not_found_on_disk:
-                        for wp in job_config.get("webhook_paths") or []:
-                            if wp not in retry_paths:
-                                retry_paths.append(wp)
+                    for wp in stale_inputs:
+                        if wp not in retry_paths:
+                            retry_paths.append(wp)
                     for pp in pending_registration_paths:
                         if pp not in retry_paths:
                             retry_paths.append(pp)
@@ -1280,7 +1367,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             parent_library = parent_library[len("Retry: ") :]
                         if not parent_library:
                             parent_library = basenames[0] if len(paths) == 1 else f"{len(paths)} files"
-                        retry_library_name = f"Retry: {parent_library}"
+                        retry_library_name = _retry_job_label(parent_library, paths)
                         parent_id = job_config.get("parent_job_id") or job_id
                         # D15 — the slow backoff schedule (1m, 2m, 5m, 15m, 60m).
                         # The old formula `30 * 2^(n-1)` capped at 5min spaced
@@ -1393,8 +1480,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         #               acquires the gate, below)
                         #   completed → parent.status COMPLETED (set at end
                         #               of rj when no more pending)
-                        #   exhausted → parent.status FAILED (set at end of
-                        #               rj when max attempts hit)
+                        #   exhausted → parent.status FAILED, or COMPLETED with a
+                        #               warning when any file of the chain
+                        #               succeeded (set at end of rj when max
+                        #               attempts hit)
                         #
                         # ``source`` comes from the chain head (``parent_id``)
                         # not from ``current_job`` — when this spawner runs
@@ -1459,7 +1548,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # ``published_pending_registration``).
                         retry_reason = {
                             "unresolved": len(unresolved_paths),
-                            "stale_paths": len(not_found_on_disk),
+                            "stale_paths": len(stale_inputs),
                             "pending_by_server": dict(pending_by_server),
                         }
 
@@ -1472,8 +1561,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             reason_parts = []
                             if unresolved_paths:
                                 reason_parts.append(f"{len(unresolved_paths)} unresolved")
-                            if not_found_on_disk:
-                                reason_parts.append(f"{len(not_found_on_disk)} stale path(s)")
+                            if stale_inputs:
+                                reason_parts.append(f"{len(stale_inputs)} stale path(s)")
                             if pending_by_server:
                                 _by_server_sorted = sorted(pending_by_server.items(), key=lambda kv: -kv[1])
                                 reason_parts.append(", ".join(f"{name} pending × {n}" for name, n in _by_server_sorted))
@@ -1497,8 +1586,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             reason_parts = []
                             if unresolved_paths:
                                 reason_parts.append(f"{len(unresolved_paths)} not found on any server")
-                            if not_found_on_disk:
-                                reason_parts.append(f"{len(not_found_on_disk)} stale path(s)")
+                            if stale_inputs:
+                                reason_parts.append(f"{len(stale_inputs)} stale path(s)")
                             if pending_by_server:
                                 _by_server_sorted = sorted(pending_by_server.items(), key=lambda kv: -kv[1])
                                 reason_parts.append(", ".join(f"{name} pending × {n}" for name, n in _by_server_sorted))
@@ -1515,9 +1604,12 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # Terminal chain transition: this is a retry Job, it
                     # didn't spawn another retry, and the parent Job is
                     # the user-visible chain row. Mark the parent terminal:
-                    #   - retry_paths empty → chain succeeded → parent COMPLETED
+                    #   - retry_paths empty → chain finished → parent COMPLETED
+                    #     (with a warning for files no retry covered; FAILED when
+                    #     that warning is set and none of the chain's files succeeded)
                     #   - retry_paths non-empty but max attempts hit →
-                    #     chain exhausted → parent FAILED
+                    #     chain exhausted → parent FAILED when none of the
+                    #     chain's files succeeded, else COMPLETED with a warning
                     # Cancellation is handled in the next block.
                     if (
                         is_retry
@@ -1536,7 +1628,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                     )
                                 else:
                                     _chain_outcome = "completed"
-                                    _chain_reason = None
+                                    _chain_reason = _chain_leftover_warning(len(not_found_on_disk), chain_failed)
 
                                 # Refresh the chain head's publishers snapshot
                                 # from the parent's JSONL. Walks every attempt
@@ -1586,6 +1678,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                         reason=_chain_reason,
                                         source=(_chain_parent.config or {}).get("source"),
                                         publishers=_chain_publishers,
+                                        successes=max(chain_successes, count_successes(_chain_parent.progress.outcome)),
                                     )
                                 except Exception as exc:
                                     # WARNING (not DEBUG): a terminal-state
@@ -1624,19 +1717,14 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             generated = outcome.get("generated", 0)
                             outcome_failed = outcome.get("failed", 0)
                             total_outcome = sum(outcome.values())
-                            if not_found > 0 and generated == 0:
-                                if spawned_retry_id:
-                                    msg = (
-                                        f"{not_found} of {total_outcome} items "
-                                        "had stale Plex paths — Plex rescan "
-                                        "triggered, retry scheduled"
-                                    )
-                                else:
-                                    msg = (
-                                        f"{not_found} of {total_outcome} items "
-                                        "skipped (file not found locally) — "
-                                        "check path mapping configuration"
-                                    )
+                            nothing_succeeded = count_successes(outcome) == 0
+                            if not_found > 0:
+                                msg = _not_found_message(
+                                    not_found,
+                                    total_outcome,
+                                    nothing_succeeded=nothing_succeeded,
+                                    retry_scheduled=bool(spawned_retry_id and stale_inputs),
+                                )
                                 job_manager.add_log(job_id, f"WARNING - {msg}")
                                 error_parts.append(msg)
                             # Per-item failures (FFmpeg crashes, adapter errors)
@@ -1652,7 +1740,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             # that ran via the multi-server scan would always
                             # report ``generated == 0`` and trip the all-failed
                             # branch even when most items succeeded.
-                            elif outcome_failed > 0:
+                            #
+                            # Left out when nothing succeeded and files weren't
+                            # found: that message already says the run made nothing.
+                            if outcome_failed > 0 and not (not_found > 0 and nothing_succeeded):
                                 published_total = (
                                     generated
                                     + outcome.get("published", 0)
@@ -1737,7 +1828,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 )
                                 if enumeration_warning:
                                     msg = _join_error_clauses([msg, enumeration_warning])
-                                job_manager.add_log(job_id, f"INFO - {msg}")
+                                job_manager.add_log(job_id, f"WARNING - {msg}")
                                 job_manager.complete_job(job_id, warning=msg)
                             elif is_retry:
                                 _level, _msg = _retry_completion_message(

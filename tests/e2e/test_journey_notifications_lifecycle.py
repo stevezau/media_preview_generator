@@ -265,3 +265,31 @@ class TestNotificationsLifecycle:
         assert DEPRECATED_IMAGE_ID not in ids, (
             f"After reload, the permanently-dismissed notification reappeared. Got IDs: {ids}"
         )
+
+
+@pytest.mark.e2e
+def test_session_only_card_offers_dismiss_without_dismiss_permanently(page) -> None:
+    """A card flagged ``permanent_dismissable: false`` (the media-mount card) gets the session button only."""
+    from pathlib import Path
+
+    from media_preview_generator.web import notifications as notif_mod
+    from media_preview_generator.web.notifications import MEDIA_MOUNT_UNHEALTHY_ID
+
+    script = Path(notif_mod.__file__).parent / "static" / "js" / "notifications.js"
+    page.set_content('<div id="notificationList"></div><span id="notificationBellBadge"></span>')
+    # app.js defines these two helpers for notifications.js; plain stand-ins keep the page free of the backend.
+    page.add_script_tag(
+        content="function escapeHtml(s) { return s; } function sanitizeNotificationHtml(h) { return h; }"
+    )
+    page.add_script_tag(path=str(script))
+    session_only = {"id": MEDIA_MOUNT_UNHEALTHY_ID, "title": "Mount", "body_html": "", "dismissable": True}
+    session_only["permanent_dismissable"] = False
+    ordinary = {"id": DEPRECATED_IMAGE_ID, "title": "Image", "body_html": "", "dismissable": True}
+
+    page.evaluate("cards => renderNotifications(cards)", [session_only, ordinary])
+
+    def button_labels(notification_id: str) -> list[str]:
+        return page.locator(f'[data-notification-id="{notification_id}"] button').all_inner_texts()
+
+    assert button_labels(MEDIA_MOUNT_UNHEALTHY_ID) == ["Dismiss"]
+    assert button_labels(DEPRECATED_IMAGE_ID) == ["Dismiss", "Dismiss permanently"]

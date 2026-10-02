@@ -768,8 +768,8 @@ def submit_version_reruns(delay_s: int = 0, after: Mapping[str, object] | None =
         for detector in taken:
             by_detector[detector] = by_detector.get(detector, 0) + 1
     logger.info(
-        "{} file(s) rest on an answer from an older detector version, were decided under older rules, or show times an "
-        "older publish rule kept ({}); "
+        "{} file(s) rest on an answer from an older detector version, were decided under older rules, show times an "
+        "older publish rule kept, or wait for a Plex item's other versions ({}); "
         "read again {} at a time (job {}: {})",
         len(due),
         ", ".join(f"{detector} {count}" for detector, count in sorted(by_detector.items())),

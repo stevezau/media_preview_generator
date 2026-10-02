@@ -991,6 +991,24 @@ def reading_line(source: Source, *, on_gpu: bool, device: str = "") -> str:
     return f"Reading {_READING_LABEL[source]} on the {where}…"
 
 
+def gpu_failure_line(source: Source, reason: str, ffmpeg_lines: Iterable[str]) -> str:
+    """Why a read on the worker's GPU failed, with what ffmpeg itself said, logged before the worker reads the file
+    again on the CPU.
+
+    Args:
+        source: ``Source.CREDITS_TEXT`` or ``Source.SEASON_AUDIO``.
+        reason: The failure, as the worker's CPU rerun names it.
+        ffmpeg_lines: ffmpeg's last lines that say why (``frames.GpuDecodeError.stderr_tail``).
+
+    Returns:
+        E.g. ``Credit text: couldn't be read on the GPU (the GPU's decoder hit a hardware or driver error (ffmpeg
+        exited 251)). FFmpeg's last lines: [hevc @ 0x1] Failed to sync surface 0x5 | [vist#0:0/hevc @ 0x2] Decoding
+        error: Input/output error``.
+    """
+    label = "Credit text" if source is Source.CREDITS_TEXT else "Season audio"
+    return f"{label}: couldn't be read on the GPU ({reason}). FFmpeg's last lines: {' | '.join(ffmpeg_lines)}"
+
+
 def _read_result_note(seconds: float, fallback: str = "", *, gpu_read_nothing: bool = False) -> str:
     """The parenthesised note a read's result line ends with: just the time it took (the start line already said
     where), unless a step fell back to the CPU or the GPU read nothing and it was read again there."""

@@ -1838,9 +1838,10 @@ class PlexMarkerPublisher(MarkerPublisher):
                 return decided
         return None
 
-    def _local_candidates_and_roots(self, plex_path: str) -> dict[str, tuple[str, ...]]:
+    def _local_candidates_and_roots(self, plex_path: str) -> tuple[dict[str, tuple[str, ...]], bool]:
         """Each local candidate of a Plex path with the disk roots it lies under: the path mapping's local folder and
-        the folder of each library holding it (``gone_from_disk``'s ``roots``)."""
+        the folder of each library holding it (``gone_from_disk``'s ``roots``); and whether a library's folder holds
+        every candidate."""
         from ...servers.ownership import path_mapping_candidates
 
         mappings = list(self._config.path_mappings or [])
@@ -1851,25 +1852,38 @@ class PlexMarkerPublisher(MarkerPublisher):
             for local, _root in path_mapping_candidates(remote, mappings)
         ]
         candidates: dict[str, tuple[str, ...]] = {}
+        all_in_a_library = True
         for local, mapping_root in path_mapping_candidates(plex_path, mappings):
             roots = [root.rstrip("/") or "/" for root in library_roots if _lies_under(local, root)]
+            # A library at ``/`` proves nothing: ``/`` holds entries whatever is mounted.
+            all_in_a_library = all_in_a_library and any(root != "/" for root in roots)
             candidates[local] = tuple(dict.fromkeys([*([mapping_root] if mapping_root else []), *roots]))
-        return candidates
+        return candidates, all_in_a_library
 
-    def _gone_from_disk(self, plex_file: str) -> bool:
-        """Whether a version's file is on none of the disks the server's path mappings give for it (``gone_from_disk``:
-        a disk that isn't mounted, or whose mount went stale, never makes it look gone).
+    def _where_on_disk(self, plex_file: str) -> tuple[str, ...] | None:
+        """The local paths holding a version's file, or None when it is on none of the disks the server's path mappings
+        give for it (``gone_from_disk``: a disk that isn't mounted, or whose mount went stale, never makes it look gone,
+        and then no path holds it).
+
+        Its disk roots holding entries stand in for a missing folder: a file replaced by one on another disk can take
+        its season folder with it, and the item would wait for that version for good. Only for a version every candidate
+        of which lies in a library's folder, as ``missing.py`` marks files: a path mapping's folder holding entries
+        says nothing about a folder inside it that no library names (a disk of its own that isn't mounted), so there
+        the version's folder has to exist.
 
         Asked while the item's lock is held, so a disk that doesn't answer within ``GONE_CHECK_TIMEOUT_S`` (a stalled
         network share blocks a stat rather than fail) counts as "not gone" instead of holding every publish to the item.
         """
-        candidates = self._local_candidates_and_roots(plex_file)
-        answer: list[bool] = []
-        check = threading.Thread(
-            target=lambda: answer.append(gone_from_disk(candidates, roots=candidates)),
-            name="plex-version-on-disk",
-            daemon=True,
-        )
+        candidates, in_a_library = self._local_candidates_and_roots(plex_file)
+        answer: list[tuple[str, ...] | None] = []
+
+        def look() -> None:
+            if gone_from_disk(candidates, roots=candidates, trust_roots=in_a_library, follow_links=True):
+                answer.append(None)
+            else:
+                answer.append(tuple(path for path in candidates if os.path.isfile(path)))
+
+        check = threading.Thread(target=look, name="plex-version-on-disk", daemon=True)
         check.start()
         check.join(GONE_CHECK_TIMEOUT_S)
         if not answer:
@@ -1879,7 +1893,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                 GONE_CHECK_TIMEOUT_S,
                 os.path.basename(plex_file),
             )
-            return False
+            return ()
         return answer[0]
 
     def _desired(
@@ -1892,7 +1906,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         written -- the calling file's, or what this app already left on the item -- is
         :func:`~.base.agreed_across_versions`'s rule, including the exception a locked type makes; it isn't restated
         here. A version never decided whose file is gone from disk (Plex lists a deleted file until its next scan)
-        takes no part; one still on disk is waited for, and sets ``last_unchecked_versions``.
+        takes no part; one still on disk is waited for, and sets ``last_unchecked_versions`` and
+        ``last_unchecked_files``.
 
         Raises:
             PublishError: Stacked multi-part files.
@@ -1912,13 +1927,19 @@ class PlexMarkerPublisher(MarkerPublisher):
             )
         # None = never decided, so no type is desired yet. {} = decided with no markers.
         decisions = []
+        unchecked: list[str] = []
         for part in others:
             decided = self._sibling_decision(part.file)
-            # A deleted file has no decision (markers_for_path), and waiting for one would hold the item back forever.
-            if decided is None and self._gone_from_disk(part.file):
-                continue
+            if decided is None:
+                on_disk = self._where_on_disk(part.file)
+                # A deleted file has no decision (markers_for_path), and waiting for one would hold the item back
+                # forever.
+                if on_disk is None:
+                    continue
+                unchecked.extend(on_disk)
             decisions.append(decided)
         self.last_unchecked_versions = any(decided is None for decided in decisions)
+        self.last_unchecked_files = tuple(dict.fromkeys(unchecked))
         return self.project(agreed_across_versions(markers, decisions, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
 
     def _local_files(self, version_files: tuple[str, ...]) -> tuple[str, ...]:
@@ -1959,6 +1980,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         self.last_replaced_stale_types = frozenset()
         self.last_item_files = None
         self.last_unchecked_versions = False
+        self.last_unchecked_files = ()
         keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
         kept_before = frozenset(kept_types)
         # Until the item's rows are read, what was kept stays kept (or is released by the setting).

@@ -739,6 +739,206 @@ class TestSourceGoneFromDisk:
         self._assert_retries(result, stale)
 
 
+def _spanning_registry(disks: list[Path], *, folder: str = "TV Shows", kind: str | None = None, mapped: bool = True):
+    """One Emby library whose folders sit on several disks, each disk its own path mapping (as a multi-disk install)."""
+    cfg = _server_config(
+        server_id="emby-1",
+        server_type=ServerType.EMBY,
+        libraries=[
+            Library(id="1", name="Library", remote_paths=tuple(str(d / folder) for d in disks), enabled=True),
+        ],
+    )
+    cfg["libraries"][0]["kind"] = kind
+    if mapped:
+        cfg["path_mappings"] = [{"remote_prefix": str(d), "local_prefix": str(d)} for d in disks]
+    return ServerRegistry.from_settings([cfg])
+
+
+class TestSourceReplacedOnAnotherDisk:
+    """A library spread over several disks: the file that replaced a missing one can land on another of them.
+
+    Production, 2026-09-29/30: Sonarr imported upgrades onto a different disk of the TV library than the file they
+    replaced. Every such file was reported "not found", retried, and the job blamed on path mappings (22 of 22), while
+    every replacement that landed on the same disk ended as "replaced by a newer file" (6 of 6).
+
+    The same rule as in the file's own folder applies to the same folder under each other folder of its library, and
+    only what is seen there counts: a disk that's missing or empty says nothing, and the missing file's own disk must
+    still look plainly mounted.
+    """
+
+    SHOW = "Brothers (2026)"
+    OLD = "Brothers (2026) - S01E03 - Little Woody [WEBDL-1080p]-RAWR.mkv"
+    NEW = "Brothers (2026) - S01E03 - Little Woody [WEBDL-1080p]-HONE.mkv"
+
+    _run = staticmethod(TestSourceGoneFromDisk._run)
+    _assert_retries = staticmethod(TestSourceGoneFromDisk._assert_retries)
+
+    @staticmethod
+    def _mounted(disk: Path) -> Path:
+        """A disk that looks plainly mounted: its library folder holds some other show."""
+        _video(disk / "TV Shows" / "Other Show (2019)" / "Season 01" / "Other Show (2019) - S01E01 - Pilot.mkv")
+        return disk
+
+    @classmethod
+    def _disks(cls, tmp_path: Path, count: int = 2) -> list[Path]:
+        return [cls._mounted(tmp_path / f"disk{n}") for n in range(1, count + 1)]
+
+    def _assert_replaced(self, result, missing: Path, replacement: str = NEW) -> None:
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == f"Skipped: replaced by a newer file ({replacement})"
+        assert result.canonical_path == str(missing)
+        assert result.publishers == []
+
+    @pytest.mark.parametrize("mapped", [True, False], ids=["one-mapping-per-disk", "no-mappings"])
+    def test_replacement_on_another_disk_with_the_show_gone_from_this_one(
+        self, mock_config_for_processing, tmp_path, mapped
+    ):
+        disk1, disk2 = self._disks(tmp_path)
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / self.NEW)
+
+        result = self._run(missing, _spanning_registry([disk1, disk2], mapped=mapped), mock_config_for_processing)
+
+        self._assert_replaced(result, missing)
+
+    def test_replacement_on_another_disk_with_other_episodes_still_on_this_one(
+        self, mock_config_for_processing, tmp_path
+    ):
+        disk1, disk2 = self._disks(tmp_path)
+        season = disk1 / "TV Shows" / self.SHOW / "Season 01"
+        _video(season / "Brothers (2026) - S01E01 - On the Road.mkv")
+        missing = season / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / self.NEW)
+
+        result = self._run(missing, _spanning_registry([disk1, disk2]), mock_config_for_processing)
+
+        self._assert_replaced(result, missing)
+
+    def test_replacement_on_the_third_disk_past_one_without_the_show(self, mock_config_for_processing, tmp_path):
+        disk1, disk2, disk3 = self._disks(tmp_path, 3)
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+        _video(disk3 / "TV Shows" / self.SHOW / "Season 01" / self.NEW)
+
+        result = self._run(missing, _spanning_registry([disk1, disk2, disk3]), mock_config_for_processing)
+
+        self._assert_replaced(result, missing)
+
+    def test_replacement_in_the_files_own_folder_is_named_before_one_on_another_disk(
+        self, mock_config_for_processing, tmp_path
+    ):
+        disk1, disk2 = self._disks(tmp_path)
+        season = disk1 / "TV Shows" / self.SHOW / "Season 01"
+        _video(season / "Brothers (2026) - S01E03 - Little Woody-SAME-DISK.mkv")
+        missing = season / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / self.NEW)
+
+        result = self._run(missing, _spanning_registry([disk1, disk2]), mock_config_for_processing)
+
+        self._assert_replaced(result, missing, "Brothers (2026) - S01E03 - Little Woody-SAME-DISK.mkv")
+
+    @pytest.mark.parametrize("kind", ["movies", "movie"], ids=["emby-movies", "plex-movie"])
+    def test_movie_replaced_by_the_one_feature_in_its_folder_on_another_disk(
+        self, mock_config_for_processing, tmp_path, kind
+    ):
+        disks = [tmp_path / "disk1", tmp_path / "disk2"]
+        for disk in disks:
+            _video(disk / "Movies" / "Kept Movie (2001)" / "Kept Movie (2001).mkv")
+        missing = disks[0] / "Movies" / "Film (2021)" / "Film (2021) - 1080p-GRP.mkv"
+        _video(disks[1] / "Movies" / "Film (2021)" / "Film (2021) - 2160p.mkv")
+        _video(disks[1] / "Movies" / "Film (2021)" / "Film (2021)-trailer.mkv")
+
+        result = self._run(missing, _spanning_registry(disks, folder="Movies", kind=kind), mock_config_for_processing)
+
+        self._assert_replaced(result, missing, "Film (2021) - 2160p.mkv")
+
+    def test_no_replacement_on_any_disk_still_retries(self, mock_config_for_processing, tmp_path):
+        disk1, disk2 = self._disks(tmp_path)
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / "Brothers (2026) - S01E01 - On the Road.mkv")
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 02" / "Brothers (2026) - S02E03 - Other Season.mkv")
+
+        self._assert_retries(
+            self._run(missing, _spanning_registry([disk1, disk2]), mock_config_for_processing), missing
+        )
+
+    @pytest.mark.parametrize("state", ["missing", "empty", "empty-library-folder"])
+    def test_other_disk_missing_or_empty_still_retries(self, mock_config_for_processing, tmp_path, state):
+        """A disk that isn't mounted (or shows a stale, empty underlay) holds nothing to see: not proof of anything."""
+        disk1, disk2 = self._mounted(tmp_path / "disk1"), tmp_path / "disk2"
+        if state == "empty":
+            disk2.mkdir()
+        elif state == "empty-library-folder":
+            (disk2 / "TV Shows").mkdir(parents=True)
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+
+        self._assert_retries(
+            self._run(missing, _spanning_registry([disk1, disk2]), mock_config_for_processing), missing
+        )
+
+    @pytest.mark.parametrize("state", ["missing", "empty"])
+    def test_one_unmounted_disk_does_not_hide_a_replacement_on_another(
+        self, mock_config_for_processing, tmp_path, state
+    ):
+        disk1, disk2, disk3 = self._mounted(tmp_path / "disk1"), tmp_path / "disk2", self._mounted(tmp_path / "disk3")
+        if state == "empty":
+            disk2.mkdir()
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+        _video(disk3 / "TV Shows" / self.SHOW / "Season 01" / self.NEW)
+
+        result = self._run(missing, _spanning_registry([disk1, disk2, disk3]), mock_config_for_processing)
+
+        self._assert_replaced(result, missing)
+
+    @pytest.mark.parametrize("state", ["missing", "empty", "empty-library-folder"])
+    def test_files_own_disk_unmounted_still_retries_whatever_another_disk_holds(
+        self, mock_config_for_processing, tmp_path, state
+    ):
+        """The missing file may be sitting on its own disk, out of sight: a same-episode file elsewhere proves nothing."""
+        disk1, disk2 = tmp_path / "disk1", self._mounted(tmp_path / "disk2")
+        if state == "empty":
+            disk1.mkdir()
+        elif state == "empty-library-folder":
+            (disk1 / "TV Shows").mkdir(parents=True)
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / self.NEW)
+
+        self._assert_retries(
+            self._run(missing, _spanning_registry([disk1, disk2]), mock_config_for_processing), missing
+        )
+
+    def test_same_episode_in_another_library_on_another_disk_still_retries(self, mock_config_for_processing, tmp_path):
+        """Another library's copy (a 4K library on its own disk) is a different file, not this one's replacement."""
+        disk1, disk2 = self._disks(tmp_path)
+        cfg = _server_config(
+            server_id="emby-1",
+            server_type=ServerType.EMBY,
+            libraries=[
+                Library(id="1", name="TV", remote_paths=(str(disk1 / "TV Shows"),), enabled=True),
+                Library(id="2", name="TV 4K", remote_paths=(str(disk2 / "TV Shows"),), enabled=True),
+            ],
+        )
+        cfg["path_mappings"] = [{"remote_prefix": str(d), "local_prefix": str(d)} for d in (disk1, disk2)]
+        season = disk1 / "TV Shows" / self.SHOW / "Season 01"
+        _video(season / "Brothers (2026) - S01E01 - On the Road.mkv")
+        missing = season / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / "Brothers (2026) - S01E03 - Little Woody [2160p].mkv")
+
+        self._assert_retries(
+            self._run(missing, ServerRegistry.from_settings([cfg]), mock_config_for_processing), missing
+        )
+
+    def test_same_named_file_on_another_disk_is_not_a_replacement(self, tmp_path):
+        """The file itself on another disk of its library has moved, not been replaced (Intro & Credits asks this
+        without previews' sibling-mount rebind in front of it)."""
+        from media_preview_generator.processing.multi_server import source_replaced_reason
+
+        disk1, disk2 = self._disks(tmp_path)
+        missing = disk1 / "TV Shows" / self.SHOW / "Season 01" / self.OLD
+        _video(disk2 / "TV Shows" / self.SHOW / "Season 01" / self.OLD)
+
+        assert source_replaced_reason(str(missing), _spanning_registry([disk1, disk2])) is None
+
+
 class TestSinglePublisher:
     def test_emby_publisher_runs_one_ffmpeg_pass(self, mock_config_for_processing, tmp_path):
         media_dir = tmp_path / "data" / "movies" / "Test (2024)"
@@ -1944,6 +2144,138 @@ class TestNoFrames:
         assert result.status is MultiServerStatus.NO_FRAMES
 
 
+class TestSourceVanishesDuringGeneration:
+    """A file that's there for the up-front check and gone by the time its frames are read ends like one that was
+    never there: replaced by a newer file, or not found and retried. It isn't a corrupt video.
+
+    Production, 2026-09-30 14:14: Sonarr replaced The Drop S01E04 two seconds after its job passed the check; the job
+    logged an ERROR with a traceback ("Common causes: corrupt video file…") and the file was marked failed.
+    """
+
+    OLD = "The Drop (2026) - S01E04 - The Big Push [HDR10].mkv"
+    NEW = "The Drop (2026) - S01E04 - The Big Push [DV HDR10Plus]-RAWR.mkv"
+
+    @staticmethod
+    def _season(tmp_path: Path) -> Path:
+        root = tmp_path / "tv"
+        _video(root / "Other Show (2019)" / "Season 01" / "Other Show (2019) - S01E01 - Pilot.mkv")
+        return root / "The Drop (2026)" / "Season 01"
+
+    @staticmethod
+    def _run(source: Path, config, tmp_path: Path, generate):
+        """Run ``source`` with ``generate`` standing in for FFmpeg; returns the result and the (level, message) log."""
+        config.tmp_folder = str(tmp_path / "cache")
+        registry = _emby_registry(tmp_path / "tv")
+        records: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG")
+        try:
+            with patch(
+                "media_preview_generator.processing.multi_server.generate_images", side_effect=generate
+            ) as mock_generate:
+                result = process_canonical_path(canonical_path=str(source), registry=registry, config=config)
+        finally:
+            logger.remove(sink)
+        return result, records, mock_generate
+
+    @staticmethod
+    def _vanish_then_raise(source: Path, exc: Exception, *, replacement: Path | None = None):
+        def generate(*_args, **_kwargs):
+            source.unlink()
+            if replacement is not None:
+                _video(replacement)
+            raise exc
+
+        return generate
+
+    @pytest.mark.parametrize(
+        "exc",
+        [FileNotFoundError("no such file"), RuntimeError("ffmpeg exited 1")],
+        ids=["file-not-found", "another-error"],
+    )
+    def test_replaced_while_generating_ends_as_replaced_by_a_newer_file(
+        self, mock_config_for_processing, tmp_path, exc
+    ):
+        season = self._season(tmp_path)
+        source = _video(season / self.OLD)
+
+        result, records, mock_generate = self._run(
+            source,
+            mock_config_for_processing,
+            tmp_path,
+            self._vanish_then_raise(source, exc, replacement=season / self.NEW),
+        )
+
+        mock_generate.assert_called_once()
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == f"Skipped: replaced by a newer file ({self.NEW})"
+        assert result.canonical_path == str(source)
+        assert result.publishers == []
+        assert [message for level, message in records if level in ("WARNING", "ERROR")] == []
+
+    @pytest.mark.parametrize(
+        "exc",
+        [FileNotFoundError("no such file"), RuntimeError("ffmpeg exited 1")],
+        ids=["file-not-found", "another-error"],
+    )
+    def test_gone_while_generating_without_a_replacement_is_retryable_not_found(
+        self, mock_config_for_processing, tmp_path, exc
+    ):
+        season = self._season(tmp_path)
+        _video(season / "The Drop (2026) - S01E03 - Family Matters.mkv")
+        source = _video(season / self.OLD)
+
+        result, records, _ = self._run(
+            source, mock_config_for_processing, tmp_path, self._vanish_then_raise(source, exc)
+        )
+
+        assert result.status is MultiServerStatus.SKIPPED_FILE_NOT_FOUND
+        assert result.message == f"Source file not found: {source}"
+        assert result.publishers == []
+        assert [level for level, _ in records if level == "ERROR"] == []
+        warnings = [message for level, message in records if level == "WARNING"]
+        assert len(warnings) == 1
+        assert warnings[0].startswith(f"Source video file is missing on disk: {source}.")
+
+    @pytest.mark.parametrize("replaced", [True, False], ids=["replaced", "not-replaced"])
+    def test_outcome_matches_a_file_missing_at_the_up_front_check(self, mock_config_for_processing, tmp_path, replaced):
+        season = self._season(tmp_path)
+        _video(season / "The Drop (2026) - S01E03 - Family Matters.mkv")
+        source = _video(season / self.OLD)
+        replacement = season / self.NEW if replaced else None
+
+        during, _, _ = self._run(
+            source,
+            mock_config_for_processing,
+            tmp_path,
+            self._vanish_then_raise(source, FileNotFoundError("no such file"), replacement=replacement),
+        )
+        up_front, _, mock_generate = self._run(source, mock_config_for_processing, tmp_path, AssertionError)
+
+        mock_generate.assert_not_called()
+        assert during == up_front
+
+    @pytest.mark.parametrize(
+        "exc",
+        [RuntimeError("ffmpeg exited 1"), FileNotFoundError("ffmpeg: no such file")],
+        ids=["another-error", "file-not-found-for-something-else"],
+    )
+    def test_failure_with_the_file_still_on_disk_is_still_a_failure(self, mock_config_for_processing, tmp_path, exc):
+        season = self._season(tmp_path)
+        source = _video(season / self.OLD)
+        _video(season / self.NEW)
+
+        def generate(*_args, **_kwargs):
+            raise exc
+
+        result, records, _ = self._run(source, mock_config_for_processing, tmp_path, generate)
+
+        assert result.status is MultiServerStatus.FAILED
+        assert result.message == f"Frame generation failed: {exc}"
+        errors = [message for level, message in records if level == "ERROR"]
+        assert len(errors) == 1
+        assert errors[0].startswith(f"Could not extract preview frames from {source} ({type(exc).__name__}: {exc}).")
+
+
 class TestAdapterFactory:
     def test_picks_default_per_server_type(self):
         plex_cfg = ServerConfig(
@@ -2076,6 +2408,45 @@ class TestSummariseResults:
         ]:
             msg = _summarise_results([self._result(pub_status)], ms_status)
             assert "publisher" not in msg.lower(), f"jargon leaked for {ms_status}: {msg!r}"
+
+
+class TestItemIdLookupMissIsNotAWarning:
+    """A server that hasn't indexed a file yet is the expected state right after an import: every lookup of every
+    attempt hits it (1,276 of ~2,000 WARNING lines in 3.6 days on the owner's server). The lookup says so at INFO; the
+    line that ends a retry chain is the one that warns."""
+
+    @staticmethod
+    def _lookup(found: str | None) -> list[tuple[str, str]]:
+        from media_preview_generator.processing.multi_server import _resolve_item_id_for
+
+        server = MagicMock()
+        server.name = "Plex"
+        server.resolve_remote_path_to_item_id.return_value = found
+        records: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG")
+        try:
+            assert _resolve_item_id_for(server, "/data/tv/Show/Show - S01E01.mkv", None) == found
+        finally:
+            logger.remove(sink)
+        server.resolve_remote_path_to_item_id.assert_called_once_with("/data/tv/Show/Show - S01E01.mkv")
+        return records
+
+    def test_miss_is_logged_at_info_not_warning(self):
+        records = self._lookup(None)
+
+        assert [level for level, _ in records if level not in ("INFO", "DEBUG")] == []
+        misses = [(level, message) for level, message in records if "not found on Plex" in message]
+        assert len(misses) == 1
+        level, message = misses[0]
+        assert level == "INFO"
+        assert message.startswith("'Show - S01E01.mkv' not found on Plex (")
+        assert message.endswith("indexing may be delayed")
+
+    def test_hit_logs_no_miss_line(self):
+        records = self._lookup("12345")
+
+        assert [message for _, message in records if "not found on" in message] == []
+        assert [level for level, _ in records if level not in ("INFO", "DEBUG")] == []
 
 
 class TestItemIdResolverMemoisation:

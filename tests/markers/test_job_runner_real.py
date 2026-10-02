@@ -1059,7 +1059,9 @@ class TestCreditTextOnTheWorkers:
         logs = engine.jm.get_logs(job.id)
         # Every entry is one record: its own time and level, then its message. A line after the file's first starts
         # with its title and " · ", so it can be told apart from another file's or worker's line interleaved with it.
-        stamped = [re.fullmatch(r"\[\d\d:\d\d:\d\d\] (INFO|WARNING|ERROR) - (.*)", line) for line in logs]
+        stamped = [
+            re.fullmatch(r"\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] (INFO|WARNING|ERROR) - (.*)", line) for line in logs
+        ]
         assert all(stamped), logs
         messages = [match.group(2) for match in stamped]
         episode = "Rick and Morty (2013) S01E01"

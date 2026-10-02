@@ -28,7 +28,9 @@ Cache validity rules:
   The key is required on both calls so no caller can skip the check.
 - Entries expire after ``ttl_seconds`` regardless of mtime — protects
   against cache file corruption or partial writes from a previous run
-  by bounding the trust window.
+  by bounding the trust window. Expired entries are removed on lookup
+  and whenever frames are stored; slot directories a previous process
+  left behind are removed the same way once they are that old.
 - LRU eviction keeps the cache to ``max_entries`` directories.
 
 The cache directory is set up under
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import threading
 import time
@@ -54,6 +57,9 @@ _DEFAULT_TTL_SECONDS = 3600  # 1 hour — covers cross-vendor webhook arrivals (
 # both servers configured). Tunable via the ``frame_reuse`` block in settings.json.
 _DEFAULT_MAX_ENTRIES = 1024  # generous; the disk cap below is the real backstop
 _DEFAULT_MAX_DISK_MB = 2048  # 2 GB ceiling on the on-disk cache
+
+# A cache slot's directory name (``FrameCache.frame_dir_for``); the sweep removes nothing else.
+_SLOT_DIR_RE = re.compile(r"frames-([0-9a-f]{16})")
 
 
 @dataclass(frozen=True)
@@ -77,7 +83,8 @@ class FrameCache:
         max_entries: Maximum number of cached entries; oldest is evicted
             when the cache is full.
         ttl_seconds: Maximum age of a cache entry. Entries older than
-            this miss on lookup and are evicted lazily.
+            this miss on lookup, and are evicted then or when the next
+            frames are stored.
     """
 
     def __init__(
@@ -103,6 +110,8 @@ class FrameCache:
         # fires race on FFmpeg's rename loop in the shared tmp dir.
         self._generation_locks: dict[str, threading.Lock] = {}
         self._generation_locks_lock = threading.Lock()
+        with self._lock:
+            self._sweep_expired()
 
     # ---------------------------------------------------------- key helpers
     def _key(self, canonical_path: str) -> str:
@@ -128,7 +137,9 @@ class FrameCache:
         and never evicted (the dict grows with the universe of files
         ever processed; that's bounded by the user's library size).
         """
-        key = self._key(canonical_path)
+        return self._generation_lock_for_key(self._key(canonical_path))
+
+    def _generation_lock_for_key(self, key: str) -> threading.Lock:
         with self._generation_locks_lock:
             lock = self._generation_locks.get(key)
             if lock is None:
@@ -259,6 +270,7 @@ class FrameCache:
         with self._lock:
             self._entries.pop(key, None)
             self._entries[key] = entry
+            self._sweep_expired(keep=key)
             self._enforce_caps()
         return entry
 
@@ -292,6 +304,50 @@ class FrameCache:
                 shutil.rmtree(entry.frame_dir)
         except OSError as exc:
             logger.debug("Frame cache: failed to rmtree {}: {}", entry.frame_dir, exc)
+
+    def _sweep_expired(self, keep: str | None = None) -> None:
+        """Remove what has outlived the TTL. Caller holds the lock.
+
+        That is every expired entry, and every slot directory no entry owns that was last written longer ago than
+        the TTL: a previous process's leftovers, which nothing would otherwise remove.
+
+        Args:
+            keep: Key of the entry the caller just stored and is about to use.
+        """
+        now = time.time()
+        expired = [key for key, entry in self._entries.items() if now - entry.cached_at > self._ttl_seconds]
+        try:
+            with os.scandir(self._base_dir) as slots:
+                for slot in slots:
+                    name = _SLOT_DIR_RE.fullmatch(slot.name)
+                    if name is None or name.group(1) in self._entries or not slot.is_dir(follow_symlinks=False):
+                        continue
+                    if now - slot.stat(follow_symlinks=False).st_mtime > self._ttl_seconds:
+                        expired.append(name.group(1))
+        except OSError as exc:
+            logger.debug("Frame cache: could not list {}: {}", self._base_dir, exc)
+        for key in expired:
+            if key != keep:
+                self._remove_slot_if_idle(key)
+
+    def _remove_slot_if_idle(self, key: str) -> None:
+        """Remove slot ``key``'s entry and directory unless a dispatcher is using it. Caller holds the lock.
+
+        A dispatcher holds the slot's generation lock for as long as it writes or reads those frames, so the slot is
+        only removed while this call holds that lock itself; a busy slot is left for a later sweep.
+        """
+        in_use = self._generation_lock_for_key(key)
+        if not in_use.acquire(blocking=False):
+            return
+        try:
+            if key in self._entries:
+                self._evict(key)
+            else:
+                shutil.rmtree(self._base_dir / f"frames-{key}")
+        except OSError as exc:
+            logger.debug("Frame cache: failed to remove slot {}: {}", key, exc)
+        finally:
+            in_use.release()
 
     def _enforce_caps(self) -> None:
         """Trim oldest entries until under both caps. Caller holds the lock.

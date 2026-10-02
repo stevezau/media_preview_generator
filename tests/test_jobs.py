@@ -104,7 +104,7 @@ class TestJobLogPersistence:
         job = jm.create_job(library_name="Test")
         with patch.object(jobs_mod, "datetime", FixedClock):
             jm.add_log(job.id, "INFO - Intro & Credits job started")
-        assert jm.get_logs(job.id) == ["[10:05:07] INFO - Intro & Credits job started"]
+        assert jm.get_logs(job.id) == ["[2026-09-24 10:05:07] INFO - Intro & Credits job started"]
 
     @pytest.mark.parametrize(
         "moment",
@@ -114,7 +114,7 @@ class TestJobLogPersistence:
     def test_log_clock_turns_a_stored_utc_time_into_local_time(self, utc_plus_10, moment):
         from media_preview_generator.web.jobs import log_clock
 
-        assert log_clock(moment) == "09:59:59"
+        assert log_clock(moment) == "2026-09-25 09:59:59"
 
     def test_get_logs_reads_from_file_after_restart(self, config_dir):
         """get_logs returns file content when in-memory cache is empty (e.g. after restart)."""

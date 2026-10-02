@@ -18,10 +18,13 @@ from types import SimpleNamespace
 import pytest
 
 from media_preview_generator.web.routes.job_runner import (
+    _chain_leftover_warning,
     _classify_job_completion,
     _format_retry_wait_server_label,
+    _not_found_message,
     _not_indexed_message,
     _retry_completion_message,
+    _retry_job_label,
 )
 
 
@@ -210,6 +213,37 @@ class TestClassifyJobCompletion:
             resolved_count=5,
         )
         assert result == "error"
+
+    @pytest.mark.parametrize("spawned_retry_id", [None, "retry-1"], ids=["no-retry", "retry-queued"])
+    @pytest.mark.parametrize("success_key", ["generated", "skipped_bif_exists", "published", "skipped_output_exists"])
+    def test_not_found_beside_any_success_is_warning(self, success_key, spawned_retry_id):
+        """Nightly scan c091d637: 115,831 previews already existed, 6 files weren't found, 2 failed, and the badge
+        was red "Failed … check path mapping configuration". Files not found only fail the job when nothing in any
+        success column succeeded, whichever column that is.
+        """
+        result = _classify_job_completion(
+            failures=[],
+            outcome={success_key: 115831, "skipped_file_not_found": 6, "failed": 2},
+            is_retry=False,
+            retry_paths=[],
+            spawned_retry_id=spawned_retry_id,
+            total_paths=0,
+            resolved_count=0,
+        )
+        assert result == "warning"
+
+    def test_all_not_found_with_a_retry_queued_is_warning(self):
+        """Nothing succeeded yet, but a retry is queued for the missing files: not a final failure."""
+        result = _classify_job_completion(
+            failures=[],
+            outcome={"generated": 0, "skipped_file_not_found": 5},
+            is_retry=False,
+            retry_paths=["/data/a.mkv"],
+            spawned_retry_id="retry-1",
+            total_paths=5,
+            resolved_count=5,
+        )
+        assert result == "warning"
 
     def test_nothing_resolved_is_hard_failure(self):
         """The user submitted paths but none resolved against Plex — the
@@ -427,3 +461,69 @@ class TestNotIndexedMessage:
         msg = _not_indexed_message(2, is_retry=is_retry, retry_attempt=retry_attempt, effective_max=effective_max)
         assert msg == expected
         assert "retried automatically" not in msg and "backoff" not in msg
+
+
+class TestNotFoundMessage:
+    """What a job says about files that weren't on disk. Only a job where nothing succeeded blames path mappings."""
+
+    @pytest.mark.parametrize(
+        ("nothing_succeeded", "retry_scheduled", "expected"),
+        [
+            (True, False, "6 of 20 items skipped (file not found locally) — check path mapping configuration"),
+            (True, True, "6 of 20 items had stale Plex paths — Plex rescan triggered, retry scheduled"),
+            (False, False, "6 file(s) weren't found on disk"),
+            (False, True, "6 file(s) weren't found on disk"),
+        ],
+        ids=["nothing-succeeded", "nothing-succeeded-retry-queued", "partial", "partial-retry-queued"],
+    )
+    def test_message(self, nothing_succeeded, retry_scheduled, expected):
+        msg = _not_found_message(6, 20, nothing_succeeded=nothing_succeeded, retry_scheduled=retry_scheduled)
+        assert msg == expected
+
+
+class TestRetryJobLabel:
+    """A retry is named after its parent, but counts the files the retry itself runs ("Retry: 8 files" ran 4)."""
+
+    @pytest.mark.parametrize(
+        ("parent_name", "paths", "expected"),
+        [
+            ("8 files", ["/d/a.mkv", "/d/b.mkv", "/d/c.mkv", "/d/d.mkv"], "Retry: 4 files"),
+            ("8 files", ["/d/a.mkv"], "Retry: 1 file"),
+            ("Manual: 8 files", ["/d/a.mkv", "/d/b.mkv"], "Retry: Manual: 2 files"),
+            ("Retry: 8 files", ["/d/a.mkv", "/d/b.mkv", "/d/c.mkv"], "Retry: 3 files"),
+            ("The Show S01E01", ["/d/a.mkv"], "Retry: The Show S01E01"),
+            ("TV Shows", ["/d/a.mkv", "/d/b.mkv"], "Retry: TV Shows"),
+            ("", ["/d/a.mkv"], "Retry: a.mkv"),
+            ("", ["/d/a.mkv", "/d/b.mkv"], "Retry: 2 files"),
+        ],
+        ids=[
+            "count-name-fewer-paths",
+            "count-name-one-path",
+            "prefixed-count-name",
+            "retry-of-a-retry",
+            "title-kept",
+            "library-name-kept",
+            "no-parent-name-one-path",
+            "no-parent-name",
+        ],
+    )
+    def test_label(self, parent_name, paths, expected):
+        assert _retry_job_label(parent_name, paths) == expected
+
+
+class TestChainLeftoverWarning:
+    """A retry chain that finished keeps a warning for its job's files that no retry covered, instead of ending
+    green: scan 55b098af had 27 files not on disk beside the one file its retries were for."""
+
+    @pytest.mark.parametrize(
+        ("not_found", "failed", "expected"),
+        [
+            (0, 0, None),
+            (27, 0, "27 file(s) weren't found on disk"),
+            (0, 2, "2 file(s) failed"),
+            (27, 2, "2 file(s) failed. 27 file(s) weren't found on disk"),
+        ],
+        ids=["all-finished", "not-found", "failed", "both"],
+    )
+    def test_warning(self, not_found, failed, expected):
+        assert _chain_leftover_warning(not_found, failed) == expected

@@ -43,7 +43,7 @@ from ..bif_reader import read_bif_metadata, unpack_bif_to_jpegs
 from ..config import resolve_frame_interval
 from ..markers.external_ids import ids_from_path, is_extra
 from ..markers.fs import gone_from_disk
-from ..markers.missing import disk_roots
+from ..markers.missing import disk_roots, library_folders
 from ..output import BifBundle, EmbyBifAdapter, JellyfinTrickplayAdapter, PlexBundleAdapter
 from ..output.base import OutputAdapter
 from ..output.journal import clear_meta, outputs_fresh_for_source, write_meta
@@ -82,7 +82,9 @@ class MultiServerStatus(str, Enum):
     SKIPPED = "skipped"  # owners exist but every one was skipped (output already on disk)
     SKIPPED_NOT_INDEXED = "skipped_not_indexed"  # owners exist but every one was waiting on the server's index
     SKIPPED_FILE_NOT_FOUND = "skipped_file_not_found"  # source file missing on disk (retryable — usually mid-copy)
-    SKIPPED_SOURCE_GONE = "skipped_source_gone"  # replaced by a newer file in its folder (terminal, no retry)
+    # Replaced by a newer file in its folder, or in the same folder under another folder of the file's library
+    # (terminal, no retry).
+    SKIPPED_SOURCE_GONE = "skipped_source_gone"
     NO_OWNERS = "no_owners"  # no enabled library covers the path
     FAILED = "failed"  # generation or every publisher failed
     NO_FRAMES = "no_frames"  # FFmpeg produced 0 frames (unrecoverable)
@@ -613,14 +615,9 @@ def _resolve_item_id_for(server: MediaServer, canonical_path: str, hint: str | N
     if result:
         logger.info("Resolved '{}' on {} → item {} ({:.1f}s)", basename, server.name, result, elapsed)
     else:
-        # WARNING (not INFO): the server didn't find the file in its
-        # library yet. Operator-visible because the typical cause is a
-        # slow library scan on the destination server — the per-job
-        # retry chain catches this and re-attempts, but surfacing the
-        # condition at WARNING in both the Job log viewer and
-        # container logs makes it grep-able for "what's blocking this
-        # webhook batch."
-        logger.warning(
+        # INFO: expected right after an import, on every lookup of every attempt, until the server's scan indexes the
+        # file. The retry chain re-attempts; the line that ends a chain is the one that warns.
+        logger.info(
             "'{}' not found on {} ({:.1f}s) — indexing may be delayed",
             basename,
             server.name,
@@ -1032,16 +1029,31 @@ def _replacement_video(canonical_path: str, *, movie_library: bool) -> str | Non
     return max(same_episode, key=_entry_mtime).name if same_episode else None
 
 
+def _same_file_on_other_library_folders(canonical_path: str, configs: list[ServerConfig]) -> list[str]:
+    """Where else a file of a library with several folders could sit: the same relative path under each other folder
+    of every library holding it (a library spread over several disks), each once."""
+    paths: list[str] = []
+    for folders in library_folders(configs):
+        local_folders = [folder for folder, _mapping_root in folders if folder]
+        for folder in local_folders:
+            if canonical_path.startswith(folder + "/"):
+                tail = canonical_path[len(folder) :]
+                paths.extend(other + tail for other in local_folders if other != folder)
+    return list(dict.fromkeys(paths))
+
+
 def source_replaced_reason(canonical_path: str, registry: ServerRegistry) -> str | None:
     """Say which newer file replaced a missing source file, or ``None`` when it may still turn up.
 
     A webhook can name a file that's already been replaced: Sonarr or Radarr importing the same episode or movie again
     under a new name deletes the old file, and no retry can find it. Previews and Intro & Credits (``markers.pipeline``)
-    both end such a file on this answer. Only a replacement sitting in the file's own folder
-    counts, and only while the library's disk looks plainly mounted: ``gone_from_disk`` with the path mapping and
+    both end such a file on this answer. Only a replacement sitting in the file's own folder counts, or in that same
+    folder under another folder of the file's library (a library spread over several disks: the import can land on any
+    of them), and only while the library's disk looks plainly mounted: ``gone_from_disk`` with the path mapping and
     library folders as roots says "not gone" when one of them is missing, empty or unreadable (a stale bind mount shows
     an empty underlay), and when the file sits directly in one. A missing folder is never taken as a deletion: a union
-    filesystem that lost a disk looks exactly the same.
+    filesystem that lost a disk looks exactly the same. The file's own disk has to pass that check before any other is
+    looked at, and another disk that fails it is skipped: it says nothing either way.
 
     Args:
         canonical_path: The local path that isn't on disk.
@@ -1054,16 +1066,63 @@ def source_replaced_reason(canonical_path: str, registry: ServerRegistry) -> str
         return None
     try:
         configs = registry.configs()
-        roots = disk_roots(canonical_path, configs)
+        candidates = [canonical_path, *_same_file_on_other_library_folders(canonical_path, configs)]
+        roots = {path: disk_roots(path, configs) for path in candidates}
     except Exception as exc:
         logger.debug("Couldn't read the library folders for {}: {}", canonical_path, exc)
         return None
-    if not roots or not gone_from_disk([canonical_path], roots={canonical_path: roots}, trust_roots=True):
-        return None
-    if not os.path.isdir(os.path.dirname(canonical_path)):
-        return None
-    replacement = _replacement_video(canonical_path, movie_library=_in_movie_library(canonical_path, configs))
-    return f"Skipped: replaced by a newer file ({replacement})" if replacement else None
+    for path in candidates:
+        if not roots[path] or not gone_from_disk([path], roots={path: roots[path]}, trust_roots=True):
+            if path == canonical_path:
+                return None
+            continue
+        if not os.path.isdir(os.path.dirname(path)):
+            continue
+        replacement = _replacement_video(path, movie_library=_in_movie_library(canonical_path, configs))
+        if replacement:
+            return f"Skipped: replaced by a newer file ({replacement})"
+    return None
+
+
+def _source_missing_result(
+    canonical_path: str, registry: ServerRegistry, sibling_candidates: list[str]
+) -> MultiServerResult:
+    """The outcome of a source file that isn't on disk, whenever that's found out (the up-front check, or FFmpeg
+    reaching for a file that went away after it).
+
+    Args:
+        canonical_path: The local path that isn't on disk.
+        registry: The server registry (``source_replaced_reason``).
+        sibling_candidates: The sibling-mount paths already checked for the file, for the warning.
+
+    Returns:
+        ``SKIPPED_SOURCE_GONE`` when a newer file replaced it (no retry), else the retryable
+        ``SKIPPED_FILE_NOT_FOUND``.
+    """
+    replaced_reason = source_replaced_reason(canonical_path, registry)
+    if replaced_reason is not None:
+        logger.info(
+            "Source file {} is no longer on disk and a newer file took its place ({}); skipping without a retry. "
+            "The newer file gets its own preview from its own webhook or the next scan.",
+            canonical_path,
+            replaced_reason.removeprefix("Skipped: "),
+        )
+        return MultiServerResult(
+            canonical_path=canonical_path,
+            status=MultiServerStatus.SKIPPED_SOURCE_GONE,
+            message=replaced_reason,
+        )
+    logger.warning(_missing_on_disk_message(canonical_path, sibling_candidates))
+    # SKIPPED_FILE_NOT_FOUND (not FAILED) so the webhook-retry path
+    # in job_runner picks it up and reschedules — webhooks fire at
+    # download-START in many *arrs, so a "file missing" right now
+    # is usually "still copying", which the retry backoff (1m, 2m,
+    # 5m, …) is exactly designed to wait through.
+    return MultiServerResult(
+        canonical_path=canonical_path,
+        status=MultiServerStatus.SKIPPED_FILE_NOT_FOUND,
+        message=f"Source file not found: {canonical_path}",
+    )
 
 
 def _summarise_results(results: list[PublisherResult], status: MultiServerStatus) -> str:
@@ -1180,10 +1239,12 @@ def _publish_one(
     # from a hard failure. Catching it here gives the user a clean, actionable
     # message instead of the cryptic "publish-time bookkeeping" ValueError
     # that compute_output_paths would otherwise raise. Also nudges the
-    # server to scan (best-effort — Jellyfin only has a full /Library/Refresh,
-    # so the cooldown inside trigger_refresh prevents scan-thrash). The
-    # dispatcher then schedules a retry on SKIPPED_NOT_IN_LIBRARY so the
-    # next attempt picks up the freshly-indexed item.
+    # server to scan (best-effort; Plex's partial scan is rate-limited per
+    # folder inside plex_client.trigger_plex_partial_scan, so a nudge sent
+    # within a minute of another for the same folder is dropped and a later
+    # attempt sends it). The dispatcher then schedules a retry on
+    # SKIPPED_NOT_IN_LIBRARY so the next attempt picks up the
+    # freshly-indexed item.
     if adapter.needs_server_metadata() and item_id is None:
         try:
             server.trigger_refresh(item_id=None, remote_path=bundle.canonical_path)
@@ -1572,31 +1633,7 @@ def process_canonical_path(
                 ", ".join(f"{srv.name}/{adp.name}" for srv, adp, _ in publishers),
             )
         else:
-            replaced_reason = source_replaced_reason(canonical_path, registry)
-            if replaced_reason is not None:
-                logger.info(
-                    "Source file {} is no longer on disk and a newer file took its place in the same folder ({}); "
-                    "skipping without a retry. The newer file gets its own preview from its own webhook or the next "
-                    "scan.",
-                    canonical_path,
-                    replaced_reason.removeprefix("Skipped: "),
-                )
-                return MultiServerResult(
-                    canonical_path=canonical_path,
-                    status=MultiServerStatus.SKIPPED_SOURCE_GONE,
-                    message=replaced_reason,
-                )
-            logger.warning(_missing_on_disk_message(canonical_path, sibling_candidates))
-            # SKIPPED_FILE_NOT_FOUND (not FAILED) so the webhook-retry path
-            # in job_runner picks it up and reschedules — webhooks fire at
-            # download-START in many *arrs, so a "file missing" right now
-            # is usually "still copying", which the retry backoff (30s, 2m,
-            # 5m, …) is exactly designed to wait through.
-            return MultiServerResult(
-                canonical_path=canonical_path,
-                status=MultiServerStatus.SKIPPED_FILE_NOT_FOUND,
-                message=f"Source file not found: {canonical_path}",
-            )
+            return _source_missing_result(canonical_path, registry, sibling_candidates)
 
     # Pre-FFmpeg short-circuit: when every owning publisher's outputs
     # already exist AND the journal confirms the source hasn't changed
@@ -1961,6 +1998,16 @@ def process_canonical_path(
                 logger.info("Frame extraction cancelled for {} — stopping this file.", canonical_path)
                 raise
             except Exception as exc:
+                if not os.path.isfile(canonical_path):
+                    # It passed the up-front check and went away since (an upgrade replacing it mid-run).
+                    logger.debug(
+                        "Frame extraction stopped for {}: the file is no longer on disk ({}: {})",
+                        canonical_path,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    moved_to, sibling_candidates = _probe_sibling_mounts(canonical_path, registry)
+                    return _source_missing_result(canonical_path, registry, [] if moved_to else sibling_candidates)
                 logger.exception(
                     "Could not extract preview frames from {} ({}: {}). "
                     "This file will be marked failed and skipped — the rest of the queue keeps running. "

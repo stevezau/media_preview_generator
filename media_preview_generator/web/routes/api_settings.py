@@ -2,7 +2,6 @@
 
 import os
 import uuid
-from datetime import UTC
 from urllib.parse import urlparse
 
 from flask import jsonify, request
@@ -10,6 +9,7 @@ from loguru import logger
 
 from ...config import MAX_CPU_THREADS, validate_processing_thread_totals
 from ...markers.settings import mask_global
+from ...processing.retry_queue import DEFAULT_RETRY_COUNT
 from ...utils import is_docker_environment
 from ..auth import api_token_required, setup_or_auth_required
 from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_HIGH, PRIORITY_LABELS, parse_priority
@@ -380,7 +380,7 @@ def get_settings():
             "job_history_days": settings.get("job_history_days", 30),
             "webhook_enabled": settings.get("webhook_enabled", True),
             "webhook_delay": settings.get("webhook_delay", 60),
-            "webhook_retry_count": settings.get("webhook_retry_count", 3),
+            "webhook_retry_count": settings.get("webhook_retry_count", DEFAULT_RETRY_COUNT),
             "webhook_retry_delay": settings.get("webhook_retry_delay", 30),
             "webhook_secret": "****" if settings.get("webhook_secret") else "",
             "auto_requeue_on_restart": settings.get("auto_requeue_on_restart", True),
@@ -1477,21 +1477,12 @@ def _list_backups_for(live_path: str) -> list[dict]:
     Recognises both the new ``filepath.{YYYYMMDD-HHMMSS}.bak`` form and the
     legacy single ``filepath.bak`` left over from older app versions.
     """
-    import glob
+    from ...utils import timestamped_backups
 
     out: list[dict] = []
     # New timestamped backups.
-    for path in glob.glob(live_path + ".*.bak"):
-        # Skip the legacy form that happens to also match (e.g. backup.bak)
-        # — it would have no timestamp segment between the dots.
-        suffix = path[len(live_path) :]  # e.g. ".20260429-211544.bak"
-        parts = suffix.split(".")
-        if len(parts) != 3 or parts[0] != "" or parts[2] != "bak":
-            continue
-        ts_raw = parts[1]
-        # Validate timestamp shape; skip if malformed.
-        if len(ts_raw) != 15 or ts_raw[8] != "-" or not (ts_raw[:8] + ts_raw[9:]).isdigit():
-            continue
+    for path in timestamped_backups(live_path):
+        ts_raw = path[len(live_path) + 1 : -len(".bak")]  # e.g. "20260429-211544"
         try:
             mtime = os.path.getmtime(path)
         except OSError:
@@ -1607,12 +1598,9 @@ def restore_backup():
     # snapshot in turn. Best-effort — never blocks the primary restore.
     if os.path.exists(live):
         try:
-            from datetime import datetime
+            from ...utils import _backup_max_age_days, _backup_retention, _prune_old_backups, backup_file
 
-            from ...utils import _backup_max_age_days, _backup_retention, _prune_old_backups
-
-            ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-            shutil.copy2(live, f"{live}.{ts}.bak")
+            backup_file(live)
             _prune_old_backups(live, _backup_retention(), _backup_max_age_days())
         except OSError as exc:
             logger.debug("Pre-restore snapshot of {} failed: {}", live, exc)

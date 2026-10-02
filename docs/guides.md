@@ -389,9 +389,9 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 1. Radarr/Sonarr imports a file (or an external tool sends a custom webhook) and a POST is sent to this app.
 2. The app **queues** the file and starts (or resets) a timer. Imports from the same source (Radarr, Sonarr, or Custom) are batched together.
 3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. A batch never waits more than **10 minutes** from its first file, though: a steady stream of imports would otherwise hold it until the stream stopped. Files that arrive once that limit is reached start the next batch.
-4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3 and initial delay of 30 s; the delay setting scales every wait, so 60 s gives 2 m → 4 m → 10 m, and more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
+4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m → 15 m → 60 m by default; **Settings → Retry policy** sets how many retries run and scales the waits), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
-6. A file that a newer file has already replaced when its job runs isn't retried: Sonarr or Radarr imported the same episode or movie again under a new name, and the new file is in the same folder. The Files panel shows it as **Gone from disk**, in preview and Intro & Credits jobs alike, and the newer file is processed on its own. Any other missing file is retried as usual.
+6. A file that a newer file has already replaced when its job runs isn't retried: Sonarr or Radarr imported the same episode or movie again under a new name, and the new file is in the same folder, or in that folder on another disk of the same library. The Files panel shows it as **Gone from disk**, in preview and Intro & Credits jobs alike, and the newer file is processed on its own. Any other missing file is retried as usual.
 
 ### Prerequisites
 
@@ -851,8 +851,9 @@ Saved fingerprints take up to about 28 KB per episode. When an Intro & Credits j
 verify jobs), a cleanup starts in the background, at most once an hour. It looks for up to 2,000 fingerprinted files on
 disk, for at most a minute, and clears the fingerprints of files that are gone (renamed by an upgrade, or deleted) while
 their folder is still there; the next cleanup goes on where it stopped. A file whose folder is missing, as in an
-unmounted library, keeps its fingerprint. The app log (not the job's log) says how many were cleared, and warns (at most
-every 10 minutes) when a cleanup is still waiting on a stalled network share.
+unmounted library, keeps its fingerprint until the file has been marked missing for 30 days. The app log (not the
+job's log) says how many were cleared, and warns (at most every 10 minutes) when a cleanup is still waiting on a
+stalled network share.
 
 An episode with no other episode of its season on disk yet (a new season's first weekly release) is compared with the
 previous season's first 4 episodes that are already fingerprinted, when its folder is named like a season (`Season 2`
@@ -1178,8 +1179,8 @@ runs at Normal priority, or at Low when the preview job itself runs at Low, and 
 first try (it doesn't wait out the preview job's retries; episodes that join it later, see below, don't wait for their
 own preview jobs). If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer
 its Plex Pass check, it's retried the way preview jobs are, with the same backoff — **Settings → Retry policy → Retry
-count / Initial retry delay**. The job stays one row in the queue: **Pending**, with a **Retry 1/3** chip and
-"Retry starting in …", then **Running** while the retry checks the files still waiting. Files that were already
+count / Initial retry delay**. The job stays one row in the queue: **Pending**, with a **Retry 1/5** chip (5 retries
+by default) and "Retry starting in …", then **Running** while the retry checks the files still waiting. Files that were already
 done keep their results. The row turns **Completed** once every file is in, or **Failed** when the retries run out
 with files still waiting (the Files panel lists them). **Retry now** starts the waiting retry at once. A job with no
 preview job before it (markers on with previews off, a manual job, the Inspector) retries the same way.
@@ -1210,47 +1211,47 @@ header once the worker finishes it, so another file's pickup line or block can n
 "Credits" chapter credit text checked:
 
 ```
-[07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
-[07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)
-[07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
-[07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39 (asked now)
-[07:37:23] INFO -   SkipDB: no entry (asked now)
-[07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU (NVIDIA GeForce RTX 3060) in 9 s)
-[07:37:23] INFO -   Plex's own markers: none (asked now)
-[07:37:23] INFO -   Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)
-[07:37:23] INFO -   Sent to Plex: credits 1:59:32–2:03:39
-[07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1
-[07:37:23] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
+[2026-09-25 07:37:13] INFO - Intro & Credits job 6742472e started: 1 file, follow-up to preview job c7ca6327 (Radarr import)
+[2026-09-25 07:37:14] INFO - GPU Worker 1 (NVIDIA GeForce RTX 3060) picked up 32 Frames: A 9/11 Mystery (2026)
+[2026-09-25 07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): checking credits (films get credits only)
+[2026-09-25 07:37:23] INFO -   Chapters: "Credits" chapter at 2:00:11–2:03:39 (asked now)
+[2026-09-25 07:37:23] INFO -   SkipDB: no entry (asked now)
+[2026-09-25 07:37:23] INFO -   Credit text: credits start at 1:59:32 (moves the "Credits" chapter at 2:00:11 to the first credit card; read on the GPU (NVIDIA GeForce RTX 3060) in 9 s)
+[2026-09-25 07:37:23] INFO -   Plex's own markers: none (asked now)
+[2026-09-25 07:37:23] INFO -   Decided: credits 1:59:32–2:03:39 (the "Credits" chapter, moved to the first credit card by credit text)
+[2026-09-25 07:37:23] INFO -   Sent to Plex: credits 1:59:32–2:03:39
+[2026-09-25 07:37:23] INFO - 32 Frames: A 9/11 Mystery (2026): done in 9.5 s on GPU Worker 1
+[2026-09-25 07:37:23] INFO - Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found
 ```
 
 A TV episode:
 
 ```
-[09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05
-[09:13:05] INFO - Accused S04E05: checking intro and credits
-[09:13:05] INFO -   Chapters: none (asked now)
-[09:13:05] INFO -   IntroDB: intro 0:41–1:12 (asked now)
-[09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; read on the CPU in 0 s)
-[09:13:05] INFO -   Credit text: credits start at 41:48 (read on the GPU (Intel UHD 770) in 13 s)
-[09:13:05] INFO -   Plex's own markers: none (asked now)
-[09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
-[09:13:05] INFO -   Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10
-[09:13:05] INFO - Accused S04E05: done in 25 s on GPU Worker 2
+[2026-09-25 09:12:40] INFO - GPU Worker 2 (Intel UHD 770) picked up Accused S04E05
+[2026-09-25 09:13:05] INFO - Accused S04E05: checking intro and credits
+[2026-09-25 09:13:05] INFO -   Chapters: none (asked now)
+[2026-09-25 09:13:05] INFO -   IntroDB: intro 0:41–1:12 (asked now)
+[2026-09-25 09:13:05] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; read on the CPU in 0 s)
+[2026-09-25 09:13:05] INFO -   Credit text: credits start at 41:48 (read on the GPU (Intel UHD 770) in 13 s)
+[2026-09-25 09:13:05] INFO -   Plex's own markers: none (asked now)
+[2026-09-25 09:13:05] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
+[2026-09-25 09:13:05] INFO -   Sent to Plex: intro 0:41–1:12 · credits 41:48–43:10
+[2026-09-25 09:13:05] INFO - Accused S04E05: done in 25 s on GPU Worker 2
 ```
 
 An unchanged file, re-checked later, logs the same full block again -- every source's line says its answer was
 reused ("saved 2026-09-25") instead of asked, and the done line ends "(nothing new to send)" when nothing was:
 
 ```
-[14:02:10] INFO - Accused S04E05: checking intro and credits
-[14:02:10] INFO -   Chapters: none (saved 2026-09-25)
-[14:02:10] INFO -   IntroDB: intro 0:41–1:12 (saved 2026-09-25)
-[14:02:10] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; saved 2026-09-25)
-[14:02:10] INFO -   Credit text: credits start at 41:48 (saved 2026-09-25)
-[14:02:10] INFO -   Plex's own markers: none (saved 2026-09-25)
-[14:02:10] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
-[14:02:10] INFO -   Sent to Plex: already up to date (intro 0:41–1:12 · credits 41:48–43:10)
-[14:02:10] INFO - Accused S04E05: done in 0 s, no worker needed (nothing new to send)
+[2026-09-26 14:02:10] INFO - Accused S04E05: checking intro and credits
+[2026-09-26 14:02:10] INFO -   Chapters: none (saved 2026-09-25)
+[2026-09-26 14:02:10] INFO -   IntroDB: intro 0:41–1:12 (saved 2026-09-25)
+[2026-09-26 14:02:10] INFO -   Season audio: intro 0:41–1:12 (same theme found in 9 of 10 episodes; saved 2026-09-25)
+[2026-09-26 14:02:10] INFO -   Credit text: credits start at 41:48 (saved 2026-09-25)
+[2026-09-26 14:02:10] INFO -   Plex's own markers: none (saved 2026-09-25)
+[2026-09-26 14:02:10] INFO -   Decided: intro 0:41–1:12 (IntroDB and season audio agree) · credits 41:48–43:10 (credit text)
+[2026-09-26 14:02:10] INFO -   Sent to Plex: already up to date (intro 0:41–1:12 · credits 41:48–43:10)
+[2026-09-26 14:02:10] INFO - Accused S04E05: done in 0 s, no worker needed (nothing new to send)
 ```
 
 - A movie is named by its title on your media server, an episode by its show and `SxxEyy`.
@@ -1273,7 +1274,13 @@ reused ("saved 2026-09-25") instead of asked, and the done line ends "(nothing n
 - Credit text says so when the file stops before its stated length ("the file ends before its stated length (27:10 of
   44:02 readable)"), and when the GPU read nothing and the CPU read the ending instead ("read on the CPU after the GPU
   read nothing").
-- A file a newer one replaced in its folder gets one line: "Blood Legacy (2024) S01E05: Skipped: replaced by a newer
+- A read that fails on a worker's GPU logs a warning with FFmpeg's own last lines, then the worker reads the file
+  again on the CPU: "Credit text: couldn't be read on the GPU (the GPU's decoder hit a hardware or driver error
+  (ffmpeg exited 251)). FFmpeg's last lines: …".
+- Files that wait for a retry get one line: "2 file(s) not in a server's library yet; retry 1 of 5 in 60s (job
+  3f2a9c1e)". It ends ", which also checks 1 version(s) never checked" when the retry also runs another version
+  of a waiting file's Plex item that no job has checked, so the item doesn't keep waiting for it.
+- A file a newer one replaced gets one line: "Blood Legacy (2024) S01E05: Skipped: replaced by a newer
   file (…)".
 
 Every file gets this full block, whatever it did: a file whose result didn't change and whose servers are up to date
@@ -1283,8 +1290,8 @@ episodes): no change, E01/E03/E04 still need review (credits from credit text on
 World S01 (3 episodes): no change" for a recheck), and logs each movie on its own. Every job ends with a totals line,
 e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found · TheIntroDB skipped for 3 files".
 
-Job log times are the container's local time (its `TZ`, or the `/etc/localtime` you mounted), the same clock as the
-app's own log.
+Every job log line starts with its date and time, `[YYYY-MM-DD HH:MM:SS]`, in the container's local time (its `TZ`,
+or the `/etc/localtime` you mounted), the same clock as the app's own log.
 
 ### Troubleshooting Intro & Credits
 
@@ -1323,7 +1330,7 @@ table covers every state the check can report, using its exact wording:
 | *(Plex)* "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any item, then try again." | Markers reuse a database row Plex creates itself the first time it ever writes a marker | Run Plex's own intro or credits analysis once on any item, then recheck |
 | *(Jellyfin)* Amber "Update needed" badge, "— installed 1.0.0.0" (the version the plugin reports; "installed version unknown" when it doesn't say) + **Update** button; the job's rows say "Update Media Preview Bridge (installed …) to get markers support" | An older plugin build predates the markers feature | Click **Update** |
 | *(Plex)* "Plex \[…\] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
-| *(Plex)* "Plex's database was busy (held by another program) for N s; trying again on the next run" (or "Plex is busy writing its database; trying again on the next run (database is locked)", or "Another Intro & Credits task is still using this Plex database; trying again on the next run", or "Another Intro & Credits task is still checking this Plex server; trying again on the next run") | Another program kept Plex's database locked for longer than a job waits (2 minutes, or 10 seconds for a file on a GPU or CPU worker when the job retries it): Plex itself during a big scan or database optimize, or a tool that writes to Plex's database (Kometa and the like) | Nothing, usually. In a job the file's row says "this job tries again in a few minutes" instead, and the job does: 1, 2 then 5 minutes later with the default retry settings. Only a file still refused after the last retry stays **Failed**, for Check servers' next day. Cancelling the job stops its wait within a second when this app opens Plex's database itself; through the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) the agent's own wait (up to 2 minutes) runs out first. If it keeps happening, schedule that tool outside your Intro & Credits runs |
+| *(Plex)* "Plex's database was busy (held by another program) for N s; trying again on the next run" (or "Plex is busy writing its database; trying again on the next run (database is locked)", or "Another Intro & Credits task is still using this Plex database; trying again on the next run", or "Another Intro & Credits task is still checking this Plex server; trying again on the next run") | Another program kept Plex's database locked for longer than a job waits (2 minutes, or 10 seconds for a file on a GPU or CPU worker when the job retries it): Plex itself during a big scan or database optimize, or a tool that writes to Plex's database (Kometa and the like) | Nothing, usually. In a job the file's row says "this job tries again in a few minutes" instead, and the job does, on the usual retry schedule (**Settings → Retry policy**). Only a file still refused after the last retry stays **Failed**, for Check servers' next day. Cancelling the job stops its wait within a second when this app opens Plex's database itself; through the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) the agent's own wait (up to 2 minutes) runs out first. If it keeps happening, schedule that tool outside your Intro & Credits runs |
 | *(Jellyfin)* "Can't reach this Jellyfin server" / "Can't reach the Media Preview Bridge markers endpoint on this Jellyfin server" | A transient connection problem | Confirm the server is up and reachable; recheck |
 | *(Jellyfin)* "Jellyfin rejected this server's credentials; reconnect it" | The stored token/login no longer works | Reconnect the server from the Servers page |
 | *(Jellyfin)* "Jellyfin refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
@@ -1349,8 +1356,8 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Waiting**: "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's library, check this server's path mappings" | Emby groups several versions in this item, and none of them maps to this file with its own item id | Nothing while Emby is still scanning; otherwise fix the server's path mappings |
 | **Failed**: "This file is Emby item 55, another version of item 53; markers not written" | The job found another version's item for this file | Check how Emby grouped this item's versions |
 | **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
-| **Failed**: "Plex's database was busy (held by another program) for N s; this job tries again in a few minutes" | The write waited 2 minutes (10 seconds on a GPU or CPU worker, which previews need back) for another program (Plex itself, or a tool writing to Plex's database) to let go of it; other files that were waiting behind it say the same | Nothing: the job log says "N file(s) not written to Plex's busy database yet; retry 1 of 3 in 60s", and the retry writes it. The last retry's row says "trying again on the next run": that file stays **Failed**, and Check servers tries it again the next day |
-| **Waiting**: "Another Intro & Credits job is running this file; this job tries again in a few minutes" (or "…; trying again on the next run") | Two jobs have the same file (a library job and a webhook, say): the other one kept running it for a minute, or is paused, so this job gave its GPU or CPU worker back. With no retry left to give it, the worker waits up to 15 minutes, or not at all while the other job is paused by Pause all or its schedule's stop time, and leaves the file to the next run | Nothing: the log says "N file(s) not released by another job yet; retry 1 of 3 in 60s", and the retry runs the file |
+| **Failed**: "Plex's database was busy (held by another program) for N s; this job tries again in a few minutes" | The write waited 2 minutes (10 seconds on a GPU or CPU worker, which previews need back) for another program (Plex itself, or a tool writing to Plex's database) to let go of it; other files that were waiting behind it say the same | Nothing: the job log says "N file(s) not written to Plex's busy database yet; retry 1 of 5 in 60s", and the retry writes it. The last retry's row says "trying again on the next run": that file stays **Failed**, and Check servers tries it again the next day |
+| **Waiting**: "Another Intro & Credits job is running this file; this job tries again in a few minutes" (or "…; trying again on the next run") | Two jobs have the same file (a library job and a webhook, say): the other one kept running it for a minute, or is paused, so this job gave its GPU or CPU worker back. With no retry left to give it, the worker waits up to 15 minutes, or not at all while the other job is paused by Pause all or its schedule's stop time, and leaves the file to the next run | Nothing: the log says "N file(s) not released by another job yet; retry 1 of 5 in 60s", and the retry runs the file |
 | Job **Failed**: "All N file(s) weren't found on disk — check the path mappings" | None of the job's files is on disk where the app looks, and no retry waits for them, so the job ends **Failed** as a preview job does | Check the server's path mappings and that the disk is mounted |
 | **Not Found**: "File not found on disk", and the log line "N files are missing from disk; they're hidden from Needs review until they come back" | The file is gone from its library: a series removed by Sonarr (its season folders go with it), or an upgrade that renamed the file. The job marks it missing in `markers.db`, and a background check after jobs finds the rest. Nothing is marked while the library's folder is missing, empty or not answering (an unmounted or stalled disk), or when a symlink is still at the path (a remote mount behind it that dropped) | Nothing: a missing file leaves **Needs review** and the job that decides those again. Nothing about it is deleted — its markers, including ones you locked or edited, stay — so if it comes back (a disk that was only unmounted, an upgrade copied in under the same name) the next job that sees it, or the background check, takes the mark off and it is as it was |
 | Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
@@ -1458,7 +1465,8 @@ Use this table to diagnose common failures quickly.
 
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
-| `Skipping as file not found` | Path mapping mismatch between a media server and this container | Verify the server's per-entry mappings in [Path Mappings](reference.md#path-mappings) (each Plex/Emby/Jellyfin entry has its own list). |
+| Job **Failed** (red): "N of M items skipped (file not found locally) — check path mapping configuration" | No file of the job got a preview and some weren't on disk where the app looks: a path mapping mismatch between a media server and this container, or a disk that isn't mounted | Verify the server's per-entry mappings in [Path Mappings](reference.md#path-mappings) (each Plex/Emby/Jellyfin entry has its own list). |
+| Job **Completed with warnings** (amber): "N file(s) weren't found on disk" | Some files weren't on disk and the rest were fine, so the path mappings work: usually files deleted or renamed since the server last scanned | Nothing, usually. The Files panel lists them as **Not Found**. |
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
@@ -1494,15 +1502,15 @@ Schema downgrades are **not automated**. If you need to revert from a release th
    ```bash
    docker stop media-preview-generator
    ```
-2. **Restore the relevant `.bak` files** from your config volume. Each JSON file the app owns leaves a single rolling `.bak` next to it on every save:
+2. **Restore the backups** from your config volume. Before each save, the app copies the JSON file it is about to change to `<file>.<timestamp>.bak` next to it, for example `settings.json.20261002-071500.bak` (UTC). An upgrade that changes the settings format copies `settings.json` before it starts, and the **Settings migrated** notice names that copy. Use the newest backup from before the upgrade:
    ```bash
    cd /your/config/dir
-   mv settings.json.bak settings.json          # required
-   mv schedules.json.bak schedules.json        # if you use Schedules
-   mv webhook_history.json.bak webhook_history.json  # optional
-   mv setup_state.json.bak setup_state.json    # optional
+   ls settings.json.*.bak                                # find the one from before the upgrade
+   cp settings.json.<timestamp>.bak settings.json        # required
+   cp schedules.json.<timestamp>.bak schedules.json      # if you use Schedules
    ```
-   `jobs.db` does **not** have a JSON `.bak` (jobs moved to SQLite as of this release). To recover an older job database, restore your full config-volume snapshot.
+   Only the newest 10 backups of each file are kept by default (**Settings → Backups**), so copy the pre-upgrade one somewhere safe if you may roll back later. The app only removes backups it made itself, never another `.bak` in the folder.
+   `jobs.db` has no such backup. To recover an older job database, restore your full config-volume snapshot.
 3. **Start the older app version** that wrote those files.
    ```bash
    docker run ... your/image:older-tag
@@ -1531,7 +1539,7 @@ Schema downgrades are **not automated**. If you need to revert from a release th
 > `schedules.json`: in step 2, don't restore a `schedules.json` backup from before that change, or the schedules
 > come back.
 
-> **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard (introduced in this release) intentionally refuses to start the older binary against a newer `settings.json` — its log message names the `.bak` path so you have a one-line recovery hint.
+> **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard (introduced in this release) intentionally refuses to start the older binary against a newer `settings.json` — its log message says where the backups are.
 
 > **Why it refuses to "just work".** Silent acceptance would drop unknown fields on the next save — exactly the failure mode that wiped a user's job history during a tag-drift incident on the multi-server branch. Refusing to boot is loud and recoverable; silent truncation is quiet and final.
 

@@ -57,6 +57,12 @@ BATCH_GAP = timedelta(minutes=30)
 # decided times; its version names that rule.
 PUBLISHED_TIMES = "published_times"
 PUBLISHED_TIMES_VERSION = 1
+# Not a detector: a file whose publish waits for its Plex item's other versions
+# (``MarkerStore.files_waiting_for_other_versions``). Until this rule's version 1 the item waited for good for a
+# replaced version whose season folder went with it (``plex_db._where_on_disk``), long after its retries ran out. The
+# file's next run publishes it, or queues the version never checked.
+WAITING_VERSIONS = "waiting_versions"
+WAITING_VERSIONS_VERSION = 1
 
 _EVERY_TYPE = frozenset(MarkerType)
 
@@ -151,6 +157,8 @@ def files_to_read_again(store: MarkerStore, settings: GlobalMarkersSettings) -> 
             due.setdefault(path, {})[answer.key] = answer.version
     for path in store.files_on_one_version_items_showing_other_times(PUBLISHED_TIMES, PUBLISHED_TIMES_VERSION):
         due.setdefault(path, {})[PUBLISHED_TIMES] = PUBLISHED_TIMES_VERSION
+    for path in store.files_waiting_for_other_versions(WAITING_VERSIONS, WAITING_VERSIONS_VERSION):
+        due.setdefault(path, {})[WAITING_VERSIONS] = WAITING_VERSIONS_VERSION
     for path in store.files_decided_under_older_rules(DECIDE_RULES, DECIDE_RULES_VERSION, carried_by=CARRIED_OVER):
         due.setdefault(path, {})[DECIDE_RULES] = DECIDE_RULES_VERSION
     return due

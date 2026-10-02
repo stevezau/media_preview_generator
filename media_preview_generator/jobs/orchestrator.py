@@ -1211,20 +1211,29 @@ def _should_use_multi_server_full_scan(config, pinned_type: str) -> bool:
     return non_plex_pin or no_plex_at_all or has_non_plex_server or multi_plex
 
 
+# The outcome counters that mean a file's preview is in place (made now, or already there). ``published`` and
+# ``skipped_output_exists`` are counted for tallies that carry publisher statuses.
+SUCCESS_OUTCOME_KEYS = ("generated", "published", "skipped_output_exists", "skipped_bif_exists")
+
+
+def count_successes(outcome: dict | None) -> int:
+    """How many files of an outcome tally ended with their preview in place."""
+    return sum((outcome or {}).get(key, 0) for key in SUCCESS_OUTCOME_KEYS)
+
+
 def _maybe_log_path_mapping_misconfig(aggregate_outcome: dict, processed: int) -> bool:
     """Emit the path-mapping misconfiguration warning when the run looks broken.
 
     Returns ``True`` when the warning fired so callers and tests can assert on
-    the exact predicate (every processed item finished as
-    ``skipped_file_not_found`` and zero items were generated). Splitting this
+    the exact predicate (files finished as ``skipped_file_not_found`` and no
+    file ended with its preview in place, see :func:`count_successes`). Splitting this
     out lets the rule be unit-tested without exercising the entire
     ``run_processing`` pipeline; before the extraction the only test coverage
     re-implemented dictionary arithmetic in the test file and never ran the
     real predicate.
     """
     not_found = aggregate_outcome.get("skipped_file_not_found", 0)
-    generated = aggregate_outcome.get("generated", 0)
-    if processed > 0 and not_found > 0 and generated == 0:
+    if processed > 0 and not_found > 0 and count_successes(aggregate_outcome) == 0:
         logger.warning(
             "All {} item(s) finished with the file not found locally — no previews were generated this run. "
             "This almost always means your path mappings are wrong: Plex reports the file at one path, but this "
@@ -1655,6 +1664,9 @@ def _run_webhook_paths_phase(
         # ``path_hint_map`` for per-path correspondence.
         "path_hints": list(dict.fromkeys(path_hint_map.values())),
         "path_hint_map": dict(path_hint_map),
+        # File rows are keyed by the dispatched (canonical) path; job_runner's retry needs the path the webhook
+        # sent for a file that wasn't on disk, so it can resubmit that file alone.
+        "input_by_canonical": dict(canonical_to_input),
     }
 
 

@@ -271,6 +271,9 @@ REPLACED_OWN = "replaced_own"
 VERIFY_LATER = "verify_later"
 # Row key on an up-to-date row whose server couldn't be read back: the job warns how many files it couldn't check.
 READ_BACK_FAILED = "read_back_failed"
+# Row key on a ``VERSIONS_UNCHECKED`` row: the local paths, on disk, of the item's versions never checked. The job's
+# retry runs them too: a version no job ever listed is otherwise never checked, and the item waits for good.
+UNCHECKED_FILES = "unchecked_files"
 
 
 # publish_state.status persisted per (file, server) for the rows that record an attempt.

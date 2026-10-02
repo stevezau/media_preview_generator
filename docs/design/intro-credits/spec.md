@@ -352,7 +352,10 @@ must have the quorum, as today, and the silence guard then runs on it (`season.g
   (`season_end_pictures`, cleared when either file changes; a forced re-detect reads none). `season_audio_needs_worker`
   runs the walk against that cache and says True while it would decode, so decoding happens on a worker. A read that
   fails (ffprobe error, a non-zero ffmpeg exit, a timeout) is never a pass: the file is remembered for a day
-  (`end_picture_failures`, `END_PICTURE_RETRY`) and not read for the check meanwhile. This episode's own file then gives
+  (`end_picture_failures`, `END_PICTURE_RETRY`) and not read for the check meanwhile. A failure of a GPU worker's GPU
+  decode that isn't decoded again on the CPU on the spot (a timeout) is not remembered: the CPU hasn't tried the file,
+  and a remembered failure refused the worker's CPU rerun of it (`end_picture.GpuAttemptFailedError`; §14 2026-10-02).
+  This episode's own file then gives
   no season audio answer (given up on the checking thread); a partner has no share, and the other partner decides (none
   left: no answer). A cancel or ffprobes stuck on earlier files give no answer this time, blaming no file. The check's
   version (`end_picture.CHECK_VERSION`) keys the cached shares and rides in the version season audio's answers are
@@ -1242,6 +1245,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
   it unread, and a row it writes has no versions matched to its `seen_at`).
 - `markers` is the single source of truth; servers are projections of it. `publish_state` is per `server_id`, so two
   Plex servers are tracked independently.
+- A file gone from disk keeps its `files` row, marked `missing_since` (§14 2026-09-24). Its cached fingerprints are
+  dropped when the sweep finds it gone from a folder that still exists, or once it has been marked missing for 30
+  days with nothing at its path (`fingerprint.MISSING_KEEP`; §14 2026-10-02).
 
 ### 6.2 Job type and flow
 **Intro & Credits is its own job type**: own queue, schedules, priority, pause/cancel, retries. It reuses triggers
@@ -1308,7 +1314,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    its credits chapter after version 7, which moves that chapter, shipped, because nothing else runs a movie again
    (2026-09-28; §14 "Live after #320–#325"). For the chapter, server-marker and online readers a type decided by other
    sources waits for the file's own next run. Also listed:
-   files whose one-version Plex item still shows times an older publish rule kept (§6.3), and **files decided under
+   files whose one-version Plex item still shows times an older publish rule kept (§6.3; the item's file has to be
+   this file, by name: a replaced file keeps its record of the item), files whose last publish waits for their Plex
+   item's other versions (`versions.WAITING_VERSIONS`, each file once: §6.3, §14 2026-10-02), and **files decided under
    older decision rules**: the rules of §5.5 carry a version (`decide.DECIDE_RULES_VERSION`, recorded as
    `decide_rules` in `version_reruns` by every run that decides a file), and a file not recorded under today's is
    listed when an unlocked type has a stored answer of its type the rules could decide differently (decided, Needs
@@ -1414,7 +1422,11 @@ at the last write), `atomic_writes`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s. A part never
   decided whose file is on none of its path-mapped disks (Plex lists a deleted file until it scans) takes no part; one
-  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24). What this app
+  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24). A part's disk roots
+  (its path mapping's local folder, its libraries' folders) that are mounted and hold entries stand in for a missing
+  folder when deciding its file is gone (a file replaced by one on another disk can take its season folder with it);
+  a root of `/` is never trusted, since it holds entries whatever is mounted. The retry also runs the never-decided
+  version's file, which no job would otherwise list (§14 2026-10-02). What this app
   already left on the item stays while it agrees with every version within 2 s, so versions don't rewrite each other;
   a one-version item shows exactly what was decided (§14 2026-09-25), and one left showing other times is published
   again on its next run.
@@ -3720,3 +3732,33 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   House of the Dragon S02E03 gaining 0:06–1:46.6, frame-checked). Baseline answer key: credits wrong 10 → 9 of 88
   (skips story 3 → 2; held out 4 → 4), Plex comparison 10 → 9 of 81; fresh sample (seed 20260929) published wrong
   11 of 78 → 10 of 77 (held out 2 → 2), Game of Thrones S08E06 back. Season audio's four truth sets: no answer changes.
+- 2026-10-02 · **After the sflix audit** (§5.3, §6.1, §6.2 step 3, §6.3; branch `fix/sflix-audit`).
+  - **A failed GPU attempt is not remembered against the file** (§5.3 End picture). A GPU worker's end-picture decode
+    that timed out (or gave a frame no timestamp) was recorded in `end_picture_failures` like a CPU failure, so the
+    worker's CPU rerun of the file was refused for a day. Now only a failure the CPU had a part in is remembered
+    (`end_picture.GpuAttemptFailedError`, `ReadFailedError.gpu_attempt`); the file still gets no answer from that
+    GPU attempt.
+  - **Fingerprints of a file missing for 30 days are dropped** (§6.1). The sweep kept the fingerprints of a file
+    whose folder is missing, which an unmounted disk and a deleted season both look like, so a deleted season's
+    stayed for good. A file marked missing (`missing_since`) for 30 days (`fingerprint.MISSING_KEEP`) with nothing
+    at its path, not even a symlink, now loses them; its `files` row stays. A month, so a disk back sooner doesn't
+    fingerprint its files again.
+  - **A replaced Plex version whose folder went with it no longer holds its item back** (§6.3). The version check
+    called a file gone only while its own folder was there, so a version replaced by a file on another disk, its
+    season folder removed with it, was waited for long after the retries ran out. The check now passes
+    `trust_roots`: disk roots that are mounted and hold entries stand in for the missing folder; a dangling symlink
+    still counts as gone there (`follow_links`). A root of `/` never stands in (`fs.gone_from_disk`, the missing-file
+    marking included): it holds entries whatever is mounted, so such a path is judged by its folder.
+  - **The retry runs the version nobody checked** (§6.3). A `versions_unchecked` row carries the local paths of the
+    item's versions on disk and never decided (`outcomes.UNCHECKED_FILES`), and the job's retry lists them too while
+    it has room (`MAX_RETRY_FILES`); they aren't counted as waiting. Its log line ends ", which also checks N
+    version(s) never checked". Before, a version no job ever listed was never checked and the item waited for good.
+  - **Files already waiting are read once more** (§6.2 step 3). The version re-run lists every file whose last
+    publish waits for its item's other versions (`versions.WAITING_VERSIONS` version 1 in `version_reruns`, so each
+    file once): its run publishes it, or queues the version never checked. The same list's one-version items now
+    count a file only when it is the item's file by name (a replaced file keeps its record of the item).
+  - **A GPU read's failure is logged with ffmpeg's own lines.** Before the worker's CPU rerun, the job log warns
+    "Credit text: couldn't be read on the GPU (\<reason\>). FFmpeg's last lines: …" (`job_log.gpu_failure_line`;
+    the last 4 lines that say why, 240 characters each), which the rerun otherwise lost.
+  - **Retries: 5 by default** (was 3; `retry_queue.DEFAULT_RETRY_COUNT`, shared with previews): with nothing stored
+    the waits are 1, 2, 5, 15 and 60 min. A stored count is kept.

@@ -440,6 +440,11 @@ def _same_identity_on_disk(path: str, size: int, mtime_ns: int) -> bool:
     return (st.st_size, st.st_mtime_ns) == (size, mtime_ns)
 
 
+def _file_name(path: str | None) -> str:
+    """A path's last part, whichever side wrote it (a server on Windows stores backslashes)."""
+    return (path or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
 @dataclass(frozen=True)
 class ItemPublishStateRow:
     """What this app last left on one server item (from any file)."""
@@ -474,12 +479,17 @@ class PublishStateRow:
 
 @dataclass(frozen=True)
 class FingerprintCheck:
-    """A fingerprinted file for the cache sweep to look for on disk, with the identity its row had when listed."""
+    """A fingerprinted file for the cache sweep to look for on disk, with the identity its row had when listed.
+
+    ``missing_long`` says the file has been marked missing (``mark_missing``) for at least as long as the sweep asked
+    about.
+    """
 
     file_id: int
     canonical_path: str
     size: int
     mtime_ns: int
+    missing_long: bool = False
 
 
 class PreviousDecision(NamedTuple):
@@ -1004,15 +1014,24 @@ class MarkerStore:
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
-    def files_waiting_for_other_versions(self) -> list[str]:
+    def files_waiting_for_other_versions(self, detector: str | None = None, version: int = 0) -> list[str]:
         """Canonical paths of the files whose last publish to a server waits for its item's other versions to agree
-        (``outcomes.VERSIONS_WAITING``), sorted; files missing from disk are left out."""
+        (``outcomes.VERSIONS_WAITING``), sorted; files missing from disk are left out.
+
+        Args:
+            detector: The name a re-run of them is recorded under (``record_version_reruns``); None lists them all.
+            version: With ``detector``, files already taken for it at this version are left out.
+
+        Returns:
+            The paths.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT DISTINCT f.canonical_path FROM publish_state p JOIN files f ON f.id = p.file_id "
+                "LEFT JOIN version_reruns r ON r.file_id = f.id AND r.detector = ? "
                 "WHERE p.status='waiting' AND substr(p.message, 1, ?) = ? AND f.missing_since IS NULL "
-                "ORDER BY f.canonical_path",
-                (len(VERSIONS_WAITING), VERSIONS_WAITING),
+                "AND (r.version IS NULL OR r.version < ?) ORDER BY f.canonical_path",
+                (detector, len(VERSIONS_WAITING), VERSIONS_WAITING, version),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
@@ -1160,6 +1179,10 @@ class MarkerStore:
         than decided, sorted; files marked missing, and files already taken for ``detector`` at ``version``, are left
         out. Only a Plex publish records an item's versions (``item_versions``).
 
+        The item's one file has to be this file, by name: a file another one replaced keeps its record of the item,
+        which then shows the new file's times. An item's files are the server's own paths, under another folder than
+        this app's wherever the server has a path mapping, so only the names are compared.
+
         Until 2026-09-25 such an item kept its earlier times when a decision moved by under 2 s
         (``publishers.base.agreed_across_versions``); the pipeline sends it the decided times on the file's next run
         (``pipeline._one_version_shows_other_times``).
@@ -1173,7 +1196,8 @@ class MarkerStore:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT f.canonical_path, i.markers_json, m.type, m.start_ms, m.end_ms FROM publish_state p "
+                "SELECT f.canonical_path, i.markers_json, m.type, m.start_ms, m.end_ms, "
+                "json_extract(iv.files_json, '$[0]') AS item_file FROM publish_state p "
                 "JOIN files f ON f.id = p.file_id "
                 "JOIN item_publish_state i ON i.server_id = p.server_id AND i.item_id = p.item_id "
                 "JOIN item_versions iv ON iv.server_id = i.server_id AND iv.item_id = i.item_id "
@@ -1185,6 +1209,8 @@ class MarkerStore:
             ).fetchall()
         decided: dict[tuple[str, str], dict[MarkerType, tuple[int, int]]] = {}
         for r in rows:
+            if _file_name(r["item_file"]) != _file_name(r["canonical_path"]):
+                continue
             decided.setdefault((r["canonical_path"], r["markers_json"]), {})[MarkerType(r["type"])] = (
                 r["start_ms"],
                 r["end_ms"],
@@ -1870,7 +1896,7 @@ class MarkerStore:
             ).fetchone()
         return r is not None and self._made_as(r, algorithm, length_s)
 
-    def fingerprint_checks(self, limit: int) -> list[FingerprintCheck]:
+    def fingerprint_checks(self, limit: int, missing_for: timedelta | None = None) -> list[FingerprintCheck]:
         """The next files with a cached fingerprint for the cache sweep to look for on disk (nothing is marked).
 
         In file id order from just after the cursor ``finish_fingerprint_checks`` left, wrapping round to the lowest id
@@ -1878,6 +1904,8 @@ class MarkerStore:
 
         Args:
             limit: Most files to return.
+            missing_for: How long a file has to have been marked missing for ``FingerprintCheck.missing_long``; None
+                says it of no file.
 
         Returns:
             Each file with its row's identity, in that order.
@@ -1885,8 +1913,8 @@ class MarkerStore:
         if limit <= 0:
             return []
         query = (
-            "SELECT p.file_id, f.canonical_path, f.size, f.mtime_ns FROM fingerprints p JOIN files f ON f.id = p.file_id "
-            "WHERE p.file_id {} ? GROUP BY p.file_id ORDER BY p.file_id LIMIT ?"
+            "SELECT p.file_id, f.canonical_path, f.size, f.mtime_ns, f.missing_since FROM fingerprints p "
+            "JOIN files f ON f.id = p.file_id WHERE p.file_id {} ? GROUP BY p.file_id ORDER BY p.file_id LIMIT ?"
         )
         with self._lock:
             row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_FINGERPRINT_CHECKED_UP_TO,)).fetchone()
@@ -1894,7 +1922,19 @@ class MarkerStore:
             batch = self._conn.execute(query.format(">"), (after, limit)).fetchall()
             if len(batch) < limit:
                 batch += self._conn.execute(query.format("<="), (after, limit - len(batch))).fetchall()
-        return [FingerprintCheck(r["file_id"], r["canonical_path"], r["size"], r["mtime_ns"]) for r in batch]
+        marked_before = None if missing_for is None else self._clock() - missing_for
+        return [
+            FingerprintCheck(
+                r["file_id"],
+                r["canonical_path"],
+                r["size"],
+                r["mtime_ns"],
+                missing_long=marked_before is not None
+                and r["missing_since"] is not None
+                and datetime.fromisoformat(r["missing_since"]) <= marked_before,
+            )
+            for r in batch
+        ]
 
     def finish_fingerprint_checks(self, checked_up_to: int, gone: Iterable[FingerprintCheck]) -> int:
         """Record a sweep's checks in one transaction: drop the cache of the files found gone, and move the cursor.

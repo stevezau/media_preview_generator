@@ -668,6 +668,52 @@ class TestFileBlocks:
         assert f"{EPISODE} · Credit text: credits start at 21:31 (6 s)" in _messages(job_log)
         assert _messages(job_log)[-1] == f"{worker} completed: {EPISODE} (success, rerun on the CPU, 10 s)"
 
+    FFMPEG_SAID = (
+        "[hevc @ 0x1] Failed to sync surface 0x5 (operation failed).",
+        "[vist#0:0/hevc @ 0x2] Decoding error: Input/output error",
+    )
+
+    def test_a_gpu_read_that_fails_logs_ffmpegs_own_lines_once_before_the_cpu_rerun(self, store, media, job_log):
+        # Production: 54 of 718 credit-text reads on the Intel GPU fell back to the CPU, and why 53 of them did was
+        # unknown: ffmpeg's lines were logged at DEBUG only.
+        from media_preview_generator.markers.credits import frames
+        from media_preview_generator.processing.generator import CodecNotSupportedError
+
+        ctx = _job(store, media, _plex(media), on_worker=True)
+        reason = "the GPU's decoder hit a hardware or driver error (ffmpeg exited 251)"
+
+        def detect(*args, gpu=None, **kwargs):
+            if not gpu:
+                return [TEXT_CREDITS]
+            try:
+                raise frames.GpuDecodeError(reason, stderr_tail=self.FFMPEG_SAID)
+            except frames.GpuDecodeError as exc:  # as ``detector.detect_credits_text`` raises it
+                raise CodecNotSupportedError(str(exc)) from exc
+
+        ctx.local_detectors[0].detect.side_effect = detect
+        worker = "GPU Worker 2 (Intel UHD 770)"
+        with pytest.raises(CodecNotSupportedError):
+            _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(), stage="process", gpu="intel",
+                 gpu_worker=True, worker_name=worker)  # fmt: skip
+        warnings = [message for level, message in job_log if level == "WARNING"]
+        assert warnings == [
+            f"{EPISODE} · Credit text: couldn't be read on the GPU ({reason}). FFmpeg's last lines: "
+            f"{self.FFMPEG_SAID[0]} | {self.FFMPEG_SAID[1]}"
+        ]
+        assert _messages(job_log)[-2:] == [f"{EPISODE} · Reading credit text on the GPU (Intel UHD 770)…", warnings[0]]
+
+        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(), stage="process", gpu=None, gpu_worker=True,
+             worker_name=worker)  # fmt: skip
+        assert [message for level, message in job_log if level == "WARNING"] == warnings  # the CPU rerun adds none
+        assert f"{EPISODE} · Credit text: credits start at 21:31 (0 s)" in _messages(job_log)
+
+    def test_a_gpu_read_that_works_logs_no_warning(self, store, media, job_log):
+        ctx = _job(store, media, _plex(media), on_worker=True)
+        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(), stage="process", gpu="intel", gpu_worker=True,
+             worker_name="GPU Worker 2 (Intel UHD 770)")  # fmt: skip
+        assert f"{EPISODE} · Credit text: credits start at 21:31 (0 s)" in _messages(job_log)
+        assert [message for level, message in job_log if level == "WARNING"] == []
+
     def test_a_file_a_newer_file_replaced_gets_one_line(self, store, media, job_log):
         stale = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E01 - Pilot-CAKES.mkv")
         ctx = _job(store, media, _plex(media))

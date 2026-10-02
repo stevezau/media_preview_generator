@@ -19,6 +19,7 @@ cleared on restart); permanent dismissals live in ``settings.json``.
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any
 
@@ -29,6 +30,10 @@ TIMEZONE_MISCONFIGURED_ID = "timezone_misconfigured"
 SCHEMA_MIGRATION_ID = "schema_migration_completed"
 DEPRECATED_IMAGE_ID = "deprecated_docker_image_name"
 MEDIA_MOUNT_UNHEALTHY_ID = "media_mount_unhealthy"
+
+# Cards that can be hidden until the next restart but never for good: the problem they report comes and goes, and a
+# permanent dismissal would hide the next occurrence too. An id stored by an older version is ignored.
+SESSION_ONLY_DISMISSAL_IDS = frozenset({MEDIA_MOUNT_UNHEALTHY_ID})
 
 # Image names recognised by the deprecation banner. The deprecated image was
 # retired — a one-shot tombstone image now sits on its tags. This banner still
@@ -138,6 +143,10 @@ def _build_schema_migration_notification() -> dict[str, Any] | None:
     from_v = notice.get("from")
     to_v = notice.get("to")
     backup = notice.get("backup") or ""
+    # Name the backup only while it is on disk: later saves prune old backups, and notices written by older
+    # versions name a file that was never created.
+    if not (isinstance(backup, str) and os.path.isfile(backup)):
+        backup = ""
     notes = notice.get("notes") or []
     notes_html = ""
     if isinstance(notes, list) and notes:
@@ -200,8 +209,6 @@ def _build_deprecated_image_notification() -> dict[str, Any] | None:
     Only fires for the deprecated value so users on the canonical name
     (and dev builds) never see it.
     """
-    import os
-
     image_name = (os.environ.get("DOCKER_IMAGE_NAME") or "").strip()
     if image_name != DEPRECATED_IMAGE_NAME:
         return None
@@ -281,6 +288,7 @@ def _build_unhealthy_media_mounts_notification() -> dict[str, Any] | None:
         "title": "Media mount looks unmounted",
         "body_html": body,
         "dismissable": True,
+        "permanent_dismissable": False,
         "source": "media_mount_health",
     }
 
@@ -303,6 +311,7 @@ def build_active_notifications(
 
     Filters out any notification whose ID is in ``dismissed_permanent``
     (from ``settings.json``) or in the in-process session dismissal set.
+    A card in ``SESSION_ONLY_DISMISSAL_IDS`` is never hidden by ``dismissed_permanent``.
     Notifications that are not currently firing (builder returned
     ``None``) are simply not included.
 
@@ -321,7 +330,7 @@ def build_active_notifications(
         notif_id = entry.get("id")
         if not notif_id:
             continue
-        if notif_id in persisted:
+        if notif_id in persisted and notif_id not in SESSION_ONLY_DISMISSAL_IDS:
             logger.debug("notifications: {} suppressed (permanently dismissed)", notif_id)
             continue
         if _session_is_dismissed(notif_id):

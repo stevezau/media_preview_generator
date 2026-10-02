@@ -196,3 +196,82 @@ class TestSettingsSaveAndReloadPersists:
             "els => els.map((el) => el.dataset.id)"
         )
         assert order == expected_order
+
+    def test_retries_switched_off_stay_off_across_a_reload_and_the_next_save(
+        self,
+        backend_real_page: Page,
+        backend_real_app: tuple[str, str],
+    ) -> None:
+        """A stored retry count of 0 is "retries off" (the field's own help text says so).
+
+        The loader read it as ``parseInt(...) || default``, so the page showed the default and the next save of
+        anything on the page wrote the default back: retries came back on without being asked.
+        """
+        app_url, config_dir = backend_real_app
+        resp = requests.post(
+            f"{app_url}/api/settings",
+            headers=_AUTH_JSON_HEADERS,
+            data='{"webhook_retry_count": 0}',
+            timeout=_API_TIMEOUT,
+        )
+        assert resp.ok, f"POST /api/settings: {resp.status_code} {resp.text}"
+
+        backend_real_page.goto(f"{app_url}/settings")
+        backend_real_page.wait_for_load_state("domcontentloaded")
+        expect(backend_real_page.locator("#thumbnailInterval")).to_have_value("5", timeout=5000)  # the form is loaded
+        expect(backend_real_page.locator("#webhookRetryCount")).to_have_value("0")
+
+        # Save something else; the interval reaching the disk says the save landed.
+        backend_real_page.locator("#thumbnailInterval").fill("9")
+        backend_real_page.evaluate("void saveAllSettings()")
+        settings_path = Path(config_dir) / "settings.json"
+        on_disk: dict = {}
+        for _ in range(40):
+            try:
+                on_disk = json.loads(settings_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                on_disk = {}
+            if on_disk.get("thumbnail_interval") == 9:
+                break
+            backend_real_page.wait_for_timeout(200)
+        assert on_disk.get("thumbnail_interval") == 9, f"the save never reached {settings_path}"
+        assert on_disk["webhook_retry_count"] == 0
+
+    def test_the_retry_count_field_shows_each_stored_value_as_it_is(
+        self,
+        backend_real_page: Page,
+        backend_real_app: tuple[str, str],
+    ) -> None:
+        """Every kind of stored count: in range (0 included) as it is, out of range clamped, missing or unreadable
+        as the default."""
+        app_url, _config_dir = backend_real_app
+        stored: dict = {}
+
+        def with_the_stored_count(route) -> None:
+            if route.request.method != "GET":
+                route.continue_()
+                return
+            response = route.fetch()
+            body = response.json()
+            body.pop("webhook_retry_count", None)
+            body.update(stored)
+            route.fulfill(response=response, json=body)
+
+        backend_real_page.route("**/api/settings", with_the_stored_count)
+        cells = [
+            ({"webhook_retry_count": 0}, "0"),
+            ({"webhook_retry_count": 3}, "3"),
+            ({"webhook_retry_count": "7"}, "7"),
+            ({"webhook_retry_count": 99}, "10"),
+            ({"webhook_retry_count": -2}, "0"),
+            ({"webhook_retry_count": "abc"}, "5"),
+            ({"webhook_retry_count": None}, "5"),
+            ({}, "5"),
+        ]
+        for settings, shown in cells:
+            stored.clear()
+            stored.update(settings)
+            backend_real_page.goto(f"{app_url}/settings")
+            backend_real_page.wait_for_load_state("domcontentloaded")
+            expect(backend_real_page.locator("#thumbnailInterval")).to_have_value("5", timeout=5000)
+            expect(backend_real_page.locator("#webhookRetryCount")).to_have_value(shown)

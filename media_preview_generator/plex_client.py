@@ -6,6 +6,7 @@ library querying, and duplicate location filtering.
 
 import http.client
 import os
+import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree
@@ -551,6 +552,33 @@ def _resolve_item_media_type(section_type: str) -> str | None:
     return None
 
 
+# A webhook burst (a season pack: one job per file, each nudging on arrival, on every retry and after publishing) would
+# otherwise ask Plex to scan the same series folder hundreds of times an hour. Process-wide: server objects are rebuilt
+# per job. Keyed by (server URL, section, folder); the value is when the request that started the window was sent.
+_PARTIAL_SCAN_COOLDOWN_S = 60.0
+_partial_scan_lock = threading.Lock()
+_partial_scan_sent_at: dict[tuple[str, str, str], float] = {}
+_monotonic = time.monotonic
+
+
+def _claim_partial_scan(key: tuple[str, str, str]) -> bool:
+    """Take the one scan request ``key`` gets per cooldown window; False when one was sent (or is being sent) in it."""
+    now = _monotonic()
+    with _partial_scan_lock:
+        for stale in [k for k, sent in _partial_scan_sent_at.items() if now - sent >= _PARTIAL_SCAN_COOLDOWN_S]:
+            del _partial_scan_sent_at[stale]
+        if key in _partial_scan_sent_at:
+            return False
+        _partial_scan_sent_at[key] = now
+        return True
+
+
+def _release_partial_scan(key: tuple[str, str, str]) -> None:
+    """Give back a claim whose request failed, so the next caller sends one."""
+    with _partial_scan_lock:
+        _partial_scan_sent_at.pop(key, None)
+
+
 def trigger_plex_partial_scan(
     plex_url: str,
     plex_token: str,
@@ -569,6 +597,15 @@ def trigger_plex_partial_scan(
     This is much faster than a full library scan and allows the subsequent
     retry attempt to find the item in Plex's database.
 
+    At most one scan request is sent per (server, section, folder) per
+    ``_PARTIAL_SCAN_COOLDOWN_S``, across every caller in the process; a
+    request that fails doesn't count. A path whose folder was requested
+    inside that window is reported as triggered without a new request.
+    That includes a caller arriving while the first request is still in
+    flight: it reports the folder as triggered even if that request then
+    fails. The failed request frees the folder, so the next attempt for
+    it sends a new request.
+
     Args:
         plex_url: Plex server URL (e.g. ``http://localhost:32400``).
         plex_token: Plex authentication token.
@@ -578,7 +615,8 @@ def trigger_plex_partial_scan(
         verify_ssl: Whether to verify TLS certificates for Plex connections.
 
     Returns:
-        List of paths for which a scan was successfully triggered.
+        List of paths for which a scan was successfully triggered, now or
+        inside the cooldown window.
 
     """
     if not unresolved_paths:
@@ -592,6 +630,7 @@ def trigger_plex_partial_scan(
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     scanned: list[str] = []
+    requests_sent = 0
 
     try:
         resp = requests.get(
@@ -652,6 +691,18 @@ def trigger_plex_partial_scan(
 
         triggered = False
         for section_key, scan_folder in sorted(scan_targets):
+            throttle_key = (plex_url.rstrip("/"), section_key, scan_folder)
+            if not _claim_partial_scan(throttle_key):
+                logger.debug(
+                    "{}Partial scan suppressed for section {}: {} (requested less than {:.0f}s ago)",
+                    log_prefix,
+                    section_key,
+                    scan_folder,
+                    _PARTIAL_SCAN_COOLDOWN_S,
+                )
+                triggered = True
+                continue
+            sent = False
             try:
                 scan_resp = requests.get(
                     f"{plex_url.rstrip('/')}/library/sections/{section_key}/refresh",
@@ -661,6 +712,8 @@ def trigger_plex_partial_scan(
                     verify=verify_ssl,
                 )
                 if scan_resp.status_code == 200:
+                    sent = True
+                    requests_sent += 1
                     section_title = section_titles.get(section_key, "")
                     section_label = f'{section_key} ("{section_title}")' if section_title else section_key
                     logger.info(
@@ -687,13 +740,16 @@ def trigger_plex_partial_scan(
                     scan_folder,
                     e,
                 )
+            finally:
+                if not sent:
+                    _release_partial_scan(throttle_key)
 
         if triggered:
             scanned.append(unresolved)
         else:
             logger.debug("Matching Plex sections found but partial scans did not succeed for: {}", unresolved)
 
-    if scanned:
+    if requests_sent:
         logger.info(
             "{}Triggered partial scans for {}/{} unresolved path(s)",
             log_prefix,

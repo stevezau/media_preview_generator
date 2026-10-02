@@ -701,6 +701,22 @@ def test_a_version_behind_a_dangling_symlink_doesnt_hold_the_item_back(plex_item
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
 
 
+def test_a_replaced_version_whose_season_folder_went_with_it_doesnt_hold_the_item_back(plex_item, tmp_path):
+    # Production (Plex items 695225, 694136, 694966): the replaced file was the only one in its season folder on that
+    # disk, so the folder went with it; Plex still listed it, and the item waited for it with no markers.
+    item = plex_item(in_item=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(credits=CREDITS_AT)
+    replaced = str(tmp_path / "media" / "Show (2020) {tvdb-1}" / "Season 05" / "Show (2020) - S01E01 - HULU.mkv")
+    item._sql(
+        ("INSERT INTO media_items (id, metadata_item_id) VALUES (2, 7)",),
+        ("INSERT INTO media_parts (id, media_item_id, file) VALUES (2, 2, ?)", (replaced,)),
+    )
+    out = item.run("1080p")
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]
+    assert item.served() == item.recorded() == [SHOWN_CREDITS]
+    assert _outcomes(item.run("1080p")) == ["up_to_date"] and item.commits == 1
+
+
 def test_a_version_on_disk_but_never_checked_waits_and_its_retry_publishes_once_it_is_deleted(plex_item):
     item = plex_item()
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -708,11 +724,31 @@ def test_a_version_on_disk_but_never_checked_waits_and_its_retry_publishes_once_
     row = out.publisher_rows[0]
     assert (row["status"], row["reason_code"]) == ("markers_waiting", VERSIONS_UNCHECKED)
     assert job_runner.retry_reason(row) == VERSIONS_UNCHECKED  # the job queues its retry
+    assert row["unchecked_files"] == [item.paths["2160p"]]  # ... which runs the version never checked too
     assert _outcomes(out) == ["waiting"]
     assert "intro, credits" in row["message"] and item.served() == []
     os.remove(item.paths["2160p"])  # deleted before the retry runs; Plex still lists it
     assert _outcomes(item.run("1080p")) == ["published"]
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
+
+
+@pytest.mark.parametrize("agree", [True, False], ids=["same-cut", "another-cut"])
+def test_running_the_version_a_waiting_file_names_settles_the_item(plex_item, agree):
+    # Production (Hawaii Five-0 S07E05): the h265 version was in no job, so the h264 one waited through every retry.
+    # The retry now runs the file the row names. Two cuts that disagree still show nothing, which is right.
+    item = plex_item()
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT - (0 if agree else 19_000))
+    row = item.run("1080p").publisher_rows[0]
+    assert row["reason_code"] == VERSIONS_UNCHECKED and row["unchecked_files"] == [item.paths["2160p"]]
+
+    named = item.run("2160p").publisher_rows[0]
+
+    assert "unchecked_files" not in named and "reason_code" not in named
+    assert item.served() == ([SHOWN_INTRO, SHOWN_CREDITS] if agree else [SHOWN_INTRO])
+    again = item.run("1080p").publisher_rows[0]
+    assert "reason_code" not in again  # nothing left to retry for
+    assert (again["status"] == "markers_waiting") is (not agree)
 
 
 def test_versions_that_were_checked_and_disagree_wait_without_a_retry(plex_item):
