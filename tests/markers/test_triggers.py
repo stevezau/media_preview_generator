@@ -775,9 +775,10 @@ class TestSeasonPublish:
         assert jm.get_job(second).config["file_paths"] == season
 
 
-class TestInReviewRedecide:
-    """The one job queued after settings v16 removed "Publish when: High": every file in Needs review, decided again
-    from its stored answers (no lookup, no detector, no probe)."""
+class TestDecideAgain:
+    """The one job queued after settings v16 removed "Publish when: High" and v20 removed Needs review itself: every
+    file still stored under that status (``store.LEGACY_NEEDS_REVIEW``), decided again from its stored answers (no
+    lookup, no detector, no probe)."""
 
     @pytest.fixture
     def store(self, tmp_path, monkeypatch):
@@ -814,6 +815,21 @@ class TestInReviewRedecide:
         store.save_decisions(rec.id, {MarkerType.CREDITS: decision}, settings_fingerprint="old")
         return rec
 
+    @staticmethod
+    def _legacy(store, path):
+        """A decisions row as the rules before 2026-10-02 wrote it; nothing writes that status now."""
+        from media_preview_generator.markers.models import FileIdentity
+
+        rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=1_000_000, season_key=None, is_movie=True)
+        store._conn.execute(
+            "INSERT INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
+            "settings_fingerprint, decided_at, decided_by) VALUES (?, 'credits', 'needs_review', 'x', 900000, "
+            "1000000, 'old', '2026-09-01T00:00:00+00:00', '[\"credits_text\"]')",
+            (rec.id,),
+        )
+        store._conn.commit()
+        return rec
+
     @classmethod
     def _last_row(cls, store, path, status, message):
         rec = cls._decided(store, path, DecisionStatus.DECIDED)
@@ -822,11 +838,11 @@ class TestInReviewRedecide:
     def _ic_jobs(self, jm):
         return [j for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS]
 
-    def test_it_queues_one_job_for_exactly_the_files_in_review_or_waiting_for_other_versions(self, jm, store):
+    def test_it_queues_one_job_for_exactly_the_legacy_review_files_or_waiting_for_other_versions(self, jm, store):
         from media_preview_generator.markers import job_runner
 
-        self._decided(store, "/media/tv/B/S01/e2.mkv", DecisionStatus.NEEDS_REVIEW)
-        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        self._legacy(store, "/media/tv/B/S01/e2.mkv")
+        self._legacy(store, "/media/movies/A/a.mkv")
         self._decided(store, "/media/tv/B/S01/e1.mkv", DecisionStatus.DECIDED)
         self._decided(store, "/media/tv/B/S01/e3.mkv", DecisionStatus.NO_EVIDENCE)
         versions = "Waiting for this item's other versions to agree on: credits"
@@ -839,7 +855,8 @@ class TestInReviewRedecide:
         (job,) = self._ic_jobs(jm)
         assert job.id == job_id
         # LOW: it runs files as any job does, and may read or ask what is due for a thousand of them.
-        assert (job.library_name, job.priority) == ("Intro & Credits: Needs review and waiting files, decided again", 3)
+        assert (job.library_name, job.priority) == (triggers.DECIDE_AGAIN_JOB_NAME, 3)
+        assert job.library_name == "Intro & Credits: files the old rules couldn't decide, decided again"
         assert job.config == {
             "kind": JOB_KIND_INTRO_CREDITS,
             "source": "decide_again",
@@ -850,8 +867,8 @@ class TestInReviewRedecide:
             "webhook_item_id_hints": {},
             "decide_again": True,
         }
-        # The job lists them when it runs: exactly the files with a type in Needs review, and the files whose last
-        # row waits for their item's other versions.
+        # The job lists them when it runs: exactly the files with a type still under the old status (not one the
+        # rules wrote as no evidence), and the files whose last row waits for their item's other versions.
         assert [i.canonical_path for i in job_runner._items_to_decide_again(store)] == [
             "/media/movies/A/a.mkv",
             "/media/movies/C/c - 4K.mkv",
@@ -881,7 +898,7 @@ class TestInReviewRedecide:
         self._intro(store, "/media/tv/A/S04/e1.mkv", ("season_audio_previous", "introdb"))
         self._intro(store, "/media/tv/A/S03/e3.mkv", ("chapters",))
         self._intro(store, "/media/tv/A/S03/e4.mkv", ("season_audio",), locked=True)
-        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        self._legacy(store, "/media/movies/A/a.mkv")
 
         assert triggers.submit_decide_again() == self._ic_jobs(jm)[0].id
         assert [i.canonical_path for i in job_runner._items_to_decide_again(store)] == [
@@ -927,14 +944,14 @@ class TestInReviewRedecide:
 
     @pytest.mark.parametrize("state", ["pending", "running"])
     def test_a_second_request_while_it_is_queued_or_running_reuses_it(self, jm, store, state):
-        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        self._legacy(store, "/media/movies/A/a.mkv")
         first = triggers.submit_decide_again()
         if state == "running":
             jm.start_job(first)
         assert triggers.submit_decide_again() == first
         assert len(self._ic_jobs(jm)) == 1
 
-    def test_nothing_is_queued_when_no_file_is_in_review_or_waiting_for_other_versions(self, jm, store):
+    def test_nothing_is_queued_when_no_file_is_under_the_old_status_or_waiting_for_other_versions(self, jm, store):
         self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.DECIDED)
         self._last_row(store, "/media/movies/D/d.mkv", "waiting", "Not in this server's library yet")
         assert triggers.submit_decide_again() is None
@@ -942,7 +959,7 @@ class TestInReviewRedecide:
 
     def test_nothing_is_queued_when_intro_and_credits_is_off_everywhere(self, jm, store, settings):
         settings["media_servers"] = [_server("jf-1", "jellyfin", markers={"enabled": False})]
-        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        self._legacy(store, "/media/movies/A/a.mkv")
         assert triggers.submit_decide_again() is None
         assert self._ic_jobs(jm) == []
 
@@ -1093,7 +1110,7 @@ class TestVersionReruns:
         assert jm.get_job(second).config["version_rerun"] is True
 
     def test_a_decide_again_job_queued_isnt_taken_for_it(self, jm, store, due, monkeypatch):
-        monkeypatch.setattr(store, "files_in_review", lambda: ["/m/a.mkv"])
+        monkeypatch.setattr(store, "files_with_legacy_review_decisions", lambda: ["/m/a.mkv"])
         decide_again = triggers.submit_decide_again()
 
         assert triggers.submit_version_reruns() != decide_again

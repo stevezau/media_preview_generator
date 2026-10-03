@@ -86,10 +86,11 @@ settings, the credits scaler and 640×360 re-reads, two playback speeds, season 
 - **After the 2026-09-25 decision rules** (§14 "Decision rules", `evidence/decide-rules/README.md`): the decision
   rules' version (§6.2 step 3) decides every file they could move again after the update (486 files on the audit's
   copy), so production's lone-SkipDB intros (Westworld S04, Somebody Somewhere S03) come off. Westworld S04's
-  intros then wait in Needs review: production's season audio has no answer for them, and where today's season audio
-  answers (the harness: S04E01 563.6–661.4 s, right) SkipDB's shorter answer disagrees with it; letting season audio
-  win such a pair was wrong on In Treatment S02 ×4 and Family Guy S14E01. Westworld S03E07 stays there too (lengths
-  5.03 s apart), and the rule 4 composition gap the property test found (predates these rules) is unfixed.
+  intros are then left undecided (nothing written): production's season audio has no answer for them, and where
+  today's season audio answers (the harness: S04E01 563.6–661.4 s, right) SkipDB's shorter answer disagrees with it;
+  letting season audio win such a pair was wrong on In Treatment S02 ×4 and Family Guy S14E01 (measured again
+  2026-10-03: both sides wrong 6 of 10, §14). Westworld S03E07 stays undecided too (lengths 5.03 s apart), and the
+  rule 4 composition gap the property test found (predates these rules) is unfixed.
 
 **Open after season audio v10** (§14 2026-09-27 "A season on every disk"; `evidence/season-across-disks/README.md`):
 - **What the whole season shows** (each would give the same answer today on a season kept on one disk): Turning Point
@@ -476,7 +477,7 @@ alone at High or Medium": alone 91 useful / 13 wrong / 14 missed on the 118, aga
 The previous-season hint still never decides alone (48 / 10 / 24 above; owner 2026-09-13: it needs a second source).
 Neither season audio nor the hint makes an agreeing pair with markers already on a server (G3, §5.5 rule 4): both come
 from matching audio. A server marker that agrees doesn't hold season audio back either: it decides as it would alone
-(§14 2026-09-24); the hint with only a server's marker stays in Needs review.
+(§14 2026-09-24); the hint with only a server's marker decides nothing.
 
 Remaining failures: variable couch gag (The Simpsons), a repeated segment ahead of the real intro (Carême), title card
 10–20 s longer than the chapter (Daredevil, Outlander), and 5 s title cards after a cold open (Accused S3–7: shorter
@@ -983,19 +984,20 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    2.8–4.8 s past on 20 episodes; §14 2026-09-25 "Decision rules"). SkipDB matches the file's duration and keeps
    2 s. A marker composed from agreeing sources is judged on its times alone.
 3. Chapters → accept (first intro/recap chapter, last credits/preview chapter; on a tie the one with the earlier end),
-   unless two agreeing independent non-chapter sources contradict the chapter → **"Needs review"**. One contradicting
-   source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
+   unless two agreeing independent non-chapter sources contradict the chapter → nothing is written, except that
+   credit text agreeing with the chapter's checked edge keeps the chapter, credited with it (2026-10-03; season audio
+   agreeing doesn't keep an intro chapter). One contradicting source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
    other edge takes their safer value if it is safer (later intro/recap start, earlier credits/preview end). **Season
    chapter-intro check (F1):** when at least 2 other episodes of the season group have an intro chapter, an intro
    chapter longer than max(2 × their median, median + 30 s) doesn't decide alone: it needs one agreeing independent
-   source that isn't markers already on a server (else "Needs review", reason "Intro chapter is much longer than the
-   rest of the season's"); the agreeing candidates may then shorten it the same way. **Credits and credit text
+   source that isn't markers already on a server (else nothing is written, reason "Intro chapter is much longer than
+   the rest of the season's"); the agreeing candidates may then shorten it the same way. **Credits and credit text
    (2026-09-25):** a cluster holding credit text is weighed at credit text's start (it reads this file's frames). When
    every agreeing cluster that contradicts a credits chapter holds credit text and a non-server source of another group,
-   they decide instead of "Needs review" (start from credit text, the rest composed as rule 4; reason "credit text and
+   they decide instead (start from credit text, the rest composed as rule 4; reason "credit text and
    agreeing sources contradict the chapters: …"). A SkipDB answer (or a SkipDB importer's copy) that contradicts a
    credits chapter nothing else agrees with, while credit text is among the sources and hasn't answered, holds the
-   chapter in "Needs review" (reason `decide.TEXT_CHECKS_CHAPTER_REASON`) so the pipeline reads credit text in the same
+   chapter undecided (reason `decide.TEXT_CHECKS_CHAPTER_REASON`) so the pipeline reads credit text in the same
    run; a local detector that can't run here, answered nothing at its version, or failed to read the file as it is
    (credit text: a decode error or a timeout recorded for this size and mtime, `LocalDetectorSpec.failed_here`) leaves
    the source order (`pipeline._decide`), so the chapter then decides as before, on the same run or the next. A
@@ -1012,23 +1014,24 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    chapter files of the 2026-09-27 audit, 3 of them on the story (A Christmas Carol 1984, 13 s before the roll). **An
    intro chapter an online answer ends inside (2026-09-27):** when IntroDB, TheIntroDB or SkipDB (or an importer's copy)
    ends the intro inside the chapter more than 5 s before its end, nothing agrees with the chapter's end, and season
-   audio is among the sources without an answer, the chapter waits in Needs review (`decide.AUDIO_CHECKS_CHAPTER_REASON`)
+   audio is among the sources without an answer, the chapter waits undecided (`decide.AUDIO_CHECKS_CHAPTER_REASON`)
    so season audio reads the episode in the same run (a detector that can't answer here leaves the order as above;
    season audio's `failed_here` is a fingerprint failure of this file). When every agreeing cluster that contradicts an
    intro chapter holds season audio and a non-server source of another group, and the intro they compose (rule 4, rule
    13's end) ends inside the chapter, they decide (`decide.AUDIO_OVER_CHAPTER_REASON`). A chapter that ends before them
-   stays in Needs review as before: on the library chapter set the chapter was the right one every time (Family Guy
+   stays undecided as before: on the library chapter set the chapter was the right one every time (Family Guy
    S14). Spring of the Blade S01E02/E03/E14: WEB "Intro" chapters ending 5–37 s into the episode; IntroDB and season
    audio end at the episode's title card.
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. An agreeing set needs a candidate that is neither markers already on a server nor season audio (or its
    previous-season hint): season audio and a server's own detection never decide together (G3; with season audio
-   alone at Medium an agreeing server marker doesn't block it, rule 6; otherwise "Needs review", reason
+   alone at Medium an agreeing server marker doesn't block it, rule 6; otherwise nothing is written, reason
    "Season audio and a server's own marker agree, but both come from matching audio; needs another source").
    Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
    times). Only candidates that agree with a different independent source may supply times: the agreed edge comes
    from the first of them in source order; the other edge takes the safer value across them (latest intro/recap
-   start, earliest credits/preview end). If the composed marker fails sanity → "Needs review". (Taking the safest
+   start, earliest credits/preview end). If the composed marker fails sanity → at Medium, credit text in the set
+   decides with its own edges; otherwise nothing is written (2026-10-03; season audio's own edges never do). (Taking the safest
    agreed edge instead was tried in the phase-1 audit and rejected: it hid a contradiction and published a wrong
    Daredevil S03E02 intro.) **Credit text's credits start (2026-09-27):** in agreeing credits, a confirming credit
    text answer supplies the start whenever the source-order winner starts more than 5 s from it
@@ -1040,10 +1043,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    agreed intro's start (`decide._partial_season_match`, the 15 s of rule 14's `OTHER_RELEASE_MIN_SHIFT_MS`). Game of Thrones S03E04/E09: the
    season split over three disks left two episodes matched with each other alone, at 63–112 s of a 5–112 s title
    sequence IntroDB had right (season audio v10 now groups the season across its disks, §5.3).
-5. If two groups of agreeing sources would publish times that don't agree with each other → "Needs review". Before
+5. If two groups of agreeing sources would publish times that don't agree with each other → nothing is written, unless
+   exactly one group holds credit text: that group decides (2026-10-03; a group holding season audio doesn't). Before
    anything is published (chapters, agreement or "Medium"), any two agreeing candidates from different independent
-   sources that are both outside the tolerance of the published time send it to "Needs review" — a third source that
-   agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
+   sources that are both outside the tolerance of the published time undo it (nothing is written) unless credit text
+   gave its checked edge — a third source that agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
 6. A single source is accepted only at the **"Medium"** rules (the app's only rules since 2026-09-24, §14:
    `decide.APP_PUBLISH_WHEN`; "High" stays in `DecisionContext` for the evaluation harness), only when that source checks the file's
@@ -1054,6 +1058,10 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    credits minutes early on the lab scale run) — and only
    when no sane candidate from another independent source (markers already on a server included) contradicts it and
    every pair of the source's own candidates agrees; its other edge takes the safer value across those candidates.
+   **Only credit text wins a disagreement (2026-10-03, `decide._WINS_A_DISAGREEMENT`):** credit text contradicted by
+   an online answer or a server's marker still decides with its own edges (measured: right or late 45 of 60, the
+   disagreeing Plex/SkipDB answer early twice as often); season audio contradicted the same way decides nothing
+   (both sides wrong 6 of 10), reason "sources disagree: …". A lone online answer stays nothing for both types.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
    times on their own. When a server marker agrees, it may **shorten** the composed skip (a later intro/recap start,
    an earlier credits/preview end) but never lengthen it — so a crowd answer running to the end of the file can't
@@ -1068,10 +1076,10 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    it, the server says the credits are already running there and nothing moves. Otherwise each server offers its first
    start more than 10 s after the decided start and more than 10 s before the decided end, and the latest offer wins —
    so a server that splits its credits into pieces can't pull the start to its last piece. `decided_by` adds
-   `server_markers`; the reason (and the Inspector) names the server(s). A shortened marker failing sanity sends the
-   type to "Needs review" with the unshortened marker proposed. This runs last, after rule 5's contradiction check and
+   `server_markers`; the reason (and the Inspector) names the server(s). A shortened marker failing sanity leaves the
+   unshortened marker as it is. This runs last, after rule 5's contradiction check and
    rules 9–10 have judged the unshortened markers, and only on types still decided, so it can shorten a marker but
-   never turn "Needs review" into a published one. Intro and recap ends are never moved this way. A chapter decision
+   never decide an undecided type. Intro and recap ends are never moved this way. A chapter decision
    shortened or confirmed only by server markers still counts as chapters alone for the evidence search.
 8. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
    from others — IntroDB + TheIntroDB always count as one source. Server markers written by an importer plugin count
@@ -1082,9 +1090,10 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    Season audio and its previous-season hint count as one source (the same method on the same show).
    SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
    (agreement is on intro ends, so they stay separate for now; re-measure before enabling TheIntroDB by default).
-9. A decided intro and recap overlapping by more than 5 s → both "Needs review".
-10. A decided preview overlapping decided credits by more than 10 s → the preview goes to "Needs review".
-11. No agreement → no marker; shown as **"Needs review"**. `decided_by`: agreement → the sources that agree with the
+9. A decided intro and recap overlapping by more than 5 s → both are left undecided (nothing written).
+10. A decided preview overlapping decided credits by more than 10 s → the preview is left undecided.
+11. No agreement → no marker; the file shows **"No markers found"** with the reason (Needs review was removed
+    2026-10-03, §14). `decided_by`: agreement → the sources that agree with the
     winner plus any that supplied an edge; chapters → `chapters`, plus the agreeing sources when they replaced the
     chapter's other edge; "Medium" → the sources that supplied an edge. Results never depend on the order candidates
     arrive in.
@@ -1159,8 +1168,8 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     as undecided: the new file's first answer of its own replaces it.
 16. **A rule change alone doesn't take a published marker off** (§14 2026-09-25 "Worker waits and rule-only
     re-decides"). A file decided under older rules (`DECIDE_RULES` in `version_reruns` below today's
-    `DECIDE_RULES_VERSION`) is decided again from what it has stored (§6.2 step 3). Where today's rules would put a
-    type in Needs review or leave it without a marker, a marker of ours that the older rules decided for it and that
+    `DECIDE_RULES_VERSION`) is decided again from what it has stored (§6.2 step 3). Where today's rules would leave a
+    type without a marker, a marker of ours that the older rules decided for it and that
     was sent to a server (its type and start in a publish state) stays, while a source it was decided by still gives
     an answer agreeing with it (rule 4's tolerances: 5 s on an intro's end, 10 s on credits' start) and no new or
     changed answer disagrees with it: one not stored when the job's first stage of the file began
@@ -1180,7 +1189,7 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
     audio only when another episode of the season group has a fingerprint, since alone it finds nothing whatever
     the episode holds). The check the rule waited for has then been made (Somebody Somewhere S03E07: a lone
     SkipDB intro 9 s into the story that season audio found no match for). Its cost: S03E03's lone SkipDB intro, which
-    was right, goes to Needs review the same way, as on every new install.
+    was right, is left undecided the same way, as on every new install.
 
 ### 5.6 Resource rules
 Intro & Credits jobs run on the preview workers with no worker cap of their own: priority alone orders the work. The
@@ -1293,8 +1302,8 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    markers go to keeps its own (`keep_plex`, `keep_emby`) and shows its own of that type now — rule 7's own markers
    (never ours, an importer plugin's or another cut's), read from each server on that run in one read the evidence
    read shares — and the type isn't locked. A type that ends undecided while that holds, whether it was skipped or
-   an answer stored earlier left it in review, is stored `disabled` with the reason "kept Plex's own marker" instead
-   of Needs review, and the rows say "Keeping Plex's credits"; a decided type stays decided (the publisher keeps
+   an answer stored earlier left it undecided, is stored `disabled` with the reason "kept Plex's own marker" instead
+   of no evidence, and the rows say "Keeping Plex's credits"; a decided type stays decided (the publisher keeps
    Plex's rows and says so, as before), and what is sent to a server is exactly what an undecided type sends. Worked
    out again on every run and never stored as an answer, so
    "Use ours", a server losing its marker or a new destination without one reads the file on the next run (§14
@@ -1310,8 +1319,8 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    **A detector's new version** (`markers.versions`, §14 2026-09-25). Every detector and reader stores its version
    with each answer (credit text, season audio with its end-picture check, the server-marker reader, chapters, the
    online parsers). On every start the app compares the stored versions with today's and lists the files, still on
-   disk, where an unlocked decided type rests on an older answer or a type it answers is undecided (Needs review, no
-   evidence) beside one. The two detectors that read the file, credit text and season audio, check what other sources
+   disk, where an unlocked decided type rests on an older answer or a type it answers is undecided (no evidence)
+   beside one. The two detectors that read the file, credit text and season audio, check what other sources
    decided (§5.5 rules 3, 4 and 16), so their older answer lists an unlocked decided type whatever decided it
    (`AnswerVersion.checks_others`): sflix's 10 Things I Hate About You kept credit text version 6's answer beside
    its credits chapter after version 7, which moves that chapter, shipped, because nothing else runs a movie again
@@ -1328,7 +1337,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    type). Its run
    decides again from what is stored and asks only what is due or from an older version, as any run does (a credits
    chapter rule 3 holds for credit text has it read, §5.5); a marker it had sent to a server stays where today's rules
-   would leave its type in Needs review or without a marker, until an answer disagrees with it (§5.5 rule 16).
+   would leave its type without a marker, until an answer disagrees with it (§5.5 rule 16).
    Version 1 is the 2026-09-25 rules (§14 "Decision rules"), 2 the 2026-09-27 ones, 3 the 2026-09-28 carry-over. Credit text found nothing at an older version is not an answer the decision waits past: it is read again,
    so rule 3's chapter waits for it (`pipeline._answered_at_this_version`), unless that read fails on the file as
    it is (a decode error or a timeout), which ends the wait. They run as ordinary Intro &
@@ -1368,7 +1377,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    backoff, until a server has it. Locked markers re-assert (§5.5 rule 1). Plex
    `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
    `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
-7. **Outcomes** per server: markers written / reused / needs review / skipped + reason. The job is red when every
+7. **Outcomes** per server: markers written / reused / no markers found / skipped + reason. The job is red when every
    file it counted failed or wasn't on disk and it queued no retry (previews' `all_not_found` rule), amber when some
    failed or on warnings, green otherwise.
 8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately (`POST /api/markers/item/markers`; `DELETE` on the same route unlocks and publishes nothing). It is one web request, so it is bounded: the save and the lock land before any server is contacted, each call to a server is capped at 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`; Plex's database waits the same 8 s for its locks), and a server the fan-out hasn't started 25 s in isn't started (`PUBLISH_NOW_DEADLINE_S`, a start gate, not a cancellation, so a server already under way can run to a small multiple of 8 s). A server not reached says so in its row and is published by the next run; a job already running on the same file makes the request give up on the whole publish after 2 s. No retries, and no thread that outlives the request. **When the editor shows any server waiting or failed** (a server with Intro & Credits on that couldn't take it, down or its plugin missing, reads "failed" too), **the save queues that next run**: one single-file HIGH job, not forced (it publishes the saved markers and asks no source again), whose retry chain takes a server that hasn't indexed the file yet (`triggers.submit_publish_retry`); a job for the file that hasn't started (an earlier one, or a queued re-detect) is reused, a running one isn't (it decided before the save). The answer carries its id as `queued_job_id`.
@@ -1423,9 +1432,13 @@ at the last write), `atomic_writes`.
   `tag_type=12, tag=''` row; rewrite `pv:intros`/`pv:credits` in every part's `extra_data` (sorted keys, rebuilt
   `url`). Write credits start as `served − 2000 ms`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
-- Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s. A part never
-  decided whose file is on none of its path-mapped disks (Plex lists a deleted file until it scans) takes no part; one
-  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24). A part's disk roots
+- Multi-version items share one marker set (`publishers.base.agreed_across_versions`): per type, the versions that
+  have a decided marker of it agree within 2 s as before; otherwise the lowest `media_item_id` holding the type wins,
+  and a locked (hand-set) version wins over an unlocked one (2026-10-03). A version never decided, or decided without
+  the type, takes no part, so nothing waits on it: its own run publishes the item again under the same rule. A part
+  never decided whose file is on none of its path-mapped disks (Plex lists a deleted file until it scans) takes no
+  part either; one on disk and never decided was once waited for, and the job retried the waiting file (§14,
+  2026-09-24). A part's disk roots
   (its path mapping's local folder, its libraries' folders) that are mounted and hold entries stand in for a missing
   folder when deciding its file is gone (a file replaced by one on another disk can take its season folder with it);
   a root of `/` is never trusted, since it holds entries whatever is mounted. The retry also runs the never-decided
@@ -1622,12 +1635,12 @@ Show a mockup and confirm wording before building each screen.
    was found: a type with no marker carries `+ Add <type>`, which seeds a round starting time (intro/recap 0:00–0:30,
    credits the last 60 s, preview the last 30 s) to drag. Save = lock = publish. Recap and preview stay editable,
    with a per-server note (only Jellyfin shows them); an edited Emby credits end carries the Emby note.
-4. **Inspector → Season view:** per-episode intro/credits, evidence chips, per-server dots, "Needs review". "Publish N
+4. **Inspector → Season view:** per-episode intro/credits, evidence chips, per-server dots. "Publish N
    to M servers" = a normal-priority Intro & Credits job for exactly that season's episodes, named `Intro & Credits:
-   <show> · Season N` (or `· Specials`); an identical pending or running job is reused (R4). Review opens that
-   episode, and every row's **Edit** opens that episode in the marker editor.
+   <show> · Season N` (or `· Specials`); an identical pending or running job is reused (R4). Every row's **Edit**
+   opens that episode in the marker editor.
 5. **Dashboard → job queue:** Intro & Credits jobs linked under the preview job; per-server "Markers written × N /
-   reused / needs review / skipped (reason)"; source counts. A job with files a server hasn't added yet stays one row,
+   reused / no markers found / skipped (reason)"; source counts. A job with files a server hasn't added yet stays one row,
    retried like a preview job: pending with the "Retry N/M" chip and "Retry starting in …" while its hidden retries
    run (§14 2026-09-23).
 6. **Setup Health:** plugin missing/outdated, Plex Pass missing, Plex marker tag row absent, Plex DB not local, Plex
@@ -1700,9 +1713,11 @@ Show a mockup and confirm wording before building each screen.
 v15 also seeded `"publish_when": "high"`. Schema **16** (2026-09-24, §14) removes it: `validate_global` drops the key
 whatever it says, `_migrate_to_v16` deletes it (a user-facing note only when it was `"high"`) and sets
 `_markers_decide_again`, and the next start (`web.app._decide_again_after_upgrade`, after revived jobs are
-started) queues one LOW job, **Intro & Credits: Needs review and waiting files, decided again**
-(`triggers.submit_decide_again`, source `decide_again`; one already queued or running is reused). The job lists, when
-it runs, the files with a type in Needs review (`MarkerStore.files_in_review`) and the files whose last row on a
+started) queues one LOW job, **Intro & Credits: files the old rules couldn't decide, decided again**
+(`triggers.DECIDE_AGAIN_JOB_NAME`, `triggers.submit_decide_again`, source `decide_again`; one already queued or running
+is reused). The job lists, when it runs, the files the old rules left in Needs review (a status removed 2026-10-03:
+a stored `needs_review` row reads as no evidence until the file is decided again, `upgrade._migrate_to_v20`) and the
+files whose last row on a
 server is "Waiting for this item's other versions to agree on: …" (`MarkerStore.files_waiting_for_other_versions`,
 `outcomes.VERSIONS_WAITING`; 12 were stuck on the owner's server), and runs them as any job does: answers that aren't
 due are reused, and what is due or from an older version is asked or read again. Its log names only files whose
@@ -3785,3 +3800,16 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     Inspector and the Season view show such a type, unless locked, with the kept status ("kept Plex's own marker"), as
     a file with no such answer is stored. Worked out when the page is read: the stored decision and what a job
     publishes don't change.
+- 2026-10-03 · **Needs review removed** (§5.5 rules 3–7, 9–11, 16; §6.2; §6.3; §7; §8; owner). Every type ends
+  decided (written) or no evidence (nothing written): on sflix the file's own read had already run on every file in
+  review, so review was a label, not a safety net (discussion #332: 1,138 files). The former review cells were
+  measured per type on the decide-level sets (`evidence/decide-rules/local/policy-measure.log`, `cells.py`, `h2h.py`;
+  disagree = nothing / file read / online × lone online = nothing / online): an intro disagreement had both sides wrong
+  6 of 10 (lab 118 wrong 4 → 12 with season audio winning), so it writes nothing, exactly as before; a credits
+  disagreement had credit text right or late 45 of 60 while the disagreeing Plex/SkipDB answer was early twice as
+  often (movie_credit_truth 103/11/18/72 → 122/43/34/5 useful/late/wrong/missed, Plex 124/11/61/8), so credit text
+  decides (`decide._WINS_A_DISAGREEMENT`). A lone online answer stays nothing for both types (rule 6; IntroDB about 1
+  in 4 wrong on lone intros). Replay: every intro set identical to 7a120c3, every credits set identical to the
+  file-read-wins run (`local/final.no-review-final/`). Multi-version Plex items stop waiting: the lowest
+  `media_item_id` holding the type wins, a locked version over an unlocked one. Follow-up: a lone IntroDB/TheIntroDB
+  credits answer was right 24 of 24 on online-43, worth a bigger test before it may decide.

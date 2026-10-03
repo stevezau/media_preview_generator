@@ -773,7 +773,7 @@ def credits_text_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:
     dropped when the file's identity changes) or a timeout (``credits_text_timeouts``, keyed by the identity).
 
     A credits chapter that rule 3 holds for credit text then decides as it did before rule 3 (spec §5.5): the file
-    would otherwise wait in Needs review for an answer that may never come. Text detection being unavailable says
+    would otherwise wait for an answer that may never come. Text detection being unavailable says
     nothing about the file and isn't recorded.
 
     Args:
@@ -867,7 +867,7 @@ def detect_credits_text(
 
     reason = _gives_up(rec, ctx)
     if reason is not None:
-        raise DetectorUnavailableError(reason)
+        raise DetectorUnavailableError(reason, this_file=True)
     # The process's one pool (spec §6.4 item 7): never closed here, since closing it ends it for every later file.
     pool = get_textdet_pool()
     name = os.path.basename(rec.canonical_path)
@@ -923,7 +923,7 @@ def detect_credits_text(
                 # Kept for this file as it is (a new identity drops it): not read again, and rule 3 stops waiting.
                 ctx.store.set_detector_failure(rec.id, Source.CREDITS_TEXT, cut_short)
                 logger.warning("Credit text can't be read for {}: {}", name, cut_short)
-                raise DetectorUnavailableError(cut_short)
+                raise DetectorUnavailableError(cut_short, this_file=True)
     except frames.GpuDecodeError as exc:
         raise CodecNotSupportedError(str(exc)) from exc
     except (frames.DecodeCancelledError, TextDetCancelledError) as exc:
@@ -932,15 +932,15 @@ def detect_credits_text(
         now = ctx.now()
         identity = FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)
         ctx.store.record_credits_text_timeout(identity, now, forget_before=now - TIMEOUT_RETRY)
-        raise DetectorUnavailableError(str(exc)) from exc
+        raise DetectorUnavailableError(str(exc), this_file=True) from exc
     except frames.ReadStalledError as exc:
-        raise DetectorUnavailableError(str(exc)) from exc
+        raise DetectorUnavailableError(str(exc), this_file=True) from exc
     except frames.FrameDecodeError as exc:
         # Kept for this file as it is (a new identity drops it): rule 3 stops waiting for an answer it may never get.
         ctx.store.set_detector_failure(rec.id, Source.CREDITS_TEXT, str(exc) or type(exc).__name__)
-        raise DetectorUnavailableError(str(exc)) from exc
+        raise DetectorUnavailableError(str(exc), this_file=True) from exc
     except TextDetUnavailableError as exc:
-        raise DetectorUnavailableError(str(exc)) from exc
+        raise DetectorUnavailableError(str(exc), this_file=True) from exc
     if result.start_s is None:
         logger.debug("No credit roll in the end of {}", os.path.basename(rec.canonical_path))
         return DetectorAnswer((), LOOK_BACK_BASIS)

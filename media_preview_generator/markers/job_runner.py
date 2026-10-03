@@ -58,9 +58,7 @@ from .outcomes import (
     PLEX_PASS_UNKNOWN,
     READ_BACK_FAILED,
     RETRY_REASON_CODES,
-    UNCHECKED_FILES,
     VERIFY_LATER,
-    VERSIONS_UNCHECKED,
     FileOutcome,
     ServerStatus,
 )
@@ -71,7 +69,6 @@ from .pipeline import (
     build_context,
     cached_capability,
     kind_handlers,
-    markers_for_path,
     online_recheck_files,
     run_detector_checks,
     sequence_number,
@@ -179,9 +176,8 @@ def retry_reason(row: object) -> str | None:
 
     Returns:
         The reason code of a waiting row the job retries (the server hasn't indexed the file yet, Plex didn't answer
-        its Plex Pass check, another version of its Plex item hasn't been checked yet, or another job kept running the
-        file past the worker's wait), or ``PLEX_DB_BUSY`` for a
-        failed row whose write gave up waiting for Plex's database; None for any other row.
+        its Plex Pass check, or another job kept running the file past the worker's wait), or ``PLEX_DB_BUSY`` for
+        a failed row whose write gave up waiting for Plex's database; None for any other row.
     """
     if not isinstance(row, dict):
         return None
@@ -194,15 +190,11 @@ def retry_reason(row: object) -> str | None:
 
 
 NOT_ON_DISK = "not_on_disk"
-# The file's row waited for a version that has a decision by the end of the job (``_versions_still_unchecked``).
-VERSIONS_NOT_COMPARED = "versions_not_compared"
 # Retry log wording per reason, in the order a combined line lists them.
 _RETRY_WORDS = {
     NOT_ON_DISK: "not on disk",
     NOT_IN_LIBRARY: "not in a server's library",
     PLEX_PASS_UNKNOWN: "not checked on Plex",
-    VERSIONS_UNCHECKED: "with another version not checked",
-    VERSIONS_NOT_COMPARED: "not compared with another version",
     PLEX_DB_BUSY: "not written to Plex's busy database",
     FILE_BUSY: "not released by another job",
 }
@@ -212,40 +204,6 @@ def _retry_reason(waiting: dict[str, set[str]]) -> str:
     words = [text for reason, text in _RETRY_WORDS.items() if waiting.get(reason)]
     listed = words[0] if len(words) == 1 else f"{', '.join(words[:-1])} or {words[-1]}"
     return f"{listed} yet"
-
-
-def _versions_still_unchecked(store: MarkerStore, waiting: dict[str, set[str]], named: dict[str, set[str]]) -> set[str]:
-    """The versions that waiting files' rows named as never checked and that still have no decision.
-
-    A retry runs a waiting file together with the version it waits for, and the waiting file, on saved answers,
-    finishes first: its row names a version the same job decides seconds later. Asked as the publisher asks
-    (``markers_for_path``). A file whose named versions all have a decision now moves in ``waiting`` from
-    ``VERSIONS_UNCHECKED`` to ``VERSIONS_NOT_COMPARED``: it is still tried again, because only its own next run
-    compares it with them (they may agree, and then it is published), but nothing is "never checked" any more. A
-    store that can't be read leaves a version unchecked. Never raises.
-
-    Args:
-        store: The markers store.
-        waiting: Local paths per reason; changed in place.
-        named: Per waiting file, the versions its ``VERSIONS_UNCHECKED`` rows named (``outcomes.UNCHECKED_FILES``).
-
-    Returns:
-        The named versions still without a decision.
-    """
-
-    def unchecked(path: str) -> bool:
-        try:
-            return markers_for_path(store, path) is None
-        except Exception as exc:
-            logger.warning("Couldn't look up whether another version was checked: {}: {}", type(exc).__name__, exc)
-            return True
-
-    still = {path for path in set().union(*named.values()) if unchecked(path)}
-    for path, versions in named.items():
-        if versions and not versions & still and path in waiting.get(VERSIONS_UNCHECKED, ()):
-            waiting[VERSIONS_UNCHECKED].discard(path)
-            waiting.setdefault(VERSIONS_NOT_COMPARED, set()).add(path)
-    return still
 
 
 def _upsert_chain(
@@ -356,7 +314,6 @@ def _queue_retry(
     waiting: dict[str, set[str]],
     sender_paths: dict[str, str],
     promised: set[str] = frozenset(),
-    also: set[str] = frozenset(),
 ) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet, that a server could take later, or whose write
     gave up waiting for Plex's busy database (a few minutes later it is usually free).
@@ -376,9 +333,6 @@ def _queue_retry(
         sender_paths: The path each local path was given as (``build_items``); a missing entry is retried as is.
         promised: Local paths whose row said this job tries again (``PipelineContext.busy_promised``, at most
             ``MAX_RETRY_FILES``): taken first when more files wait than a retry job takes.
-        also: Local paths the retry runs as well, while it has room: the versions of a waiting file's Plex item that
-            were never checked (``outcomes.UNCHECKED_FILES``). No job lists them otherwise, so the item would wait for
-            good. They aren't counted as waiting.
 
     Returns:
         The paths the retry job lists (as sent); empty when none was queued.
@@ -413,17 +367,15 @@ def _queue_retry(
         if len(paths) > MAX_RETRY_FILES:
             jm.add_log(job.id, f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} get no retry; {again}")
             paths = paths[:MAX_RETRY_FILES]
-        unchecked = sorted(set(also) - set(paths) - waiting_paths)[: MAX_RETRY_FILES - len(paths)]
-        listed = [*paths, *unchecked]
         delay = scaled_backoff_delay(attempt, delay_setting)
         # A retry's own retry joins the same chain; any other job (an old top-level "Retry:" job included) heads one.
         head_id = cfg.get("parent_job_id") or job.id
         retry = create_intro_credits_job(
-            library_name=_later_job_name("Retry: ", job, listed),
+            library_name=_later_job_name("Retry: ", job, paths),
             priority=job.priority,
             source=str(cfg.get("source") or "retry"),
-            file_paths=listed,
-            item_id_hints=_hints_for(cfg, listed) or None,
+            file_paths=paths,
+            item_id_hints=_hints_for(cfg, paths) or None,
             retry_attempt=attempt,
             retry_delay_s=delay,
             verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
@@ -440,13 +392,11 @@ def _queue_retry(
             next_run_at=retry.config.get("retry_not_before"),
             wait_seconds=delay,
         )
-        checks = f", which also checks {len(unchecked)} version(s) never checked" if unchecked else ""
         jm.add_log(
             job.id,
-            f"INFO - {len(paths)} file(s) {reason}; retry {attempt} of {count} in {delay}s "
-            f"(job {retry.id[:8]}){checks}",
+            f"INFO - {len(paths)} file(s) {reason}; retry {attempt} of {count} in {delay}s (job {retry.id[:8]})",
         )
-        return listed
+        return paths
     except Exception:
         logger.exception("Could not queue the retry for files job {} found waiting", job.id)
         return []
@@ -968,7 +918,7 @@ def _still_undecided(store: MarkerStore, path: str) -> bool:
     decisions = store.get_decisions(rec.id) if rec is not None else {}
     return (
         not decisions
-        or any(row.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE) for row in decisions.values())
+        or any(row.status is DecisionStatus.NO_EVIDENCE for row in decisions.values())
         or any(is_carried_over(marker) for marker in store.get_markers(rec.id).values())
     )
 
@@ -1075,7 +1025,7 @@ def _stored_file_items(paths: set[str]) -> list[ProcessableItem]:
 
 def _files_to_decide_again(store: MarkerStore) -> set[str]:
     return {
-        *store.files_in_review(),
+        *store.files_with_legacy_review_decisions(),
         *store.files_waiting_for_other_versions(),
         *store.files_with_season_audio_intro(),
         *store.files_decided_by_online_and_server_markers(),
@@ -1083,7 +1033,8 @@ def _files_to_decide_again(store: MarkerStore) -> set[str]:
 
 
 def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] = ()) -> list[ProcessableItem]:
-    """The files in Needs review now, those whose last publish waits for their item's other versions, those whose
+    """The files still stored under the removed "Needs review" status (``store.LEGACY_NEEDS_REVIEW``, settings v20),
+    those whose last publish waits for their item's other versions, those whose
     unlocked intro was decided with a season audio answer (settings v17: season audio's guards changed its answers), and
     those whose unlocked intro or credits rests on an online answer and a server's own marker alone (settings v18:
     online times on the file's clock).
@@ -1368,7 +1319,6 @@ _SETTLED_OUTCOMES = frozenset(
     {
         FileOutcome.PUBLISHED.value,
         FileOutcome.UP_TO_DATE.value,
-        FileOutcome.NEEDS_REVIEW.value,
         FileOutcome.NO_MARKERS.value,
         FileOutcome.NO_OWNERS.value,
     }
@@ -1932,7 +1882,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
                     elif cfg.get(DECIDE_AGAIN):
-                        jm.add_log(job_id, "INFO - No file is in Needs review or waiting for its item's other versions")
+                        jm.add_log(job_id, "INFO - No file is left to decide again")
                         jm.complete_job(job_id)
                         _settle_decide_again(jm, job_id, cfg)
                     elif cfg.get(ONLINE_RECHECK):
@@ -1989,9 +1939,6 @@ def run_intro_credits_job(job_id: str) -> None:
                 replaced: set[str] = set(replaced_before_restart)
                 unchecked: dict[str, set[str]] = {}
                 gone_items: dict[str, set[tuple[str, str]]] = {}
-                # Per waiting file, the versions of its Plex item its row named as never checked: the retry runs those
-                # still without a decision too.
-                named_versions: dict[str, set[str]] = {}
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that can take the file later, even when another server was written. Check servers
@@ -2002,10 +1949,6 @@ def run_intro_credits_job(job_id: str) -> None:
                         codes &= {PLEX_DB_BUSY, FILE_BUSY}
                     for code in codes:
                         waiting.setdefault(code, set()).add(file_path)
-                    if VERSIONS_UNCHECKED in codes:
-                        for row in servers or []:
-                            if retry_reason(row) == VERSIONS_UNCHECKED:
-                                named_versions.setdefault(file_path, set()).update(row.get(UNCHECKED_FILES) or ())
                     if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
                         waiting.setdefault(NOT_ON_DISK, set()).add(file_path)
                     if any(isinstance(row, dict) and row.get(VERIFY_LATER) for row in servers or []):
@@ -2110,12 +2053,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
                 # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
                 # file still waiting keeps its item and is listed again by a later run.
-                unchecked_versions = _versions_still_unchecked(ctx.store, waiting, named_versions)
-                retried = (
-                    _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised(), unchecked_versions)
-                    if waiting
-                    else []
-                )
+                retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 _complete(
                     jm,

@@ -635,17 +635,19 @@ def _expected(
 ) -> list[dict]:
     """What the server should show once published, per type.
 
-    Mirrors :func:`~.publishers.base.agreed_across_versions`, which is the rule that decides it: the Plex publisher
-    keeps (and writes back) what is already ours on an item with ``other_versions`` when it agrees with the decision
-    within its version tolerance, **except for a locked type**, whose own times are written however close they are. A
-    one-version item shows what was decided. An item whose versions couldn't be counted is read as one version: "will
-    replace" where the publisher may keep is the safe way round.
+    Mirrors :func:`~.publishers.base.agreed_across_versions`, which is the rule that decides it: per type, the version
+    with the lowest ``media_item_id`` that holds a marker of it decides the item, except that a version whose marker
+    the user locked wins over an unlocked one. The Plex publisher keeps (and writes back) what is already ours on an
+    item with ``other_versions`` when it agrees with the winner within its version tolerance, **except for a locked
+    type**, whose own times are written however close they are. A one-version item shows what was decided. An item
+    whose versions couldn't be counted is read as one version: "will replace" where the publisher may keep is the
+    safe way round.
 
-    This never reads sibling versions, so every part of the publisher's rule that depends on them can differ. The
-    locked exception ending when the item shows a locked version's exact times reads as "will replace" where the
-    publisher keeps what the item shows: the safe way round. Two parts err the other way, for unlocked types: the
-    publisher also requires ``prior`` to agree with every sibling and drops the type when a sibling disagrees, and
-    this reads "up to date" for both.
+    This never reads sibling versions, so every part of the publisher's rule that depends on them can differ. It
+    reads this file as the winner; where an earlier or locked sibling wins instead, the publisher writes that
+    sibling's times and this reads "will replace" or "up to date" for this file's own. The locked exception ending
+    when the item shows a locked version's exact times reads as "will replace" where the publisher keeps what the
+    item shows: the safe way round.
     """
     expected = []
     for mtype in dict.fromkeys(m.type for m in wanted):
@@ -1139,14 +1141,12 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         ``markers_enabled``: Intro & Credits on there and its library selected); ``episodes`` (the season group's
         files from every disk of the library, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``, ``duration_ms``, ``intro`` and
         ``credits`` in ``item_payload``'s decision shape without ``shortened_by`` (read the same way: a type of
-        ``_left_to_servers`` has the kept status and doesn't count as ready), ``needs_review`` (any marker type
-        in Needs review) with ``review_reason`` (the first such type's reason, intro first), ``evidence`` chips
+        ``_left_to_servers`` has the kept status and doesn't count as ready), ``evidence`` chips
         ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``: ``off`` (Intro & Credits off
         there, or this episode's library not selected or excluded), ``ok`` (last publish wrote markers of ours),
         ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``); and
         ``counts``: ``episodes`` (the files listed), ``total_episodes`` (the season's size before the 40-nearest
-        cap), ``ready`` (at least one decided marker of any type: what Publish sends, even when another type is in
-        Needs review) and ``needs_review`` (any type in Needs review).
+        cap) and ``ready`` (at least one decided marker of any type: what Publish sends).
     """
     videos = season_videos(canonical_path, registry.configs())
     group = season_group(canonical_path, videos)
@@ -1160,7 +1160,7 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         }
         for cfg, _server, matches in owners
     ]
-    episodes, ready, review = [], 0, 0
+    episodes, ready = [], 0
     unreadable: set[str] = set()
     for path in group.episodes:
         rec = store.get_file(path)
@@ -1175,14 +1175,6 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
             mtype.value: _decision_dict(read.get(mtype), markers.get(mtype), lock_dates.get(mtype))
             for mtype in _SEASON_TYPES
         }
-        # Counted over every type, not only the two columns: a job publishes each decided type of a file even while
-        # another type (a recap, say) is in Needs review, and that file's job row then says Needs review.
-        in_review = [
-            decisions[mtype]
-            for mtype in MarkerType
-            if mtype in decisions and decisions[mtype].status is DecisionStatus.NEEDS_REVIEW
-        ]
-        review += int(bool(in_review))
         ready += int(bool(markers))
         matches_by_server = {cfg.id: matches for cfg, _server, matches in episode_owners}
         episodes.append(
@@ -1193,8 +1185,6 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
                 "known": rec is not None,
                 "duration_ms": rec.duration_ms if rec else None,
                 **types,
-                "needs_review": bool(in_review),
-                "review_reason": next((d.reason for d in in_review if d.reason), ""),
                 "evidence": _chips(store.evidence_rows(rec.id)) if rec else [],
                 "servers": {
                     cfg.id: _dot(cfg, matches_by_server.get(cfg.id, []), rec, store) for cfg, _server, _m in owners
@@ -1212,6 +1202,5 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
             "episodes": len(episodes),
             "total_episodes": season_size(canonical_path, videos),
             "ready": ready,
-            "needs_review": review,
         },
     }

@@ -140,7 +140,7 @@ def _markers_job(job_id: str = "7c1f09aa-0000-4000-8000-000000000002", **overrid
                 "server_id": "plex-1",
                 "server_name": "Home Plex",
                 "server_type": "plex",
-                "counts": {"markers_written": 8, "markers_needs_review": 3},
+                "counts": {"markers_written": 8, "markers_none": 3},
             },
             {
                 "server_id": "jf-1",
@@ -156,7 +156,7 @@ def _markers_job(job_id: str = "7c1f09aa-0000-4000-8000-000000000002", **overrid
                 "messages": {"markers_skipped": "Emby plugin not installed"},
             },
         ],
-        "progress": {"outcome": {"markers_published": 8, "markers_needs_review": 3}},
+        "progress": {"outcome": {"markers_published": 8, "markers_none": 3}},
     }
     base.update(overrides)
     return _job(job_id, **base)
@@ -558,13 +558,13 @@ class TestQueueRows:
         detail = page.locator(f"#job-detail-{follower['id']}")
         expect(detail).to_be_visible()
         expect(detail).to_contain_text("Markers written × 8")
-        expect(detail).to_contain_text("Needs review × 3")
+        expect(detail).to_contain_text("No markers found × 3")
         expect(detail).to_contain_text("Up to date × 3")
         expect(detail).to_contain_text("Skipped × 11 · Emby plugin not installed")
         expect(detail).not_to_contain_text("Generated")
         expect(detail).not_to_contain_text("Reused")
         plex_line = detail.locator("div", has_text="Home Plex").last
-        expect(plex_line).to_contain_text(re.compile(r"Markers written × 8\s*Needs review × 3"))
+        expect(plex_line).to_contain_text(re.compile(r"Markers written × 8\s*No markers found × 3"))
 
     def test_a_quote_in_a_webhook_file_name_stays_inside_the_name_cell_title(self, dashboard) -> None:
         # The row's title lists the webhook's file names; a Sonarr import can name a file with '"' in it.
@@ -1154,7 +1154,7 @@ class TestFilesPanel:
         expect(page.locator("#fileResultsBody")).not_to_contain_text("Click to load", timeout=3000)
         return requests
 
-    def test_needs_review_filter_sends_its_outcome_key(self, dashboard) -> None:
+    def test_an_outcome_filter_sends_its_outcome_key(self, dashboard) -> None:
         job = _markers_job(config={"kind": "intro_credits", "source": "manual", "libraries": [], "file_paths": []})
         page = dashboard([job])
         requests = self._open_files(page, job, [])
@@ -1162,10 +1162,10 @@ class TestFilesPanel:
 
         expect(page.locator("#logsModalHeader")).to_contain_text("Intro & Credits")
         with page.expect_request(re.compile(r".*/api/jobs/.*/files\?.*")) as filtered:
-            page.locator("#fileOutcomeFilter").select_option(label="Needs review")
+            page.locator("#fileOutcomeFilter").select_option(label="No markers found")
 
         assert f"/api/jobs/{job['id']}/files?" in filtered.value.url
-        assert "outcome=markers_needs_review" in filtered.value.url
+        assert "outcome=markers_none" in filtered.value.url
 
     def test_filter_lists_only_the_outcomes_of_the_job_kind(self, dashboard) -> None:
         markers = _markers_job(config={"kind": "intro_credits", "source": "manual", "libraries": [], "file_paths": []})
@@ -1180,7 +1180,6 @@ class TestFilesPanel:
             "",
             "markers_published",
             "markers_up_to_date",
-            "markers_needs_review",
             "markers_waiting",
             "markers_skipped",
             "markers_none",

@@ -49,7 +49,7 @@ _redetect_lock = threading.Lock()
 _pending_follow_up_lock = threading.Lock()
 _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
-DECIDE_AGAIN_JOB_NAME = "Intro & Credits: Needs review and waiting files, decided again"
+DECIDE_AGAIN_JOB_NAME = "Intro & Credits: files the old rules couldn't decide, decided again"
 ONLINE_RECHECK_JOB_NAME = "Intro & Credits: weekly online re-check"
 VERSION_RERUN_JOB_NAME = "Intro & Credits: Re-checking {total} after the app update · batch {batch} of {batches}"
 ONLINE_RECHECK_EVERY = timedelta(days=7)
@@ -627,13 +627,14 @@ def submit_season_publish(episode: str) -> str:
 
 
 def submit_decide_again() -> str | None:
-    """Queue the one job that decides the files in Needs review, those waiting for their item's other versions, those
-    whose intro rests on season audio, and those whose intro or credits rests on an online answer and a server's own
-    marker alone, again.
+    """Queue the one job that decides the files the old rules left in "Needs review" (a status the rules no longer
+    give, ``store.LEGACY_NEEDS_REVIEW``), those waiting for their item's other versions, those whose intro rests on
+    season audio, and those whose intro or credits rests on an online answer and a server's own marker alone, again.
 
     Queued after the settings upgrade that removed the stricter publish rule (``upgrade._migrate_to_v16``), so the files
     it held in Needs review are published now, not only when a later job happens to list them; a file whose last
-    publish waits for its item's other versions is published again with them. Queued again after the one that added
+    publish waits for its item's other versions is published again with them. Queued once more after the one that
+    removed Needs review itself (``upgrade._migrate_to_v20``): every such file ends decided or with nothing found. Queued again after the one that added
     season audio's guards (``upgrade._migrate_to_v17``), so an intro that was only a network ident or cold-open music
     is decided again, and taken off the servers, now; and after the one that reads online times on the file's clock
     (``upgrade._migrate_to_v18``), so a pair of online times from another release and a server's marker made for an
@@ -644,21 +645,22 @@ def submit_decide_again() -> str | None:
     that job is returned instead.
 
     Returns:
-        The job's id; None when Intro & Credits is off on every server or no file is in Needs review, waiting, or has
-        an unlocked intro decided with season audio or an unlocked intro or credits decided by an online answer and a
-        server's marker alone.
+        The job's id; None when Intro & Credits is off on every server or no file is left under the old status,
+        waiting, or has an unlocked intro decided with season audio or an unlocked intro or credits decided by an
+        online answer and a server's marker alone.
     """
     if not markers_enabled_anywhere():
-        logger.info("Intro & Credits is off on every server; no file in Needs review is decided again")
+        logger.info("Intro & Credits is off on every server; no file is decided again")
         return None
     store = get_marker_store()
-    in_review, waiting = set(store.files_in_review()), set(store.files_waiting_for_other_versions())
+    legacy = set(store.files_with_legacy_review_decisions())
+    waiting = set(store.files_waiting_for_other_versions())
     season_audio = set(store.files_with_season_audio_intro())
     online_and_server = set(store.files_decided_by_online_and_server_markers())
-    if not in_review | waiting | season_audio | online_and_server:
+    if not legacy | waiting | season_audio | online_and_server:
         logger.info(
-            "No file is in Needs review, waiting for its item's other versions, or has an intro from season audio or "
-            "from an online answer and a server's marker; nothing to decide again"
+            "No file is left under the old Needs review status, waiting for its item's other versions, or has an "
+            "intro from season audio or from an online answer and a server's marker; nothing to decide again"
         )
         return None
     jm = get_job_manager()
@@ -666,7 +668,7 @@ def submit_decide_again() -> str | None:
         for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
             cfg = job.config or {}
             if job.kind == JOB_KIND_INTRO_CREDITS and cfg.get(DECIDE_AGAIN) and not is_live_retry_chain(cfg):
-                logger.info("The files in Needs review are already queued as job {}", job.id[:8])
+                logger.info("The files to decide again are already queued as job {}", job.id[:8])
                 return job.id
         job = create_intro_credits_job(
             library_name=DECIDE_AGAIN_JOB_NAME,
@@ -675,11 +677,11 @@ def submit_decide_again() -> str | None:
             decide_again=True,
         )
     logger.info(
-        "{} file(s) in Needs review, {} waiting for their item's other versions and {} with an intro from season audio "
-        "are decided again (job {})",
-        len(in_review),
-        len(waiting - in_review),
-        len(season_audio - in_review - waiting),
+        "{} file(s) the old rules couldn't decide, {} waiting for their item's other versions and {} with an intro "
+        "from season audio are decided again (job {})",
+        len(legacy),
+        len(waiting - legacy),
+        len(season_audio - legacy - waiting),
         job.id[:8],
     )
     return job.id

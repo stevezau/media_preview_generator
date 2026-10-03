@@ -634,7 +634,7 @@
                 <section class="mt-4" id="markersHowItDecides" aria-labelledby="markersHowItDecidesLabel">
                     <h6 class="mb-1" id="markersHowItDecidesLabel">How it decides</h6>
                     <p class="small text-muted mb-3">Every file goes through the same four steps. Each marker type (intro,
-                        credits) is decided on its own, so one can be sent while the other waits for your check.</p>
+                        credits) is decided on its own, so one can be sent when the other isn&#39;t found.</p>
                     <ol class="markers-steps list-unstyled mb-2">
                         <li class="markers-step">
                             <span class="markers-step-num" aria-hidden="true">1</span>
@@ -649,7 +649,7 @@
                         <li class="markers-step">
                             <span class="markers-step-num" aria-hidden="true">3</span>
                             <div class="markers-step-title">Decide</div>
-                            <div class="markers-step-text">A marker is sent when a chapter isn&#39;t contradicted, when two independent sources agree, or when a source that reads the file answers and nothing disagrees. Everything else needs your check.</div>
+                            <div class="markers-step-text">A marker is sent when a chapter isn&#39;t contradicted, when two independent sources agree, or when a source that reads the file answers. Otherwise nothing is written for that type; you can add or adjust one in the Inspector.</div>
                         </li>
                         <li class="markers-step">
                             <span class="markers-step-num" aria-hidden="true">4</span>
@@ -679,19 +679,16 @@
                     <p class="small text-muted">IntroDB and TheIntroDB count as one source. A plugin&#39;s imported copy of
                         IntroDB or SkipDB counts as that database, not as a second opinion.</p>
 
-                    <h6 class="mt-4">The three outcomes</h6>
+                    <h6 class="mt-4">The two outcomes</h6>
                     <dl class="markers-outcomes">
                         <dt><i class="bi bi-circle-fill text-success me-2" aria-hidden="true"></i>Decided and sent</dt>
                         <dd>A chapter nobody contradicts · two independent sources agree · one file-reading source
-                            answers and nothing disagrees.</dd>
-                        <dt><i class="bi bi-circle-fill text-warning me-2" aria-hidden="true"></i>Needs your check</dt>
-                        <dd>Two agreeing sources contradict a chapter · two agreeing groups conflict · the only answer
-                            can&#39;t decide alone · sources disagree · an intro overlaps a recap by more than 5&nbsp;s, or a
-                            preview overlaps credits by more than 10&nbsp;s. You pick on real frames in the Inspector; the
-                            other type is still sent.</dd>
+                            answers.</dd>
                         <dt><i class="bi bi-circle-fill text-secondary me-2" aria-hidden="true"></i>Nothing found</dt>
-                        <dd>No source answered, or every answer failed the sanity checks: an intro starting after 35% of
-                            the file or running to its end, credits before the last 25%.</dd>
+                        <dd>No source answered, the answers didn&#39;t clear that bar, or every answer failed the sanity
+                            checks: an intro starting after 35% of the file or running to its end, credits before the
+                            last 25%. Nothing is written for that type; the other type is still sent, and you can add or
+                            adjust one in the Inspector.</dd>
                     </dl>
 
                     <h6 class="mt-4">Rules that surprise people</h6>

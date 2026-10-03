@@ -25,11 +25,11 @@ from .config.validation import MAX_CPU_THREADS, validate_processing_thread_total
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 19
+_CURRENT_SCHEMA_VERSION = 20
 
-#: Set by v16, v17 and v18: once the job manager runs, the app queues the one job that decides the files in Intro &
-#: Credits' Needs review, those waiting for their item's other versions, those whose intro rests on season audio and
-#: those whose intro or credits rests on an online answer and a server's own marker alone again
+#: Set by v16, v17, v18 and v20: once the job manager runs, the app queues the one job that decides the files Intro &
+#: Credits' old rules left in Needs review, those waiting for their item's other versions, those whose intro rests on
+#: season audio and those whose intro or credits rests on an online answer and a server's own marker alone again
 #: (``triggers.submit_decide_again``, from ``web.app``). Cleared when that job completes
 #: (``markers.job_runner``), so a start after a failed, cancelled or interrupted one queues it again, and a start with
 #: Intro & Credits off everywhere leaves it for later.
@@ -137,6 +137,11 @@ _USER_FACING_NOTES: dict[int, str] = {
         "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
         "marker (on-screen credit text or chapters), so far fewer files wait in Needs review. The files already "
         "waiting there are checked again by one Intro & Credits job, which reuses what was already found."
+    ),
+    20: (
+        "Intro & Credits no longer has a Needs review list. When it can't confirm an intro or credits from your own "
+        "file, it writes nothing, and you can still add or adjust one in the Inspector. The files that were waiting "
+        "there are checked again by one Intro & Credits job, which reuses what was already found."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -441,6 +446,8 @@ def _migrate_schema(sm) -> None:
                such a file's own clock, and a Plex marker made for an earlier file counts for nothing.
         v19 -- Marks a pause with no workers configured as the zero-workers auto-pause, so the settings save that
                adds workers back resumes processing on installs paused before that pause was flagged.
+        v20 -- Asks the next start to decide the files the old rules left in Needs review again: that status is
+               gone, and every type ends decided or with nothing found.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -512,6 +519,8 @@ def _migrate_schema(sm) -> None:
         _run(18, _migrate_to_v18)
     if current < 19:
         _run(19, _migrate_to_v19)
+    if current < 20:
+        _run(20, _migrate_to_v20)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -1669,6 +1678,41 @@ def _migrate_to_v19(sm) -> list:
         sm.apply_changes(deletes=[_AUTO_PAUSED_KEY])
         return ["v19: removed a no-workers auto-pause flag the settings no longer match"]
     return []
+
+
+def _migrate_to_v20(sm) -> list:
+    """Have the files the old rules left in Needs review decided again (owner, 2026-10-02).
+
+    Needs review is gone: every marker type ends decided or with nothing found, and where the online answers can't
+    settle a type the file's own read decides (``markers.decide``). A file stored under the old status would otherwise
+    keep it until some later job happened to run it, so this sets :data:`DECIDE_AGAIN_KEY`; the decide-again job
+    lists exactly those files still on disk (``markers.job_runner._items_to_decide_again``,
+    ``MarkerStore.files_with_legacy_review_decisions``) and runs them as any job does. A file gone from disk keeps the
+    old row, which reads as nothing found (``store._status``).
+
+    Runs once, gated on ``_schema_version``.
+
+    Returns:
+        One note when a server has Intro & Credits turned on (only such an install can hold Needs review files):
+        nothing in the settings changes, but a user-facing note only surfaces for a step that returns one
+        (``_migrate_schema._run``), and the dashboard tells the user where their Needs review files went. No note
+        otherwise (every install has a ``markers`` block since v15, so the block alone says nothing).
+    """
+    sm.set(DECIDE_AGAIN_KEY, True)
+    if not _intro_credits_on_any_server(sm):
+        return []
+    return ["v20: removed Needs review; the files it held are decided again by one Intro & Credits job"]
+
+
+def _intro_credits_on_any_server(sm) -> bool:
+    """Whether a configured server has Intro & Credits turned on (``media_servers[].markers.enabled``)."""
+    servers = sm.get("media_servers")
+    if not isinstance(servers, list):
+        return False
+    return any(
+        isinstance(entry, dict) and isinstance(entry.get("markers"), dict) and bool(entry["markers"].get("enabled"))
+        for entry in servers
+    )
 
 
 # =========================================================================

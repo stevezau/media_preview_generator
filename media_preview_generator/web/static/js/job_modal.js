@@ -1586,8 +1586,8 @@ function renderFileResultsTable(files) {
         // multi-server fan-out it's one per target.
         var serversHtml = _renderFileServerPills(f.servers || [], showServerStatus);
         // Every row whose file is a full path opens the Inspector on that file: its preview frames and its intro
-        // & credits on one page, so a preview job's rows and an Intro & Credits job's rows (the Needs review filter
-        // included) both link there. A row without a full path but with a BIF opens just that preview's frames.
+        // & credits on one page, so a preview job's rows and an Intro & Credits job's rows both link there. A row
+        // without a full path but with a BIF opens just that preview's frames.
         //
         // The button sits in a flex row with `flex-shrink-0` so a long file name truncates around it instead of
         // pushing it off-screen (Bootstrap text-truncate sets white-space:nowrap + overflow: hidden).

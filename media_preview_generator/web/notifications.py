@@ -12,6 +12,8 @@ Current sources:
   thumbnail warning, sourced from ``api_vulkan._get_vulkan_info``.
 - ``timezone_misconfigured`` — container is running UTC without an
   explicit TZ env var, sourced from ``api_system._get_timezone_info``.
+- ``gpu_keeps_failing_<device>`` — one per GPU whose last files all ran on
+  the CPU, sourced from ``jobs.gpu_fallback``.
 
 Session-only dismissals live in ``_SESSION_DISMISSED`` (process memory,
 cleared on restart); permanent dismissals live in ``settings.json``.
@@ -25,6 +27,8 @@ from typing import Any
 
 from loguru import logger
 
+from ..jobs.gpu_fallback import GPU_FALLBACK_STREAK, get_gpu_fallback_tracker, is_gpu_notification_id, notification_id
+
 VULKAN_SOFTWARE_FALLBACK_ID = "vulkan_software_fallback"
 TIMEZONE_MISCONFIGURED_ID = "timezone_misconfigured"
 SCHEMA_MIGRATION_ID = "schema_migration_completed"
@@ -34,6 +38,12 @@ MEDIA_MOUNT_UNHEALTHY_ID = "media_mount_unhealthy"
 # Cards that can be hidden until the next restart but never for good: the problem they report comes and goes, and a
 # permanent dismissal would hide the next occurrence too. An id stored by an older version is ignored.
 SESSION_ONLY_DISMISSAL_IDS = frozenset({MEDIA_MOUNT_UNHEALTHY_ID})
+
+
+def is_session_only_dismissal(notification_id_value: str) -> bool:
+    """Whether a card can only be hidden until the next restart (the GPU cards are per device, so not a fixed id)."""
+    return notification_id_value in SESSION_ONLY_DISMISSAL_IDS or is_gpu_notification_id(notification_id_value)
+
 
 # Image names recognised by the deprecation banner. The deprecated image was
 # retired — a one-shot tombstone image now sits on its tags. This banner still
@@ -293,6 +303,36 @@ def _build_unhealthy_media_mounts_notification() -> dict[str, Any] | None:
     }
 
 
+def _build_gpu_keeps_failing_notifications() -> list[dict[str, Any]]:
+    """One warning card per GPU whose last ``GPU_FALLBACK_STREAK`` files all needed the CPU fallback.
+
+    The streak lives in ``jobs.gpu_fallback`` (fed by every GPU worker, across jobs); the card goes when that GPU
+    finishes a file on its own again, and its session dismissal is lifted then so a later streak shows again.
+    """
+    from markupsafe import escape
+
+    cards = []
+    for state in get_gpu_fallback_tracker().flagged():
+        body = (
+            f"<p class='mb-0'>{escape(state.name)} couldn't process the last {GPU_FALLBACK_STREAK} files, so they "
+            f"ran on the CPU (slower). Last reason: {escape(state.last_reason or 'GPU processing failed')}. "
+            "Check the GPU driver in Settings → GPU.</p>"
+        )
+        cards.append(
+            {
+                "id": notification_id(state.key),
+                "severity": "warning",
+                "title": "GPU keeps failing: files are running on the CPU",
+                "body_html": body,
+                "dismissable": True,
+                "permanent_dismissable": False,
+                "source": "gpu_fallback_streak",
+                "device": state.key,
+            }
+        )
+    return cards
+
+
 def _notification_sources() -> list[dict[str, Any] | None]:
     """All notification builders.  Add new sources here as they arrive."""
     return [
@@ -301,6 +341,7 @@ def _notification_sources() -> list[dict[str, Any] | None]:
         _build_schema_migration_notification(),
         _build_deprecated_image_notification(),
         _build_unhealthy_media_mounts_notification(),
+        *_build_gpu_keeps_failing_notifications(),
     ]
 
 
@@ -311,7 +352,7 @@ def build_active_notifications(
 
     Filters out any notification whose ID is in ``dismissed_permanent``
     (from ``settings.json``) or in the in-process session dismissal set.
-    A card in ``SESSION_ONLY_DISMISSAL_IDS`` is never hidden by ``dismissed_permanent``.
+    A session-only card (``is_session_only_dismissal``) is never hidden by ``dismissed_permanent``.
     Notifications that are not currently firing (builder returned
     ``None``) are simply not included.
 
@@ -330,7 +371,7 @@ def build_active_notifications(
         notif_id = entry.get("id")
         if not notif_id:
             continue
-        if notif_id in persisted and notif_id not in SESSION_ONLY_DISMISSAL_IDS:
+        if notif_id in persisted and not is_session_only_dismissal(notif_id):
             logger.debug("notifications: {} suppressed (permanently dismissed)", notif_id)
             continue
         if _session_is_dismissed(notif_id):

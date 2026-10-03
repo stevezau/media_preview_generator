@@ -349,7 +349,7 @@ class TestSeasonAudioAcrossDisks:
                 FileIdentity(path, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
             )
             store.set_detector_run(recs[path].id, Source.SEASON_AUDIO, "older")
-            undecided = TypeDecision(MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources disagree")
+            undecided = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "sources disagree")
             store.save_decisions(recs[path].id, {MarkerType.INTRO: undecided}, settings_fingerprint="x")
         configs = registry.configs()
         videos = season.season_videos(e8, configs)
@@ -457,8 +457,9 @@ class TestUnreadableDisk:
                 assert season.season_audio_followups(rec, ctx) == []
                 assert season.season_audio_answer_outdated(ctx, e8) is False
                 assert season.season_audio_compared(rec, ctx) is False
-                with pytest.raises(DetectorUnavailableError, match="can't be read"):
+                with pytest.raises(DetectorUnavailableError, match="can't be read") as unreadable:
                     season.detect_season_audio(rec, ctx=ctx)
+                assert unreadable.value.this_file is False  # the siblings' disk, not this file: not a failed read
                 assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) == answer
             assert season.season_audio_due(rec, ctx) is True
             assert e9 in season.season_group(e8, season.season_videos(e8, ctx.registry.configs())).episodes

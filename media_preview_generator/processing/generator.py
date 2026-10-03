@@ -2073,7 +2073,7 @@ def generate_images(
                 cut_off = _gpu_hand_off(rc, stderr_lines, stderr_lines_all, stopped_part_way=False)
                 disk = cut_off if cut_off and cut_off[0] in (FALLBACK_STALL, FALLBACK_IO_ERROR) else None
                 if gpu is not None:
-                    # Still failing on GPU even with DV-safe filter -> hand off to CPU worker.
+                    # Still failing on GPU even with DV-safe filter -> the same worker retries on the CPU.
                     _clean_output_images(output_folder)
                     if disk is not None:
                         raise CodecNotSupportedError(
@@ -2109,7 +2109,7 @@ def generate_images(
     # has had a chance: skip-frame retry, software-libplacebo retry, and
     # DV-safe fps+scale retry. If this is still a GPU context and a
     # codec/crash error is detected, raise CodecNotSupportedError so the
-    # worker pool can hand off to a CPU worker.
+    # worker retries the file on the CPU itself (jobs/worker.py).
 
     if rc != 0 and image_count == 0 and gpu is not None:
         if cancel_check and cancel_check():
@@ -2120,7 +2120,7 @@ def generate_images(
             # Log relevant stderr excerpt for debugging
             stderr_excerpt = "\n".join(stderr_lines[-5:]) if len(stderr_lines) > 0 else "No stderr output"
             logger.warning(
-                "GPU processing failed for {} (reason: {}, exit code {}) — automatically handing off to a CPU "
+                "GPU processing failed for {} (reason: {}, exit code {}) — retrying it on the CPU on this same "
                 "worker. {}",
                 video_file,
                 fallback_reason,
@@ -2130,7 +2130,7 @@ def generate_images(
             logger.debug("FFmpeg stderr excerpt (last 5 lines): {}", stderr_excerpt)
             # Clean up any partial files from GPU attempts
             _clean_output_images(output_folder)
-            # Raise exception to signal worker pool to re-queue for CPU worker
+            # The worker catches this and reruns the file with gpu=None.
             raise CodecNotSupportedError(
                 f"GPU processing failed ({fallback_reason}) for {video_file} (exit code {rc})", kind=fallback_kind
             )

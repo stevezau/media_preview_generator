@@ -1,4 +1,4 @@
-"""E2E: the Inspector — search, a checked episode, Needs your check, and Adjust.
+"""E2E: the Inspector — search, a checked episode, Back to automatic, and Adjust.
 
 The Inspector's API is mocked by ``_inspector_fixtures.install`` in the real routes' shapes; each test pins what one
 screen shows and, for the writes, exactly what the page sends (save = lock + publish, unlock, re-detect).
@@ -53,7 +53,7 @@ class TestSearch:
         expect(first.locator(".insp-cell-markers")).to_have_text("Not checked yet")
         expect(rows.nth(1).locator(".insp-cell-markers")).to_have_text("Credits set")
         expect(rows.nth(2).locator(".insp-cell-preview")).to_have_text("Missing")
-        expect(rows.nth(2).locator(".insp-cell-markers")).to_have_text("Needs review")
+        expect(rows.nth(2).locator(".insp-cell-markers")).to_have_text("Nothing found")
         # Rows name the title, never the file's path.
         expect(authed_page.locator("#inspResults")).not_to_contain_text("/data/")
         fx.screenshot(authed_page, "13-search")
@@ -93,7 +93,7 @@ class TestSearch:
         expect(episodes.nth(0)).to_contain_text("E01")
         expect(episodes.nth(0)).to_contain_text("Intro + credits")
         expect(episodes.nth(6)).to_contain_text("Not checked yet")
-        expect(episodes.nth(9)).to_contain_text("Needs review")
+        expect(episodes.nth(9)).to_contain_text("Nothing found")
         fx.screenshot(authed_page, "13b-search-show-picker")
 
         panel.locator(".insp-seasons button", has_text="Season 2").click()
@@ -186,65 +186,7 @@ class TestCheckedEpisode:
 
 
 @pytest.mark.e2e
-class TestNeedsReview:
-    def test_pick_a_candidate_and_save_locks_and_publishes_it(self, authed_page: Page, app_url: str) -> None:
-        api = fx.install(authed_page)
-        _open(authed_page, app_url, fx.REVIEW)
-
-        panel = authed_page.locator("[data-review='credits']")
-        expect(panel.locator(".insp-review-title")).to_have_text(
-            "Where do the credits start? Two answers disagree by 28 seconds."
-        )
-        cards = panel.locator("[data-candidate]")
-        expect(cards).to_have_count(2)
-        expect(cards.nth(0)).to_contain_text("1:32:09")
-        expect(cards.nth(0)).to_contain_text("From the file's “Credits” chapter")
-        expect(cards.nth(1)).to_contain_text("From the credits read on screen · Plex's own marker agrees")
-        # Seven exact frames a second apart, the answer's own ringed.
-        expect(cards.nth(1).locator(".insp-frame")).to_have_count(7)
-        expect(cards.nth(1).locator(".insp-frame.is-ringed span")).to_have_text("1:32:37")
-        assert {"path": fx.REVIEW, "start_ms": 5_554_000, "count": 7} in api.frame_requests
-
-        cards.nth(1).get_by_role("button", name="Credits start at 1:32:37").click()
-        confirm = panel.locator("[data-confirm='credits']")
-        expect(confirm).to_contain_text("Selected: credits start at 1:32:37")
-        fx.screenshot(authed_page, "12-needs-your-check")
-
-        with authed_page.expect_response(
-            lambda r: r.url.endswith("/api/markers/item/markers") and r.request.method == "POST"
-        ):
-            confirm.get_by_role("button", name="Save and send to Plex").click()
-        # Save is the lock-and-publish route: the chosen start, running to the end of the file.
-        assert api.saves == [
-            {"path": fx.REVIEW, "markers": [{"type": "credits", "start_ms": 5_557_000, "end_ms": None}]}
-        ]
-
-    def test_pick_the_frame_yourself_and_not_now(self, authed_page: Page, app_url: str) -> None:
-        api = fx.install(authed_page)
-        _open(authed_page, app_url, fx.REVIEW)
-        pick = authed_page.locator("[data-pick-yourself='credits']")
-        expect(pick.locator(".insp-frame")).to_have_count(14)
-        expect(pick.locator(".insp-frame span").first).to_have_text("1:32:04")
-
-        pick.get_by_role("button", name="Show 10 seconds later").click()
-        expect(pick.locator(".insp-frame span").first).to_have_text("1:32:14")
-        pick.get_by_role("button", name="Show 10 seconds earlier").click()
-        pick.locator(".insp-frame", has_text="1:32:10").click()
-        confirm = authed_page.locator("[data-confirm='credits']")
-        expect(confirm).to_contain_text("Selected: credits start at 1:32:10")
-        expect(pick.locator(".insp-frame.is-ringed span")).to_have_text("1:32:10")
-
-        confirm.get_by_role("button", name="Not now").click()
-        expect(authed_page.locator("[data-confirm='credits']")).to_have_count(0)
-        pick.locator(".insp-frame", has_text="1:32:12").click()
-        with authed_page.expect_response(
-            lambda r: r.url.endswith("/api/markers/item/markers") and r.request.method == "POST"
-        ):
-            authed_page.locator("[data-confirm='credits']").get_by_role("button", name="Save and send to Plex").click()
-        assert api.saves == [
-            {"path": fx.REVIEW, "markers": [{"type": "credits", "start_ms": 5_532_000, "end_ms": None}]}
-        ]
-
+class TestBackToAutomatic:
     def test_back_to_automatic_unlocks_the_types_you_set(self, authed_page: Page, app_url: str) -> None:
         api = fx.InspectorApi()
         file, item = fx.checked_episode()

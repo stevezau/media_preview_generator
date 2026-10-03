@@ -460,7 +460,7 @@ class TestUnlock:
         body = resp.get_json()
         assert body["unlocked"] == ["intro"]
         assert body["markers"] == {}
-        assert body["decisions"]["intro"] == {"status": "needs_review", "reason": UNLOCKED_PENDING}
+        assert body["decisions"]["intro"] == {"status": "no_evidence", "reason": UNLOCKED_PENDING}
         assert published.calls == []  # the next run re-decides and re-publishes; this request contacts nobody
         assert get_marker_store().get_locked(known.id) == {}
 

@@ -1097,7 +1097,7 @@ class TestCreditTextOnTheWorkers:
         # The totals come after the file's lines, however the job log's queue was drained; the job manager's own
         # completion line stays last.
         assert messages[-2:] == [
-            "Done: 1 file · 0 sent to PLEX-1 · 0 need review · 1 nothing found",
+            "Done: 1 file · 0 sent to PLEX-1 · 1 nothing found",
             f"Job {job.id} completed successfully",
         ]
 
@@ -1118,28 +1118,50 @@ class TestCreditTextOnTheWorkers:
         rec = setup.store.get_file(setup.path)
         cut_short = "the file ends before its stated length (10:00 of 22:01 readable)"
         assert setup.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) == cut_short
-        assert job.status is JobStatus.COMPLETED and job.error is None
-        assert _outcome(engine.jm, job.id) == {"markers_none": 1}
+        # The file's own read failed and nothing was written: the file failed and says why, with no retry job.
+        assert (job.status, job.error) == (JobStatus.FAILED, "All 1 file(s) failed — see the Files panel")
+        assert _outcome(engine.jm, job.id) == {"failed": 1}
+        [row] = engine.jm.get_file_results(job.id)
+        assert row["reason"].startswith(f"Couldn't read the credits: {cut_short}; ")
+        assert [(r["id"], r["status"]) for r in row["servers"]] == [("plex-1", "failed")]
         assert self._released(engine)
         episode = "Rick and Morty (2013) S01E01"
-        assert f"INFO - {episode} · Credit text: {cut_short}" in [
-            line.split("] ", 1)[1] for line in engine.jm.get_logs(job.id)
-        ]
+        first = [line.split("] ", 1)[1] for line in engine.jm.get_logs(job.id)]
+        assert f"INFO - {episode} · Credit text: {cut_short}" in first
+        assert f"INFO - {episode} · [PLEX-1] Failed (Couldn't read the credits: {cut_short})" in first
 
-        # The next scan of the same file: no worker, no decode.
+        # The next scan of the same file: no worker, no decode; the recorded reason fails the file again.
         again = self._run(engine, setup)
         assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
         assert measured == [DURATION / 1000 - frames.EPISODE_TAIL_S]
-        assert again.status is JobStatus.COMPLETED and _outcome(engine.jm, again.id) == {"markers_none": 1}
+        assert again.status is JobStatus.FAILED and _outcome(engine.jm, again.id) == {"failed": 1}
         assert any(cut_short in line for line in engine.jm.get_logs(again.id))
         # Nothing changed since, so the file still gets its full lines, not a decode.
         messages = [line.split("] ", 1)[1] for line in engine.jm.get_logs(again.id)]
         assert f"INFO - {episode}: checking credits" in messages
         assert f"INFO - {episode} · Credit text: {cut_short}" in messages
         assert f"INFO - {episode} · Decided: credits nothing found" in messages
-        assert f"INFO - {episode} · [PLEX-1] Nothing to send" in messages
-        assert f"INFO - {episode} · done in 0 s (nothing new to send)" in messages
+        assert f"INFO - {episode} · [PLEX-1] Failed (Couldn't read the credits: {cut_short})" in messages
         assert detector.credits_text_failed_here(rec, SimpleNamespace(store=setup.store)) is True
+
+    def test_a_detector_stopped_by_a_siblings_folder_leaves_the_job_green(self, engine, setup):
+        from media_preview_generator.markers.pipeline import DetectorUnavailableError
+
+        # Season audio's listing error on other episodes' folders, as the detector raises it: not this file's read.
+        setup.effects["gpu"] = DetectorUnavailableError("Season 02 can't be read")
+        job = self._run(engine, setup)
+        assert setup.decodes == [("NVIDIA", "cuda:0")]  # no CPU rerun: the GPU didn't fail
+        assert job.status is JobStatus.COMPLETED and job.error is None
+        assert _outcome(engine.jm, job.id) == {"markers_none": 1}
+        [row] = engine.jm.get_file_results(job.id)
+        assert "Couldn't read" not in (row["reason"] or "")
+        assert [(r["id"], r["status"]) for r in row["servers"]] == [("plex-1", "markers_none")]
+        messages = [line.split("] ", 1)[1] for line in engine.jm.get_logs(job.id)]
+        assert (
+            "INFO - Rick and Morty (2013) S01E01 · Credit text: no answer this time (Season 02 can't be read)"
+            in messages
+        )
+        assert self._released(engine)
 
     def test_a_gpu_that_misses_frames_the_cpu_reads_is_a_gpu_fallback(self, engine, setup, monkeypatch):
         from media_preview_generator.markers.credits import frames
@@ -1202,7 +1224,7 @@ class TestCreditTextOnTheWorkers:
         assert self._released(engine)
 
     @pytest.mark.parametrize("where", ["gpu-helper", "cpu-helper-after-gpu-decode-failure"])
-    def test_a_text_detection_failure_leaves_the_file_unanswered_and_frees_every_slot(self, engine, setup, where):
+    def test_a_text_detection_failure_fails_the_file_unanswered_and_frees_every_slot(self, engine, setup, where):
         from media_preview_generator.markers.credits import frames
         from media_preview_generator.markers.credits.textdet_helper import TextDetUnavailableError
         from media_preview_generator.markers.models import Source
@@ -1215,7 +1237,16 @@ class TestCreditTextOnTheWorkers:
         job = self._run(engine, setup)
         rec = setup.store.get_file(setup.path)
         assert setup.store.evidence_version(rec.id, Source.CREDITS_TEXT) is None  # asked again next run
-        assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
+        # Nothing written and the file's own read failed: the file failed and says why (no retry job: the next run
+        # reads it again anyway).
+        assert job.status is JobStatus.FAILED and _outcome(engine.jm, job.id) == {"failed": 1}
+        [row] = engine.jm.get_file_results(job.id)
+        failure = "Couldn't read the credits: Text detection failed: the helper exited (-9)"
+        assert row["reason"].startswith(f"{failure}; ")
+        assert [(r["id"], r["status"]) for r in row["servers"]] == [("plex-1", "failed")]
+        assert f"INFO - Rick and Morty (2013) S01E01 · [PLEX-1] Failed ({failure})" in [
+            line.split("] ", 1)[1] for line in engine.jm.get_logs(job.id)
+        ]
         assert self._released(engine)
 
 

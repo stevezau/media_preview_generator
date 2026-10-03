@@ -4,6 +4,16 @@ Why: Plex serves one marker set per metadata item across all versions, but `prev
 file. Three review rounds each found a new way our markers stay on Plex untracked (versions disagree, partial removal,
 a version added after publish, an undecided sibling). The fix is to track and compute the item's set directly.
 
+## Rule since 2026-10-02: the first version holding a type decides it (no waiting)
+
+Per type, the item shows the decision of the version with the lowest `media_item_id` (then part id) among the
+versions that have a marker of that type; a version the user locked that type on comes first regardless. A version
+never decided, decided without the type, or gone from disk takes no part, so nothing waits on it: when its decision
+arrives, its own run applies the same deterministic rule, and what the item already shows stays when it is within 2 s
+of the winner (a locked winner's exact times excepted). The "Waiting for this item's other versions" row is gone;
+`versions.WAITING_VERSIONS_VERSION` 2 publishes each file left in that state once more. Points 2 and "File outcome per
+type" below describe the rule this replaced.
+
 ## Contract changes
 
 1. `MarkerPublisher.write(item_id, markers, *, previous, duration_ms, canonical_path) -> list[Marker]`

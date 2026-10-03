@@ -1898,7 +1898,7 @@ def detect_season_audio(
                 # Siblings' runs don't ask for this file again until its season changes (season_audio_followups).
                 attempted = _signature(ctx, _signature_paths(rec.canonical_path, group, configs))
                 ctx.store.set_detector_failure(rec.id, Source.SEASON_AUDIO, attempted)
-            raise DetectorUnavailableError(str(exc)) from exc
+            raise DetectorUnavailableError(str(exc), this_file=True) from exc
         if found is None and own_file:
             raise DetectorUnavailableError("the file changed while it was fingerprinted")
         return found

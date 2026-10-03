@@ -304,26 +304,25 @@ independent sources agree on something different; any other source needs an inde
 on-screen credit text (credits) and season audio (intros) may decide alone. IntroDB, TheIntroDB, SkipDB, the
 previous-season hint (`season_audio_previous`) and markers already on servers never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
 pair on its own. An agreeing server marker doesn't hold season audio back (it decides as if alone, credited to
-`season_audio` only); the hint with only a server's marker stays in Needs review. The removed
+`season_audio` only); the hint with only a server's marker decides nothing. The removed
 `publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
-version 16 deletes it and has the next start queue one job, **Intro & Credits: Needs review and waiting files, decided
-again** (Low priority, source `decide_again`), an ordinary Intro & Credits job over every file in Needs review and
-every file whose last row waits for its item's other versions, listed when it runs. The request (settings key
+version 16 deletes it and has the next start queue one job (Low priority, source `decide_again`), an ordinary Intro &
+Credits job over every file it left undecided, listed when it runs. The request (settings key
 `_markers_decide_again`) is cleared when that job completes; until then every start queues it again (or finds it
 queued), and with Intro & Credits off on every server it waits. An intro season audio decided alone keeps asking the
-online sources on their schedule: one that later disagrees sends it to Needs review.
+online sources on their schedule.
 
 After an update that raises a detector's or reader's version (credit text, season audio and its end-picture check,
 the server-marker reader, chapter rules, an online parser), every start queues **Intro & Credits: re-checking
 files after an update** (Low priority, source `version_rerun`) while a file is left: an ordinary Intro & Credits job
 over at most 100 files still on disk where an unlocked decided type rests on an older answer, or a type that answer
-covers is in Needs review or not found. Credit text and season audio check what other sources decided (a credits
+covers wasn't found. Credit text and season audio check what other sources decided (a credits
 chapter or an online start, an intro chapter or a lone online intro), so their older answer lists an unlocked decided
 type whatever decided it. It also takes files whose one-version Plex item still shows times within
-2 s of an older decision, files still waiting for their Plex item's other versions (each once), and, after an update that changes the decision rules, every file not yet decided under
-them with an unlocked type that has a stored answer (decided, Needs review, not found, or kept as the server's own;
+2 s of an older decision and, after an update that changes the decision rules, every file not yet decided under
+them with an unlocked type that has a stored answer (decided, not found, or kept as the server's own;
 not a type whose detection is off) or a marker carried over from a file it replaced: each run that decides a file records the rules version it used (`decide_rules` in
-`version_reruns`). A marker such a run's new rules alone would move to Needs review (or leave out) stays while
+`version_reruns`). A marker such a run's new rules alone would leave out stays while
 a server has it and no new or changed answer disagrees, its reason starting "kept: published before a rule change". The next batch is queued 30 minutes after one completes; after a cancelled or failed batch
 the next start queues one. A job keeps its batch in its config (`version_rerun_files`, removed when it ends) so a job
 revived after a restart runs the same files, and each file is recorded in markers.db (`version_reruns`) with the
@@ -423,7 +422,7 @@ the warning `Couldn't check what N file(s) show on <server>`. A job where an onl
 partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
 next scheduled or manual run for the same files asks it again on its own. For TheIntroDB only, the files it left with
-a type undecided (`needs_review` / `no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
+a type undecided (`no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
 named "TheIntroDB recheck: N files", at most 500 files) due 5 minutes after the next 00:00 UTC (`retry_not_before`);
 when it runs it drops files decided since, and lists nothing if TheIntroDB has been turned off. TheIntroDB also isn't
 asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry"
@@ -485,23 +484,21 @@ Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files pane
 
 | Key | Label | Meaning |
 |---|---|---|
-| `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included); another marker type may still need review, and the reason names it |
+| `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included); the reason names any other marker type that wasn't found |
 | `markers_up_to_date` | Up to date | Every enabled server already showed these markers (read back before saying so) |
-| `markers_waiting` | Waiting | A server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or a Plex item's versions don't yet agree |
-| `markers_needs_review` | Needs review | At least one marker wasn't sent (the sources disagree, or the only answer can't decide alone), and the job wrote nothing else for the file. The server row's message gives each such marker's reason |
-| `markers_none` | No markers found | No source found an intro or credits for this file |
+| `markers_waiting` | Waiting | A server hasn't indexed the file yet, or Plex didn't answer its Plex Pass check |
+| `markers_none` | No markers found | No source found an intro or credits for this file, or nothing confirmed one; the server row's message gives the reason |
 | `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
 | `skipped_file_not_found` | Not Found | File not found on disk |
 | `markers_skipped` | Skipped | Every server that owns this file can't take markers right now (see the [capability states](guides.md#troubleshooting-intro--credits) — a plugin missing, Plex not ready, etc.), or the file is a trailer or other extra (reason "Extras aren't checked for markers") |
 | `failed` | Failed | Processing failed |
 
 Per-server row statuses (`markers.outcomes.ServerStatus`) use the same `markers_written` / `markers_up_to_date` /
-`markers_needs_review` / `markers_skipped` / `markers_waiting` / `failed` keys, plus `markers_none` (nothing to
+`markers_skipped` / `markers_waiting` / `failed` keys, plus `markers_none` (nothing to
 publish on that server). A file's overall outcome shows what still needs something, first match wins: any server
 failed → failed; any server waiting with a retry queued (not indexed yet, Plex Pass unconfirmed) → waiting; any
-written → published (or waiting while another server waits for the item's versions); any marker in review → needs
-review; any server waiting → waiting; any up to date → up to date; any with nothing to publish → no markers; otherwise
-skipped. So one server that is still
+written → published; any server waiting → waiting; any up to date → up to date; any with nothing to publish → no
+markers; otherwise skipped. So one server that is still
 waiting (or failed) is never hidden behind another server that was written or is up to date. Retries and verify jobs
 read the per-server rows, not this outcome.
 
@@ -520,13 +517,15 @@ decided, per marker type:
 {"intro": {"chapters": 40, "theintrodb+skipdb": 6}, "credits": {"chapters": 40, "credits_text": 9, "theintrodb+server_markers": 3}}
 ```
 
+Any job's `progress.cpu_fallback_files` counts the files a GPU worker ran on the CPU because its GPU failed (`0`
+when none did); the job summary shows it as "N files ran on the CPU because the GPU failed".
+
 A file counts once per decided marker type, under one group: its marker's sources (source ids from Settings, joined
 with `+`, in your source order). A marker a chapter set counts as `chapters` even when other sources agreed (a chapter
 decides on its own; they only confirmed or trimmed it); markers already on servers (`server_markers`, importer copies
 included) are named only when they were the one other opinion a single source needed; the user's own marker is
 `user`. A file counts when its run ends with any outcome but `failed`, so a file whose every server was skipped still
-counts what its sources decided, while a type in review, and a file not found, with no server, or an extra, never
-count. A job revived after a restart counts the files it carries from what the markers store holds for them. The
+counts what its sources decided, while a file not found, with no server, or an extra never counts. A job revived after a restart counts the files it carries from what the markers store holds for them. The
 Dashboard shows these as **Decided by** under the job's per-server breakdown, biggest group first, at most five groups
 per type (the rest add up under "other").
 
@@ -671,7 +670,7 @@ length cap and the position windows that catch a wrong source are not applied.
 ```
 
 `markers` holds every stored marker of the file, keyed by type. Per server, `result` is `written`, `unchanged`,
-`waiting`, `failed`, `not_enabled` (Intro & Credits is off there), `nothing_to_publish` or `needs_review`; `message` is
+`waiting`, `failed`, `not_enabled` (Intro & Credits is off there) or `nothing_to_publish`; `message` is
 the same wording a job's row carries. `can_show` is what that server type can display and `cant_show` the saved types it
 can't (Plex and Emby take no recap or preview). `notes` are per-field notes: on Emby an edited credits `end` is accepted
 and published start-only, and the note says so. `replaced_own` lists the types whose own markers that server lost to
@@ -705,7 +704,7 @@ run decides those types again.
 
 **Response:** `200` with `canonical_path`, `unlocked` (the requested types that were locked; the rest were already
 unlocked), `markers` (the file's remaining stored markers) and `decisions`, by type, for the requested types that have
-one: `{"intro": {"status": "needs_review", "reason": "unlocked; the next run decides this type again"}}`. `400`, `404`
+one: `{"intro": {"status": "no_evidence", "reason": "unlocked; the next run decides this type again"}}`. `400`, `404`
 and `503` as above; `409` when the server is off or the file was never analysed.
 
 #### GET /api/markers/season
@@ -726,15 +725,12 @@ per-episode `GET /api/markers/item` stays the place for what a server shows righ
   and the same season number; at most the 40 nearest in a flat folder of hundreds; extras left out), each with `path`,
   `name`, `episode` (`"E01"`), `known` (the app has looked at it), `duration_ms`, `intro` and `credits`
   (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
-  `needs_review` (any marker type in Needs review, recap and preview included) with `review_reason` (the first such
-  type's reason, `""` when none),
   `evidence` chips (`[{source, label}]`: the sources with intro or credits evidence, markers already on servers left
   out; only season audio has a `label`, e.g. `"10/10"`) and `servers` dots (`{server_id: {state, message}}`, `state`
   one of `ok` — last publish wrote our markers, `none` — nothing of ours there or never published, `waiting`,
   `failed`, `skipped`, or `off` — Intro & Credits off there, or this episode's library isn't selected or is excluded).
-- `counts` — `episodes` (the episodes listed), `total_episodes` (the season's size before the 40-nearest cap), `ready`
-  (at least one decided marker of any type: what Publish sends, even when another type is in Needs review) and
-  `needs_review` (any type in Needs review).
+- `counts` — `episodes` (the episodes listed), `total_episodes` (the season's size before the 40-nearest cap) and
+  `ready` (at least one decided marker of any type: what Publish sends).
 
 `400` `{"error": "Path is not a file inside any server library"}` (also for a missing `path`) or `{"error": "Not a TV
 episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Season view for this file"}`.
@@ -1336,7 +1332,7 @@ Every other one:
 ```
 
 `quality` comes from the file's name. `preview.state` is `ready`, `missing`, or `unknown` (a server couldn't be
-asked); `frames` is the BIF's frame count (null for trickplay). `markers.state` is `not_checked`, `needs_review`,
+asked); `frames` is the BIF's frame count (null for trickplay). `markers.state` is `not_checked`,
 `both` ("Intro + credits"), `credits` ("Credits set" for a film, "Credits only" for an episode), `intro` or `none`
 ("Nothing found"), from markers.db only. A file that took longer than 12 seconds to check has `error` instead.
 `400` for a body that isn't `{"paths": [...]}` or has more than 30.
@@ -1716,7 +1712,7 @@ unless noted.
 | GET | `/api/system/browse` | Folder picker: lists sub-directories of `?path=` (default `/`). `?include_files=1` also returns video files (each entry has `is_dir`); `?show_hidden=1` includes dot-entries. System dirs (`/proc`, `/sys`, …) are denied. |
 | GET | `/api/system/notifications` | In-app notification list (health checks, deprecations, warnings) |
 | POST | `/api/system/notifications/{id}/dismiss` | Dismiss until the next restart |
-| POST | `/api/system/notifications/{id}/dismiss-permanent` | Dismiss for good (stored in settings). `400` for `media_mount_unhealthy` (a media folder that looks empty or unmounted), which can only be dismissed until the next restart. A dismissed **Settings migrated** notice comes back after the next upgrade that changes the settings format |
+| POST | `/api/system/notifications/{id}/dismiss-permanent` | Dismiss for good (stored in settings). `400` for `media_mount_unhealthy` (a media folder that looks empty or unmounted) and `gpu_keeps_failing_<device>` (a GPU whose last 5 files ran on the CPU), which can only be dismissed until the next restart. A dismissed **Settings migrated** notice comes back after the next upgrade that changes the settings format |
 | POST | `/api/system/notifications/reset-dismissed` | Clear all permanent dismissals |
 | GET | `/api/system/whats-new` | Release-notes viewer payload (version + changes since last-seen) |
 | POST | `/api/system/whats-new/dismiss` | Mark the current version's notes as seen |

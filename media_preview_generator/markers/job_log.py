@@ -157,6 +157,8 @@ class RunNotes:
         asked: ``(source, origin)`` read or asked during this job (origin: a server's id for its markers, else "").
         unanswered: Sources asked this job whose answer couldn't be stored, with what happened ("unavailable (HTTP
             503)", "no answer this time (…)").
+        read_failed: Local detectors whose read of the file failed this job, with the detector's own reason; a later
+            stage that reads it after all clears the entry. The file's result names them (``pipeline._read_failure``).
         not_asked: Why a source wasn't asked (``ALREADY_DECIDED``, "not read (every server keeps its own credits)").
         server_not_read: Why a server's own markers were never read for this file at all ("this server shows our
             markers"), keyed by server id; consulted only when the file has no evidence row for that server.
@@ -183,6 +185,7 @@ class RunNotes:
 
     asked: set[tuple[Source, str]] = field(default_factory=set)
     unanswered: dict[Source, str] = field(default_factory=dict)
+    read_failed: dict[Source, str] = field(default_factory=dict)
     not_asked: dict[Source, str] = field(default_factory=dict)
     server_not_read: dict[str, str] = field(default_factory=dict)
     title: str = ""
@@ -577,7 +580,7 @@ def type_phrase(decision: TypeDecision, chapters: Mapping[MarkerType, Mapping[in
 
     Returns:
         E.g. ``credits 58:23–59:04 (TheIntroDB and credit text agree)``, ``credits 2:00:11–2:03:39, from the "Credits"
-        chapter``, ``intro nothing found`` or ``credits 47:36–48:38 from credit text needs review (…)``.
+        chapter``, ``intro nothing found`` or ``credits nothing found (sources disagree: introdb, skipdb)``.
     """
     mtype = decision.type.value
     names_by_type = chapters or {}
@@ -613,12 +616,6 @@ def type_phrase(decision: TypeDecision, chapters: Mapping[MarkerType, Mapping[in
         if kept_before_rule_change(decision.reason):
             notes.append(KEPT_BEFORE_RULE_CHANGE)
         return _with_notes(core, notes)
-    if decision.status is DecisionStatus.NEEDS_REVIEW:
-        if decision.proposed is None:
-            return f"{mtype} needs review ({decision.reason})"
-        proposed = decision.proposed
-        found = _and(_names(proposed.decided_by, _chapter_of(names_by_type, decision.type, proposed.start_ms)))
-        return f"{mtype} {_span(proposed.start_ms, proposed.end_ms)} from {found} needs review ({decision.reason})"
     if decision.status is DecisionStatus.NO_EVIDENCE:
         return f"{mtype} nothing found" + ("" if decision.reason == "no evidence" else f" ({decision.reason})")
     if is_kept_own(decision.status, decision.reason):
@@ -652,31 +649,6 @@ def decided_line(
     names = chapter_names(rows)
     parts = [type_phrase(decision, names) for decision in _shown(decisions, types)]
     return f"Decided: {_SEP.join(parts) or 'nothing to detect for this file'}"
-
-
-def review_note(decisions: Mapping[MarkerType, TypeDecision], types: Collection[MarkerType]) -> str:
-    """What a file's types in review were found by, for a Season job's summary and a file's one-line result.
-
-    Args:
-        decisions: The file's decisions.
-        types: The types detected for the file.
-
-    Returns:
-        E.g. ``credits from credit text only``; "" when no type is in review.
-    """
-    notes = []
-    for mtype in MarkerType:
-        decision = decisions.get(mtype)
-        if mtype not in types or decision is None or decision.status is not DecisionStatus.NEEDS_REVIEW:
-            continue
-        names = _names(decision.proposed.decided_by) if decision.proposed else []
-        if len(names) == 1:
-            notes.append(f"{mtype.value} from {names[0]} only")
-        elif names:
-            notes.append(f"{mtype.value} from {' + '.join(names)}")
-        else:
-            notes.append(mtype.value)
-    return ", ".join(notes)
 
 
 def _lower_first(text: str) -> str:
@@ -791,7 +763,7 @@ def server_result_line(result: ServerResult) -> str:
     kept = _kept_phrase(result, name) if result.kept else ""
     if status == ServerStatus.WRITTEN.value:
         text = _written_phrase(result, name)
-    elif status in (ServerStatus.UP_TO_DATE.value, ServerStatus.NEEDS_REVIEW.value, ServerStatus.NONE.value):
+    elif status in (ServerStatus.UP_TO_DATE.value, ServerStatus.NONE.value):
         text = f"already up to date ({ours})" if ours else ("" if kept else "nothing to send")
     elif status == ServerStatus.WAITING.value:
         code = row.get("reason_code")
@@ -1147,11 +1119,10 @@ def start_line(job_id: str, files: int, trigger: str) -> str:
 
 @dataclass(frozen=True)
 class SeasonEpisode:
-    """One episode a Season job checked: its short name, whether its decisions changed, and its review note."""
+    """One episode a Season job checked: its short name and whether its decisions changed."""
 
     episode: str
     changed: bool
-    review: str
 
 
 def _joined(names: list[str]) -> str:
@@ -1167,8 +1138,8 @@ def season_line(season: str, episodes: list[SeasonEpisode], label: str = SEASON_
         label: What the job is (``SEASON_RECHECK_LABEL``, or ``BUDGET_RECHECK_LABEL`` for a TheIntroDB recheck).
 
     Returns:
-        E.g. ``Season re-check, Rick and Morty (2013) S01 (3 episodes): no change, E01/E03/E04 still need review
-        (credits from credit text only)``.
+        E.g. ``Season re-check, Rick and Morty (2013) S01 (3 episodes): E02 changed (logged above); no change for
+        E01/E03``.
     """
     ordered = sorted(episodes, key=lambda e: e.episode)
     changed = [e.episode for e in ordered if e.changed]
@@ -1177,17 +1148,7 @@ def season_line(season: str, episodes: list[SeasonEpisode], label: str = SEASON_
     if changed:
         parts.append(f"{_joined(changed)} changed (logged above)")
     if same:
-        text = "no change" if not changed else f"no change for {_joined([e.episode for e in same])}"
-        review = [e for e in same if e.review]
-        if review:
-            verb = "needs" if len(review) == 1 else "need"
-            # The unchanged episodes are already named when some changed: they aren't named twice.
-            who = "" if changed and len(review) == len(same) else f" {_joined([e.episode for e in review])}"
-            text += f",{who} still {verb} review"
-            notes = {e.review for e in review}
-            if len(notes) == 1:
-                text += f" ({notes.pop()})"
-        parts.append(text)
+        parts.append("no change" if not changed else f"no change for {_joined([e.episode for e in same])}")
     count = len(ordered)
     return f"{label}, {season} ({count} episode{'' if count == 1 else 's'}): {'; '.join(parts)}"
 
@@ -1201,21 +1162,20 @@ def decide_again_line(files: Iterable[tuple[bool, bool]]) -> str:
     for the files whose decisions didn't change; the ones that did were logged file by file.
 
     Args:
-        files: Per file it ran: whether its decisions changed, and whether a type is still in review.
+        files: Per file it ran: whether its decisions changed, and whether it still has no marker at all.
 
     Returns:
-        E.g. ``Decided again after the update (3 files): 2 changed (logged above); 1 unchanged, still needs review``.
+        E.g. ``Decided again after the update (3 files): 2 changed (logged above); 1 unchanged, still nothing found``.
     """
     results = list(files)
     changed = sum(1 for was_changed, _ in results if was_changed)
     same = len(results) - changed
-    review = sum(1 for was_changed, in_review in results if not was_changed and in_review)
+    undecided = sum(1 for was_changed, is_undecided in results if not was_changed and is_undecided)
     parts = [f"{changed} changed (logged above)"] if changed else []
     if same:
         text = f"{same} unchanged"
-        if review:
-            verb = "needs" if review == 1 else "need"
-            text += f", still {verb} review" if review == same else f", {review} still {verb} review"
+        if undecided:
+            text += ", still nothing found" if undecided == same else f", {undecided} still nothing found"
         parts.append(text)
     return f"Decided again after the update ({_files(len(results))}): {'; '.join(parts) or 'nothing to decide'}"
 
@@ -1262,13 +1222,11 @@ def totals_line(outcome: Mapping[str, int], sent: Mapping[str, int], skipped_sou
         skipped_sources: Per online source label, the files checked without it (daily limit or refused key).
 
     Returns:
-        E.g. ``Done: 1 file · 0 sent to Plex · 1 needs review · 0 nothing found · TheIntroDB skipped for 1 file``.
+        E.g. ``Done: 1 file · 0 sent to Plex · 1 nothing found · TheIntroDB skipped for 1 file``.
     """
     total = sum(count for count in outcome.values() if isinstance(count, int))
-    review = outcome.get(FileOutcome.NEEDS_REVIEW.value, 0)
     parts = [f"Done: {_files(total)}"]
     parts += [f"{count} sent to {name}" for name, count in sorted(sent.items())]
-    parts.append(f"{review} {'needs' if review == 1 else 'need'} review")
     parts.append(f"{outcome.get(FileOutcome.NO_MARKERS.value, 0)} nothing found")
     parts += [f"{outcome[key.value]} {words}" for key, words in _OTHER_OUTCOMES if outcome.get(key.value)]
     parts += [f"{label} skipped for {_files(count)}" for label, count in sorted(skipped_sources.items()) if count]

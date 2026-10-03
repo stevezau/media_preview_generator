@@ -1845,8 +1845,9 @@ class TestDetect:
             season_key=None, is_movie=True,
         )  # fmt: skip
         seen = self._find(monkeypatch, frames.NoDecoderError("This file's video can't be decoded by any device"))
-        with pytest.raises(DetectorUnavailableError, match="can't be decoded by any device"):
+        with pytest.raises(DetectorUnavailableError, match="can't be decoded by any device") as caught:
             detector.detect_credits_text(rec, ctx=ctx, gpu=gpu, gpu_device_path=device)
+        assert caught.value.this_file is True
         assert [call["gpu"] for call in seen] == [gpu]
         assert "can't be decoded by any device" in ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT)
 
@@ -1933,8 +1934,11 @@ class TestDetect:
 
         # Every later scan: no worker, no decode, the same reason.
         assert detector.credits_text_needs_worker(rec, ctx) is False
-        with pytest.raises(DetectorUnavailableError, match=r"^the file ends before its stated length \(27:10 of"):
+        with pytest.raises(
+            DetectorUnavailableError, match=r"^the file ends before its stated length \(27:10 of"
+        ) as cut:
             detector.detect_credits_text(rec, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
+        assert cut.value.this_file is True
         assert len(seen) == 2
 
         # A new download of the file is read.
@@ -2183,8 +2187,9 @@ class TestDetect:
         monkeypatch.setattr(detector.frames, "decode_rows", Decodes(*answers))
         rec = ctx.store.upsert_file(FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns),
                                     duration_ms=MOVIE.duration_ms, season_key=None, is_movie=True)  # fmt: skip
-        with pytest.raises(DetectorUnavailableError, match="^cancelled$"):
+        with pytest.raises(DetectorUnavailableError, match="^cancelled$") as cancelled:
             detector.detect_credits_text(rec, ctx=ctx, gpu=None, gpu_device_path=None)
+        assert cancelled.value.this_file is False  # nothing about the file
         assert ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT) is None
         assert ctx.store.credits_text_timed_out_at(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)) is None
         assert ctx.store.evidence_version(rec.id, Source.CREDITS_TEXT) is None
@@ -2239,8 +2244,9 @@ class TestDetect:
     def test_a_timed_out_640x360_reading_of_a_tail_with_no_answer_waits_a_day(self, monkeypatch, pool, ctx, probes):
         decodes = Decodes(STORY, frames.DecodeTimeoutError("decoding Movie (2020).mkv timed out after 600 s"))
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
-        with pytest.raises(DetectorUnavailableError, match="timed out after 600 s"):
+        with pytest.raises(DetectorUnavailableError, match="timed out after 600 s") as timed_out:
             detector.detect_credits_text(MOVIE, ctx=ctx)
+        assert timed_out.value.this_file is True
         assert [call["scale"] for call in decodes.calls] == [1, 2]
         identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
         assert ctx.store.credits_text_timed_out_at(identity) == NOW

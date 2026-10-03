@@ -497,7 +497,6 @@ _EDITOR_RESULTS = {
     "markers_waiting": "waiting",
     "markers_skipped": "not_enabled",
     "markers_none": "nothing_to_publish",
-    "markers_needs_review": "needs_review",
     "failed": "failed",
 }
 
@@ -561,7 +560,7 @@ def marker_item_save():
     Returns:
         200 with ``markers`` (every stored marker for the file, the saved ones locked) and ``servers``: one row per
         owning server with ``result`` (``written``, ``unchanged``, ``waiting``, ``failed``, ``not_enabled``,
-        ``nothing_to_publish`` or ``needs_review``), its ``message``, what it ``can_show``, the saved types it
+        or ``nothing_to_publish``), its ``message``, what it ``can_show``, the saved types it
         ``cant_show``, per-field ``notes`` (Emby's credits end), and the types whose own markers the lock
         ``replaced_own`` on a server set to keep its own (spec §5.5 rule 1), and ``queued_job_id``: the Intro &
         Credits job that delivers the save to the servers whose row is ``waiting`` or ``failed`` (null when every
@@ -650,8 +649,8 @@ def _queue_delivery(path: str, rows: list[dict]) -> str | None:
     """Queue the job that delivers the save to every server the editor shows waiting or failed (``submit_publish_retry``).
 
     Decided from the editor's words, so every row the user sees as not delivered gets the job: a server with Intro &
-    Credits on that couldn't take the markers (down, plugin missing) reads "failed" too. Off, nothing to publish and
-    needs review are nothing a job can deliver. Never raises: the save is stored and its answer stands whatever happens
+    Credits on that couldn't take the markers (down, plugin missing) reads "failed" too. Off and nothing to publish
+    are nothing a job can deliver. Never raises: the save is stored and its answer stands whatever happens
     here.
 
     Args:
@@ -678,7 +677,7 @@ def marker_item_unlock():
     """Drop the user's lock on one or more marker types for a file.
 
     Body: ``path`` (or ``server_id`` + ``item_id``, and optionally ``version_file``) and ``types``
-    (``["intro", "credits", "recap", "preview"]``). Nothing is published: the type goes back to "Needs review" and the
+    (``["intro", "credits", "recap", "preview"]``). Nothing is published: the type is left undecided and the
     next Intro & Credits run decides and publishes it again.
 
     Returns:

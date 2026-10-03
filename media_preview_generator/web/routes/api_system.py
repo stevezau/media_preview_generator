@@ -124,18 +124,18 @@ def dismiss_notification_permanent(notification_id: str):
 
     Survives container restarts.  No authentication required.
 
-    Two cards are special. One in ``SESSION_ONLY_DISMISSAL_IDS`` is refused: it can only be hidden until the next
-    restart. The schema-migration card is dismissed by clearing ``_pending_migration_notice``, as the session route
+    Two cards are special. A session-only one (``is_session_only_dismissal``) is refused: it can only be hidden until
+    the next restart. The schema-migration card is dismissed by clearing ``_pending_migration_notice``, as the session route
     does; its id is not stored, because a stored id would also hide the notice of every later migration.
     """
     from ..notifications import (
         SCHEMA_MIGRATION_ID,
-        SESSION_ONLY_DISMISSAL_IDS,
         dismiss_schema_migration_notice,
+        is_session_only_dismissal,
     )
     from ..settings_manager import get_settings_manager
 
-    if notification_id in SESSION_ONLY_DISMISSAL_IDS:
+    if is_session_only_dismissal(notification_id):
         return (
             jsonify({"ok": False, "error": "This notification can only be dismissed until the next restart"}),
             400,

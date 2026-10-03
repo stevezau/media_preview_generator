@@ -57,7 +57,7 @@ def _add(
     *,
     lookups=((Source.THEINTRODB, False, 15),),
     decided_by=None,
-    status=DecisionStatus.NEEDS_REVIEW,
+    status=DecisionStatus.NO_EVIDENCE,
     locked=False,
     on_disk=True,
 ):
@@ -122,7 +122,6 @@ class TestOnlineRecheckFiles:
     @pytest.mark.parametrize(
         ("status", "decided_by", "locked", "listed"),
         [
-            (DecisionStatus.NEEDS_REVIEW, None, False, True),
             (DecisionStatus.NO_EVIDENCE, None, False, True),
             (None, None, False, True),  # never decided: treated as undecided, as the TheIntroDB recheck does
             (DecisionStatus.DECIDED, ("season_audio",), False, True),
@@ -135,7 +134,6 @@ class TestOnlineRecheckFiles:
             (DecisionStatus.DECIDED, ("season_audio",), True, False),  # the user's lock: detection never changes it
         ],
         ids=[
-            "needs-review",
             "nothing-found",
             "never-decided",
             "season-audio-alone",

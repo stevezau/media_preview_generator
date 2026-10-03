@@ -45,6 +45,7 @@ from .decide import (
     APP_PUBLISH_WHEN,
     DECIDE_RULES,
     DECIDE_RULES_VERSION,
+    NO_EVIDENCE_REASON,
     DecisionContext,
     DecisionStatus,
     FileLimits,
@@ -81,7 +82,6 @@ from .job_log import (
     path_year,
     read_result_line,
     reading_line,
-    review_note,
     season_line,
     season_of,
     server_result_line,
@@ -119,10 +119,7 @@ from .outcomes import (
     REPLACED_OWN,
     RETRY_REASON_CODES,
     STATE_BY_STATUS,
-    UNCHECKED_FILES,
     VERIFY_LATER,
-    VERSIONS_UNCHECKED,
-    VERSIONS_WAITING,
     FileOutcome,
     ServerStatus,
     file_outcome,
@@ -131,7 +128,6 @@ from .outcomes import (
     kept_own_reason,
     replaced_own_note,
     replaced_stale_note,
-    review_message,
     with_kept_note,
     with_sentence,
 )
@@ -182,7 +178,6 @@ SERIES_NO_ENTRY_MISSES = 3
 SERIES_NO_ENTRY_PAUSE = timedelta(days=7)
 _SERIES_PAUSED_SOURCES = frozenset({Source.THEINTRODB})
 # Types still worth another source's answer once a file's run ends.
-_UNDECIDED = frozenset({DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE})
 # Servers detect their own markers on a schedule (Plex overnight), so "none there" is asked again a day later.
 EMPTY_SERVER_MARKERS_RETRY = timedelta(days=1)
 # Check servers asks a server again for a decided file it had no markers for once the answer is this old, a step further
@@ -284,7 +279,18 @@ def _no_phase(_text: str) -> None:
 class DetectorUnavailableError(Exception):
     """A local detector couldn't answer this time (its tool failed, the job was cancelled). No answer is stored for it,
     so the next run asks it again, unless the detector itself gives up at once there (credit text on a file that timed
-    out lately or was found cut short)."""
+    out lately or was found cut short).
+
+    Attributes:
+        this_file: The detector's read of this file itself failed (a frame decode error, a file cut short, a timeout or
+            stall reading it): the file's result says so (``_read_failure``). False for whatever else stopped the
+            detector (no ffmpeg with chromaprint, other episodes' folders unreadable, cancelled): that leaves the file
+            at nothing found, with the reason on the source's line.
+    """
+
+    def __init__(self, message: str = "", *, this_file: bool = False) -> None:
+        super().__init__(message)
+        self.this_file = this_file
 
 
 @dataclass(frozen=True)
@@ -405,7 +411,7 @@ class PipelineContext:
             detector, any state but UNKNOWN keeps stored season audio answers from helping decide (``_decide``);
             UNKNOWN (ffmpeg didn't answer) still registers no detector, but stored answers count as if it were there.
         credits_text: What the job's check for credit text detection found. ABSENT keeps stored credits text answers
-            from helping decide (they may still hold a type in review); UNKNOWN (the check didn't answer) registers no
+            from helping decide (they may still leave a type undecided); UNKNOWN (the check didn't answer) registers no
             detector, but stored answers count as if it were there.
         decided_by: Files per marker type and source group this job decided; a file counts once its run reaches
             publishing and doesn't fail (the job summary's "Decided by" counts).
@@ -415,8 +421,9 @@ class PipelineContext:
         season_recheck: A Season job: a file whose decisions didn't change logs no lines of its own; the job ends with
             one line per season instead (``summary_lines``).
         recheck_label: How those per-season lines name the job (a TheIntroDB recheck logs them too).
-        decide_again: The one-off job after settings v16 and v17 that decides the files in Needs review (and those
-            waiting for their item's other versions, and those whose intro rests on season audio) again: like a Season
+        decide_again: The one-off job after a settings upgrade that decides the files the old rules couldn't decide
+            (and those waiting for their item's other versions, and those whose intro rests on season audio) again:
+            like a Season
             job, a file whose decisions didn't change logs no lines
             of its own, and the job ends with one line for them (``summary_lines``). It runs files as any job does.
         online_recheck: The weekly job that asks the online databases again about files they had no entry for
@@ -514,7 +521,7 @@ class PipelineContext:
     # worker, so the worker's stage can't tell on its own that it publishes a replaced file (``VERIFY_LATER``).
     _replaced_at_start: dict[str, bool] = field(default_factory=dict, repr=False)
     # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, per file a
-    # decide-again job ran, whether its decisions changed and whether a type is still in review, and per file the weekly
+    # decide-again job ran, whether its decisions changed and whether it still has no marker, and per file the weekly
     # online re-check ran, whether an online database now has an entry for it and whether its decisions changed.
     _sent: dict[str, int] = field(default_factory=dict, repr=False)
     _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
@@ -735,7 +742,7 @@ class PipelineContext:
             outcome: The job's file counts per outcome (files finished before a restart included).
 
         Returns:
-            The lines, e.g. ``Done: 3 files · 2 sent to Plex · 1 needs review · 0 nothing found``.
+            The lines, e.g. ``Done: 3 files · 2 sent to Plex · 1 nothing found``.
         """
         with self._summary_lock:
             sent = dict(self._sent)
@@ -1313,8 +1320,8 @@ def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, no
     """The files the weekly online re-check lists: an enabled online source's stored "no entry" is due again (older
     than ``NO_DATA_RETRY``, as ``_needs_lookup`` asks it again), and its answer could still change a decision.
 
-    That is a file with a type undecided (Needs review or nothing found), or one season audio decided alone: an online
-    answer confirms that intro or sends it to review (``_decided_beyond_chapters``). A file decided otherwise, by
+    That is a file with a type undecided (nothing found), or one season audio decided alone: an online answer
+    confirms that intro or undoes it (``_decided_beyond_chapters``). A file decided otherwise, by
     chapters alone included, isn't listed; nor is one gone from disk, which would otherwise be listed every week.
 
     Args:
@@ -1343,7 +1350,7 @@ def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
     decisions = store.get_decisions(rec.id)
     if not decisions:
         return True
-    if any(row.status in _UNDECIDED for row in decisions.values()):
+    if any(row.status is DecisionStatus.NO_EVIDENCE for row in decisions.values()):
         return True
     # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``). A marker carried over from a
     # replaced file stands only until the file has evidence of its own.
@@ -1401,7 +1408,7 @@ def _decide(
     """Decide from everything stored for the enabled sources, so a forced and a normal run always agree.
 
     Stored answers of a local detector this job doesn't have can't be produced again by this job (season audio can't be
-    re-matched as the season changes; credit text can't be re-read at all), so they may hold a type in review but never
+    re-matched as the season changes; credit text can't be re-read at all), so they may leave a type undecided but never
     help decide it: a type the decision with them decides is decided again without them. When the chromaprint check
     didn't answer (``ctx.chromaprint`` UNKNOWN), stored season audio answers count as usual until it does, and the same
     for credit text while ``ctx.credits_text`` is UNKNOWN.
@@ -1447,7 +1454,7 @@ def _decide(
     # A local detector with nothing stored stays in the order only while it may still answer this file: a rule waiting
     # for its answer (credit text checking a credits chapter SkipDB contradicts, spec §5.5 rule 3) must not wait for
     # a detector that can't run here, that found nothing at its version now, or that failed to read the file as it is
-    # (the owner's rule: decisions are automatic, never an open-ended wait in Needs review). An older version's
+    # (the owner's rule: decisions are automatic, never an open-ended wait). An older version's
     # "nothing" is read again (``_detector_pending``), so the rule waits for that.
     answered = {c.source.value for c in evidence}
     order = tuple(
@@ -1559,7 +1566,7 @@ def _keep_published_before_rule_change(
     ctx: PipelineContext, rec: FileRecord, decisions: dict[MarkerType, TypeDecision]
 ) -> dict[MarkerType, TypeDecision]:
     """The file's decisions with a marker published before the decision rules changed kept where today's rules leave
-    its type in Needs review or without a marker (``decide.keep_published``): a rule change alone never takes a marker
+    its type without a marker (``decide.keep_published``): a rule change alone never takes a marker
     off the servers; new or changed evidence can, and so can a detector that read the file and found nothing to agree
     with a marker resting only on sources that never decide alone (below).
 
@@ -1573,9 +1580,7 @@ def _keep_published_before_rule_change(
     to compare it with, not due) go with it (``read_by``): a lone online answer isn't kept once one of them read the file without an answer agreeing
     with it. Season audio with no other episode to match finds nothing whatever the file holds, so it doesn't count.
     """
-    undecided = [
-        t for t, d in decisions.items() if d.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE)
-    ]
+    undecided = [t for t, d in decisions.items() if d.status is DecisionStatus.NO_EVIDENCE]
     if not undecided:
         return decisions
     stored = ctx.store.get_decisions(rec.id)
@@ -1821,14 +1826,15 @@ def _run_detector(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
-) -> str | None:
+) -> DetectorUnavailableError | None:
     """Run one detector and store its answer under each of its sources with its version, and its basis when it gave one,
     in one transaction.
 
     Anything but ``DetectorUnavailableError`` propagates, so a GPU error reaches the worker's CPU fallback.
 
     Returns:
-        None once the answer is stored; why there was none when the detector couldn't answer this time.
+        None once the answer is stored; the error saying why there was none when the detector couldn't answer this
+        time (its ``this_file`` tells a failed read of the file from anything else).
     """
     try:
         answer = spec.detect(
@@ -1848,7 +1854,7 @@ def _run_detector(
         logger.info(
             "{} had no answer for {} this time: {}", spec.source.value, os.path.basename(rec.canonical_path), exc
         )
-        return str(exc) or type(exc).__name__
+        return exc
     stray = [c for c in found if c.source not in spec.stored_sources]
     if stray:
         logger.warning("{} returned candidates for sources it doesn't store: {}", spec.source.value, stray)
@@ -2401,7 +2407,7 @@ def _kept_by_every_destination(
     stale_counts: bool = False,
 ) -> frozenset[MarkerType]:
     """The types no answer of ours would be shown for: no local detector reads the file for them, and one left
-    undecided isn't in review (``stale_counts``: see ``_own_types_now``).
+    undecided has no answer of ours (``stale_counts``: see ``_own_types_now``).
 
     A type qualifies when every server the file's markers go to keeps its own markers ("Keep Plex's", "Keep Emby's")
     and shows its own of that type now; a locked type never does (a lock wins, spec §5.5 rule 1). Worked out on every
@@ -2636,7 +2642,6 @@ def _publish_to(
     owner: _Owning,
     rec: FileRecord,
     markers: dict[MarkerType, Marker],
-    in_review: str,
     servers: _ItemServers,
     ctx: PipelineContext,
     phase: Callable[[str], None],
@@ -2645,9 +2650,8 @@ def _publish_to(
     brief_db_wait: bool = False,
     notes: RunNotes | None = None,
 ) -> dict:
-    # in_review: why the file's types in Needs review are there (``review_message``), "" when none is. kept_own: types
-    # left undecided while every server keeps its own and shows one. The row's wording names them, and the file is
-    # recorded on its item even with nothing to send; what is sent is exactly what an undecided type sends.
+    # kept_own: types left undecided while every server keeps its own and shows one. The row's wording names them, and
+    # the file is recorded on its item even with nothing to send; what is sent is exactly what an undecided type sends.
     # brief_db_wait: a worker whose job retries a busy write waits for Plex's database only
     # ``plex_db.WORKER_BUSY_TIMEOUT_S`` (the retry comes a few minutes later), also for another thread's check of it.
     # notes: so the job log's "Sent to" line can say "our last sent" (see the ``sent_before`` assignment below) --
@@ -2772,8 +2776,6 @@ def _publish_to(
         return publisher.projection_note(ours, duration_ms=rec.duration_ms)
 
     def _up_to_date(kept_types: frozenset[MarkerType]) -> dict:
-        if in_review and not wanted:
-            return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, in_review, path, kept_types=kept_types)
         message = with_kept_note("", kept_note(kept_types, wanted, vendor, not_decided=kept_own)) or "Up to date"
         message = with_kept_note(message, _shown_differently([m for m in wanted if m.type not in kept_types]))
         return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, message, path, kept_types=kept_types)
@@ -2837,8 +2839,6 @@ def _publish_to(
         # of ours before) but records the file on its item, so Check servers reads the server's own marker back.
         nothing_to_send = not wanted and previous == [] and own_previous is None and not holds_kept
         if nothing_to_send and not kept_own:
-            if in_review:
-                return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, in_review, path)
             message = "This server can't show the markers found for this file" if markers else "No markers found"
             return _row(cfg, publisher.name, ServerStatus.NONE, message, path)
 
@@ -2889,8 +2889,6 @@ def _publish_to(
         changed = publisher.last_write_changed
         kept = publisher.last_kept_types
         replaced_own = publisher.last_replaced_own_types
-        unchecked_versions = publisher.last_unchecked_versions
-        unchecked_files = [str(path) for path in publisher.last_unchecked_files] if unchecked_versions else []
         if nothing_to_send and item_row is not None and item_row.status != "written":
             # Nothing was sent: another version's failed write stays on record for its retry (files_of_failed_items).
             version = item_row.version
@@ -2914,25 +2912,6 @@ def _publish_to(
                 return row
             return {**row, REPLACED_OWN: [t.value for t in MarkerType if t in replaced_own]}
 
-        shown_types = {m.type for m in ours} | kept
-        waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
-        if waiting_for:
-            # Plex shows a type only when every version of the item is decided and agrees on it. A version not checked
-            # yet may be checked (or deleted) later, so the job tries this file again; versions that disagree don't.
-            message = with_kept_note(f"{VERSIONS_WAITING}: {', '.join(waiting_for)}", note)
-            message = with_sentence(message, override)
-            row = _finish(
-                ServerStatus.WAITING,
-                message,
-                name=publisher.name,
-                item_id=item_id,
-                published=ours,
-                reason_code=VERSIONS_UNCHECKED if unchecked_versions else None,
-                kept_types=kept,
-            )
-            if unchecked_files:
-                row[UNCHECKED_FILES] = unchecked_files
-            return _says_override(row)
         if ours:
             message = f"{len(ours)} marker(s)"
         else:
@@ -3020,7 +2999,6 @@ def publish_now(
     servers = _ItemServers(item, marker_owners)
     markers = store.get_markers(rec.id)
     decisions = store.get_decisions(rec.id)
-    in_review = review_message(decisions, decisions.keys())
     # The types the file's last run left to the servers' own markers, so the rows say so as that run's did.
     kept_own = frozenset(mtype for mtype, d in decisions.items() if is_kept_own(d.status, d.reason))
     stop_at = clock() + deadline_s
@@ -3064,7 +3042,7 @@ def publish_now(
                 # Only a server that still keeps its own and took the last run's rows: one switched to Use ours or
                 # added since gets what an undecided type gets.
                 left = kept_own if _kept_own_applies(ctx, cfg, rec, store) else frozenset()
-                rows.append(_publish_to(owner, rec, markers, in_review, servers, ctx, _no_phase, kept_own=left))
+                rows.append(_publish_to(owner, rec, markers, servers, ctx, _no_phase, kept_own=left))
             except _FileChangedError:
                 rows.append(_later(cfg, "The file changed while it was being published"))
             except Exception as exc:
@@ -3084,17 +3062,13 @@ def _summary(
         if d.status is DecisionStatus.DECIDED and d.marker:
             by = ", ".join(d.marker.decided_by)
             parts.append(f"{mtype.value} {clock(d.marker.start_ms)}–{clock(d.marker.end_ms)} ({by})")
-        elif d.status is DecisionStatus.NEEDS_REVIEW:
-            proposed = ""
-            if d.proposed is not None:
-                by = ", ".join(d.proposed.decided_by)
-                proposed = f": {clock(d.proposed.start_ms)}–{clock(d.proposed.end_ms)} from {by}"
-            parts.append(f"{mtype.value} needs review ({d.reason}){proposed}")
         elif d.status is DecisionStatus.DISABLED:
             # Only a type every server keeps its own of is off among the enabled types (``kept_own_reason``).
             parts.append(f"{mtype.value}: {d.reason}")
-        else:
+        elif d.reason == NO_EVIDENCE_REASON:
             parts.append(f"{mtype.value}: none")
+        else:
+            parts.append(f"{mtype.value}: none ({d.reason})")
     text = "; ".join(parts) or "Nothing to detect for this file"
     # Only when this file's result could still change once the source is available again: everything already
     # decided beyond chapters alone means asking it again would tell the user nothing new.
@@ -3508,10 +3482,14 @@ def _attempt(
                         )
                     raise
                 if unanswered is None:
+                    notes.read_failed.pop(spec.source, None)
                     for stored in spec.stored_sources:
                         notes.answered(stored)
                 else:
-                    notes.unanswered[spec.source] = _detector_unanswered(unanswered)
+                    reason = str(unanswered) or type(unanswered).__name__
+                    notes.unanswered[spec.source] = _detector_unanswered(reason)
+                    if unanswered.this_file:
+                        notes.read_failed[spec.source] = reason
                 seconds = ctx.monotonic() - read_started
                 fallback = fell_back[0] if fell_back else ""
                 gpu_read_nothing = CPU_RECHECK_PHASE in phases
@@ -3578,7 +3556,7 @@ def _attempt(
     decisions = _decide(ctx, rec, types, intro_limit)
     # A type that ends undecided while every server keeps its own and shows one is nothing for the user to review: the
     # servers' own markers stay whatever it would decide. That holds whether the file was skipped for it or an answer
-    # stored earlier left it in review. A decided type stays decided (the publisher's own kept note names it).
+    # stored earlier left it undecided. A decided type stays decided (the publisher's own kept note names it).
     # Plex's marker made for an earlier file counts as the server's own here, though not before detection: the file was
     # read for its type, and with nothing of ours decided for it, Plex's marker is still the closest there is.
     undecided = frozenset(t for t in types if decisions[t].status is not DecisionStatus.DECIDED)
@@ -3607,7 +3585,7 @@ def _attempt(
     if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)
-    in_review = review_message(decisions, types)
+    read_failure = _read_failure(notes)
     if identity_changed(rec):
         raise _FileChangedError(path)
     replaced = ctx._replaced_at_start.get(path, existing is not None and not unchanged)
@@ -3625,7 +3603,6 @@ def _attempt(
                 owner,
                 rec,
                 markers,
-                in_review,
                 servers,
                 ctx,
                 phase,
@@ -3635,13 +3612,16 @@ def _attempt(
             )
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
+        if read_failure and row["status"] == ServerStatus.NONE.value:
+            # Nothing to send because a read of the file itself failed: that is the row's result, not "no markers".
+            row["status"], row["message"] = ServerStatus.FAILED.value, read_failure
         rows.append(row)
         # A bug describing what a server got mustn't stop the next owner's write: each row is already stored above.
         _log_live(lambda r=row: titled(title, server_result_line(_server_result(ctx, rec, r, decisions, notes))))
     waiting_to_retry = any(
         r["status"] == ServerStatus.WAITING.value and r.get("reason_code") in RETRY_REASON_CODES for r in rows
     )
-    outcome = file_outcome({r["status"] for r in rows}, needs_review=bool(in_review), waiting_to_retry=waiting_to_retry)
+    outcome = file_outcome({r["status"] for r in rows}, waiting_to_retry=waiting_to_retry)
     if outcome is not FileOutcome.FAILED:
         ctx.decided_by.add(decided_groups(decisions))
     try:
@@ -3650,13 +3630,17 @@ def _attempt(
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
     if is_budget_exhausted(skipped.get(Source.THEINTRODB, "")) and any(
-        decisions[t].status in _UNDECIDED or is_carried_over(decisions[t].marker) for t in types
+        decisions[t].status is DecisionStatus.NO_EVIDENCE or is_carried_over(decisions[t].marker) for t in types
     ):
         with ctx._budget_lock:
             ctx._budget_rechecks.add(path)
             ctx._budget_refused_at = ctx._budget_refused_at or ctx.now()
     labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
-    return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
+    summary = _summary(decisions, types, labels)
+    if read_failure:
+        # A failed file leads with why; a file whose other type was written keeps its result and adds the failure.
+        summary = f"{read_failure}; {summary}" if outcome is FileOutcome.FAILED else f"{summary}; {read_failure}"
+    return ItemOutcome(outcome.value, summary, rows)
 
 
 # Plain words for a server's stored markers answer that says they weren't used.
@@ -3829,6 +3813,30 @@ def _noting(noted: list[str], callback: Callable[[str], None] | None) -> Callabl
     return told
 
 
+# How a file's result names a local read that failed (``RunNotes.read_failed``).
+_READ_FAILURE_LABELS = {
+    Source.CREDITS_TEXT: "Couldn't read the credits",
+    Source.SEASON_AUDIO: "Couldn't read the intro's audio",
+}
+
+
+def _read_failure(notes: RunNotes) -> str:
+    """Why this run's reads of the file itself failed, one sentence per detector in source order; "" when none did.
+
+    Only a read of the file itself the detector gave up on after its own fallbacks counts
+    (``DetectorUnavailableError`` with ``this_file``): a GPU error is the worker's CPU rerun, not a failed read, and a
+    detector stopped by something else (no chromaprint ffmpeg, a sibling's folder unreadable) leaves the file at
+    nothing found. The next run reads the file again as it would anyway (``_detector_due``), so no retry is queued.
+    """
+    parts = []
+    for source in Source:
+        why = notes.read_failed.get(source)
+        if why:
+            label = _READ_FAILURE_LABELS.get(source, f"Couldn't read the file for {source.value}")
+            parts.append(f"{label}: {why}")
+    return "; ".join(parts)
+
+
 def _detector_unanswered(reason: str) -> str:
     """How a detector's line says it had no answer: a file found cut short says so plainly (it isn't read again until it
     changes); anything else had no answer this time."""
@@ -3890,10 +3898,11 @@ def _log_file(
     season = decided_again = rechecked_online = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
         name, episode = season_of(rec.canonical_path)
-        season = (name, SeasonEpisode(episode, changed, review_note(decisions, types)))
+        season = (name, SeasonEpisode(episode, changed))
     if ctx.decide_again:
-        in_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types if t in decisions)
-        decided_again = (changed, in_review)
+        # "Still nothing found" is a file with no marker at all, not one missing a type it may simply not have.
+        nothing_found = not any(decisions[t].status is DecisionStatus.DECIDED for t in types if t in decisions)
+        decided_again = (changed, nothing_found)
     if ctx.online_recheck:
         rechecked_online = (_found_online(ctx, rec, notes), changed)
     ctx._note_finished(rows, season, decided_again, rechecked_online)

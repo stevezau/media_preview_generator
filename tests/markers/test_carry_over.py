@@ -81,7 +81,7 @@ class TestCarryOver:
             _decided(T.INTRO, 64_000, 152_000, ("season_audio",), reason="single source (season_audio)"),
             TypeDecision(
                 T.INTRO,
-                DecisionStatus.NEEDS_REVIEW,
+                DecisionStatus.NO_EVIDENCE,
                 None,
                 Marker(T.INTRO, 5_000, 30_000, ("skipdb",)),
                 "sources disagree",
@@ -495,7 +495,7 @@ class TestPipeline:
         _first, _out, rec = _replace(tmp_path, store)
         assert store.get_markers(rec.id)[T.INTRO].decided_by == (co.CARRIED_OVER,)
         # SkipDB, asked again after its "no entry" went stale, now matches this file's length: its own evidence. SkipDB
-        # never decides alone (rule 6), so the intro waits in Needs review on it; the carried marker is gone either way.
+        # never decides alone (rule 6), so the intro stays undecided on it; the carried marker is gone either way.
         own = LookupResult("ok", (Candidate(T.INTRO, 300, 89_200, Source.SKIPDB, origin="exact"),))
         new = rec.canonical_path
         ctx = _ctx(store, _registry(new, ServerType.PLEX), settings_raw=NOTHING, clients=_clients(skipdb=own),
@@ -504,10 +504,11 @@ class TestPipeline:
         assert T.INTRO not in store.get_markers(rec.id)
         decision = store.get_decisions(rec.id)[T.INTRO]
         assert (decision.status, decision.proposed_start_ms, decision.proposed_end_ms) == (
-            DecisionStatus.NEEDS_REVIEW,
+            DecisionStatus.NO_EVIDENCE,
             300,
             89_200,
         )
+        assert decision.reason == "only SkipDB has the intro; an online answer needs a check against the file"
 
     def test_a_file_replaced_in_place_keeps_its_intro(self, tmp_path, store):
         # A transcode at the same path (Tdarr) drops the chapters and keeps the length.

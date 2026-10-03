@@ -192,7 +192,7 @@ def test_save_decisions_matrix(store):
         rec.id,
         {
             T.INTRO: _decided(T.INTRO, 12_000, 38_000, ("theintrodb", "skipdb")),
-            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, proposed, "sources don't agree yet"),
+            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NO_EVIDENCE, None, proposed, "sources don't agree yet"),
             T.RECAP: TypeDecision(T.RECAP, DecisionStatus.DISABLED, None, None, "detection off"),
         },
         settings_fingerprint="f2",
@@ -200,9 +200,49 @@ def test_save_decisions_matrix(store):
     markers = store.get_markers(rec.id)
     assert markers == {T.INTRO: Marker(T.INTRO, 12_000, 38_000, ("theintrodb", "skipdb"))}
     d = store.get_decisions(rec.id)
-    assert d[T.CREDITS].status is DecisionStatus.NEEDS_REVIEW
+    assert d[T.CREDITS].status is DecisionStatus.NO_EVIDENCE
     assert (d[T.CREDITS].proposed_start_ms, d[T.CREDITS].proposed_end_ms) == (1_290_000, 1_320_000)
     assert d[T.RECAP].status is DecisionStatus.DISABLED and d[T.INTRO].settings_fingerprint == "f2"
+
+
+def test_a_legacy_needs_review_row_reads_as_no_evidence_and_is_listed_for_deciding_again(store):
+    """The rules before 2026-10-02 stored ``needs_review``; nothing writes it now. Such a row loads as no evidence,
+    keeps its reason and proposal, and lists the file for the decide-again job while the file is on disk."""
+    legacy = store.upsert_file(
+        _ident("/m/Show/Season 01/S01E01.mkv"), duration_ms=1_320_000, season_key=None, is_movie=False
+    )
+    other = store.upsert_file(
+        _ident("/m/Show/Season 01/S01E02.mkv"), duration_ms=1_320_000, season_key=None, is_movie=False
+    )
+    gone = store.upsert_file(
+        _ident("/m/Show/Season 01/S01E03.mkv"), duration_ms=1_320_000, season_key=None, is_movie=False
+    )
+    for rec in (legacy, gone):
+        store._conn.execute(
+            "INSERT INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
+            "settings_fingerprint, decided_at, decided_by) VALUES (?, 'intro', 'needs_review', 'sources disagree', "
+            "1000, 30000, 'fp', '2026-09-01T00:00:00+00:00', '[\"skipdb\"]')",
+            (rec.id,),
+        )
+    store._conn.commit()
+    store.save_decisions(
+        other.id,
+        {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "no evidence")},
+        settings_fingerprint="fp",
+    )
+    store.mark_missing(gone)
+
+    row = store.get_decisions(legacy.id)[T.INTRO]
+    assert (row.status, row.reason, row.proposed_start_ms, row.proposed_end_ms, row.decided_by) == (
+        DecisionStatus.NO_EVIDENCE,
+        "sources disagree",
+        1000,
+        30000,
+        ("skipdb",),
+    )
+    assert store.get_decisions(gone.id)[T.INTRO].status is DecisionStatus.NO_EVIDENCE
+    # Only the legacy rows of files on disk are listed; a row the rules wrote as no evidence isn't decided again.
+    assert store.files_with_legacy_review_decisions() == ["/m/Show/Season 01/S01E01.mkv"]
 
 
 def test_save_decisions_never_overwrites_locked_marker(store):
@@ -221,11 +261,7 @@ class TestUserMarkers:
         rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
         store.save_decisions(
             rec.id,
-            {
-                T.INTRO: TypeDecision(
-                    T.INTRO, DecisionStatus.NEEDS_REVIEW, None, Marker(T.INTRO, 5, 6, ("skipdb",)), "x"
-                )
-            },
+            {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NO_EVIDENCE, None, Marker(T.INTRO, 5, 6, ("skipdb",)), "x")},
             settings_fingerprint="old",
         )
         saved = store.save_user_markers(
@@ -255,7 +291,7 @@ class TestUserMarkers:
         assert decide([], ctx, {T.INTRO: locked})[T.INTRO].reason == store_mod.LOCKED_BY_USER
 
     def test_a_save_whose_decision_write_fails_leaves_no_marker_either(self, store):
-        """P-R1: the save is all or nothing -- a half-saved edit (locked, but still "Needs review") is worse than
+        """P-R1: the save is all or nothing -- a half-saved edit (locked, but still undecided) is worse than
         a refused one."""
         rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
         store._conn = _FailOnPrefix(store._conn, "INSERT OR REPLACE INTO decisions")
@@ -264,13 +300,13 @@ class TestUserMarkers:
         assert store.get_markers(rec.id) == {}
         assert store.get_decisions(rec.id) == {}
 
-    def test_unlock_drops_the_lock_and_sends_the_type_back_to_needs_review(self, store):
+    def test_unlock_drops_the_lock_and_leaves_the_type_undecided_until_the_next_run(self, store):
         rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
         store.save_user_markers(rec.id, [Marker(T.INTRO, 1_000, 30_000, ("user",))], settings_fingerprint="fp")
         assert store.unlock_markers(rec.id, [T.INTRO]) == frozenset({T.INTRO})
         assert store.get_markers(rec.id) == {} and store.get_locked(rec.id) == {}
         row = store.get_decisions(rec.id)[T.INTRO]
-        assert row.status is DecisionStatus.NEEDS_REVIEW
+        assert row.status is DecisionStatus.NO_EVIDENCE
         assert row.reason == store_mod.UNLOCKED_PENDING
         # An empty fingerprint can never equal a real one, so the next run always re-decides and re-publishes.
         assert row.settings_fingerprint == ""
@@ -284,7 +320,7 @@ class TestUserMarkers:
         store.save_user_markers(rec.id, [Marker(T.INTRO, 1_000, 30_000, ("user",))], settings_fingerprint="fp")
         assert not _decisions_changed(store, rec.id, {T.INTRO: _locked_decision()}, "fp")  # a run changes nothing
         store.unlock_markers(rec.id, [T.INTRO])
-        same = {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, store_mod.UNLOCKED_PENDING)}
+        same = {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NO_EVIDENCE, None, None, store_mod.UNLOCKED_PENDING)}
         assert _decisions_changed(store, rec.id, same, "fp")
 
     def test_unlock_leaves_an_unlocked_marker_and_its_decision_alone(self, store):
@@ -313,7 +349,7 @@ def test_save_decisions_stores_the_proposals_own_sources(store):
     store.save_decisions(
         rec.id,
         {
-            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, proposed, "sources disagree"),
+            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NO_EVIDENCE, None, proposed, "sources disagree"),
             T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "nothing found"),
         },
         settings_fingerprint="f",
@@ -851,7 +887,7 @@ def test_a_schema_1_database_gains_the_lock_and_proposal_columns_and_keeps_its_r
             1,
             {
                 T.PREVIEW: TypeDecision(
-                    T.PREVIEW, DecisionStatus.NEEDS_REVIEW, None, Marker(T.PREVIEW, 1, 2, ("skipdb",)), "r"
+                    T.PREVIEW, DecisionStatus.NO_EVIDENCE, None, Marker(T.PREVIEW, 1, 2, ("skipdb",)), "r"
                 )
             },
             settings_fingerprint="fp",
@@ -893,9 +929,9 @@ def test_a_schema_2_database_gains_the_missing_mark_and_keeps_its_rows(tmp_path)
             backup.close()
         rec = s.get_file("/m/Show/S01E01.mkv")
         assert (rec.id, rec.size, rec.missing_since) == (1, 100, None)
-        assert s.files_in_review() == ["/m/Show/S01E01.mkv"]
+        assert s.files_with_legacy_review_decisions() == ["/m/Show/S01E01.mkv"]
         assert s.mark_missing(rec) is True
-        assert s.files_in_review() == [] and s.get_file(rec.canonical_path).missing_since is not None
+        assert s.files_with_legacy_review_decisions() == [] and s.get_file(rec.canonical_path).missing_since is not None
     finally:
         s.close()
 
@@ -1141,15 +1177,15 @@ def test_locked_marker_on_one_file_does_not_block_decisions_for_another(store):
     assert store.get_markers(b.id) == {T.INTRO: Marker(T.INTRO, 5_000, 25_000, ("chapters",))}
 
 
-def test_needs_review_decision_on_one_file_does_not_delete_another_files_marker(store):
+def test_no_evidence_decision_on_one_file_does_not_delete_another_files_marker(store):
     """HIGH A: a mutant dropping file_id from save_decisions' unlocked-marker DELETE (N41) would
-    delete B's marker when A's same-type decision goes to NEEDS_REVIEW."""
+    delete B's marker when A's same-type decision ends with no evidence."""
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
     b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
     store.save_decisions(b.id, {T.INTRO: _decided(T.INTRO, 5_000, 25_000)}, settings_fingerprint="f")
     store.save_decisions(
         a.id,
-        {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "no agreement")},
+        {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "no agreement")},
         settings_fingerprint="f",
     )
     assert store.get_markers(b.id) == {T.INTRO: Marker(T.INTRO, 5_000, 25_000, ("chapters",))}
@@ -1722,7 +1758,7 @@ class TestServerRechecks:
             ("answer-has-a-marker", False),
             ("imported-answer-has-a-marker", False),
             ("unusable-answer", True),
-            ("credits-needs-review", False),
+            ("credits-no-evidence", False),
             ("intro-decided-only", False),
             ("preview-decided", True),
             ("other-server", False),
@@ -1736,9 +1772,9 @@ class TestServerRechecks:
         decisions, answers = None, None
         if change == "answer-has-a-marker":
             answers = {"jf-1": [Candidate(MarkerType.CREDITS, 950_000, None, Source.SERVER_MARKERS)]}
-        elif change == "credits-needs-review":
+        elif change == "credits-no-evidence":
             proposed = Marker(MarkerType.CREDITS, 900_000, 1_000_000, ("chapters",))
-            review = TypeDecision(MarkerType.CREDITS, DecisionStatus.NEEDS_REVIEW, None, proposed, "x")
+            review = TypeDecision(MarkerType.CREDITS, DecisionStatus.NO_EVIDENCE, None, proposed, "x")
             decisions = {MarkerType.CREDITS: review}
         elif change == "intro-decided-only":
             decisions = {MarkerType.INTRO: _decided(MarkerType.INTRO, 10_000, 40_000)}

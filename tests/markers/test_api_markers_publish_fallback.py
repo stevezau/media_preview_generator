@@ -45,10 +45,9 @@ class TestASaveThatWasntWrittenEverywhere:
             ("jf-9", ServerStatus.SKIPPED, "not_enabled", False),  # Intro & Credits off there
             ("jf-1", ServerStatus.WRITTEN, "written", False),
             ("jf-1", ServerStatus.UP_TO_DATE, "unchanged", False),
-            ("jf-1", ServerStatus.NEEDS_REVIEW, "needs_review", False),  # a job can't settle what only the user can
             ("jf-1", ServerStatus.NONE, "nothing_to_publish", False),
         ],
-        ids=["waiting", "failed", "not-ready", "off", "written", "unchanged", "needs-review", "nothing"],
+        ids=["waiting", "failed", "not-ready", "off", "written", "unchanged", "nothing"],
     )
     def test_queues_one_job_only_when_the_editor_shows_a_server_waiting_or_failed(
         self, client, servers, known, episode, published, server_id, status, result, queued

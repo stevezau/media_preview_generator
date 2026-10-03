@@ -29,8 +29,8 @@ from .speed import online_time_scale
 # and found nothing in; spec §5.5 rule 15): the version re-run lists the files holding a carried marker too.
 DECIDE_RULES = "decide_rules"
 DECIDE_RULES_VERSION = 3
-# A decided type whose published marker today's rules would put in Needs review or leave without one keeps it, until new
-# or changed evidence contradicts it (``keep_published``); the reason starts with this.
+# A decided type whose published marker today's rules would leave without one keeps it, until new or changed evidence
+# contradicts it (``keep_published``); the reason starts with this.
 KEPT_BEFORE_RULE_CHANGE = "kept: published before a rule change"
 INTRO_END_TOLERANCE_MS = 5_000
 CREDITS_START_TOLERANCE_MS = 10_000
@@ -103,10 +103,10 @@ SEASON_AUDIO_WITH_SERVER_REASON = (
     "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
 )
 # The level the app decides at: one source that checks the file itself may decide alone (rule 6). The stricter "high"
-# (always two agreeing sources) left most of a library in Needs review and was removed from Settings (owner ruling
+# (always two agreeing sources) left most of a library undecided and was removed from Settings (owner ruling
 # 2026-09-24); ``DecisionContext`` still takes it for the evaluation harness.
 APP_PUBLISH_WHEN = "medium"
-# How a Needs review reason names a source (the words Settings uses for it).
+# How a reason names a source (the words Settings uses for it).
 _SOURCE_LABELS = {
     Source.CHAPTERS: "chapters",
     Source.THEINTRODB: "TheIntroDB",
@@ -119,6 +119,12 @@ _SOURCE_LABELS = {
     Source.SERVER_MARKERS_IMPORTED: "a server's imported marker",
 }
 _READS_THE_FILE = frozenset({Source.CHAPTERS, Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS, Source.CREDITS_TEXT})
+# The file reads that win a disagreement with online or server answers: where those can't settle credits, credit text
+# decides, and an agreeing pair of them doesn't overrule it. Season audio doesn't: an intro disagreement writes nothing.
+# Measured 2026-10-03 (evidence/decide-rules/local/policy-measure.log): where season audio and an online or server
+# intro disagreed, both sides were wrong 6/10; where credit text disagreed it was right or late 45/60 while the
+# disagreeing Plex/SkipDB answer was early twice as often. Chapters are a release's labels, not a read of the file.
+_WINS_A_DISAGREEMENT = frozenset({Source.CREDITS_TEXT})
 _ONLINE_SOURCES = frozenset({Source.INTRODB, Source.THEINTRODB, Source.SKIPDB})
 _NEEDS_ANOTHER_SOURCE = "it needs another source to agree"
 _ONLINE_ALONE = "an online answer needs a check against the file"
@@ -174,7 +180,6 @@ class DecisionStatus(str, Enum):
     """Outcome of deciding one marker type for one file."""
 
     DECIDED = "decided"
-    NEEDS_REVIEW = "needs_review"
     NO_EVIDENCE = "no_evidence"
     DISABLED = "disabled"
 
@@ -489,8 +494,31 @@ def _own_marker(candidate: Candidate, ctx: DecisionContext) -> Marker:
     )
 
 
-def _review(mtype: MarkerType, proposed: Marker | None, reason: str) -> TypeDecision:
-    return TypeDecision(mtype, DecisionStatus.NEEDS_REVIEW, None, proposed, reason)
+def _no_evidence(mtype: MarkerType, proposed: Marker | None, reason: str) -> TypeDecision:
+    """Nothing is published for the type; ``proposed`` is the closest answer there was, kept for the Inspector."""
+    return TypeDecision(mtype, DecisionStatus.NO_EVIDENCE, None, proposed, reason)
+
+
+def _rests_on_credit_text(marker: Marker, candidates: list[Candidate], ctx: DecisionContext) -> bool:
+    """Whether a decided marker's checked edge (an intro's or recap's end, credits' or a preview's start) is one a
+    source that wins a disagreement (``_WINS_A_DISAGREEMENT``, credit text) gave: that source is credited and its answer
+    agrees with the edge. Credit text credited for the other edge alone doesn't make the result its own."""
+    checked = _checked_value(marker.type, marker)
+    return any(
+        c.source in _WINS_A_DISAGREEMENT
+        and c.source.value in marker.decided_by
+        and abs(_agree_value(c, ctx.duration_ms) - checked) <= _tolerance_ms(marker.type)
+        for c in candidates
+    )
+
+
+def _credit_text_with_own_marker(candidates: list[Candidate], ctx: DecisionContext) -> Candidate | None:
+    """The best-ranked candidate that wins a disagreement (``_WINS_A_DISAGREEMENT``, credit text) whose own edges are
+    sane, at "medium"; None otherwise."""
+    if ctx.publish_when != "medium":
+        return None
+    reads = [c for c in candidates if c.source in _WINS_A_DISAGREEMENT and _marker_is_sane(_own_marker(c, ctx), ctx)]
+    return min(reads, key=_sort_key(ctx), default=None)
 
 
 def _agreeing_cliques(candidates: list[Candidate], mtype: MarkerType, ctx: DecisionContext) -> list[list[Candidate]]:
@@ -687,17 +715,19 @@ def _decide_from_chapters(
     When >= 2 independent non-chapter groups agree with the chapter's checked edge, and the safer
     unchecked edge across those agreeing candidates (server markers included: they may shorten the
     skip) is safer than the chapter's own, it replaces the chapter's; decided_by then adds every
-    agreeing source. A replacement that fails sanity sends the type to review.
+    agreeing source. A replacement that fails sanity leaves the chapter's own edges.
 
     An intro chapter longer than the season's limit (``ctx.intro_chapter_limit_ms``) needs one agreeing group instead
     of none, and not markers already on a server (a chapter they alone confirm still counts as chapters alone, rule
     7); the agreeing candidates then shorten the skip the same way and are always credited.
 
-    Credits (rule 3, 2026-09-25): a cluster holding credit text is weighed at credit text's start. When every cluster
-    that contradicts the chapter holds credit text and a source of another group that isn't a server's marker, they
-    decide instead of Needs review (:func:`_text_over_chapter`). A SkipDB answer contradicting a chapter nothing else
-    agrees with sends it to Needs review while credit text is among the sources and hasn't answered, so the file's frames
-    are read (``TEXT_CHECKS_CHAPTER_REASON``).
+    Agreeing clusters that contradict the chapter leave the type undecided, unless credit text (``_WINS_A_DISAGREEMENT``)
+    agrees with the chapter: the chapter then stands, credited with it. Credits (rule 3, 2026-09-25):
+    a cluster holding credit text is weighed at credit text's start. When every cluster that contradicts the chapter
+    holds credit text and a source of another group that isn't a server's marker, they decide instead
+    (:func:`_text_over_chapter`). A SkipDB answer contradicting a chapter nothing else agrees with leaves it undecided
+    while credit text is among the sources and hasn't answered, so the file's frames are read
+    (``TEXT_CHECKS_CHAPTER_REASON``).
     """
     chosen = min(chapters, key=lambda c: _chapter_choice_key(c, ctx.duration_ms))
     chapter_marker = _own_marker(chosen, ctx)
@@ -719,11 +749,23 @@ def _decide_from_chapters(
         if overruled is not None:
             return overruled
         names = ", ".join(contradicting[0][1].decided_by)
-        return _review(mtype, chapter_marker, f"chapters contradicted by agreeing sources: {names}")
+        reason = f"chapters contradicted by agreeing sources: {names}"
+        reads = [
+            c
+            for c in others
+            if c.source in _WINS_A_DISAGREEMENT and abs(_agree_value(c, ctx.duration_ms) - chapter_value) <= tol
+        ]
+        if reads:
+            other_edge = chapter_marker.start_ms if mtype in _START_SEGMENTS else chapter_marker.end_ms
+            sources = {Source.CHAPTERS, *(c.source for c in reads)}
+            marker = _composed_marker(mtype, chapter_value, other_edge, sources, ctx)
+            labels = " and ".join(dict.fromkeys(_SOURCE_LABELS[c.source] for c in reads))
+            return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, f"chapters, {labels} agrees; {reason}")
+        return _no_evidence(mtype, chapter_marker, reason)
     if text_start and _text_should_check_chapter(chapter_value, others, ctx):
-        return _review(mtype, chapter_marker, TEXT_CHECKS_CHAPTER_REASON)
+        return _no_evidence(mtype, chapter_marker, TEXT_CHECKS_CHAPTER_REASON)
     if mtype is MarkerType.INTRO and _audio_should_check_chapter(chapter_marker, others, ctx):
-        return _review(mtype, chapter_marker, AUDIO_CHECKS_CHAPTER_REASON)
+        return _no_evidence(mtype, chapter_marker, AUDIO_CHECKS_CHAPTER_REASON)
     if text_start and (moved := _text_moves_chapter(chosen, chapter_marker, others, ctx)) is not None:
         return moved
 
@@ -734,7 +776,7 @@ def _decide_from_chapters(
         mtype is MarkerType.INTRO and limit is not None and chapter_marker.end_ms - chapter_marker.start_ms > limit
     )
     if suspect and all(c.source in SERVER_SOURCES for c in agreeing):
-        return _review(mtype, chapter_marker, LONG_INTRO_CHAPTER_REASON)
+        return _no_evidence(mtype, chapter_marker, LONG_INTRO_CHAPTER_REASON)
     if len({_group(c) for c in agreeing}) >= (1 if suspect else 2):
         other_edge, _ = _safer_other_edge(mtype, agreeing, ctx)
         if mtype in _START_SEGMENTS:
@@ -745,7 +787,7 @@ def _decide_from_chapters(
         if safer:
             marker = _composed_marker(mtype, chapter_value, other_edge, sources, ctx)
             if not _marker_is_sane(marker, ctx):
-                return _review(mtype, chapter_marker, "chapters and agreeing sources disagree on the other edge")
+                marker = chapter_marker  # the chapter stands as it is; the agreeing sources' edge isn't taken
         elif suspect:  # an intro: the chapter keeps its own start
             marker = _composed_marker(mtype, chapter_value, chapter_marker.start_ms, sources, ctx)
     return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "chapters")
@@ -759,8 +801,8 @@ def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: 
     composes.
 
     Returns:
-        The decision, or None when a cluster lacks such a pair, the clusters disagree with each other, or the composed
-        marker fails sanity: the chapter then goes to Needs review as before.
+        The decision, or None when a cluster lacks such a pair or the clusters disagree with each other: the chapter
+        is then judged as before (``_decide_from_chapters``).
     """
     for cluster in clusters:
         if not any(c.source is Source.CREDITS_TEXT for c in cluster):
@@ -768,9 +810,15 @@ def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: 
         if not any(c.source not in SERVER_SOURCES and _group(c) != Source.CREDITS_TEXT.value for c in cluster):
             return None
     decision = _decide_from_cliques(mtype, clusters, ctx, text_start=True)
-    if decision.status is not DecisionStatus.DECIDED:
+    if not _agreed(decision):
         return None
     return replace(decision, reason=TEXT_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
+
+
+def _agreed(decision: TypeDecision) -> bool:
+    """Whether :func:`_decide_from_cliques` decided from the agreement itself, not from one file read's own edges
+    (its fallback when the composed marker fails sanity): one source never overrules a chapter (rule 3)."""
+    return decision.status is DecisionStatus.DECIDED and len(decision.marker.decided_by) > 1
 
 
 def chapter_hint(chapter_start_ms: int, *, moves: bool, to_ms: int | None = None) -> str:
@@ -892,13 +940,13 @@ def _audio_over_chapter(clusters: list[list[Candidate]], chapter: Marker, ctx: D
     answer and a source of another group that isn't a server's marker, and they end the intro inside the chapter (rule
     3): the chapter then runs past the intro the file's own audio and an independent answer both end, into the episode
     (2026-09-27 audit: a streaming release's "Intro" chapter ran 28 s into the episode). Composed as rule 4 composes, so
-    season audio supplies the end (rule 13). A chapter that ends *before* them stays in Needs review, as before: on the
+    season audio supplies the end (rule 13). A chapter that ends *before* them is left undecided, as before: on the
     library chapter set the chapter was the right one every time (Family Guy S14, a 15 s title card where season audio
     and SkipDB ran on 15 s into the episode).
 
     Returns:
-        The decision, or None when a cluster lacks such a pair, the clusters disagree with each other, the composed
-        marker doesn't end inside the chapter or fails sanity: the chapter then goes to Needs review as before.
+        The decision, or None when a cluster lacks such a pair, the clusters disagree with each other, or the decided
+        marker doesn't end inside the chapter: the chapter is then judged as before (``_decide_from_chapters``).
     """
     for cluster in clusters:
         if not any(c.source is Source.SEASON_AUDIO for c in cluster):
@@ -906,7 +954,7 @@ def _audio_over_chapter(clusters: list[list[Candidate]], chapter: Marker, ctx: D
         if not any(c.source not in SERVER_SOURCES and _group(c) != Source.SEASON_AUDIO.value for c in cluster):
             return None
     decision = _decide_from_cliques(MarkerType.INTRO, clusters, ctx)
-    if decision.status is not DecisionStatus.DECIDED:
+    if not _agreed(decision):
         return None
     if not chapter.start_ms < decision.marker.end_ms < chapter.end_ms:
         return None
@@ -952,20 +1000,32 @@ def _text_should_check_chapter(chapter_value: int, others: list[Candidate], ctx:
 def _decide_from_cliques(
     mtype: MarkerType, cliques: list[list[Candidate]], ctx: DecisionContext, *, text_start: bool = False
 ) -> TypeDecision:
+    """The decision of agreeing clusters. Clusters that conflict with each other leave the type undecided, unless
+    exactly one of them holds credit text (``_WINS_A_DISAGREEMENT``): that cluster decides. A composed marker that
+    fails sanity gives way to credit text's own edges, or leaves the type undecided; an intro's never has any."""
     composed = [_compose_cluster(cl, mtype, ctx, text_start=text_start) for cl in cliques]
     values = [_checked_value(mtype, m) for m, _ in composed]
+    outvoted = ""
     if max(values) - min(values) > _tolerance_ms(mtype):
         rank = _sort_key(ctx)
         # Stable sort: clusters sharing a winner keep ascending compared-value order.
         ranked = sorted(composed, key=lambda mw: rank(mw[1]))
         names = " vs ".join(dict.fromkeys(_group(winner) for _, winner in ranked))
-        return _review(mtype, ranked[0][0], f"agreeing sources conflict: {names}")
+        read = [cl for cl in cliques if any(c.source in _WINS_A_DISAGREEMENT for c in cl)]
+        if len(read) != 1:
+            return _no_evidence(mtype, ranked[0][0], f"agreeing sources conflict: {names}")
+        cliques = read
+        outvoted = f"; agreeing sources conflict ({names}), credit text's cluster decides"
 
     merged = list({id(c): c for cl in cliques for c in cl}.values())
     marker, winner = _compose_cluster(merged, mtype, ctx, text_start=text_start)
     if not _marker_is_sane(marker, ctx):
-        return _review(mtype, _own_marker(winner, ctx), "agreeing sources disagree on the other edge")
-    reason = "sources agree: " + ", ".join(marker.decided_by)
+        read = _credit_text_with_own_marker(merged, ctx)
+        if read is None:
+            return _no_evidence(mtype, _own_marker(winner, ctx), "agreeing sources disagree on the other edge")
+        reason = f"single source ({read.source.value}); agreeing sources disagree on the other edge"
+        return TypeDecision(mtype, DecisionStatus.DECIDED, _own_marker(read, ctx), None, reason)
+    reason = "sources agree: " + ", ".join(marker.decided_by) + outvoted
     if mtype is MarkerType.CREDITS and not text_start and winner.source is Source.CREDITS_TEXT:
         others = {c.source for c in merged if c.source.value in marker.decided_by} - SERVER_SOURCES - {winner.source}
         if others:
@@ -1014,6 +1074,12 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     other source that may decide alone forms a cluster with an agreeing server marker. A group whose own candidates
     don't all agree pairwise contradicts itself. The checked edge comes from the best-ranked candidate, the unchecked
     edge is the safer value across the group's candidates, and decided_by names the sources that supplied either edge.
+
+    Where a second group disagrees, or the group's own candidates give an insane other edge, credit text
+    (``_WINS_A_DISAGREEMENT``) still decides at "medium" with its own edges: the file's own frames outrank an online
+    answer timed on whichever release. Season audio doesn't: an intro disagreement writes nothing (measured
+    2026-10-03, both sides wrong 6/10). A group that contradicts itself, or sources none of which may decide alone,
+    decide nothing.
     """
     ranked = sorted(sane, key=_sort_key(ctx))
     groups = sorted({_group(c) for c in sane})
@@ -1025,26 +1091,33 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     )
     if ctx.publish_when == "medium" and proposal is not None and servers_only_agree:
         if not all(_agree(a, b, ctx.duration_ms) for a, b in combinations(own, 2)):
-            return _review(mtype, _own_marker(proposal, ctx), "source disagrees with itself")
+            return _no_evidence(mtype, _own_marker(proposal, ctx), "source disagrees with itself")
         other_edge, edge_suppliers = _safer_other_edge(mtype, own, ctx)
         sources = {proposal.source, *(c.source for c in edge_suppliers)}
         marker = _composed_marker(mtype, _agree_value(proposal, ctx.duration_ms), other_edge, sources, ctx)
+        reason = f"single source ({proposal.source.value})"
         if not _marker_is_sane(marker, ctx):
-            return _review(mtype, _own_marker(proposal, ctx), "sources disagree on the other edge")
-        return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, f"single source ({proposal.source.value})")
+            if proposal.source not in _WINS_A_DISAGREEMENT:
+                return _no_evidence(mtype, _own_marker(proposal, ctx), "sources disagree on the other edge")
+            marker, reason = _own_marker(proposal, ctx), f"{reason}; sources disagree on the other edge"
+        return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, reason)
     disagree = any(_group(a) != _group(b) and not _agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2))
     if disagree:
         reason = f"sources disagree: {', '.join(groups)}"
+        proposal = next((c for c in ranked if c.source in _WINS_A_DISAGREEMENT), None)
     elif _only_audio_and_server_markers({c.source for c in sane}):
         reason = SEASON_AUDIO_WITH_SERVER_REASON
     else:
         alone_allowed = proposal is not None and ctx.publish_when != "medium"
         reason = _lone_answer_reason(mtype, sane, ranked[0], alone_allowed=alone_allowed)
-    return _review(mtype, _own_marker(ranked[0], ctx), reason)
+    if ctx.publish_when == "medium" and proposal is not None:
+        reason = f"single source ({proposal.source.value}); {reason}"
+        return TypeDecision(mtype, DecisionStatus.DECIDED, _own_marker(proposal, ctx), None, reason)
+    return _no_evidence(mtype, _own_marker(ranked[0], ctx), reason)
 
 
 def _lone_answer_reason(mtype: MarkerType, sane: list[Candidate], best: Candidate, *, alone_allowed: bool) -> str:
-    """Why a type nothing disagrees about still needs review: only one source (or only copies of one) answered.
+    """Why a type nothing disagrees about is still undecided: only one source (or only copies of one) answered.
 
     Args:
         mtype: The marker type.
@@ -1219,11 +1292,12 @@ def _decide_type(
     else:
         decision = _decide_from_single_source(mtype, sane, ctx)
 
-    if decision.status is DecisionStatus.DECIDED:
+    # An agreeing pair that contradicts the result undoes it, unless the result rests on credit text.
+    if decision.status is DecisionStatus.DECIDED and not _rests_on_credit_text(decision.marker, sane, ctx):
         contradicting = _contradicting_groups(decision.marker, guard_pool, ctx)
         if contradicting:
             reason = f"agreeing sources contradict the result: {', '.join(contradicting)}"
-            return _review(mtype, decision.marker, reason)
+            return _no_evidence(mtype, decision.marker, reason)
     return decision
 
 
@@ -1238,7 +1312,7 @@ def _shorten_to_server_markers(decision: TypeDecision, sane: list[Candidate], ct
     so a server that splits its credits into pieces can't pull the start to its last piece -- and the latest offer
     wins. Our own markers and another cut's never reach here: the pipeline doesn't store them as evidence. Runs last,
     after the contradiction guard and the overlap checks have judged the unshortened markers, so it can only shorten a
-    decided marker and never turn Needs review into decided.
+    decided marker and never decide an undecided type.
 
     Args:
         decision: A decided, unlocked type.
@@ -1246,8 +1320,8 @@ def _shorten_to_server_markers(decision: TypeDecision, sane: list[Candidate], ct
         ctx: The file's context.
 
     Returns:
-        The decision unchanged, the shortened marker with ``server_markers`` added to decided_by, or Needs review
-        (the unshortened marker proposed) when the shortened marker fails sanity.
+        The decision unchanged (also when the shortened marker would fail sanity), or the shortened marker with
+        ``server_markers`` added to decided_by.
     """
     marker = decision.marker
     mtype = decision.type
@@ -1272,7 +1346,7 @@ def _shorten_to_server_markers(decision: TypeDecision, sane: list[Candidate], ct
     servers = sorted(origin for origin, value in first_start.items() if value == start and origin)
     note = f"start {SHORTENED_NOTE}" + (f" ({', '.join(servers)})" if servers else "")
     if not _marker_is_sane(shortened, ctx):
-        return _review(mtype, marker, f"{note} fails sanity checks")
+        return decision
     return replace(decision, marker=shortened, reason=f"{decision.reason}; {note}")
 
 
@@ -1308,7 +1382,7 @@ def keep_published(
     """Today's decision for a type, or the marker published before the rules changed, kept in its place.
 
     A re-decide that only a rule change causes never takes a published marker off the servers (owner ruling
-    2026-09-25): where today's rules leave the type in Needs review or without a marker, the marker stays while a source
+    2026-09-25): where today's rules leave the type without a marker, the marker stays while a source
     it was decided by still gives an answer that agrees with it, and no new or changed answer disagrees with it. An
     answer that disagreed before and is only stored again (a forced run, a parser's new version reading the same
     answer) is no news. An answer agrees as two sources do (rule 4): its end within 5 s for an intro or recap, its start
@@ -1333,7 +1407,7 @@ def keep_published(
     Returns:
         ``decision``, or the kept marker decided with the reason :data:`KEPT_BEFORE_RULE_CHANGE` and today's.
     """
-    if decision.status not in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE):
+    if decision.status is not DecisionStatus.NO_EVIDENCE:
         return decision
     checked = _checked_value(published.type, published)
     candidates = list(candidates)
@@ -1381,7 +1455,7 @@ def _overlap_ms(a: Marker, b: Marker) -> int:
 
 
 def _demote(decision: TypeDecision, reason: str) -> TypeDecision:
-    return _review(decision.type, decision.marker, reason)
+    return _no_evidence(decision.type, decision.marker, reason)
 
 
 def _apply_overlap_demotions(out: dict[MarkerType, TypeDecision]) -> None:

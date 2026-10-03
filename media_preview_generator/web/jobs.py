@@ -360,6 +360,8 @@ class JobProgress:
     # Intro & Credits: files per marker type and source group that decided them, {"credits": {"chapters": 40}}
     # (markers.source_counts). None on other jobs.
     marker_sources: dict[str, dict[str, int]] | None = None
+    # Files a GPU worker finished on the CPU because its GPU failed (JobTracker.cpu_fallback_files).
+    cpu_fallback_files: int = 0
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -2047,6 +2049,22 @@ class JobManager:
             job = self._jobs.get(job_id)
             if job:
                 job.progress.outcome = outcome
+            return job
+
+    def set_job_cpu_fallback_files(self, job_id: str, count: int) -> Optional["Job"]:
+        """Store how many of a job's files ran on the CPU because the GPU failed.
+
+        Args:
+            job_id: Job identifier.
+            count: Files so far (``JobTracker.cpu_fallback_files``).
+
+        Returns:
+            The job, or None when there's no such job.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.progress.cpu_fallback_files = count
             return job
 
     def set_marker_sources(self, job_id: str, counts: dict[str, dict[str, int]]) -> Optional["Job"]:

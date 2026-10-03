@@ -27,6 +27,8 @@ from ..processing.generator import (
     gpu_fallback_advice,
 )
 from ..utils import format_display_title, redact_secrets, redacted_traceback
+from .gpu_fallback import get_gpu_fallback_tracker
+from .worker_naming import friendly_device_label
 
 # Map thread_id -> job_id. The previous implementation stored a flat set
 # of "is a job thread" booleans; that broke as soon as multiple jobs ran
@@ -116,6 +118,26 @@ def resolve_per_item_pin(config, item, registry) -> str | None:
         origin_is_plex = bool(origin_cfg and origin_cfg.type is _ST.PLEX)
         return item.server_id if not origin_is_plex else None
     return None
+
+
+def _extracted_frames(ms_result) -> bool:
+    """Whether FFmpeg decoded this file for this run: a publisher row that took frames (``frame_source`` "extracted"
+    on a status that describes a frame outcome), as opposed to frames from the cache or an output already there.
+
+    Args:
+        ms_result: The :class:`MultiServerResult` of the run.
+
+    Returns:
+        True when at least one publisher row records extracted frames.
+    """
+    # Lazy: the orchestrator imports this module at load time.
+    from .orchestrator import _FRAME_PROVENANCE_STATUSES
+
+    return any(
+        getattr(p.status, "value", str(p.status)) in _FRAME_PROVENANCE_STATUSES
+        and (p.frame_source or "extracted") == "extracted"
+        for p in getattr(ms_result, "publishers", None) or []
+    )
 
 
 # Emit cadences for ``process_items_headless``'s poll loop. Module-level so
@@ -243,6 +265,9 @@ class Worker:
         # happened.
         self.fallback_active = False
         self.fallback_reason: str | None = None
+        # True once the last finished file needed the CPU fallback (cancelled files stay False); the dispatcher
+        # folds it into the job's "N files ran on the CPU because the GPU failed" tally.
+        self.last_task_cpu_fallback = False
 
         # Per-worker removal flag set by reconcile_gpu_workers for busy
         # workers that should be retired after completing their current task.
@@ -390,6 +415,7 @@ class Worker:
         self.task_start_time = time.time()
         self.fallback_active = False
         self.fallback_reason = None
+        self.last_task_cpu_fallback = False
         self.cancel_check = cancel_check
         self.pause_check = pause_check
         self.process_fn = process_fn
@@ -609,8 +635,11 @@ class Worker:
                     )
                 self.last_publishers = rows
 
+            cancelled = False
+            gpu_decoded = False
             try:
                 ms_result = _run_once(self.gpu, self.gpu_device)
+                gpu_decoded = self.gpu is not None and _extracted_frames(ms_result)
                 _capture_publishers(ms_result)
                 result = _outcome_for_multi_server_status(ms_result.status)
                 self.outcome_counts[result.value] += 1
@@ -621,6 +650,7 @@ class Worker:
                 _persist(result)
             except CancellationError:
                 ctx_logger.info("{} cancelled while processing {}", self.display_name, display_name)
+                cancelled = True
                 self.outcome_counts["failed"] += 1
                 self.failed += 1
                 _persist(ProcessingResult.FAILED, "cancelled by user")
@@ -634,6 +664,7 @@ class Worker:
                     reason = str(e) or "GPU processing failed"
                     if self.cancel_check and self.cancel_check():
                         ctx_logger.info("{} cancelled before CPU fallback for {}", self.display_name, display_name)
+                        cancelled = True
                         self.outcome_counts["failed"] += 1
                         self.failed += 1
                         _persist(ProcessingResult.FAILED, "cancelled before CPU fallback")
@@ -665,6 +696,7 @@ class Worker:
                             _persist(result, f"CPU fallback after GPU error: {reason}")
                         except CancellationError:
                             ctx_logger.info("{} cancelled during CPU fallback for {}", self.display_name, display_name)
+                            cancelled = True
                             self.outcome_counts["failed"] += 1
                             self.failed += 1
                             _persist(ProcessingResult.FAILED, "cancelled during CPU fallback")
@@ -704,8 +736,37 @@ class Worker:
                 self.failed += 1
                 _persist(ProcessingResult.FAILED, str(exc) or type(exc).__name__)
             finally:
+                # Counters are final by here; the dispatcher reads them once this thread has exited.
                 if self._done_event is not None:
                     self._done_event.set()
+                self._record_gpu_file(gpu_decoded=gpu_decoded, cancelled=cancelled)
+
+    def _record_gpu_file(self, *, gpu_decoded: bool, cancelled: bool) -> None:
+        """Count a finished file for this GPU's fallback streak and the job's CPU-fallback tally.
+
+        A file that needed the CPU counts as fallen back; one the GPU itself decoded counts as ok and ends a streak;
+        any other (frames from the cache, output already there, failed outright, cancelled) says nothing about the
+        GPU and is not recorded. CPU workers never record. Called after the file's counters and done event: nothing
+        here may stop the worker, so a tracker failure is logged and dropped.
+
+        Args:
+            gpu_decoded: The GPU decoded this file (not the CPU rerun).
+            cancelled: The file was cancelled before it finished.
+        """
+        if self.worker_type != "GPU" or cancelled:
+            return
+        self.last_task_cpu_fallback = self.fallback_active
+        if not (self.fallback_active or gpu_decoded):
+            return
+        try:
+            get_gpu_fallback_tracker().record(
+                self.gpu_device or self.gpu or "GPU",
+                friendly_device_label({"name": self.gpu_name or ""}, self.gpu_device, self.gpu),
+                fell_back=self.fallback_active,
+                reason=self.fallback_reason,
+            )
+        except Exception as exc:
+            logger.debug("{}: the GPU fallback tracker failed: {}: {}", self.display_name, type(exc).__name__, exc)
 
     def _log_pickup(self, item, display_name: str) -> None:
         """Log that this worker started a non-preview item: the kind's own line, or the generic one.
@@ -771,12 +832,15 @@ class Worker:
                 )
                 return ItemOutcome("failed", text)
 
+            cancelled = False
             try:
                 outcome = _run(self.gpu, self.gpu_device)
             except CancellationError:
+                cancelled = True
                 outcome = ItemOutcome("failed", "cancelled by user")
             except CodecNotSupportedError as exc:
-                if self.worker_type == "GPU" and not (self.cancel_check and self.cancel_check()):
+                cancelled = bool(self.cancel_check and self.cancel_check())
+                if self.worker_type == "GPU" and not cancelled:
                     self.fallback_active = True
                     self.fallback_reason = redact_secrets(str(exc)) or "GPU processing failed"
                     logger.warning(
@@ -788,6 +852,7 @@ class Worker:
                     try:
                         outcome = _run(None, None)
                     except CancellationError:
+                        cancelled = True
                         outcome = ItemOutcome("failed", "cancelled during CPU fallback")
                     except Exception as fallback_exc:
                         outcome = _failed(f"CPU fallback failed: {fallback_exc}", fallback_exc)
@@ -808,6 +873,8 @@ class Worker:
                 self.failed += 1
             else:
                 self.completed += 1
+            # A kind doesn't say what the GPU decoded: a file it finished on this GPU counts as the GPU's.
+            self._record_gpu_file(gpu_decoded=not outcome.failed, cancelled=cancelled)
             try:
                 raw_rows = list(outcome.publisher_rows or [])
             except Exception:

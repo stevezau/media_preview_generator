@@ -77,7 +77,7 @@ class TestDecidedGroups:
     def test_only_decided_types_count(self):
         decisions = {
             T.INTRO: TypeDecision(T.INTRO, DecisionStatus.DECIDED, _marker("skipdb", mtype=T.INTRO), None, ""),
-            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, _marker("theintrodb"), "one"),
+            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NO_EVIDENCE, None, _marker("theintrodb"), "one"),
             T.RECAP: TypeDecision(T.RECAP, DecisionStatus.NO_EVIDENCE, None, None, ""),
             T.PREVIEW: TypeDecision(T.PREVIEW, DecisionStatus.DISABLED, None, None, ""),
         }
@@ -144,7 +144,7 @@ class TestStoredGroups:
             rec.id,
             {
                 T.INTRO: TypeDecision(T.INTRO, DecisionStatus.DECIDED, _marker("chapters", mtype=T.INTRO), None, ""),
-                T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, None, "one source"),
+                T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NO_EVIDENCE, None, None, "one source"),
             },
             settings_fingerprint="fp",
         )
@@ -176,7 +176,7 @@ class TestWhichFilesCount:
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert ctx.decided_by.snapshot() == {"intro": {"theintrodb+skipdb": 1}}
 
-    def test_a_type_needing_review_isnt_counted_but_the_decided_one_is(self, store, media):
+    def test_an_undecided_type_isnt_counted_but_the_decided_one_is(self, store, media):
         # TheIntroDB alone can't publish an intro; the credits chapter decides credits.
         clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
         ctx = _ctx(store, _registry(media, ServerType.PLEX), clients=clients)
@@ -186,13 +186,13 @@ class TestWhichFilesCount:
         assert out.outcome_key == FileOutcome.PUBLISHED.value  # the credits were written
         assert ctx.decided_by.snapshot() == {"credits": {"chapters": 1}}
 
-    def test_a_file_needing_review_for_every_type_counts_nothing(self, store, media):
+    def test_a_file_with_every_type_undecided_counts_nothing(self, store, media):
         clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
         ctx = _ctx(store, _registry(media, ServerType.PLEX), clients=clients, settings_raw=INTRO_ONLY)
 
         out, _ = _run(ctx, media, {"plex-1": ready_publisher()})
 
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value
         assert ctx.decided_by.snapshot() == {}
 
     def test_a_failed_file_counts_nothing_though_its_markers_were_decided(self, store, media):

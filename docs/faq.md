@@ -136,7 +136,7 @@ Yes, on Plex, Emby and Jellyfin, once you turn it on for each server. What each 
 
 ### How does it find intros and credits?
 
-From the file's chapters, online skip databases, the theme song a season's episodes share, or the credit roll itself. It does this once per file and sends the result to every server that has the file. When it isn't sure, the file waits in **Needs review** instead of getting a guess.
+From the file's chapters, online skip databases, the theme song a season's episodes share, or the credit roll itself. It does this once per file and sends the result to every server that has the file. If it can't confirm an intro or credits from the file itself, it writes nothing — you can still add or adjust one in the Inspector.
 
 ### Will it overwrite Plex's or Emby's own markers?
 

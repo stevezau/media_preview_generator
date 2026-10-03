@@ -1877,9 +1877,9 @@ class TestMigrationNoticeUserFacingSplit:
         notice = settings_manager.get("_pending_migration_notice")
         assert isinstance(notice, dict)
         notes = notice.get("notes") or []
-        # Exactly 2 entries — one from v7, one from v11. Pinning the count
-        # catches a regression where extra raw dev strings get appended on
-        # top of the friendly ones.
+        # Exactly 2 entries — one each from v7 and v11 (v20 says nothing on an install that never turned Intro &
+        # Credits on). Pinning the count catches a regression where extra raw dev strings get appended on top of
+        # the friendly ones.
         assert len(notes) == 2, f"expected 2 user notes (v7+v11), got {len(notes)}: {notes}"
         joined = " ".join(notes)
         assert "multi-server format" in joined, f"v7 user-facing note missing: {notes}"
@@ -1923,7 +1923,7 @@ class TestMigrationNoticeUserFacingSplit:
 
         notice = settings_manager.get("_pending_migration_notice") or {}
         notes = notice.get("notes") or []
-        assert len(notes) == 1, f"expected 1 user note (v13 only), got {len(notes)}: {notes}"
+        assert len(notes) == 1, f"expected 1 user note (v13), got {len(notes)}: {notes}"
         joined = notes[0]
         assert "every server consistently" in joined, (
             f"v13 user-facing note missing the expected friendly copy: {notes}"
@@ -2581,7 +2581,7 @@ class TestMigrateToV14:
         _migrate_schema(settings_manager)
 
         notes = (settings_manager.get("_pending_migration_notice") or {}).get("notes") or []
-        assert len(notes) == 1, f"expected 1 user note (v14 only), got {notes}"
+        assert len(notes) == 1, f"expected 1 user note (v14), got {notes}"
         assert "Incoming job priority" in notes[0], notes
         assert not notes[0].startswith("v14:"), f"dev prefix leaked into the user notice: {notes}"
         assert "unpinned" not in notes[0], f"dev wording leaked into the user notice: {notes}"
@@ -2824,7 +2824,7 @@ class TestMigrationNoticeBackupAndDismissal:
         _migrate_schema(sm)
 
         notice = sm.get("_pending_migration_notice")
-        this_upgrades_notes = [_USER_FACING_NOTES[14]]
+        this_upgrades_notes = [_USER_FACING_NOTES[14]]  # v20 says nothing: no server has Intro & Credits on
         if earlier_notice == "unread":
             assert notice["notes"] == ["An earlier note.", *this_upgrades_notes]
             assert notice["from"] == 11
@@ -2840,7 +2840,10 @@ class TestMigrationNoticeBackupAndDismissal:
         from media_preview_generator.upgrade import _migrate_schema
         from media_preview_generator.web.notifications import SCHEMA_MIGRATION_ID
 
-        sm = self._boot(tmp_path, {"_schema_version": 18, "dismissed_notifications": [SCHEMA_MIGRATION_ID]})
+        # A boot already at the current version runs no step and writes no notice.
+        sm = self._boot(
+            tmp_path, {"_schema_version": _CURRENT_SCHEMA_VERSION, "dismissed_notifications": [SCHEMA_MIGRATION_ID]}
+        )
 
         _migrate_schema(sm)
 
@@ -2899,7 +2902,7 @@ class TestMigrateToV15:
         assert len(notes) == 1
         assert _migrate_to_v15(settings_manager) == []
 
-    def test_schema_chain_from_14_leaves_no_user_note(self, settings_manager):
+    def test_schema_chain_from_14_leaves_no_v16_user_note(self, settings_manager):
         # v15 seeds the block without the removed publish rule, so v16 has nothing to tell a new Intro & Credits user.
         from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, _migrate_schema
 
@@ -2908,7 +2911,7 @@ class TestMigrateToV15:
         assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
         assert "publish_when" not in settings_manager.get("markers")
         notice = settings_manager.get("_pending_migration_notice") or {}
-        assert notice.get("notes", []) == []
+        assert notice.get("notes", []) == []  # v20 says nothing either: no server has Intro & Credits on
 
 
 class TestMigrateToV16:
@@ -2962,7 +2965,7 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 20
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[16]]
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
@@ -2990,13 +2993,17 @@ class TestMigrateToV17:
 
     @pytest.mark.parametrize("start", [15, 16], ids=["from-v15", "from-v16"])
     def test_the_schema_step_runs_once_and_leaves_no_user_note(self, settings_manager, start):
-        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, DECIDE_AGAIN_KEY, _migrate_schema
+        from media_preview_generator.upgrade import (
+            _CURRENT_SCHEMA_VERSION,
+            DECIDE_AGAIN_KEY,
+            _migrate_schema,
+        )
 
         settings_manager.apply_changes(updates={"_schema_version": start})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 20
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
-        assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
+        assert settings_manager.get("_pending_migration_notice") is None  # v20 too: Intro & Credits is on nowhere
 
         # The completed job clears the request; a later start at the current version doesn't ask again.
         settings_manager.delete(DECIDE_AGAIN_KEY)
@@ -3019,13 +3026,78 @@ class TestMigrateToV18:
         assert settings_manager.get("markers") == block
 
     def test_a_start_after_v17_s_job_completed_asks_again_once(self, settings_manager):
-        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, DECIDE_AGAIN_KEY, _migrate_schema
+        from media_preview_generator.upgrade import (
+            _CURRENT_SCHEMA_VERSION,
+            DECIDE_AGAIN_KEY,
+            _migrate_schema,
+        )
 
         settings_manager.apply_changes(updates={"_schema_version": 17})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 20
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
-        assert (settings_manager.get("_pending_migration_notice") or {}).get("notes", []) == []
+        assert settings_manager.get("_pending_migration_notice") is None  # v20 too: Intro & Credits is on nowhere
+        settings_manager.delete(DECIDE_AGAIN_KEY)
+        _migrate_schema(settings_manager)
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
+
+
+class TestMigrateToV20:
+    """Needs review is gone (owner, 2026-10-02): every type ends decided or with nothing found, so the next start
+    decides the files still stored under the old status again (``DECIDE_AGAIN_KEY``)."""
+
+    PLEX_WITH_MARKERS_ON = {"id": "p1", "type": "plex", "name": "P", "markers": {"enabled": True, "library_ids": None}}
+
+    def test_it_asks_for_the_decide_again_job_and_changes_nothing_else(self, settings_manager):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v20
+
+        block = {"detect": {"intro": True, "credits": True, "recap": False}}
+        settings_manager.apply_changes(updates={"markers": dict(block), "media_servers": [self.PLEX_WITH_MARKERS_ON]})
+        assert len(_migrate_to_v20(settings_manager)) == 1
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get("markers") == block
+        assert settings_manager.get("media_servers") == [self.PLEX_WITH_MARKERS_ON]
+
+    # Only an install with Intro & Credits on can hold Needs review files; every install has a ``markers`` block since
+    # v15, so the note would otherwise reach people who never saw the list.
+    @pytest.mark.parametrize(
+        "servers",
+        [
+            None,
+            [],
+            [{"id": "p1", "type": "plex", "name": "P"}],
+            [{"id": "p1", "type": "plex", "markers": {"enabled": False}}],
+        ],
+        ids=["no-servers-key", "no-servers", "server-without-markers", "markers-off"],
+    )
+    def test_an_install_without_intro_credits_gets_the_job_but_no_note(self, settings_manager, servers):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v20
+
+        updates = {"markers": {"detect": {"intro": True, "credits": True, "recap": False}}}
+        if servers is not None:
+            updates["media_servers"] = servers
+        settings_manager.apply_changes(updates=updates)
+        assert _migrate_to_v20(settings_manager) == []
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+
+    def test_the_schema_step_runs_once_and_tells_the_user_where_needs_review_went(self, settings_manager):
+        from media_preview_generator.markers.triggers import DECIDE_AGAIN_JOB_NAME
+        from media_preview_generator.upgrade import (
+            _CURRENT_SCHEMA_VERSION,
+            _USER_FACING_NOTES,
+            DECIDE_AGAIN_KEY,
+            _migrate_schema,
+        )
+
+        settings_manager.apply_changes(updates={"_schema_version": 19, "media_servers": [self.PLEX_WITH_MARKERS_ON]})
+        _migrate_schema(settings_manager)
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 20
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[20]]
+        # The job this queues is named for what it does now; the status it clears up is gone.
+        assert "Needs review" not in DECIDE_AGAIN_JOB_NAME
+
+        # The completed job clears the request; a later start at the current version doesn't ask again.
         settings_manager.delete(DECIDE_AGAIN_KEY)
         _migrate_schema(settings_manager)
         assert settings_manager.get(DECIDE_AGAIN_KEY) is None
@@ -3142,7 +3214,7 @@ class TestMigrateToV19:
             }
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 19
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 20
         assert settings_manager.processing_auto_paused is True
 
         # Pause all takes the pause over (and drops the flag); a later start doesn't mark it again (the version gate).

@@ -12,7 +12,7 @@ The rule is narrow on purpose:
   nothing gives no candidate, and counts the same: none of them tells an intro that isn't there from one it missed
   (a file without an intro chapter, a season match that didn't pass its guards, no crowd entry, no credit roll
   found). What does tell a different cut, the length, is checked instead. Any candidate of the type, even one that
-  fails the sanity checks or leaves the type in review, is the new file's own evidence and wins; so do a user's lock
+  fails the sanity checks or leaves the type undecided, is the new file's own evidence and wins; so do a user's lock
   and a type left off or to a server's own marker.
 - Only within 1 s of the replaced file's length, and only a marker at least one of whose deciding sources is still
   turned on (a user's marker, or one carried before, whose sources aren't known, always counts).

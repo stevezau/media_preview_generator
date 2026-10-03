@@ -8,7 +8,7 @@ versions with today's and queues the files whose decisions could move with them 
 jobs, at most ``BATCH_FILES`` a job with ``BATCH_GAP`` between jobs (``triggers.submit_version_reruns``).
 
 A file is listed for a detector when an unlocked decided type rests on its older answer, or a type it answers is still
-undecided (Needs review, no evidence) beside one. The two detectors that read the file check what other sources
+undecided (no evidence) beside one. The two detectors that read the file check what other sources
 decided (credit text moves a credits chapter's start and wins an online start, season audio checks an intro chapter
 and a lone online answer: spec §5.5 rules 3, 4 and 16), so their older answer lists an unlocked decided type whatever
 decided it: a credits chapter credit text version 6 kept, which version 7 moves, is read again although nothing else
@@ -57,12 +57,13 @@ BATCH_GAP = timedelta(minutes=30)
 # decided times; its version names that rule.
 PUBLISHED_TIMES = "published_times"
 PUBLISHED_TIMES_VERSION = 1
-# Not a detector: a file whose publish waits for its Plex item's other versions
-# (``MarkerStore.files_waiting_for_other_versions``). Until this rule's version 1 the item waited for good for a
-# replaced version whose season folder went with it (``plex_db._where_on_disk``), long after its retries ran out. The
-# file's next run publishes it, or queues the version never checked.
+# Not a detector: a file whose last publish was left waiting for its Plex item's other versions
+# (``MarkerStore.files_waiting_for_other_versions``). Version 1: the item waited for good for a replaced version whose
+# season folder went with it. Version 2 (2026-10-02): an item no longer waits for its versions to agree at all (the
+# first version holding a type decides it, ``publishers.base.agreed_across_versions``), so every file still recorded
+# as waiting is published once under that rule.
 WAITING_VERSIONS = "waiting_versions"
-WAITING_VERSIONS_VERSION = 1
+WAITING_VERSIONS_VERSION = 2
 
 _EVERY_TYPE = frozenset(MarkerType)
 

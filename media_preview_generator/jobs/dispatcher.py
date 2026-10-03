@@ -107,6 +107,9 @@ class JobTracker:
             self.outcome_counts[key] = self.outcome_counts.get(key, 0) + count
             self.successful += count
             self.total_items += count
+        # Files a GPU worker finished on the CPU because its GPU failed (guarded by _counts_lock); the job summary's
+        # "N files ran on the CPU because the GPU failed" line. Not an outcome: those files keep their own outcome.
+        self.cpu_fallback_files = 0
         # D12 — per-server aggregate (one entry per server_id) so the Job
         # views render a fixed-size summary regardless of file count.
         # Per-file × per-server detail lives in the Files-panel JSONL via
@@ -239,6 +242,7 @@ class JobTracker:
             with self._counts_lock:
                 completed = self.successful + self.failed
                 outcome_snapshot = dict(self.outcome_counts)
+                cpu_fallback_files = self.cpu_fallback_files
             fraction = 0.0
             if self.in_progress_fraction_getter is not None:
                 try:
@@ -251,6 +255,7 @@ class JobTracker:
             # parts, …) rides the same throttled job_progress emit
             # (progress.outcome used to be set only at completion).
             self._push_outcome_snapshot(outcome_snapshot)
+            self._push_cpu_fallback_files(cpu_fallback_files)
             self.progress_callback(
                 completed,
                 self.total_items,
@@ -293,6 +298,17 @@ class JobTracker:
             get_job_manager().set_job_outcome(self.job_id, outcome)
         except Exception as exc:
             logger.debug("Could not push live outcome for job {}: {}", self.job_id, exc)
+
+    def _push_cpu_fallback_files(self, count: int) -> None:
+        """Mirror the CPU-fallback tally onto the Job, on the progress cadence like the outcome snapshot."""
+        if count <= 0:
+            return
+        try:
+            from ..web.jobs import get_job_manager
+
+            get_job_manager().set_job_cpu_fallback_files(self.job_id, count)
+        except Exception as exc:
+            logger.debug("Could not push the CPU-fallback tally for job {}: {}", self.job_id, exc)
 
     def cancel(self) -> None:
         """Mark this job cancelled and drain remaining items.
@@ -804,6 +820,8 @@ class JobDispatcher:
             for key, count in delta.items():
                 if count > 0 and key in tracker.outcome_counts:
                     tracker.outcome_counts[key] += count
+            if worker.last_task_cpu_fallback:
+                tracker.cpu_fallback_files += 1
         # D12 — fold this task's per-server publisher rows into the
         # tracker's per-server aggregate (server_id → status counts) and
         # mirror that fixed-size summary onto the Job. The earlier D7

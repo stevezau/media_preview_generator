@@ -67,9 +67,11 @@ def test_compare_text_rows_are_what_the_pipeline_publishes():
     rows = ct.compare_text(FILES, {}, answers=ANSWERS, probe=probe, baseline=BASELINE, is_movie=True)
     assert rows.plex == Counter(useful=2, wrong=2, late=1)
     assert rows.text == Counter(useful=2, wrong=1, missed=1, late=1)
-    # A: 42 s apart → review; B: they agree while both early → wrong; C: Plex alone never decides → missed;
-    # D: they agree 60 s late → late; E: they agree, and the text's end stops the skip before the scene.
-    assert rows.high == rows.medium == Counter(useful=1, wrong=1, missed=2, late=1)
+    # A: 42 s apart → nothing at "high", at "medium" credit text wins the disagreement (measured 2026-10-03) → useful;
+    # B: they agree while both early → wrong; C: Plex alone never decides → missed; D: they agree 60 s late → late;
+    # E: they agree, and the text's end stops the skip before the scene.
+    assert rows.high == Counter(useful=1, wrong=1, missed=2, late=1)
+    assert rows.medium == Counter(useful=2, wrong=1, missed=1, late=1)
     assert rows.text_and_server_only == 3
     assert (rows.ends_found, rows.ends_published) == (1, Counter(high=1, medium=1))
     e = rows.files[-1]

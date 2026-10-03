@@ -70,14 +70,17 @@ class TestStoredAnswers:
 
     def test_a_current_answer_is_not_asked_again_while_the_type_stays_undecided(self, store, media):
         reg = _registry(media, ServerType.PLEX)
-        # The previous season's hint alone: it never decides, so the intro stays in review.
+        # The previous season's hint alone: it never decides, so the intro stays undecided.
         hint = Candidate(T.INTRO, 126_000, 158_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4")
         detector = MagicMock(return_value=[hint])
         spec = _spec(detector, stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}))
         ctx = _ctx(store, reg, detectors=(spec,), settings_raw=INTRO_ONLY)
         first, _ = _run(ctx, media, _pubs(), stage="process")
         second, _ = _run(ctx, media, _pubs(), stage="process")
-        assert first.outcome_key == second.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert first.outcome_key == second.outcome_key == FileOutcome.NO_MARKERS.value
+        decision = store.get_decisions(store.get_file(media).id)[T.INTRO]
+        assert decision.status is DecisionStatus.NO_EVIDENCE
+        assert (decision.proposed_start_ms, decision.proposed_end_ms) == (126_000, 158_000)
         assert detector.call_count == 1
 
     def test_candidates_for_a_source_it_does_not_store_are_dropped(self, store, media, loguru_caplog):
@@ -203,16 +206,52 @@ class TestStoredAnswers:
         rec, passed_ctx = due.call_args.args
         assert rec.canonical_path == media and passed_ctx is ctx
 
-    def test_unavailable_detector_stores_nothing_and_is_asked_next_run(self, store, media):
+    def test_a_failed_read_of_the_file_fails_it_and_it_is_asked_next_run(self, store, media):
         reg = _registry(media, ServerType.PLEX)
-        detector = MagicMock(side_effect=[DetectorUnavailableError("no chromaprint"), [AUDIO_INTRO]])
+        detector = MagicMock(side_effect=[DetectorUnavailableError("ffmpeg exited 1", this_file=True), [AUDIO_INTRO]])
+        ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY)
+        out, _ = _run(ctx, media, _pubs(), stage="process")
+        rec = store.get_file(media)
+        # Nothing written and the file's own read failed: the file failed, and says why (no retry job: the next run
+        # reads it again anyway).
+        assert out.outcome_key == FileOutcome.FAILED.value
+        assert out.message.startswith("Couldn't read the intro's audio: ffmpeg exited 1; ")
+        assert [(r["status"], r["message"]) for r in out.publisher_rows] == [
+            (ServerStatus.FAILED.value, "Couldn't read the intro's audio: ffmpeg exited 1")
+        ]
+        assert store.evidence_version(rec.id, Source.SEASON_AUDIO) is None
+        out, _ = _run(ctx, media, _pubs(), stage="process")
+        assert detector.call_count == 2 and AUDIO_INTRO in store.get_evidence(rec.id)
+        assert out.outcome_key == FileOutcome.PUBLISHED.value and "Couldn't read" not in out.message
+
+    # Season audio stopped by something that isn't this file's read must not fail the file: one unreadable sibling
+    # folder would fail a whole season and paint the job red (the false-Failed-job shape of 15753ca).
+    @pytest.mark.parametrize("why", ["no ffmpeg with chromaprint", "Season 02 can't be read"])
+    def test_a_detector_stopped_by_something_else_leaves_the_file_at_nothing_found(self, store, media, why):
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(side_effect=[DetectorUnavailableError(why), [AUDIO_INTRO]])
         ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY)
         out, _ = _run(ctx, media, _pubs(), stage="process")
         rec = store.get_file(media)
         assert out.outcome_key == FileOutcome.NO_MARKERS.value
+        assert out.message == "intro: none"  # the reason is on the source's line in the job log
+        assert [r["status"] for r in out.publisher_rows] == [ServerStatus.NONE.value]
         assert store.evidence_version(rec.id, Source.SEASON_AUDIO) is None
-        _run(ctx, media, _pubs(), stage="process")
-        assert detector.call_count == 2 and AUDIO_INTRO in store.get_evidence(rec.id)
+        out, _ = _run(ctx, media, _pubs(), stage="process")  # asked again next run
+        assert detector.call_count == 2 and out.outcome_key == FileOutcome.PUBLISHED.value
+
+    def test_a_failed_read_beside_a_written_type_keeps_the_file_written(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        audio = _spec(MagicMock(side_effect=DetectorUnavailableError("fingerprint failed", this_file=True)))
+        text = LocalDetectorSpec(Source.CREDITS_TEXT, frozenset({T.CREDITS}), MagicMock(return_value=[TEXT_CREDITS]))
+        both = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"intro": True, "credits": True}}
+        ctx = _ctx(store, reg, detectors=(audio, text), settings_raw=both)
+        out, _ = _run(ctx, media, _pubs(), stage="process")
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert out.message.endswith("; Couldn't read the intro's audio: fingerprint failed")
+        assert out.message.startswith("intro: none")
+        assert [r["status"] for r in out.publisher_rows] == [ServerStatus.WRITTEN.value]
+        assert store.get_markers(store.get_file(media).id)[T.CREDITS].decided_by == ("credits_text",)
 
 
 class TestWhereItRuns:

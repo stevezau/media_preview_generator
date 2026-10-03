@@ -931,10 +931,10 @@ def test_missing_client_is_not_listed(store, factory):
             {"servers": ["gone", "PLEX"]},
         ),
         (DecisionStatus.DECIDED, "chapters", None),
-        # not published: the shortened marker failed sanity
-        (DecisionStatus.NEEDS_REVIEW, "start shortened to the server's own marker (plex) fails sanity checks", None),
+        # an undecided type names no server, whatever its reason says
+        (DecisionStatus.NO_EVIDENCE, "agreeing sources disagree on the other edge", None),
     ],
-    ids=["one-server", "removed-server", "not-shortened", "needs-review"],
+    ids=["one-server", "removed-server", "not-shortened", "undecided"],
 )
 def test_decisions_name_the_servers_whose_own_markers_shortened_them(store, factory, status, reason, expected):
     rec = _known_file(store)
@@ -956,7 +956,7 @@ def test_known_file_decisions_and_evidence(store, factory):
         rec.id,
         {
             T.RECAP: TypeDecision(
-                T.RECAP, DecisionStatus.NEEDS_REVIEW, None, Marker(T.RECAP, 1_000, 8_000, ("x",)), "disagree"
+                T.RECAP, DecisionStatus.NO_EVIDENCE, None, Marker(T.RECAP, 1_000, 8_000, ("x",)), "disagree"
             )
         },
         settings_fingerprint="f",
@@ -994,7 +994,7 @@ def test_known_file_decisions_and_evidence(store, factory):
             "shortened_by": None,
         },
         "recap": {
-            "status": "needs_review",
+            "status": "no_evidence",
             "reason": "disagree",
             "marker": None,
             "proposed": {"start_ms": 1_000, "end_ms": 8_000, "decided_by": ["x"]},
@@ -1052,14 +1052,14 @@ def test_locked_marker_shows_as_locked_and_is_published(store, factory):
 
 
 def test_a_proposal_carries_the_sources_the_editor_would_override(store, factory):
-    """L100: the editor says what a Needs review proposal was based on before the user replaces it."""
+    """L100: the editor says what an undecided type's closest answer was based on before the user replaces it."""
     rec = _known_file(store, {t: _none(t) for t in MarkerType})
     store.save_decisions(
         rec.id,
         {
             T.CREDITS: TypeDecision(
                 T.CREDITS,
-                DecisionStatus.NEEDS_REVIEW,
+                DecisionStatus.NO_EVIDENCE,
                 None,
                 Marker(T.CREDITS, 1_290_000, DURATION, ("chapters", "skipdb")),
                 "sources disagree",
@@ -2630,7 +2630,7 @@ class TestSeasonPayload:
         return SimpleNamespace(folder=str(folder), paths=paths, root=root, reg=reg, store=store)
 
     @staticmethod
-    def _decide(store, path, intro=None, *, credits_review=False, evidence=()):
+    def _decide(store, path, intro=None, *, credits_proposed=False, evidence=()):
         st = os.stat(path)
         rec = store.upsert_file(
             FileIdentity(path, st.st_size, st.st_mtime_ns),
@@ -2643,8 +2643,8 @@ class TestSeasonPayload:
         server = [c for c in evidence if c.source is Source.SERVER_MARKERS]
         store.replace_evidence(rec.id, Source.SERVER_MARKERS, server, origin="plex-1")
         credits = (
-            TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, Marker(T.CREDITS, 1_296_000, DURATION, ("skipdb",)), "disagree")
-            if credits_review
+            TypeDecision(T.CREDITS, DecisionStatus.NO_EVIDENCE, None, Marker(T.CREDITS, 1_296_000, DURATION, ("skipdb",)), "disagree")
+            if credits_proposed
             else _none(T.CREDITS)
         )  # fmt: skip
         store.save_decisions(
@@ -2663,7 +2663,7 @@ class TestSeasonPayload:
         season.store.set_publish_state(
             e1.id, "plex-1", item_id="7", markers=[intro], status="written", message="1 marker(s)"
         )
-        e2 = self._decide(season.store, season.paths[1], intro, credits_review=True, evidence=(audio,))
+        e2 = self._decide(season.store, season.paths[1], intro, credits_proposed=True, evidence=(audio,))
         season.store.set_publish_state(
             e2.id, "plex-1", item_id="8", markers=None, status="waiting", message="Not in this server's library yet"
         )
@@ -2686,7 +2686,12 @@ class TestSeasonPayload:
             "proposed": None,
         }  # fmt: skip
         assert (eps[0]["known"], eps[0]["duration_ms"]) == (True, DURATION)
-        assert [(e["needs_review"], e["review_reason"]) for e in eps] == [(False, ""), (True, "disagree"), (False, "")]
+        assert [(e["credits"]["status"], e["credits"]["reason"]) for e in eps] == [
+            ("no_evidence", "nothing found"),
+            ("no_evidence", "disagree"),
+            (None, ""),
+        ]
+        assert "needs_review" not in eps[1] and "review_reason" not in eps[1]
         # Markers already on a server are the dots, not chips; only season audio carries its "2/2" label.
         assert eps[0]["evidence"] == [{"source": "season_audio", "label": "2/2"}, {"source": "skipdb", "label": ""}]
         assert eps[0]["servers"] == {
@@ -2694,7 +2699,7 @@ class TestSeasonPayload:
             "jf-1": {"state": "off", "message": ""},
         }
         assert eps[1]["credits"] == {
-            "status": "needs_review",
+            "status": "no_evidence",
             "reason": "disagree",
             "marker": None,
             "proposed": {"start_ms": 1_296_000, "end_ms": DURATION, "decided_by": ["skipdb"]},
@@ -2703,24 +2708,25 @@ class TestSeasonPayload:
         assert (eps[2]["known"], eps[2]["duration_ms"], eps[2]["evidence"]) == (False, None, [])
         assert eps[2]["intro"] == {"status": None, "reason": "", "marker": None, "proposed": None}
         assert eps[2]["servers"]["plex-1"] == {"state": "none", "message": ""}
-        # E02's decided intro is published although its credits are in review: it counts in both.
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 2, "needs_review": 1}
+        # E02's decided intro is published whatever its credits came to: it counts as ready.
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 2}
 
     @pytest.mark.parametrize(
-        ("decisions", "ready", "review", "reason"),
+        ("decisions", "ready"),
         [
-            ({T.INTRO: "decided"}, 1, 0, ""),
-            ({T.INTRO: "decided", T.CREDITS: "review"}, 1, 1, "credits review"),
-            ({T.INTRO: "decided", T.RECAP: "review"}, 1, 1, "recap review"),
-            ({T.RECAP: "decided"}, 1, 0, ""),
-            ({T.PREVIEW: "review"}, 0, 1, "preview review"),
-            ({T.INTRO: "review", T.RECAP: "review"}, 0, 1, "intro review"),
-            ({T.CREDITS: "no_evidence"}, 0, 0, ""),
+            ({T.INTRO: "decided"}, 1),
+            ({T.INTRO: "decided", T.CREDITS: "proposed"}, 1),
+            ({T.INTRO: "decided", T.RECAP: "proposed"}, 1),
+            ({T.RECAP: "decided"}, 1),
+            ({T.PREVIEW: "proposed"}, 0),
+            ({T.INTRO: "proposed", T.RECAP: "proposed"}, 0),
+            ({T.CREDITS: "no_evidence"}, 0),
         ],
-        ids=["intro", "intro-credits-review", "intro-recap-review", "recap-only", "preview-review", "two-reviews",
-             "nothing"],
+        ids=["intro", "intro-credits-proposed", "intro-recap-proposed", "recap-only", "preview-proposed",
+             "two-proposed", "nothing"],
     )  # fmt: skip
-    def test_counts_take_every_marker_type_as_a_job_publishes_them(self, season, decisions, ready, review, reason):
+    def test_counts_take_every_marker_type_as_a_job_publishes_them(self, season, decisions, ready):
+        """Only a decided marker is ready; an undecided type's closest answer (its proposal) isn't sent."""
         st = os.stat(season.paths[0])
         rec = season.store.upsert_file(
             FileIdentity(season.paths[0], st.st_size, st.st_mtime_ns), duration_ms=DURATION, season_key=None, is_movie=False
@@ -2735,17 +2741,23 @@ class TestSeasonPayload:
         for mtype, state in decisions.items():
             if state == "decided":
                 stored[mtype] = _decided(markers[mtype])
-            elif state == "review":
-                stored[mtype] = _none(mtype, DecisionStatus.NEEDS_REVIEW, f"{mtype.value} review")
+            elif state == "proposed":
+                stored[mtype] = TypeDecision(
+                    mtype, DecisionStatus.NO_EVIDENCE, None, markers[mtype], "sources disagree"
+                )
             else:
                 stored[mtype] = _none(mtype)
         season.store.save_decisions(rec.id, stored, settings_fingerprint="f")
 
         payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
 
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": ready, "needs_review": review}
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": ready}
         first = payload["episodes"][0]
-        assert (first["needs_review"], first["review_reason"]) == (bool(review), reason)
+        for mtype in (T.INTRO, T.CREDITS):
+            if decisions.get(mtype) == "proposed":
+                assert first[mtype.value]["status"] == "no_evidence"
+                assert first[mtype.value]["marker"] is None
+                assert first[mtype.value]["proposed"]["start_ms"] == markers[mtype].start_ms
 
     @pytest.mark.parametrize(
         ("folder_parts", "name", "season_label"),
@@ -2843,7 +2855,7 @@ class TestSeasonPayload:
         payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
         assert payload["episodes"][0]["servers"]["plex-1"] == {"state": state, "message": "m"}
         # Known, but nothing decided: not ready.
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 0, "needs_review": 0}
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 0}
 
     @pytest.mark.parametrize(("files", "listed"), [(40, 40), (60, 40)])
     def test_counts_the_seasons_episodes_before_the_40_nearest_cap(self, tmp_path, store, files, listed):

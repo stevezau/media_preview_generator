@@ -20,9 +20,9 @@ from unittest.mock import ANY, MagicMock, create_autospec, patch
 import pytest
 
 from media_preview_generator.markers import job_runner, pipeline, reconcile
-from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
+from media_preview_generator.markers.decide import NO_EVIDENCE_REASON, DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import PLEX_DB_BUSY, VERSIONS_UNCHECKED, FileOutcome, kept_own_reason
+from media_preview_generator.markers.outcomes import PLEX_DB_BUSY, FileOutcome, kept_own_reason
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError, Shown
@@ -508,27 +508,47 @@ def test_a_same_length_replacement_without_chapters_keeps_what_the_item_shows(pl
     assert {m.decided_by for m in markers.values()} == {("carried_over",)}
 
 
-def test_a_version_added_later_takes_off_the_credits_it_disagrees_with(plex_item):
+def test_a_version_added_later_that_disagrees_keeps_the_first_versions_credits(plex_item):
     item = plex_item(in_item=("1080p",))
     a, b = item.paths["1080p"], item.paths["2160p"]
     item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     assert _outcomes(item.run("1080p")) == ["published"]
     item.add_part("2160p")
     item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
-    assert _outcomes(item.run("2160p")) == ["waiting"]
-    assert item.served() == item.recorded() == [SHOWN_INTRO] and item.commits == 2
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting"] * 3
-    assert item.served() == item.recorded() == [SHOWN_INTRO] and item.commits == 2
-    assert item.part_types() == {os.path.basename(a): ["pv:intros"], os.path.basename(b): ["pv:intros"]}
+    out = item.run("2160p")  # the 1080p version comes first in Plex's order: its credits stay; B's part gets the keys
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["up_to_date"] * 3
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
+    both = ["pv:credits", "pv:intros"]
+    assert item.part_types() == {os.path.basename(a): both, os.path.basename(b): both}
 
 
-def test_partial_agreement_then_agreeing_credits_with_different_times(plex_item):
+def test_the_first_version_in_plex_s_order_decides_a_type_the_versions_disagree_on(plex_item):
+    item = plex_item(in_item=("2160p",))  # Plex numbered the 2160p version first
+    a, b = item.paths["1080p"], item.paths["2160p"]
+    item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
+    item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("2160p")) == ["published"]
+    item.add_part("1080p")
+    out = item.run("1080p")
+    assert "reason_code" not in out.publisher_rows[0]
+    first = [SHOWN_INTRO, ("credits", CREDITS_AT - 19_000, DUR)]
+    assert item.served() == item.recorded() == first
+    # Alternating runs settle: the same version wins every time.
+    commits = item.commits
+    assert _outcomes(item.run("2160p"), item.run("1080p"), item.run("2160p")) == ["up_to_date"] * 3
+    assert item.served() == first and item.commits == commits
+
+
+def test_partial_disagreement_then_agreeing_credits_with_different_times(plex_item):
     item = plex_item()
     a, b = item.paths["1080p"], item.paths["2160p"]
     item.chapters[a] = chapters(intro=(11_000, 37_000), credits=CREDITS_AT)
     item.chapters[b] = chapters(intro=(11_000, 37_000), credits=CREDITS_AT - 19_000)
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting"] * 3
-    assert item.served() == item.recorded() == [("intro", 11_000, 37_000)] and item.commits == 1
+    outs = _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p"))
+    assert outs == ["published", "up_to_date", "up_to_date"]  # A is first: its credits, B's run changes nothing
+    assert item.served() == item.recorded() == [("intro", 11_000, 37_000), SHOWN_CREDITS] and item.commits == 1
 
     # Both re-cut without an intro chapter (a new length each: nothing carries over); the credits now agree 576 ms
     # apart.
@@ -537,27 +557,25 @@ def test_partial_agreement_then_agreeing_credits_with_different_times(plex_item)
     item.durations[a] = item.durations[b] = NEW_CUT
     item.touch("1080p", 11)
     item.touch("2160p", 12)
-    assert _outcomes(item.run("1080p")) == ["waiting"]  # B not decided again yet: our intro comes off
-    assert item.served() == item.recorded() == [] and item.commits == 2
-    # A's run changes nothing: B's publish already shows the credits A agrees with.
-    assert _outcomes(item.run("2160p"), item.run("1080p")) == ["published", "up_to_date"]
-    shown = item.served()
-    assert shown == item.recorded() and [t for t, *_ in shown] == ["credits"] and item.commits == 3
+    assert _outcomes(item.run("1080p")) == ["published"]  # B not decided again yet: our intro comes off
+    new_credits = [("credits", CREDITS_AT, NEW_CUT)]
+    assert item.served() == item.recorded() == new_credits and item.commits == 2
+    # B's run keeps A's credits: A is first, and what the item shows is within 2 s of B's own reading anyway.
     assert _outcomes(item.run("2160p"), item.run("1080p"), item.run("2160p")) == ["up_to_date"] * 3
-    assert item.served() == shown and item.commits == 3
+    assert item.served() == new_credits and item.commits == 2
 
 
-def test_a_version_added_later_takes_our_markers_off_on_the_next_normal_run(plex_item):
+def test_a_version_added_later_but_never_decided_leaves_the_items_markers(plex_item):
     item = plex_item(in_item=("1080p",))
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     assert _outcomes(item.run("1080p")) == ["published"]
     assert item.store.get_item_publish_state("plex-1", "7").item_files == (item.paths["1080p"],)
     item.add_part("2160p")  # its disk isn't mapped into the container: never decided
     out = item.run("1080p")
-    assert _outcomes(out) == ["waiting"] and "intro, credits" in out.publisher_rows[0]["message"]
-    assert item.served() == item.recorded() == [] and item.commits == 2
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]  # the new part gets the keys
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
     assert item.store.get_item_publish_state("plex-1", "7").item_files == tuple(sorted(item.paths.values()))
-    assert _outcomes(item.run("1080p")) == ["waiting"] and item.commits == 2
+    assert _outcomes(item.run("1080p")) == ["up_to_date"] and item.commits == 2
 
 
 def _spy(monkeypatch, name: str) -> list[dict]:
@@ -578,7 +596,7 @@ def test_a_write_that_changes_nothing_still_records_the_versions_it_saw(plex_ite
     a, b = item.paths["1080p"], item.paths["2160p"]
     item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT)
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting", "published", "up_to_date"]
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["published"] + ["up_to_date"] * 2
     assert item.store.get_item_publish_state("plex-1", "7").item_files == (a, b)
     commits = item.commits
     item._sql(("UPDATE media_parts SET deleted_at=1 WHERE file=?", (b,)))  # B's version removed from the item
@@ -630,8 +648,8 @@ def test_an_item_recorded_without_its_versions_is_written_once_to_record_them(pl
     monkeypatch.setattr(plex_db.LocalPlexDb, "_database", database)
     first, second = item.run("1080p"), item.run("1080p")
     if version_added:
-        assert _outcomes(first, second) == ["waiting", "waiting"]
-        assert item.served() == item.recorded() == [] and item.commits == 2
+        assert _outcomes(first, second) == ["published", "up_to_date"]  # the new part gets the item's keys
+        assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
         assert item.store.get_item_publish_state("plex-1", "7").item_files == tuple(sorted(item.paths.values()))
     else:
         assert _outcomes(first, second) == ["up_to_date", "up_to_date"]
@@ -651,7 +669,7 @@ def test_an_item_whose_files_are_all_deleted_waits_for_the_library(plex_item):
 
 
 @pytest.mark.parametrize("trigger", ["forced", "file-changed"])
-def test_a_new_version_that_is_never_decided_takes_our_markers_off_at_the_next_publish(plex_item, trigger):
+def test_a_new_version_that_is_never_decided_leaves_our_markers_at_the_next_publish(plex_item, trigger):
     item = plex_item(in_item=("1080p",))
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.run("1080p")
@@ -659,22 +677,26 @@ def test_a_new_version_that_is_never_decided_takes_our_markers_off_at_the_next_p
     if trigger == "file-changed":
         item.touch("1080p", 9)
     out = item.run("1080p", force=trigger == "forced")
-    assert _outcomes(out) == ["waiting"] and "intro, credits" in out.publisher_rows[0]["message"]
-    assert item.served() == item.recorded() == [] and item.commits == 2
-    assert _outcomes(item.run("1080p", force=trigger == "forced"), item.run("1080p")) == ["waiting", "waiting"]
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]  # the new part gets the keys
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
+    assert _outcomes(item.run("1080p", force=trigger == "forced"), item.run("1080p")) == ["up_to_date"] * 2
     assert item.commits == 2
-    assert item.part_types() == {os.path.basename(p): [] for p in item.paths.values()}
+    both = ["pv:credits", "pv:intros"]
+    assert item.part_types() == {os.path.basename(p): both for p in item.paths.values()}
 
 
-def test_a_deleted_version_stops_blocking_the_types_it_disagreed_on(plex_item):
-    item = plex_item()
+def test_a_deleted_first_version_hands_its_types_to_the_next(plex_item):
+    item = plex_item(in_item=("2160p",))  # Plex numbered the 2160p version first
     a, b = item.paths["1080p"], item.paths["2160p"]
-    item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting"] * 3
+    item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("2160p")) == ["published"]
+    item.add_part("1080p")
+    item.run("1080p")
+    assert item.served() == [SHOWN_INTRO, ("credits", CREDITS_AT - 19_000, DUR)]
     item.delete_part("2160p")
     assert _outcomes(item.run("1080p"), item.run("1080p")) == ["published", "up_to_date"]
-    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
 
 
 def test_a_version_plex_still_lists_but_that_is_gone_from_disk_doesnt_hold_the_item_back(plex_item):
@@ -717,53 +739,36 @@ def test_a_replaced_version_whose_season_folder_went_with_it_doesnt_hold_the_ite
     assert _outcomes(item.run("1080p")) == ["up_to_date"] and item.commits == 1
 
 
-def test_a_version_on_disk_but_never_checked_waits_and_its_retry_publishes_once_it_is_deleted(plex_item):
+def test_a_version_on_disk_but_never_checked_is_not_waited_for(plex_item):
+    # Production (Hawaii Five-0 S07E05): the h265 version was in no job, so the h264 one waited through every retry.
+    # Nothing waits now: the decided version is written, and nothing is queued for the other.
     item = plex_item()
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     out = item.run("1080p")
     row = out.publisher_rows[0]
-    assert (row["status"], row["reason_code"]) == ("markers_waiting", VERSIONS_UNCHECKED)
-    assert job_runner.retry_reason(row) == VERSIONS_UNCHECKED  # the job queues its retry
-    assert row["unchecked_files"] == [item.paths["2160p"]]  # ... which runs the version never checked too
-    assert _outcomes(out) == ["waiting"]
-    assert "intro, credits" in row["message"] and item.served() == []
-    os.remove(item.paths["2160p"])  # deleted before the retry runs; Plex still lists it
-    assert _outcomes(item.run("1080p")) == ["published"]
+    assert _outcomes(out) == ["published"] and row["status"] == "markers_written"
+    assert "reason_code" not in row and "unchecked_files" not in row
+    assert job_runner.retry_reason(row) is None
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
 
 
 @pytest.mark.parametrize("agree", [True, False], ids=["same-cut", "another-cut"])
-def test_running_the_version_a_waiting_file_names_settles_the_item(plex_item, agree):
-    # Production (Hawaii Five-0 S07E05): the h265 version was in no job, so the h264 one waited through every retry.
-    # The retry now runs the file the row names. Two cuts that disagree still show nothing, which is right.
+def test_a_sibling_decided_later_settles_on_the_first_versions_times_without_flapping(plex_item, agree):
     item = plex_item()
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT - (0 if agree else 19_000))
-    row = item.run("1080p").publisher_rows[0]
-    assert row["reason_code"] == VERSIONS_UNCHECKED and row["unchecked_files"] == [item.paths["2160p"]]
+    assert _outcomes(item.run("1080p")) == ["published"]
 
-    named = item.run("2160p").publisher_rows[0]
+    later = item.run("2160p").publisher_rows[0]
 
-    assert "unchecked_files" not in named and "reason_code" not in named
-    assert item.served() == ([SHOWN_INTRO, SHOWN_CREDITS] if agree else [SHOWN_INTRO])
-    again = item.run("1080p").publisher_rows[0]
-    assert "reason_code" not in again  # nothing left to retry for
-    assert (again["status"] == "markers_waiting") is (not agree)
-
-
-def test_versions_that_were_checked_and_disagree_wait_without_a_retry(plex_item):
-    item = plex_item()
-    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
-    item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
-    item.run("1080p")
-    for version in ("2160p", "1080p"):
-        row = item.run(version).publisher_rows[0]
-        assert row["status"] == "markers_waiting" and "reason_code" not in row
-        assert job_runner.retry_reason(row) is None
-    assert item.served() == [SHOWN_INTRO]
+    assert "unchecked_files" not in later and "reason_code" not in later
+    assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]  # the 1080p version is first in Plex's order
+    commits = item.commits
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["up_to_date"] * 3
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == commits
 
 
-def test_a_version_on_a_disk_that_isnt_mounted_is_still_waited_for(plex_item, tmp_path):
+def test_a_version_on_a_disk_that_isnt_mounted_is_not_waited_for(plex_item, tmp_path):
     item = plex_item(in_item=("1080p",))
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     unmounted = str(tmp_path / "unmounted" / "Show (2020) {tvdb-1}" / "Season 01" / "Show (2020) - S01E01 - 2160p.mkv")
@@ -772,8 +777,8 @@ def test_a_version_on_a_disk_that_isnt_mounted_is_still_waited_for(plex_item, tm
         ("INSERT INTO media_parts (id, media_item_id, file) VALUES (2, 2, ?)", (unmounted,)),
     )
     row = item.run("1080p").publisher_rows[0]
-    assert (row["status"], row["reason_code"]) == ("markers_waiting", VERSIONS_UNCHECKED)
-    assert item.served() == []
+    assert row["status"] == "markers_written" and "reason_code" not in row
+    assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
 
 
 @contextlib.contextmanager
@@ -921,8 +926,8 @@ def test_agreeing_versions_with_different_runtimes_commit_once(plex_item):
     item.durations[b] = DUR + 800
     item.chapters[a] = chapters(credits=CREDITS_AT)
     item.chapters[b] = chapters(credits=CREDITS_AT)
-    assert _outcomes(item.run("1080p"), item.run("2160p")) == ["waiting", "published"]
-    assert _outcomes(item.run("1080p")) == ["up_to_date"]  # 2160p's publish already shows what 1080p decided
+    assert _outcomes(item.run("1080p"), item.run("2160p")) == ["published", "up_to_date"]
+    assert _outcomes(item.run("1080p")) == ["up_to_date"]  # 1080p's publish already shows what 2160p agrees with
     outs = [item.run(v) for _ in range(3) for v in ("2160p", "1080p")]
     assert _outcomes(*outs) == ["up_to_date"] * 6
     assert item.commits == 1 and item.served() == item.recorded()
@@ -940,12 +945,14 @@ def test_a_merge_takes_the_moved_versions_credits_off_its_part(plex_item):
 
     item.move_part("2160p", 7)  # the user merges item 8 into 7
     item._sql(("DELETE FROM taggings WHERE metadata_item_id=8",), ("DELETE FROM metadata_items WHERE id=8",))
-    # A's decision and item 7's row are unchanged, but its read-back sees the part that joined.
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting", "waiting", "waiting"]
-    assert item.served() == item.recorded() == [SHOWN_INTRO]
-    assert item.part_types() == {os.path.basename(a): ["pv:intros"], os.path.basename(b): ["pv:intros"]}
+    # A's decision and item 7's row are unchanged, but its read-back sees the part that joined: A is first in Plex's
+    # order, so the moved part gets A's credits in place of its own.
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["published"] + ["up_to_date"] * 2
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
+    both = ["pv:credits", "pv:intros"]
+    assert item.part_types() == {os.path.basename(a): both, os.path.basename(b): both}
     commits = item.commits
-    assert _outcomes(item.run("1080p"), item.run("2160p")) == ["waiting", "waiting"] and item.commits == commits
+    assert _outcomes(item.run("1080p"), item.run("2160p")) == ["up_to_date"] * 2 and item.commits == commits
 
 
 def test_a_split_takes_the_credits_that_went_to_review_off_the_moved_part(plex_item):
@@ -974,8 +981,8 @@ def test_concurrent_versions_leave_the_item_row_matching_what_plex_serves(plex_i
     a, b = item.paths["1080p"], item.paths["2160p"]
     item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.chapters[b] = chapters(intro=INTRO_X)
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting", "published", "waiting"]
-    assert item.served() == item.recorded() == [SHOWN_INTRO]
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["published"] + ["up_to_date"] * 2
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
 
     item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.touch("2160p", 21)
@@ -1036,11 +1043,12 @@ def test_concurrent_versions_leave_the_item_row_matching_what_plex_serves(plex_i
     for thread in threads:
         thread.join(30)
     assert set(results) == {"A", "B"}
-    assert item.served() == item.recorded() == []
+    # A's new cut holds nothing, so the item shows B's decision; A's record must say so too.
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
     for _ in range(2):
         item.run("2160p")
         item.run("1080p")
-        assert item.served() == item.recorded() == []
+        assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
 
 
 @pytest.mark.parametrize(
@@ -1472,24 +1480,23 @@ class TestKeepPlexsPerType:
         assert _outcomes(out) == (["up_to_date"] if setting == "keep_plex" else ["published"])
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
-    def test_a_version_still_waiting_on_another_type_respects_the_setting(self, plex_item, setting):
-        # Review probe A: 2160p has no credits chapter, so 1080p's row stays WAITING and never takes the read-back.
+    def test_a_version_holding_a_type_alone_respects_the_setting(self, plex_item, setting):
+        # Review probe A: 2160p has no credits chapter, so the credits are 1080p's alone; the read-back and the setting
+        # apply to the item all the same.
         item = plex_item(versions=("1080p", "2160p"))
         item.cfg.markers["plex"]["on_plex_redetect"] = setting
         item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
         item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X)
         outs = [item.run("1080p"), item.run("2160p"), item.run("1080p")]
-        assert _outcomes(*outs) == ["waiting", "published", "waiting"] and item.served() == [SHOWN_INTRO]
+        assert _outcomes(*outs) == ["published", "up_to_date", "up_to_date"]
+        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
         _native_intro(item)
         o2160, o1080 = item.run("2160p"), item.run("1080p")
+        self._expect(item, setting)
         if setting == "keep_plex":
-            assert item.served() == [PLEX_INTRO] and item.kept() == {"intro"} and item.recorded() == []
-            assert o1080.publisher_rows[0]["message"] == (
-                "Waiting for this item's other versions to agree on: credits; keeping Plex's intro"
-            )
+            assert o1080.publisher_rows[0]["message"] == "Keeping Plex's intro"
         else:
-            assert item.served() == [SHOWN_INTRO] and item.kept() == set()
-            assert _outcomes(o2160, o1080) == ["published", "waiting"]
+            assert _outcomes(o2160, o1080) == ["published", "up_to_date"]
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_a_sibling_versions_publish_doesnt_undo_the_setting(self, plex_item, setting):
@@ -1581,24 +1588,27 @@ class TestKeepPlexsPerType:
 
         outs = [item.run("2160p"), item.run("1080p"), item.run("1080p")]
 
-        assert _outcomes(*outs) == ["waiting"] * 3
-        assert {o.publisher_rows[0]["message"] for o in outs} == {
-            "Waiting for this item's other versions to agree on: intro"
-        }
-        assert item.served() == [] and item.kept() == set()
+        # Plex's intro is gone and nothing is kept: the first version's intro (1080p's) is written back.
+        assert _outcomes(*outs) == ["published", "up_to_date", "up_to_date"]
+        assert item.served() == item.recorded() == [SHOWN_INTRO] and item.kept() == set()
 
     def test_plex_filling_a_type_we_removed_ourselves_is_kept(self, plex_item):
-        # keepplex re-review P2: our intro went when the versions stopped agreeing, then Plex's own detection filled
-        # the gap; the next agreement mustn't delete Plex's intro.
+        # keepplex re-review P2: our intro went when no version held it any more, then Plex's own detection filled
+        # the gap; the next version to hold an intro mustn't delete Plex's.
         item = plex_item(versions=("1080p", "2160p"))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
         for version in ("1080p", "2160p"):
             item.chapters[item.paths[version]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
         for version in ("1080p", "2160p", "1080p"):
             item.run(version)
-        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_Y, credits=CREDITS_AT)
-        item.touch("2160p", 77)
-        assert _outcomes(item.run("2160p")) == ["waiting"] and item.served() == [SHOWN_CREDITS]
+        for version, ns in (("1080p", 76), ("2160p", 77)):
+            # New cuts of another length without an intro chapter (a same-length cut would carry the intro over).
+            item.chapters[item.paths[version]] = chapters(credits=CREDITS_AT)
+            item.durations[item.paths[version]] = NEW_CUT
+            item.touch(version, ns)
+        new_credits = ("credits", CREDITS_AT, NEW_CUT)
+        assert _outcomes(item.run("1080p"), item.run("2160p")) == ["published", "up_to_date"]
+        assert item.served() == [new_credits]
         _native_intro(item)
         item.run("1080p")
         item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -1606,7 +1616,7 @@ class TestKeepPlexsPerType:
 
         out = item.run("2160p")
 
-        assert item.served() == [PLEX_INTRO, SHOWN_CREDITS] and item.kept() == {"intro"}
+        assert item.served() == [PLEX_INTRO, new_credits] and item.kept() == {"intro"}
         assert (_outcomes(out), out.publisher_rows[0]["message"]) == (["up_to_date"], "Keeping Plex's intro")
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
@@ -1743,8 +1753,8 @@ class TestKeepPlexsPerType:
 
     @pytest.mark.parametrize("order", [("1080p", "2160p"), ("2160p", "1080p")], ids=["1080p-first", "2160p-first"])
     def test_a_plex_item_with_two_versions_is_read_as_before_in_either_order(self, plex_item, order):
-        # Plex writes a type only once every version decided it alike, so leaving one version undecided kept the
-        # others waiting (three review findings in a row). An item with several versions is read as before.
+        # An item with several versions is read as before whichever version runs first (three review findings in a
+        # row when a version left undecided kept the others waiting).
         item = plex_item(versions=("1080p", "2160p"))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
         _native_credits(item)
@@ -1756,7 +1766,7 @@ class TestKeepPlexsPerType:
         outs = [item.run(version, detectors=detectors) for version in (*order, order[0])]
 
         assert [call.args[0].canonical_path for call in text.call_args_list] == [item.paths[v] for v in order]
-        assert _outcomes(*outs) == ["waiting", "published", "up_to_date"]
+        assert _outcomes(*outs) == ["published", "up_to_date", "up_to_date"]
         assert outs[2].publisher_rows[0]["message"] == "Keeping Plex's credits"
         assert item.served() == [SHOWN_INTRO, PLEX_CREDITS] and item.kept() == {"credits"}
 
@@ -2099,11 +2109,19 @@ class TestSeasonAudioAnswerLost:
     locked intro are never touched."""
 
     @pytest.mark.parametrize(
-        ("now", "status"),
-        [((), DecisionStatus.NO_EVIDENCE), ((TITLE_HINT,), DecisionStatus.NEEDS_REVIEW)],
-        ids=["no-intro-now", "needs-review-now"],
+        ("now", "reason", "proposed"),
+        [
+            ((), NO_EVIDENCE_REASON, (None, None)),
+            # A previous season's hint never decides alone (``decide._AGREEMENT_ONLY``); it stays the proposal.
+            (
+                (TITLE_HINT,),
+                "only the previous season's audio found the intro; matching audio needs another source to agree",
+                (70_000, 82_000),
+            ),
+        ],
+        ids=["no-intro-now", "hint-alone-now"],
     )
-    def test_the_intro_comes_off_plex_and_plexs_own_credits_stay(self, plex_item, now, status):
+    def test_the_intro_comes_off_plex_and_plexs_own_credits_stay(self, plex_item, now, reason, proposed):
         item = plex_item(versions=("1080p",))
         path, name = item.paths["1080p"], os.path.basename(item.paths["1080p"])
         _plex_native_credits(item, 1_280_000, 1_302_000)
@@ -2115,7 +2133,13 @@ class TestSeasonAudioAnswerLost:
         out = item.run("1080p", detectors=(_season_audio(5, *now),))
 
         rec = item.store.get_file(path)
-        assert item.store.get_decisions(rec.id)[T.INTRO].status is status
+        row = item.store.get_decisions(rec.id)[T.INTRO]
+        assert (row.status, row.reason, row.proposed_start_ms, row.proposed_end_ms) == (
+            DecisionStatus.NO_EVIDENCE,
+            reason,
+            *proposed,
+        )
+        assert T.INTRO not in item.store.get_markers(rec.id)
         assert out.publisher_rows[0]["status"] == "markers_written"  # the removal is a write
         assert item.served() == [PLEX_OWN_CREDITS]
         assert item.part_types() == {name: []} and item.recorded() == []

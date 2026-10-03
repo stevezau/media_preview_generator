@@ -374,6 +374,15 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 LOCKED_BY_USER = "locked by user"
 # The reason a just-unlocked type carries until the next detection run decides it again (`unlock_markers`).
 UNLOCKED_PENDING = "unlocked; the next run decides this type again"
+# The status the rules before 2026-10-02 stored for a type they couldn't settle ("Needs review"). Nothing writes it any
+# more: a stored row reads as no evidence (``_status``) until the file is decided again (``upgrade._migrate_to_v20``
+# queues that for the files on disk), and a decided marker it never pulled stays as it is.
+LEGACY_NEEDS_REVIEW = "needs_review"
+
+
+def _status(raw: str) -> DecisionStatus:
+    """A stored decision's status, the removed ``needs_review`` read as no evidence."""
+    return DecisionStatus.NO_EVIDENCE if raw == LEGACY_NEEDS_REVIEW else DecisionStatus(raw)
 
 
 @dataclass(frozen=True)
@@ -514,7 +523,7 @@ class PreviousDecision(NamedTuple):
 
 
 # The statuses of a decision of ours (a type turned off, or left to a server's own marker, is none).
-_JUDGED = (DecisionStatus.DECIDED.value, DecisionStatus.NEEDS_REVIEW.value, DecisionStatus.NO_EVIDENCE.value)
+_JUDGED = (DecisionStatus.DECIDED.value, DecisionStatus.NO_EVIDENCE.value, LEGACY_NEEDS_REVIEW)
 
 
 class EndPictureKey(NamedTuple):
@@ -851,7 +860,7 @@ class MarkerStore:
     @staticmethod
     def _judged(conn: sqlite3.Connection, file_id: int) -> list[tuple[str, tuple[int, int] | None, tuple[str, ...]]]:
         """A file's decisions of ours per type: its decided marker's times and sources, or None and no sources
-        (Needs review, no evidence)."""
+        (no evidence)."""
         markers = {r["type"]: r for r in conn.execute("SELECT * FROM markers WHERE file_id=?", (file_id,)).fetchall()}
         judged = []
         for r in conn.execute("SELECT type, status FROM decisions WHERE file_id=?", (file_id,)).fetchall():
@@ -1003,14 +1012,15 @@ class MarkerStore:
             ).fetchall()
         return [self._file(r) for r in rows]
 
-    def files_in_review(self) -> list[str]:
-        """Canonical paths of the files with at least one marker type in Needs review, sorted; files missing from disk
-        (``mark_missing``) are left out until they come back."""
+    def files_with_legacy_review_decisions(self) -> list[str]:
+        """Canonical paths of the files with a marker type still stored under the removed "Needs review" status
+        (:data:`LEGACY_NEEDS_REVIEW`), sorted: the decide-again job decides them under today's rules. Files missing
+        from disk (``mark_missing``) are left out until they come back."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT DISTINCT f.canonical_path FROM decisions d JOIN files f ON f.id = d.file_id "
                 "WHERE d.status=? AND f.missing_since IS NULL ORDER BY f.canonical_path",
-                (DecisionStatus.NEEDS_REVIEW.value,),
+                (LEGACY_NEEDS_REVIEW,),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
@@ -1087,8 +1097,8 @@ class MarkerStore:
     ) -> list[str]:
         """Canonical paths of the files with an answer stored under ``sources`` from a version older than ``version``
         that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``; with
-        ``checks_others``, whatever decided it) or that an undecided type of ``types`` was decided without (Needs
-        review, no evidence), sorted; files marked missing, and files already taken for ``detector`` at ``version``
+        ``checks_others``, whatever decided it) or that an undecided type of ``types`` was decided without (no
+        evidence), sorted; files marked missing, and files already taken for ``detector`` at ``version``
         (``record_version_reruns``), are left out.
 
         Args:
@@ -1128,7 +1138,7 @@ class MarkerStore:
                     version_step,
                     version,
                     version,
-                    DecisionStatus.NEEDS_REVIEW.value,
+                    LEGACY_NEEDS_REVIEW,
                     DecisionStatus.NO_EVIDENCE.value,
                     DecisionStatus.DECIDED.value,
                     int(checks_others),
@@ -1142,7 +1152,7 @@ class MarkerStore:
     ) -> list[str]:
         """Canonical paths of the files not recorded as decided under ``version`` of the decision rules (``detector``
         in ``version_reruns``) with a type those rules could decide differently from what is stored, sorted: an
-        unlocked type with a stored answer of its type, decided, in Needs review, not found (its answers failed a
+        unlocked type with a stored answer of its type, decided, not found (its answers failed a
         check a rule may have changed) or left to the servers' own markers, or one holding a marker carried over from
         a replaced file (``carried_by`` among its deciding sources: the carry-over is a rule too); not one whose
         detection is off. Files marked missing are left out.
@@ -1169,8 +1179,7 @@ class MarkerStore:
         found = {
             r["canonical_path"]
             for r in rows
-            if DecisionStatus(r["status"]) is not DecisionStatus.DISABLED
-            or is_kept_own(DecisionStatus.DISABLED, r["reason"])
+            if _status(r["status"]) is not DecisionStatus.DISABLED or is_kept_own(DecisionStatus.DISABLED, r["reason"])
         }
         return sorted(found)
 
@@ -1629,8 +1638,8 @@ class MarkerStore:
         """Store one user-locked marker; detection never replaces it.
 
         The low-level primitive: it writes the ``markers`` row only. The Inspector editor calls
-        :meth:`save_user_markers`, which also records the decision so the file doesn't keep reading as
-        "Needs review" until the next run.
+        :meth:`save_user_markers`, which also records the decision so the file doesn't keep its old answer
+        until the next run.
         """
         now = self._now()
         with self._tx() as conn:
@@ -1651,7 +1660,7 @@ class MarkerStore:
 
         The whole save lands or none of it does, and it lands before any server is contacted (plan ruling P-R1), so a
         publish that fails can never lose the edit. The decision row is rewritten to
-        :data:`LOCKED_BY_USER` so the Inspector and the Season view stop saying "Needs review" straight away, with the
+        :data:`LOCKED_BY_USER` so the Inspector and the Season view show the lock straight away, with the
         same words the next detection run writes for a locked type. The proposal the lock replaces is dropped for the
         same reason: a run's own decision for a locked type carries none, so keeping it would make the row flip back
         on the next run.
@@ -1678,7 +1687,7 @@ class MarkerStore:
         return saved
 
     def unlock_markers(self, file_id: int, types: Iterable[MarkerType]) -> frozenset[MarkerType]:
-        """Drop the user's lock on these types and send each back to "Needs review" until the next run decides it.
+        """Drop the user's lock on these types and leave each undecided until the next run decides it.
 
         The stored decision can't be restored here — a locked type's row says "locked by user", not what detection had
         found — so the type is left with no answer and a stale fingerprint, which makes the next run re-decide and
@@ -1705,7 +1714,7 @@ class MarkerStore:
                 conn.execute(
                     "INSERT OR REPLACE INTO decisions (file_id, type, status, reason, proposed_start_ms, "
                     "proposed_end_ms, settings_fingerprint, decided_at, decided_by) VALUES (?,?,?,?,NULL,NULL,'',?,'[]')",
-                    (file_id, mtype.value, DecisionStatus.NEEDS_REVIEW.value, UNLOCKED_PENDING, now),
+                    (file_id, mtype.value, DecisionStatus.NO_EVIDENCE.value, UNLOCKED_PENDING, now),
                 )
         return frozenset(unlocked)
 
@@ -1725,7 +1734,7 @@ class MarkerStore:
         return {
             MarkerType(r["type"]): DecisionRow(
                 MarkerType(r["type"]),
-                DecisionStatus(r["status"]),
+                _status(r["status"]),
                 r["reason"],
                 r["proposed_start_ms"],
                 r["proposed_end_ms"],

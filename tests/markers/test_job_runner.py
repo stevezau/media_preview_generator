@@ -550,7 +550,7 @@ class TestRun:
     def test_the_files_a_run_marked_missing_are_one_line_of_the_jobs_log(self, env, loguru_caplog):
         env.ctx.take_missing.return_value = 3
         self._run()
-        assert "3 files are missing from disk; they're hidden from Needs review until they come back" in (
+        assert "3 files are missing from disk; they're left out of Intro & Credits jobs until they come back" in (
             loguru_caplog.text
         )
 
@@ -1526,7 +1526,6 @@ class TestRun:
 ALL_OUTCOMES = [
     ("markers_published", True),
     ("markers_up_to_date", True),
-    ("markers_needs_review", True),
     ("markers_none", True),
     ("markers_no_owners", True),
     ("markers_waiting", False),  # the server may have indexed the item while the app was down
@@ -1609,7 +1608,7 @@ class TestRestart:
             decisions = {
                 mtype: TypeDecision(mtype, DecisionStatus.DECIDED, Marker(mtype, 0, 30_000, sources), None, "")
                 if sources
-                else TypeDecision(mtype, DecisionStatus.NEEDS_REVIEW, None, None, "one source")
+                else TypeDecision(mtype, DecisionStatus.NO_EVIDENCE, None, None, "sources disagree: skipdb, theintrodb")
                 for mtype, sources in decided.items()
             }
             store.save_decisions(rec.id, decisions, settings_fingerprint="fp")
@@ -1626,8 +1625,8 @@ class TestRestart:
                 "a.mkv", "markers_published", {MarkerType.INTRO: chapters, MarkerType.CREDITS: credit_text}
             ),
             decided_in_store("b.mkv", "markers_up_to_date", {MarkerType.CREDITS: chapters}),
-            # Only the decided type of a file in review counts.
-            decided_in_store("c.mkv", "markers_needs_review", {MarkerType.INTRO: (), MarkerType.CREDITS: chapters}),
+            # Only the decided type counts for a file whose other type found nothing.
+            decided_in_store("c.mkv", "markers_published", {MarkerType.INTRO: (), MarkerType.CREDITS: chapters}),
             decided_in_store("d.mkv", "markers_none", {MarkerType.CREDITS: ()}),
             # No server had Intro & Credits on for it, so this job decided nothing; the store's markers are old.
             decided_in_store("e.mkv", "markers_no_owners", {MarkerType.CREDITS: chapters}),
@@ -1684,16 +1683,16 @@ class TestRestart:
         assert env.dispatcher.submit_items.call_args.kwargs["items"] == [item]
 
     def test_resumed_job_with_every_file_finished_completes_without_submitting(self, env, finished):
-        item = finished("a.mkv", "markers_needs_review")
-        env.ctx.summary_lines.return_value = ["Done: 1 file · 0 need review · 0 nothing found"]
+        item = finished("a.mkv", "markers_none")
+        env.ctx.summary_lines.return_value = ["Done: 1 file · 1 nothing found"]
         with patch.object(job_runner, "build_items", return_value=([item], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_not_called()
-        env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_needs_review": 1})
+        env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_none": 1})
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
         # Its totals count the files finished before the restart.
-        env.ctx.summary_lines.assert_called_once_with({"markers_needs_review": 1})
-        env.jm.add_log.assert_any_call("j1", "INFO - Done: 1 file · 0 need review · 0 nothing found")
+        env.ctx.summary_lines.assert_called_once_with({"markers_none": 1})
+        env.jm.add_log.assert_any_call("j1", "INFO - Done: 1 file · 1 nothing found")
 
     @pytest.mark.parametrize("results", [OSError("disk gone"), None])
     def test_unreadable_file_results_checks_every_file_again(self, env, monkeypatch, results):
@@ -1860,7 +1859,8 @@ NOT_IN_LIBRARY_ROW = _row("markers_waiting", "Not in this server's library yet",
 PLEX_PASS_UNKNOWN_ROW = _row(
     "markers_waiting", "Can't reach Plex to confirm Plex Pass", sid="plex-1", reason_code="plex_pass_unknown"
 )
-VERSIONS_UNCHECKED_ROW = _row(
+# Written before 2026-10-02, when a Plex item waited for its other versions; nothing writes the code now.
+LEGACY_VERSIONS_UNCHECKED_ROW = _row(
     "markers_waiting",
     "Waiting for this item's other versions to agree on: intro, credits",
     sid="plex-1",
@@ -1885,7 +1885,7 @@ PLEX_DB_BUSY_ROW = _row(
     [
         (NOT_IN_LIBRARY_ROW, "not_in_library"),
         (PLEX_PASS_UNKNOWN_ROW, "plex_pass_unknown"),
-        (VERSIONS_UNCHECKED_ROW, "versions_unchecked"),
+        (LEGACY_VERSIONS_UNCHECKED_ROW, None),  # a row from before the rule change gets no retry of its own
         (PLEX_DB_BUSY_ROW, "plex_db_busy"),
         (_row("failed", "boom", sid="plex-1"), None),  # any other failure waits for the next run, as before
         (_row("failed", "x", sid="plex-1", reason_code="not_in_library"), None),
@@ -1896,7 +1896,7 @@ PLEX_DB_BUSY_ROW = _row(
     ids=[
         "waiting-not-in-library",
         "waiting-plex-pass",
-        "waiting-versions",
+        "waiting-versions-legacy",
         "failed-busy",
         "failed-other",
         "failed-waiting-code",
@@ -1933,10 +1933,7 @@ class TestLibraryRetry:
         env.tracker.wait.side_effect = during_wait
         set_cb = MagicMock()
         monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
-        # What the store holds for a file once the job's files have run: None = never decided, as the publisher asks.
-        decided = {}
-        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: decided.get(path))
-        return SimpleNamespace(settings=settings, create=create, results=results, decided=decided)
+        return SimpleNamespace(settings=settings, create=create, results=results)
 
     def _run(self, paths=("/m/a.mkv", "/m/b.mkv"), listing=None):
         from media_preview_generator.markers import reconcile
@@ -2039,10 +2036,10 @@ class TestLibraryRetry:
         ("outcome", "other_row"),
         [
             ("markers_waiting", _row("markers_written", "2 marker(s)", sid="plex-1")),
-            ("markers_needs_review", _row("markers_up_to_date", "Up to date", sid="plex-1")),
+            ("markers_none", _row("markers_none", "No markers found", sid="plex-1")),
             ("failed", _row("failed", "boom", sid="plex-1")),
         ],
-        ids=["waiting", "needs-review", "failed"],
+        ids=["waiting", "none", "failed"],
     )
     def test_a_server_that_hasnt_indexed_the_file_retries_whatever_the_file_outcome(
         self, env, retry_env, outcome, other_row
@@ -2170,12 +2167,10 @@ class TestLibraryRetry:
             ([NOT_IN_LIBRARY_ROW], "not in a server's library yet"),
             ([PLEX_PASS_UNKNOWN_ROW], "not checked on Plex yet"),  # Plex restarting: the Pass check didn't answer
             ([PLEX_PASS_UNKNOWN_ROW, NOT_IN_LIBRARY_ROW], "not in a server's library or not checked on Plex yet"),
-            # Another version of the Plex item is on disk but unchecked: it may be checked, or deleted, by then.
-            ([VERSIONS_UNCHECKED_ROW], "with another version not checked yet"),
             # Another job kept running the file past the worker's wait (``pipeline.WORKER_FILE_WAIT_S``).
             ([FILE_BUSY_ROW], "not released by another job yet"),
         ],
-        ids=["not-indexed", "plex-pass-unknown", "both", "versions-unchecked", "file-busy"],
+        ids=["not-indexed", "plex-pass-unknown", "both", "file-busy"],
     )
     def test_each_retry_reason_gets_the_retry_and_its_log_line(self, env, retry_env, rows, reason):
         retry_env.results.append(("/m/a.mkv", "markers_waiting", rows))
@@ -2184,182 +2179,20 @@ class TestLibraryRetry:
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
         assert f"INFO - 1 file(s) {reason}; retry 1 of 3 in 60s (job retry-1)" in logs, logs
 
-    def test_the_retry_also_lists_the_version_that_was_never_checked(self, env, retry_env):
-        # Production (Hawaii Five-0 S07E05): the retries ran the waiting file again and again, and the version it
-        # waited for was in no job, so nothing ever checked it.
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
-        self._run(["/m/a.mkv"])
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        # One file waits; the version it waits for isn't counted as waiting.
-        assert (
-            "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
-            "checks 1 version(s) never checked"
-        ) in logs, logs
-
-    # The other version's own row once it was checked: every version is decided and they disagree (no retry code).
-    VERSIONS_DISAGREE_ROW = _row("markers_waiting", VERSIONS_UNCHECKED_ROW["message"], sid="plex-1")
-
-    def test_a_version_this_job_checked_is_neither_listed_again_nor_called_never_checked(self, env, retry_env):
-        # Production (Hawaii Five-0 S07E05, retry 1 of job 36083a12): the waiting file ran on saved answers before the
-        # version it waited for had been read, so its row still named that version. The closing line then said the next
-        # retry "also checks 1 version(s) never checked", and the next retry ran that version a second time.
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        retry_env.results += [
-            ("/m/a.mkv", "markers_waiting", [row]),
-            ("/m/a - h265.mkv", "markers_waiting", [self.VERSIONS_DISAGREE_ROW]),
-        ]
-        retry_env.decided["/m/a - h265.mkv"] = {}
-        self._run(["/m/a.mkv", "/m/a - h265.mkv"])
-        # Only the file whose row came before the other version's check runs again: that run compares the two.
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert "INFO - 1 file(s) not compared with another version yet; retry 1 of 3 in 60s (job retry-1)" in logs, logs
-        assert not any("never checked" in line or "not checked yet" in line for line in logs), logs
-
     @pytest.mark.parametrize(
-        "other_result",
+        "row",
         [
-            [],  # in no job: nothing checked it
-            [("/m/a - h265.mkv", "failed", [_row("failed", "ffmpeg exited 1", sid="plex-1")])],  # ran, undecided
+            LEGACY_VERSIONS_UNCHECKED_ROW,
+            _row("markers_waiting", LEGACY_VERSIONS_UNCHECKED_ROW["message"], sid="plex-1"),
         ],
-        ids=["not-in-the-job", "failed-in-the-job"],
+        ids=["with-the-old-code", "without-a-code"],
     )
-    def test_a_version_still_without_a_decision_keeps_its_place_and_the_wording(self, env, retry_env, other_result):
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        retry_env.results += [("/m/a.mkv", "markers_waiting", [row]), *other_result]
-        self._run(["/m/a.mkv", "/m/a - h265.mkv"])
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert (
-            "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
-            "checks 1 version(s) never checked"
-        ) in logs, logs
-
-    def test_only_the_versions_still_unchecked_are_counted_and_listed(self, env, retry_env):
-        # Three versions: one was checked since the waiting file's row, the other still has no decision.
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - 1080p.mkv", "/m/a - h265.mkv"]}
-        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
-        retry_env.decided["/m/a - 1080p.mkv"] = {}
-        self._run(["/m/a.mkv"])
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert (
-            "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1), which also "
-            "checks 1 version(s) never checked"
-        ) in logs, logs
-
-    @pytest.mark.parametrize(
-        ("version", "still_unchecked"),
-        [
-            ("decided-with-a-marker", False),
-            ("decided-nothing-to-show", False),
-            ("never-seen", True),
-            ("known-but-undecided", True),
-            ("replaced-since-its-decision", True),
-        ],
-    )
-    def test_a_named_version_is_checked_once_markers_db_has_a_decision_for_the_file_on_disk(
-        self, tmp_path, version, still_unchecked
+    def test_a_row_still_waiting_for_other_versions_from_before_the_rule_change_queues_nothing(
+        self, env, retry_env, row
     ):
-        # Against a real markers.db: the other tests answer for the store through ``markers_for_path``.
-        waiting_file, other = str(tmp_path / "a.mkv"), tmp_path / "a - h265.mkv"
-        other.write_bytes(b"x")
-        st = os.stat(other)
-        store = MarkerStore(str(tmp_path / "markers.db"))
-        try:
-            if version != "never-seen":
-                identity = FileIdentity(str(other), st.st_size, st.st_mtime_ns)
-                rec = store.upsert_file(identity, duration_ms=1_380_000, season_key=None, is_movie=True)
-            if version not in ("never-seen", "known-but-undecided"):
-                intro = Marker(MarkerType.INTRO, 11_000, 37_000, ("chapters",))
-                decided = TypeDecision(MarkerType.INTRO, DecisionStatus.DECIDED, intro, None, "agreed")
-                nothing = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "nothing found")
-                decision = nothing if version == "decided-nothing-to-show" else decided
-                store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="f")
-            if version == "replaced-since-its-decision":
-                other.write_bytes(b"another file")
-            waiting = {job_runner.VERSIONS_UNCHECKED: {waiting_file}}
-
-            still = job_runner._versions_still_unchecked(store, waiting, {waiting_file: {str(other)}})
-        finally:
-            store.close()
-
-        if still_unchecked:
-            assert still == {str(other)}
-            assert waiting == {job_runner.VERSIONS_UNCHECKED: {waiting_file}}
-        else:
-            assert still == set()
-            assert waiting == {job_runner.VERSIONS_UNCHECKED: set(), job_runner.VERSIONS_NOT_COMPARED: {waiting_file}}
-
-    def test_a_row_that_names_no_version_keeps_waiting_for_an_unchecked_one(self, env, retry_env):
-        # The publisher couldn't tell in time whether the other version is still on disk: it names no file.
-        retry_env.results.append(("/m/a.mkv", "markers_waiting", [VERSIONS_UNCHECKED_ROW]))
-        self._run(["/m/a.mkv"])
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert "INFO - 1 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1)" in logs, logs
-
-    def test_a_store_that_cant_be_read_leaves_the_named_versions_unchecked(self, env, retry_env, monkeypatch):
-        monkeypatch.setattr(job_runner, "markers_for_path", MagicMock(side_effect=sqlite3.OperationalError("locked")))
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
-        self._run(["/m/a.mkv"])
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/a - h265.mkv"]
-
-    def test_two_versions_that_wait_for_each_other_are_each_listed_once(self, env, retry_env):
-        for path, other in (("/m/a.mkv", "/m/a - h265.mkv"), ("/m/a - h265.mkv", "/m/a.mkv")):
-            row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": [other]}
-            retry_env.results.append((path, "markers_waiting", [row]))
-        self._run(["/m/a - h265.mkv", "/m/a.mkv"])
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a - h265.mkv", "/m/a.mkv"]
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert "INFO - 2 file(s) with another version not checked yet; retry 1 of 3 in 60s (job retry-1)" in logs
-
-    def test_after_the_last_retry_the_unchecked_version_isnt_counted_as_waiting(self, env, retry_env):
-        env.job.config["retry_attempt"] = 3
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
-        self._run(["/m/a.mkv"])
-        retry_env.create.assert_not_called()
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert (
-            "WARNING - 1 file(s) still with another version not checked after 3 retries; a later job for them tries "
-            "again"
-        ) in logs, logs
-
-    @pytest.mark.parametrize(
-        ("row", "outcome"),
-        [
-            (NOT_IN_LIBRARY_ROW, "markers_waiting"),
-            (PLEX_PASS_UNKNOWN_ROW, "markers_waiting"),
-            (FILE_BUSY_ROW, "markers_waiting"),
-            (PLEX_DB_BUSY_ROW, "failed"),
-        ],
-        ids=["not-indexed", "plex-pass-unknown", "file-busy", "plex-db-busy"],
-    )
-    def test_any_other_retry_lists_only_the_waiting_file(self, env, retry_env, row, outcome):
-        retry_env.results.append(("/m/a.mkv", outcome, [{**row, "unchecked_files": ["/m/a - h265.mkv"]}]))
-        self._run(["/m/a.mkv"])
-        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
-
-    def test_versions_that_were_checked_and_disagree_queue_nothing(self, env, retry_env):
-        row = _row("markers_waiting", VERSIONS_UNCHECKED_ROW["message"], sid="plex-1")
+        # A Plex item no longer waits for its versions; the one-off re-run of such files is the decide-again job.
         retry_env.results.append(("/m/a.mkv", "markers_waiting", [{**row, "unchecked_files": ["/m/a - h265.mkv"]}]))
         self._run(["/m/a.mkv"])
-        retry_env.create.assert_not_called()
-
-    def test_check_servers_leaves_an_unchecked_version_to_a_later_run(self, env, retry_env):
-        # It retries only a busy write or a busy file; a version not checked isn't its to queue either.
-        from media_preview_generator.markers import reconcile
-
-        env.job.config = {"reconcile": True, "source": "reconcile"}
-        env.job.library_name = reconcile.RECONCILE_JOB_NAME
-        row = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
-        listing = MagicMock(spec=reconcile.CheckServersListing, items=[_item("/m/a.mkv")], warnings=[])
-        listing.confirmed_gone_items.return_value = set()
-        self._run(listing=listing)
         retry_env.create.assert_not_called()
 
     def test_all_three_reasons_share_one_retry_and_one_log_line(self, env, retry_env):
@@ -2616,30 +2449,25 @@ class TestLaterJobNamesCountTheirOwnFiles:
         return create
 
     @pytest.mark.parametrize(
-        ("parent_name", "waiting", "unchecked", "expected"),
+        ("parent_name", "waiting", "expected"),
         [
-            ("Intro & Credits · 7 files", ["/m/a.mkv"], [], "Retry: Intro & Credits · 1 file"),
-            ("Intro & Credits · 6 files", ["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"], [], "Retry: Intro & Credits · 3 files"),
-            # The retry also runs a version of the waiting file's item that was never checked: it is a file it runs.
-            ("Intro & Credits · 7 files", ["/m/a.mkv"], ["/m/a - 4k.mkv"], "Retry: Intro & Credits · 2 files"),
+            ("Intro & Credits · 7 files", ["/m/a.mkv"], "Retry: Intro & Credits · 1 file"),
+            ("Intro & Credits · 6 files", ["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"], "Retry: Intro & Credits · 3 files"),
             # A retry's own retry: one prefix, and its own count again.
-            ("Retry: Intro & Credits · 3 files", ["/m/a.mkv"], [], "Retry: Intro & Credits · 1 file"),
-            ("Retry: Intro & Credits · 1 file", ["/m/a.mkv"], ["/m/a - 4k.mkv"], "Retry: Intro & Credits · 2 files"),
+            ("Retry: Intro & Credits · 3 files", ["/m/a.mkv"], "Retry: Intro & Credits · 1 file"),
             # A name that isn't a file count is kept.
-            ("Intro & Credits · Pilot", ["/m/a.mkv"], [], "Retry: Intro & Credits · Pilot"),
+            ("Intro & Credits · Pilot", ["/m/a.mkv"], "Retry: Intro & Credits · Pilot"),
         ],
-        ids=["one-of-seven", "three-of-six", "plus-unchecked-version", "retry-of-retry", "retry-grows", "title-kept"],
+        ids=["one-of-seven", "three-of-six", "retry-of-retry", "title-kept"],
     )
-    def test_a_retry_is_named_for_the_files_it_runs(self, env, create, parent_name, waiting, unchecked, expected):
+    def test_a_retry_is_named_for_the_files_it_runs(self, env, create, parent_name, waiting, expected):
         env.job.library_name = parent_name
 
-        listed = job_runner._queue_retry(
-            env.job, env.job.config, {job_runner.NOT_ON_DISK: set(waiting)}, {}, also=set(unchecked)
-        )
+        listed = job_runner._queue_retry(env.job, env.job.config, {job_runner.NOT_ON_DISK: set(waiting)}, {})
 
         kwargs = create.call_args.kwargs
         assert kwargs["library_name"] == expected
-        assert kwargs["file_paths"] == listed == [*waiting, *unchecked]
+        assert kwargs["file_paths"] == listed == waiting
 
     def test_a_verify_job_is_named_for_the_files_it_checks(self, env, create):
         env.job.library_name = "Intro & Credits · 7 files"
@@ -2789,42 +2617,16 @@ class TestRetryChain:
             "1 file(s) still not in a server's library after 3 retries. Check the Files panel for the affected paths."
         )
 
-    def test_a_retry_that_checked_the_other_version_runs_the_waiting_file_once_more(self, env, chain_env, monkeypatch):
-        # The waiting file's row came before the other version's check in this retry, so nothing has compared the two.
-        self._as_retry(env)
-        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: {})
-        stale = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [stale]))
-        self._run()
-        kwargs = chain_env.create.call_args.kwargs
-        assert (kwargs["file_paths"], kwargs["parent_job_id"], kwargs["retry_attempt"]) == (["/m/a.mkv"], "head-1", 2)
-        assert [c["outcome"] for c in self._chain_calls(env)] == ["running", "scheduled"]
-
-    def test_a_retry_that_finds_the_versions_checked_and_disagreeing_ends_the_chain(self, env, chain_env, monkeypatch):
-        # Every version is decided and they disagree: no retry changes that, so the chain ends with nothing queued.
+    def test_a_retry_that_finds_a_row_waiting_for_other_versions_from_before_the_rule_change_ends_the_chain(
+        self, env, chain_env
+    ):
         self._as_retry(env, attempt=2)
-        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: {})
-        chain_env.rows.append(
-            ("/m/a.mkv", "markers_waiting", [_row("markers_waiting", VERSIONS_UNCHECKED_ROW["message"], sid="plex-1")])
-        )
+        stale = {**LEGACY_VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
+        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [stale]))
         self._run()
         chain_env.create.assert_not_called()
         ended = self._chain_calls(env)[-1]
         assert (ended["originating_job_id"], ended["outcome"], ended["reason"]) == ("head-1", "completed", None)
-
-    def test_the_last_retry_names_a_file_never_compared_with_its_other_version(self, env, chain_env, monkeypatch):
-        self._as_retry(env, attempt=3)
-        monkeypatch.setattr(job_runner, "markers_for_path", lambda store, path: {})
-        stale = {**VERSIONS_UNCHECKED_ROW, "unchecked_files": ["/m/a - h265.mkv"]}
-        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [stale]))
-        self._run()
-        chain_env.create.assert_not_called()
-        exhausted = self._chain_calls(env)[-1]
-        assert (exhausted["outcome"], exhausted["reason"]) == (
-            "exhausted",
-            "1 file(s) still not compared with another version after 3 retries. Check the Files panel for the "
-            "affected paths.",
-        )
 
     def test_a_chain_head_waiting_on_its_retry_is_not_run_again_when_the_queue_resumes(self, env, chain_env):
         env.job.config = {"file_paths": ["/m/a.mkv"], "is_retry_chain": True, "last_outcome": "scheduled"}
@@ -3546,7 +3348,7 @@ class TestTheIntroDbBudgetRecheck:
             "file_paths": ["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"],
         }
         env.ctx.settings.source_enabled.side_effect = lambda source_id: source_id == "theintrodb"
-        self._decisions(env, {"/m/a.mkv": ["decided", "needs_review"], "/m/b.mkv": ["decided", "disabled"]})
+        self._decisions(env, {"/m/a.mkv": ["decided", "no_evidence"], "/m/b.mkv": ["decided", "disabled"]})
         items = [_item("/m/a.mkv"), _item("/m/b.mkv"), _item("/m/c.mkv")]
         with patch.object(job_runner, "build_items", return_value=(items, [], {})):
             job_runner.run_intro_credits_job("j1")
@@ -4064,9 +3866,10 @@ def test_start_job_async_falls_back_to_the_preview_thread_when_the_job_cant_be_r
     threading_mod.Thread.assert_called_once()
 
 
-class TestInReviewJob:
-    """The one job after settings v16 (``triggers.submit_decide_again``): an ordinary Intro & Credits job over the files
-    in Needs review, and those waiting for their item's other versions, when it runs."""
+class TestDecideAgainJob:
+    """The one job after settings v16 and v20 (``triggers.submit_decide_again``): an ordinary Intro & Credits job over
+    the files still stored under the removed Needs review status, and those waiting for their item's other versions,
+    when it runs."""
 
     CONFIG = {
         "kind": JOB_KIND_INTRO_CREDITS,
@@ -4082,9 +3885,13 @@ class TestInReviewJob:
 
         env.jm.complete_job.side_effect = lambda *args, **kwargs: setattr(env.job, "status", JobStatus[status])
 
-    def test_it_lists_the_files_in_review_and_waiting_and_runs_them_as_any_job(self, env):
+    def test_it_lists_the_legacy_review_files_and_waiting_and_runs_them_as_any_job(self, env):
         env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_in_review.return_value = ["/tv/B/S01/e2.mkv", "/movies/A/a.mkv", "/tv/B/S01/e1.mkv"]
+        env.ctx.store.files_with_legacy_review_decisions.return_value = [
+            "/tv/B/S01/e2.mkv",
+            "/movies/A/a.mkv",
+            "/tv/B/S01/e1.mkv",
+        ]
         env.ctx.store.files_waiting_for_other_versions.return_value = ["/tv/B/S01/e1.mkv", "/movies/C/c - 4K.mkv"]
         with patch.object(job_runner, "build_items") as build:
             job_runner.run_intro_credits_job("j1")
@@ -4107,19 +3914,23 @@ class TestInReviewJob:
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
 
         env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_in_review.return_value = ["/m/a.mkv"]
+        env.ctx.store.files_with_legacy_review_decisions.return_value = ["/m/a.mkv"]
         self._ends(env, status)
         job_runner.run_intro_credits_job("j1")
         assert env.sm.delete.call_args_list == ([call(DECIDE_AGAIN_KEY)] if cleared else [])
 
-    def test_with_nothing_in_review_it_completes_without_a_warning_and_clears_the_request(self, env):
+    def test_with_nothing_left_to_decide_again_it_completes_without_a_warning_and_clears_the_request(self, env):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
 
         env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_in_review.return_value = []
+        env.ctx.store.files_with_legacy_review_decisions.return_value = []
+        env.ctx.store.files_waiting_for_other_versions.return_value = []
+        env.ctx.store.files_with_season_audio_intro.return_value = []
+        env.ctx.store.files_decided_by_online_and_server_markers.return_value = []
         self._ends(env, "COMPLETED")
         job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_not_called()
+        env.jm.add_log.assert_any_call("j1", "INFO - No file is left to decide again")
         env.jm.complete_job.assert_called_once_with("j1")
         env.sm.delete.assert_called_once_with(DECIDE_AGAIN_KEY)
 
@@ -4128,7 +3939,7 @@ class TestInReviewJob:
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert env.build_context.call_args.kwargs["decide_again"] is False
-        env.ctx.store.files_in_review.assert_not_called()
+        env.ctx.store.files_with_legacy_review_decisions.assert_not_called()
         env.sm.delete.assert_not_called()
 
     def test_its_retry_is_an_ordinary_retry_and_a_file_off_disk_gets_none(self, env, monkeypatch):
@@ -4138,7 +3949,7 @@ class TestInReviewJob:
         env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
         env.job.config = dict(self.CONFIG)
         env.job.library_name = triggers.DECIDE_AGAIN_JOB_NAME
-        env.ctx.store.files_in_review.return_value = ["/m/a.mkv", "/m/b.mkv"]
+        env.ctx.store.files_with_legacy_review_decisions.return_value = ["/m/a.mkv", "/m/b.mkv"]
         create = MagicMock(return_value=MagicMock(id="retry-1"))
         monkeypatch.setattr(triggers, "create_intro_credits_job", create)
         set_cb = MagicMock()
