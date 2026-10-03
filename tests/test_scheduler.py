@@ -1,7 +1,8 @@
 """Tests for media_preview_generator.web.scheduler."""
 
 import os
-from datetime import UTC
+from collections.abc import Callable
+from datetime import UTC, datetime, tzinfo
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,19 +18,33 @@ from media_preview_generator.web.scheduler import (
 
 
 @pytest.fixture
-def scheduler_manager(tmp_path, monkeypatch):
-    """Create and start a ScheduleManager, set as global singleton, clean up after."""
+def start_scheduler_manager(tmp_path, monkeypatch):
+    """Factory: build and start a ScheduleManager as the global singleton; stops it after the test.
+
+    A factory rather than an instance so a test can patch the clock or timezone first.
+    """
     config_dir = str(tmp_path / "config")
     os.makedirs(config_dir, exist_ok=True)
+    started: list[ScheduleManager] = []
 
-    manager = ScheduleManager(config_dir=config_dir, run_job_callback=None)
-    # Make this the global singleton so execute_scheduled_job uses it
-    monkeypatch.setattr("media_preview_generator.web.scheduler._schedule_manager", manager)
-    manager.start()
+    def _start() -> ScheduleManager:
+        manager = ScheduleManager(config_dir=config_dir, run_job_callback=None)
+        # Make this the global singleton so execute_scheduled_job uses it
+        monkeypatch.setattr("media_preview_generator.web.scheduler._schedule_manager", manager)
+        manager.start()
+        started.append(manager)
+        return manager
 
-    yield manager
+    yield _start
 
-    manager.stop()
+    for manager in started:
+        manager.stop()
+
+
+@pytest.fixture
+def scheduler_manager(start_scheduler_manager):
+    """Create and start a ScheduleManager, set as global singleton, clean up after."""
+    return start_scheduler_manager()
 
 
 # ========================================================================
@@ -825,42 +840,97 @@ class TestScheduleRunNow:
         assert updated["last_run"] is not None
 
 
+def _freeze_apscheduler_clock(monkeypatch: pytest.MonkeyPatch, now: datetime, tz: tzinfo) -> Callable[[datetime], None]:
+    """Pin APScheduler's wall clock and local timezone so cron math depends on neither today's date
+    nor the machine's zone.
+
+    ``now`` must be aware. Patches the ``datetime`` name in the scheduler loop (due-job selection,
+    next fire time) and the executor (misfire check), and ``tzlocal.get_localzone`` everywhere
+    APScheduler imports it: the scheduler (its ``timezone``) and the cron/interval triggers, which
+    resolve the local zone on their own when ``CronTrigger.from_crontab`` is given none.
+
+    Returns a setter that moves the frozen clock, so a test can arm a run in the future and then
+    jump to the instant it is due instead of racing the scheduler thread.
+    """
+    clock = [now]
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return clock[0].astimezone(tz)
+
+    def set_now(new_now: datetime) -> None:
+        clock[0] = new_now
+
+    for module in ("apscheduler.schedulers.base", "apscheduler.triggers.cron", "apscheduler.triggers.interval"):
+        monkeypatch.setattr(f"{module}.get_localzone", lambda: tz)
+    monkeypatch.setattr("apscheduler.schedulers.base.datetime", FrozenDatetime)
+    monkeypatch.setattr("apscheduler.executors.base.datetime", FrozenDatetime)
+    return set_now
+
+
 class TestNextRunAfterAFire:
     """Live case: TV Daily ("0 2 * * *") fired at 02:00; APScheduler moved on to
     the next day's 02:00, but ``schedules.json`` kept ``next_run`` at the 02:00
     that had just fired — ``_update_last_run`` saved the copy last refreshed by
     a page read, which was still the upcoming (now fired) run."""
 
-    def test_stored_next_run_matches_the_scheduler_when_a_cron_schedule_fires(self, scheduler_manager, monkeypatch):
+    @pytest.mark.parametrize(
+        ("frozen_now", "dst_case"),
+        [
+            pytest.param("2026-06-10T12:00:00", "ordinary day", id="ordinary-day"),
+            # Sydney starts DST on 2026-10-04: 02:00 doesn't exist, the clock jumps 02:00 -> 03:00.
+            pytest.param("2026-10-03T12:00:00", "DST gap", id="dst-gap"),
+            # Sydney ends DST on 2027-04-04: 02:00-03:00 happens twice.
+            pytest.param("2027-04-03T12:00:00", "DST overlap", id="dst-overlap"),
+        ],
+    )
+    def test_stored_next_run_matches_the_scheduler_when_a_cron_schedule_fires(
+        self, start_scheduler_manager, monkeypatch, frozen_now: str, dst_case: str
+    ):
         import json
         import time
         from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
 
+        def instant(iso: str) -> datetime:
+            return datetime.fromisoformat(iso).astimezone(UTC)
+
+        tz = ZoneInfo("Australia/Sydney")
+        now = datetime.fromisoformat(frozen_now).replace(tzinfo=tz)
+        fire_at = now - timedelta(seconds=1)
+        # Start an hour early so the armed run is still in the future while the page "polls";
+        # the clock then jumps to ``now`` and the scheduler is woken with the run due.
+        set_now = _freeze_apscheduler_clock(monkeypatch, now - timedelta(hours=1), tz)
         monkeypatch.setattr(
             "media_preview_generator.web.settings_manager.get_settings_manager",
             lambda: MagicMock(processing_paused=False),
         )
+        scheduler_manager = start_scheduler_manager()
         callback = MagicMock()
         scheduler_manager.set_run_job_callback(callback)
         schedule = scheduler_manager.create_schedule(
             name="TV Daily", library_id="2", library_name="TV Shows", cron_expression="0 2 * * *"
         )
         sid = schedule["id"]
-        fire_at = datetime.now(UTC) - timedelta(seconds=1)
         scheduler_manager.scheduler.modify_job(sid, next_run_time=fire_at)
         # The Schedules page polls, which copies the upcoming run into memory.
-        assert [s["next_run"] for s in scheduler_manager.get_all_schedules()] == [fire_at.isoformat()]
+        assert [instant(s["next_run"]) for s in scheduler_manager.get_all_schedules()] == [fire_at.astimezone(UTC)]
 
+        set_now(now)
         scheduler_manager.scheduler.wakeup()
 
         def stored() -> dict:
             with open(scheduler_manager.schedules_file) as fh:
                 return json.load(fh)["schedules"][sid]
 
+        def stored_next_run_utc() -> datetime:
+            return instant(stored()["next_run"])
+
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             live = scheduler_manager.scheduler.get_job(sid).next_run_time
-            if callback.called and stored()["last_run"] and datetime.fromisoformat(stored()["next_run"]) == live:
+            if callback.called and stored()["last_run"] and stored_next_run_utc() == live.astimezone(UTC):
                 break
             time.sleep(0.05)
 
@@ -868,12 +938,16 @@ class TestNextRunAfterAFire:
         assert callback.call_args.kwargs["parent_schedule_id"] == sid
         live = scheduler_manager.scheduler.get_job(sid).next_run_time
         assert live > fire_at
-        assert (live.hour, live.minute) == (2, 0)
+        local = live.astimezone(tz)
+        assert (local.date(), local.hour, local.minute) == ((now + timedelta(days=1)).date(), 2, 0), dst_case
         assert stored()["last_run"] is not None
-        assert datetime.fromisoformat(stored()["next_run"]) == live, (
-            f"schedules.json next_run {stored()['next_run']} is the run that just fired; the scheduler holds {live}"
+        # A datetime inside a DST gap or overlap compares unequal to any other zone's datetime (PEP 495),
+        # so compare the instants in UTC rather than the ISO string's fixed offset against the scheduler's zone.
+        assert stored_next_run_utc() == live.astimezone(UTC), (
+            f"{dst_case}: schedules.json next_run {stored()['next_run']} is the run that just fired; "
+            f"the scheduler holds {live}"
         )
-        assert datetime.fromisoformat(scheduler_manager.get_schedule(sid)["next_run"]) == live
+        assert instant(scheduler_manager.get_schedule(sid)["next_run"]) == live.astimezone(UTC)
 
     def _dispatch(self, manager, code: int, job_id: str) -> None:
         from datetime import datetime

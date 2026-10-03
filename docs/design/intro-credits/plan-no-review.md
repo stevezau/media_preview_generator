@@ -122,10 +122,21 @@ existing `keep_published` / `_keep_published_before_rule_change` behaviour for t
   `/api/jobs/<id>/files` (web/jobs.py:2752-2754); the job log shows JF12 "Added". FOLLOW-UP: make that check read
   the job's own log line or accept written|up_to_date plus served-per-source. Row 11 not run.
 - Owner switched to the fast path (2026-10-03): commit → PR → CI → merge → upgrade sflix → live sweep.
-- [x] PR #349 all green, squash-merged into dev as 4617b74  - [ ] dev image  - [ ] sflix upgrade + live sweep
-- [ ] #332 reply (show owner the text first)
+- [x] PR #349 all green, squash-merged into dev as 4617b74; sflix upgraded 2026-10-03 07:12 UTC, live sweep: 112
+  on-disk review rows → 18 credits decided by credit text, intros nothing; 0 versions waiting (134 multi-version
+  items written); 11 Animal Control S04 intros re-decided by IntroDB+season audio (legit); 6 Failed = Legends of
+  Tomorrow S03 truncated files; no GPU warning. Found 79 rows still raw `needs_review` → fixed in PR #350
+  (b7f98f7), sflix upgraded 07:4x UTC, 79 → 0. Backups: `/config/plex-generate-previews.pre-pr349.tgz`,
+  `.pre-pr350.tgz`; old containers `-pre-pr349`, `-pre-pr350` stopped.
+- [x] #332 reply text given to the owner to post (2026-10-03)
 - [x] lab check follow-up: `phase1_matrix.py` `_version_case` A2/B2 accepts written|up_to_date and requires the
   served segments per media source (branch fix/legacy-review-rows)
 - [x] sflix live bug: 79 raw `needs_review` rows survived decide-again (`_decisions_changed` read them as
   NO_EVIDENCE = unchanged); `DecisionRow.legacy` now forces the rewrite (branch fix/legacy-review-rows)
 - [ ] owner OK to commit  - [ ] deploy + live sweep
+- [x] Lab phase 2 row 11 (Plex versions drifting) on the published dev image b7f98f7: PASS — Plex served
+  intro 25–55 s / credits 100–120 s at every step, no flapping, no versions-waiting lines (run 1 failed on setup
+  only: a fresh DB had never decided E03). Result `evidence/lab/results/p2-row-11.json`.
+- [x] DST-dependent scheduler test made deterministic (test bug, PEP 495 inter-zone compare).
+- Follow-ups, not part of this chunk: PR #341 (credit text v9, captions) matters more now that credit text wins
+  credits disagreements — rebase, re-measure, ship next; bigger test of lone IntroDB/TheIntroDB credits (24/24).

@@ -174,7 +174,16 @@ jobs:
     # used to do.
     runs-on: ubuntu-latest
     needs: unit
+    # Run even when a unit shard fails. Without this the job is SKIPPED on a red shard, and
+    # GitHub counts a skipped required check as passing — PR #351 merged red that way.
+    if: ${{ !cancelled() }}
     steps:
+      - name: Fail when any unit shard did not succeed
+        if: needs.unit.result != 'success'
+        run: |
+          echo "::error::unit tests did not pass (result: ${{ needs.unit.result }}) — see the unit (n/3) jobs"
+          exit 1
+
       - uses: actions/checkout@v4
 
       - name: Set up Python
