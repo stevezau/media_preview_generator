@@ -449,10 +449,10 @@ class TestIntroCreditsSettings:
         expect(authed_page.locator("#globalInfoModal")).to_be_visible(timeout=5000)
         expect(authed_page.locator("#globalInfoTitle")).to_have_text("How decisions are made")
         expect(authed_page.locator("#globalInfoBody h6")).to_have_text(
-            ["Who can decide alone", "The three outcomes", "Rules that surprise people"]
+            ["Who can decide alone", "The two outcomes", "Rules that surprise people"]
         )
         expect(authed_page.locator("#globalInfoBody .markers-outcomes dt")).to_have_text(
-            ["Decided and sent", "Needs your check", "Nothing found"]
+            ["Decided and sent", "Nothing found"]
         )
 
     def test_who_can_decide_alone_matches_the_decision_rules(self, authed_page: Page, app_url: str) -> None:

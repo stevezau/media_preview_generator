@@ -34,9 +34,11 @@ from __future__ import annotations
 from typing import Any
 
 #: Backoff schedule in seconds for each attempt (1-indexed:
-#: ``BACKOFF_SCHEDULE[0]`` is the delay before attempt #2). Five entries
-#: → up to five retries before giving up. Total wall time is ~83 minutes,
-#: deliberately past typical Plex full-scan duration on a small library.
+#: ``BACKOFF_SCHEDULE[0]`` is the delay before attempt #2). Five entries;
+#: the retry count setting decides how many are used (a count past five
+#: repeats the last). At the default count and delay the retries span
+#: ~83 minutes, deliberately past typical Plex full-scan duration on a
+#: small library; a count of 3 stops after 8.
 #:
 #: First attempt is 60s — Jellyfin's ``LibraryMonitor`` has a hard-coded
 #: ~45s file-event settle delay before processing the refresh, so anything
@@ -45,6 +47,9 @@ from typing import Any
 #: Subsequent gaps (2m / 5m / 15m / 1h) cover Plex's typical scan latency
 #: window without turning into a runaway loop.
 BACKOFF_SCHEDULE: tuple[int, ...] = (60, 120, 300, 900, 3600)
+
+#: Retries when no count is stored: the whole schedule. Only the default; a stored count is kept as it is.
+DEFAULT_RETRY_COUNT = len(BACKOFF_SCHEDULE)
 
 
 def scaled_backoff_delay(attempt: int, retry_delay_sec: int) -> int:
@@ -110,10 +115,11 @@ def retry_policy(settings: Any) -> tuple[int, int]:
         settings: The settings manager (anything with ``get(key, default)``).
 
     Returns:
-        ``(webhook_retry_count, webhook_retry_delay)``: count clamped to 0-10 (default 3), delay to 10-300 seconds
-        (default 30); a value that isn't a number falls back to its default.
+        ``(webhook_retry_count, webhook_retry_delay)``: count clamped to 0-10 (default
+        :data:`DEFAULT_RETRY_COUNT`), delay to 10-300 seconds (default 30); a value that isn't a number falls back
+        to its default.
     """
     return (
-        _clamped_int(settings, "webhook_retry_count", 3, 0, 10),
+        _clamped_int(settings, "webhook_retry_count", DEFAULT_RETRY_COUNT, 0, 10),
         _clamped_int(settings, "webhook_retry_delay", 30, 10, 300),
     )

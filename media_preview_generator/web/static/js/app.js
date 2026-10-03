@@ -1546,14 +1546,13 @@ const STATUS_META = {
 
     // Intro & Credits — file outcomes (markers.outcomes.FileOutcome) and per-server row statuses (ServerStatus).
     // markers_up_to_date / _none / _skipped / _waiting are both, with one label each.
-    markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'The job changed what at least one server shows; the reason names any other marker that still needs review' },
+    markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'The job changed what at least one server shows; the reason names any other marker that wasn\'t found' },
     markers_written:        { label: 'Markers written', cls: 'bg-success', tip: 'Markers were written to this server' },
     markers_up_to_date:     { label: 'Up to date', cls: 'bg-secondary', tip: 'The server already shows these markers' },
-    markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'A marker wasn\'t sent (the sources disagree, or the only answer can\'t decide on its own), and the job wrote nothing else for this file' },
     markers_none:           { label: 'No markers found', cls: 'bg-secondary', tip: 'No source found an intro or credits for this file' },
     markers_no_owners:      { label: 'No server with Intro & Credits on', cls: 'bg-secondary', tip: 'No server with Intro & Credits turned on has this file' },
     markers_skipped:        { label: 'Skipped', cls: 'bg-secondary', tip: 'The server can\'t take markers right now (for example, a plugin is missing), or the file is a trailer or other extra' },
-    markers_waiting:        { label: 'Waiting', cls: 'bg-info text-dark', tip: 'The server hasn\'t added the file yet (the job tries it again later), or the item\'s versions don\'t agree yet' },
+    markers_waiting:        { label: 'Waiting', cls: 'bg-info text-dark', tip: 'The server hasn\'t added the file yet (the job tries it again later)' },
 };
 
 const JOB_KIND_INTRO_CREDITS = 'intro_credits';
@@ -1561,7 +1560,7 @@ const JOB_KIND_INTRO_CREDITS = 'intro_credits';
 const MARKERS_NOT_IN_LIBRARY = 'not_in_library';
 const MARKERS_NOT_IN_LIBRARY_LABEL = 'Not in the server\'s library yet — will retry';
 // Server messages that only repeat the pill or the file's reason (markers/pipeline.py); the Files panel lists the rest.
-// "Sources don't agree yet" is what rows recorded before a Needs review row said why (2026-09-24).
+// "Sources don't agree yet" is what rows recorded before 2026-09-24 said when nothing was written.
 const MARKERS_ROUTINE_MESSAGE = /^(Up to date|No markers found|Sources don't agree yet|\d+ marker\(s\))$/;
 
 function _isMarkersJob(job) {
@@ -1814,6 +1813,16 @@ function _renderMarkerSources(sources) {
         + `<div class="small text-muted mt-1">${lines.join('')}</div></div>`;
 }
 
+// "N files ran on the CPU because the GPU failed" (progress.cpu_fallback_files, JobTracker.cpu_fallback_files):
+// files a GPU worker reran on the CPU. Nothing when none did.
+function _renderCpuFallbackLine(count) {
+    const n = Number(count) || 0;
+    if (n <= 0) return '';
+    const files = n === 1 ? '1 file ran' : `${n.toLocaleString()} files ran`;
+    return `<div class="mt-1 small text-warning-emphasis cpu-fallback-line"><i class="bi bi-arrow-down-circle me-1"></i>`
+        + `${files} on the CPU because the GPU failed</div>`;
+}
+
 function _renderPublishersBlock(job) {
     // D12 — per-server aggregate (one row per registered server with
     // status counts), NOT per-file. Per-file × per-server attribution
@@ -1830,7 +1839,8 @@ function _renderPublishersBlock(job) {
     const fileIssues = _renderJobFileIssues(outcome);
     const isMarkers = _isMarkersJob(job);
     const sourcesBlock = isMarkers ? _renderMarkerSources(job.progress && job.progress.marker_sources) : '';
-    if (!rows.length && !fileIssues && !sourcesBlock) return '';
+    const cpuLine = _renderCpuFallbackLine(job && job.progress && job.progress.cpu_fallback_files);
+    if (!rows.length && !fileIssues && !sourcesBlock && !cpuLine) return '';
     const lines = rows.map(function (entry) {
         const stype = (entry.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 12) || '';
@@ -1840,7 +1850,7 @@ function _renderPublishersBlock(job) {
         const badgeSpecs = [];
         if (isMarkers) {
             // Intro & Credits: no frame provenance; per-server marker statuses in a fixed order.
-            const order = ['markers_written', 'markers_up_to_date', 'markers_needs_review', 'markers_waiting',
+            const order = ['markers_written', 'markers_up_to_date', 'markers_waiting',
                            'markers_skipped', 'markers_none', 'failed'];
             const present = Object.keys(counts).filter(function (k) { return counts[k] > 0; });
             order.concat(present.filter(function (k) { return order.indexOf(k) === -1; }))
@@ -1895,7 +1905,7 @@ function _renderPublishersBlock(job) {
             `</div>`
         );
     }).filter(Boolean).join('');
-    if (!lines && !sourcesBlock) return '';
+    if (!lines && !sourcesBlock && !cpuLine) return '';
     // The verbose "Auto-retrying — Tiles are on disk… backs off 30s →
     // 2m → 5m → 15m → 1h…" alert previously rendered here was
     // redundant with (a) the per-server badge tooltip on "Generated
@@ -1927,7 +1937,7 @@ function _renderPublishersBlock(job) {
           `<span class="badge bg-light text-dark border"><i class="bi bi-exclamation-triangle me-1"></i>Files</span>` +
           `<span class="text-muted small" aria-hidden="true">→</span>${fileIssues}</div>`
         : '';
-    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}${sourcesBlock}</div>`;
+    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}${cpuLine}${sourcesBlock}</div>`;
 }
 
 // Pick the retry-chain info-modal template matching the Job's server
@@ -3956,7 +3966,7 @@ function _buildOutcomeTooltip(outcome) {
     // D14 — pull labels from the unified STATUS_META so the tooltip
     // matches the file-outcome chip and the per-server pill.
     var keys = ['generated', 'skipped_bif_exists', 'skipped_not_indexed',
-                'markers_published', 'markers_up_to_date', 'markers_needs_review', 'markers_waiting',
+                'markers_published', 'markers_up_to_date', 'markers_waiting',
                 'markers_skipped', 'markers_none', 'markers_no_owners',
                 'skipped_file_not_found', 'skipped_source_gone', 'skipped_excluded',
                 'skipped_invalid_hash', 'failed', 'no_media_parts'];

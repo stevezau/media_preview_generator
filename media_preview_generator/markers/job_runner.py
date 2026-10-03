@@ -39,6 +39,7 @@ from ..web.routes.job_runner import (
     _inflight_jobs,
     _inflight_lock,
     _is_force_fire_now_set,
+    _retry_job_label,
 )
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
@@ -58,7 +59,6 @@ from .outcomes import (
     READ_BACK_FAILED,
     RETRY_REASON_CODES,
     VERIFY_LATER,
-    VERSIONS_UNCHECKED,
     FileOutcome,
     ServerStatus,
 )
@@ -176,9 +176,8 @@ def retry_reason(row: object) -> str | None:
 
     Returns:
         The reason code of a waiting row the job retries (the server hasn't indexed the file yet, Plex didn't answer
-        its Plex Pass check, another version of its Plex item hasn't been checked yet, or another job kept running the
-        file past the worker's wait), or ``PLEX_DB_BUSY`` for a
-        failed row whose write gave up waiting for Plex's database; None for any other row.
+        its Plex Pass check, or another job kept running the file past the worker's wait), or ``PLEX_DB_BUSY`` for
+        a failed row whose write gave up waiting for Plex's database; None for any other row.
     """
     if not isinstance(row, dict):
         return None
@@ -196,7 +195,6 @@ _RETRY_WORDS = {
     NOT_ON_DISK: "not on disk",
     NOT_IN_LIBRARY: "not in a server's library",
     PLEX_PASS_UNKNOWN: "not checked on Plex",
-    VERSIONS_UNCHECKED: "with another version not checked",
     PLEX_DB_BUSY: "not written to Plex's busy database",
     FILE_BUSY: "not released by another job",
 }
@@ -311,7 +309,11 @@ def _end_chain(jm, cfg: dict, waiting: dict[str, set[str]]) -> None:
 
 
 def _queue_retry(
-    job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str], promised: set[str] = frozenset()
+    job,
+    cfg: dict,
+    waiting: dict[str, set[str]],
+    sender_paths: dict[str, str],
+    promised: set[str] = frozenset(),
 ) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet, that a server could take later, or whose write
     gave up waiting for Plex's busy database (a few minutes later it is usually free).
@@ -366,11 +368,10 @@ def _queue_retry(
             jm.add_log(job.id, f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} get no retry; {again}")
             paths = paths[:MAX_RETRY_FILES]
         delay = scaled_backoff_delay(attempt, delay_setting)
-        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         # A retry's own retry joins the same chain; any other job (an old top-level "Retry:" job included) heads one.
         head_id = cfg.get("parent_job_id") or job.id
         retry = create_intro_credits_job(
-            library_name=f"Retry: {base_name}",
+            library_name=_later_job_name("Retry: ", job, paths),
             priority=job.priority,
             source=str(cfg.get("source") or "retry"),
             file_paths=paths,
@@ -399,6 +400,21 @@ def _queue_retry(
     except Exception:
         logger.exception("Could not queue the retry for files job {} found waiting", job.id)
         return []
+
+
+def _later_job_name(prefix: str, job, paths: list[str]) -> str:
+    """Name a retry or verify job after the job it follows, counting the files the later job itself runs.
+
+    Args:
+        prefix: ``"Retry: "`` or ``"Verify: "``.
+        job: The job it follows (a "Retry: " or "Verify: " prefix of its own is dropped, so they never stack).
+        paths: The files the later job is created with.
+
+    Returns:
+        The later job's name: a trailing "N files" of the followed job's name becomes this job's own count.
+    """
+    followed = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
+    return prefix + _retry_job_label(followed, paths).removeprefix("Retry: ")
 
 
 def _sent_paths(files: set[str], sender_paths: dict[str, str]) -> list[str]:
@@ -456,9 +472,8 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
                 "them checks them",
             )
         delay = max(MIN_VERIFY_DELAY_S, scaled_backoff_delay(1, delay_setting) * VERIFY_DELAY_FACTOR)
-        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         check = create_intro_credits_job(
-            library_name=f"Verify: {base_name}",
+            library_name=_later_job_name("Verify: ", job, paths),
             priority=job.priority,
             source=str(cfg.get("source") or "verify"),
             file_paths=paths,
@@ -903,7 +918,7 @@ def _still_undecided(store: MarkerStore, path: str) -> bool:
     decisions = store.get_decisions(rec.id) if rec is not None else {}
     return (
         not decisions
-        or any(row.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE) for row in decisions.values())
+        or any(row.status is DecisionStatus.NO_EVIDENCE for row in decisions.values())
         or any(is_carried_over(marker) for marker in store.get_markers(rec.id).values())
     )
 
@@ -1010,7 +1025,7 @@ def _stored_file_items(paths: set[str]) -> list[ProcessableItem]:
 
 def _files_to_decide_again(store: MarkerStore) -> set[str]:
     return {
-        *store.files_in_review(),
+        *store.files_with_legacy_review_decisions(),
         *store.files_waiting_for_other_versions(),
         *store.files_with_season_audio_intro(),
         *store.files_decided_by_online_and_server_markers(),
@@ -1018,7 +1033,8 @@ def _files_to_decide_again(store: MarkerStore) -> set[str]:
 
 
 def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] = ()) -> list[ProcessableItem]:
-    """The files in Needs review now, those whose last publish waits for their item's other versions, those whose
+    """The files still stored under the removed "Needs review" status (``store.LEGACY_NEEDS_REVIEW``, settings v20),
+    those whose last publish waits for their item's other versions, those whose
     unlocked intro was decided with a season audio answer (settings v17: season audio's guards changed its answers), and
     those whose unlocked intro or credits rests on an online answer and a server's own marker alone (settings v18:
     online times on the file's clock).
@@ -1303,7 +1319,6 @@ _SETTLED_OUTCOMES = frozenset(
     {
         FileOutcome.PUBLISHED.value,
         FileOutcome.UP_TO_DATE.value,
-        FileOutcome.NEEDS_REVIEW.value,
         FileOutcome.NO_MARKERS.value,
         FileOutcome.NO_OWNERS.value,
     }
@@ -1867,7 +1882,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
                     elif cfg.get(DECIDE_AGAIN):
-                        jm.add_log(job_id, "INFO - No file is in Needs review or waiting for its item's other versions")
+                        jm.add_log(job_id, "INFO - No file is left to decide again")
                         jm.complete_job(job_id)
                         _settle_decide_again(jm, job_id, cfg)
                     elif cfg.get(ONLINE_RECHECK):

@@ -887,7 +887,7 @@ def test_integration_probe_unsafe_disables_skip_frame(
         temp_dir=str(tmp_path),
     )
 
-    with loguru_caplog.at_level("WARNING"):
+    with loguru_caplog.at_level("INFO"):
         generate_images("/test/dhurandhar.mkv", str(tmp_path), None, None, cfg)
 
     # Exactly one FFmpeg call, and that call had NO -skip_frame flag.
@@ -897,17 +897,17 @@ def test_integration_probe_unsafe_disables_skip_frame(
         "Probe said max_gap=10s > interval=2s — FFmpeg must run without "
         "-skip_frame:v nokey to produce unique thumbnails"
     )
-    # User-friendly WARN line fired exactly once.
-    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
-    assert len(warns) == 1, f"Expected one Slow-path WARN, got {len(warns)}"
-    assert "snapshot frame every" in warns[0].message
+    # User-friendly line fired exactly once, at INFO: a normal file with correct output is not a warning.
+    slow_path_lines = [r for r in loguru_caplog.records if "Slow path" in r.message]
+    assert [r.levelname for r in slow_path_lines] == ["INFO"]
+    assert "snapshot frame every" in slow_path_lines[0].message
     # The measured gap appears in the message at one-decimal precision
     # (formatted with ``~{:.1f}s``).  Synthetic data was 0.0 → 10.0.
-    assert "~10.0s" in warns[0].message
+    assert "~10.0s" in slow_path_lines[0].message
     # Interval is rendered as a plain integer in the message.
-    assert "every 2s" in warns[0].message
+    assert "every 2s" in slow_path_lines[0].message
     # No prescriptive "set to 10s" hint — softer copy keeps it informational.
-    assert "Tip:" not in warns[0].message
+    assert "Tip:" not in slow_path_lines[0].message
     # Validator never consulted — we already knew the file was unsafe.
     mock_has_dupes.assert_not_called()
 
@@ -957,15 +957,15 @@ def test_integration_probe_inconclusive_disables_skip_frame(
         temp_dir=str(tmp_path),
     )
 
-    with loguru_caplog.at_level("WARNING"):
+    with loguru_caplog.at_level("INFO"):
         generate_images("/test/unknown.mkv", str(tmp_path), None, None, cfg)
 
     assert mock_popen.call_count == 1
     args = mock_popen.call_args_list[0][0][0]
     assert "-skip_frame:v" not in args
-    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
-    assert len(warns) == 1
-    assert "couldn't read" in warns[0].message.lower()
+    slow_path_lines = [r for r in loguru_caplog.records if "Slow path" in r.message]
+    assert [r.levelname for r in slow_path_lines] == ["INFO"]
+    assert "couldn't read" in slow_path_lines[0].message.lower()
     mock_has_dupes.assert_not_called()
 
 
@@ -1082,7 +1082,7 @@ def test_integration_gap_just_within_tolerance_keeps_skip_frame(
         temp_dir=str(tmp_path),
     )
 
-    with loguru_caplog.at_level("WARNING"):
+    with loguru_caplog.at_level("INFO"):
         generate_images("/test/borderline.mkv", str(tmp_path), None, None, cfg)
 
     # Single fast-path FFmpeg call, WITH -skip_frame, no slow-path warning.
@@ -1090,8 +1090,8 @@ def test_integration_gap_just_within_tolerance_keeps_skip_frame(
     args = mock_popen.call_args_list[0][0][0]
     assert "-skip_frame:v" in args, "10.4s gap is within the 6% tolerance of a 10s interval — keep the fast path"
     assert args[args.index("-skip_frame:v") + 1] == "nokey"
-    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
-    assert warns == [], "No slow-path WARN should fire for a within-tolerance gap"
+    slow_path_lines = [r for r in loguru_caplog.records if "Slow path" in r.message]
+    assert slow_path_lines == [], "No slow-path line should be logged for a within-tolerance gap"
     # The post-extract validator still runs as the safety net.
     mock_has_dupes.assert_called_once()
 
@@ -1143,15 +1143,15 @@ def test_integration_gap_just_beyond_tolerance_disables_skip_frame(
         temp_dir=str(tmp_path),
     )
 
-    with loguru_caplog.at_level("WARNING"):
+    with loguru_caplog.at_level("INFO"):
         generate_images("/test/sparse.mkv", str(tmp_path), None, None, cfg)
 
     assert mock_popen.call_count == 1, "Probe-driven slow path must not retry FFmpeg"
     args = mock_popen.call_args_list[0][0][0]
     assert "-skip_frame:v" not in args, "10.9s gap exceeds the 6% tolerance — must slow-decode"
-    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
-    assert len(warns) == 1
-    assert "~10.9s" in warns[0].message
+    slow_path_lines = [r for r in loguru_caplog.records if "Slow path" in r.message]
+    assert [r.levelname for r in slow_path_lines] == ["INFO"]
+    assert "~10.9s" in slow_path_lines[0].message
     mock_has_dupes.assert_not_called()
 
 
@@ -1208,7 +1208,7 @@ def test_integration_known_duration_samples_instead_of_scanning(
         duration_ms=7200_000,
     )
 
-    with loguru_caplog.at_level("WARNING"):
+    with loguru_caplog.at_level("INFO"):
         generate_images("/test/long_movie.mkv", str(tmp_path), None, None, cfg)
 
     # The one-frame run below is short of the runtime, so the drift warning's
@@ -1226,6 +1226,6 @@ def test_integration_known_duration_samples_instead_of_scanning(
     assert mock_popen.call_count == 1
     args = mock_popen.call_args_list[0][0][0]
     assert "-skip_frame:v" in args, "1s keyframes at a 2s interval — the fast path must survive sampling"
-    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
-    assert warns == []
+    slow_path_lines = [r for r in loguru_caplog.records if "Slow path" in r.message]
+    assert slow_path_lines == []
     mock_has_dupes.assert_called_once()

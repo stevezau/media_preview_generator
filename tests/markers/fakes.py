@@ -130,7 +130,6 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     # The Plex publisher records the item's versions on every write that has markers to leave; the pipeline writes a
     # Plex item recorded without them once more.
     pub.last_item_files = ("/plex/item-7.mkv",) if name == "plex_db" else None
-    pub.last_unchecked_versions = False
     pub.shows.return_value = Shown.OURS
     return pub
 
@@ -140,14 +139,13 @@ def _served(marker):
 
 
 class FakePlexItems:
-    """Plex-like server state: one marker set per item across all its versions (plex-item-publish-design.md §2).
+    """Plex-like server state: one marker set per item across all its versions (plex-item-publishing.md).
 
-    ``parts`` maps an item id to the local paths of its versions. A type is written only when every version is decided,
-    has that type and agrees within 2 s (the calling file's times are written). Rows of a type that isn't written are
-    removed only when they are exactly what ``previous`` says we left there; ``previous=None`` removes nothing.
+    ``parts`` maps an item id to the local paths of its versions, in Plex's order. Per type, the first version in that
+    order with a decided marker of it decides it (a version never decided takes no part; the 2 s keep-what-is-shown
+    tolerance of the real publisher is left out). Rows of a type that isn't written are removed only when they are
+    exactly what ``previous`` says we left there; ``previous=None`` removes nothing.
     """
-
-    AGREEMENT_MS = 2_000
 
     def __init__(self, parts: dict[str, list[str]]):
         self.parts = parts
@@ -182,27 +180,13 @@ class FakePlexItems:
                 error, self.fail_next = self.fail_next, None
                 raise error
             pub.last_item_files = tuple(sorted(self.parts[item_id]))
-            pub.last_unchecked_versions = any(
-                sibling_markers(path) is None for path in self.parts[item_id] if path != canonical_path
-            )
-            mine = {m.type: m for m in pub.project(markers)}
-            desired = []
-            for mtype, marker in mine.items():
-                agree = True
-                for path in self.parts[item_id]:
-                    if path == canonical_path:
-                        continue
-                    decided = sibling_markers(path)  # None: that version was never decided
-                    sibling = None if decided is None else decided.get(mtype)
-                    if (
-                        sibling is None
-                        or max(abs(sibling.start_ms - marker.start_ms), abs(sibling.end_ms - marker.end_ms))
-                        > self.AGREEMENT_MS
-                    ):
-                        agree = False
-                        break
-                if agree:
-                    desired.append(marker)
+            desired: list = []
+            for path in self.parts[item_id]:
+                decided = {m.type: m for m in markers} if path == canonical_path else sibling_markers(path)
+                if decided is None:  # that version was never decided: it takes no part
+                    continue
+                taken = {m.type for m in desired}
+                desired += [m for m in pub.project(list(decided.values())) if m.type not in taken]
             desired_types = {m.type for m in desired}
             ours_before = {_served(m) for m in (previous or [])}
             kept = [

@@ -171,6 +171,7 @@ def gone_from_disk(
     *,
     roots: Mapping[str, Iterable[str]] | None = None,
     trust_roots: bool = False,
+    follow_links: bool | None = None,
 ) -> bool:
     """Whether a file is gone: on none of the local paths it can be at, while a folder of one of them is still there.
 
@@ -182,11 +183,15 @@ def gone_from_disk(
 
     With ``trust_roots``, a path whose disk roots all hold entries is gone even when its folder is missing too (a series
     deleted whole takes its season folder with it), as long as the nearest folder above it that still exists, up to its
-    deepest root, holds entries. A path without roots is still judged by its folder. Anything at a path is then there,
+    deepest root, holds entries. A path without roots, or whose only root is ``/`` (which holds entries whatever is
+    mounted), is still judged by its folder. Anything at a path is then there,
     a dangling symlink included (``os.lstat``): a library of symlinks into a remote mount (rclone, zurg) that dropped
     keeps its links, and marking missing files must not take them for deleted. Without it a dangling link is gone, as a
-    Plex version's file (``plex_db``) and a cached fingerprint are judged: a version behind a dangling link can't be
-    decided, and waiting for it would hold its item's markers back.
+    cached fingerprint is judged.
+
+    A Plex version's file (``plex_db``) is judged with ``trust_roots`` and ``follow_links``: a file replaced by one on
+    another disk can take its season folder with it, and waiting for that version would hold its item's markers back
+    for good; so would a version behind a dangling link, which can't be decided, so there a dangling link is gone.
 
     Args:
         paths: The file's local paths, one per mapped disk (a single path where there is one disk).
@@ -194,12 +199,15 @@ def gone_from_disk(
         roots: Per path, the disk roots it lies under (its path mapping's local folder, its library's folder); a path
             without an entry is judged by its folder alone.
         trust_roots: Let mounted, non-empty roots stand in for a missing folder (markers.db forgetting deleted files).
+        follow_links: Whether a dangling symlink at a path is gone (True) or the file (False); None: the file with
+            ``trust_roots``, gone without.
 
     Returns:
         True when no path holds the file, no disk root of theirs looks unmounted, and at least one of their folders
         exists (with ``trust_roots``, or the nearest existing folder above one holds entries).
     """
     folders = {} if folders is None else folders
+    stat = os.stat if (not trust_roots if follow_links is None else follow_links) else os.lstat
     folder_there = False
     for path in paths:
         folder = os.path.dirname(path)
@@ -207,11 +215,13 @@ def gone_from_disk(
         for root in path_roots:
             if os.path.normpath(folder) == os.path.normpath(root) or not _holds_entries(root):
                 return False
-        trusted = trust_roots and bool(path_roots)
+        # ``/`` holds entries whatever is mounted, so it never stands in for a missing folder.
+        standing_in = [root for root in path_roots if root.strip("/")]
+        trusted = trust_roots and bool(standing_in)
         if folders.get(folder) is False and not trusted:
             continue
         try:
-            (os.lstat if trust_roots else os.stat)(path)
+            stat(path)
             return False
         except FileNotFoundError:
             pass
@@ -219,6 +229,6 @@ def gone_from_disk(
             return False
         if folder not in folders:
             folders[folder] = os.path.isdir(folder)
-        if folders[folder] or (trusted and _nearest_folder_holds_entries(folder, max(path_roots, key=len))):
+        if folders[folder] or (trusted and _nearest_folder_holds_entries(folder, max(standing_in, key=len))):
             folder_there = True
     return folder_there

@@ -400,11 +400,13 @@ class TestProductionDecode:
             ("INTEL", "/dev/dri/renderD129", 1, 1,
              ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD129", "-hwaccel_output_format", "vaapi",
               "-extra_hw_frames", "8"],
-             "fps=1,hwdownload,format=p010le,scale=320:180:flags=neighbor,format=nv12,showinfo"),
+             "fps=1,scale_vaapi=out_chroma_location=left,hwdownload,format=p010le,"
+             "scale=320:180:flags=neighbor,format=nv12,showinfo"),
             ("AMD", "/dev/dri/renderD128", 0, 2,
              ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi",
               "-extra_hw_frames", "8"],
-             "fps=1,hwdownload,format=nv12,scale=640:360:flags=neighbor,format=nv12,showinfo"),
+             "fps=1,scale_vaapi=out_chroma_location=left,hwdownload,format=nv12,"
+             "scale=640:360:flags=neighbor,format=nv12,showinfo"),
             ("APPLE", None, 0, 1, ["-hwaccel", "videotoolbox"],
              "fps=1,scale=320:180:flags=neighbor,format=nv12,showinfo"),
             (None, None, 1, 2, [], "fps=1,scale=640:360:flags=neighbor,format=nv12,showinfo"),

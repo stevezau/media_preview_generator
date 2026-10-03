@@ -1293,17 +1293,26 @@ def _version_case(label: str, original: str, second: str, source: Path, episode:
     }
     steps.append(both)
     parts = part_markers(both["plex"])
+    jf12_truth = truth_everywhere(episode)["mlab-jf12"]
     checks = {
-        f"{label}1 Plex waits (row + file outcome) and hides the item's markers": first["rows"][0]["servers"]
-        .get("mlab-plex", "")
-        .startswith("markers_waiting")
-        and first["rows"][0]["outcome"] == "markers_waiting"
-        and not first["plex"]["served"][item],
+        # Since 2026-10-02 the item never waits for a version not yet decided: the original's decision is served.
+        f"{label}1 Plex writes the original's markers without waiting for the second version": first["rows"][0][
+            "servers"
+        ].get("mlab-plex", "")
+        in ("markers_written", "markers_up_to_date")
+        and first["rows"][0]["outcome"] in ("markers_published", "markers_up_to_date")
+        and _served_is_truth(first["plex"]["served"][item], episode),
         f"{label}2 both parts carry the same pv:intros and pv:credits": len(parts) == 2
         and all(v == next(iter(parts.values())) and "pv:intros" in v and "pv:credits" in v for v in parts.values()),
         f"{label}2 Plex serves the chapters": _served_is_truth(both["plex"]["served"][item], episode),
+        # /api/jobs/<id>/files keeps the last row per path, so a later retry job's "Already up to date" can hide this
+        # job's "markers_written" (seen 2026-10-03): accept either, and require the served segments per media source.
         f"{label}2 Jellyfin 12.0 written for the second version": both["rows"][0]["servers"].get("mlab-jf12")
-        == "markers_written",
+        in ("markers_written", "markers_up_to_date")
+        and all(
+            same_markers({"mlab-jf12": both["jellyfin"]["mlab-jf12"][p]}, {"mlab-jf12": jf12_truth})["mlab-jf12"]
+            for p in (original, second)
+        ),
     }
     return {"item": item, "steps": steps, "checks": checks}
 
@@ -1314,8 +1323,9 @@ def row_08_multi_version() -> dict:
 
     A: S01E01 + "Extended" (+10 s tail; durations differ by more than 2 s, credits still in the last 25%).
     B: S01E03 + an identical "Copy", starting with a forced job on the original.
-    Each: the original alone makes Plex wait and hide the item's markers; deciding the second version writes the shared
-    set to both parts. Jellyfin 12.0 lists both second files as alternate versions (row 19 checks their segments).
+    Each: the original alone is written (since 2026-10-02 the item never waits for an undecided version); deciding the
+    second version keeps the shared set on both parts (the original is the first version, so its decision wins where
+    they differ). Jellyfin 12.0 lists both second files as alternate versions (row 19 checks their segments).
     """
     episode_b = int(os.environ.get("ROW8_EPISODE", "3"))
     extended = synth_path(1, " - Extended")

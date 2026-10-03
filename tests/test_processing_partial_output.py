@@ -201,7 +201,7 @@ def assert_published_with_warning(outcome: Outcome, rc: int, n_frames: int) -> N
 def assert_handed_to_cpu(outcome: Outcome) -> None:
     assert isinstance(outcome.result, CodecNotSupportedError), f"expected a CPU hand-off, got {outcome.result!r}"
     assert outcome.frames_left == [], "frames left on disk would be counted by the publisher"
-    # A hand-off isn't a failed item: the CPU worker gets its turn.
+    # A hand-off isn't a failed item: the same worker retries it on the CPU.
     assert outcome.failures == []
 
 

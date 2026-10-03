@@ -14,7 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from media_preview_generator.processing.retry_queue import BACKOFF_SCHEDULE, scaled_backoff_delay
+from media_preview_generator.processing.retry_queue import (
+    BACKOFF_SCHEDULE,
+    DEFAULT_RETRY_COUNT,
+    scaled_backoff_delay,
+)
 
 SETTINGS_HTML = Path(__file__).resolve().parent.parent / "media_preview_generator/web/templates/settings.html"
 
@@ -77,6 +81,16 @@ class TestSettingsRetryCopy:
         # The copy promises "60 s doubles every wait"; hold the code to it.
         assert scaled_backoff_delay(1, 60) == 2 * scaled_backoff_delay(1, 30)
         assert "60 s doubles" in _retry_delay_copy()
+
+    def test_retry_count_field_shows_the_default_count(self) -> None:
+        """The field's starting value and the page's fallback for an unreadable setting are the code's default."""
+        text = SETTINGS_HTML.read_text(encoding="utf-8")
+        field = re.search(r'<input[^>]*id="webhookRetryCount"[^>]*value="(\d+)"', text)
+        fallback = re.search(r"Number\.isNaN\(retryCount\) \? (\d+)", text)
+        assert field and fallback, "settings.html: retry-count field or its loader not found — update the regexes"
+
+        assert int(field.group(1)) == DEFAULT_RETRY_COUNT
+        assert int(fallback.group(1)) == DEFAULT_RETRY_COUNT
 
     def test_copy_states_the_floor_when_rendered(self) -> None:
         assert scaled_backoff_delay(1, 10) == scaled_backoff_delay(1, 15)

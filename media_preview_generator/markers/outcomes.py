@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from enum import Enum
-from typing import Any
 
 from .decide import DecisionStatus
 from .models import Marker, MarkerType
@@ -16,7 +15,6 @@ class FileOutcome(str, Enum):
     PUBLISHED = "markers_published"
     UP_TO_DATE = "markers_up_to_date"
     WAITING = "markers_waiting"
-    NEEDS_REVIEW = "markers_needs_review"
     SKIPPED = "markers_skipped"
     NO_MARKERS = "markers_none"
     NO_OWNERS = "markers_no_owners"
@@ -35,38 +33,31 @@ class ServerStatus(str, Enum):
 
     WRITTEN = "markers_written"
     UP_TO_DATE = "markers_up_to_date"
-    NEEDS_REVIEW = "markers_needs_review"
     SKIPPED = "markers_skipped"
     WAITING = "markers_waiting"
     NONE = "markers_none"
     FAILED = "failed"
 
 
-def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bool = False) -> FileOutcome:
+def file_outcome(statuses: set[str], *, waiting_to_retry: bool = False) -> FileOutcome:
     """Fold one file's per-server statuses into its job outcome.
 
     The file shows what still needs something, most urgent first, so a finished server never hides an unfinished one.
     First match wins:
 
     1. Any server failed → failed: a broken write or check, even when another server took the markers.
-    2. A server waiting with a retry queued (it hasn't indexed the file yet, Plex Pass is unconfirmed, or another
-       version of the file's Plex item is on disk but not checked yet) → waiting, even when a marker type needs review:
-       the job runs the file again.
-    3. Any server written → published (or waiting while another server waits for the item's other versions): the job
-       changed what a server shows. A type still in review is named in the file's summary.
-    4. An enabled marker type is in Needs review (the sources disagree, or the only answer can't decide alone) → needs
-       review: nothing was written, and only the user settles it, even when the decided types are up to date.
-    5. Any server waiting (the item's other versions were checked and don't agree) → waiting, even when another server
-       is up to date.
-    6. Any server up to date → up to date.
-    7. Any server with nothing to publish, or no rows → no markers.
-    8. Every server skipped (no publisher, plugin missing, turned off) → skipped.
+    2. A server waiting with a retry queued (it hasn't indexed the file yet, Plex Pass is unconfirmed, or another job
+       held the file) → waiting: the job runs the file again.
+    3. Any server written → published: the job changed what a server shows.
+    4. Any other server waiting → waiting, even when another server is up to date.
+    5. Any server up to date → up to date.
+    6. Any server with nothing to publish, or no rows → no markers.
+    7. Every server skipped (no publisher, plugin missing, turned off) → skipped.
 
     Retry and verify jobs are queued from the per-server rows, not from this outcome.
 
     Args:
         statuses: ``ServerStatus`` values of the file's rows.
-        needs_review: Whether any enabled marker type is waiting for agreement.
         waiting_to_retry: Whether a waiting row has a reason the job retries (``RETRY_REASON_CODES``).
 
     Returns:
@@ -76,8 +67,6 @@ def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bo
         return FileOutcome.FAILED
     if waiting_to_retry and ServerStatus.WAITING.value in statuses:
         return FileOutcome.WAITING
-    if needs_review and ServerStatus.WRITTEN.value not in statuses:
-        return FileOutcome.NEEDS_REVIEW
     for status, outcome in (
         (ServerStatus.WAITING, FileOutcome.WAITING),
         (ServerStatus.WRITTEN, FileOutcome.PUBLISHED),
@@ -95,46 +84,23 @@ def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bo
 NOT_IN_LIBRARY = "not_in_library"
 # Plex answered its database checks but not the Plex Pass check (restarting, an HTTP blip).
 PLEX_PASS_UNKNOWN = "plex_pass_unknown"
-# Plex shows one marker set per item, and another version of this file's item is on disk but hasn't been checked yet.
-# Versions that were checked and disagree carry no code: trying again changes nothing until one of them changes.
-VERSIONS_UNCHECKED = "versions_unchecked"
 # Another job kept running the file past a worker's wait for it (``pipeline.WORKER_FILE_WAIT_S``): nothing was done.
 FILE_BUSY = "file_busy"
-RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, VERSIONS_UNCHECKED, FILE_BUSY})
+# A row written before 2026-10-02 may still carry ``versions_unchecked`` (a Plex item waited for its other versions);
+# it isn't listed here, so such a row reads as any other waiting row and gets no retry of its own.
+RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FILE_BUSY})
 # ``reason_code`` of a failed row the job retries: the write gave up waiting for Plex's database (another program, or
 # another task of this app, held it past the wait). The row stays failed, and so does the file once the retries run out.
 PLEX_DB_BUSY = "plex_db_busy"
 
 
-# Start of a waiting row's message: Plex shows a type only once every version of the item is decided and agrees on
-# it (``MarkerStore.files_waiting_for_other_versions`` finds these rows by it).
+# Start of the waiting rows written before 2026-10-02, when a Plex item still waited for every version to agree on a
+# type. No longer produced; ``MarkerStore.files_waiting_for_other_versions`` finds those rows by it so each file is
+# published once more under the rule that replaced it (``versions.WAITING_VERSIONS``).
 VERSIONS_WAITING = "Waiting for this item's other versions to agree on"
 
 # Skipped-file message for trailers and other extras (``external_ids.is_extra``).
 EXTRAS_NOT_CHECKED = "Extras aren't checked for markers"
-
-
-def review_message(decisions: Mapping[MarkerType, Any], types: Iterable[MarkerType]) -> str:
-    """Row wording for a file with marker types in Needs review: why each one is there, in type order.
-
-    Args:
-        decisions: The file's decisions by type, fresh (``TypeDecision``) or stored (``DecisionRow``); both carry
-            ``status`` and ``reason``.
-        types: The types that count (the enabled ones, or every stored one).
-
-    Returns:
-        Each reason as a sentence, e.g. ``Only IntroDB has the intro; an online answer needs a check against the
-        file``; "" when none of ``types`` is in review.
-    """
-    wanted = set(types)
-    reasons = [
-        decision.reason or "Needs review"
-        for mtype in MarkerType
-        if mtype in wanted
-        and (decision := decisions.get(mtype)) is not None
-        and decision.status is DecisionStatus.NEEDS_REVIEW
-    ]
-    return ". ".join(dict.fromkeys(reason[0].upper() + reason[1:] for reason in reasons))
 
 
 def kept_note(

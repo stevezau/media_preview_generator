@@ -261,7 +261,7 @@ Two layers prevent the same file being processed twice:
 
 1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache holds the most recent files for a configurable window (default 1 hour). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
 
-2. **Long-term sidecar tracking** — every published output gets a small companion file (`<file>.bif.meta`) that records the source file's last-modified time and size. On any later webhook, the app checks this companion file first — if every output already exists and the source hasn't changed, the whole pipeline is skipped. This handles "Sonarr fires immediately, then Plex's own webhook fires 30 minutes later for the same file."
+2. **Long-term sidecar tracking** — every published output gets a small companion file (`<file>.bif.meta`) that records the source file's last-modified time and size. On any later webhook, the app checks this companion file first — if every output already exists, isn't empty, and the source hasn't changed, the whole pipeline is skipped. This handles "Sonarr fires immediately, then Plex's own webhook fires 30 minutes later for the same file."
 
    Plex keeps one preview for byte-identical copies of a video (a re-grab saved next to the original, say), so the companion file records every copy that uses it, and the copies don't take turns rebuilding it.
 
@@ -285,10 +285,11 @@ Emby/Jellyfin publishes still waiting for the server to register the item.
 **Backoff schedule:** the wait before each retry is 1 m → 2 m → 5 m →
 15 m → 60 m. Two settings under **Settings → Retry policy** shape it:
 
-- **Retry count** (default 3, max 10) sets how many retries run. With the
-  default, that's 1 m → 2 m → 5 m, then it stops (about 8 minutes in
-  total). Set it to 5 for the full ~83-minute schedule. Retries after the
-  fifth wait 60 m each.
+- **Retry count** (default 5, max 10) sets how many retries run. The
+  default runs the whole schedule, about 83 minutes in total. Retries
+  after the fifth wait 60 m each. The default used to be 3 (1 m → 2 m →
+  5 m); an install that already saved its settings keeps the count it
+  stored.
 - **Initial retry delay** (default 30) scales the whole schedule by
   *value ÷ 30*. The default leaves it unchanged, and 60 doubles every wait.
   Values of 15 or less all halve it (30 s → 1 m → 2.5 m …).

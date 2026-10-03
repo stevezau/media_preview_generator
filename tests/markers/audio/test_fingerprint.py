@@ -12,7 +12,7 @@ import sys
 import textwrap
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -854,6 +854,55 @@ class TestCacheSweep:
 
         assert fpmod.sweep_fingerprint_cache(store) == 0
         assert store.get_fingerprint(rec.id, "intro") is not None
+
+    @pytest.mark.parametrize(
+        ("missing_days", "folder", "dropped"),
+        [
+            (None, "there", True),  # the folder shows the file gone: the rule as it was
+            (None, "gone", False),  # an unmounted library looks the same
+            (29, "there", True),
+            (29, "gone", False),  # a disk back within a month doesn't fingerprint its files again
+            (31, "there", True),
+            (31, "gone", True),  # a deleted season takes its folder with it: its fingerprints stayed for good
+        ],
+        ids=lambda value: str(value),
+    )
+    def test_a_file_missing_for_a_month_loses_its_fingerprint_whatever_its_folder(
+        self, tmp_path, missing_days, folder, dropped
+    ):
+        now = [datetime(2026, 9, 1, tzinfo=UTC)]
+        store = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: now[0])
+        try:
+            rec = self._fingerprinted(store, tmp_path / "Show" / "Season 01" / "Show - S01E01.mkv")
+            os.remove(rec.canonical_path)
+            if folder == "gone":
+                shutil.rmtree(tmp_path / "Show")
+            if missing_days is not None:
+                assert store.mark_missing(rec) is True
+                now[0] += timedelta(days=missing_days)
+
+            assert fpmod.sweep_fingerprint_cache(store) == int(dropped)
+
+            assert (store.get_fingerprint(rec.id, "intro") is None) is dropped
+            # Only the fingerprints go: the row stays, and a replacement's carry-over reads it.
+            kept = store.get_file(rec.canonical_path)
+            assert kept.id == rec.id and (kept.missing_since is not None) is (missing_days is not None)
+        finally:
+            store.close()
+
+    def test_a_file_back_on_disk_still_marked_missing_keeps_its_fingerprint(self, tmp_path):
+        # A disk back after more than a month: the missing-file sweep clears the marks a batch at a time.
+        now = [datetime(2026, 9, 1, tzinfo=UTC)]
+        store = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: now[0])
+        try:
+            rec = self._fingerprinted(store, tmp_path / "Show" / "Season 01" / "Show - S01E01.mkv")
+            store.mark_missing(rec)
+            now[0] += timedelta(days=31)
+
+            assert fpmod.sweep_fingerprint_cache(store) == 0
+            assert store.get_fingerprint(rec.id, "intro") is not None
+        finally:
+            store.close()
 
     def test_a_file_that_cant_be_read_keeps_its_fingerprint(self, store, tmp_path):
         rec = self._fingerprinted(store, tmp_path / "Show" / "Season 01" / "Show - S01E01.mkv")

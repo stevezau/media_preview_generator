@@ -1,5 +1,5 @@
 """E2E: the Inspector's behaviours past the happy path — failed and in-flight saves, the re-read after a save, the
-save-result toast, Adjust's switches, refusals and add cards, Back to automatic, Needs your check for every type, the
+save-result toast, Adjust's switches, refusals and add cards, Back to automatic, the
 header actions failing, the /jobs socket, read failures, a late answer, the servers card and rows in every plan, the
 evidence notes, search edge cases, a preview-only open, tooltips, and Adjust's frame reads.
 
@@ -102,18 +102,6 @@ def _locked(item: dict, *types: str) -> dict:
     return out
 
 
-def _intro_review() -> fx.InspectorApi:
-    """An episode whose intro needs your check: season audio says 2:45-2:59, TheIntroDB 3:10-3:42."""
-    file, item = fx.checked_episode()
-    item["decisions"]["intro"] = fx.decision("needs_review", reason="sources disagree")
-    item["evidence"] = [
-        fx.evidence_row("season_audio", "intro", 165_000, 179_000, label="20/20"),
-        fx.evidence_row("theintrodb", "intro", 190_000, 222_000),
-        fx.evidence_row("chapters", "credits", 1_499_000, None, label="Credits"),
-    ]
-    return _api_with(file, item)
-
-
 @pytest.mark.e2e
 class TestSaving:
     """Items 1-4: a failed save, a save in flight, the re-read after a save, and the save-result toast."""
@@ -155,27 +143,6 @@ class TestSaving:
         expect(authed_page.locator("#inspAdjustPanel")).to_have_count(0)
         assert api.saves == [sent, sent]
 
-    def test_a_failed_review_save_keeps_the_choice(self, authed_page: Page, app_url: str) -> None:
-        api = fx.install(authed_page)
-        api.answers["save"] = (409, {"error": "The file changed on disk since this page read it"})
-        _open(authed_page, app_url, fx.REVIEW)
-        cards = authed_page.locator("[data-review='credits'] [data-candidate]")
-        cards.nth(1).get_by_role("button", name="Credits start at 1:32:37").click()
-
-        save = authed_page.locator("[data-save-review='credits']")
-        with authed_page.expect_response(_is_save):
-            save.click()
-        confirm = authed_page.locator("[data-confirm='credits']")
-        expect(confirm.locator(".insp-adjust-problem")).to_have_text(
-            "Couldn't save: The file changed on disk since this page read it"
-        )
-        expect(confirm).to_contain_text("Selected: credits start at 1:32:37")
-        expect(save).to_be_enabled()
-        expect(save).to_have_text("Save and send to Plex")
-        assert api.saves == [
-            {"path": fx.REVIEW, "markers": [{"type": "credits", "start_ms": 5_557_000, "end_ms": None}]}
-        ]
-
     def test_adjust_save_in_flight_says_sending_and_waits(self, authed_page: Page, app_url: str) -> None:
         api = fx.install(authed_page)
         api.hold_writes = {"save"}
@@ -190,25 +157,6 @@ class TestSaving:
         api.release_writes()
         expect(authed_page.locator("#inspAdjustPanel")).to_have_count(0)
         assert len(api.saves) == 1
-
-    def test_review_save_in_flight_says_sending_and_waits(self, authed_page: Page, app_url: str) -> None:
-        api = fx.install(authed_page)
-        api.hold_writes = {"save"}
-        _open(authed_page, app_url, fx.REVIEW)
-        authed_page.locator("[data-review='credits'] [data-candidate]").nth(0).get_by_role(
-            "button", name="Credits start at 1:32:09"
-        ).click()
-        save = authed_page.locator("[data-save-review='credits']")
-        save.click()
-
-        expect(save).to_have_text("Sending…")
-        expect(save).to_be_disabled()
-        _wait_until(authed_page, lambda: len(api.saves) == 1)
-        api.release_writes()
-        expect(authed_page.locator("#toastBody")).to_have_text("Plex has them now.")
-        assert api.saves == [
-            {"path": fx.REVIEW, "markers": [{"type": "credits", "start_ms": 5_529_000, "end_ms": None}]}
-        ]
 
     def test_after_a_save_the_editor_closes_and_the_file_is_read_again(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
@@ -398,13 +346,13 @@ class TestAdjustEditing:
         ]
 
     def test_a_film_is_never_offered_an_intro(self, authed_page: Page, app_url: str) -> None:
-        file, item = fx.review_film()
+        file, item = fx.undecided_film()
         item["decisions"]["credits"] = fx.decision(
-            "decided", fx.marker("credits", 5_557_000, fx.REVIEW_MS, ["credits_text"])
+            "decided", fx.marker("credits", 5_557_000, fx.UNDECIDED_MS, ["credits_text"])
         )
         item["decisions"]["intro"] = fx.decision("no_evidence")
         fx.install(authed_page, _api_with(file, item))
-        _open(authed_page, app_url, fx.REVIEW)
+        _open(authed_page, app_url, fx.UNDECIDED)
         authed_page.locator("#inspAdjust").click()
         expect(authed_page.locator("#inspAdjustPanel [data-adjust='credits']")).to_be_visible()
         expect(authed_page.locator("[data-add='intro']")).to_have_count(0)
@@ -525,118 +473,6 @@ class TestBackToAutomatic:
         expect(authed_page.locator("#inspLock")).to_be_visible()
         assert api.unlocks == [{"path": fx.EPISODE, "types": ["intro", "credits"]}]
         assert api.item_requests == [fx.EPISODE, fx.EPISODE]
-
-
-@pytest.mark.e2e
-class TestReviewOtherTypes:
-    """Items 12-13: Needs your check for an intro, a credits answer with its own end, and every heading."""
-
-    @pytest.mark.parametrize(
-        ("choice", "start", "end"),
-        [("Intro starts at 2:45", 165_000, 179_000), ("Intro starts at 3:10", 190_000, 222_000)],
-    )
-    def test_choosing_an_intro_answer_keeps_its_length(
-        self, authed_page: Page, app_url: str, choice: str, start: int, end: int
-    ) -> None:
-        api = fx.install(authed_page, _intro_review())
-        _open(authed_page, app_url, fx.EPISODE)
-        panel = authed_page.locator("[data-review='intro']")
-        expect(panel.locator(".insp-review-title")).to_have_text(
-            "Where does the intro start? Two answers disagree by 25 seconds."
-        )
-        expect(panel.locator("[data-candidate]").nth(0)).to_contain_text("From the theme music heard across the season")
-        expect(panel.locator("[data-candidate]").nth(1)).to_contain_text("From TheIntroDB")
-        # No Adjust while something needs your check.
-        expect(authed_page.locator("#inspAdjust")).to_have_count(0)
-
-        panel.get_by_role("button", name=choice).click()
-        expect(authed_page.locator("[data-confirm='intro']")).to_contain_text(f"Selected: {choice.lower()}")
-        save = authed_page.locator("[data-save-review='intro']")
-        expect(save).to_have_text("Save and send to Plex and Jellyfin")
-        with authed_page.expect_response(_is_save):
-            save.click()
-        assert api.saves == [{"path": fx.EPISODE, "markers": [{"type": "intro", "start_ms": start, "end_ms": end}]}]
-
-    def test_an_intro_picked_by_hand_is_thirty_seconds_long(self, authed_page: Page, app_url: str) -> None:
-        api = fx.install(authed_page, _intro_review())
-        _open(authed_page, app_url, fx.EPISODE)
-        pick = authed_page.locator("[data-pick-yourself='intro']")
-        pick.get_by_role("button", name="Frame at 2:50: the intro starts here").click()
-        expect(authed_page.locator("[data-confirm='intro']")).to_contain_text("Selected: intro starts at 2:50")
-        with authed_page.expect_response(_is_save):
-            authed_page.locator("[data-save-review='intro']").click()
-        assert api.saves == [
-            {"path": fx.EPISODE, "markers": [{"type": "intro", "start_ms": 170_000, "end_ms": 200_000}]}
-        ]
-
-    @pytest.mark.parametrize(
-        ("answer_end", "sent_end"),
-        # 5,819,000 is within two seconds of the 1:37:00 end: that is "runs to the end", sent as null.
-        [(5_700_000, 5_700_000), (5_819_000, None)],
-    )
-    def test_a_credits_answer_that_ends_before_the_file_sends_its_end(
-        self, authed_page: Page, app_url: str, answer_end: int, sent_end: int | None
-    ) -> None:
-        file, item = fx.review_film()
-        item["evidence"][0]["end_ms"] = answer_end
-        api = fx.install(authed_page, _api_with(file, item))
-        _open(authed_page, app_url, fx.REVIEW)
-        authed_page.locator("[data-review='credits']").get_by_role("button", name="Credits start at 1:32:09").click()
-        with authed_page.expect_response(_is_save):
-            authed_page.locator("[data-save-review='credits']").click()
-        assert api.saves == [
-            {"path": fx.REVIEW, "markers": [{"type": "credits", "start_ms": 5_529_000, "end_ms": sent_end}]}
-        ]
-
-    @pytest.mark.parametrize(
-        ("evidence", "proposed", "heading", "starts", "pick_title"),
-        [
-            (
-                [("chapters", 5_529_000)],
-                {"start_ms": 5_529_000, "end_ms": None, "decided_by": ["chapters"]},
-                "Where do the credits start? Only one answer came in, and it can't decide on its own.",
-                ["1:32:09"],
-                "Neither is right? Pick the frame yourself.",
-            ),
-            (
-                [],
-                None,
-                "Where do the credits start? Nothing found an answer to check.",
-                [],
-                "Pick the frame yourself.",
-            ),
-            (
-                [("chapters", 5_529_000)],
-                {"start_ms": 5_600_000, "end_ms": None, "decided_by": ["credits_text"]},
-                "Where do the credits start? Two answers disagree by 71 seconds.",
-                ["1:32:09", "1:33:20"],
-                "Neither is right? Pick the frame yourself.",
-            ),
-        ],
-        ids=["one-answer", "no-answer", "proposed-not-in-evidence"],
-    )
-    def test_the_heading_says_how_many_answers_came_in(
-        self,
-        authed_page: Page,
-        app_url: str,
-        evidence: list[tuple[str, int]],
-        proposed: dict | None,
-        heading: str,
-        starts: list[str],
-        pick_title: str,
-    ) -> None:
-        file, item = fx.review_film()
-        item["evidence"] = [fx.evidence_row(src, "credits", at, None) for src, at in evidence]
-        item["decisions"]["credits"]["proposed"] = proposed
-        fx.install(authed_page, _api_with(file, item))
-        _open(authed_page, app_url, fx.REVIEW)
-
-        panel = authed_page.locator("[data-review='credits']")
-        expect(panel.locator(".insp-review-title")).to_have_text(heading)
-        expect(panel.locator("[data-candidate] > .insp-mono")).to_have_text(starts)
-        expect(panel.locator("[data-pick-yourself='credits'] .insp-pick-title")).to_have_text(pick_title)
-        if proposed and proposed["start_ms"] == 5_600_000:
-            expect(panel.locator("[data-candidate='5600000']")).to_contain_text("From the credits read on screen")
 
 
 @pytest.mark.e2e
@@ -926,14 +762,6 @@ def _plan_cells() -> list[tuple[str, str, str, str, str, str | None]]:
             "Intro & credits: the next job removes the ones this app sent",
             "Plex loses the markers this app sent, on the next job.",
         ),
-        (
-            "waiting",
-            "plex-1",
-            "Plex",
-            "plex",
-            "Intro & credits: waiting for its other versions to agree",
-            "Plex is waiting for its other versions to agree.",
-        ),
         ("keeps_plex", "plex-1", "Plex", "plex", "Intro & credits: keeps Plex's own", "Plex keeps its own markers."),
         ("keeps_emby", "emby-1", "Emby", "emby", "Intro & credits: keeps Emby's own", "Emby keeps its own markers."),
         (
@@ -992,7 +820,6 @@ class TestServersCard:
         ("plan", "sentence"),
         [
             ("keeps_plex", "Plex and Emby keep their own markers."),
-            ("waiting", "Plex and Emby are waiting for their other versions to agree."),
             ("will_add", "Plex and Emby get them on the next job."),
         ],
     )
@@ -1031,7 +858,7 @@ class TestServersCard:
                 "jf-1",
                 "Jellyfin",
                 "jellyfin",
-                plan="waiting",
+                plan="will_add",
                 publish_status="waiting",
                 publish_message="Waiting for Jellyfin to add the file",
                 version_count=2,
@@ -1195,7 +1022,7 @@ class TestLanesAndNotChecked:
 
 @pytest.mark.e2e
 class TestEvidenceNotes:
-    """Item 22: agreement at the 5 s (intro) and 10 s (credits) edges, a review answer, and the empty card."""
+    """Item 22: agreement at the 5 s (intro) and 10 s (credits) edges, an unused answer, and the empty card."""
 
     def test_answers_agree_up_to_the_tolerance_and_not_past_it(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
@@ -1238,13 +1065,11 @@ class TestEvidenceNotes:
             expect(row.locator(":scope > div").nth(2).locator(".insp-small")).to_have_text(note)
             expect(row.locator(".insp-ev-icon i")).to_have_class(f"bi {icon}")
 
-    def test_a_review_answer_says_it_needs_your_check(self, authed_page: Page, app_url: str) -> None:
+    def test_an_answer_for_a_type_nothing_was_found_for_says_not_used(self, authed_page: Page, app_url: str) -> None:
         fx.install(authed_page)
-        _open(authed_page, app_url, fx.REVIEW)
+        _open(authed_page, app_url, fx.UNDECIDED)
         row = authed_page.locator("#inspEvidence .insp-ev[data-source='credits_text']")
-        expect(row.locator(":scope > div").nth(2).locator(".insp-small")).to_have_text(
-            "One of the answers that needs your check"
-        )
+        expect(row.locator(":scope > div").nth(2).locator(".insp-small")).to_have_text("Not used")
 
     def test_an_empty_card_says_why(self, authed_page: Page, app_url: str) -> None:
         file, item = fx.checked_episode()
@@ -1310,7 +1135,7 @@ class TestSearchEdges:
         expect(rows.nth(0).locator(".insp-cell-markers")).to_have_text("—")
         expect(rows.nth(1).locator(".insp-cell-preview")).to_have_text("Not in a library")
         expect(rows.nth(1).locator(".insp-cell-markers")).to_have_text("—")
-        expect(rows.nth(2).locator(".insp-cell-markers")).to_have_text("Needs review")
+        expect(rows.nth(2).locator(".insp-cell-markers")).to_have_text("Nothing found")
 
     def test_a_failed_status_read_marks_every_row(self, authed_page: Page, app_url: str) -> None:
         api = fx.install(authed_page)

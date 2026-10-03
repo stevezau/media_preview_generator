@@ -62,8 +62,8 @@ class Shown(str, Enum):
     OURS = "ours"
     MISSING = "missing"  # some of ours are gone and nothing else of that type took their place
     REPLACED = "replaced"  # the server shows another marker of one of our types instead (its own detection)
-    # The item's versions aren't the ones our last write agreed on (Plex: one marker set for every version, and a
-    # version added since hasn't been decided the same way).
+    # The item's versions aren't the ones our last write computed the marker set for (Plex: one marker set for every
+    # version, and a version added or removed since may change which version's decision the item shows).
     VERSIONS_CHANGED = "versions_changed"
     GONE = "gone"  # the server no longer has the item (deleted, or its file moved to a new item)
 
@@ -124,87 +124,68 @@ def same_times(mine: list[Marker], theirs: list[Marker]) -> bool:
     )
 
 
+# Plex's order for the versions of one item: ``(media_items.id, media_parts.id)``.
+VersionKey = tuple[int, int]
+
+
 def agreed_across_versions(
     markers: Iterable[Marker],
-    others: Iterable[Mapping[MarkerType, Marker] | None],
+    key: VersionKey,
+    others: Iterable[tuple[VersionKey, Mapping[MarkerType, Marker] | None]],
     prior: Iterable[Marker],
     types: Iterable[MarkerType],
 ) -> list[Marker]:
-    """The markers one Plex item shows for all its versions: the types every version decided alike.
+    """The markers one Plex item shows for all its versions: per type, the first version holding it decides.
 
-    A type is kept only when the calling file has it and every other version is decided, has that type and agrees
-    within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless there is another version and what this
-    app already left on the item (``prior``) agrees with every version too: then that stays, so versions whose times
-    differ slightly don't rewrite each other's markers on every run. With no other version there is nothing to agree
-    with, so the item shows exactly what was decided (observed: one-version items kept intros ending
-    at 113.0 s after the decision moved to 110.5-112.4 s). **A locked type is the exception** -- the user's own times win however close
-    they are to what the item shows, because the whole difference an editor nudge makes is smaller than
-    ``VERSION_AGREEMENT_MS``, so keeping ``prior`` would silently discard the edit. That exception stops once
-    ``prior`` *is* a locked version's own times: the item can then show only one of two deliberate user choices that
-    agree inside the window this app calls one answer, so the first to land stays and the versions settle rather than
-    rewriting each other on every run forever. Whichever times win, each returned marker carries the calling file's
-    ``locked`` flag for its type — only that file's, never a sibling version's: a lock belongs to the file the user edited, and a
-    run of an unlocked version that lets the server keep its own markers again is undone by the locked version's next
-    write (that write bumps the item's version, so the unlocked one's publish basis no longer matches either).
+    Each type is judged on its own over the versions that have a decided marker of it: a version never decided, or
+    decided without the type, takes no part, so nothing waits on it (its own run publishes the item again under this
+    same rule). The item shows the times of the first of those versions in Plex's order (``key``), except that a
+    version whose marker of the type the user locked comes first whatever its order: the user's own times beat a
+    detector's. Every version computes the same winner from the same decisions, so runs settle instead of rewriting
+    each other. With no version holding the type, the type is off the item.
+
+    What this app already left on the item (``prior``) stays when it agrees with the winner within
+    ``VERSION_AGREEMENT_MS`` and another version holds the type too: versions whose readings differ slightly don't
+    rewrite each other's markers on every run. A lone holder shows exactly what it decided (observed: one-version
+    items kept intros ending at 113.0 s after the decision moved to 110.5-112.4 s). **A locked winner is the
+    exception** -- its own times are written however close they are to what the item shows, because the whole
+    difference an editor nudge makes is smaller than ``VERSION_AGREEMENT_MS``, so keeping ``prior`` would silently
+    discard the edit; once the item shows exactly those times, they stay.
+
+    Whichever times win, each returned marker carries the calling file's ``locked`` flag for its type -- only that
+    file's, never a sibling version's: a lock belongs to the file the user edited, and whether the type is the user's
+    own decides whether the server may keep its own markers of it (spec §5.5 rule 1).
 
     Args:
         markers: The calling file's decided markers.
-        others: Each other version's decided markers by type; None for a version never decided.
+        key: The calling file's place in Plex's order.
+        others: Each other version's place and decided markers by type; None for a version never decided.
         prior: What this app last left on the item.
         types: The types the server shows.
 
     Returns:
-        The agreed markers (unsorted).
+        The item's markers (unsorted).
     """
-    markers, others, prior = list(markers), list(others), list(prior)
-    agreed: list[Marker] = []
+    markers, prior = list(markers), list(prior)
+    decided = [(key, markers)] + [(k, list(d.values())) for k, d in others if d is not None]
+    shown: list[Marker] = []
     for mtype in types:
-        mine = [m for m in markers if m.type is mtype]
-        theirs = [None if d is None else [m for m in d.values() if m.type is mtype] for d in others]
-        if not mine or any(t is None or not versions_agree(mine, t) for t in theirs):
+        holders = [(k, [m for m in ms if m.type is mtype]) for k, ms in decided]
+        holders = [(k, ms) for k, ms in holders if ms]
+        if not holders:
             continue
+        holders.sort(key=lambda h: (not any(m.locked for m in h[1]), h[0]))
+        chosen = holders[0][1]
         kept = [m for m in prior if m.type is mtype]
-        locked = any(m.locked for m in mine)
-        # Every entry of ``theirs`` is a decided version that agrees with ``mine``; the guard above skipped this type
-        # otherwise.
-        locked_versions = [mine] + [t for t in theirs if any(m.locked for m in t)]
-        # Not ``versions_agree``: the question is whether the item is already showing times a user locked, not
-        # whether it is showing something close enough. Within the tolerance but belonging to nobody -- the detector's
-        # times from before the locks, or an edit a later one superseded -- is exactly where a lock has to win.
-        kept_is_a_locked_versions = any(same_times(kept, v) for v in locked_versions)
-        agrees = bool(theirs) and kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs)
-        if agrees and (not locked or kept_is_a_locked_versions):
-            # The times stay what the item already shows, but the calling file's lock rides along: whether the type is
-            # the user's own decides whether the server may keep its own markers of it (spec §5.5 rule 1), and what the
-            # item record happens to carry from an earlier run must not answer that.
-            agreed.extend(replace(m, locked=locked) for m in kept)
+        caller_locked = any(m.locked for m in markers if m.type is mtype)
+        # Not ``versions_agree`` for a locked winner: the question is whether the item already shows the user's own
+        # times, not something close enough -- the detector's times from before the lock is exactly where it must win.
+        settled = same_times(kept, chosen) if any(m.locked for m in chosen) else versions_agree(kept, chosen)
+        if len(holders) > 1 and kept and settled:
+            shown.extend(replace(m, locked=caller_locked) for m in kept)
         else:
-            # A locked type takes the shortcut above only when the item is already showing a locked version's own
-            # times. The shortcut exists so two versions of one item don't rewrite each other every run over a
-            # difference inside ``VERSION_AGREEMENT_MS``, and a nudge of the editor's arrow keys is smaller than
-            # that: against times nobody locked, keeping ``prior`` would hand the user back what they just changed,
-            # report the row ``unchanged``, and never reach ``set_publish_basis`` -- the same silent no-op on every
-            # later run, which is the bug this branch was split for.
-            #
-            # Where the item *is* showing a locked version's times, keeping them is right even against another
-            # locked version: both are the user's own deliberate choices, the item can show only one of them, and
-            # they are inside the window this app already calls one answer. Letting each version write its own
-            # instead makes the runs alternate forever, every one of them a real Plex write that bumps the item
-            # version and so invalidates the other version's publish basis.
-            #
-            # The residual, stated at its real size: which locked version wins is whichever landed first, so any
-            # other locked version's edit within ``VERSION_AGREEMENT_MS`` of it -- a first lock as much as a
-            # re-edit -- is dropped. It is dropped *quietly*: the publisher returns ``prior`` unchanged, the pipeline
-            # advances the publish basis and reports the row up to date, and nothing retries. A deterministic
-            # winner over the locked set (lowest start, ties by path) would converge the same way and remove the
-            # dependence on run order; deferred, see the phase-4 progress log.
-            #
-            # Also not fixed here: the guard above compares ``mine`` with each sibling but never sibling with
-            # sibling, so versions that agree only through a middle one (0, 2500, 1200 ms) still make each run
-            # remove or rewrite the type. That predates locks; the claim that versions "settle" holds for versions
-            # that agree pairwise.
-            agreed.extend(mine)
-    return agreed
+            shown.extend(replace(m, locked=caller_locked) for m in chosen)
+    return shown
 
 
 # One item for ``MarkerPublisher.shows_many``: item id, what this app last left there, the types kept as the server's
@@ -316,10 +297,6 @@ class MarkerPublisher(ABC):
     # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
     # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin, Emby).
     last_item_files: tuple[str, ...] | None = None
-    # Set by every ``write``: whether another version of the item is on disk but not decided yet, so what the item
-    # doesn't show waits for that version's first run, not for versions that disagree (the job tries the file again
-    # later). False where items have no shared versions (Jellyfin, Emby).
-    last_unchecked_versions: bool = False
 
     @abstractmethod
     def capability(self) -> CapabilityReport:

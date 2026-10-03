@@ -20,7 +20,7 @@ from media_preview_generator.processing.generator import (
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
 
-KEYS = ("markers_published", "markers_needs_review", "failed")
+KEYS = ("markers_published", "markers_none", "failed")
 
 
 def _config():
@@ -69,7 +69,7 @@ def test_terminal_check_outcome_never_uses_a_worker():
         )
         assert tracker.wait(timeout=10)
     process.assert_not_called()
-    assert tracker.outcome_counts == {"markers_published": 1, "markers_needs_review": 0, "failed": 0}
+    assert tracker.outcome_counts == {"markers_published": 1, "markers_none": 0, "failed": 0}
     assert tracker.successful == 1
     args, kwargs = notify.call_args
     assert args[0] == "/m/a.mkv" and args[1].value == "markers_published" and args[2] == "ok"
@@ -99,7 +99,7 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
         seen["kwargs"] = kwargs
         kwargs["phase_callback"]("Detecting intro")
         seen["phase_on_worker"] = worker.current_phase
-        return ItemOutcome("markers_needs_review", "no agreement", [_row("markers_needs_review")])
+        return ItemOutcome("markers_none", "No markers found", [_row("markers_none")])
 
     picked_up = []
     handlers = KindHandlers(
@@ -150,7 +150,7 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
     assert kwargs["progress_callback"].func == pool._update_worker_progress
     assert kwargs["progress_callback"].args == (worker,)
     assert seen["phase_on_worker"] == "Detecting intro"
-    assert tracker.outcome_counts["markers_needs_review"] == 1
+    assert tracker.outcome_counts["markers_none"] == 1
     dispatcher.shutdown()
 
 
@@ -195,7 +195,7 @@ def test_check_exception_routes_to_worker():
     assert call.kwargs["pause_check"] is pause_cb
     assert call.kwargs["progress_callback"].func == pool._update_worker_progress
     assert call.kwargs["progress_callback"].args == (worker,)
-    assert tracker.outcome_counts == {"markers_published": 1, "markers_needs_review": 0, "failed": 0}
+    assert tracker.outcome_counts == {"markers_published": 1, "markers_none": 0, "failed": 0}
     assert tracker.failed == 0 and tracker.successful == 1
     dispatcher.shutdown()
 
@@ -215,7 +215,7 @@ def test_malformed_check_outcome_counts_as_failed_and_job_completes(bad):
         )
         assert tracker.wait(timeout=10)
     process.assert_not_called()
-    assert tracker.outcome_counts == {"markers_published": 0, "markers_needs_review": 0, "failed": 1}
+    assert tracker.outcome_counts == {"markers_published": 0, "markers_none": 0, "failed": 1}
     assert tracker.failed == 1 and tracker.successful == 0
     assert notify.call_args.args[1].value == "failed"
     dispatcher.shutdown()
@@ -263,7 +263,7 @@ def test_worker_stage_bad_publisher_rows_still_complete_the_item(rows):
         )
         assert tracker.wait(timeout=10)
     assert tracker.completed == 1 and tracker.successful == 1
-    assert tracker.outcome_counts == {"markers_published": 1, "markers_needs_review": 0, "failed": 0}
+    assert tracker.outcome_counts == {"markers_published": 1, "markers_none": 0, "failed": 0}
     dispatcher.shutdown()
 
 
@@ -769,12 +769,12 @@ def test_failed_check_thread_start_releases_slots_and_keeps_the_item():
     ("carried", "expected_total", "expected_outcome"),
     [
         (
-            {"markers_needs_review": 2, "markers_published": 1},
+            {"markers_none": 2, "markers_published": 1},
             4,
-            {"markers_published": 2, "markers_needs_review": 2, "failed": 0},
+            {"markers_published": 2, "markers_none": 2, "failed": 0},
         ),
-        (None, 1, {"markers_published": 1, "markers_needs_review": 0, "failed": 0}),
-        ({}, 1, {"markers_published": 1, "markers_needs_review": 0, "failed": 0}),
+        (None, 1, {"markers_published": 1, "markers_none": 0, "failed": 0}),
+        ({}, 1, {"markers_published": 1, "markers_none": 0, "failed": 0}),
     ],
     ids=["revived", "none", "empty"],
 )

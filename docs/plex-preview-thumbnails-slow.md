@@ -47,7 +47,7 @@ Once it is running, set Plex's **Settings → Library → Generate video preview
 ## Limits to know first
 
 - It runs only in Docker. It has a web UI and no CLI.
-- Plex must scan a new file before its preview can be written, because the file's location in Plex's data folder only exists after the scan. The app retries automatically after 1, 2 and 5 minutes by default. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
+- Plex must scan a new file before its preview can be written, because the file's location in Plex's data folder only exists after the scan. The app retries automatically after 1, 2, 5, 15 and 60 minutes by default. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
 - It makes video preview thumbnails only, not chapter thumbnails.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are. Those setups run on CPU.
 

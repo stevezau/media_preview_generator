@@ -752,6 +752,19 @@ class TestDispatchLoopOrdering:
         pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
         dispatcher = JobDispatcher(pool)
 
+        # A file is checked on its own thread before a worker gets it, and workers are idle (truthfully) until
+        # then. Hold the dispatch tick that starts the check until the check has queued the file, so this tick is
+        # the one that assigns it: the ordering under test is assign-then-emit within one tick.
+        start_checks = dispatcher._submit_checks
+
+        def start_checks_and_wait_for_them():
+            start_checks()
+            deadline = time.monotonic() + 10
+            while dispatcher._checks_in_flight and time.monotonic() < deadline:
+                time.sleep(0.001)
+
+        dispatcher._submit_checks = start_checks_and_wait_for_them
+
         worker_snapshots = []
 
         def capture_workers(workers_list):
@@ -1323,3 +1336,235 @@ class TestGetOrCreateDispatcher:
 
         assert len(results) == 2 and results[0] is results[1]
         assert len(built) == 1, f"a second WorkerPool was built and leaked: {built}"
+
+
+def _recording_tracker(job_id: str, total: int, callback) -> JobTracker:
+    return JobTracker(
+        job_id=job_id,
+        items=_pi_list_or_passthrough([(f"k{i}", f"t{i}", "movie") for i in range(total)]),
+        config=_make_config(),
+        registry=MagicMock(),
+        callbacks={"progress_callback": callback},
+    )
+
+
+class TestProgressNeverEndsOnAStaleCount:
+    """A slower thread's older count must never land after a newer one (job 6f150bfe ended on 3 of 4, "2/4")."""
+
+    @staticmethod
+    def _run_overtake(stale_emit):
+        """Hold a non-final progress callback open, fire the job's final completion, then let the held one finish.
+
+        Args:
+            stale_emit: Called with the tracker at 2 of 4; must take it to 3 of 4 and emit that.
+
+        Returns:
+            Every (current, total, message, percent) the callback stored from the held emit onwards, in order.
+        """
+        stored = []
+        armed = threading.Event()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def callback_that_is_slow_once(current, total, message, percent_override=None):
+            if armed.is_set() and not entered.is_set():
+                entered.set()
+                release.wait(timeout=5)
+            stored.append((current, total, message, percent_override))
+
+        tracker = _recording_tracker("stale-job", 4, callback_that_is_slow_once)
+        for title in ("t0", "t1"):
+            tracker.record_completion(True, "CPU 1", title)
+        stored.clear()
+        armed.set()
+
+        stale = threading.Thread(target=stale_emit, args=(tracker,))
+        stale.start()
+        assert entered.wait(timeout=5), "the non-final emit never reached the callback"
+        final = threading.Thread(target=tracker.record_completion, args=(True, "CPU 2", "t3"))
+        final.start()
+        final.join(timeout=0.3)  # unserialised, the final emit overtakes here; serialised, it waits its turn
+        release.set()
+        stale.join(timeout=5)
+        final.join(timeout=5)
+        assert not stale.is_alive() and not final.is_alive()
+        assert tracker.done_event.is_set()
+        return stored
+
+    _IN_ORDER = [
+        (3, 4, "Checking existing previews… 3/4", 75.0),
+        (4, 4, "Checking existing previews… 4/4", 100.0),
+    ]
+
+    def test_final_count_is_stored_last_when_an_earlier_completion_callback_finishes_late(self):
+        def third_completion(tracker):
+            tracker._last_progress_update = 0.0  # not throttled: this is the emit that gets held
+            tracker.record_completion(True, "CPU 1", "t2")
+
+        assert self._run_overtake(third_completion) == self._IN_ORDER
+
+    def test_final_count_is_stored_last_when_a_periodic_emit_finishes_late(self):
+        pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+        dispatcher = JobDispatcher(pool)
+
+        def third_completion_then_periodic_emit(tracker):
+            tracker._last_progress_update = time.time()  # the completion's own emit is throttled away
+            tracker.record_completion(True, "CPU 1", "t2")
+            tracker._last_progress_update = 0.0
+            dispatcher._trackers[tracker.job_id] = tracker
+            dispatcher._emit_progress_updates()
+
+        try:
+            stored = self._run_overtake(third_completion_then_periodic_emit)
+        finally:
+            dispatcher.shutdown()
+
+        assert stored == self._IN_ORDER
+
+    def test_emitted_counts_never_go_backwards_and_each_message_matches_its_count(self):
+        import itertools
+        import random
+
+        total = 240
+        emitted = []
+        ticks = itertools.count(step=10)
+
+        def jittery_callback(current, total_items, message, percent_override=None):
+            time.sleep(random.uniform(0, 0.001))  # widen the gap between reading the count and storing it
+            emitted.append((current, total_items, message))
+
+        tracker = _recording_tracker("monotonic-job", total, jittery_callback)
+        pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+        dispatcher = JobDispatcher(pool)
+        dispatcher._trackers[tracker.job_id] = tracker
+        stop = threading.Event()
+
+        def complete(count):
+            for i in range(count):
+                tracker.record_completion(True, "CPU", f"t{i}")
+
+        def periodic():
+            while not stop.is_set():
+                dispatcher._emit_progress_updates()
+
+        # Every time.time() read is 10 s later than the last, so neither emit path is ever throttled.
+        with patch("media_preview_generator.jobs.dispatcher.time") as fake_time:
+            fake_time.time.side_effect = lambda: next(ticks)
+            completers = [threading.Thread(target=complete, args=(total // 8,)) for _ in range(8)]
+            ticker = threading.Thread(target=periodic)
+            ticker.start()
+            for t in completers:
+                t.start()
+            for t in completers:
+                t.join(timeout=30)
+            stop.set()
+            ticker.join(timeout=30)
+        dispatcher.shutdown()
+
+        counts = [c for c, _t, _m in emitted]
+        assert counts == sorted(counts), "a progress emit carried an older count than the one before it"
+        assert emitted[-1] == (total, total, f"Checking existing previews… {total}/{total}")
+        mismatched = [(c, m) for c, t, m in emitted if not m.endswith(f" {c}/{t}")]
+        assert not mismatched, f"message and count disagree: {mismatched[:3]}"
+
+    def test_progress_callback_may_read_the_tracker_without_deadlocking(self):
+        results = []
+
+        def reading_callback(current, total, message, percent_override=None):
+            results.append(tracker.get_result()["completed"])  # takes the counts lock
+
+        tracker = _recording_tracker("reentrant-job", 1, reading_callback)
+        worker = threading.Thread(target=tracker.record_completion, args=(True, "CPU 1", "t0"), daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive(), "the progress callback ran with the counts lock held"
+        assert results == [1]
+
+
+class TestDispatcherProgressLogSkipsRepeats:
+    """The 5 s "Dispatcher progress" line is only worth a line when the count moved (4,270 of 7,292 were repeats)."""
+
+    @pytest.fixture
+    def dispatcher(self):
+        pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+        dispatcher = JobDispatcher(pool)
+        yield dispatcher
+        dispatcher.shutdown()
+
+    @staticmethod
+    def _progress_lines(caplog) -> list[str]:
+        return [r.message for r in caplog.records if r.message.startswith("Dispatcher progress")]
+
+    @staticmethod
+    def _add_tracker(dispatcher, job_id: str, total: int = 4) -> JobTracker:
+        tracker = _recording_tracker(job_id, total, None)
+        dispatcher._trackers[job_id] = tracker
+        return tracker
+
+    def test_unchanged_count_is_logged_once(self, dispatcher, loguru_caplog):
+        self._add_tracker(dispatcher, "aaaaaaaa-job")
+
+        dispatcher._log_progress()
+        dispatcher._log_progress()
+
+        assert self._progress_lines(loguru_caplog) == ["Dispatcher progress: job aaaaaaaa 0/4 (0%)"]
+
+    def test_changed_count_is_logged_again(self, dispatcher, loguru_caplog):
+        tracker = self._add_tracker(dispatcher, "aaaaaaaa-job")
+
+        dispatcher._log_progress()
+        tracker.record_completion(True, "CPU 1", "t0")
+        dispatcher._log_progress()
+        dispatcher._log_progress()
+
+        assert self._progress_lines(loguru_caplog) == [
+            "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
+            "Dispatcher progress: job aaaaaaaa 1/4 (25%)",
+        ]
+
+    def test_changed_total_is_logged_again(self, dispatcher, loguru_caplog):
+        tracker = self._add_tracker(dispatcher, "aaaaaaaa-job")
+
+        dispatcher._log_progress()
+        tracker.total_items = 8
+        dispatcher._log_progress()
+
+        assert self._progress_lines(loguru_caplog) == [
+            "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
+            "Dispatcher progress: job aaaaaaaa 0/8 (0%)",
+        ]
+
+    def test_each_job_is_tracked_on_its_own(self, dispatcher, loguru_caplog):
+        self._add_tracker(dispatcher, "aaaaaaaa-job")
+        moving = self._add_tracker(dispatcher, "bbbbbbbb-job")
+
+        dispatcher._log_progress()
+        moving.record_completion(True, "CPU 1", "t0")
+        dispatcher._log_progress()
+
+        assert self._progress_lines(loguru_caplog) == [
+            "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
+            "Dispatcher progress: job bbbbbbbb 0/4 (0%)",
+            "Dispatcher progress: job bbbbbbbb 1/4 (25%)",
+        ]
+
+    def test_a_finished_job_leaves_nothing_behind_for_a_later_job_with_the_same_id(self, dispatcher, loguru_caplog):
+        first = self._add_tracker(dispatcher, "aaaaaaaa-job")
+        dispatcher._log_progress()
+        first.cancel()
+        first._done_at = time.time() - 61
+        dispatcher._cleanup_done_trackers()
+        assert "aaaaaaaa-job" not in dispatcher._trackers
+        remembered = [
+            name for name, value in vars(dispatcher).items() if isinstance(value, dict) and "aaaaaaaa-job" in value
+        ]
+        assert remembered == [], f"dispatcher still holds per-job state in {remembered}"
+
+        self._add_tracker(dispatcher, "aaaaaaaa-job")
+        dispatcher._log_progress()
+
+        assert self._progress_lines(loguru_caplog) == [
+            "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
+            "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
+        ]

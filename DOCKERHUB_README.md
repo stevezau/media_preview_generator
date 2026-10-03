@@ -36,8 +36,8 @@ tonight can sit with a blank timeline until the next maintenance window.
 server holds the same file, it decodes it once and writes each server's own format.
 
 **It also adds Skip Intro and Skip Credits.** It finds each file's intro and end credits once and sends
-the markers to every server that has the file. When it isn't sure, it sends nothing and the file waits
-for your review.
+the markers to every server that has the file. When it isn't sure, it sends nothing; you can add or adjust
+a marker in the Inspector.
 
 ## What it looks like
 
@@ -70,7 +70,7 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 - **Webhooks.** Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex (Plex Pass), Emby (Premiere) and Jellyfin, or any JSON with a path. Sonarr, Radarr and the three servers can share one URL.
 - **Schedules.** Recently Added polling, plus cron and interval schedules.
 - **Manual Generation.** Search your servers by title (a whole show, a movie or one episode), or browse the media folders, and make previews for just those.
-- **Retries and skips.** Retries after 1, 2 and 5 minutes by default while a server indexes a new file, and skips files whose previews are current.
+- **Retries and skips.** Retries after 1, 2, 5, 15 and 60 minutes by default while a server indexes a new file, and skips files whose previews are current.
 
 **Every server from one decode**
 - **Each server's own format.** A BIF in Plex's data folder, a BIF next to the video for Emby, and Jellyfin trickplay tiles (next to the video, or in Jellyfin's data folder with the companion plugin).
@@ -80,7 +80,7 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 - **HDR tone mapping.** Tone-maps HDR10, HLG and HDR10+, and uses the HDR10 layer of Dolby Vision profiles 7 and 8. Profile 5 needs a GPU with a hardware Vulkan driver.
 
 **Skip Intro and Skip Credits**
-- **Found once, sent to every server.** Finds intros and end credits from the file's chapters, online skip databases (TheIntroDB, IntroDB.app, SkipDB), the season's theme song or the credit roll itself (read on the GPU when that's faster), then sends the markers to every server. When it isn't sure, the file waits for your review instead of getting a guess. Off until you [turn it on](https://mediapreviewgenerator.dev/guides/#turning-it-on) for a server.
+- **Found once, sent to every server.** Finds intros and end credits from the file's chapters, online skip databases (TheIntroDB, IntroDB.app, SkipDB), the season's theme song or the credit roll itself (read on the GPU when that's faster), then sends the markers to every server. When it isn't sure, it sends nothing instead of a guess; you can add or adjust a marker in the Inspector. Off until you [turn it on](https://mediapreviewgenerator.dev/guides/#turning-it-on) for a server.
 - **Yours to correct.** Tools → Intro & Credits adjusts, adds and locks a file's markers by hand, and Setup Health checks each server's Intro & Credits setup.
 - **Plex.** Needs Plex Pass on the server, and for viewers (or their Plex Home). The app runs on the Plex machine, or next to it through the [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent).
 - **Jellyfin.** Jellyfin 10.11 or 12.0, with the Media Preview Bridge plugin (the one trickplay uses).

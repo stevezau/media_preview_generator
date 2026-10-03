@@ -127,3 +127,71 @@ def test_runner_survives_non_utf8_progress_bytes(tmp_path):
     # The 0xc5 line should have surfaced (possibly with U+FFFD), proving
     # the read path actually executed against the bytes.
     assert any("x" * 1000 in line for line in stderr_lines)
+
+
+def test_stderr_is_read_on_from_where_the_last_read_stopped(tmp_path):
+    """Each poll reads only what FFmpeg added since the last one, from one open file.
+
+    The loop used to open and read the whole stderr file every 5 ms; a failing AV1 run's file grew to 21 MB. A line
+    FFmpeg had only half written at one poll is parsed once, whole, when the rest arrives.
+    """
+    stderr_path: list[str] = []
+    opened_for_reading: list[str] = []
+    real_open = open
+
+    def open_spy(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if isinstance(path, str) and os.path.basename(path).startswith("ffmpeg_output_"):
+            if mode == "w":
+                stderr_path.append(path)
+            elif mode == "r":
+                opened_for_reading.append(path)
+        return real_open(path, *args, **kwargs)
+
+    written_per_poll = [b"first line\nhalf of a ", b"second line\n", b"third line\n"]
+
+    def popen(*_a, **_kw):
+        proc = MagicMock(pid=12345, returncode=0)
+        pending = iter(written_per_poll)
+
+        def poll():
+            chunk = next(pending, None)
+            if chunk is None:
+                return 0
+            with real_open(stderr_path[0], "ab") as fh:
+                fh.write(chunk)
+            return None
+
+        proc.poll.side_effect = poll
+        return proc
+
+    with patch("builtins.open", side_effect=open_spy), patch("subprocess.Popen", side_effect=popen):
+        runner = create_ffmpeg_runner(**_runner_kwargs(tmp_path))
+        rc, _seconds, _speed, stderr_lines = runner(use_skip=False, init_vulkan=False)
+
+    assert rc == 0
+    assert stderr_lines == ["first line", "half of a second line", "third line"]
+    assert len(opened_for_reading) == 1, f"stderr file opened for reading {len(opened_for_reading)} times"
+
+
+def test_a_line_ffmpeg_never_finished_is_still_returned(tmp_path):
+    stderr_path: list[str] = []
+    real_open = open
+
+    def open_spy(path, *args, **kwargs):
+        if isinstance(path, str) and os.path.basename(path).startswith("ffmpeg_output_") and args == ("w",):
+            stderr_path.append(path)
+        return real_open(path, *args, **kwargs)
+
+    def popen(*_a, **_kw):
+        with real_open(stderr_path[0], "ab") as fh:
+            fh.write(b"complete line\nConversion failed")  # killed before the newline
+        proc = MagicMock(pid=12345, returncode=0)
+        proc.poll.side_effect = [None, None, 0]
+        return proc
+
+    with patch("builtins.open", side_effect=open_spy), patch("subprocess.Popen", side_effect=popen):
+        runner = create_ffmpeg_runner(**_runner_kwargs(tmp_path))
+        _rc, _seconds, _speed, stderr_lines = runner(use_skip=False, init_vulkan=False)
+
+    assert stderr_lines == ["complete line", "Conversion failed"]

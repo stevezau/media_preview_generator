@@ -65,7 +65,7 @@ class TestAlone:
         # "high" is the evaluation harness's level only: the app decides at "medium" (2026-09-24).
         d = credits([text(5_700_000)])[T.CREDITS]
         why = 'only on-screen text found the credits; at "high" a second source must agree'
-        assert (d.status, d.reason, d.marker) == (DecisionStatus.NEEDS_REVIEW, why, None)
+        assert (d.status, d.reason, d.marker) == (DecisionStatus.NO_EVIDENCE, why, None)
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (
             5_700_000,
             MOVIE_MS,
@@ -84,7 +84,7 @@ class TestAlone:
             assert (d.status, d.proposed) == (DecisionStatus.DECIDED, None)
             shown = d.marker
         else:
-            assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+            assert (d.status, d.marker) == (DecisionStatus.NO_EVIDENCE, None)
             shown = d.proposed
         assert (shown.start_ms, shown.end_ms, shown.decided_by) == (1_250_000, EPISODE_MS, ("credits_text",))
 
@@ -138,26 +138,37 @@ class TestWithSkipDb:
             )
         else:
             assert (d.status, d.reason, d.marker) == (
-                DecisionStatus.NEEDS_REVIEW,
+                DecisionStatus.NO_EVIDENCE,
                 "sources disagree: credits_text, skipdb",
                 None,
             )
+            assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (start, 5_990_000, ("skipdb",))
 
     @pytest.mark.parametrize(
         ("order", "proposed"),
         [(ORDER, (5_730_000, MOVIE_MS, ("skipdb",))), (TEXT_FIRST, (5_700_000, MOVIE_MS, ("credits_text",)))],
         ids=["skipdb-first", "text-first"],
     )
-    @pytest.mark.parametrize("level", ["high", "medium"])
-    def test_disagreeing_goes_to_review(self, level, order, proposed):
-        d = credits([text(5_700_000), skipdb(5_730_000)], level=level, order=order)[T.CREDITS]
+    def test_disagreeing_decides_nothing_at_high(self, order, proposed):
+        d = credits([text(5_700_000), skipdb(5_730_000)], level="high", order=order)[T.CREDITS]
         assert (d.status, d.reason, d.marker) == (
-            DecisionStatus.NEEDS_REVIEW,
+            DecisionStatus.NO_EVIDENCE,
             "sources disagree: credits_text, skipdb",
             None,
         )
         # The Inspector's proposal is the best-ranked source's answer in the user's order.
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == proposed
+
+    @pytest.mark.parametrize("order", [ORDER, TEXT_FIRST], ids=["skipdb-first", "text-first"])
+    def test_disagreeing_decides_by_the_texts_own_read_at_medium(self, order):
+        # The file's own frames outrank an online answer timed on whichever release, whatever the user's order.
+        d = credits([text(5_700_000), skipdb(5_730_000)], level="medium", order=order)[T.CREDITS]
+        assert (d.status, d.reason, d.proposed) == (
+            DecisionStatus.DECIDED,
+            "single source (credits_text); sources disagree: credits_text, skipdb",
+            None,
+        )
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (5_700_000, MOVIE_MS, ("credits_text",))
 
 
 class TestWithIntroDb:
@@ -180,11 +191,22 @@ class TestWithIntroDb:
         )
 
     @pytest.mark.parametrize("online", [Source.INTRODB, Source.THEINTRODB])
-    def test_a_disagreeing_online_answer_stops_text_publishing_alone_at_medium(self, online):
+    def test_a_disagreeing_online_answer_loses_to_the_text_at_medium(self, online):
         answer = Candidate(T.CREDITS, 5_730_000, None, online)
         d = credits([text(5_700_000), answer], level="medium")[T.CREDITS]
+        assert (d.status, d.reason, d.proposed) == (
+            DecisionStatus.DECIDED,
+            "single source (credits_text); sources disagree: credits_text, introdb/theintrodb",
+            None,
+        )
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (5_700_000, MOVIE_MS, ("credits_text",))
+
+    @pytest.mark.parametrize("online", [Source.INTRODB, Source.THEINTRODB])
+    def test_a_disagreeing_online_answer_decides_nothing_at_high(self, online):
+        answer = Candidate(T.CREDITS, 5_730_000, None, online)
+        d = credits([text(5_700_000), answer], level="high")[T.CREDITS]
         assert (d.status, d.reason, d.marker) == (
-            DecisionStatus.NEEDS_REVIEW,
+            DecisionStatus.NO_EVIDENCE,
             "sources disagree: credits_text, introdb/theintrodb",
             None,
         )
@@ -223,15 +245,28 @@ class TestWithServerMarkers:
             ("credits_text", "server_markers"),
         )
 
-    @pytest.mark.parametrize("level", ["high", "medium"])
-    def test_a_server_marker_25_s_later_contradicts_it(self, level):
-        d = credits([text(5_700_000), plex(5_725_000)], level=level)[T.CREDITS]
-        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, "sources disagree: credits_text, server_markers")
+    def test_a_server_marker_25_s_later_contradicts_it_at_high(self):
+        d = credits([text(5_700_000), plex(5_725_000)], level="high")[T.CREDITS]
+        assert (d.status, d.reason) == (DecisionStatus.NO_EVIDENCE, "sources disagree: credits_text, server_markers")
         assert d.marker is None
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (
             5_700_000,
             MOVIE_MS,
             ("credits_text",),
+        )
+
+    def test_a_server_marker_25_s_later_loses_to_the_text_at_medium_then_shortens_its_start(self):
+        # The text decides; rule 7 then moves the start to the server's later one, as it does for any decided credits.
+        d = credits([text(5_700_000), plex(5_725_000)], level="medium")[T.CREDITS]
+        assert (d.status, d.reason, d.proposed) == (
+            DecisionStatus.DECIDED,
+            "single source (credits_text); sources disagree: credits_text, server_markers" + SHORTENED,
+            None,
+        )
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
+            5_725_000,
+            MOVIE_MS,
+            ("credits_text", "server_markers"),
         )
 
     def test_rule_7_moves_a_decided_start_to_the_servers_later_first_start(self):
@@ -258,15 +293,24 @@ class TestWithServerMarkers:
             ("credits_text", "server_markers_imported"),
         )
 
-    @pytest.mark.parametrize("level", ["high", "medium"])
-    def test_skipdb_and_a_skipdb_importers_copy_are_one_source_against_it(self, level):
+    def test_skipdb_and_a_skipdb_importers_copy_are_one_source_against_it_at_high(self):
         # Rule 8 (ruling 2026-09-16): the copy agreeing with SkipDB 1 s apart is SkipDB again, not a second opinion.
-        d = credits([text(5_700_000), skipdb(5_730_000), imported(5_731_000, "skipdb")], level=level)[T.CREDITS]
+        d = credits([text(5_700_000), skipdb(5_730_000), imported(5_731_000, "skipdb")], level="high")[T.CREDITS]
         assert (d.status, d.reason, d.marker) == (
-            DecisionStatus.NEEDS_REVIEW,
+            DecisionStatus.NO_EVIDENCE,
             "sources disagree: credits_text, skipdb",
             None,
         )
+        assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (5_730_000, MOVIE_MS, ("skipdb",))
+
+    def test_skipdb_and_a_skipdb_importers_copy_are_one_source_the_text_outranks_at_medium(self):
+        d = credits([text(5_700_000), skipdb(5_730_000), imported(5_731_000, "skipdb")], level="medium")[T.CREDITS]
+        assert (d.status, d.reason, d.proposed) == (
+            DecisionStatus.DECIDED,
+            "single source (credits_text); sources disagree: credits_text, skipdb",
+            None,
+        )
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (5_700_000, MOVIE_MS, ("credits_text",))
 
     @pytest.mark.parametrize(
         "server",
@@ -310,9 +354,11 @@ class TestWithChapters:
         assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
         assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (5_698_000, 5_900_000, decided_by)
 
-    def test_text_and_a_servers_marker_agreeing_against_the_chapter_send_it_to_review(self):
+    def test_text_and_a_servers_marker_agreeing_against_the_chapter_leave_it_undecided(self):
+        # The text is 60 s off the chapter, so it doesn't confirm it; and only text plus an independent non-server
+        # answer may outvote a chapter (rule 3), which a server's marker isn't.
         d = credits([chapter(5_640_000), text(5_700_000), plex(5_703_000)])[T.CREDITS]
-        assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+        assert (d.status, d.marker) == (DecisionStatus.NO_EVIDENCE, None)
         assert d.reason == "chapters contradicted by agreeing sources: credits_text, server_markers"
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (5_640_000, MOVIE_MS, ("chapters",))
 
@@ -538,10 +584,11 @@ class TestEndQ3:
         open_ended = credits([text(5_700_000), skipdb(5_702_000), preview], types=(T.CREDITS, T.PREVIEW))
         c, p = open_ended[T.CREDITS], open_ended[T.PREVIEW]
         assert (c.status, c.marker.start_ms, c.marker.end_ms) == (DecisionStatus.DECIDED, 5_702_000, MOVIE_MS)
-        assert (p.status, p.reason, p.marker) == (DecisionStatus.NEEDS_REVIEW, "preview overlaps credits", None)
+        assert (p.status, p.reason, p.marker) == (DecisionStatus.NO_EVIDENCE, "preview overlaps credits", None)
+        assert (p.proposed.start_ms, p.proposed.end_ms, p.proposed.decided_by) == (5_950_000, 5_990_000, ("chapters",))
 
 
-def test_a_preview_overlapping_text_decided_credits_goes_to_review():
+def test_a_preview_overlapping_text_decided_credits_is_left_undecided():
     preview = Candidate(T.PREVIEW, 5_750_000, 5_800_000, Source.CHAPTERS, 1.0, "Preview")
     out = credits([text(5_700_000), skipdb(5_702_000), preview], types=(T.CREDITS, T.PREVIEW))
     c, p = out[T.CREDITS], out[T.PREVIEW]
@@ -551,8 +598,8 @@ def test_a_preview_overlapping_text_decided_credits_goes_to_review():
         MOVIE_MS,
         ("skipdb", "credits_text"),
     )
-    assert (p.status, p.reason, p.marker) == (DecisionStatus.NEEDS_REVIEW, "preview overlaps credits", None)
-    assert (p.proposed.start_ms, p.proposed.end_ms) == (5_750_000, 5_800_000)
+    assert (p.status, p.reason, p.marker) == (DecisionStatus.NO_EVIDENCE, "preview overlaps credits", None)
+    assert (p.proposed.start_ms, p.proposed.end_ms, p.proposed.decided_by) == (5_750_000, 5_800_000, ("chapters",))
 
 
 # Cells that collapse into others:

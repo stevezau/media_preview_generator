@@ -321,20 +321,65 @@ def _backup_max_age_days() -> int:
     return max(0, min(n, 365))
 
 
-def _prune_old_backups(filepath: str, keep: int, max_age_days: int = 0) -> None:
-    """Glob ``{filepath}.*.bak``, drop oldest beyond ``keep`` AND anything older than ``max_age_days``.
+_BACKUP_SUFFIX_RE = re.compile(r"\.[0-9]{8}-[0-9]{6}\.bak")
 
-    Best-effort — failures are swallowed (a stale backup never blocks the
-    next save). Lex order matches chronological order because the timestamp
-    suffix is fixed-width ``YYYYMMDD-HHMMSS``. ``max_age_days=0`` disables
-    age-based pruning so existing installs keep behaving exactly as before
-    until the user opts in.
+
+def timestamped_backups(filepath: str) -> list[str]:
+    """Return the app's own backups of ``filepath`` (``{filepath}.YYYYMMDD-HHMMSS.bak``), oldest first.
+
+    Any other ``.bak`` beside the file — the legacy ``{filepath}.bak``, a deploy script's
+    ``{filepath}.pre-upgrade.bak`` — is someone else's: it is never listed here, so never counted or pruned.
+    Name order is age order because the stamp is fixed-width.
+
+    Args:
+        filepath: The live file the backups were taken of.
+
+    Returns:
+        Paths of the app's own backups, oldest first.
     """
     import glob
+
+    return sorted(
+        path
+        for path in glob.glob(glob.escape(filepath) + ".*.bak")
+        if _BACKUP_SUFFIX_RE.fullmatch(path[len(filepath) :])
+    )
+
+
+def backup_file(filepath: str) -> str:
+    """Copy ``filepath`` to ``{filepath}.{YYYYMMDD-HHMMSS}.bak`` unless this second already has a backup.
+
+    Args:
+        filepath: The file to back up; it must exist.
+
+    Returns:
+        The backup's path for this second (just written, or the one already there).
+
+    Raises:
+        OSError: If the copy fails.
+    """
+    bak_path = f"{filepath}.{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.bak"
+    # Several saves can land in one second (a settings migration makes about seven). The first copy is the file
+    # before any of them; overwriting it would leave only a half-changed state to roll back to.
+    if not os.path.exists(bak_path):
+        shutil.copy2(filepath, bak_path)
+        # The copy carries the file's modified time; pruning by age (``_prune_old_backups``) would delete the backup
+        # of a file last changed before the cutoff as soon as it was made. A backup's time is when it was made.
+        os.utime(bak_path)
+    return bak_path
+
+
+def _prune_old_backups(filepath: str, keep: int, max_age_days: int = 0) -> None:
+    """Drop the app's own backups of ``filepath`` beyond the newest ``keep`` AND any older than ``max_age_days``.
+
+    Best-effort — failures are swallowed (a stale backup never blocks the
+    next save). Only :func:`timestamped_backups` are counted or deleted.
+    ``max_age_days=0`` disables age-based pruning so existing installs keep
+    behaving exactly as before until the user opts in.
+    """
     import time
 
-    pattern = filepath + ".*.bak"
-    backups = sorted(glob.glob(pattern))
+    backups = timestamped_backups(filepath)
     to_delete: set[str] = set()
 
     excess = len(backups) - keep
@@ -362,14 +407,14 @@ def atomic_json_save_with_backup(filepath: str, data: Any, *, permissions: int |
 
     Same atomicity guarantees as ``atomic_json_save``, plus: before writing,
     if ``filepath`` already exists, copy it to ``filepath.{YYYYMMDD-HHMMSS}.bak``
-    and prune oldest beyond ``CONFIG_BACKUP_KEEP`` (default 10). Backup is
-    best-effort — failures are logged but never block the primary write,
-    since the caller's data is more important than the recovery copy.
+    (see :func:`backup_file`) and prune oldest beyond ``CONFIG_BACKUP_KEEP``
+    (default 10). Backup is best-effort — failures are logged but never block
+    the primary write, since the caller's data is more important than the
+    recovery copy.
 
     The legacy single ``filepath.bak`` (from previous app versions) is left
     in place: the inventory + restore endpoints recognise it as a
-    "previous version" entry alongside the new timestamped backups, and it
-    ages out as fresh saves accumulate.
+    "previous version" entry alongside the new timestamped backups.
 
     Designed for the small, hand-editable JSON files this app owns
     (settings.json, schedules.json, webhook_history.json, setup_state.json).
@@ -384,12 +429,8 @@ def atomic_json_save_with_backup(filepath: str, data: Any, *, permissions: int |
         IOError: If the primary write or replace fails. Backup failures do not raise.
     """
     if os.path.exists(filepath):
-        from datetime import datetime
-
-        ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        bak_path = f"{filepath}.{ts}.bak"
         try:
-            shutil.copy2(filepath, bak_path)
+            backup_file(filepath)
             _prune_old_backups(filepath, _backup_retention(), _backup_max_age_days())
         except OSError as exc:
             # Don't import loguru at module load — keep this dep-light. Log
@@ -398,7 +439,7 @@ def atomic_json_save_with_backup(filepath: str, data: Any, *, permissions: int |
             import sys
 
             print(
-                f"[atomic_json_save_with_backup] Could not write backup {bak_path}: {exc}",
+                f"[atomic_json_save_with_backup] Could not write a backup of {filepath}: {exc}",
                 file=sys.stderr,
             )
     atomic_json_save(filepath, data, permissions=permissions)

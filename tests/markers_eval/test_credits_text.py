@@ -67,9 +67,11 @@ def test_compare_text_rows_are_what_the_pipeline_publishes():
     rows = ct.compare_text(FILES, {}, answers=ANSWERS, probe=probe, baseline=BASELINE, is_movie=True)
     assert rows.plex == Counter(useful=2, wrong=2, late=1)
     assert rows.text == Counter(useful=2, wrong=1, missed=1, late=1)
-    # A: 42 s apart → review; B: they agree while both early → wrong; C: Plex alone never decides → missed;
-    # D: they agree 60 s late → late; E: they agree, and the text's end stops the skip before the scene.
-    assert rows.high == rows.medium == Counter(useful=1, wrong=1, missed=2, late=1)
+    # A: 42 s apart → nothing at "high", at "medium" credit text wins the disagreement (measured 2026-10-03) → useful;
+    # B: they agree while both early → wrong; C: Plex alone never decides → missed; D: they agree 60 s late → late;
+    # E: they agree, and the text's end stops the skip before the scene.
+    assert rows.high == Counter(useful=1, wrong=1, missed=2, late=1)
+    assert rows.medium == Counter(useful=2, wrong=1, missed=1, late=1)
     assert rows.text_and_server_only == 3
     assert (rows.ends_found, rows.ends_published) == (1, Counter(high=1, medium=1))
     e = rows.files[-1]
@@ -486,10 +488,11 @@ def test_the_detector_digest_follows_every_source_file_it_names(tmp_path):
 # plumbing the detector reports through, the Vulkan probe, which only picks the helper's device (the self-test
 # keeps a GPU whose boxes differ from the CPU's out), the settings, read only for how many CPU helpers may run, the
 # playback speeds decide reads online times by, the pause that stops a running decode where it is (it moves time
-# limits, never what a decode gives), and the job log's clock, which only words a file cut short.
+# limits, never what a decode gives), the job log's clock, which only words a file cut short, and the previews
+# runner, read only for the decoder's "can't decode" line that ends a doomed GPU run sooner (the CPU reads it either way).
 NOT_ANSWER_CODE = {"markers.models", "markers.locks", "markers.pipeline", "markers.store", "markers.speed",
                    "processing.generator", "gpu.vulkan_probe", "web.settings_manager", "markers.freeze",
-                   "markers.job_log"}  # fmt: skip
+                   "markers.job_log", "processing.ffmpeg_runner"}  # fmt: skip
 
 
 def _package_imports(path, root):

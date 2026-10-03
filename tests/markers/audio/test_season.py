@@ -34,6 +34,8 @@ from tests.markers.fakes import FakeRegistry, ready_publisher
 from tests.markers.test_pipeline import EPISODE_IDS, MOVIE_IDS, _clients, _ctx, _item, _registry, _run
 
 DUR = 1_321_472
+# Why an intro only IntroDB answered for is left undecided (``decide._lone_answer_reason``).
+IDB_ALONE = "only IntroDB has the intro; an online answer needs a check against the file"
 N_POINTS = int(fingerprint.window_s(DUR) / POINT_S)
 INTRO = np.random.default_rng(42).integers(0, 2**32, size=240, dtype=np.uint64).astype("<u4")
 OFFSETS = {
@@ -678,6 +680,56 @@ class TestEndPictureCheck:
             _run(ctx, e2, {"plex-1": ready_publisher()})
             assert audio.compared == [] and store.get_detector_run(rec2.id, Source.SEASON_AUDIO) is None
 
+    @staticmethod
+    def _gpu_times_out(path, cpu_reads):
+        """A share whose GPU attempt times out on ``path``; the CPU attempt after it reads the file or fails too."""
+        attempt = ["gpu"]
+
+        def share(target, partner, *_args):
+            if path in (target, partner):
+                if attempt[0] == "gpu":
+                    raise season.end_picture.ReadFailedError(
+                        path, f"decoding {path} timed out after 120 s", gpu_attempt=True
+                    )
+                if not cpu_reads:
+                    raise season.end_picture.ReadFailedError(path, f"decoding {path} timed out after 120 s")
+            return 1.0
+
+        return attempt, share
+
+    @pytest.mark.parametrize("cpu_reads", [True, False], ids=["cpu-reads-it", "cpu-fails-too"])
+    def test_a_gpu_attempt_that_fails_isnt_held_against_the_files_cpu_rerun(self, store, show, cpu_reads):
+        # Production (Person of Interest S02E19, AV1 on a GPU without an AV1 decoder): the GPU's decode ran to the
+        # 120 s limit, the file was remembered as unreadable, and the worker's CPU rerun a moment later was refused.
+        e1, _e2, _e3 = show(1, 3)
+        clock = [datetime(2026, 9, 13, tzinfo=UTC)]
+        ctx = self._clocked(store, e1, clock)
+        attempt, share = self._gpu_times_out(e1, cpu_reads)
+        with _Audio(points=early_points, share=share) as audio:
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            rec = store.get_file(e1)
+            identity = FileIdentity(e1, rec.size, rec.mtime_ns)
+            assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None  # no answer from the GPU attempt
+            assert store.end_picture_failed_at(identity) is None  # ... and nothing against the file
+            assert season.season_audio_needs_worker(rec, ctx) is True
+            attempt[0] = "cpu"
+            audio.compared.clear()
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            assert audio.compared  # the CPU read it
+        assert bool(_evidence(store, e1, Source.SEASON_AUDIO)) is cpu_reads
+        assert store.end_picture_failed_at(identity) == (None if cpu_reads else clock[0])
+
+    def test_a_partner_the_gpu_attempt_couldnt_read_isnt_remembered_and_the_other_partner_decides(self, store, show):
+        e1, e2, _e3 = show(1, 3)
+        ctx = _season_ctx(store, e1)
+        _attempt, share = self._gpu_times_out(e2, cpu_reads=True)
+        with _Audio(points=early_points, share=share):
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            assert _evidence(store, e1, Source.SEASON_AUDIO)  # e3's share of 1.0 decides
+            rec2 = store.get_file(e2)
+            assert store.end_picture_failed_at(FileIdentity(e2, rec2.size, rec2.mtime_ns)) is None
+            assert season.season_audio_needs_worker(rec2, ctx) is True  # its own run isn't given up on
+
     def test_no_partner_that_could_be_read_leaves_no_answer(self, store, show):
         e1, e2, e3 = show(1, 3)
         _unreadable_now, share = self._unreadable(e2, e3)
@@ -1307,7 +1359,12 @@ class TestWeeklyReleases:
         assert hint.origin == "4/4"
         start, end = planted_ms(s2e1)
         assert abs(hint.start_ms - start) <= 500 and abs(hint.end_ms - end) <= 500
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value  # a hint needs a second source even at Medium
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value  # a hint needs a second source even at Medium
+        assert _intro_decision(store, s2e1) == (
+            DecisionStatus.NO_EVIDENCE,
+            "only the previous season's audio found the intro; matching audio needs another source to agree",
+            None,
+        )
         # This episode is the matcher's first file in every pair (the order few_siblings.py measured), and the previous
         # season's episodes are never asked about again: they aren't this season's.
         new = store.get_file(s2e1)
@@ -1400,7 +1457,10 @@ class TestFailures:
         with _Audio(fail={e1}):
             out, _ = _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
         rec = store.get_file(e1)
-        assert out.outcome_key == FileOutcome.NO_MARKERS.value
+        # A read of the file itself that failed is the file's result, not "no markers" (it is read again next run).
+        assert out.outcome_key == FileOutcome.FAILED.value
+        assert out.message.startswith("Couldn't read the intro's audio: ffmpeg exited 1; ")
+        assert [r["status"] for r in out.publisher_rows] == ["failed"]
         assert store.evidence_version(rec.id, Source.SEASON_AUDIO) is None
         assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None
 
@@ -1446,8 +1506,8 @@ class TestFailures:
         # E4 has an answer from an earlier run, and its audio can't be fingerprinted now.
         victim = store.upsert_file(FileIdentity(e4, *_identity(e4)), duration_ms=DUR, season_key=None, is_movie=False)
         store.set_detector_run(victim.id, Source.SEASON_AUDIO, "an earlier season")
-        review = TypeDecision(MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet")
-        store.save_decisions(victim.id, {MarkerType.INTRO: review}, settings_fingerprint="x")
+        undecided = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "sources don't agree yet")
+        store.save_decisions(victim.id, {MarkerType.INTRO: undecided}, settings_fingerprint="x")
 
         def run(ctx, path):
             if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
@@ -1863,12 +1923,10 @@ class TestFailures:
         ctx.chromaprint = fingerprint.ChromaprintState.ABSENT  # what build_context records for this container
         with _Audio():
             out, _ = _run(ctx, target, {"plex-1": ready_publisher()})
-        rec = store.get_file(target)
-        # The write took our intro off Plex, so the file counts as written; the intro in review is in its reason.
+        # The write took our intro off Plex, so the file counts as written; the undecided intro's reason is in its message.
         assert out.outcome_key == FileOutcome.PUBLISHED.value
-        assert "intro needs review" in out.message
-        assert store.get_decisions(rec.id)[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
-        assert MarkerType.INTRO not in store.get_markers(rec.id)
+        assert f"intro: none ({IDB_ALONE})" in out.message
+        assert _intro_decision(store, target) == (DecisionStatus.NO_EVIDENCE, IDB_ALONE, None)
         assert _evidence(store, target, answer)  # kept for when chromaprint is back
 
     def test_a_chromaprint_check_that_didnt_answer_keeps_stored_season_audio_answers_deciding(
@@ -1905,7 +1963,7 @@ class TestFailures:
         [("registered", "available"), ("none", "absent"), ("none", "unknown")],
         ids=["registered", "absent", "unknown"],
     )
-    def test_a_stale_season_audio_answer_can_still_hold_a_chapter_in_review(self, store, show, detectors, chromaprint):
+    def test_a_stale_season_audio_answer_can_still_hold_a_chapter_undecided(self, store, show, detectors, chromaprint):
         (path,) = show(1, 1)
         rec = store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=None, is_movie=False)
         store.set_frame_rate(rec.id, None, identity=(rec.size, rec.mtime_ns))  # probed as this build probes a file
@@ -1924,8 +1982,14 @@ class TestFailures:
 
         decision = pipeline._decide(ctx, rec, frozenset({MarkerType.INTRO}))[MarkerType.INTRO]
 
-        # IntroDB and season audio agree against the chapter; without the detector the chapter alone would decide.
-        assert decision.status is DecisionStatus.NEEDS_REVIEW and decision.marker is None
+        # IntroDB and season audio agree against the chapter (and end after it, so they don't outvote it); without the
+        # detector the chapter alone would decide.
+        assert (decision.status, decision.reason, decision.marker) == (
+            DecisionStatus.NO_EVIDENCE,
+            "chapters contradicted by agreeing sources: introdb, season_audio",
+            None,
+        )
+        assert decision.proposed == Marker(MarkerType.INTRO, 0, 60_000, ("chapters",))
 
     def test_no_chromaprint_registers_no_detector(self, loguru_caplog):
         from media_preview_generator.markers.settings import load_global, validate_global
@@ -2244,17 +2308,17 @@ class TestSeasonIntroChapters:
     # Reservation Dogs S01 (Disney+): two "Intro" chapters are story, the others 3-11 s.
     RESERVATION_DOGS = {1: 3_000, 2: 6_931, 3: 7_000, 4: 11_000, 5: 125_834, 6: 86_545, 7: None}
 
-    def test_the_story_chapters_need_review_and_the_others_publish(self, store, show):
+    def test_the_story_chapters_decide_nothing_and_the_others_publish(self, store, show):
         paths = show(1, 7)
         ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters(self.RESERVATION_DOGS) as chapters:
             outs = {i + 1: _check(ctx, p, chapters) for i, p in enumerate(paths)}
         # Every episode here resolves to the same Plex item, so E05's publish takes E04's intro off it: that write
         # counts the file as written. E06 then has nothing of ours there and nothing to send.
-        assert [outs[e].outcome_key for e in (5, 6)] == [FileOutcome.PUBLISHED.value, FileOutcome.NEEDS_REVIEW.value]
+        assert [outs[e].outcome_key for e in (5, 6)] == [FileOutcome.PUBLISHED.value, FileOutcome.NO_MARKERS.value]
         for e in (5, 6):
-            assert f"intro needs review ({LONG_INTRO_CHAPTER_REASON})" in outs[e].message
-            assert _intro_decision(store, paths[e - 1])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+            assert f"intro: none ({LONG_INTRO_CHAPTER_REASON})" in outs[e].message
+            assert _intro_decision(store, paths[e - 1]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
         for e in (1, 2, 3, 4):
             assert outs[e].outcome_key == FileOutcome.PUBLISHED.value
             assert _intro_decision(store, paths[e - 1])[:2] == (DecisionStatus.DECIDED, "chapters")
@@ -2268,7 +2332,8 @@ class TestSeasonIntroChapters:
             assert sorted(chapters.probed) == sorted(paths)
             chapters.probed.clear()
             _check(ctx, paths[1], chapters)
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value
+        assert _intro_decision(store, paths[0]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
         assert chapters.probed == []  # the season step stored its siblings' chapters: nothing is read twice
 
     def test_fewer_than_two_other_intro_chapters_is_no_check(self, store, show):
@@ -2326,7 +2391,7 @@ class TestSeasonIntroChapters:
             assert ctx.take_followups() == [e2]  # E1 stays decided either way
             assert _intro_decision(store, e2)[0] is DecisionStatus.DECIDED
             _check(ctx, e2, chapters)  # the Season follow-up job
-        assert _intro_decision(store, e2)[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+        assert _intro_decision(store, e2) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
         assert ctx.take_followups() == []
 
     @staticmethod
@@ -2443,7 +2508,7 @@ class TestSeasonChapterState:
             if handed_over:
                 _run(ctx, paths[4], {"plex-1": ready_publisher()}, stage="process", probe_effect=chapters.probe)
             _job(store, registry, [paths[3]], chapters, detectors=detectors)  # the Season job
-        assert _intro_decision(store, paths[3])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+        assert _intro_decision(store, paths[3]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
 
     def test_a_member_another_episodes_step_probed_is_noticed_by_the_next_run(self, store, season_folder):
         paths = self._paths(season_folder, (1, 2, 3))
@@ -2456,7 +2521,7 @@ class TestSeasonChapterState:
             _write(paths[3], 103)
             # E1 runs again first (a user or webhook re-run): its step probes E3 and E2's limit is 41 s now.
             assert _job(store, registry, [paths[1]], chapters) == [paths[2]]
-        assert _intro_decision(store, paths[2])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+        assert _intro_decision(store, paths[2]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
 
     def test_follow_ups_lost_to_a_restart_are_asked_again_by_the_next_run(self, tmp_path, season_folder):
         paths = self._paths(season_folder, (1, 2, 3))
@@ -2473,7 +2538,7 @@ class TestSeasonChapterState:
             store = MarkerStore(db)
             assert _intro_decision(store, paths[2])[0] is DecisionStatus.DECIDED
             assert _job(store, registry, [paths[1]], chapters) == [paths[2]]  # any later run of the season
-        assert _intro_decision(store, paths[2])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+        assert _intro_decision(store, paths[2]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
         store.close()
 
     def test_a_deleted_episode_asks_again_for_the_siblings_it_changes(self, store, season_folder):
@@ -2483,7 +2548,7 @@ class TestSeasonChapterState:
         registry = _registry(paths[1], ServerType.PLEX)
         with _Chapters({1: 10_000, 2: 12_000, 3: 126_000}) as chapters:
             _job(store, registry, list(paths.values()), chapters)
-            assert _intro_decision(store, paths[3])[0] is DecisionStatus.NEEDS_REVIEW
+            assert _intro_decision(store, paths[3]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
             os.remove(paths[1])  # only E2 is left beside E3: one other is no season
             assert _job(store, registry, [paths[2]], chapters) == [paths[3]]
         assert _intro_decision(store, paths[3])[:2] == (DecisionStatus.DECIDED, "chapters")
@@ -2503,7 +2568,7 @@ class TestSeasonChapterState:
         # E3's others are 10 s and 40 s (median 25 s, limit 55 s). Its own 75 s isn't one of them: with it, the median
         # would be 40 s and the limit 80 s.
         assert limits == [(True, 115_000), (True, 85_000), (True, 55_000)]
-        assert _intro_decision(store, paths[3])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+        assert _intro_decision(store, paths[3]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
         assert all(c.args[1].canonical_path == paths[1] for c in decided.call_args_list)  # siblings' limits held
 
     @pytest.mark.parametrize("stored_limit", [True, False], ids=["decided-with-a-limit", "decided-without-one"])
@@ -2797,13 +2862,13 @@ class TestFlatFolder:
         for path in paths:
             _write(path, 100)
         ctx = _season_ctx(store, paths[0])
-        review = TypeDecision(MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet")
+        undecided = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "sources don't agree yet")
         recs = []
         for path in paths:
             rec = store.upsert_file(
                 FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=None, is_movie=False
             )
-            store.save_decisions(rec.id, {MarkerType.INTRO: review}, settings_fingerprint="x")
+            store.save_decisions(rec.id, {MarkerType.INTRO: undecided}, settings_fingerprint="x")
             store.set_detector_run(
                 rec.id, Source.SEASON_AUDIO, season._signature(ctx, season.season_group(path).episodes)
             )
@@ -2858,7 +2923,7 @@ class TestFlatFolder:
             lengths[6] = None  # E6 replaced by a release without an intro chapter: E41's limit drops to 70 s
             _write(paths[6], 999)
             assert _job(store, registry, [paths[6]], chapters) == [paths[41]]
-        assert _intro_decision(store, paths[41])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+        assert _intro_decision(store, paths[41]) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
 
     def test_a_change_reaches_a_file_whose_group_holds_the_changed_episode_for_season_audio_too(self, store, tmp_path):
         # E41's group is E6-E45. The intro is in E41 and 20 of its 39 others (E6-E25), the quorum's edge: E6's replacement
@@ -2901,8 +2966,7 @@ class TestFlatFolder:
             replaced.add(6)
             _write(paths[6], 999)  # a release whose opening doesn't match
             assert paths[41] in job([paths[6]])
-        assert store.get_decisions(e41.id)[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
-        assert MarkerType.INTRO not in store.get_markers(e41.id)
+        assert _intro_decision(store, paths[41]) == (DecisionStatus.NO_EVIDENCE, IDB_ALONE, None)
 
 
 def _record_intro_chapter(store, path, length_ms, chapter_version=CHAPTER_RULES_VERSION):
@@ -3308,8 +3372,7 @@ class TestAnswersRestingOnSeasonAudio:
         assert early[1] == (DecisionStatus.DECIDED, "sources agree: introdb, season_audio", self.COLD_OPEN_MARKER)
         weekly, requests, _ = _cold_open_season(tmp_path / "weekly", episodes, [[1], [2], [3, 4]])
         at_once, _, _ = _cold_open_season(tmp_path / "at-once", episodes, [[1, 2, 3, 4]])
-        idb_alone = "only IntroDB has the intro; an online answer needs a check against the file"
-        assert weekly[1] == at_once[1] == (DecisionStatus.NEEDS_REVIEW, idb_alone, None)
+        assert weekly[1] == at_once[1] == (DecisionStatus.NO_EVIDENCE, IDB_ALONE, None)
         assert weekly == at_once
         assert "Show (2020) - S01E01.mkv" in {os.path.basename(p) for p in requests[-1]}
 
@@ -3365,9 +3428,7 @@ class TestAnswersRestingOnSeasonAudio:
         elif state == "kept-own":
             decision = TypeDecision(MarkerType.INTRO, DecisionStatus.DISABLED, None, None, kept_own_reason(["Plex"]))
         else:
-            decision = TypeDecision(
-                MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
-            )
+            decision = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "sources don't agree yet")
         store.save_decisions(sibling.id, {MarkerType.INTRO: decision}, settings_fingerprint="x")
         if state == "changed-on-disk":
             _write(e2, 999)

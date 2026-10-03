@@ -8,8 +8,8 @@
 // A file: GET /api/inspector/file (where each server keeps its preview, what it holds, a job working on the file,
 // other versions) and GET /api/markers/item (what was decided, the evidence, what each server shows). The Timeline is
 // one strip of every preview frame (GET /api/bif/frame, /api/bif/trickplay/frame), drawn only near the viewport, with
-// a row per server underneath on the same scale. Adjust and "Needs your check" read exact frames one second apart
-// from the video (GET /api/inspector/frames). Saving is POST /api/markers/item/markers (save = lock = publish to every
+// a row per server underneath on the same scale. Adjust reads exact frames one second apart from the video
+// (GET /api/inspector/frames). Saving is POST /api/markers/item/markers (save = lock = publish to every
 // owner); "Back to automatic" is DELETE on the same route. Regenerate preview is POST /api/jobs/manual, Re-detect
 // POST /api/markers/item/redetect. A job on the /jobs socket that works on the open file shows as a live banner, and
 // the file is read again when it ends.
@@ -44,19 +44,15 @@
     };
     const SOURCE_ORDER = ['season_audio', 'season_audio_previous', 'chapters', 'credits_text', 'theintrodb', 'introdb',
         'skipdb', 'server_markers', 'server_markers_imported', 'user'];
-    // Candidates within this of each other are one answer ("Two answers disagree by 28 seconds").
-    const SAME_ANSWER_MS = 2000;
     const SEARCH_DEBOUNCE_MS = 300;
     const STATUS_BATCH = 5;
     const EXACT_COUNT = 7;
-    const PICK_COUNT = 14;
-    const PICK_STEP_MS = 10000;
     const ADJUST_COUNT = 8;
     const ADJUST_BEFORE = 3;
     const MARKERS_JOB = 'intro_credits';
     const ADD_HEAD_MS = 30000;
     const ADD_TAIL_MS = 60000;
-    const ATTENTION_PLANS = ['unknown', 'will_add', 'will_replace', 'will_remove', 'waiting'];
+    const ATTENTION_PLANS = ['unknown', 'will_add', 'will_replace', 'will_remove'];
 
     // Timeline geometry, in pixels: a tile every PITCH, lanes under the frames on the same scale.
     const PITCH = 152;
@@ -79,7 +75,6 @@
         regenerate: 'Makes this file\'s preview again for every server that has it, replacing the one there now. Runs as a job on the Dashboard.',
         redetect: 'Looks this file up again and asks every source afresh. Runs as a job on the Dashboard.',
         adjust: 'Move the intro and credits one second at a time on the video\'s frames. Saving sends them to your servers and keeps them.',
-        pick: 'Frames one second apart, read from the video. Step ten seconds either way to find the first frame.',
         lock: 'Keep these times exactly as they are. Later checks won\'t change them, and your servers get them now.',
         unlockHeader: 'Let later checks set these times again. What your servers show now stays until the next Intro & Credits job.',
         scope: 'Intros usually sit at the same spot in every episode, so an odd one stands out side by side. Click an episode to open it.',
@@ -104,7 +99,6 @@
         itemError: '',
         loadSeq: 0,
         adjust: null,
-        review: {},
         confirmUnlock: false,
         confirmLock: false,
         locking: false,
@@ -420,7 +414,6 @@
         if (!status) return ['…', 'insp-state-muted'];
         if (status.error || !status.in_library || !status.markers) return ['—', 'insp-state-muted'];
         const m = status.markers;
-        if (m.state === 'needs_review') return [m.label, 'insp-state-review'];
         if (m.state === 'not_checked' || m.state === 'none') return [m.label, 'insp-state-muted'];
         return [m.label, ''];
     }
@@ -547,7 +540,7 @@
             card.type = 'button';
             card.dataset.path = ep.path;
             const stateText = (ep.markers && ep.markers.label) || '';
-            card.append(el('div', 'insp-episode-code', ep.code), el('div', 'insp-episode-state' + (ep.markers && ep.markers.state === 'needs_review' ? ' insp-state-review' : ''), stateText));
+            card.append(el('div', 'insp-episode-code', ep.code), el('div', 'insp-episode-state', stateText));
             card.addEventListener('click', function () {
                 const code = ep.episode !== null && ep.episode !== undefined && season.season !== null
                     ? `S${String(season.season).padStart(2, '0')}E${String(ep.episode).padStart(2, '0')}` : ep.code;
@@ -594,7 +587,6 @@
         state.item = null;
         state.itemError = '';
         state.adjust = null;
-        state.review = {};
         state.confirmUnlock = false;
         state.confirmLock = false;
         state.locking = false;
@@ -753,10 +745,6 @@
         return TYPES.filter(function (t) { return decided(t); });
     }
 
-    function reviewTypes() {
-        return TYPES.filter(function (t) { return decision(t).status === 'needs_review'; });
-    }
-
     function lockedTypes() {
         return TYPES.filter(function (t) { const m = decided(t); return m && m.locked; });
     }
@@ -821,7 +809,6 @@
         if (wanted.length && s.plan === 'will_add') {
             return `Nothing yet · the next job adds ${joinWith(wanted.map(function (t) { return `${TYPE_WORDS[t]} ${rangeText(decided(t), dur)}`; }), 'and')}`;
         }
-        if (s.plan === 'waiting') return 'Nothing yet · waiting for its other versions to agree';
         return 'Nothing yet';
     }
 
@@ -873,7 +860,6 @@
             if (state.scope === 'season') {
                 parts.push(seasonCard());
             } else {
-                reviewTypes().forEach(function (type) { parts.push(reviewPanel(type)); });
                 parts.push(statTiles([serversStat(), foundStat(), previewStat(), checkedStat()]));
                 parts.push(timelineCard());
                 const lower = el('div', 'insp-grid-2');
@@ -1004,7 +990,7 @@
             if (state.adjust || state.locking) b.querySelector('button').disabled = true;
             list.push(b);
         }
-        if (analysed && !reviewTypes().length) {
+        if (analysed) {
             const label = state.adjust ? 'Adjusting…' : 'Adjust';
             const b = actionButton('', label, 'btn insp-btn-primary', startAdjust, TIPS.adjust, 'inspAdjust');
             if (state.adjust || state.locking) b.querySelector('button').disabled = true;
@@ -1212,7 +1198,6 @@
             else if (s.plan === 'will_add') add(`gets ${onNext}`, `get ${onNext}`, name);
             else if (s.plan === 'will_replace') add('shows other times; the next job replaces them', 'show other times; the next job replaces them', name);
             else if (s.plan === 'will_remove') add('loses the markers this app sent, on the next job', 'lose the markers this app sent, on the next job', name);
-            else if (s.plan === 'waiting') add('is waiting for its other versions to agree', 'are waiting for their other versions to agree', name);
             else if (s.plan === 'keeps_plex' || s.plan === 'keeps_emby') add('keeps its own markers', 'keep their own markers', name);
             else if (s.plan === 'not_enabled') add('has Intro & Credits turned off', 'have Intro & Credits turned off', name);
         });
@@ -1237,7 +1222,7 @@
             return stat('servers', label, 'Nothing shown yet', `Your servers get ours once this ${fileWord()} is checked`, 'muted');
         }
         if (!decidedTypes().length) {
-            return stat('servers', label, 'Nothing to send yet', reviewTypes().length ? 'Waiting for your check above' : 'Nothing was decided for this file', 'muted');
+            return stat('servers', label, 'Nothing to send yet', 'Nothing was decided for this file', 'muted');
         }
         const sentences = serverSentences().join(' ');
         const need = attention();
@@ -1255,10 +1240,7 @@
         if (!state.item) return stat('found', label, 'Couldn\'t read', state.itemError || 'Intro & Credits couldn\'t be read for this file', 'warn');
         if (!isChecked()) return stat('found', label, 'Not checked yet', `Check this ${fileWord()} to decide ours`, 'muted');
         const types = decidedTypes();
-        const review = reviewTypes();
-        const reviewNote = review.length ? `The ${typePhrase(review)} need${review.length === 1 && review[0] !== 'credits' ? 's' : ''} your check above` : '';
         if (!types.length) {
-            if (review.length) return stat('found', label, 'Needs your check', reviewNote, 'warn');
             return stat('found', label, 'Nothing found', 'No intro or credits were found. Adjust adds them by hand.', 'muted');
         }
         const dur = duration();
@@ -1287,7 +1269,6 @@
             sub = names.length ? `From ${joinWith(names, 'and')}` : '';
             if (locked.length) sub += `${sub ? ' · ' : ''}${capitalise(typePhrase(locked))} set by you`;
         }
-        if (reviewNote) sub += `${sub ? ' · ' : ''}${reviewNote}`;
         return stat('found', label, lines, sub);
     }
 
@@ -1332,7 +1313,6 @@
         TYPES.forEach(function (t) {
             const d = decision(t);
             if (d.status === 'decided') parts.push(`${TYPE_WORDS[t]} found`);
-            else if (d.status === 'needs_review') parts.push(`${TYPE_WORDS[t]} need${t === 'credits' ? '' : 's'} your check`);
             else if (t === 'intro' || t === 'credits') parts.push(`no ${TYPE_WORDS[t]}`);
         });
         return stat('checked', label, checkedAt ? when(checkedAt) : 'Checked', capitalise(parts.join(' · ')));
@@ -1381,7 +1361,6 @@
             item: !!state.item,
             checked: isChecked(),
             d: TYPES.map(function (t) { const m = decided(t); return m ? [m.start_ms, m.end_ms] : null; }),
-            r: reviewTypes(),
             s: servers().map(function (s) { return [s.server_id, s.server_name, s.error, s.markers_enabled, s.plan, s.can_show, s.current]; }),
         });
     }
@@ -1415,7 +1394,7 @@
             lane.dot = 'none';
             lane.note = { text: 'Not checked yet', cls: 'is-muted' };
         } else if (!decidedTypes().length) {
-            lane.note = reviewTypes().length ? { text: 'Needs your check', cls: 'is-warn' } : { text: 'Nothing found', cls: 'is-muted' };
+            lane.note = { text: 'Nothing found', cls: 'is-muted' };
         } else {
             lane.bands = decidedTypes().map(function (t) {
                 const m = decided(t);
@@ -1480,9 +1459,8 @@
     function jumpChips(dur) {
         const chips = [];
         if (isChecked()) {
-            // One waiting for your check isn't "none": the panels above ask about it.
             ['intro', 'credits'].forEach(function (t) {
-                if (!decided(t) && decision(t).status !== 'needs_review') {
+                if (!decided(t)) {
                     chips.push({ disabled: true, label: `No ${TYPE_WORDS[t]}`, dot: tone(t), title: `No ${TYPE_WORDS[t]} in this ${fileWord()}` });
                 }
             });
@@ -2217,12 +2195,9 @@
     function seasonCell(ep, type) {
         const d = ep[type] || {};
         if (d.status === 'decided' && d.marker) return el('div', `insp-mono insp-season-time insp-t-${tone(type)}`, rangeText(d.marker, ep.duration_ms));
-        if (d.status === 'needs_review') {
-            const cell = el('div', 'insp-season-time insp-state-review', 'Needs review');
-            if (ep.review_reason) cell.title = ep.review_reason;
-            return cell;
-        }
-        return el('div', 'insp-season-time insp-state-muted', '—');
+        const cell = el('div', 'insp-season-time insp-state-muted', '—');
+        if (d.reason) cell.title = d.reason;
+        return cell;
     }
 
     function seasonLane(ep, scale) {
@@ -2263,7 +2238,7 @@
                 chip.title = names.join(' · ');
             }
             chips.appendChild(chip);
-        } else if (!decidedAny && !ep.needs_review) {
+        } else if (!decidedAny) {
             chips.appendChild(el('span', 'insp-mini-chip is-muted', 'Nothing found'));
         }
         if (['intro', 'credits'].some(function (t) { return ep[t] && ep[t].marker && ep[t].marker.locked; })) {
@@ -2296,12 +2271,6 @@
         const intro = has('intro');
         const credits = has('credits');
         node.append(`${intro} ${intro === 1 ? 'has' : 'have'} an intro · ${credits} ${credits === 1 ? 'has' : 'have'} credits`);
-        if (counts.needs_review) {
-            node.append(' · ');
-            const review = el('span', 'insp-state-review', `${counts.needs_review} need${counts.needs_review === 1 ? 's' : ''} review`);
-            review.id = 'inspSeasonReview';
-            node.appendChild(review);
-        }
         const on = list.filter(function (s) { return s.markers_enabled; });
         let serversText;
         if (!on.length) {
@@ -2833,184 +2802,12 @@
         }
     }
 
-    // ------------------------------------------------------------------ review
-
-    function sourcePhrase(row) {
-        const src = row.source;
-        if (src === 'chapters') return row.label ? `From the file's “${row.label}” chapter` : 'From the file\'s chapters';
-        if (src === 'credits_text') return 'From the credits read on screen';
-        if (src === 'season_audio') return 'From the theme music heard across the season';
-        if (src === 'season_audio_previous') return 'From the previous season\'s theme music';
-        if (src === 'server_markers' || src === 'server_markers_imported') return `${originName(row)}'s own marker`;
-        if (src === 'user') return 'Your earlier times';
-        return `From ${(SOURCES[src] || [src])[0]}`;
-    }
+    // ---------------------------------------------------------------- evidence
 
     function originName(row) {
         const s = servers().find(function (x) { return x.server_id === row.origin; });
         return s ? serverName(s) : (row.origin || 'A server');
     }
-
-    function candidates(type) {
-        const rows = ((state.item && state.item.evidence) || []).filter(function (r) {
-            return r.type === type && r.start_ms !== null && r.start_ms !== undefined && !/earlier file/i.test(r.detail || '');
-        });
-        const groups = [];
-        rows.sort(function (a, b) { return a.start_ms - b.start_ms; }).forEach(function (r) {
-            let g = groups.find(function (x) { return Math.abs(x.start - r.start_ms) <= SAME_ANSWER_MS; });
-            if (!g) {
-                g = { start: r.start_ms, end: r.end_ms, rows: [] };
-                groups.push(g);
-            }
-            g.rows.push(r);
-        });
-        const own = groups.filter(function (g) { return g.rows.some(function (r) { return r.source !== 'server_markers' && r.source !== 'server_markers_imported'; }); });
-        const proposed = decision(type).proposed;
-        if (proposed && proposed.start_ms !== null && !own.some(function (g) { return Math.abs(g.start - proposed.start_ms) <= SAME_ANSWER_MS; })) {
-            own.push({ start: proposed.start_ms, end: proposed.end_ms, rows: [{ source: (proposed.decided_by || [])[0] || 'user', label: '' }] });
-        }
-        return (own.length ? own : groups).map(function (g) {
-            const phrases = [];
-            const agreeing = [];
-            g.rows.forEach(function (r) {
-                if (r.source === 'server_markers' || r.source === 'server_markers_imported') agreeing.push(`${originName(r)}'s own marker agrees`);
-                else if (phrases.indexOf(sourcePhrase(r)) === -1) phrases.push(sourcePhrase(r));
-            });
-            return { start: g.start, end: g.end, text: phrases.concat(agreeing).join(' · ') || agreeing.join(' · ') };
-        }).sort(function (a, b) { return a.start - b.start; });
-    }
-
-    function reviewState(type) {
-        if (!state.review[type]) {
-            const found = candidates(type);
-            const first = found.length ? found[0].start : (TO_END_TYPES.indexOf(type) !== -1 ? Math.max(0, duration() - 120000) : 0);
-            state.review[type] = { selected: null, end: null, pickStart: Math.max(0, edgeRounded(first) - 5000) };
-        }
-        return state.review[type];
-    }
-
-    function startsWord(type, ms) {
-        return type === 'credits' ? `Credits start at ${clock(ms)}` : `${TYPE_LABELS[type]} starts at ${clock(ms)}`;
-    }
-
-    function reviewPanel(type) {
-        const found = candidates(type);
-        const rs = reviewState(type);
-        const panel = el('div', 'insp-review');
-        panel.dataset.review = type;
-        const box = el('div', 'insp-review-box');
-        const word = TYPE_WORDS[type];
-        const where = `Where ${type === 'credits' ? 'do the credits' : `does the ${word}`} start?`;
-        let heading;
-        if (found.length >= 2) {
-            const spread = found[found.length - 1].start - found[0].start;
-            heading = `${where} ${found.length === 2 ? 'Two' : found.length} answers disagree by ${Math.round(spread / 1000)} seconds.`;
-        } else if (found.length === 1) {
-            heading = `${where} Only one answer came in, and it can't decide on its own.`;
-        } else {
-            heading = `${where} Nothing found an answer to check.`;
-        }
-        const names = receivers([type]);
-        box.append(el('div', 'insp-review-title', heading),
-            el('div', 'insp-review-text', `Pick the frame where the ${word} begin${type === 'credits' ? '' : 's'}. Your choice goes to ${names.length ? joinWith(names, 'and') : 'your servers'} and stays, even when the app checks this ${fileWord()} again.`));
-        panel.appendChild(box);
-        if (found.length) {
-            const grid = el('div', 'insp-grid-2');
-            found.forEach(function (c) {
-                const card = el('div', 'insp-card insp-candidate');
-                card.dataset.candidate = String(c.start);
-                card.append(el('div', 'insp-candidate-time insp-mono', clock(c.start)), el('div', 'insp-candidate-text', c.text));
-                card.appendChild(exactFramesAround(c.start, { count: EXACT_COUNT, before: 3, ring: c.start }));
-                card.appendChild(el('div', 'insp-small', 'Frames one second apart, read from the video. The ringed frame is where this answer starts.'));
-                const chosen = rs.selected !== null && edgeRounded(rs.selected) === edgeRounded(c.start);
-                const b = button(startsWord(type, c.start), chosen ? 'btn insp-btn-primary' : 'btn insp-btn', function () {
-                    rs.selected = c.start;
-                    rs.end = c.end;
-                    render();
-                });
-                b.dataset.pick = String(c.start);
-                card.appendChild(b);
-                grid.appendChild(card);
-            });
-            panel.appendChild(grid);
-        }
-        const pick = el('div', 'insp-card insp-pick');
-        pick.dataset.pickYourself = type;
-        const top = el('div', 'insp-pick-head');
-        top.appendChild(withInfo(el('div', 'insp-pick-title', found.length ? 'Neither is right? Pick the frame yourself.' : 'Pick the frame yourself.'), TIPS.pick));
-        const nav = el('div', 'd-flex gap-2');
-        const back = button('◀︎ 10 s', 'btn insp-btn btn-sm', function () { rs.pickStart = Math.max(0, rs.pickStart - PICK_STEP_MS); render(); });
-        back.setAttribute('aria-label', 'Show 10 seconds earlier');
-        const fwd = button('10 s ▶︎', 'btn insp-btn btn-sm', function () { rs.pickStart = rs.pickStart + PICK_STEP_MS; render(); });
-        fwd.setAttribute('aria-label', 'Show 10 seconds later');
-        nav.append(back, fwd);
-        top.appendChild(nav);
-        pick.appendChild(top);
-        pick.appendChild(exactFramesAround(rs.pickStart, {
-            before: 0,
-            count: PICK_COUNT,
-            ring: rs.selected === null ? undefined : rs.selected,
-            onPick: function (t) { rs.selected = t; rs.end = null; render(); },
-            pickLabel: `the ${word} start${type === 'credits' ? '' : 's'} here`,
-        }));
-        pick.appendChild(el('div', 'insp-small mt-2', `Click the first frame of the ${word}. You'll see it here before anything is saved.`));
-        panel.appendChild(pick);
-        if (rs.selected !== null) {
-            const bar = el('div', 'insp-confirm-bar is-card');
-            bar.dataset.confirm = type;
-            const text = el('div');
-            text.append(el('div', 'insp-confirm-title', `Selected: ${startsWord(type, rs.selected).toLowerCase()}`),
-                el('div', 'insp-small', `Saving sends it to ${names.length ? joinWith(names, 'and') : 'your servers'} now and keeps it through future checks. You can go back to automatic any time.`));
-            if (rs.error) {
-                const p = el('div', 'insp-adjust-problem', rs.error);
-                p.setAttribute('role', 'alert');
-                text.appendChild(p);
-            }
-            const buttons = el('div', 'insp-confirm-actions');
-            const notNow = button('Not now', 'btn insp-btn', function () { rs.selected = null; rs.error = ''; render(); });
-            const save = button(rs.saving ? 'Sending…' : `Save and send to ${names.length ? joinWith(names, 'and') : 'your servers'}`, 'btn insp-btn-primary', function () { saveReview(type); });
-            save.disabled = !!rs.saving;
-            save.dataset.saveReview = type;
-            buttons.append(notNow, save);
-            bar.append(text, buttons);
-            panel.appendChild(bar);
-        }
-        return panel;
-    }
-
-    async function saveReview(type) {
-        const rs = state.review[type];
-        const dur = duration();
-        let end = null;
-        if (START_TYPES.indexOf(type) !== -1) {
-            // An intro keeps the chosen answer's length; one picked by hand starts at 30 s long for Adjust to refine.
-            const length = rs.end && rs.selected !== null && rs.end > rs.selected ? rs.end - rs.selected : 30000;
-            end = Math.min(dur, rs.selected + length);
-        } else if (rs.end && rs.end < dur - END_OF_FILE_MS && rs.end > rs.selected) {
-            end = rs.end;
-        }
-        rs.saving = true;
-        rs.error = '';
-        const path = state.path;
-        render();
-        try {
-            const answer = await saveMarkers([{ type: type, start_ms: edgeRounded(rs.selected), end_ms: end }], path);
-            toast('Saved', savedMessage(answer), 'success');
-            if (state.review[type] !== rs) return;
-            delete state.review[type];
-            await loadFile();
-        } catch (e) {
-            if (state.review[type] !== rs) {
-                toast('Needs your check', `Couldn't save: ${e.message}`, 'danger');
-                return;
-            }
-            rs.saving = false;
-            rs.error = `Couldn't save: ${e.message}`;
-            render();
-        }
-    }
-
-    // ---------------------------------------------------------------- evidence
 
     function evidenceFound(row, dur) {
         if (row.type === null || row.type === undefined || row.start_ms === null || row.start_ms === undefined) return 'No entry';
@@ -3037,7 +2834,6 @@
         if (m && (m.decided_by || []).indexOf(row.source) !== -1) {
             return { icon: 'used', text: extra.concat([`Used for the ${TYPE_WORDS[row.type]}`]).join(' · ') };
         }
-        if (d.status === 'needs_review') return { icon: 'warn', text: extra.concat(['One of the answers that needs your check']).join(' · ') };
         if (m) {
             const gap = Math.abs(row.start_ms - m.start_ms);
             const agrees = gap <= (START_TYPES.indexOf(row.type) !== -1 ? 5000 : 10000);
@@ -3178,7 +2974,6 @@
         will_add: 'Intro & credits: adds them on the next job',
         will_replace: 'Intro & credits: the next job replaces what it shows',
         will_remove: 'Intro & credits: the next job removes the ones this app sent',
-        waiting: 'Intro & credits: waiting for its other versions to agree',
         keeps_plex: 'Intro & credits: keeps Plex\'s own',
         keeps_emby: 'Intro & credits: keeps Emby\'s own',
         not_enabled: 'Intro & Credits is off here',
@@ -3210,7 +3005,7 @@
         const dur = duration();
         if (s.error || !Array.isArray(s.current)) return { dot: 'bad', text: 'Couldn\'t read what it shows now', cls: 'is-bad' };
         const sorted = sortedCurrent(s);
-        if (!sorted.length) return { dot: s.plan === 'will_add' || s.plan === 'waiting' ? 'wait' : 'none', text: emptyText(s), cls: 'is-muted' };
+        if (!sorted.length) return { dot: s.plan === 'will_add' ? 'wait' : 'none', text: emptyText(s), cls: 'is-muted' };
         const ours = sorted.filter(function (m) { return m.ours; });
         const own = sorted.filter(function (m) { return !m.ours; });
         const parts = [];

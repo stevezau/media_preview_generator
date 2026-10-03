@@ -18,6 +18,7 @@ from media_preview_generator.markers.publishers.base import Capability, Capabili
 from media_preview_generator.markers.publishers.jellyfin import MARKERS_FEATURE
 from media_preview_generator.markers.publishers.plex_db import SAME_HOST_PATH_ADVICE
 from media_preview_generator.markers.store import MarkerStore
+from media_preview_generator.markers.versions import answer_versions
 from media_preview_generator.servers.base import Library, ServerType
 from tests.markers.fakes import FakeRegistry, server_config
 
@@ -930,10 +931,10 @@ def test_missing_client_is_not_listed(store, factory):
             {"servers": ["gone", "PLEX"]},
         ),
         (DecisionStatus.DECIDED, "chapters", None),
-        # not published: the shortened marker failed sanity
-        (DecisionStatus.NEEDS_REVIEW, "start shortened to the server's own marker (plex) fails sanity checks", None),
+        # an undecided type names no server, whatever its reason says
+        (DecisionStatus.NO_EVIDENCE, "agreeing sources disagree on the other edge", None),
     ],
-    ids=["one-server", "removed-server", "not-shortened", "needs-review"],
+    ids=["one-server", "removed-server", "not-shortened", "undecided"],
 )
 def test_decisions_name_the_servers_whose_own_markers_shortened_them(store, factory, status, reason, expected):
     rec = _known_file(store)
@@ -955,7 +956,7 @@ def test_known_file_decisions_and_evidence(store, factory):
         rec.id,
         {
             T.RECAP: TypeDecision(
-                T.RECAP, DecisionStatus.NEEDS_REVIEW, None, Marker(T.RECAP, 1_000, 8_000, ("x",)), "disagree"
+                T.RECAP, DecisionStatus.NO_EVIDENCE, None, Marker(T.RECAP, 1_000, 8_000, ("x",)), "disagree"
             )
         },
         settings_fingerprint="f",
@@ -993,7 +994,7 @@ def test_known_file_decisions_and_evidence(store, factory):
             "shortened_by": None,
         },
         "recap": {
-            "status": "needs_review",
+            "status": "no_evidence",
             "reason": "disagree",
             "marker": None,
             "proposed": {"start_ms": 1_000, "end_ms": 8_000, "decided_by": ["x"]},
@@ -1051,14 +1052,14 @@ def test_locked_marker_shows_as_locked_and_is_published(store, factory):
 
 
 def test_a_proposal_carries_the_sources_the_editor_would_override(store, factory):
-    """L100: the editor says what a Needs review proposal was based on before the user replaces it."""
+    """L100: the editor says what an undecided type's closest answer was based on before the user replaces it."""
     rec = _known_file(store, {t: _none(t) for t in MarkerType})
     store.save_decisions(
         rec.id,
         {
             T.CREDITS: TypeDecision(
                 T.CREDITS,
-                DecisionStatus.NEEDS_REVIEW,
+                DecisionStatus.NO_EVIDENCE,
                 None,
                 Marker(T.CREDITS, 1_290_000, DURATION, ("chapters", "skipdb")),
                 "sources disagree",
@@ -1975,6 +1976,206 @@ def test_row_says_whether_the_server_keeps_its_own_markers(store, factory, stype
     assert row["keeps_server_markers"] is keeps
 
 
+# --------------------------------------------------------------------------- an older answer nothing reads again
+
+CREDITS_TEXT = Marker(T.CREDITS, 1_290_000, DURATION, ("credits_text",))
+SEASON_INTRO = Marker(T.INTRO, 11_000, 37_000, ("season_audio",))
+KEPT_REASON = "kept Plex's own marker"
+OLDER, CURRENT = "older", "current"
+
+
+def _answer_version(key, age):
+    now = next(a for a in answer_versions() if a.key == key).version
+    return now - 1 if age == OLDER else now
+
+
+def _file_decided_by_a_file_detector(
+    store, marker=CREDITS_TEXT, *, age=OLDER, kept=frozenset({T.CREDITS}), server="plex", version=None
+):
+    """A file whose marker rests on a file detector's answer, last published with Plex's own markers kept."""
+    other = T.INTRO if marker.type is T.CREDITS else T.CREDITS
+    rec = _known_file(store, {marker.type: _decided(marker), other: _none(other)})
+    source = Source(marker.decided_by[-1])
+    if source in (Source.CREDITS_TEXT, Source.SEASON_AUDIO):
+        stored = version if version is not None else _answer_version(source.value, age)
+        answer = Candidate(marker.type, marker.start_ms, marker.end_ms, source)
+        store.replace_evidence(rec.id, source, [answer], version=stored)
+    _published(store, rec, server, "rk-1", [], basis_for=[marker], message="Keeping Plex's credits", kept=kept)
+    return rec
+
+
+def _keeping_plex(redetect="keep_plex"):
+    registry = _registry(server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True, redetect=redetect)))
+    registry.get("plex").get_markers.return_value = _plex_rows(PLEX_INTRO, PLEX_CREDITS, final_credits=False)
+    return registry
+
+
+def _left_to_plex(payload, mtype=T.CREDITS):
+    decision = payload["decisions"][mtype.value]
+    return (decision["status"], decision["reason"], decision["marker"]) == ("disabled", KEPT_REASON, None)
+
+
+@pytest.mark.parametrize(
+    ("age", "redetect", "kept", "left"),
+    [
+        # Production: "3 Women", "99 Homes" and nine more showed a credits start "saved 2026-09-22" from credit text
+        # v3 as today's answer. No run reads the file for a type every server keeps its own of, so nothing refreshes it.
+        (OLDER, "keep_plex", {T.CREDITS}, True),
+        (CURRENT, "keep_plex", {T.CREDITS}, False),  # today's detector's answer: decided, and Plex keeps its own
+        (OLDER, "restore", {T.CREDITS}, False),  # switched to "Use ours": the next run reads the file and sends ours
+        (CURRENT, "restore", {T.CREDITS}, False),
+        (OLDER, "keep_plex", None, False),  # Plex kept nothing of that type: ours is (or will be) shown
+        (CURRENT, "keep_plex", None, False),
+        (OLDER, "restore", None, False),
+        (CURRENT, "restore", None, False),
+    ],
+    ids=[
+        "older-keeps-kept",
+        "current-keeps-kept",
+        "older-ours-kept",
+        "current-ours-kept",
+        "older-keeps-shown",
+        "current-keeps-shown",
+        "older-ours-shown",
+        "current-ours-shown",
+    ],
+)
+def test_an_older_answer_no_run_reads_again_reads_as_left_to_the_server(store, factory, age, redetect, kept, left):
+    rec = _file_decided_by_a_file_detector(store, age=age, kept=kept)
+    payload = inspect.item_payload(PATH, registry=_keeping_plex(redetect), store=store)
+    assert _left_to_plex(payload) is left
+    if not left:
+        assert payload["decisions"]["credits"]["status"] == "decided"
+        assert payload["decisions"]["credits"]["marker"]["start_ms"] == CREDITS_TEXT.start_ms
+    # Only how the page reads it: the stored decision, its marker and the answer are what a publish goes on using.
+    assert store.get_decisions(rec.id)[T.CREDITS].status is DecisionStatus.DECIDED
+    assert store.get_markers(rec.id)[T.CREDITS].start_ms == CREDITS_TEXT.start_ms
+    assert [e["source"] for e in payload["evidence"] if e["type"] == "credits"] == ["credits_text"]
+
+
+def test_a_file_left_to_the_server_reads_exactly_like_one_stored_that_way(store, factory, tmp_path):
+    _file_decided_by_a_file_detector(store)
+    stale = inspect.item_payload(PATH, registry=_keeping_plex(), store=store)
+    peer_store = MarkerStore(str(tmp_path / "peer.db"), clock=lambda: datetime(2026, 9, 14, tzinfo=UTC))
+    try:
+        kept = TypeDecision(T.CREDITS, DecisionStatus.DISABLED, None, None, KEPT_REASON)
+        rec = _known_file(peer_store, {T.CREDITS: kept, T.INTRO: _none(T.INTRO)})
+        _published(peer_store, rec, "plex", "rk-1", [], basis_for=[], message="Keeping Plex's credits")
+        peer = inspect.item_payload(PATH, registry=_keeping_plex(), store=peer_store)
+    finally:
+        peer_store.close()
+    assert stale["decisions"] == peer["decisions"]
+    row, peer_row = _row(stale, "plex"), _row(peer, "plex")
+    assert (row["plan"], row["plan_reason"]) == (peer_row["plan"], peer_row["plan_reason"])
+    assert (row["plan"], row["plan_reason"]) == ("keeps_plex", "Keeping Plex's credits")
+    assert row["published"] == peer_row["published"] == []
+
+
+@pytest.mark.parametrize(
+    ("shown", "left", "plan"),
+    [
+        ((PLEX_INTRO, PLEX_CREDITS), True, "keeps_plex"),
+        # Plex lost its own credits since that publish: the next job sends ours, so it reads as before the rule.
+        ((PLEX_INTRO,), False, "will_add"),
+        ((), False, "will_add"),
+        (None, False, "unknown"),  # Plex can't be read: nothing says its marker is still there
+    ],
+    ids=["still-shown", "another-type-shown", "nothing-shown", "unreadable"],
+)
+def test_only_a_type_the_server_still_shows_reads_as_left_to_it(store, factory, shown, left, plan):
+    rec = _file_decided_by_a_file_detector(store)
+    registry = _keeping_plex()
+    registry.get("plex").get_markers.return_value = None if shown is None else _plex_rows(*shown, final_credits=False)
+    payload = inspect.item_payload(PATH, registry=registry, store=store)
+    assert _left_to_plex(payload) is left
+    assert _row(payload, "plex")["plan"] == plan
+    if not left:
+        assert payload["decisions"]["credits"]["status"] == "decided"
+        assert payload["decisions"]["credits"]["marker"]["start_ms"] == CREDITS_TEXT.start_ms
+    assert store.get_markers(rec.id)[T.CREDITS].start_ms == CREDITS_TEXT.start_ms
+
+
+def test_season_audios_older_answer_for_a_kept_intro_reads_as_left_to_the_server_too(store, factory):
+    _file_decided_by_a_file_detector(store, SEASON_INTRO, kept={T.INTRO})
+    assert _left_to_plex(inspect.item_payload(PATH, registry=_keeping_plex(), store=store), T.INTRO)
+
+
+def test_a_window_the_user_chose_is_not_an_older_credit_text_answer(store, factory):
+    # Stored as the version plus the window's seconds above the step (``credits_answer_version``).
+    chosen = _answer_version("credits_text", CURRENT) + 600 * 1000
+    _file_decided_by_a_file_detector(store, version=chosen)
+    assert not _left_to_plex(inspect.item_payload(PATH, registry=_keeping_plex(), store=store))
+
+
+@pytest.mark.parametrize(
+    "decided_by",
+    [("chapters",), ("skipdb", "introdb")],
+    ids=["chapters", "online"],
+)
+def test_a_marker_that_doesnt_rest_on_the_older_answer_stays_decided(store, factory, decided_by):
+    # Credit text's older answer is stored, but the marker was decided without it: every run still asks those sources.
+    marker = Marker(T.CREDITS, 1_290_000, DURATION, decided_by)
+    rec = _file_decided_by_a_file_detector(store, marker)
+    answer = Candidate(T.CREDITS, 1_290_000, DURATION, Source.CREDITS_TEXT)
+    store.replace_evidence(rec.id, Source.CREDITS_TEXT, [answer], version=_answer_version("credits_text", OLDER))
+    assert not _left_to_plex(inspect.item_payload(PATH, registry=_keeping_plex(), store=store))
+
+
+def test_a_marker_the_user_locked_stays_theirs(store, factory):
+    rec = _file_decided_by_a_file_detector(store)
+    store.lock_marker(rec.id, Marker(T.CREDITS, 1_290_000, DURATION, ("credits_text",), locked=True))
+    payload = inspect.item_payload(PATH, registry=_keeping_plex(), store=store)
+    assert payload["decisions"]["credits"]["marker"]["locked"] is True
+
+
+@pytest.mark.parametrize(
+    ("second", "left"),
+    [
+        ({"enabled": True, "library_ids": None}, False),  # Jellyfin gets ours: the next run reads the file for it
+        ({"enabled": False, "library_ids": None}, True),  # Intro & Credits is off there: nothing goes to it
+        ({"enabled": True, "library_ids": ["other"]}, True),  # the file's library isn't selected there
+    ],
+    ids=["second-server-shows-ours", "second-server-off", "second-server-library-off"],
+)
+def test_every_server_the_markers_go_to_has_to_keep_its_own(store, factory, second, left):
+    _file_decided_by_a_file_detector(store)
+    registry = _registry(
+        server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True, redetect="keep_plex")),
+        server_config("jf", ServerType.JELLYFIN, markers=second),
+    )
+    registry.get("plex").get_markers.return_value = _plex_rows(PLEX_CREDITS, final_credits=False)
+    assert _left_to_plex(inspect.item_payload(PATH, registry=registry, store=store)) is left
+
+
+def test_emby_keeping_its_own_names_emby(store, factory):
+    _file_decided_by_a_file_detector(store, server="emby")
+    markers = {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "keep_emby"}}
+    registry = _registry(server_config("emby", ServerType.EMBY, markers=markers))
+    registry.get("emby").get_chapter_markers.return_value = _emby_rows(PLEX_CREDITS)
+    decision = inspect.item_payload(PATH, registry=registry, store=store)["decisions"]["credits"]
+    assert (decision["status"], decision["reason"], decision["marker"]) == ("disabled", "kept Emby's own marker", None)
+
+
+def test_a_file_never_published_keeps_its_decision(store, factory):
+    rec = _known_file(store, {T.CREDITS: _decided(CREDITS_TEXT), T.INTRO: _none(T.INTRO)})
+    answer = Candidate(T.CREDITS, 1_290_000, DURATION, Source.CREDITS_TEXT)
+    store.replace_evidence(rec.id, Source.CREDITS_TEXT, [answer], version=_answer_version("credits_text", OLDER))
+    assert not _left_to_plex(inspect.item_payload(PATH, registry=_keeping_plex(), store=store))
+
+
+def test_a_waiting_plex_item_is_still_read_from_the_stored_decision(store, factory):
+    # Another type waits for the item's other versions: that is told from the publish basis of every stored marker,
+    # the one left to Plex included.
+    intro = Marker(T.INTRO, 11_000, 37_000, ("chapters",))
+    rec = _known_file(store, {T.INTRO: _decided(intro), T.CREDITS: _decided(CREDITS_TEXT)})
+    answer = Candidate(T.CREDITS, 1_290_000, DURATION, Source.CREDITS_TEXT)
+    store.replace_evidence(rec.id, Source.CREDITS_TEXT, [answer], version=_answer_version("credits_text", OLDER))
+    _published(store, rec, "plex", "rk-1", [], basis_for=[intro, CREDITS_TEXT], kept={T.CREDITS})
+    payload = inspect.item_payload(PATH, registry=_keeping_plex(), store=store)
+    assert _left_to_plex(payload)
+    assert _row(payload, "plex")["plan"] == "waiting"
+
+
 # --------------------------------------------------------------------------- capability cache
 
 
@@ -2429,7 +2630,7 @@ class TestSeasonPayload:
         return SimpleNamespace(folder=str(folder), paths=paths, root=root, reg=reg, store=store)
 
     @staticmethod
-    def _decide(store, path, intro=None, *, credits_review=False, evidence=()):
+    def _decide(store, path, intro=None, *, credits_proposed=False, evidence=()):
         st = os.stat(path)
         rec = store.upsert_file(
             FileIdentity(path, st.st_size, st.st_mtime_ns),
@@ -2442,8 +2643,8 @@ class TestSeasonPayload:
         server = [c for c in evidence if c.source is Source.SERVER_MARKERS]
         store.replace_evidence(rec.id, Source.SERVER_MARKERS, server, origin="plex-1")
         credits = (
-            TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, Marker(T.CREDITS, 1_296_000, DURATION, ("skipdb",)), "disagree")
-            if credits_review
+            TypeDecision(T.CREDITS, DecisionStatus.NO_EVIDENCE, None, Marker(T.CREDITS, 1_296_000, DURATION, ("skipdb",)), "disagree")
+            if credits_proposed
             else _none(T.CREDITS)
         )  # fmt: skip
         store.save_decisions(
@@ -2462,7 +2663,7 @@ class TestSeasonPayload:
         season.store.set_publish_state(
             e1.id, "plex-1", item_id="7", markers=[intro], status="written", message="1 marker(s)"
         )
-        e2 = self._decide(season.store, season.paths[1], intro, credits_review=True, evidence=(audio,))
+        e2 = self._decide(season.store, season.paths[1], intro, credits_proposed=True, evidence=(audio,))
         season.store.set_publish_state(
             e2.id, "plex-1", item_id="8", markers=None, status="waiting", message="Not in this server's library yet"
         )
@@ -2485,7 +2686,12 @@ class TestSeasonPayload:
             "proposed": None,
         }  # fmt: skip
         assert (eps[0]["known"], eps[0]["duration_ms"]) == (True, DURATION)
-        assert [(e["needs_review"], e["review_reason"]) for e in eps] == [(False, ""), (True, "disagree"), (False, "")]
+        assert [(e["credits"]["status"], e["credits"]["reason"]) for e in eps] == [
+            ("no_evidence", "nothing found"),
+            ("no_evidence", "disagree"),
+            (None, ""),
+        ]
+        assert "needs_review" not in eps[1] and "review_reason" not in eps[1]
         # Markers already on a server are the dots, not chips; only season audio carries its "2/2" label.
         assert eps[0]["evidence"] == [{"source": "season_audio", "label": "2/2"}, {"source": "skipdb", "label": ""}]
         assert eps[0]["servers"] == {
@@ -2493,7 +2699,7 @@ class TestSeasonPayload:
             "jf-1": {"state": "off", "message": ""},
         }
         assert eps[1]["credits"] == {
-            "status": "needs_review",
+            "status": "no_evidence",
             "reason": "disagree",
             "marker": None,
             "proposed": {"start_ms": 1_296_000, "end_ms": DURATION, "decided_by": ["skipdb"]},
@@ -2502,24 +2708,25 @@ class TestSeasonPayload:
         assert (eps[2]["known"], eps[2]["duration_ms"], eps[2]["evidence"]) == (False, None, [])
         assert eps[2]["intro"] == {"status": None, "reason": "", "marker": None, "proposed": None}
         assert eps[2]["servers"]["plex-1"] == {"state": "none", "message": ""}
-        # E02's decided intro is published although its credits are in review: it counts in both.
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 2, "needs_review": 1}
+        # E02's decided intro is published whatever its credits came to: it counts as ready.
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 2}
 
     @pytest.mark.parametrize(
-        ("decisions", "ready", "review", "reason"),
+        ("decisions", "ready"),
         [
-            ({T.INTRO: "decided"}, 1, 0, ""),
-            ({T.INTRO: "decided", T.CREDITS: "review"}, 1, 1, "credits review"),
-            ({T.INTRO: "decided", T.RECAP: "review"}, 1, 1, "recap review"),
-            ({T.RECAP: "decided"}, 1, 0, ""),
-            ({T.PREVIEW: "review"}, 0, 1, "preview review"),
-            ({T.INTRO: "review", T.RECAP: "review"}, 0, 1, "intro review"),
-            ({T.CREDITS: "no_evidence"}, 0, 0, ""),
+            ({T.INTRO: "decided"}, 1),
+            ({T.INTRO: "decided", T.CREDITS: "proposed"}, 1),
+            ({T.INTRO: "decided", T.RECAP: "proposed"}, 1),
+            ({T.RECAP: "decided"}, 1),
+            ({T.PREVIEW: "proposed"}, 0),
+            ({T.INTRO: "proposed", T.RECAP: "proposed"}, 0),
+            ({T.CREDITS: "no_evidence"}, 0),
         ],
-        ids=["intro", "intro-credits-review", "intro-recap-review", "recap-only", "preview-review", "two-reviews",
-             "nothing"],
+        ids=["intro", "intro-credits-proposed", "intro-recap-proposed", "recap-only", "preview-proposed",
+             "two-proposed", "nothing"],
     )  # fmt: skip
-    def test_counts_take_every_marker_type_as_a_job_publishes_them(self, season, decisions, ready, review, reason):
+    def test_counts_take_every_marker_type_as_a_job_publishes_them(self, season, decisions, ready):
+        """Only a decided marker is ready; an undecided type's closest answer (its proposal) isn't sent."""
         st = os.stat(season.paths[0])
         rec = season.store.upsert_file(
             FileIdentity(season.paths[0], st.st_size, st.st_mtime_ns), duration_ms=DURATION, season_key=None, is_movie=False
@@ -2534,17 +2741,23 @@ class TestSeasonPayload:
         for mtype, state in decisions.items():
             if state == "decided":
                 stored[mtype] = _decided(markers[mtype])
-            elif state == "review":
-                stored[mtype] = _none(mtype, DecisionStatus.NEEDS_REVIEW, f"{mtype.value} review")
+            elif state == "proposed":
+                stored[mtype] = TypeDecision(
+                    mtype, DecisionStatus.NO_EVIDENCE, None, markers[mtype], "sources disagree"
+                )
             else:
                 stored[mtype] = _none(mtype)
         season.store.save_decisions(rec.id, stored, settings_fingerprint="f")
 
         payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
 
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": ready, "needs_review": review}
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": ready}
         first = payload["episodes"][0]
-        assert (first["needs_review"], first["review_reason"]) == (bool(review), reason)
+        for mtype in (T.INTRO, T.CREDITS):
+            if decisions.get(mtype) == "proposed":
+                assert first[mtype.value]["status"] == "no_evidence"
+                assert first[mtype.value]["marker"] is None
+                assert first[mtype.value]["proposed"]["start_ms"] == markers[mtype].start_ms
 
     @pytest.mark.parametrize(
         ("folder_parts", "name", "season_label"),
@@ -2576,6 +2789,62 @@ class TestSeasonPayload:
             f"Intro & Credits: {payload['show']} · {payload['season']}"
         )
 
+    def _older_answer_kept_by_plex(self, season, path, age=OLDER, item_id="rk-1"):
+        rec = self._decide(season.store, path)
+        season.store.save_decisions(rec.id, {T.CREDITS: _decided(CREDITS_TEXT)}, settings_fingerprint="f")
+        answer = Candidate(T.CREDITS, CREDITS_TEXT.start_ms, DURATION, Source.CREDITS_TEXT)
+        version = _answer_version("credits_text", age)
+        season.store.replace_evidence(rec.id, Source.CREDITS_TEXT, [answer], version=version)
+        _published(season.store, rec, "plex-1", item_id, [], kept={T.CREDITS})
+
+    @pytest.mark.parametrize(
+        ("age", "shown", "status", "ready"),
+        [
+            (OLDER, (PLEX_CREDITS,), "disabled", 0),
+            # Plex lost its own credits since that publish: a job would send ours, so Publish stays on.
+            (OLDER, (), "decided", 1),
+            (OLDER, None, "decided", 1),  # Plex can't be read
+            (CURRENT, (PLEX_CREDITS,), "decided", 1),
+        ],
+        ids=["older-still-shown", "older-no-longer-shown", "older-unreadable", "current"],
+    )
+    def test_an_older_answer_left_to_the_server_isnt_listed_as_decided_or_ready(
+        self, season, age, shown, status, ready
+    ):
+        keeps = _plex_markers(enabled=True, redetect="keep_plex")
+        reg = _registry(server_config("plex-1", ServerType.PLEX, root=season.root, markers=keeps))
+        reg.get("plex-1").get_markers.return_value = None if shown is None else _plex_rows(*shown, final_credits=False)
+        self._older_answer_kept_by_plex(season, season.paths[0], age)
+        payload = inspect.season_payload(season.paths[0], registry=reg, store=season.store)
+        credits = payload["episodes"][0]["credits"]
+        assert credits["status"] == status
+        if status == "disabled":
+            assert (credits["reason"], credits["marker"]) == (KEPT_REASON, None)
+        else:
+            assert credits["marker"]["start_ms"] == CREDITS_TEXT.start_ms
+        assert payload["counts"]["ready"] == ready
+
+    @pytest.mark.parametrize(("readable", "asked"), [(True, ["rk-1", "rk-2", "rk-3"]), (False, ["rk-1"])])
+    def test_the_season_asks_a_server_it_couldnt_read_only_once(self, season, readable, asked):
+        # Only episodes with such an older answer are asked about at all; a server that is down would otherwise hold
+        # the page for its timeout once per episode.
+        keeps = _plex_markers(enabled=True, redetect="keep_plex")
+        reg = _registry(server_config("plex-1", ServerType.PLEX, root=season.root, markers=keeps))
+        plex = reg.get("plex-1")
+        plex.get_markers.return_value = _plex_rows(PLEX_CREDITS, final_credits=False) if readable else None
+        for n, path in enumerate(season.paths, start=1):
+            self._older_answer_kept_by_plex(season, path, item_id=f"rk-{n}")
+        payload = inspect.season_payload(season.paths[0], registry=reg, store=season.store)
+        assert [call.args[0] for call in plex.get_markers.call_args_list] == asked
+        assert payload["counts"]["ready"] == (0 if readable else 3)
+
+    def test_the_season_asks_no_server_without_such_an_older_answer(self, season):
+        intro = Marker(T.INTRO, 127_000, 157_000, ("season_audio", "skipdb"))
+        for path in season.paths:
+            self._decide(season.store, path, intro)
+        inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+        assert season.reg.get("plex-1").method_calls == []
+
     @pytest.mark.parametrize(
         ("status", "markers", "state"),
         [("written", [], "none"), ("failed", None, "failed"), ("skipped", None, "skipped")],
@@ -2586,7 +2855,7 @@ class TestSeasonPayload:
         payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
         assert payload["episodes"][0]["servers"]["plex-1"] == {"state": state, "message": "m"}
         # Known, but nothing decided: not ready.
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 0, "needs_review": 0}
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 0}
 
     @pytest.mark.parametrize(("files", "listed"), [(40, 40), (60, 40)])
     def test_counts_the_seasons_episodes_before_the_40_nearest_cap(self, tmp_path, store, files, listed):

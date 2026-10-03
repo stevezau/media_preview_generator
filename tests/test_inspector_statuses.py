@@ -11,7 +11,6 @@ from media_preview_generator.inspector.statuses import (
     CREDITS_ONLY,
     CREDITS_SET,
     INTRO_ONLY,
-    NEEDS_REVIEW,
     NOT_CHECKED,
     NOTHING_FOUND,
     file_title,
@@ -98,18 +97,6 @@ class TestMarkersState:
         _known(store, self.PATH)
 
         assert markers_state(store, self.PATH) == {"state": "not_checked", "label": NOT_CHECKED}
-
-    def test_needs_review_wins_over_decided(self, store):
-        _known(
-            store,
-            self.PATH,
-            {
-                T.INTRO: _decided(INTRO),
-                T.CREDITS: _not_decided(T.CREDITS, DecisionStatus.NEEDS_REVIEW),
-            },
-        )
-
-        assert markers_state(store, self.PATH) == {"state": "needs_review", "label": NEEDS_REVIEW}
 
     def test_intro_and_credits_decided_is_both(self, store):
         _known(store, self.PATH, {T.INTRO: _decided(INTRO), T.CREDITS: _decided(CREDITS)})

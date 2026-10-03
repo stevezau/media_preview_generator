@@ -93,5 +93,5 @@ Install Jellyfin's **Webhook** plugin. Add a Generic destination pointing at `ht
 
 - Docker only, with a web UI and no CLI.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are.
-- New files are retried after 1, 2 and 5 minutes by default while Jellyfin indexes them ([retry queue](multi-server.md#slow-backoff-retry-queue)).
+- New files are retried after 1, 2, 5, 15 and 60 minutes by default while Jellyfin indexes them ([retry queue](multi-server.md#slow-backoff-retry-queue)).
 - It doesn't make chapter images.

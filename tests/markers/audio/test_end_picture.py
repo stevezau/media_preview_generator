@@ -3,6 +3,8 @@ from credit text (GPU then CPU, cancel, stalls), with the audio stream's start o
 
 from __future__ import annotations
 
+import os
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -12,6 +14,7 @@ from media_preview_generator.markers.audio import end_picture as ep
 from media_preview_generator.markers.audio.matcher import Hit
 from media_preview_generator.markers.credits import frames
 from media_preview_generator.markers.probe import ProbeError, ProbeStalledError, ProbeTimeoutError, StreamStarts
+from tests.markers.credits.test_frames import VENDORS, _cant_decode_lines, _fake_ffmpeg
 
 
 def _textured(seed: int) -> np.ndarray:
@@ -304,6 +307,36 @@ class TestReader:
                 assert failed.value.path == "b"
         assert calls == ["a", "b"]
 
+    @pytest.mark.parametrize(
+        ("error", "gpu_attempt"),
+        [
+            (ep.GpuAttemptFailedError("decoding b timed out after 120 s"), True),
+            (frames.DecodeTimeoutError("decoding b timed out after 120 s"), False),  # the CPU's, after the GPU failed
+            (frames.FrameDecodeError("ffmpeg exited 1 decoding b on the CPU"), False),
+        ],
+        ids=["gpu-attempt", "cpu-timed-out", "cpu-non-zero-exit"],
+    )
+    def test_a_failed_read_says_whether_only_the_gpu_attempt_failed(self, error, gpu_attempt):
+        def decoder(path, *_args, **_kwargs):
+            if path == "b":
+                raise error
+            return []
+
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None), decoder)
+        with patched, pytest.raises(ep.ReadFailedError) as failed:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert (failed.value.path, failed.value.gpu_attempt) == ("b", gpu_attempt)
+
+    def test_a_file_ffprobe_cant_read_isnt_the_gpu_attempts_failure(self):
+        # ffprobe reads the file the same way on every worker: its failure is the file's, whatever the worker's device.
+        def starts(path, **_kw):
+            raise ProbeError("ffprobe exited 1 for a")
+
+        reader, patched = self._reader(starts, _Decoder())
+        with patched, pytest.raises(ep.ReadFailedError) as failed:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert failed.value.gpu_attempt is False
+
     def test_a_cancelled_decode_gives_no_verdict_and_blames_no_file(self):
         def decoder(*_args, **_kwargs):
             raise frames.DecodeCancelledError("cancelled while decoding a")
@@ -381,14 +414,16 @@ class TestDecodeFrames:
     VAAPI = ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi",
              "-extra_hw_frames", "8"]  # fmt: skip
     NEIGHBOR = "scale=320:180:flags=neighbor,format=nv12"
+    VAAPI_COPY = "scale_vaapi=out_chroma_location=left"
 
     @pytest.mark.parametrize(
         ("gpu", "device", "download_format", "hw_args", "video_filter"),
         [
             ("NVIDIA", "cuda:0", "nv12", CUDA, f"fps=2,hwdownload,format=nv12,{NEIGHBOR}"),
             ("NVIDIA", "cuda:0", "p010le", CUDA, f"fps=2,hwdownload,format=p010le,{NEIGHBOR}"),
-            ("INTEL", "/dev/dri/renderD128", "nv12", VAAPI, f"fps=2,hwdownload,format=nv12,{NEIGHBOR}"),
-            ("AMD", "/dev/dri/renderD128", "p010le", VAAPI, f"fps=2,hwdownload,format=p010le,{NEIGHBOR}"),
+            # On VAAPI the frames fps picked are copied on the GPU before the download (frames.decode_command).
+            ("INTEL", "/dev/dri/renderD128", "nv12", VAAPI, f"fps=2,{VAAPI_COPY},hwdownload,format=nv12,{NEIGHBOR}"),
+            ("AMD", "/dev/dri/renderD128", "p010le", VAAPI, f"fps=2,{VAAPI_COPY},hwdownload,format=p010le,{NEIGHBOR}"),
             # A pixel format the surfaces aren't known in: ffmpeg downloads each frame itself, the same scaler follows.
             ("NVIDIA", "cuda:0", None, ["-hwaccel", "cuda", "-hwaccel_device", "0"], f"fps=2,{NEIGHBOR}"),
             (None, None, "nv12", [], f"fps=2,{NEIGHBOR}"),
@@ -419,6 +454,109 @@ class TestDecodeFrames:
         assert "-hwaccel" not in calls[1]["command"] and len(got) == 1
         cpu = calls[1]["command"]
         assert cpu[cpu.index("-vf") + 1] == f"fps=2,{self.NEIGHBOR},showinfo"
+
+    @staticmethod
+    def _fake_commands(monkeypatch, gpu_argv, cpu_argv):
+        """The real ``run_decode`` on stand-in ffmpegs: the worker's own command decides GPU or CPU, as in the job."""
+        real, runs = frames.decode_command, []
+
+        def decode_command(*args, **kwargs):
+            _argv, hw_active = real(*args, **kwargs)
+            runs.append(hw_active)
+            return (gpu_argv if hw_active else cpu_argv), hw_active
+
+        monkeypatch.setattr(frames, "decode_command", decode_command)
+        return runs
+
+    @pytest.mark.parametrize(("gpu", "device", "hwaccel"), VENDORS, ids=[v[0] for v in VENDORS])
+    def test_a_gpu_that_cant_decode_the_codec_is_stopped_at_its_verdict_and_the_cpu_decodes_on_the_spot(
+        self, monkeypatch, tmp_path, gpu, device, hwaccel
+    ):
+        # Production (TITAN RTX, AV1, 2026-10-02): the GPU decode failed on every packet to the end of the file, hit
+        # the 120 s limit, and the CPU never tried. Stopped at the verdict it is a GPU failure, decoded again here.
+        monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
+        pid_file = tmp_path / "gpu-ffmpeg.pid"
+        runs = self._fake_commands(
+            monkeypatch,
+            _fake_ffmpeg([10], ["34.0"], stderr_head=_cant_decode_lines(hwaccel), head_wait_s=30,
+                         pid_file=str(pid_file)),
+            _fake_ffmpeg([10, 250], ["33.5", "34.0"]),
+        )  # fmt: skip
+        flagged: list[str] = []
+        started = time.monotonic()
+        got = ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=gpu, gpu_device_path=device,
+                               container_start_s=0.0, download_format="nv12", fallback_callback=flagged.append)  # fmt: skip
+        assert time.monotonic() - started < 5
+        assert runs == [True, False]
+        assert [t for t, _frame in got] == [33.5, 34.0]
+        assert len(flagged) == 1 and "the GPU can't decode this file's AV1 video" in flagged[0]
+        assert not os.path.exists(f"/proc/{pid_file.read_text()}")
+
+    @pytest.mark.parametrize("said", [_cant_decode_lines("cuda"), ""], ids=["verdict", "nothing"])
+    def test_a_cpu_workers_decode_is_never_stopped(self, monkeypatch, said):
+        # A CPU run has no decoder verdict to act on; the text in its stderr changes nothing.
+        runs = self._fake_commands(
+            monkeypatch,
+            ["false"],
+            _fake_ffmpeg([10, 250], ["33.5", "34.0"], stderr_head=said, head_wait_s=0.4),
+        )
+        got = ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=None, gpu_device_path=None,
+                               container_start_s=0.0, download_format="nv12")  # fmt: skip
+        assert runs == [False] and [t for t, _frame in got] == [33.5, 34.0]
+
+    @pytest.mark.parametrize(("gpu", "calls_made"), [("NVIDIA", [True]), (None, [False])], ids=["gpu", "cpu"])
+    def test_a_video_no_device_can_decode_is_the_files_failure_and_the_cpu_isnt_tried(self, gpu, calls_made):
+        # Previews' rule for "no decoder found for": not the GPU attempt's failure, which the caller wouldn't hold
+        # against the file.
+        no_decoder = frames.NoDecoderError("This file's video can't be decoded by any device")
+        calls, run_decode = self._failing(no_decoder, no_decoder)
+        with (
+            patch.object(frames, "run_decode", side_effect=run_decode),
+            pytest.raises(frames.NoDecoderError) as failed,
+        ):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=gpu, gpu_device_path="cuda:0" if gpu else None,
+                             container_start_s=0.0, download_format="nv12")  # fmt: skip
+        assert calls == calls_made and not isinstance(failed.value, ep.GpuAttemptFailedError)
+
+    @staticmethod
+    def _failing(gpu_error, cpu_error):
+        calls = []
+
+        def run_decode(command, *, hw_active, **_kwargs):
+            calls.append(hw_active)
+            raise gpu_error if hw_active else cpu_error
+
+        return calls, run_decode
+
+    TIMEOUT = frames.DecodeTimeoutError("decoding a.mkv timed out after 120 s")
+
+    def test_a_gpu_decode_that_times_out_isnt_run_again_on_the_cpu_and_is_the_gpu_attempts_failure(self):
+        # A timeout is never decoded again on the spot (T-R7: a stalled mount would hold the worker twice as long), so
+        # the CPU hasn't tried: the caller holds nothing against the file.
+        calls, run_decode = self._failing(self.TIMEOUT, AssertionError("the CPU isn't tried"))
+        with (
+            patch.object(frames, "run_decode", side_effect=run_decode),
+            pytest.raises(ep.GpuAttemptFailedError, match="timed out after 120 s"),
+        ):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu="NVIDIA", gpu_device_path="cuda:0",
+                             container_start_s=0.0, download_format="nv12")  # fmt: skip
+        assert calls == [True]
+
+    @pytest.mark.parametrize(
+        ("gpu", "calls_made"),
+        [("NVIDIA", [True, False]), (None, [False])],
+        ids=["cpu-after-the-gpu-failed", "cpu-worker"],
+    )
+    def test_a_cpu_decode_that_times_out_is_the_files_failure(self, monkeypatch, gpu, calls_made):
+        monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
+        calls, run_decode = self._failing(frames.GpuDecodeError("ffmpeg exited 69"), self.TIMEOUT)
+        with (
+            patch.object(frames, "run_decode", side_effect=run_decode),
+            pytest.raises(frames.DecodeTimeoutError) as failed,
+        ):
+            ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=gpu, gpu_device_path="cuda:0" if gpu else None,
+                             container_start_s=0.0, download_format="nv12")  # fmt: skip
+        assert calls == calls_made and not isinstance(failed.value, ep.GpuAttemptFailedError)
 
     def test_a_gpu_workers_threads_cap_its_gpu_decode_and_the_pause_reaches_both_decodes(self):
         # The CPU rerun is uncapped, as previews' CPU fallback on a GPU worker is.

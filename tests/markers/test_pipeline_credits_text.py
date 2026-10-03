@@ -654,7 +654,7 @@ class TestSkipDbAgainstACreditsChapter:
         ("stored_version", "status", "reason"),
         [
             (detector.CREDITS_TEXT_VERSION, DecisionStatus.DECIDED, "chapters"),
-            (detector.CREDITS_TEXT_VERSION - 1, DecisionStatus.NEEDS_REVIEW, TEXT_CHECKS_CHAPTER_REASON),
+            (detector.CREDITS_TEXT_VERSION - 1, DecisionStatus.NO_EVIDENCE, TEXT_CHECKS_CHAPTER_REASON),
         ],
         ids=["this-version", "older-version"],
     )
@@ -673,7 +673,7 @@ class TestSkipDbAgainstACreditsChapter:
         assert (decision.status, decision.reason) == (status, reason)
 
     CHAPTER = Marker(T.CREDITS, 1_200_000, DUR, ("chapters",))
-    WAITING = (DecisionStatus.NEEDS_REVIEW, TEXT_CHECKS_CHAPTER_REASON)
+    WAITING = (DecisionStatus.NO_EVIDENCE, TEXT_CHECKS_CHAPTER_REASON)
     DECIDED_BY_THE_CHAPTER = (DecisionStatus.DECIDED, "chapters")
 
     def _ctx(self, store, media):
@@ -692,7 +692,7 @@ class TestSkipDbAgainstACreditsChapter:
 
     @pytest.mark.parametrize("failure", [None, "decode error", "timeout"])
     def test_a_failure_recorded_for_the_file_as_it_is_ends_the_wait(self, store, media, find, failure):
-        # The owner's rule: decisions are automatic, never an open-ended wait in Needs review. Credit text that can't
+        # The owner's rule: decisions are automatic, never an open-ended wait. Credit text that can't
         # read this file won't answer the next run either, so the chapter decides as it did before rule 3.
         ctx = self._checked(store, media)
         rec = store.get_file(media)

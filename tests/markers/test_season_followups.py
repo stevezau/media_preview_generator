@@ -1134,7 +1134,7 @@ class TestSeasonJobThroughTheRealEngine:
                 assert jm.get_job(arrival.id).config[job_runner.FILES_SEALED] is True
                 job_runner.run_intro_credits_job(season_job.id)
             assert jm.get_job(season_job.id).status is JobStatus.COMPLETED
-            assert _intro_decision(store, e2)[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+            assert _intro_decision(store, e2) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
             assert len(_season_jobs(jm)) == 1
         finally:
             store.close()

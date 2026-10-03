@@ -581,23 +581,6 @@ class TestTheDecisionPath:
         assert store.get_item_publish_state(sid, pub.write.call_args.args[0]).kept_types == frozenset()
         assert store.get_markers(rec.id)[T.INTRO].locked is True
 
-    def test_a_row_still_waiting_on_the_items_other_versions_says_it_too(self, store, media, monkeypatch):
-        # A Plex item shows a type only once every version agrees on it, so the same write can both take a locked type
-        # off Plex and hold another back. The override sentence and the row key are composed again on that lane.
-        reg = _registry(media, ServerType.PLEX, setting="keep_plex")
-        _known(store, media, [JOB_CREDITS], locked=[replace(JOB_INTRO, locked=True)])
-        pub = ready_publisher("plex_db")
-        _keeping(pub, frozenset(), {T.INTRO}, changed=True, replaced_own={T.INTRO})
-
-        rows = _publish_now(monkeypatch, store, media, reg, {"plex-1": pub})
-
-        assert rows[0]["status"] == ServerStatus.WAITING.value
-        assert rows[0][REPLACED_OWN] == ["intro"]
-        assert rows[0]["message"] == (
-            "Waiting for this item's other versions to agree on: credits. Replaced Plex's own marker. "
-            "This server is set to keep Plex's, but a marker you adjust always wins."
-        )
-
     def test_an_unlocked_decision_on_a_kept_type_still_sends_nothing(self, store, media, monkeypatch):
         sid = "plex-1"
         reg = _registry(media, ServerType.PLEX, setting="keep_plex")

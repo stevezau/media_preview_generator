@@ -1,16 +1,18 @@
 """Whether a GPU decodes credits frames exactly as the CPU does: a diagnostic, run once per device per process
 (spec §5.4).
 
-A credits answer depends on the decoder alone: every path downloads the whole decoded frame and shrinks it with the
-same software scaler (``frames._scale_filter``). NVIDIA and Intel VAAPI decode H.264 and HEVC bit-exactly against the
-CPU (no pixel differed on 8 real files), but no other hardware was measured. So each GPU gets a check: two packaged
-reference clips go through the credits decode's own command (``frames.decode_rows``) on that device and on the CPU, at
-both sizes credits are read at, and every frame's Y plane is compared. It runs in the background when an Intro &
-Credits job builds the worker pool (:func:`start_checks`), never on a worker, and nothing waits for it. The result is
-only logged: a match as an info line, a difference, decode error or timeout as one warning. The work never moves: a GPU
-worker decodes credits on its GPU, every codec included (users choose GPU or CPU workers, often to take the work off
-the CPU). A GPU that can't decode a file at all is another matter: its ``frames.GpuDecodeError`` still sends that file
-to the worker's CPU rerun. Text detection has its own per-device self-test (``textdet_helper``).
+A credits answer depends on what the device hands over before the scaler: every path downloads the whole decoded frame
+and shrinks it with the same software scaler (``frames._scale_filter``). On a GPU that is the decoder's frame, on VAAPI
+after a same-size GPU copy (``frames._VAAPI_COPY``, measured to download the same bytes). NVIDIA and Intel VAAPI decode
+H.264 and HEVC bit-exactly against the CPU (no pixel differed on 8 real files), but no other hardware was measured. So
+each GPU gets a check: two packaged reference clips go through the credits decode's own command
+(``frames.decode_rows``, VAAPI's copy included) on that device and on the CPU, at both sizes credits are read at, and
+every frame's Y plane is compared. It runs in the background when an Intro & Credits job builds the worker pool
+(:func:`start_checks`), never on a worker, and nothing waits for it. The result is only logged: a match as an info
+line, a difference, decode error or timeout as one warning. The work never moves: a GPU worker decodes credits on its
+GPU, every codec included (users choose GPU or CPU workers, often to take the work off the CPU). A GPU that can't
+decode a file at all is another matter: its ``frames.GpuDecodeError`` still sends that file to the worker's CPU rerun.
+Text detection has its own per-device self-test (``textdet_helper``).
 """
 
 from __future__ import annotations
@@ -95,7 +97,8 @@ def decode_clip(
     """Decode a reference clip the way a credits refine window is decoded, every frame kept.
 
     The command is ``frames.decode_command``'s own, as a 1 fps refine decode builds it: the device's hwaccel arguments,
-    the surfaces downloaded whole and the shared scaler. The clips are 1 fps, so every frame is decoded and kept,
+    the surfaces downloaded whole (on VAAPI after its same-size GPU copy, ``frames._VAAPI_COPY``) and the shared
+    scaler. The clips are 1 fps, so every frame is decoded and kept,
     keyframes and the frames between them alike; the tail's keyframe pass decodes those same keyframes, only skipping
     the rest (``-skip_frame nokey``).
 

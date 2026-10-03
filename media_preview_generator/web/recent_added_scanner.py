@@ -18,6 +18,7 @@ race conditions on first install, restart, and clock skew.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
@@ -101,7 +102,7 @@ def _item_has_all_bifs(plex, item, plex_config_folder: str) -> bool:
     Queries Plex's ``/<item_key>/tree`` endpoint (the same query the
     Plex bundle adapter uses) to recover the bundle hash for each media
     part, then checks whether the corresponding ``index-sd.bif`` file
-    exists on disk.
+    exists on disk with data in it (a 0-byte BIF holds no preview).
 
     A single missing part means the worker needs to run, so we return
     ``False`` and let the item through.  On any query error we also
@@ -142,7 +143,11 @@ def _item_has_all_bifs(plex, item, plex_config_folder: str) -> bool:
             "Indexes",
             "index-sd.bif",
         )
-        if not os.path.isfile(bif_path):
+        try:
+            bif = os.stat(bif_path)
+        except OSError:
+            return False
+        if not stat.S_ISREG(bif.st_mode) or bif.st_size == 0:
             return False
     return True
 

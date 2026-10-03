@@ -121,13 +121,16 @@ function renderNotifications(notifications) {
             dismiss.onclick = function () { dismissNotificationSession(notif.id); };
             actions.appendChild(dismiss);
 
-            var dismissPerm = document.createElement('button');
-            dismissPerm.type = 'button';
-            dismissPerm.className = 'btn btn-sm btn-outline-danger';
-            dismissPerm.textContent = 'Dismiss permanently';
-            dismissPerm.title = 'Never show this notification again';
-            dismissPerm.onclick = function () { dismissNotificationPermanent(notif.id); };
-            actions.appendChild(dismissPerm);
+            // A card for a problem that comes and goes (an unmounted media folder) is session-only.
+            if (notif.permanent_dismissable !== false) {
+                var dismissPerm = document.createElement('button');
+                dismissPerm.type = 'button';
+                dismissPerm.className = 'btn btn-sm btn-outline-danger';
+                dismissPerm.textContent = 'Dismiss permanently';
+                dismissPerm.title = 'Never show this notification again';
+                dismissPerm.onclick = function () { dismissNotificationPermanent(notif.id); };
+                actions.appendChild(dismissPerm);
+            }
         }
 
         entry.appendChild(header);

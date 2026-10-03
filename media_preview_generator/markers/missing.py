@@ -10,8 +10,8 @@ unreadable (a stale handle) keeps the file unmarked, and so does a file under no
 Even then the file is only marked: a mergerfs pool with a branch down, or a bind mount showing a stale underlay, looks
 exactly like a deletion from here. Nothing stored about the file goes (decisions, locked and edited markers, publish
 records), and the mark comes off as soon as the file is seen again: any job that finds it on disk, a new file stored at
-its path, or the sweep below. Marked files are left out of what lists files to work on (Needs review, the decide-again
-job, Check servers' re-reads of servers' own markers and undelivered locks).
+its path, or the sweep below. Marked files are left out of what lists files to work on (the decide-again job, Check
+servers' re-reads of servers' own markers and undelivered locks).
 
 Three places mark: a job's run of a file it finds missing (holding that file's run lock), the decide-again job before
 it lists its files, and a sweep on the fingerprint sweep's thread and schedule, which also clears the marks of files
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .store import FileRecord, MarkerStore
 
 # The INFO line each pass that marks files logs (``logger.info(MISSING_LINE, count)``).
-MISSING_LINE = "{} files are missing from disk; they're hidden from Needs review until they come back"
+MISSING_LINE = "{} files are missing from disk; they're left out of Intro & Credits jobs until they come back"
 # How long one file's check may take on a job's thread. A stalled network share blocks a stat instead of failing, so a
 # check that doesn't answer in time leaves the file unmarked.
 CHECK_TIMEOUT_S = 5.0

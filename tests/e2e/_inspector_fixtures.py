@@ -39,8 +39,8 @@ FILM_1080 = (
     "/data/movies/The Matrix (1999) {tmdb-603}/The Matrix (1999) {imdb-tt0133093} - [Bluray-1080p][DTS 5.1][x264].mkv"
 )
 FILM_MS = 8_178_000
-REVIEW = "/data/movies/10 Things I Hate About You (1999)/10 Things I Hate About You (1999) - [Bluray-1080p].mkv"
-REVIEW_MS = 5_820_000
+UNDECIDED = "/data/movies/10 Things I Hate About You (1999)/10 Things I Hate About You (1999) - [Bluray-1080p].mkv"
+UNDECIDED_MS = 5_820_000
 SHOW_FOLDER = "/data/tv/Blood Legacy (2024) {tvdb-436915}"
 PLEX_BIF = "/plex/Media/localhost/a/bc123.bundle/Contents/Indexes/index-sd.bif"
 
@@ -301,8 +301,8 @@ def unchecked_film() -> tuple[dict, dict]:
     return file, item
 
 
-def review_film() -> tuple[dict, dict]:
-    """Board 4: the credits are in Needs review; the chapter and the on-screen text disagree by 28 s."""
+def undecided_film() -> tuple[dict, dict]:
+    """Board 4: the credits weren't found; the chapter and the on-screen text disagree by 28 s."""
     plex_preview = _preview_row(
         "plex-1",
         "Plex",
@@ -315,14 +315,14 @@ def review_film() -> tuple[dict, dict]:
         created_at="2026-09-20T09:00:00+00:00",
     )
     file = {
-        "canonical_path": REVIEW,
+        "canonical_path": UNDECIDED,
         "exists": True,
         "in_library": True,
         "known": True,
         "title": "10 Things I Hate About You (1999)",
         "kind": "movie",
         "quality": "1080p",
-        "duration_ms": REVIEW_MS,
+        "duration_ms": UNDECIDED_MS,
         "previews": [plex_preview],
         "preview": dict(plex_preview),
         "versions": [],
@@ -330,16 +330,12 @@ def review_film() -> tuple[dict, dict]:
     }
     item = {
         "known": True,
-        "canonical_path": REVIEW,
-        "duration_ms": REVIEW_MS,
+        "canonical_path": UNDECIDED,
+        "duration_ms": UNDECIDED_MS,
         "is_movie": True,
         "decisions": {
             "intro": _type("disabled", reason="detection off"),
-            "credits": _type(
-                "needs_review",
-                reason="sources disagree",
-                proposed={"start_ms": 5_529_000, "end_ms": None, "decided_by": ["chapters"]},
-            ),
+            "credits": _type("no_evidence", reason="sources disagree"),
             "recap": _type("disabled", reason="detection off"),
             "preview": _type("disabled", reason="detection off"),
         },
@@ -558,7 +554,7 @@ def statuses() -> dict:
         search_results()[3]["paths"][0]: (
             "2160p Dolby Vision",
             {"state": "missing", "frames": None},
-            ("needs_review", "Needs review"),
+            ("none", "Nothing found"),
         ),
     }
     return {
@@ -576,12 +572,12 @@ def statuses() -> dict:
 
 
 def show_seasons() -> list[dict]:
-    states = ["both", "both", "both", "credits", "both", "both", "not_checked", "both", "both", "needs_review"]
+    states = ["both", "both", "both", "credits", "both", "both", "not_checked", "both", "both", "none"]
     labels = {
         "both": "Intro + credits",
         "credits": "Credits only",
         "not_checked": "Not checked yet",
-        "needs_review": "Needs review",
+        "none": "Nothing found",
     }
 
     def season(n: int, count: int) -> dict:
@@ -627,7 +623,7 @@ def season_payload(*, ready: int | None = None, total: int | None = None, marker
         if n == 7:
             intro, credits = _type(None), _type(None)
         if n == 10:
-            credits = _type("needs_review", reason="sources disagree")
+            credits = _type("no_evidence", reason="Sources disagree: chapters, credits_text")
         for d in (intro, credits):
             d.pop("shortened_by", None)
         dots = {
@@ -643,15 +639,13 @@ def season_payload(*, ready: int | None = None, total: int | None = None, marker
                 "duration_ms": dur,
                 "intro": intro,
                 "credits": credits,
-                "needs_review": n == 10,
-                "review_reason": "Sources disagree: chapters, credits_text" if n == 10 else "",
                 "evidence": []
                 if n == 7
                 else [{"source": "season_audio", "label": "9/10"}, {"source": "chapters", "label": ""}],
                 "servers": dots,
             }
         )
-    decided = sum(1 for e in episodes if e["known"] and not e["needs_review"]) + 1
+    decided = sum(1 for e in episodes if e["known"])
     return {
         "folder": folder,
         "show": "Blood Legacy (2024) {tvdb-436915}",
@@ -665,7 +659,6 @@ def season_payload(*, ready: int | None = None, total: int | None = None, marker
             "episodes": len(episodes),
             "total_episodes": total if total is not None else len(episodes),
             "ready": ready if ready is not None else decided,
-            "needs_review": 1,
         },
     }
 
@@ -752,8 +745,8 @@ def default_kinds(path: str) -> list[tuple[int, int, str]]:
         return [(7_680_000, 7_710_000, "credits"), (FILM_CREDITS_MS, FILM_MS + 1, "credits")]
     if path == LONG_FILM:
         return [(10_500_000, LONG_FILM_MS + 1, "credits")]
-    if path == REVIEW:
-        return [(5_557_000, REVIEW_MS + 1, "credits")]
+    if path == UNDECIDED:
+        return [(5_557_000, UNDECIDED_MS + 1, "credits")]
     return []
 
 
@@ -761,7 +754,7 @@ def install(page: Page, api: InspectorApi | None = None) -> InspectorApi:
     """Route every Inspector call on ``page`` to ``api`` (a fresh one with the three boards when None)."""
     if api is None:
         api = InspectorApi()
-        for make in (checked_episode, unchecked_film, review_film):
+        for make in (checked_episode, unchecked_film, undecided_film):
             file, item = make()
             api.add(file, item, default_kinds(file["canonical_path"]))
 

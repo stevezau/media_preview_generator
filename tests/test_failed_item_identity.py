@@ -96,6 +96,18 @@ class TestWebhookPhaseRetriesTheFailedPaths:
 
         assert result["unresolved_paths"] == ["/tv/b.mkv"]
 
+    def test_names_the_webhook_path_each_dispatched_file_came_from(self):
+        """job_runner's retry scan reads file rows keyed by the path the file was dispatched under, and must
+        resubmit the path the webhook sent for just the files still missing. The phase hands it that map."""
+        canonical_by_raw = {"/tv/a.mkv": "/data/tv/a.mkv", "/tv/b.mkv": "/data/tv/b.mkv"}
+        result = self._run_phase(
+            list(canonical_by_raw),
+            canonical_by_raw,
+            {"completed": 2, "failed": 0, "cancelled": False, "outcome": {}, "failed_paths": []},
+        )
+
+        assert result["input_by_canonical"] == {"/data/tv/a.mkv": "/tv/a.mkv", "/data/tv/b.mkv": "/tv/b.mkv"}
+
     def test_nothing_unresolved_when_nothing_failed(self):
         paths = ["/data/a.mkv", "/data/b.mkv"]
         result = self._run_phase(

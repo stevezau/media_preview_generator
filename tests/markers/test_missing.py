@@ -19,14 +19,14 @@ from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.pipeline import PipelineContext, check_item
 from media_preview_generator.markers.probe import ProbeError
 from media_preview_generator.markers.settings import load_global, validate_global
-from media_preview_generator.markers.store import MarkerStore
+from media_preview_generator.markers.store import LEGACY_NEEDS_REVIEW, MarkerStore
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library, ServerConfig, ServerType
 from tests.markers.fakes import FakeRegistry
 
 INTRO = Marker(MarkerType.INTRO, 10_000, 40_000, ("chapters",))
 LOCK = Marker(MarkerType.CREDITS, 1_400_000, 1_500_000, ("user",), locked=True)
-MISSING_4 = "4 files are missing from disk; they're hidden from Needs review until they come back"
+MISSING_4 = "4 files are missing from disk; they're left out of Intro & Credits jobs until they come back"
 
 
 def _config(library_root: str, *, mapping: tuple[str, str] | None = None, enabled: bool = True) -> ServerConfig:
@@ -54,8 +54,10 @@ def _episode(folder, name: str) -> str:
     return str(path)
 
 
-def _known(store: MarkerStore, path: str, status: DecisionStatus = DecisionStatus.NEEDS_REVIEW):
-    """A file markers.db knows, with its identity as it is on disk and an intro in ``status``."""
+def _known(store: MarkerStore, path: str, status: DecisionStatus | str = DecisionStatus.NO_EVIDENCE):
+    """A file markers.db knows, with its identity as it is on disk and an intro in ``status``; with
+    ``LEGACY_NEEDS_REVIEW`` the decisions row is written as the rules before 2026-10-02 wrote it (raw SQL: nothing
+    writes that status now), which is what lists the file for the decide-again job."""
     st = os.stat(path)
     rec = store.upsert_file(
         FileIdentity(path, st.st_size, st.st_mtime_ns),
@@ -63,6 +65,15 @@ def _known(store: MarkerStore, path: str, status: DecisionStatus = DecisionStatu
         season_key=os.path.dirname(path),
         is_movie=False,
     )
+    if status == LEGACY_NEEDS_REVIEW:
+        store._conn.execute(
+            "INSERT OR REPLACE INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
+            "settings_fingerprint, decided_at, decided_by) VALUES (?, 'intro', ?, 'x', ?, ?, 's', "
+            "'2026-09-01T00:00:00+00:00', '[\"chapters\"]')",
+            (rec.id, LEGACY_NEEDS_REVIEW, INTRO.start_ms, INTRO.end_ms),
+        )
+        store._conn.commit()
+        return store.get_file(path)
     shown = (
         {"marker": INTRO, "proposed": None} if status is DecisionStatus.DECIDED else {"marker": None, "proposed": INTRO}
     )
@@ -80,7 +91,8 @@ def store(tmp_path):
 
 @pytest.fixture
 def library(tmp_path, store):
-    """A TV library mapped from Plex's /data/tv to <tmp>/mnt/tv: one show kept, one Sonarr deleted whole."""
+    """A TV library mapped from Plex's /data/tv to <tmp>/mnt/tv: one show kept, one Sonarr deleted whole; every
+    file still stored under the old Needs review status, as an install from before 2026-10-02 is."""
     mount = tmp_path / "mnt"
     tv = mount / "tv"
     kept = _episode(tv / "Kept Show" / "Season 01", "Kept Show - S01E01.mkv")
@@ -88,7 +100,7 @@ def library(tmp_path, store):
         _episode(tv / "Deleted Show" / f"Season 0{s}", f"Deleted Show - S0{s}E0{e}.mkv") for s in (1, 2) for e in (1, 2)
     ]
     for path in [kept, *deleted]:
-        _known(store, path)
+        _known(store, path, LEGACY_NEEDS_REVIEW)
     store.lock_marker(store.get_file(deleted[0]).id, LOCK)
     configs = [_config("/data/tv", mapping=("/data", str(mount)))]
     return SimpleNamespace(mount=mount, tv=tv, kept=kept, deleted=deleted, configs=configs)
@@ -136,7 +148,7 @@ class TestDiskRoots:
 
 
 class TestSweep:
-    def test_a_series_deleted_whole_is_marked_and_hidden_from_needs_review_with_nothing_deleted(
+    def test_a_series_deleted_whole_is_marked_and_left_out_of_the_decide_again_job_with_nothing_deleted(
         self, store, library, loguru_caplog
     ):
         _delete_series(library)
@@ -145,7 +157,7 @@ class TestSweep:
         assert missing.sweep_missing_files(store, library.configs) == 4
 
         assert _marked(store, [library.kept, *library.deleted]) == [False, True, True, True, True]
-        assert store.files_in_review() == [library.kept]
+        assert store.files_with_legacy_review_decisions() == [library.kept]
         assert MISSING_4 in loguru_caplog.text
         for path, rec in before.items():  # the rows, their decisions and the user's lock all stay
             assert store.get_file(path).id == rec.id and store.get_decisions(rec.id)
@@ -251,7 +263,7 @@ class TestSweep:
         assert missing.sweep_missing_files(store, library.configs) == 0
 
         assert _marked(store, library.deleted) == [False, True, True, True]
-        assert store.files_in_review() == sorted([library.kept, library.deleted[0]])
+        assert store.files_with_legacy_review_decisions() == sorted([library.kept, library.deleted[0]])
 
     def test_a_symlink_back_at_a_missing_files_path_clears_it(self, store, library, tmp_path):
         # Whatever is at the path, a dangling link included, isn't missing (a remote mount behind it may come back).
@@ -347,7 +359,7 @@ class TestAJobFindsTheFileMissing:
         os.remove(path)  # the gap
         ctx, out = self._run(store, library.configs, path)
         assert out.outcome_key == FileOutcome.FILE_NOT_FOUND.value and _marked(store, [path]) == [True]
-        assert library.deleted[0] not in store.files_in_review()
+        assert library.deleted[0] not in store.files_with_legacy_review_decisions()
         with open(path, "wb") as fh:
             fh.write(b"y" * 20)  # the upgrade lands
         monkeypatch.setattr(pipeline, "probe_media", MagicMock(side_effect=ProbeError("still being written")))
@@ -356,7 +368,7 @@ class TestAJobFindsTheFileMissing:
 
         assert _marked(store, [path]) == [False]
         assert store.get_locked(rec.id) == {MarkerType.CREDITS: LOCK}
-        assert path in store.files_in_review()
+        assert path in store.files_with_legacy_review_decisions()
 
     def test_the_same_identity_stored_again_clears_the_mark(self, store, library):
         rec = store.get_file(library.kept)
@@ -461,14 +473,14 @@ class TestStore:
                                 message="Waiting for this item's other versions to agree on: intro")  # fmt: skip
         store.set_publish_state(rec.id, "plex-2", item_id="8", markers=None, status="failed", message="x")
         season = os.path.dirname(library.deleted[0])
-        assert library.deleted[0] in store.files_in_review()
+        assert library.deleted[0] in store.files_with_legacy_review_decisions()
         assert store.files_waiting_for_other_versions() == [library.deleted[0]]
         assert store.files_with_undelivered_locks(["plex-2"]) == [(library.deleted[0], "plex-2")]
         assert [r.canonical_path for r in store.files_in_season(season)] == library.deleted[:2]
 
         store.mark_missing(rec)
 
-        assert library.deleted[0] not in store.files_in_review()
+        assert library.deleted[0] not in store.files_with_legacy_review_decisions()
         assert store.files_waiting_for_other_versions() == []
         assert store.files_with_undelivered_locks(["plex-2"]) == []
         assert [r.canonical_path for r in store.files_in_season(season)] == library.deleted[1:2]

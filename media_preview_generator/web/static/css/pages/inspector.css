@@ -55,9 +55,6 @@
     --insp-banner-bg: #13203a;
     --insp-banner-line: #2a4675;
     --insp-banner-link: #9cc6ff;
-    --insp-review-bg: #2a2418;
-    --insp-review-line: #6b5220;
-    --insp-review-text: #e6dcc6;
     --insp-overlay: rgba(6, 9, 15, 0.78);
     --insp-now: #ffffff;
     --insp-bubble-bg: #e9edf5;
@@ -128,9 +125,6 @@ html[data-bs-theme="light"] .insp {
     --insp-banner-bg: #e8f0fe;
     --insp-banner-line: #b7cdf5;
     --insp-banner-link: #1f5fcf;
-    --insp-review-bg: #fff6e5;
-    --insp-review-line: #f0cf8f;
-    --insp-review-text: #5b4a26;
     --insp-overlay: rgba(20, 26, 38, 0.55);
     --insp-now: #141a26;
     --insp-bubble-bg: #141a26;
@@ -170,11 +164,6 @@ html[data-bs-theme="light"] body:has(#inspector) {
 
 .insp-state-muted {
     color: var(--insp-muted);
-}
-
-.insp-state-review {
-    color: var(--insp-amber-fg);
-    font-weight: 600;
 }
 
 .insp .info-icon {
@@ -829,10 +818,6 @@ button.insp-row:focus-visible,
     background: var(--insp-card);
     border: 1px solid var(--insp-amber-line);
     border-radius: 12px;
-}
-
-.insp-confirm-bar.is-card {
-    border-color: var(--insp-line);
 }
 
 .insp-confirm-title {
@@ -1648,7 +1633,7 @@ html[data-bs-theme="light"] .insp-centre {
     color: var(--insp-faint);
 }
 
-/* --- Exact frames (Adjust, Needs your check) ------------------------------ */
+/* --- Exact frames (Adjust) ------------------------------------------------ */
 
 .insp-frames {
     display: grid;
@@ -1988,72 +1973,6 @@ button.insp-frame:focus-visible {
     margin-top: 4px;
     font-size: 13px;
     color: var(--insp-bad-text);
-}
-
-/* --- Needs your check (board 4) ----------------------------------------- */
-
-.insp-review {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-}
-
-.insp-review-box {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 18px 22px;
-    background: var(--insp-review-bg);
-    border: 1px solid var(--insp-review-line);
-    border-radius: 12px;
-}
-
-.insp-review-title {
-    font-size: 18px;
-    font-weight: 600;
-}
-
-.insp-review-text {
-    font-size: 15px;
-    color: var(--insp-review-text);
-}
-
-.insp-candidate,
-.insp-pick {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    border-radius: 12px;
-    padding: 20px 24px;
-}
-
-.insp-candidate-time {
-    font-size: 20px;
-    font-weight: 600;
-}
-
-.insp-candidate-text {
-    margin-top: -12px;
-    font-size: 14px;
-    color: var(--insp-text-2);
-}
-
-.insp .insp-candidate .btn {
-    width: 100%;
-    border-radius: 8px;
-}
-
-.insp-pick-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.insp-pick-title {
-    font-size: 16px;
-    font-weight: 600;
 }
 
 /* --- How it was decided, not checked, on your servers --------------------- */

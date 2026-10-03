@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from loguru import logger
 
 from ..decide import FileLimits, unusable_server_marker
-from ..fs import filesystem_type, gone_from_disk, is_local_filesystem, is_network_filesystem
+from ..fs import filesystem_type, is_local_filesystem, is_network_filesystem
 from ..models import Candidate, Marker, MarkerType, Source
 from .base import (
     NEXT_RUN,
@@ -75,8 +75,6 @@ BUSY_STRETCH_GAP_S = 5.0
 # Lock waits run in slices this long, asking between them whether the job was cancelled (``base.cancellable_waits``).
 WAIT_SLICE_S = 1.0
 WAIT_CANCELLED = "Stopped waiting for Plex's database: the job was cancelled"
-# How long a write waits to learn whether another version's file is gone from disk before treating it as still there.
-GONE_CHECK_TIMEOUT_S = 5.0
 # How long the read before detection (``types_not_made_for_file``) waits for the database locks. Asked for every file
 # Plex keeps its own markers of, so a busy database means "can't tell" (asked again next run), never a writer's wait.
 STALE_READ_WAIT_S = 5.0
@@ -659,11 +657,6 @@ def _is_optimized_copy(part: _Part) -> bool:
     # Plex's "Optimize" transcodes carry media_items.proxy_type and live under a "Plex Versions" folder. Both must hold:
     # an unknown proxy_type on an ordinary file still takes part in the version agreement.
     return bool(part.proxy_type) and "Plex Versions" in part.file.replace("\\", "/").split("/")
-
-
-def _lies_under(path: str, folder: str) -> bool:
-    folder = folder.rstrip("/")
-    return not folder or path.startswith(folder + "/")
 
 
 def _version_files(parts: list[_Part]) -> tuple[str, ...]:
@@ -1838,61 +1831,16 @@ class PlexMarkerPublisher(MarkerPublisher):
                 return decided
         return None
 
-    def _local_candidates_and_roots(self, plex_path: str) -> dict[str, tuple[str, ...]]:
-        """Each local candidate of a Plex path with the disk roots it lies under: the path mapping's local folder and
-        the folder of each library holding it (``gone_from_disk``'s ``roots``)."""
-        from ...servers.ownership import path_mapping_candidates
-
-        mappings = list(self._config.path_mappings or [])
-        library_roots = [
-            local
-            for library in self._config.libraries
-            for remote in library.remote_paths
-            for local, _root in path_mapping_candidates(remote, mappings)
-        ]
-        candidates: dict[str, tuple[str, ...]] = {}
-        for local, mapping_root in path_mapping_candidates(plex_path, mappings):
-            roots = [root.rstrip("/") or "/" for root in library_roots if _lies_under(local, root)]
-            candidates[local] = tuple(dict.fromkeys([*([mapping_root] if mapping_root else []), *roots]))
-        return candidates
-
-    def _gone_from_disk(self, plex_file: str) -> bool:
-        """Whether a version's file is on none of the disks the server's path mappings give for it (``gone_from_disk``:
-        a disk that isn't mounted, or whose mount went stale, never makes it look gone).
-
-        Asked while the item's lock is held, so a disk that doesn't answer within ``GONE_CHECK_TIMEOUT_S`` (a stalled
-        network share blocks a stat rather than fail) counts as "not gone" instead of holding every publish to the item.
-        """
-        candidates = self._local_candidates_and_roots(plex_file)
-        answer: list[bool] = []
-        check = threading.Thread(
-            target=lambda: answer.append(gone_from_disk(candidates, roots=candidates)),
-            name="plex-version-on-disk",
-            daemon=True,
-        )
-        check.start()
-        check.join(GONE_CHECK_TIMEOUT_S)
-        if not answer:
-            logger.warning(
-                "Plex {}: couldn't tell within {:.0f} s whether {} is still on disk; waiting for it",
-                self._config.name,
-                GONE_CHECK_TIMEOUT_S,
-                os.path.basename(plex_file),
-            )
-            return False
-        return answer[0]
-
     def _desired(
         self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
     ) -> list[Marker]:
-        """The item's marker set: the markers of every type all versions decided alike.
+        """The item's marker set: per type, the decision of the first version in Plex's order that has one.
 
-        Plex serves one marker set per item, across all its versions. A type is desired only when every version is
-        decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). Which version's times are
-        written -- the calling file's, or what this app already left on the item -- is
-        :func:`~.base.agreed_across_versions`'s rule, including the exception a locked type makes; it isn't restated
-        here. A version never decided whose file is gone from disk (Plex lists a deleted file until its next scan)
-        takes no part; one still on disk is waited for, and sets ``last_unchecked_versions``.
+        Plex serves one marker set per item, across all its versions. Which version's times are written -- the first
+        holder's in ``(media_item_id, part id)`` order, a locked one's first, or what this app already left on the
+        item -- is :func:`~.base.agreed_across_versions`'s rule; it isn't restated here. A version never decided
+        (never checked, or its file gone from disk: ``markers_for_path`` has nothing for either) takes no part, so no
+        write waits on it.
 
         Raises:
             PublishError: Stacked multi-part files.
@@ -1902,24 +1850,18 @@ class PlexMarkerPublisher(MarkerPublisher):
         if len(set(media_items)) != len(media_items):
             raise PublishError("Plex item uses stacked multi-part files; markers for those are not supported")
         # Plex's optimized copies are transcodes we never decide: they share the item's markers but take no part in
-        # the agreement.
+        # choosing them.
         versions = [p for p in parts if not _is_optimized_copy(p)]
-        others = [p for p in versions if canonical_path not in self._local_candidates(p.file)]
-        if len(others) == len(versions):
+        mine = [p for p in versions if canonical_path in self._local_candidates(p.file)]
+        if not mine:
             # The markers were decided for a file this item doesn't hold: never write them onto another file.
             raise ItemNotFoundError(
                 "This Plex item has no file matching this path (yet); check the server's path mappings"
             )
-        # None = never decided, so no type is desired yet. {} = decided with no markers.
-        decisions = []
-        for part in others:
-            decided = self._sibling_decision(part.file)
-            # A deleted file has no decision (markers_for_path), and waiting for one would hold the item back forever.
-            if decided is None and self._gone_from_disk(part.file):
-                continue
-            decisions.append(decided)
-        self.last_unchecked_versions = any(decided is None for decided in decisions)
-        return self.project(agreed_across_versions(markers, decisions, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
+        key = min((p.media_item_id, p.id) for p in mine)
+        # None = never decided. {} = decided with no markers.
+        others = [((p.media_item_id, p.id), self._sibling_decision(p.file)) for p in versions if p not in mine]
+        return self.project(agreed_across_versions(markers, key, others, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
 
     def _local_files(self, version_files: tuple[str, ...]) -> tuple[str, ...]:
         """Every local candidate of every version file, sorted (see ``live_files``)."""
@@ -1958,7 +1900,6 @@ class PlexMarkerPublisher(MarkerPublisher):
         self.last_replaced_own_types = frozenset()
         self.last_replaced_stale_types = frozenset()
         self.last_item_files = None
-        self.last_unchecked_versions = False
         keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
         kept_before = frozenset(kept_types)
         # Until the item's rows are read, what was kept stays kept (or is released by the setting).

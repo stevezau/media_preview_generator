@@ -225,8 +225,8 @@ state hangs around longer than necessary.
 → Library`.
 
 **Why it matters:** off = Plex never reacts to filesystem changes.
-Your only signals for new files become this app's scan-nudges and
-Plex's periodic timer. Most "why didn't Plex pick up the file?"
+Your only signals for new files become this app's scan-nudges (at
+most one per folder a minute) and Plex's periodic timer. Most "why didn't Plex pick up the file?"
 complaints trace back here.
 
 **Enable / disable:** toggle directly. Server-wide setting (not

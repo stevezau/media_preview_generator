@@ -2290,7 +2290,7 @@ class TestSettingsAPI:
         resp = client.get("/api/settings", headers=_api_headers())
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["webhook_retry_count"] == 3
+        assert data["webhook_retry_count"] == 5
         assert data["webhook_retry_delay"] == 30
 
     def test_save_webhook_retry_settings(self, client):
@@ -6576,6 +6576,39 @@ class TestBackupRestore:
             if p.name.startswith("settings.json.") and p.name.endswith(".bak") and p.name != target_bak.name
         ]
         assert any(p.read_text() == '{"label": "current"}' for p in snapshots)
+
+    def test_restores_within_one_second_keep_the_file_as_it_was_before_the_first(self, client, monkeypatch, tmp_path):
+        """Two restores in one second: the snapshot of that second is the file before either (``utils.backup_file``),
+        not the first restore's result written over it."""
+        from datetime import datetime as _real_datetime
+
+        from media_preview_generator import utils
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        class _FrozenClock:
+            @staticmethod
+            def now(tz=None):
+                return _real_datetime(2026, 9, 1, 12, 0, 0, tzinfo=tz)
+
+        monkeypatch.setattr(utils, "datetime", _FrozenClock)
+        monkeypatch.setattr(get_settings_manager(), "config_dir", tmp_path)
+        live = tmp_path / "settings.json"
+        live.write_text('{"label": "current"}')
+        january = tmp_path / "settings.json.20260101-100000.bak"
+        february = tmp_path / "settings.json.20260201-100000.bak"
+        january.write_text('{"label": "from-january"}')
+        february.write_text('{"label": "from-february"}')
+
+        for backup in (january.name, february.name):
+            resp = client.post(
+                "/api/settings/backups/restore",
+                headers=_api_headers(),
+                json={"file": "settings.json", "backup": backup},
+            )
+            assert resp.status_code == 200, resp.get_json()
+
+        assert live.read_text() == '{"label": "from-february"}'
+        assert (tmp_path / "settings.json.20260901-120000.bak").read_text() == '{"label": "current"}'
 
     def test_restore_defaults_to_newest_when_backup_param_omitted(self, client, monkeypatch, tmp_path):
         """Backwards-compat: restore without `backup` picks the newest snapshot."""

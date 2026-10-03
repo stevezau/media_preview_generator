@@ -1093,8 +1093,8 @@ class TestTriggerRefresh:
         # filter). The fallback-to-full path fires when the per-path
         # nudge errors — a burst of nudges with the same failure mode
         # must NOT trigger one /Library/Refresh per call or Jellyfin
-        # pins for minutes. The cooldown lives on the server instance
-        # so concurrent calls collapse to a single scan.
+        # pins for minutes. The cooldown is claimed before the request
+        # goes out, so concurrent calls collapse to a single scan.
         path_exc = RuntimeError("path nudge failed")
         full_resp = MagicMock(raise_for_status=MagicMock(return_value=None))
 
@@ -1112,6 +1112,107 @@ class TestTriggerRefresh:
             # is allowed to escalate to /Library/Refresh.
             full_refresh_calls = [c for c in req.call_args_list if c.args == ("POST", "/Library/Refresh")]
             assert len(full_refresh_calls) == 1, f"Expected one full refresh, got {len(full_refresh_calls)}"
+
+    @staticmethod
+    def _failing_path_nudge(full_refresh):
+        """``_request`` stand-in: the per-path nudge always fails; ``full_refresh()`` answers /Library/Refresh."""
+
+        def side_effect(method, endpoint, *args, **kwargs):
+            if endpoint == "/Library/Media/Updated":
+                raise RuntimeError("path nudge failed")
+            return full_refresh()
+
+        return side_effect
+
+    @staticmethod
+    def _full_refreshes(req) -> int:
+        return len([c for c in req.call_args_list if c.args == ("POST", "/Library/Refresh")])
+
+    def test_full_refresh_cooldown_outlives_the_server_object(self):
+        """Server objects are rebuilt for every job, so a season pack's jobs each hold a new one."""
+        ok = MagicMock(raise_for_status=MagicMock(return_value=None))
+
+        with patch.object(JellyfinServer, "_request", side_effect=self._failing_path_nudge(lambda: ok)) as req:
+            for _job in range(3):
+                JellyfinServer(_jelly_config()).trigger_refresh(item_id=None, remote_path="/some/path.mkv")
+
+            assert self._full_refreshes(req) == 1
+
+    @pytest.mark.parametrize("failure", ["request_raises", "http_error_status"])
+    def test_full_refresh_that_fails_does_not_start_the_cooldown(self, failure):
+        ok = MagicMock(raise_for_status=MagicMock(return_value=None))
+        refused = MagicMock(raise_for_status=MagicMock(side_effect=requests.HTTPError("503")))
+        answers: list = [requests.ConnectionError("down") if failure == "request_raises" else refused, ok, ok]
+
+        def full_refresh():
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with patch.object(JellyfinServer, "_request", side_effect=self._failing_path_nudge(full_refresh)) as req:
+            for _job in range(3):
+                JellyfinServer(_jelly_config()).trigger_refresh(item_id=None, remote_path="/some/path.mkv")
+
+            # The failed one, then the one that got through; the third is inside that one's cooldown.
+            assert self._full_refreshes(req) == 2
+
+    def test_full_refresh_that_fails_after_its_cooldown_leaves_a_newer_ones_cooldown_alone(self):
+        from media_preview_generator.servers import jellyfin as jellyfin_module
+
+        ok = MagicMock(raise_for_status=MagicMock(return_value=None))
+        now = [1000.0]
+        answers: list = ["outlives its cooldown, then fails", ok, ok]
+
+        def trigger():
+            JellyfinServer(_jelly_config()).trigger_refresh(item_id=None, remote_path="/some/path.mkv")
+
+        def full_refresh():
+            answer = answers.pop(0)
+            if answer is ok:
+                return ok
+            # While this request is still out its cooldown ends, and another caller's refresh gets through.
+            now[0] += jellyfin_module._JELLYFIN_FULL_REFRESH_COOLDOWN_S + 1
+            trigger()
+            raise requests.ConnectionError("timed out")
+
+        with (
+            patch.object(JellyfinServer, "_request", side_effect=self._failing_path_nudge(full_refresh)) as req,
+            patch.object(jellyfin_module, "_monotonic", side_effect=lambda: now[0]),
+        ):
+            trigger()
+            now[0] += 1
+            trigger()
+
+            # The one that failed and the newer one; the third is inside the newer one's cooldown.
+            assert self._full_refreshes(req) == 2
+
+    def test_full_refresh_cooldown_is_per_server(self):
+        ok = MagicMock(raise_for_status=MagicMock(return_value=None))
+
+        with patch.object(JellyfinServer, "_request", side_effect=self._failing_path_nudge(lambda: ok)) as req:
+            for url in ("http://jelly-a:8096", "http://jelly-b:8096", "http://jelly-a:8096/"):
+                JellyfinServer(_jelly_config(url=url)).trigger_refresh(item_id=None, remote_path="/some/path.mkv")
+
+            assert self._full_refreshes(req) == 2
+
+    def test_full_refresh_is_sent_again_once_the_cooldown_has_passed(self):
+        from media_preview_generator.servers import jellyfin as jellyfin_module
+
+        ok = MagicMock(raise_for_status=MagicMock(return_value=None))
+        cooldown = jellyfin_module._JELLYFIN_FULL_REFRESH_COOLDOWN_S
+        clock = iter([1000.0, 1000.0 + cooldown - 1, 1000.0 + cooldown])
+
+        with (
+            patch.object(JellyfinServer, "_request", side_effect=self._failing_path_nudge(lambda: ok)) as req,
+            patch.object(jellyfin_module, "_monotonic", side_effect=lambda: next(clock)),
+        ):
+            sent = []
+            for _job in range(3):
+                JellyfinServer(_jelly_config()).trigger_refresh(item_id=None, remote_path="/some/path.mkv")
+                sent.append(self._full_refreshes(req))
+
+            assert sent == [1, 1, 2]
 
     def test_path_nudge_failure_falls_back_to_full_refresh(self, jelly):
         # Path-based nudge raises (e.g. older Jellyfin without the

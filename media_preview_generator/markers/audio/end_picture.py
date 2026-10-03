@@ -78,17 +78,25 @@ class CheckUnavailableError(Exception):
     """No verdict this time: cancelled, a stalled mount, or a file that couldn't be read (lately)."""
 
 
+class GpuAttemptFailedError(frames.FrameDecodeError):
+    """The worker's GPU decode failed in a way that isn't decoded again on the CPU on the spot (a timeout, T-R7), so
+    the CPU hasn't tried the file."""
+
+
 class ReadFailedError(Exception):
     """ffprobe or ffmpeg couldn't read one file for the check: an error, a non-zero exit or a timeout. Not proof that it
-    has nothing to compare, so never a pass: the caller remembers the file for a while and reads it again later.
+    has nothing to compare, so never a pass: the caller remembers the file for a while and reads it again later, unless
+    only the GPU's attempt failed (the worker's CPU rerun of the file must not be refused for it).
 
     Attributes:
         path: The file.
+        gpu_attempt: Only the worker's GPU decode failed (:class:`GpuAttemptFailedError`); the CPU hasn't tried.
     """
 
-    def __init__(self, path: str, message: str) -> None:
+    def __init__(self, path: str, message: str, *, gpu_attempt: bool = False) -> None:
         super().__init__(message)
         self.path = path
+        self.gpu_attempt = gpu_attempt
 
 
 def is_early(start_s: float) -> bool:
@@ -232,7 +240,9 @@ def decode_frames(
 
     Raises:
         frames.DecodeCancelledError: Cancelled.
-        frames.DecodeTimeoutError: The decode ran past ``DECODE_TIMEOUT_S``.
+        GpuAttemptFailedError: The GPU decode ran past ``DECODE_TIMEOUT_S`` or gave a frame no timestamp.
+        frames.NoDecoderError: ffmpeg has no decoder for the file's video (the CPU isn't tried).
+        frames.DecodeTimeoutError: The CPU decode ran past ``DECODE_TIMEOUT_S``.
         frames.FrameDecodeError: ffmpeg couldn't decode the stretch on the CPU either, or gave a frame no timestamp.
     """
     name = os.path.basename(path)
@@ -243,6 +253,11 @@ def decode_frames(
         if gpu is None:
             raise
         _note_cpu_fallback(gpu, gpu_device_path, name, exc, fallback_callback)
+    except frames.FrameDecodeError as exc:
+        # No decoder at all is the file's failure, not the GPU attempt's: the CPU would fail the same way.
+        if gpu is None or isinstance(exc, frames.NoDecoderError):
+            raise
+        raise GpuAttemptFailedError(str(exc)) from exc
     return _decode(path, start_s, length_s, ffmpeg, None, None, container_start_s, cancel_check, download_format,
                    pause_check, None)  # fmt: skip
 
@@ -418,6 +433,8 @@ class Reader:
         return self._frames[key]
 
     def _fail(self, path: str, exc: Exception) -> ReadFailedError:
-        logger.info("The end-picture check couldn't read {}: {}", os.path.basename(path), exc)
-        self._failed[path] = ReadFailedError(path, str(exc))
+        gpu_attempt = isinstance(exc, GpuAttemptFailedError)
+        where = " on the GPU" if gpu_attempt else ""
+        logger.info("The end-picture check couldn't read {}{}: {}", os.path.basename(path), where, exc)
+        self._failed[path] = ReadFailedError(path, str(exc), gpu_attempt=gpu_attempt)
         return self._failed[path]

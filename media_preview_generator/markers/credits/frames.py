@@ -25,6 +25,7 @@ from typing import BinaryIO, NamedTuple
 import numpy as np
 from loguru import logger
 
+from ...processing.ffmpeg_runner import GPU_CANT_DECODE_VERDICT
 from ...processing.hwaccel import hwaccel_decode_args
 from ..freeze import Freeze
 from ..probe import (
@@ -70,6 +71,14 @@ _CODEC_NAMES = {"h264": "H.264", "mpeg2video": "MPEG-2", "mpeg4": "MPEG-4", "vc1
 # Lines that never say why ffmpeg failed: showinfo's per-frame lines ("color_space:unknown" reads as an error to the
 # summary) and the "Conversion failed!" every failed run ends on, which would hide the line before it.
 _SAYS_NOTHING_RE = re.compile(r"\[Parsed_showinfo_\d+ @|^Conversion failed!\s*$")
+# ffmpeg's closing lines, which end every failed run whatever failed: its progress line, a thread or task ending, and
+# "Nothing was written". Left out of the lines a GPU failure keeps for the job log (``GpuDecodeError.stderr_tail``).
+_CLOSING_LINE_RE = re.compile(
+    r"^frame=|Terminating thread with return code|Task finished with error code|Nothing was written into output file"
+)
+# How much of ffmpeg's stderr a GPU failure keeps: its last lines that say why, each cut to this many characters.
+STDERR_LINES = 4
+STDERR_LINE_CHARS = 240
 # The GPUs whose decoded frames stay surfaces for the filter graph to download (CUDA, and VAAPI on Intel and AMD);
 # any other GPU decodes and lets ffmpeg download each frame itself, as it does for a stream whose surface format isn't
 # known (``DOWNLOAD_FORMATS``).
@@ -82,6 +91,17 @@ DOWNLOAD_FORMATS = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", 
 # Intel GPU failed without them. Not on CUDA, where this same full-frame hwdownload ran without them on every measured
 # set (credit text's and the end-picture check's), and each spare is a full-size NVDEC surface.
 EXTRA_HW_FRAMES = 8
+# A same-size GPU copy before ``hwdownload`` on VAAPI, so the download syncs this filter's surface and never the
+# decoder's: on Intel's driver that sync fails now and then ("Failed to sync surface: 1 (operation failed)" or "34 (HW
+# busy now)", ffmpeg exits 251), on AV1 keyframes (15 of 16 runs) and on H.264 once ``fps`` has dropped surfaces (16 of
+# 30); with the copy 0 of 40 each. Previews never met it: ``scale_vaapi`` already stands there. Naming a chroma
+# location only stops ffmpeg passing the surfaces through untouched: the downloaded frames are the same bytes
+# (measured on H.264 8-bit, HEVC and AV1 10-bit).
+_VAAPI_COPY = "scale_vaapi=out_chroma_location=left"
+# The decoder's verdict that the GPU can't decode the file, as previews look for it (``ffmpeg_runner``): a GPU run is
+# stopped at the first one before any frame, instead of failing on every packet to the end of the file.
+_CANT_DECODE = GPU_CANT_DECODE_VERDICT.encode()
+_STDERR_PEEK_BYTES = 1 << 16
 _POLL_S = 0.1
 _KILL_WAIT_S = 5.0
 _READER_JOIN_S = 2.0
@@ -97,7 +117,27 @@ class ReadStalledError(FrameDecodeError):
 
 
 class GpuDecodeError(FrameDecodeError):
-    """The GPU decode failed; the worker reruns the file on the CPU."""
+    """The GPU decode failed; the worker reruns the file on the CPU.
+
+    Attributes:
+        stderr_tail: ffmpeg's last lines that say why (``STDERR_LINES`` of them), for the job log; empty when ffmpeg
+            said nothing.
+    """
+
+    def __init__(self, message: str = "", *, stderr_tail: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.stderr_tail = stderr_tail
+
+
+def gpu_failure_lines(exc: BaseException) -> tuple[str, ...]:
+    """ffmpeg's last lines for a GPU decode failure (``GpuDecodeError.stderr_tail``), from the error itself or the
+    one it was raised from (the detector raises the worker's CPU rerun from it); empty for anything else."""
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, GpuDecodeError):
+            return seen.stderr_tail
+        seen = seen.__cause__
+    return ()
 
 
 class GpuReadNothingError(GpuDecodeError):
@@ -107,6 +147,11 @@ class GpuReadNothingError(GpuDecodeError):
 
     def __init__(self, message: str = "the GPU read no frames in that part of the file") -> None:
         super().__init__(message)
+
+
+class NoDecoderError(FrameDecodeError):
+    """ffmpeg has no decoder at all for the file's video (an unknown or protected codec): no device can decode it, so
+    it is the file's failure on a GPU worker too and is never rerun on the CPU, as in previews."""
 
 
 class DecodeTimeoutError(FrameDecodeError):
@@ -211,7 +256,8 @@ def decode_command(
         scale: Decode frames this many times 320×180 (2: 640×360), on the same scaler.
         download_format: The format of the stream's decoded GPU surfaces (``KeyframeThinning.download_format``). On
             CUDA and VAAPI (``_SURFACE_VENDORS``) the frames then stay surfaces until the filter graph downloads them,
-            after ``fps`` has picked the ones kept; None, or any other GPU, lets ffmpeg download each frame itself.
+            after ``fps`` has picked the ones kept (on VAAPI through ``_VAAPI_COPY``, with or without ``fps``); None,
+            or any other GPU, lets ffmpeg download each frame itself.
         ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (its GPU's entry in ``gpu_config``): ffmpeg's threads
             and filter threads, the flags previews put on a GPU worker's FFmpeg. None or 0, and any decode on the CPU
             (a CPU worker, or a GPU worker's CPU rerun), leave ffmpeg its own thread count, as previews do.
@@ -223,6 +269,8 @@ def decode_command(
     decode = hwaccel_decode_args(gpu, gpu_device_path, keep_on_gpu=keep_on_gpu)
     surfaces = keep_on_gpu and decode.active
     video_filter = _scale_filter(download_format if surfaces else None, scale)
+    if surfaces and gpu != "NVIDIA":
+        video_filter = f"{_VAAPI_COPY},{video_filter}"
     if fps:
         video_filter = f"fps={fps},{video_filter}"
     command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info"]
@@ -442,6 +490,24 @@ def _read_frames(stream: BinaryIO, frames: queue.Queue, stop: threading.Event, y
     put(_END)
 
 
+def _said_cant_decode(stderr_file: BinaryIO, offset: int) -> tuple[bool, int]:
+    """Whether ffmpeg has written the decoder's verdict that the GPU can't decode the file, at or after ``offset``.
+
+    Read with ``pread``: ffmpeg writes through this same open file, so moving its position would move ffmpeg's writes.
+
+    Returns:
+        Whether it has, and where the next look starts (the last bytes again: a verdict may be half written).
+    """
+    overlap = len(_CANT_DECODE) - 1
+    while True:
+        data = os.pread(stderr_file.fileno(), _STDERR_PEEK_BYTES, offset)
+        if _CANT_DECODE in data:
+            return True, offset
+        offset += max(0, len(data) - overlap)
+        if len(data) < _STDERR_PEEK_BYTES:
+            return False, offset
+
+
 def _kill(proc: subprocess.Popen) -> None:
     """Kill ffmpeg's whole process group (it runs in its own session) and wait a bounded time for it."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -538,7 +604,9 @@ def run_decode(
     Raises:
         DecodeCancelledError: Cancelled (ffmpeg is killed).
         GpuReadNothingError: The GPU decode exited cleanly without a frame.
-        GpuDecodeError: The GPU decode exited non-zero.
+        NoDecoderError: ffmpeg has no decoder for the file's video, on the GPU or the CPU.
+        GpuDecodeError: The GPU decode exited non-zero, or was stopped at the decoder's verdict that the GPU can't
+            decode the file (before any frame; a CPU decode is never stopped).
         DecodeTimeoutError: The decode (on the GPU or the CPU) ran past ``timeout_s``; ffmpeg is killed.
         FrameDecodeError: ffmpeg couldn't be started, a CPU decode exited non-zero, text detection answered boxes for a
             number of frames it wasn't asked or boxes that aren't four numbers each, or a clean exit wrote a number of
@@ -558,6 +626,7 @@ def run_decode(
     if cancel_check and cancel_check():
         raise DecodeCancelledError(f"cancelled before decoding {name}")
     deadline = freeze.clock() + timeout_s
+    stderr_seen = 0
 
     def flush() -> None:
         planes = np.frombuffer(b"".join(pending), dtype=np.uint8).reshape(
@@ -614,6 +683,14 @@ def run_decode(
                 except queue.Empty:
                     if not reader.is_alive() and frames.empty():
                         break  # the reader died without its end marker (it only returns early once stopped)
+                    if hw_active and not boxes and not pending:
+                        cant_decode, stderr_seen = _said_cant_decode(stderr_file, stderr_seen)
+                        if cant_decode:
+                            # Left alone, ffmpeg fails on every packet to the end of the file (41 s for 4 s of a
+                            # 25-minute AV1 file on a GPU without AV1 decode; 120 s and the time limit in production).
+                            logger.debug("The GPU can't decode {}: its decode is stopped at ffmpeg's verdict", name)
+                            _kill(proc)
+                            break
                     continue
                 if item is _END:
                     break
@@ -652,8 +729,15 @@ def run_decode(
     if returncode != 0:
         lines = [line for line in stderr.decode("utf-8", "replace").splitlines() if not _SAYS_NOTHING_RE.search(line)]
         logger.debug("ffmpeg exited {} decoding {}; its last lines: {}", returncode, name, "\n".join(lines[-8:]))
+        from ...processing.generator import NO_DECODER_SUMMARY, video_has_no_decoder
+
+        if video_has_no_decoder(lines):
+            raise NoDecoderError(NO_DECODER_SUMMARY)
         if hw_active:
-            raise GpuDecodeError(_gpu_failure(returncode, lines, name))
+            said = [line.strip()[:STDERR_LINE_CHARS] for line in lines if not _CLOSING_LINE_RE.search(line)]
+            raise GpuDecodeError(
+                _gpu_failure(returncode, lines, name), stderr_tail=tuple(line for line in said if line)[-STDERR_LINES:]
+            )
         raise FrameDecodeError(_with_ffmpegs_error(f"ffmpeg exited {returncode} decoding {name} on the CPU", lines))
     if not boxes and hw_active:
         raise GpuReadNothingError()
@@ -685,10 +769,13 @@ def _gpu_failure(returncode: int, stderr_lines: list[str], name: str) -> str:
 
     hand_off = _gpu_hand_off(returncode, stderr_lines, stderr_lines, stopped_part_way=False)
     kind = hand_off[0] if hand_off else None
-    if kind == FALLBACK_CODEC:
+    said_cant_decode = any(GPU_CANT_DECODE_VERDICT in line for line in stderr_lines)
+    if said_cant_decode or kind == FALLBACK_CODEC:
         codec = _video_codec(stderr_lines)
         video = f"{codec} video" if codec else "video"
-        return f"the GPU can't decode this file's {video} (ffmpeg exited {returncode})"
+        # No exit code after the decoder's verdict: a run stopped at it (``run_decode``) exits with the kill's.
+        exited = "" if said_cant_decode else f" (ffmpeg exited {returncode})"
+        return f"the GPU can't decode this file's {video}{exited}"
     if kind == FALLBACK_HWACCEL:
         return f"the GPU's decoder hit a hardware or driver error (ffmpeg exited {returncode})"
     if kind == FALLBACK_IO_ERROR:

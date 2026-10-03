@@ -45,7 +45,7 @@ class TestWholeSeason:
         season = authed_page.locator("#inspSeason")
         expect(season.locator(".insp-season-title")).to_have_text("Season 1 · 10 episodes")
         expect(season.locator("#inspSeasonSub")).to_have_text(
-            "8 have an intro · 8 have credits · 1 needs review · 9 not on every server yet"
+            "8 have an intro · 8 have credits · 9 not on every server yet"
         )
         expect(season.locator(".insp-season-head > div:not(.insp-axis)")).to_have_text(
             ["EP", "INTRO", "CREDITS", "FROM", "SERVERS"]
@@ -64,8 +64,8 @@ class TestWholeSeason:
         expect(rows.nth(1).locator(".insp-mini-chip.is-locked")).to_have_text("Locked by you")
         expect(rows.nth(3).locator(".insp-season-time")).to_have_text(["—", "24:53 → end"])
         expect(rows.nth(6).locator(".insp-season-chips")).to_have_text("Not checked yet")
-        expect(rows.nth(9).locator(".insp-season-time")).to_have_text(["3:03 – 3:17", "Needs review"])
-        expect(rows.nth(9).locator(".insp-state-review")).to_have_attribute(
+        expect(rows.nth(9).locator(".insp-season-time")).to_have_text(["3:03 – 3:17", "—"])
+        expect(rows.nth(9).locator(".insp-season-time").nth(1)).to_have_attribute(
             "title", "Sources disagree: chapters, credits_text"
         )
         chip = rows.nth(0).locator(".insp-season-chips .insp-mini-chip")
@@ -112,7 +112,6 @@ class TestWholeSeason:
         expect(publish.locator("xpath=following-sibling::button[contains(@class,'info-icon')]")).to_have_attribute(
             "aria-label", re.compile(r"^Runs Intro & Credits for this season as a job")
         )
-        expect(authed_page.locator("#inspSeasonReview")).to_have_text("1 needs review")
 
         with authed_page.expect_response(lambda r: r.url.endswith("/api/markers/season/publish")):
             publish.click()
@@ -248,7 +247,7 @@ class TestLock:
 
     def test_a_file_with_nothing_decided_has_no_lock(self, authed_page: Page, app_url: str) -> None:
         fx.install(authed_page)
-        _open(authed_page, app_url, fx.REVIEW)
+        _open(authed_page, app_url, fx.UNDECIDED)
         expect(authed_page.locator("#inspLock")).to_have_count(0)
         expect(authed_page.locator("#inspUnlock")).to_have_count(0)
 

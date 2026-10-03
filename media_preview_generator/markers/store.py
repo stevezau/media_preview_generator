@@ -374,6 +374,15 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 LOCKED_BY_USER = "locked by user"
 # The reason a just-unlocked type carries until the next detection run decides it again (`unlock_markers`).
 UNLOCKED_PENDING = "unlocked; the next run decides this type again"
+# The status the rules before 2026-10-02 stored for a type they couldn't settle ("Needs review"). Nothing writes it any
+# more: a stored row reads as no evidence (``_status``) until the file is decided again (``upgrade._migrate_to_v20``
+# queues that for the files on disk), and a decided marker it never pulled stays as it is.
+LEGACY_NEEDS_REVIEW = "needs_review"
+
+
+def _status(raw: str) -> DecisionStatus:
+    """A stored decision's status, the removed ``needs_review`` read as no evidence."""
+    return DecisionStatus.NO_EVIDENCE if raw == LEGACY_NEEDS_REVIEW else DecisionStatus(raw)
 
 
 @dataclass(frozen=True)
@@ -429,6 +438,9 @@ class DecisionRow:
     settings_fingerprint: str
     decided_at: str
     decided_by: tuple[str, ...] = ()
+    # Stored under the removed ``needs_review`` status: ``status`` reads as no evidence, but the row must be rewritten
+    # by the next decision even when nothing else differs, or ``files_with_legacy_review_decisions`` lists it forever.
+    legacy: bool = False
 
 
 def _same_identity_on_disk(path: str, size: int, mtime_ns: int) -> bool:
@@ -438,6 +450,11 @@ def _same_identity_on_disk(path: str, size: int, mtime_ns: int) -> bool:
     except OSError:
         return False
     return (st.st_size, st.st_mtime_ns) == (size, mtime_ns)
+
+
+def _file_name(path: str | None) -> str:
+    """A path's last part, whichever side wrote it (a server on Windows stores backslashes)."""
+    return (path or "").replace("\\", "/").rsplit("/", 1)[-1]
 
 
 @dataclass(frozen=True)
@@ -474,12 +491,17 @@ class PublishStateRow:
 
 @dataclass(frozen=True)
 class FingerprintCheck:
-    """A fingerprinted file for the cache sweep to look for on disk, with the identity its row had when listed."""
+    """A fingerprinted file for the cache sweep to look for on disk, with the identity its row had when listed.
+
+    ``missing_long`` says the file has been marked missing (``mark_missing``) for at least as long as the sweep asked
+    about.
+    """
 
     file_id: int
     canonical_path: str
     size: int
     mtime_ns: int
+    missing_long: bool = False
 
 
 class PreviousDecision(NamedTuple):
@@ -504,7 +526,7 @@ class PreviousDecision(NamedTuple):
 
 
 # The statuses of a decision of ours (a type turned off, or left to a server's own marker, is none).
-_JUDGED = (DecisionStatus.DECIDED.value, DecisionStatus.NEEDS_REVIEW.value, DecisionStatus.NO_EVIDENCE.value)
+_JUDGED = (DecisionStatus.DECIDED.value, DecisionStatus.NO_EVIDENCE.value, LEGACY_NEEDS_REVIEW)
 
 
 class EndPictureKey(NamedTuple):
@@ -841,7 +863,7 @@ class MarkerStore:
     @staticmethod
     def _judged(conn: sqlite3.Connection, file_id: int) -> list[tuple[str, tuple[int, int] | None, tuple[str, ...]]]:
         """A file's decisions of ours per type: its decided marker's times and sources, or None and no sources
-        (Needs review, no evidence)."""
+        (no evidence)."""
         markers = {r["type"]: r for r in conn.execute("SELECT * FROM markers WHERE file_id=?", (file_id,)).fetchall()}
         judged = []
         for r in conn.execute("SELECT type, status FROM decisions WHERE file_id=?", (file_id,)).fetchall():
@@ -993,26 +1015,36 @@ class MarkerStore:
             ).fetchall()
         return [self._file(r) for r in rows]
 
-    def files_in_review(self) -> list[str]:
-        """Canonical paths of the files with at least one marker type in Needs review, sorted; files missing from disk
-        (``mark_missing``) are left out until they come back."""
+    def files_with_legacy_review_decisions(self) -> list[str]:
+        """Canonical paths of the files with a marker type still stored under the removed "Needs review" status
+        (:data:`LEGACY_NEEDS_REVIEW`), sorted: the decide-again job decides them under today's rules. Files missing
+        from disk (``mark_missing``) are left out until they come back."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT DISTINCT f.canonical_path FROM decisions d JOIN files f ON f.id = d.file_id "
                 "WHERE d.status=? AND f.missing_since IS NULL ORDER BY f.canonical_path",
-                (DecisionStatus.NEEDS_REVIEW.value,),
+                (LEGACY_NEEDS_REVIEW,),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
-    def files_waiting_for_other_versions(self) -> list[str]:
+    def files_waiting_for_other_versions(self, detector: str | None = None, version: int = 0) -> list[str]:
         """Canonical paths of the files whose last publish to a server waits for its item's other versions to agree
-        (``outcomes.VERSIONS_WAITING``), sorted; files missing from disk are left out."""
+        (``outcomes.VERSIONS_WAITING``), sorted; files missing from disk are left out.
+
+        Args:
+            detector: The name a re-run of them is recorded under (``record_version_reruns``); None lists them all.
+            version: With ``detector``, files already taken for it at this version are left out.
+
+        Returns:
+            The paths.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT DISTINCT f.canonical_path FROM publish_state p JOIN files f ON f.id = p.file_id "
+                "LEFT JOIN version_reruns r ON r.file_id = f.id AND r.detector = ? "
                 "WHERE p.status='waiting' AND substr(p.message, 1, ?) = ? AND f.missing_since IS NULL "
-                "ORDER BY f.canonical_path",
-                (len(VERSIONS_WAITING), VERSIONS_WAITING),
+                "AND (r.version IS NULL OR r.version < ?) ORDER BY f.canonical_path",
+                (detector, len(VERSIONS_WAITING), VERSIONS_WAITING, version),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
@@ -1068,8 +1100,8 @@ class MarkerStore:
     ) -> list[str]:
         """Canonical paths of the files with an answer stored under ``sources`` from a version older than ``version``
         that a decision rests on (an unlocked decided type of ``types`` whose marker names one of ``sources``; with
-        ``checks_others``, whatever decided it) or that an undecided type of ``types`` was decided without (Needs
-        review, no evidence), sorted; files marked missing, and files already taken for ``detector`` at ``version``
+        ``checks_others``, whatever decided it) or that an undecided type of ``types`` was decided without (no
+        evidence), sorted; files marked missing, and files already taken for ``detector`` at ``version``
         (``record_version_reruns``), are left out.
 
         Args:
@@ -1109,7 +1141,7 @@ class MarkerStore:
                     version_step,
                     version,
                     version,
-                    DecisionStatus.NEEDS_REVIEW.value,
+                    LEGACY_NEEDS_REVIEW,
                     DecisionStatus.NO_EVIDENCE.value,
                     DecisionStatus.DECIDED.value,
                     int(checks_others),
@@ -1123,7 +1155,7 @@ class MarkerStore:
     ) -> list[str]:
         """Canonical paths of the files not recorded as decided under ``version`` of the decision rules (``detector``
         in ``version_reruns``) with a type those rules could decide differently from what is stored, sorted: an
-        unlocked type with a stored answer of its type, decided, in Needs review, not found (its answers failed a
+        unlocked type with a stored answer of its type, decided, not found (its answers failed a
         check a rule may have changed) or left to the servers' own markers, or one holding a marker carried over from
         a replaced file (``carried_by`` among its deciding sources: the carry-over is a rule too); not one whose
         detection is off. Files marked missing are left out.
@@ -1150,8 +1182,7 @@ class MarkerStore:
         found = {
             r["canonical_path"]
             for r in rows
-            if DecisionStatus(r["status"]) is not DecisionStatus.DISABLED
-            or is_kept_own(DecisionStatus.DISABLED, r["reason"])
+            if _status(r["status"]) is not DecisionStatus.DISABLED or is_kept_own(DecisionStatus.DISABLED, r["reason"])
         }
         return sorted(found)
 
@@ -1159,6 +1190,10 @@ class MarkerStore:
         """Canonical paths of the files whose one-version Plex item holds, of a type they decided, times of ours other
         than decided, sorted; files marked missing, and files already taken for ``detector`` at ``version``, are left
         out. Only a Plex publish records an item's versions (``item_versions``).
+
+        The item's one file has to be this file, by name: a file another one replaced keeps its record of the item,
+        which then shows the new file's times. An item's files are the server's own paths, under another folder than
+        this app's wherever the server has a path mapping, so only the names are compared.
 
         Until 2026-09-25 such an item kept its earlier times when a decision moved by under 2 s
         (``publishers.base.agreed_across_versions``); the pipeline sends it the decided times on the file's next run
@@ -1173,7 +1208,8 @@ class MarkerStore:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT f.canonical_path, i.markers_json, m.type, m.start_ms, m.end_ms FROM publish_state p "
+                "SELECT f.canonical_path, i.markers_json, m.type, m.start_ms, m.end_ms, "
+                "json_extract(iv.files_json, '$[0]') AS item_file FROM publish_state p "
                 "JOIN files f ON f.id = p.file_id "
                 "JOIN item_publish_state i ON i.server_id = p.server_id AND i.item_id = p.item_id "
                 "JOIN item_versions iv ON iv.server_id = i.server_id AND iv.item_id = i.item_id "
@@ -1185,6 +1221,8 @@ class MarkerStore:
             ).fetchall()
         decided: dict[tuple[str, str], dict[MarkerType, tuple[int, int]]] = {}
         for r in rows:
+            if _file_name(r["item_file"]) != _file_name(r["canonical_path"]):
+                continue
             decided.setdefault((r["canonical_path"], r["markers_json"]), {})[MarkerType(r["type"])] = (
                 r["start_ms"],
                 r["end_ms"],
@@ -1603,8 +1641,8 @@ class MarkerStore:
         """Store one user-locked marker; detection never replaces it.
 
         The low-level primitive: it writes the ``markers`` row only. The Inspector editor calls
-        :meth:`save_user_markers`, which also records the decision so the file doesn't keep reading as
-        "Needs review" until the next run.
+        :meth:`save_user_markers`, which also records the decision so the file doesn't keep its old answer
+        until the next run.
         """
         now = self._now()
         with self._tx() as conn:
@@ -1625,7 +1663,7 @@ class MarkerStore:
 
         The whole save lands or none of it does, and it lands before any server is contacted (plan ruling P-R1), so a
         publish that fails can never lose the edit. The decision row is rewritten to
-        :data:`LOCKED_BY_USER` so the Inspector and the Season view stop saying "Needs review" straight away, with the
+        :data:`LOCKED_BY_USER` so the Inspector and the Season view show the lock straight away, with the
         same words the next detection run writes for a locked type. The proposal the lock replaces is dropped for the
         same reason: a run's own decision for a locked type carries none, so keeping it would make the row flip back
         on the next run.
@@ -1652,7 +1690,7 @@ class MarkerStore:
         return saved
 
     def unlock_markers(self, file_id: int, types: Iterable[MarkerType]) -> frozenset[MarkerType]:
-        """Drop the user's lock on these types and send each back to "Needs review" until the next run decides it.
+        """Drop the user's lock on these types and leave each undecided until the next run decides it.
 
         The stored decision can't be restored here — a locked type's row says "locked by user", not what detection had
         found — so the type is left with no answer and a stale fingerprint, which makes the next run re-decide and
@@ -1679,7 +1717,7 @@ class MarkerStore:
                 conn.execute(
                     "INSERT OR REPLACE INTO decisions (file_id, type, status, reason, proposed_start_ms, "
                     "proposed_end_ms, settings_fingerprint, decided_at, decided_by) VALUES (?,?,?,?,NULL,NULL,'',?,'[]')",
-                    (file_id, mtype.value, DecisionStatus.NEEDS_REVIEW.value, UNLOCKED_PENDING, now),
+                    (file_id, mtype.value, DecisionStatus.NO_EVIDENCE.value, UNLOCKED_PENDING, now),
                 )
         return frozenset(unlocked)
 
@@ -1699,13 +1737,14 @@ class MarkerStore:
         return {
             MarkerType(r["type"]): DecisionRow(
                 MarkerType(r["type"]),
-                DecisionStatus(r["status"]),
+                _status(r["status"]),
                 r["reason"],
                 r["proposed_start_ms"],
                 r["proposed_end_ms"],
                 r["settings_fingerprint"],
                 r["decided_at"],
                 tuple(json.loads(r["decided_by"] or "[]")),
+                legacy=r["status"] == LEGACY_NEEDS_REVIEW,
             )
             for r in rows
         }
@@ -1870,7 +1909,7 @@ class MarkerStore:
             ).fetchone()
         return r is not None and self._made_as(r, algorithm, length_s)
 
-    def fingerprint_checks(self, limit: int) -> list[FingerprintCheck]:
+    def fingerprint_checks(self, limit: int, missing_for: timedelta | None = None) -> list[FingerprintCheck]:
         """The next files with a cached fingerprint for the cache sweep to look for on disk (nothing is marked).
 
         In file id order from just after the cursor ``finish_fingerprint_checks`` left, wrapping round to the lowest id
@@ -1878,6 +1917,8 @@ class MarkerStore:
 
         Args:
             limit: Most files to return.
+            missing_for: How long a file has to have been marked missing for ``FingerprintCheck.missing_long``; None
+                says it of no file.
 
         Returns:
             Each file with its row's identity, in that order.
@@ -1885,8 +1926,8 @@ class MarkerStore:
         if limit <= 0:
             return []
         query = (
-            "SELECT p.file_id, f.canonical_path, f.size, f.mtime_ns FROM fingerprints p JOIN files f ON f.id = p.file_id "
-            "WHERE p.file_id {} ? GROUP BY p.file_id ORDER BY p.file_id LIMIT ?"
+            "SELECT p.file_id, f.canonical_path, f.size, f.mtime_ns, f.missing_since FROM fingerprints p "
+            "JOIN files f ON f.id = p.file_id WHERE p.file_id {} ? GROUP BY p.file_id ORDER BY p.file_id LIMIT ?"
         )
         with self._lock:
             row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_FINGERPRINT_CHECKED_UP_TO,)).fetchone()
@@ -1894,7 +1935,19 @@ class MarkerStore:
             batch = self._conn.execute(query.format(">"), (after, limit)).fetchall()
             if len(batch) < limit:
                 batch += self._conn.execute(query.format("<="), (after, limit - len(batch))).fetchall()
-        return [FingerprintCheck(r["file_id"], r["canonical_path"], r["size"], r["mtime_ns"]) for r in batch]
+        marked_before = None if missing_for is None else self._clock() - missing_for
+        return [
+            FingerprintCheck(
+                r["file_id"],
+                r["canonical_path"],
+                r["size"],
+                r["mtime_ns"],
+                missing_long=marked_before is not None
+                and r["missing_since"] is not None
+                and datetime.fromisoformat(r["missing_since"]) <= marked_before,
+            )
+            for r in batch
+        ]
 
     def finish_fingerprint_checks(self, checked_up_to: int, gone: Iterable[FingerprintCheck]) -> int:
         """Record a sweep's checks in one transaction: drop the cache of the files found gone, and move the cursor.

@@ -547,9 +547,9 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
 
 
 def _decide_again_after_upgrade(config_dir: str) -> None:
-    """Queue the one job that decides the files in Intro & Credits' Needs review (and those waiting for their item's
-    other versions, those whose intro rests on season audio, and those whose intro or credits rests on an online answer
-    and a server's own marker alone) again, while the settings upgrade's request for it is open
+    """Queue the one job that decides the files Intro & Credits' old rules left in Needs review (and those waiting for
+    their item's other versions, those whose intro rests on season audio, and those whose intro or credits rests on an
+    online answer and a server's own marker alone) again, while the settings upgrade's request for it is open
     (``upgrade.DECIDE_AGAIN_KEY``).
 
     Runs after the restart requeue, once the job manager can start jobs, so a revived job is found and not queued twice
@@ -573,7 +573,7 @@ def _decide_again_after_upgrade(config_dir: str) -> None:
             settings.delete(DECIDE_AGAIN_KEY)
     except Exception as exc:
         logger.warning(
-            "Couldn't queue the Intro & Credits job that decides the files in Needs review again ({}: {}); the "
+            "Couldn't queue the Intro & Credits job that decides files again after the update ({}: {}); the "
             "next start tries again",
             type(exc).__name__,
             exc,

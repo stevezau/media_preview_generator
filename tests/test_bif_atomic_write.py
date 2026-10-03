@@ -204,3 +204,42 @@ class TestModeAndOwnerKept:
 
         assert [c.args[1:] for c in chown.call_args_list] == [(4242, 4343), (-1, 4343)]
         assert sorted(os.listdir(out_dir)) == ["index-sd.bif"]
+
+
+class TestForcedToDisk:
+    """The BIF's data is on disk before its name is: a power loss can't leave a 0-byte BIF in place."""
+
+    def test_fsyncs_the_temp_file_before_renaming_it_into_place(self, tmp_path, config):
+        out_dir = tmp_path / "Indexes"
+        out_dir.mkdir()
+        bif = out_dir / "index-sd.bif"
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fsync(fd):
+            synced = os.fstat(fd)
+            events.append(("fsync", synced.st_ino, synced.st_size))
+            real_fsync(fd)
+
+        def replace(src, dst):
+            events.append(("replace", os.stat(src).st_ino, str(dst)))
+            real_replace(src, dst)
+
+        with patch.object(generator.os, "fsync", side_effect=fsync), patch.object(generator.os, "replace", replace):
+            generate_bif(str(bif), _frames(tmp_path / "frames", 3), config)
+
+        written = os.stat(bif)
+        assert events == [("fsync", written.st_ino, written.st_size), ("replace", written.st_ino, str(bif))]
+        assert _image_count(bif) == 3
+
+    def test_bif_still_published_when_fsync_is_not_supported(self, tmp_path, config):
+        out_dir = tmp_path / "Indexes"
+        out_dir.mkdir()
+        bif = out_dir / "index-sd.bif"
+
+        with patch.object(generator.os, "fsync", side_effect=OSError(22, "Invalid argument")) as fsync:
+            generate_bif(str(bif), _frames(tmp_path / "frames", 3), config)
+
+        fsync.assert_called_once()
+        assert sorted(os.listdir(out_dir)) == ["index-sd.bif"]
+        assert _image_count(bif) == 3

@@ -13,7 +13,6 @@ from ..markers.models import MarkerType
 from ..markers.store import MarkerStore
 
 NOT_CHECKED = "Not checked yet"
-NEEDS_REVIEW = "Needs review"
 BOTH = "Intro + credits"
 CREDITS_SET = "Credits set"
 CREDITS_ONLY = "Credits only"
@@ -63,8 +62,7 @@ def markers_state(store: MarkerStore, canonical_path: str) -> dict:
         canonical_path: The file's local path.
 
     Returns:
-        ``state`` (``not_checked``, ``needs_review``, ``both``, ``credits``, ``intro`` or ``none``) and its
-        ``label``. Needs review wins over whatever else was decided: that file is waiting on the user.
+        ``state`` (``not_checked``, ``both``, ``credits``, ``intro`` or ``none``) and its ``label``.
     """
     rec = store.get_file(canonical_path)
     if rec is None:
@@ -72,8 +70,6 @@ def markers_state(store: MarkerStore, canonical_path: str) -> dict:
     decisions = store.get_decisions(rec.id)
     if not decisions:
         return {"state": "not_checked", "label": NOT_CHECKED}
-    if any(d.status is DecisionStatus.NEEDS_REVIEW for d in decisions.values()):
-        return {"state": "needs_review", "label": NEEDS_REVIEW}
     decided = {t for t, d in decisions.items() if d.status is DecisionStatus.DECIDED}
     intro, credits = MarkerType.INTRO in decided, MarkerType.CREDITS in decided
     if intro and credits:

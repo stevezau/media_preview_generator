@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
+from datetime import timedelta
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -54,6 +55,10 @@ SWEEP_MIN_GAP_S = 3600.0
 SWEEP_STUCK_S = 600.0
 # A sweep checks no further file once this long has passed; the next one goes on from there.
 SWEEP_BUDGET_S = 60.0
+# A file marked missing this long loses its fingerprints whatever its folder says: a deleted season takes its folder
+# with it, which the folder rule can't tell from an unmounted disk, so those fingerprints stayed for good. A month, so
+# a disk that comes back sooner doesn't fingerprint its files again.
+MISSING_KEEP = timedelta(days=30)
 # How long an ffmpeg that didn't list its muxers (timed out, couldn't start, exited with an error) stays unknown before
 # it is asked again.
 CHROMAPRINT_RETRY_S = 600.0
@@ -450,13 +455,26 @@ def ensure_fingerprint(
         return points
 
 
+def _nothing_at(path: str) -> bool:
+    """Whether nothing is at the path, not even a symlink; a read that fails any other way (a stale handle) says no. A
+    file back on disk can still carry its missing mark: the missing-file sweep clears them a batch at a time."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def sweep_fingerprint_cache(
     store: MarkerStore, *, limit: int = MAX_SWEEP_CHECKS, budget_s: float = SWEEP_BUDGET_S
 ) -> int:
     """Drop cached fingerprints of files gone from disk (a quality upgrade renames a file; a show is deleted).
 
     Checks the next ``limit`` fingerprinted files, those checked longest ago first, until ``budget_s`` has passed (a slow
-    network mount); the next sweep goes on from the first file left unchecked. A file whose folder is missing is kept.
+    network mount); the next sweep goes on from the first file left unchecked. A file whose folder is missing is kept,
+    until it has been marked missing for ``MISSING_KEEP`` and nothing is at its path.
     Its ``files`` row stays either way: the missing-file sweep that runs before this one on the same thread
     (``missing.sweep_missing_files``) marks it missing once the file's disk roots show it gone.
 
@@ -472,12 +490,14 @@ def sweep_fingerprint_cache(
     folders: dict[str, bool] = {}
     gone: list[FingerprintCheck] = []
     checked_up_to = None
-    for check in store.fingerprint_checks(limit):
+    for check in store.fingerprint_checks(limit, missing_for=MISSING_KEEP):
         if _monotonic() >= deadline:
             break
         # A stalled hard-mounted share blocks these stats, which is why start_fingerprint_sweep runs this on its own
         # thread.
-        if gone_from_disk([check.canonical_path], folders):
+        if gone_from_disk([check.canonical_path], folders) or (
+            check.missing_long and _nothing_at(check.canonical_path)
+        ):
             gone.append(check)
         checked_up_to = check.file_id
     if checked_up_to is None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import signal
 import sqlite3
 import subprocess
@@ -39,7 +38,7 @@ from media_preview_generator.markers.publishers.plex_db import (
     plex_db_path,
 )
 from media_preview_generator.markers.settings import ServerMarkersSettings
-from media_preview_generator.servers.base import Library, ServerConfig, ServerType
+from media_preview_generator.servers.base import ServerConfig, ServerType
 
 T = MarkerType
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "markers"
@@ -674,9 +673,42 @@ class TestMultiVersion:
         [None, {}, {T.INTRO: Marker(T.INTRO, 14_000, 40_000, ("chapters",))}],
         ids=["undecided", "decided-without-intro", "disagrees"],
     )
-    def test_a_type_not_every_version_agrees_on_is_not_written(self, tmp_path, sibling):
+    def test_the_first_version_holding_a_type_decides_it_without_waiting(self, tmp_path, sibling):
+        # The calling file is the item's first version (lowest media_item_id): a sibling never checked, decided
+        # without the type, or disagreeing by more than 2 s neither holds the write back nor changes its times.
         db, pub = self._write(tmp_path, sibling)
-        assert pub.write("7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01 - 1080p.mkv") == []
+        ours = pub.write("7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01 - 1080p.mkv")
+        assert ours == [INTRO]
+        assert _rows(db, "SELECT text, time_offset, end_time_offset FROM taggings") == [("intro", 11_000, 37_000)]
+        assert [json.loads(r[0])["pv:intros"] for r in _rows(db, "SELECT extra_data FROM media_parts ORDER BY id")] == [
+            INTRO_PAYLOAD,
+            INTRO_PAYLOAD,
+        ]
+
+    def test_a_disagreeing_first_version_wins_over_the_calling_file(self, tmp_path):
+        # Plex numbered the 2160p version first; its intro is 3 s later than the calling 1080p file's.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=tuple(reversed(self.PARTS)))
+        first = {T.INTRO: Marker(T.INTRO, 14_000, 40_000, ("chapters",))}
+        pub = _publisher(tmp_path, folder, sibling_markers=lambda path: first if path.endswith("2160p.mkv") else None)
+        ours = pub.write("7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01 - 1080p.mkv")
+        assert [(m.type, m.start_ms, m.end_ms) for m in ours] == [(T.INTRO, 14_000, 40_000)]
+        assert _rows(db, "SELECT text, time_offset, end_time_offset FROM taggings") == [("intro", 14_000, 40_000)]
+
+    def test_a_type_only_a_sibling_holds_is_written_from_it(self, tmp_path):
+        # The calling file found nothing (NO_EVIDENCE) and takes its old credits off; the item still shows the version
+        # that has an intro. (With nothing decided and nothing of ours on record, write doesn't read Plex at all: the
+        # sibling's own run already left its markers on every part.)
+        db, pub = self._write(tmp_path, {T.INTRO: INTRO})
+        ours = pub.write(
+            "7", [], previous=[CREDITS_FINAL], duration_ms=DUR, canonical_path="/data/tv/S01E01 - 1080p.mkv"
+        )
+        assert ours == [INTRO]
+        assert _rows(db, "SELECT text, time_offset, end_time_offset FROM taggings") == [("intro", 11_000, 37_000)]
+
+    def test_no_version_holding_a_type_leaves_it_off(self, tmp_path):
+        db, pub = self._write(tmp_path, {})
+        assert pub.write("7", [], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01 - 1080p.mkv") == []
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
 
     def test_stacked_parts_in_one_version_are_refused(self, tmp_path):
@@ -1034,10 +1066,11 @@ class TestMultiVersionMatrix:
         return folder, _make_db(folder, parts=tuple((f, None) for f in files))
 
     @pytest.mark.parametrize(
-        ("d_start", "d_end", "agrees"),
+        ("d_start", "d_end", "kept"),
         [
             (2_000, 0, True),
             (0, 2_000, True),
+            (0, -2_000, True),
             (-2_000, -2_000, True),
             (2_001, 0, False),
             (-2_001, 0, False),
@@ -1045,47 +1078,71 @@ class TestMultiVersionMatrix:
             (0, -2_001, False),
         ],
     )
-    def test_agreement_is_within_2s_on_both_edges(self, tmp_path, d_start, d_end, agrees):
+    def test_what_the_item_shows_stays_within_2s_of_the_first_versions_times(self, tmp_path, d_start, d_end, kept):
+        # A (the first version) decides the intro; what this app already left on the item is B's times. Within 2 s on
+        # both edges they stay (versions don't rewrite each other); past it, A's times are written.
         folder, db = self._db(tmp_path, (self.A, self.B))
-        sibling = {T.INTRO: Marker(T.INTRO, INTRO.start_ms + d_start, INTRO.end_ms + d_end, ("chapters",))}
-        pub = _publisher(tmp_path, folder, sibling_markers=lambda p: sibling if p == self.B else None)
-        ours = _write_one(pub, [INTRO], path=self.A)
-        if agrees:
-            assert ours == [INTRO]
-            assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(11_000, 37_000)]
-            assert _part_markers(db, 2, "pv:intros") == [{"startTimeOffset": 11_000, "endTimeOffset": 37_000}]
-        else:
-            assert ours == []
-            assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+        shown = Marker(T.INTRO, INTRO.start_ms + d_start, INTRO.end_ms + d_end, ("chapters",))
+        pub = _publisher(tmp_path, folder, sibling_markers=lambda p: {T.INTRO: shown} if p == self.B else None)
+        ours = _write_one(pub, [INTRO], previous=[shown], path=self.A)
+        want = shown if kept else INTRO
+        assert ours == [want]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(want.start_ms, want.end_ms)]
+        assert _part_markers(db, 2, "pv:intros") == [{"startTimeOffset": want.start_ms, "endTimeOffset": want.end_ms}]
+
+    def test_a_lone_holder_shows_exactly_what_it_decided(self, tmp_path):
+        # The tolerance exists so versions don't rewrite each other; with no other version holding the type there is
+        # nothing to keep the item's old times for (observed: one-version items kept intros ending at 113.0 s after
+        # the decision moved to 110.5-112.4 s).
+        folder, db = self._db(tmp_path, (self.A, self.B))
+        shown = Marker(T.INTRO, INTRO.start_ms + 500, INTRO.end_ms, ("chapters",))
+        pub = _publisher(tmp_path, folder, sibling_markers=lambda p: {} if p == self.B else None)
+        assert _write_one(pub, [INTRO], previous=[shown], path=self.A) == [INTRO]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(11_000, 37_000)]
 
     @pytest.mark.parametrize(
-        "sibling",
+        ("sibling", "written"),
         [
-            {T.INTRO: INTRO, T.CREDITS: CREDITS_FINAL},  # sibling has credits we don't: credits just aren't desired
-            {T.INTRO: INTRO, T.RECAP: Marker(T.RECAP, 0, 9_000, ("chapters",))},  # Plex can't show recaps
+            ({T.INTRO: INTRO, T.CREDITS: CREDITS_FINAL}, [INTRO, CREDITS_FINAL]),  # its credits are the item's too
+            ({T.INTRO: INTRO, T.RECAP: Marker(T.RECAP, 0, 9_000, ("chapters",))}, [INTRO]),  # Plex can't show recaps
         ],
         ids=["extra-supported-type", "extra-unsupported-type"],
     )
-    def test_each_type_is_judged_on_its_own(self, tmp_path, sibling):
+    def test_each_type_is_judged_on_its_own(self, tmp_path, sibling, written):
         folder, db = self._db(tmp_path, (self.A, self.B))
         pub = _publisher(tmp_path, folder, sibling_markers=lambda p: sibling if p == self.B else None)
-        assert _write_one(pub, [INTRO], path=self.A) == [INTRO]
-        assert _rows(db, "SELECT text FROM taggings") == [("intro",)]
+        assert _write_one(pub, [INTRO], path=self.A) == written
+        assert _rows(db, "SELECT text FROM taggings ORDER BY text") == sorted((m.type.value,) for m in written)
 
-    def test_every_type_must_agree(self, tmp_path):
-        folder, db = self._db(tmp_path, (self.A, self.B))
+    def test_each_type_takes_the_first_version_holding_it(self, tmp_path):
+        # Plex numbered B first. Both hold both types: B's credits (3 s later than A's) win, and the intros are equal.
+        folder, db = self._db(tmp_path, (self.B, self.A))
         late_credits = Marker(T.CREDITS, CREDITS_FINAL.start_ms + 3_000, DUR, ("chapters",))
         sibling = {T.INTRO: INTRO, T.CREDITS: late_credits}
         pub = _publisher(tmp_path, folder, sibling_markers=lambda p: sibling if p == self.B else None)
-        assert _write_one(pub, [INTRO, CREDITS_FINAL], path=self.A) == [INTRO]
-        assert _rows(db, "SELECT text FROM taggings") == [("intro",)]
+        assert _write_one(pub, [INTRO, CREDITS_FINAL], path=self.A) == [INTRO, late_credits]
+        assert _rows(db, "SELECT text, time_offset FROM taggings ORDER BY text") == [
+            ("credits", late_credits.start_ms - 2_000),
+            ("intro", 11_000),
+        ]
 
-    def test_every_other_version_must_agree(self, tmp_path):
-        folder, db = self._db(tmp_path, (self.A, self.B, self.C))
-        decided = {self.B: {T.INTRO: INTRO}, self.C: {T.INTRO: Marker(T.INTRO, 20_000, 46_000, ("chapters",))}}
+    def test_the_lowest_media_item_id_wins_among_three_versions(self, tmp_path):
+        folder, db = self._db(tmp_path, (self.C, self.A, self.B))
+        c_intro = Marker(T.INTRO, 20_000, 46_000, ("chapters",))
+        decided = {self.B: {T.INTRO: INTRO}, self.C: {T.INTRO: c_intro}}
         pub = _publisher(tmp_path, folder, sibling_markers=decided.get)
-        assert _write_one(pub, [INTRO], path=self.A) == []
-        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+        assert _write_one(pub, [INTRO], path=self.A) == [c_intro]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(20_000, 46_000)]
+
+    def test_a_locked_version_outranks_an_unlocked_first_version(self, tmp_path):
+        # The user's own times beat a detector's wherever they sit in Plex's order: A (first) read the intro 3 s
+        # from where the user locked it on B, and the item shows B's.
+        folder, db = self._db(tmp_path, (self.A, self.B))
+        locked_b = Marker(T.INTRO, 14_000, 40_000, ("user",), locked=True)
+        pub = _publisher(tmp_path, folder, sibling_markers=lambda p: {T.INTRO: locked_b} if p == self.B else None)
+        ours = _write_one(pub, [INTRO], path=self.A)
+        assert [(m.start_ms, m.end_ms, m.locked) for m in ours] == [(14_000, 40_000, False)]  # A's own lock flag
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(14_000, 40_000)]
 
     def test_removal_publishes_when_the_other_version_is_decided_empty(self, tmp_path):
         folder, db = self._db(tmp_path, (self.A, self.B))
@@ -1133,10 +1190,12 @@ class TestMultiVersionMatrix:
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 1
 
 
-class TestAVersionGoneFromDisk:
-    """A version Plex still lists (it hasn't scanned since) whose file is gone from every mapped disk isn't waited for.
+class TestAnUndecidedVersionNeverHoldsTheItemBack:
+    """A version with no decision takes no part, wherever its file is: on disk and never checked, deleted (Plex lists
+    a deleted file until its next scan), or on a disk that isn't mounted. Its own run, when it comes, publishes the
+    item again under the same rule.
 
-    Plex's parts carry Plex's own paths; only the path-mapped local paths are looked at.
+    Plex's parts carry Plex's own paths; only the path-mapped local paths are looked up.
     """
 
     @pytest.fixture
@@ -1153,18 +1212,18 @@ class TestAVersionGoneFromDisk:
         return db, _publisher(tmp_path, folder, mappings=mappings, sibling_markers=lambda _path: None)
 
     @pytest.mark.parametrize(
-        ("disks_mapped", "b_on", "b_folder_removed", "written"),
+        ("disks_mapped", "b_on", "b_folder_removed"),
         [
-            (("disk1",), None, False, True),  # deleted: its folder is still there
-            (("disk1",), "disk1", False, False),  # on disk, never checked: waited for
-            (("disk1",), None, True, False),  # its folder is missing too: an unmounted disk looks like this
-            (("disk1", "disk2"), None, False, True),
-            (("disk1", "disk2"), "disk2", False, False),  # moved to the other disk
+            (("disk1",), None, False),  # deleted: its folder is still there
+            (("disk1",), "disk1", False),  # on disk, never checked
+            (("disk1",), None, True),  # its folder is missing too: an unmounted disk looks like this
+            (("disk1", "disk2"), None, False),
+            (("disk1", "disk2"), "disk2", False),  # moved to the other disk
         ],
         ids=["deleted", "unchecked", "folder-missing", "deleted-from-both-disks", "on-the-other-disk"],
     )
-    def test_only_a_version_on_no_mapped_disk_stops_counting(
-        self, tmp_path, disks, disks_mapped, b_on, b_folder_removed, written
+    def test_the_decision_is_written_whatever_became_of_the_other_version(
+        self, tmp_path, disks, disks_mapped, b_on, b_folder_removed
     ):
         if b_on:
             (tmp_path / b_on / "tv" / "B.mkv").write_bytes(b"b")
@@ -1173,64 +1232,14 @@ class TestAVersionGoneFromDisk:
             (tmp_path / "disk1" / "tv").rmdir()
         db, pub = self._publisher(tmp_path, disks_mapped)
         path = str(tmp_path / "disk1" / "tv" / "A.mkv")
-        assert _write_one(pub, [INTRO], path=path) == ([INTRO] if written else [])
-        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == int(written)
-        # Only a version still to be checked makes the job try the file again.
-        assert pub.last_unchecked_versions is (not written)
+        assert _write_one(pub, [INTRO], path=path) == [INTRO]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(11_000, 37_000)]
+        assert not hasattr(pub, "last_unchecked_versions")  # nothing for the job to wait on or retry
 
-    def test_a_version_on_a_disk_whose_mount_went_stale_is_waited_for(self, tmp_path, disks):
-        # The architecture review's case: the season folder is on disk1, and disk2 (which really holds B) shows only
-        # its empty mount point.
-        shutil.rmtree(tmp_path / "disk2")
-        (tmp_path / "disk2").mkdir()
-        db, pub = self._publisher(tmp_path, ("disk1", "disk2"))
-        assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == []
-        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
-        assert pub.last_unchecked_versions is True
-
-    @pytest.mark.parametrize("root", ["mapping", "library"])
-    def test_a_version_in_a_flat_library_at_its_mount_point_is_waited_for(self, tmp_path, root):
-        # The files sit right in the disk's root folder, which stays (empty) once the disk is unmounted, so a missing
-        # file there proves nothing.
-        mount_point = tmp_path / "movies4k"
-        mount_point.mkdir()
-        (mount_point / "A.mkv").write_bytes(b"a")
-        folder = tmp_path / "Plex Media Server"
-        if root == "mapping":
-            _make_db(folder, parts=(("/plexmedia/A.mkv", None), ("/plexmedia/B.mkv", None)))
-            pub = _publisher(
-                tmp_path,
-                folder,
-                mappings=[{"plex_prefix": "/plexmedia", "local_prefix": str(mount_point)}],
-                sibling_markers=lambda _path: None,
-            )
-        else:
-            _make_db(folder, parts=((str(mount_point / "A.mkv"), None), (str(mount_point / "B.mkv"), None)))
-            pub = _publisher(
-                tmp_path,
-                folder,
-                libraries=[Library("1", "4K Movies", (str(mount_point),))],
-                sibling_markers=lambda _path: None,
-            )
-        assert _write_one(pub, [INTRO], path=str(mount_point / "A.mkv")) == []
-        assert pub.last_unchecked_versions is True
-
-    def test_a_disk_that_doesnt_answer_in_time_counts_as_still_holding_the_version(self, tmp_path, disks, monkeypatch):
-        # The check runs while the item's lock is held: a stalled network share must not hold every publish to it.
-        stalled = threading.Event()
-        monkeypatch.setattr(plex_db, "GONE_CHECK_TIMEOUT_S", 0.05)
-        monkeypatch.setattr(plex_db, "gone_from_disk", lambda *_a, **_kw: stalled.wait(5) or True)
-        try:
-            db, pub = self._publisher(tmp_path, ("disk1",))
-            assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == []
-            assert pub.last_unchecked_versions is True
-        finally:
-            stalled.set()
-
-    def test_a_decided_version_that_disagrees_is_not_unchecked(self, tmp_path, disks):
+    def test_a_decided_version_that_disagrees_takes_the_first_versions_times(self, tmp_path, disks):
         (tmp_path / "disk1" / "tv" / "B.mkv").write_bytes(b"b")
         folder = tmp_path / "Plex Media Server"
-        _make_db(folder, parts=(("/plexmedia/tv/A.mkv", None), ("/plexmedia/tv/B.mkv", None)))
+        db = _make_db(folder, parts=(("/plexmedia/tv/A.mkv", None), ("/plexmedia/tv/B.mkv", None)))
         late = {T.INTRO: Marker(T.INTRO, INTRO.start_ms + 5_000, INTRO.end_ms, ("chapters",))}
         pub = _publisher(
             tmp_path,
@@ -1238,8 +1247,8 @@ class TestAVersionGoneFromDisk:
             mappings=[{"plex_prefix": "/plexmedia", "local_prefix": str(tmp_path / "disk1")}],
             sibling_markers=lambda _path: late,
         )
-        assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == []
-        assert pub.last_unchecked_versions is False
+        assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == [INTRO]
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(11_000, 37_000)]
 
 
 class TestCapabilityDetails:
@@ -2224,7 +2233,7 @@ class TestOptimizedVersions:
     OPTIMIZED = "/data/tv/Plex Versions/Optimized for TV/S01E01.mp4"
 
     @pytest.mark.parametrize(
-        ("proxy_type", "path", "waits"),
+        ("proxy_type", "path", "ordinary"),
         [
             (42, OPTIMIZED, False),
             (0, OPTIMIZED, True),
@@ -2233,19 +2242,15 @@ class TestOptimizedVersions:
         ],
         ids=["optimized", "proxy-type-0", "proxy-type-outside-plex-versions", "plex-versions-inside-a-folder-name"],
     )
-    def test_optimized_copies_are_rewritten_but_never_block(self, tmp_path, proxy_type, path, waits):
+    def test_optimized_copies_are_rewritten_but_never_looked_up(self, tmp_path, proxy_type, path, ordinary):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", None), (path, None)))
         _exec(db, "UPDATE media_items SET proxy_type=? WHERE id=2", proxy_type)
         seen = []
         pub = _publisher(tmp_path, folder, sibling_markers=lambda p: seen.append(p))
-        if waits:  # an ordinary version that was never decided: intro isn't desired
-            assert _write_one(pub, [INTRO]) == []
-            assert seen == [path]
-            assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
-            return
         assert _write_one(pub, [INTRO]) == [INTRO]
-        assert seen == []
+        # Only an ordinary version's decision is asked for (an undecided one takes no part); a transcode's never is.
+        assert seen == ([path] if ordinary else [])
         assert [json.loads(r[0])["pv:intros"] for r in _rows(db, "SELECT extra_data FROM media_parts ORDER BY id")] == [
             INTRO_PAYLOAD,
             INTRO_PAYLOAD,
@@ -3038,8 +3043,9 @@ class TestItemDesiredSet:
         parts = [json.loads(r[0]) if r[0] else {} for r in _rows(db, "SELECT extra_data FROM media_parts ORDER BY id")]
         return rows, parts
 
-    def test_a_version_added_later_that_disagrees_removes_the_first_version_s_credits(self, tmp_path):
-        # t8rr2/added_version.py: A publishes alone; B is added to the item with different credits.
+    def test_a_version_added_later_that_disagrees_keeps_the_first_version_s_credits(self, tmp_path):
+        # t8rr2/added_version.py: A publishes alone; B is added to the item with different credits. A came first in
+        # Plex's order, so its credits stay and B's part gets them too.
         decided = {self.A: {T.INTRO: INTRO, T.CREDITS: CREDITS_FINAL}}
         db, pub = self._item(tmp_path, (self.A,), decided)
         item_row = _write_one(pub, [INTRO, CREDITS_FINAL], path=self.A)
@@ -3049,25 +3055,29 @@ class TestItemDesiredSet:
         decided[self.B] = {T.INTRO: INTRO, T.CREDITS: self.EARLY_CREDITS}
         # B's run: previous is the item row (what this app last left on the item, from any file).
         item_row = _write_one(pub, [INTRO, self.EARLY_CREDITS], previous=item_row, path=self.B)
-        assert item_row == [INTRO]
+        assert item_row == [INTRO, CREDITS_FINAL]
         rows, parts = self._rows_and_parts(db)
-        assert [(r[2], r[3]) for r in rows] == [("intro", 11_000)]
-        assert all("pv:credits" not in extra and extra["pv:intros"] == INTRO_PAYLOAD for extra in parts)
+        assert [(r[2], r[3]) for r in rows] == [("credits", 1_297_000), ("intro", 11_000)]
+        assert len(parts) == 2
+        assert all(
+            extra["pv:credits"] == CREDITS_FINAL_PAYLOAD and extra["pv:intros"] == INTRO_PAYLOAD for extra in parts
+        )
         # A's next run sees the same item and returns the same set, writing nothing.
         before = self._rows_and_parts(db)
-        assert _write_one(pub, [INTRO, CREDITS_FINAL], previous=item_row, path=self.A) == [INTRO]
+        assert _write_one(pub, [INTRO, CREDITS_FINAL], previous=item_row, path=self.A) == [INTRO, CREDITS_FINAL]
         assert self._rows_and_parts(db) == before
 
-    def test_partial_agreement_then_the_other_type(self, tmp_path):
-        # t8rr2/partial.py: agree on intro, disagree on credits; later intro goes to review and credits agree.
+    def test_the_other_versions_disagreement_changes_nothing_then_a_type_comes_off_everywhere(self, tmp_path):
+        # t8rr2/partial.py: agree on intro, B's credits move 19 s; later both intros go to review (nobody holds the
+        # type) and the credits agree again.
         decided = {self.B: {T.INTRO: INTRO, T.CREDITS: CREDITS_FINAL}}
         db, pub = self._item(tmp_path, (self.A, self.B), decided)
         item_row = _write_one(pub, [INTRO, CREDITS_FINAL], path=self.A)
         assert item_row == [INTRO, CREDITS_FINAL]
         decided[self.B] = {T.INTRO: INTRO, T.CREDITS: self.EARLY_CREDITS}
         item_row = _write_one(pub, [INTRO, CREDITS_FINAL], previous=item_row, path=self.A)
-        assert item_row == [INTRO]
-        assert [r[2] for r in self._rows_and_parts(db)[0]] == ["intro"]
+        assert item_row == [INTRO, CREDITS_FINAL]  # A is first: its credits stay
+        assert [r[2] for r in self._rows_and_parts(db)[0]] == ["credits", "intro"]
         decided[self.B] = {T.CREDITS: CREDITS_FINAL}  # both versions' intros in review, credits agree again
         item_row = _write_one(pub, [CREDITS_FINAL], previous=item_row, path=self.A)
         assert item_row == [CREDITS_FINAL]
@@ -3075,14 +3085,14 @@ class TestItemDesiredSet:
         assert [(r[2], r[3]) for r in rows] == [("credits", 1_297_000)]  # our intro row is gone
         assert all("pv:intros" not in extra and extra["pv:credits"] == CREDITS_FINAL_PAYLOAD for extra in parts)
 
-    def test_an_undecided_version_s_types_are_removed_when_they_are_provably_ours(self, tmp_path):
+    def test_a_type_no_version_holds_any_more_is_removed_where_it_is_provably_ours(self, tmp_path):
         decided = {self.B: {T.INTRO: INTRO}}
         db, pub = self._item(tmp_path, (self.A, self.B), decided, native_credits=True)
         plex_credits = _insert_taggings(db, (7, 563, 0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA))[0]
         item_row = _write_one(pub, [INTRO], path=self.A)
         assert item_row == [INTRO]
         decided[self.B] = None  # re-decided file became undecided (identity changed, not probed yet)
-        assert _write_one(pub, [INTRO], previous=item_row, path=self.A) == []
+        assert _write_one(pub, [], previous=item_row, path=self.A) == []  # A's new cut has no intro either
         rows, parts = self._rows_and_parts(db)
         assert rows == [(plex_credits, 0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA)]  # Plex's own row stays
         assert all("pv:intros" not in extra and extra["pv:credits"] == NATIVE_CREDITS for extra in parts)
@@ -3091,8 +3101,8 @@ class TestItemDesiredSet:
         decided = {self.B: {T.INTRO: INTRO, T.CREDITS: CREDITS_FINAL}}
         db, pub = self._item(tmp_path, (self.A, self.B), decided)
         _write_one(pub, [INTRO, CREDITS_FINAL], path=self.A)
-        decided[self.B] = {T.INTRO: INTRO, T.CREDITS: self.EARLY_CREDITS}
-        assert _write_one(pub, [INTRO, CREDITS_FINAL], previous=None, path=self.A) == [INTRO]
+        decided[self.B] = {T.INTRO: INTRO}  # no version holds credits any more
+        assert _write_one(pub, [INTRO], previous=None, path=self.A) == [INTRO]
         assert [r[2] for r in self._rows_and_parts(db)[0]] == ["credits", "intro"]  # nothing provably ours to remove
 
     def test_an_atomic_failure_keeps_the_item_row_true_so_a_later_run_removes_our_rows(self, tmp_path, monkeypatch):
@@ -3287,20 +3297,24 @@ class TestAgreeingVersionsDoNotPingPong:
         assert _rows(db, "SELECT time_offset FROM taggings") == [(1_298_500,)]
 
     @pytest.mark.parametrize(
-        ("mine", "sibling"),
+        ("mine", "sibling", "kept"),
         [
-            (1_300_500, 1_301_500),  # what we left (1_299_000) is 2.5 s from the other version
-            (1_301_500, 1_300_500),  # ... or 2.5 s from the calling file
+            (1_300_500, 1_301_500, True),  # what we left (1_299_000) is 1.5 s from the first version's decision
+            (1_301_500, 1_300_500, False),  # ... or 2.5 s from it: the first version's times are written
         ],
-        ids=["far-from-the-other-version", "far-from-the-calling-file"],
+        ids=["within-2s-of-the-first-version", "past-2s-of-the-first-version"],
     )
-    def test_the_calling_file_s_times_win_once_ours_no_longer_agree_with_every_version(self, tmp_path, mine, sibling):
+    def test_what_the_item_shows_gives_way_once_the_first_versions_times_moved_past_2s(
+        self, tmp_path, mine, sibling, kept
+    ):
+        # Only the first version's times count: how far the other version sits from what the item shows is no reason
+        # to rewrite it, since the item never shows that version's times while the first one holds the type.
         mine_credits = Marker(T.CREDITS, mine, DUR, ("chapters",))
         decided = {self.B: {T.CREDITS: Marker(T.CREDITS, sibling, DUR, ("chapters",))}}
         db, pub = self._item(tmp_path, decided)
         item_row = _write_one(pub, [mine_credits], previous=[self.CREDITS_A], path=self.A)
-        assert item_row == [mine_credits]
-        assert _rows(db, "SELECT time_offset FROM taggings") == [(mine - 2_000,)]
+        assert item_row == [self.CREDITS_A if kept else mine_credits]
+        assert _rows(db, "SELECT time_offset FROM taggings") == [((1_299_000 if kept else mine) - 2_000,)]
 
     def test_previous_of_another_type_or_unknown_is_never_kept(self, tmp_path):
         decided = {self.B: {T.INTRO: INTRO}}
@@ -3332,9 +3346,8 @@ class TestOneVersionShowsWhatWasDecided:
         assert _rows(db, "SELECT text, time_offset, end_time_offset FROM taggings") == [("intro", 6_000, 112_075)]
         assert sql_log.count("COMMIT") == 2
 
-    def test_a_version_gone_from_disk_takes_no_part_so_the_decision_is_written(self, tmp_path, monkeypatch):
-        # B was never decided and its file is gone (Plex lists a deleted file until its next scan): A stands alone.
-        monkeypatch.setattr(plex_db, "gone_from_disk", lambda *_a, **_kw: True)
+    def test_an_undecided_version_takes_no_part_so_the_decision_is_written(self, tmp_path):
+        # B was never decided (deleted, or never checked): A stands alone, and shows exactly what it decided.
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, parts=((self.A, None), (self.B, None)))
         pub = _publisher(tmp_path, folder, sibling_markers={}.get)
@@ -3375,7 +3388,8 @@ class TestOwnPreviousAfterTheItemChanged:
             for r in _rows(db, "SELECT extra_data FROM media_parts ORDER BY id")
         ]
 
-    def test_merge_removes_the_moved_part_s_own_credits_key(self, tmp_path):
+    def test_merge_replaces_the_moved_part_s_own_credits_key_with_the_item_s(self, tmp_path):
+        # After the merge A (media item 1) comes first: its credits are the item's, on B's part too.
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, parts=((self.A, None),))
         _exec(db, "INSERT INTO metadata_items (id, metadata_type, title) VALUES (8, 4, 'Ep dup')")
@@ -3395,9 +3409,13 @@ class TestOwnPreviousAfterTheItemChanged:
         ours = _write_one(
             pub, [self.INTRO_REAL, self.CREDITS_B], previous=item7, own_previous=b_on_8, path=self.B, item_id="7"
         )
-        assert ours == [self.INTRO_REAL]
-        assert _rows(db, "SELECT text FROM taggings WHERE metadata_item_id=7") == [("intro",)]
-        assert self._keys(db) == [["pv:intros"], ["pv:intros"]]
+        assert ours == [self.INTRO_REAL, self.CREDITS_A]
+        assert _rows(db, "SELECT text, time_offset FROM taggings WHERE metadata_item_id=7 ORDER BY text") == [
+            ("credits", self.CREDITS_A.start_ms - 2_000),
+            ("intro", self.INTRO_REAL.start_ms),
+        ]
+        assert self._keys(db) == [["pv:credits", "pv:intros"], ["pv:credits", "pv:intros"]]
+        assert _part_markers(db, 2, "pv:credits")[0]["startTimeOffset"] == self.CREDITS_A.start_ms - 2_000
 
     @pytest.mark.parametrize(
         ("own_previous", "key_after"),
@@ -3458,7 +3476,8 @@ class TestServedTimesDecideWhatIsAlreadyThere:
     CREDITS = Marker(T.CREDITS, 1_295_324, DUR - 1_000, ("chapters",))  # final for A, not final for B (1.5 s longer)
 
     def test_a_final_flag_flip_from_another_runtime_does_not_rewrite(self, tmp_path, sql_log):
-        # rr-final/flag_pingpong.py: intros disagree, credits agree; each caller's runtime flips the credits' final flag.
+        # rr-final/flag_pingpong.py: intros disagree (A's, the first version's, is the item's), credits agree; each
+        # caller's runtime flips the credits' final flag.
         folder = tmp_path / "Plex Media Server"
         _make_db(folder, parts=((self.A, None), (self.B, None)))
         intro_a, intro_b = INTRO, Marker(T.INTRO, 61_000, 97_000, ("chapters",))
@@ -3471,8 +3490,11 @@ class TestServedTimesDecideWhatIsAlreadyThere:
         for run in range(8):
             path, intro, duration = (self.A, intro_a, DUR) if run % 2 == 0 else (self.B, intro_b, DUR + 1_500)
             item_row = _write_one(pub, [intro, self.CREDITS], previous=item_row, duration_ms=duration, path=path)
-            assert item_row == [self.CREDITS]
-            assert _served(Path(plex_db_path(str(folder)))) == [(T.CREDITS, 1_295_324, DUR - 1_000)]
+            assert item_row == [intro_a, self.CREDITS]
+            assert _served(Path(plex_db_path(str(folder)))) == [
+                (T.INTRO, 11_000, 37_000),
+                (T.CREDITS, 1_295_324, DUR - 1_000),
+            ]
         assert sql_log.count("COMMIT") == 1
 
     STORED_NOT_FINAL = (

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -847,7 +848,7 @@ class TestStartJobAsyncRetryBranchPublisherStatuses:
             "1 file(s) still weren't indexed by the media server after 2 retries, so no more retries are queued. "
             "The next scheduled scan will pick them up."
         )
-        assert any(line.endswith(f"INFO - {gave_up}") for line in last_logs), (
+        assert any(line.endswith(f"WARNING - {gave_up}") for line in last_logs), (
             f"the last retry must say it gave up; got {last_logs!r}"
         )
         assert not any("retried automatically" in line or "slow backoff" in line for line in all_logs), all_logs
@@ -2197,3 +2198,574 @@ class TestRetryReasonPersistedOnSpawn:
             "stale_paths": 1,
             "pending_by_server": {},
         }, f"Stale-path case must produce exactly one stale path with no other categories; got {reason!r}"
+
+
+# ---------------------------------------------------------------------------
+# How a job and its retry chain end: badge, message, and which files a retry runs
+# ---------------------------------------------------------------------------
+
+
+def _all_resolved(count: int, input_by_canonical: dict | None = None) -> dict:
+    payload = {
+        "unresolved_paths": [],
+        "skipped_paths": [],
+        "resolved_count": count,
+        "total_paths": count,
+        "path_hints": [],
+    }
+    if input_by_canonical is not None:
+        payload["input_by_canonical"] = input_by_canonical
+    return payload
+
+
+def _chain_head_id(jm, job_id: str) -> str:
+    return (jm.get_job(job_id).config or {}).get("parent_job_id") or job_id
+
+
+def _retries_of(jm, head_id: str) -> list:
+    return sorted(
+        (j for j in jm.get_all_jobs() if (j.config or {}).get("parent_job_id") == head_id),
+        key=lambda j: j.config["retry_attempt"],
+    )
+
+
+def _plex_row(status: str) -> list[dict]:
+    return [{"server_id": "plex-1", "server_name": "Plex Main", "server_type": "plex", "status": status}]
+
+
+@contextmanager
+def _chain_ends(jm):
+    """Record how each chain end left the chain head: ``(outcome, status, error, successes)``, the successes
+    being those an exhausted chain was told of (None for a completed one: its status says what they were).
+
+    Read at the moment the chain ends, not afterwards: under the sync-thread shim a retry runs nested inside the
+    job that queued it, so that job's own completion lands after its chain has already ended (in production the
+    retry starts on its own thread, after its delay).
+    """
+    ends: list[tuple] = []
+    real = jm.upsert_retry_chain_job
+
+    def record(**kwargs):
+        job = real(**kwargs)
+        if kwargs["outcome"] in ("completed", "exhausted"):
+            successes = kwargs.get("successes", 0) if kwargs["outcome"] == "exhausted" else None
+            ends.append((kwargs["outcome"], job.status.value, job.error, successes))
+        return job
+
+    with patch.object(jm, "upsert_retry_chain_job", side_effect=record):
+        yield ends
+
+
+@pytest.fixture()
+def no_retry_wait():
+    """Retries start at once instead of counting down their backoff."""
+    with (
+        patch("media_preview_generator.plex_client.trigger_plex_partial_scan", return_value=[]),
+        patch("media_preview_generator.web.routes.job_runner._is_force_fire_now_set", return_value=True),
+    ):
+        yield
+
+
+class TestFilesNotFoundBesideSuccesses:
+    """Nightly scan c091d637: 0 generated, 115,831 already existed, 6 not found, 2 failed. It ended red "Failed …
+    check path mapping configuration", though working path mappings had found 115,831 files."""
+
+    def test_scan_with_a_few_files_not_found_ends_amber_with_a_plain_message(self, app, tmp_path):
+        from media_preview_generator.web.jobs import JobStatus, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            get_job_manager().record_file_result(
+                kwargs["job_id"], "/data/tv/Gone/S01E01.mkv", "skipped_file_not_found", "file gone", "Library scan"
+            )
+            return {"outcome": {"skipped_bif_exists": 115831, "skipped_file_not_found": 6, "failed": 2}}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            _start_job_async(job.id, config_overrides=None)
+            finished = jm.get_job(job.id)
+            logs = jm.get_logs(job.id) or []
+            retries = _retries_of(jm, job.id)
+
+        assert finished.status is JobStatus.COMPLETED
+        summary = "2 file(s) failed. 6 file(s) weren't found on disk. 115,831 of 115,839 file(s) were fine"
+        assert finished.error == summary
+        # Said once in the job log, not clause by clause and then again joined.
+        assert [line.split(" - ", 1)[1] for line in logs if "weren't found on disk" in line or "failed" in line] == [
+            summary,
+            f"Job {job.id} completed with warnings: {summary}",
+        ], logs
+        assert not any("path mapping" in line for line in logs), logs
+        # A scan's own not-found files have no webhook path to resubmit: no retry is queued for them.
+        assert retries == []
+
+    def test_scan_where_nothing_succeeded_still_fails_and_points_at_path_mappings(self, app, tmp_path):
+        from media_preview_generator.web.jobs import JobStatus, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            return {"outcome": {"skipped_file_not_found": 6}}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            _start_job_async(job.id, config_overrides=None)
+            finished = jm.get_job(job.id)
+
+        assert finished.status is JobStatus.FAILED
+        assert finished.error == "6 of 6 items skipped (file not found locally) — check path mapping configuration"
+
+
+class TestRetryRunsOnlyTheUnresolvedFiles:
+    """Production chains 861c0385 ("10 files": 6 done, 4 not found, every retry re-ran all 10 and the chain ended
+    "did not register 10 file(s)") and f928a863 ("Retry: 18 files" ran 6)."""
+
+    @pytest.mark.parametrize("mapped", [False, True], ids=["same-path", "webhook-path-mapped"])
+    def test_one_done_one_not_found_retries_just_the_missing_file(self, app, tmp_path, no_retry_wait, mapped):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        raw = {"done": "/data/tv/Show/S01E01.mkv", "missing": "/data/tv/Show/S01E02.mkv"}
+        prefix = "/mnt/disk3" if mapped else ""
+        canonical = {key: prefix + path for key, path in raw.items()}
+        run_calls: list[list[str]] = []
+
+        def resolution(keys):
+            # The same-path cell also covers a payload without the map (file rows keyed by the webhook's own path).
+            return _all_resolved(len(keys), {canonical[k]: raw[k] for k in keys} if mapped else None)
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(list(config.webhook_paths or []))
+            jm = get_job_manager()
+            head_id = _chain_head_id(jm, kwargs["job_id"])
+            if len(run_calls) == 1:
+                jm.record_file_result(head_id, canonical["done"], "skipped_bif_exists", "", "Checking")
+                jm.record_file_result(head_id, canonical["missing"], "skipped_file_not_found", "file gone", "Checking")
+                return {
+                    "outcome": {"skipped_bif_exists": 1, "skipped_file_not_found": 1},
+                    "webhook_resolution": resolution(["done", "missing"]),
+                }
+            jm.record_file_result(head_id, canonical["missing"], "generated", "", "[GPU 0]")
+            return {"outcome": {"generated": 1}, "webhook_resolution": resolution(["missing"])}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="2 files", config={"source": "sonarr"})
+            with _chain_ends(jm) as ends:
+                _start_job_async(
+                    job.id,
+                    config_overrides={
+                        "webhook_paths": list(raw.values()),
+                        "webhook_retry_count": 3,
+                        "webhook_retry_delay": 30,
+                    },
+                )
+            head_logs = jm.get_logs(job.id) or []
+            retries = _retries_of(jm, job.id)
+
+        assert run_calls == [list(raw.values()), [raw["missing"]]]
+        assert [r.library_name for r in retries] == ["Retry: 1 file"]
+        assert retries[0].config["path_count"] == 1
+        assert retries[0].config["retry_reason"] == {"unresolved": 0, "stale_paths": 1, "pending_by_server": {}}
+        assert any(line.endswith("1 file(s) weren't found on disk. 1 path(s) sent for retry") for line in head_logs), (
+            head_logs
+        )
+        assert not any("2 path(s)" in line or "path mapping" in line for line in head_logs), head_logs
+        # The job's own log is for its user: job bookkeeping stays out of it (the retry is announced in plain words).
+        assert any("(retry 1 of 3)" in line for line in head_logs), head_logs
+        assert not any("Created job" in line or "chain is active" in line for line in head_logs), head_logs
+        assert ends == [("completed", "completed", None, None)]
+
+    def test_a_scans_own_not_found_files_do_not_make_its_retry_run_again(self, app, tmp_path, no_retry_wait):
+        """Scan 55b098af had 27 files not on disk and 1 not indexed. Its retries ran the 1 file, but each one saw
+        the scan's 27 not-found rows, resubmitted its own path and the chain ran out. The retry of the indexed-late
+        file ends the chain; the scan's not-found files stay on its row as a warning, not wiped to green.
+        """
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[list[str]] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(list(getattr(config, "webhook_paths", None) or []))
+            jm = get_job_manager()
+            head_id = _chain_head_id(jm, kwargs["job_id"])
+            if len(run_calls) == 1:
+                jm.record_file_result(head_id, "/data/tv/Old/S01E01.mkv", "skipped_bif_exists", "", "Library scan")
+                jm.record_file_result(
+                    head_id, "/data/tv/Gone/S01E01.mkv", "skipped_file_not_found", "file gone", "Library scan"
+                )
+                jm.record_file_result(
+                    head_id, late, "skipped_not_indexed", "", "[GPU 0]", servers=_plex_row("skipped_not_indexed")
+                )
+                return {"outcome": {"skipped_bif_exists": 1, "skipped_file_not_found": 1, "skipped_not_indexed": 1}}
+            jm.record_file_result(
+                head_id, late, "skipped_bif_exists", "", "Checking", servers=_plex_row("skipped_output_exists")
+            )
+            return {"outcome": {"skipped_bif_exists": 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            with _chain_ends(jm) as ends:
+                _start_job_async(job.id, config_overrides=None)
+            head_logs = jm.get_logs(job.id) or []
+            retries = _retries_of(jm, job.id)
+
+        assert run_calls == [[], [late]]
+        assert [r.config["retry_reason"] for r in retries] == [
+            {"unresolved": 0, "stale_paths": 0, "pending_by_server": {"Plex Main": 1}}
+        ]
+        assert any(line.endswith("Plex Main pending × 1, retry scheduled in 60s (retry 1 of 3)") for line in head_logs)
+        assert ends == [("completed", "completed", "1 file(s) weren't found on disk", None)]
+
+
+class TestExhaustedChainEnd:
+    """An exhausted chain is red only when none of its files succeeded, and counts only the files still missing."""
+
+    GAVE_UP_ONE = (
+        "1 file(s) still weren't indexed by the media server after 2 retries, so no more retries are queued. "
+        "The next scheduled scan will pick them up."
+    )
+
+    def _run_chain(self, app, first_rows: dict[str, str], retry_rows: dict[int, dict[str, str]], retry_count: int):
+        """Run a webhook job whose files end as ``first_rows`` ({path: outcome}), then ``retry_rows[attempt]``."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        run_calls: list[list[str]] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(list(config.webhook_paths or []))
+            jm = get_job_manager()
+            head_id = _chain_head_id(jm, kwargs["job_id"])
+            rows = first_rows if len(run_calls) == 1 else retry_rows[len(run_calls) - 1]
+            outcome: dict[str, int] = {}
+            for path, result in rows.items():
+                servers = _plex_row("skipped_not_in_library") if result == "skipped_not_indexed" else None
+                jm.record_file_result(head_id, path, result, "", "[GPU 0]", servers=servers)
+                outcome[result] = outcome.get(result, 0) + 1
+            return {"outcome": outcome, "webhook_resolution": _all_resolved(len(rows))}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name=f"{len(first_rows)} files", config={"source": "sonarr"})
+            with _chain_ends(jm) as ends:
+                _start_job_async(
+                    job.id,
+                    config_overrides={
+                        "webhook_paths": list(first_rows),
+                        "webhook_retry_count": retry_count,
+                        "webhook_retry_delay": 30,
+                    },
+                )
+            logs = {r.config["retry_attempt"]: jm.get_logs(r.id) or [] for r in _retries_of(jm, job.id)}
+        return run_calls, ends, logs
+
+    @pytest.mark.parametrize("still", ["skipped_file_not_found", "skipped_not_indexed"])
+    @pytest.mark.parametrize(
+        ("done_outcome", "status", "successes"),
+        [("skipped_bif_exists", "completed", 1), ("generated", "completed", 1), (None, "failed", 0)],
+        ids=["one-already-existed-amber", "one-generated-amber", "nothing-succeeded-red"],
+    )
+    def test_chain_head_badge_and_count(self, app, tmp_path, no_retry_wait, still, done_outcome, status, successes):
+        a, b = "/data/tv/Show/S01E01.mkv", "/data/tv/Show/S01E02.mkv"
+        first = {a: done_outcome, b: still} if done_outcome else {b: still}
+
+        run_calls, ends, _logs = self._run_chain(app, first, {1: {b: still}, 2: {b: still}}, retry_count=2)
+
+        assert run_calls == [list(first), [b], [b]]
+        assert ends == [
+            ("exhausted", status, f"{self.GAVE_UP_ONE} Check the Files panel for the affected paths.", successes)
+        ]
+
+    def test_a_file_a_retry_finished_counts_as_a_success_of_the_chain(self, app, tmp_path, no_retry_wait):
+        """Chain ca328838: 8 files none indexed at first, 3 finished on retries, 5 never were. The head's own run
+        had no successes, but the chain did: amber, counting the files still waiting."""
+        a, b = "/data/tv/Show/S01E01.mkv", "/data/tv/Show/S01E02.mkv"
+        waiting = "skipped_not_indexed"
+
+        run_calls, ends, _logs = self._run_chain(
+            app, {a: waiting, b: waiting}, {1: {a: "generated", b: waiting}, 2: {b: waiting}}, retry_count=2
+        )
+
+        assert run_calls == [[a, b], [a, b], [b]]
+        assert ends == [
+            ("exhausted", "completed", f"{self.GAVE_UP_ONE} Check the Files panel for the affected paths.", 1)
+        ]
+
+    @pytest.mark.parametrize(
+        ("done_outcome", "status"),
+        [("generated", "completed"), (None, "failed")],
+        ids=["one-generated-amber", "nothing-succeeded-red"],
+    )
+    def test_a_chain_whose_retry_failed_its_file_is_red_only_when_nothing_succeeded(
+        self, app, tmp_path, no_retry_wait, done_outcome, status
+    ):
+        """A webhook's file wasn't found, the retry found it and FFmpeg failed: nothing is left to retry, so the chain
+        ends "completed" with the failure as its leftover. With no success in the chain that is a total failure."""
+        a, b = "/data/tv/Show/S01E01.mkv", "/data/tv/Show/S01E02.mkv"
+        first = {a: done_outcome, b: "skipped_file_not_found"} if done_outcome else {b: "skipped_file_not_found"}
+
+        run_calls, ends, _logs = self._run_chain(app, first, {1: {b: "failed"}}, retry_count=2)
+
+        assert run_calls == [list(first), [b]]
+        assert ends == [("completed", status, "1 file(s) failed", None)]
+
+    def test_the_gave_up_line_is_the_chains_one_warning(self, app, tmp_path, no_retry_wait):
+        """The last retry says once, as a WARNING, that it gave up; the earlier retry doesn't say it at all."""
+        b = "/data/tv/Show/S01E02.mkv"
+        waiting = "skipped_not_indexed"
+
+        _runs, _ends, logs = self._run_chain(app, {b: waiting}, {1: {b: waiting}, 2: {b: waiting}}, 2)
+
+        # complete_job's own "Job <id> completed with warnings: …" app-log line repeats the text at INFO.
+        said = {
+            attempt: [
+                line.split("] ", 1)[1]
+                for line in lines
+                if "still weren't indexed" in line and "completed with warnings" not in line
+            ]
+            for attempt, lines in logs.items()
+        }
+        assert said == {1: [], 2: [f"WARNING - {self.GAVE_UP_ONE}"]}
+        warnings = [line for line in logs[2] if "WARNING" in line and "still weren't indexed" in line]
+        assert len(warnings) == 1, warnings
+
+
+class TestRetryRowPastTheFileResultsCap:
+    """Scan 55b098af: retries 2 and 3 found the late file's preview done, but the chain head's Files-panel bucket
+    for "already existed" was full, their row was dropped, and the stale "not indexed" row kept the chain retrying
+    until it failed."""
+
+    def test_a_retrys_result_is_recorded_on_a_full_bucket_and_ends_the_chain(self, app, tmp_path, no_retry_wait):
+        from media_preview_generator.processing.generator import ProcessingResult, _notify_file_result
+        from media_preview_generator.web.jobs import JobManager, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            # Through the job's own file-result callback, as the workers report: the retry's rows must reach the
+            # chain head's file past its cap.
+            run_calls.append(kwargs["job_id"])
+            if len(run_calls) == 1:
+                for i in range(4):
+                    _notify_file_result(f"/data/tv/Old/S01E0{i}.mkv", ProcessingResult.SKIPPED_BIF_EXISTS, "", "Scan")
+                _notify_file_result(
+                    late, ProcessingResult.SKIPPED_NOT_INDEXED, "", "[GPU 0]", servers=_plex_row("skipped_not_indexed")
+                )
+                return {"outcome": {"skipped_bif_exists": 4, "skipped_not_indexed": 1}}
+            _notify_file_result(
+                late, ProcessingResult.SKIPPED_BIF_EXISTS, "", "Checking", servers=_plex_row("skipped_output_exists")
+            )
+            return {"outcome": {"skipped_bif_exists": 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            patch.object(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 2),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            with _chain_ends(jm) as ends:
+                _start_job_async(job.id, config_overrides=None)
+            latest = {r["file"]: r["outcome"] for r in jm.get_file_results(job.id) if r["file"]}
+
+        assert len(run_calls) == 2, f"the scan plus one retry expected; got {len(run_calls)} runs"
+        assert latest[late] == "skipped_bif_exists"
+        assert ends == [("completed", "completed", None, None)]
+
+    @pytest.mark.parametrize(
+        ("failed", "not_found", "warning"),
+        [
+            (3, 0, "3 file(s) failed"),
+            (0, 3, "3 file(s) weren't found on disk"),
+            (4, 3, "4 file(s) failed. 3 file(s) weren't found on disk"),
+            (2, 1, "2 file(s) failed. 1 file(s) weren't found on disk"),  # at and under the cap of 2
+        ],
+    )
+    def test_the_chains_leftover_warning_counts_files_whose_rows_the_cap_dropped(
+        self, app, tmp_path, no_retry_wait, failed, not_found, warning
+    ):
+        """The Files panel lists 5,000 rows per outcome; a scan with more failures than that still failed them all."""
+        from media_preview_generator.processing.generator import ProcessingResult, _notify_file_result
+        from media_preview_generator.web.jobs import JobManager, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs["job_id"])
+            if len(run_calls) == 1:
+                _notify_file_result("/data/tv/Old/S01E01.mkv", ProcessingResult.SKIPPED_BIF_EXISTS, "", "Scan")
+                for i in range(failed):
+                    _notify_file_result(f"/data/tv/Bad/S01E0{i}.mkv", ProcessingResult.FAILED, "boom", "[GPU 0]")
+                for i in range(not_found):
+                    _notify_file_result(
+                        f"/data/tv/Gone/S01E0{i}.mkv", ProcessingResult.SKIPPED_FILE_NOT_FOUND, "", "Scan"
+                    )
+                _notify_file_result(
+                    late, ProcessingResult.SKIPPED_NOT_INDEXED, "", "[GPU 0]", servers=_plex_row("skipped_not_indexed")
+                )
+                return {
+                    "outcome": {
+                        "skipped_bif_exists": 1,
+                        "failed": failed,
+                        "skipped_file_not_found": not_found,
+                        "skipped_not_indexed": 1,
+                    }
+                }
+            _notify_file_result(
+                late, ProcessingResult.SKIPPED_BIF_EXISTS, "", "Checking", servers=_plex_row("skipped_output_exists")
+            )
+            return {"outcome": {"skipped_bif_exists": 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            patch.object(JobManager, "_FILE_RESULTS_PER_OUTCOME_CAP", 2),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            with _chain_ends(jm) as ends:
+                _start_job_async(job.id, config_overrides=None)
+
+        assert len(run_calls) == 2, f"the scan plus one retry expected; got {len(run_calls)} runs"
+        assert ends == [("completed", "completed", warning, None)]
+
+
+class TestJobStartedLoggedOnce:
+    """Every job log had two "Job started" lines: one when the job took its slot, one when its files began."""
+
+    def test_one_job_started_line(self, app, tmp_path):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            kwargs["on_dispatch_start"]()
+            return {"outcome": {"generated": 1}}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="Movies", config={})
+            _start_job_async(job.id, config_overrides=None)
+            logs = jm.get_logs(job.id) or []
+
+        assert len([line for line in logs if line.endswith("INFO - Job started")]) == 1, logs
+
+
+class TestJobCreationIsLoggedForTheAppNotTheJob:
+    """A job that queues a retry creates it on its own thread. That belongs in app.log (a job that never starts leaves
+    no other trace there), not in the Logs panel of the job that queued it."""
+
+    def test_a_retry_queued_by_a_job_is_in_the_app_log_and_in_no_jobs_own_log(self, app, tmp_path, no_retry_wait):
+        from loguru import logger
+
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs["job_id"])
+            jm = get_job_manager()
+            done = len(run_calls) > 1
+            outcome = "skipped_bif_exists" if done else "skipped_not_indexed"
+            row = _plex_row("skipped_output_exists" if done else "skipped_not_indexed")
+            jm.record_file_result(_chain_head_id(jm, kwargs["job_id"]), late, outcome, "", "[GPU 0]", servers=row)
+            return {"outcome": {outcome: 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        app_log: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: app_log.append((m.record["level"].name, m.record["message"])), level="INFO")
+        try:
+            with (
+                app.app_context(),
+                patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            ):
+                jm = get_job_manager()
+                job = jm.create_job(library_name="TV Shows", server_name="Plex", config={})
+                _start_job_async(job.id, config_overrides=None)
+                (retry,) = _retries_of(jm, job.id)
+                job_logs = (jm.get_logs(job.id) or []) + (jm.get_logs(retry.id) or [])
+        finally:
+            logger.remove(sink)
+
+        assert len(run_calls) == 2, f"the scan plus one retry expected; got {len(run_calls)} runs"
+        assert [message for level, message in app_log if level == "INFO" and message.startswith("Created ")] == [
+            f"Created previews job {job.id} for library TV Shows (server=Plex)",
+            f"Created previews job {retry.id} for library Retry: TV Shows (server=Plex)",
+        ]
+        assert job_logs, "the jobs' own logs were captured"
+        assert not [line for line in job_logs if "Created " in line], job_logs
+
+
+class TestDefaultRetryCount:
+    """An install that never stored a retry count gets 5 retries: the whole backoff schedule (about 83 minutes)."""
+
+    def test_a_job_with_no_stored_retry_count_retries_five_times(self, app, tmp_path, no_retry_wait):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        late = "/data/tv/Dateline/S34E01.mkv"
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs["job_id"])
+            jm = get_job_manager()
+            jm.record_file_result(
+                _chain_head_id(jm, kwargs["job_id"]),
+                late,
+                "skipped_not_indexed",
+                "",
+                "[GPU 0]",
+                servers=_plex_row("skipped_not_indexed"),
+            )
+            return {"outcome": {"skipped_not_indexed": 1}, "webhook_resolution": _all_resolved(1, {late: late})}
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+        ):
+            get_settings_manager().delete("webhook_retry_count")
+            jm = get_job_manager()
+            job = jm.create_job(library_name="TV Shows", config={})
+            with _chain_ends(jm) as ends:
+                _start_job_async(job.id, config_overrides=None)
+            retries = _retries_of(jm, job.id)
+
+        assert len(run_calls) == 6, f"the scan plus 5 retries expected; got {len(run_calls)} runs"
+        assert [(r.config["retry_attempt"], r.config["max_retries"]) for r in retries] == [(n, 5) for n in range(1, 6)]
+        assert ends == [
+            (
+                "exhausted",
+                "failed",
+                "1 file(s) still weren't indexed by the media server after 5 retries, so no more retries are queued. "
+                "The next scheduled scan will pick them up. Check the Files panel for the affected paths.",
+                0,
+            )
+        ]

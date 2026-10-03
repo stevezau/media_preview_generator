@@ -24,7 +24,7 @@ It looks in four places:
 - **The theme song** a season's episodes share (TV only).
 - **The credit roll itself**, read from the text on screen near the end of the file.
 
-When it isn't sure, it sends nothing. The file waits in **Needs review** instead of getting a guess, because a missing skip button is better than one that skips into the story. From there you can check it, adjust the times, or add a marker yourself.
+If it can't confirm an intro or credits from the file itself, it writes nothing, because a missing skip button is better than one that skips into the story. You can still add or adjust one in the Inspector.
 
 ## When it runs
 

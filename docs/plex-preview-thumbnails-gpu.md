@@ -87,7 +87,7 @@ If many of your files always fall back, raise **CPU Workers** above 0. Those fil
 ## Limits
 
 - Docker only, with a web UI and no CLI.
-- Plex must scan a new file before its BIF can be written. The app retries after 1, 2 and 5 minutes by default ([retry queue](multi-server.md#slow-backoff-retry-queue)).
+- Plex must scan a new file before its BIF can be written. The app retries after 1, 2, 5, 15 and 60 minutes by default ([retry queue](multi-server.md#slow-backoff-retry-queue)).
 - Video preview thumbnails only, not chapter thumbnails.
 
 ## Related

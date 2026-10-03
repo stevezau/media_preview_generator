@@ -332,7 +332,7 @@ class TestBudgetRecheckJobLog:
         ]
         assert recheck.summary_lines({FileOutcome.NO_MARKERS.value: 3}) == [
             "TheIntroDB recheck, Rick and Morty (2013) S01 (3 episodes): no change",
-            "Done: 3 files · 0 sent to PLEX-1 · 0 need review · 3 nothing found · TheIntroDB skipped for 3 files",
+            "Done: 3 files · 0 sent to PLEX-1 · 3 nothing found · TheIntroDB skipped for 3 files",
         ]
 
     def test_a_movie_logs_its_own_lines(self, store, tmp_path, loguru_caplog):

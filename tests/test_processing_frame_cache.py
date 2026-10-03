@@ -453,6 +453,90 @@ class TestLruEviction:
             tb.join(timeout=2)
 
 
+def _store_frames(cache: FrameCache, media: Path, *, frame_bytes: int = 3) -> Path:
+    """Extract "frames" for ``media`` into its slot and record them, as the dispatcher does."""
+    media.write_bytes(b"x")
+    slot = cache.frame_dir_for(str(media))
+    slot.mkdir(parents=True, exist_ok=True)
+    (slot / "0000000000.jpg").write_bytes(b"\xff" * frame_bytes)
+    cache.put(str(media), frame_dir=slot, frame_count=1, extraction_key=_EXTRACTION_KEY)
+    return slot
+
+
+class TestCapEvictionSparesSlotsInUse:
+    """A dispatcher holds a slot's generation lock while it writes or publishes from it; the caps must not delete it.
+
+    Both caps (entry count, disk bytes) pick the oldest entries first, so a slot still being published from — or an
+    old entry a regenerate is re-extracting into — is exactly what they would reach for.
+    """
+
+    def test_entry_cap_skips_the_slot_in_use_and_evicts_the_next_oldest(self, tmp_path):
+        cache = FrameCache(tmp_path / "cache", max_entries=2)
+        in_use = tmp_path / "in_use.mkv"
+        in_use_slot = _store_frames(cache, in_use)
+        idle_slot = _store_frames(cache, tmp_path / "idle.mkv")
+
+        publishing = cache.generation_lock(str(in_use))
+        publishing.acquire()
+        try:
+            newest_slot = _store_frames(cache, tmp_path / "newest.mkv")
+
+            assert (in_use_slot / "0000000000.jpg").is_file()
+            assert not idle_slot.exists(), "the oldest slot nobody is using goes instead"
+            assert newest_slot.is_dir()
+            assert len(cache) == 2
+        finally:
+            publishing.release()
+        assert publishing.acquire(blocking=False), "eviction must release every lock it took"
+
+    def test_disk_cap_skips_the_slot_in_use_and_evicts_the_next_oldest(self, tmp_path):
+        cache = FrameCache(tmp_path / "cache", max_disk_mb=1)
+        cache._max_disk_bytes = 250  # room for two 100-byte slots, not three
+        in_use = tmp_path / "in_use.mkv"
+        in_use_slot = _store_frames(cache, in_use, frame_bytes=100)
+        idle_slot = _store_frames(cache, tmp_path / "idle.mkv", frame_bytes=100)
+
+        publishing = cache.generation_lock(str(in_use))
+        publishing.acquire()
+        try:
+            newest_slot = _store_frames(cache, tmp_path / "newest.mkv", frame_bytes=100)
+
+            assert (in_use_slot / "0000000000.jpg").is_file()
+            assert not idle_slot.exists(), "the oldest slot nobody is using goes instead"
+            assert newest_slot.is_dir()
+            assert len(cache) == 2
+        finally:
+            publishing.release()
+        assert publishing.acquire(blocking=False), "eviction must release every lock it took"
+
+    @pytest.mark.parametrize("cap", ["entries", "disk"])
+    def test_cap_is_exceeded_rather_than_deleting_slots_in_use_then_enforced_once_they_are_free(self, tmp_path, cap):
+        cache = FrameCache(tmp_path / "cache", max_entries=1 if cap == "entries" else 1024, max_disk_mb=1)
+        if cap == "disk":
+            cache._max_disk_bytes = 150  # room for one 100-byte slot
+        first, second = tmp_path / "first.mkv", tmp_path / "second.mkv"
+        first_slot = _store_frames(cache, first, frame_bytes=100)
+        first_lock = cache.generation_lock(str(first))
+        first_lock.acquire()
+        second_lock = cache.generation_lock(str(second))
+        second_lock.acquire()  # held across put, as the dispatcher does
+        try:
+            second_slot = _store_frames(cache, second, frame_bytes=100)
+            assert (first_slot / "0000000000.jpg").is_file()
+            assert second_slot.is_dir()
+            assert len(cache) == 2, "over the cap while both slots are in use"
+        finally:
+            first_lock.release()
+            second_lock.release()
+
+        third_slot = _store_frames(cache, tmp_path / "third.mkv", frame_bytes=100)
+
+        assert not first_slot.exists()
+        assert not second_slot.exists()
+        assert third_slot.is_dir()
+        assert len(cache) == 1
+
+
 class TestSingletonAccessor:
     def test_returns_same_instance_with_matching_args(self, tmp_path):
         a = get_frame_cache(base_dir=tmp_path / "cache")

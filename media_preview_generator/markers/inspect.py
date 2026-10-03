@@ -23,7 +23,7 @@ from .audio.season import season_group, season_size, season_videos
 from .decide import DecisionStatus, shortened_by
 from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, Marker, MarkerType, Source
-from .outcomes import is_kept_own, kept_note, lock_overrides_note, with_kept_note, with_sentence
+from .outcomes import is_kept_own, kept_note, kept_own_reason, lock_overrides_note, with_kept_note, with_sentence
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability, versions_agree
 from .publishers.emby import CREDENTIALS_REJECTED, credits_note
@@ -31,7 +31,8 @@ from .publishers.factory import publisher_for
 from .publishers.plex_db import SAME_HOST_PATH_ADVICE
 from .settings import ServerMarkersSettings, is_sports_library, load_server
 from .sources.server_markers import SAME_CUT_MS, read_server_markers
-from .store import FileRecord, MarkerStore
+from .store import DecisionRow, FileRecord, MarkerStore
+from .versions import AnswerVersion, answer_versions
 
 # The marker types each server can show at all. The editor refuses a type no enabled owner is in this table for
 # (spec §6.3: Plex and Emby take no recap or preview); an Emby credits *end* is not covered here -- it is accepted and
@@ -634,17 +635,19 @@ def _expected(
 ) -> list[dict]:
     """What the server should show once published, per type.
 
-    Mirrors :func:`~.publishers.base.agreed_across_versions`, which is the rule that decides it: the Plex publisher
-    keeps (and writes back) what is already ours on an item with ``other_versions`` when it agrees with the decision
-    within its version tolerance, **except for a locked type**, whose own times are written however close they are. A
-    one-version item shows what was decided. An item whose versions couldn't be counted is read as one version: "will
-    replace" where the publisher may keep is the safe way round.
+    Mirrors :func:`~.publishers.base.agreed_across_versions`, which is the rule that decides it: per type, the version
+    with the lowest ``media_item_id`` that holds a marker of it decides the item, except that a version whose marker
+    the user locked wins over an unlocked one. The Plex publisher keeps (and writes back) what is already ours on an
+    item with ``other_versions`` when it agrees with the winner within its version tolerance, **except for a locked
+    type**, whose own times are written however close they are. A one-version item shows what was decided. An item
+    whose versions couldn't be counted is read as one version: "will replace" where the publisher may keep is the
+    safe way round.
 
-    This never reads sibling versions, so every part of the publisher's rule that depends on them can differ. The
-    locked exception ending when the item shows a locked version's exact times reads as "will replace" where the
-    publisher keeps what the item shows: the safe way round. Two parts err the other way, for unlocked types: the
-    publisher also requires ``prior`` to agree with every sibling and drops the type when a sibling disagrees, and
-    this reads "up to date" for both.
+    This never reads sibling versions, so every part of the publisher's rule that depends on them can differ. It
+    reads this file as the winner; where an earlier or locked sibling wins instead, the publisher writes that
+    sibling's times and this reads "will replace" or "up to date" for this file's own. The locked exception ending
+    when the item shows a locked version's exact times reads as "will replace" where the publisher keeps what the
+    item shows: the safe way round.
     """
     expected = []
     for mtype in dict.fromkeys(m.type for m in wanted):
@@ -727,6 +730,102 @@ def _plan(
     return ("will_replace" if shown else "will_add"), reason
 
 
+# The detectors that read the file itself (``versions.AnswerVersion.key``). A run reads the file for none of them while
+# every server its markers go to keeps its own markers of the type (``pipeline._kept_by_every_destination``).
+_FILE_DETECTORS = frozenset({"credits_text", "season_audio"})
+
+
+def _older_answer(store: MarkerStore, rec: FileRecord, marker: Marker, answer: AnswerVersion) -> bool:
+    """Whether a marker rests on an answer this detector stored at an older version than its version now."""
+    step = answer.version_step
+    for source in answer.sources:
+        stored = store.evidence_version(rec.id, source) if source.value in marker.decided_by else None
+        if stored is not None and (stored % step if step else stored) < answer.version:
+            return True
+    return False
+
+
+def _left_to_servers(
+    rec: FileRecord | None,
+    markers: dict[MarkerType, Marker],
+    owners: list[tuple[ServerConfig, Any, list[OwnershipMatch]]],
+    store: MarkerStore,
+    unreadable: set[str] | None = None,
+) -> dict[MarkerType, str]:
+    """The decided types to read as left to the servers' own markers, each with the kept status's reason.
+
+    A type qualifies when its unlocked marker rests on a file detector's answer from an older version of that
+    detector, and every server the file's markers go to is set to keep its own markers, kept that type at the
+    item's last publish and shows markers of it now. No run reads the file again for such a type, so the answer is
+    never made again and nothing of it is on a server; a file with no such answer is stored with the kept status in the
+    same situation (``outcomes.kept_own_reason``), and this one reads as that. From markers.db and the saved settings;
+    a server is asked what it shows only for a file that qualifies that far. It changes how the page reads the file,
+    never the stored decision or what a job publishes.
+
+    Args:
+        rec: The file's record, None for a file not in markers.db.
+        markers: Its stored markers.
+        owners: The servers owning the file (``_owners``).
+        store: The markers store.
+        unreadable: The ids of servers whose markers couldn't be read, kept across the files of one page (the Season
+            view): such a server isn't asked again, so one that is down holds the page for one read, not one per
+            episode. None asks every time.
+
+    Returns:
+        ``{type: reason}``; empty when nothing qualifies, or a server's saved settings or markers can't be read.
+    """
+    if rec is None:
+        return {}
+    left = {
+        mtype
+        for answer in answer_versions()
+        if answer.key in _FILE_DETECTORS
+        for mtype, marker in markers.items()
+        if mtype in answer.types and not marker.locked and _older_answer(store, rec, marker, answer)
+    }
+    vendors = []
+    for cfg, server, matches in owners:
+        if not left:
+            break
+        try:
+            settings = load_server(cfg.markers, cfg.type.value)
+        except Exception as exc:
+            logger.warning("Couldn't read the saved Intro & Credits settings of {}: {}", cfg.name, type(exc).__name__)
+            return {}
+        if _off_reason(cfg, settings, matches):
+            continue  # nothing of this file goes there
+        state = store.get_publish_state(rec.id, cfg.id)
+        item = store.get_item_publish_state(cfg.id, state.item_id) if state is not None and state.item_id else None
+        left &= item.kept_types if item is not None and settings.keeps_server_markers else frozenset()
+        if left:
+            # Kept at the last publish isn't kept now: a server that lost its own marker since gets ours from the next
+            # job (``pipeline._kept_by_every_destination`` reads the server too), so the decision reads as stored.
+            asked = unreadable is None or cfg.id not in unreadable
+            shown = _current(server, cfg, state.item_id, CAN_SHOW.get(cfg.type, ())) if asked else None
+            if shown is None and unreadable is not None:
+                unreadable.add(cfg.id)
+            left &= {MarkerType(c["type"]) for c in shown or []}
+        vendors.append(cfg.type.value.capitalize())
+    return dict.fromkeys(left, kept_own_reason(vendors)) if vendors else {}
+
+
+def _read_as_left(
+    decisions: dict[MarkerType, DecisionRow], markers: dict[MarkerType, Marker], left: dict[MarkerType, str]
+) -> tuple[dict[MarkerType, DecisionRow], dict[MarkerType, Marker]]:
+    """Stored decisions and markers as the page reads them: the types of ``_left_to_servers`` with the kept status."""
+    if not left:
+        return decisions, markers
+    read = {
+        mtype: dataclasses.replace(
+            d, status=DecisionStatus.DISABLED, reason=left[mtype], proposed_start_ms=None, proposed_end_ms=None
+        )
+        if mtype in left
+        else d
+        for mtype, d in decisions.items()
+    }
+    return read, {mtype: m for mtype, m in markers.items() if mtype not in left}
+
+
 def _server_row(
     cfg: ServerConfig,
     server: Any,
@@ -736,11 +835,15 @@ def _server_row(
     rec: FileRecord | None,
     markers: dict[MarkerType, Marker],
     store: MarkerStore,
+    left_to_servers: frozenset[MarkerType] = frozenset(),
 ) -> dict:
     settings = load_server(cfg.markers, cfg.type.value)
     off_reason = _off_reason(cfg, settings, matches)
     can_show = CAN_SHOW.get(cfg.type, ())
-    wanted = sorted((m for m in markers.values() if m.type.value in can_show), key=lambda m: (m.start_ms, m.type.value))
+    # ``markers`` are the stored ones: the publish basis below was recorded for all of them. The types read as left to
+    # the servers' own markers (``_left_to_servers``) are taken out after it.
+    stored = sorted((m for m in markers.values() if m.type.value in can_show), key=lambda m: (m.start_ms, m.type.value))
+    wanted = [m for m in stored if m.type not in left_to_servers]
     file_state = store.get_publish_state(rec.id, cfg.id) if rec else None
     item_id = _item_id(server, cfg, canonical_path, file_state.item_id if file_state else None, matches)
     item_state = store.get_item_publish_state(cfg.id, item_id) if item_id else None
@@ -754,7 +857,7 @@ def _server_row(
     published_unchanged = bool(
         rec is not None
         and item_state is not None
-        and store.get_publish_basis(rec.id, cfg.id) == (MarkerStore.markers_hash(wanted), item_state.version)
+        and store.get_publish_basis(rec.id, cfg.id) == (MarkerStore.markers_hash(stored), item_state.version)
     )
     # Plex shows one set per item: a type this file decided but the item doesn't show after this file's last publish
     # waits for the item's other versions to agree.
@@ -777,7 +880,8 @@ def _server_row(
         # Every job leaves the server's own markers alone, type by type ("Keep Plex's", "Keep Emby's").
         keep_own=settings.keeps_server_markers,
         recorded_kept=item_state.kept_types if item_state is not None else frozenset(),
-        kept_own=frozenset(
+        kept_own=left_to_servers
+        | frozenset(
             mtype
             for mtype, d in (store.get_decisions(rec.id) if rec else {}).items()
             if is_kept_own(d.status, d.reason)
@@ -894,7 +998,8 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         store: The markers store.
 
     Returns:
-        ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type (``marker.locked_at`` when
+        ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type (a type of
+        ``_left_to_servers`` reads with the kept status, not as decided; ``marker.locked_at`` when
         the user locked it, ``proposed.decided_by`` = the sources behind a proposal the editor would override, and
         ``shortened_by``:
         ``{"servers": [names]}`` when the servers' own markers shortened a decided credits/preview start, else None), ``evidence`` rows (empty
@@ -918,6 +1023,10 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
     decisions = store.get_decisions(rec.id) if rec else {}
     markers = store.get_markers(rec.id) if rec else {}
     lock_dates = store.locked_at(rec.id) if rec else {}
+    owners = list(_owners(canonical_path, registry))
+    left = _left_to_servers(rec, markers, owners, store)
+    stored_markers = markers
+    decisions, markers = _read_as_left(decisions, markers, left)
     payload: dict = {
         "known": rec is not None,
         "canonical_path": canonical_path,
@@ -948,10 +1057,17 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
             }
             for r in store.evidence_rows(rec.id)
         ]
-    for cfg, server, matches in _owners(canonical_path, registry):
+    for cfg, server, matches in owners:
         try:
             row = _server_row(
-                cfg, server, matches, canonical_path=canonical_path, rec=rec, markers=markers, store=store
+                cfg,
+                server,
+                matches,
+                canonical_path=canonical_path,
+                rec=rec,
+                markers=stored_markers,
+                store=store,
+                left_to_servers=frozenset(left),
             )
         except Exception as exc:
             row = _degraded_row(cfg, exc)
@@ -1011,7 +1127,8 @@ def _dot(cfg: ServerConfig, matches: list[OwnershipMatch], rec: FileRecord | Non
 
 
 def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> dict:
-    """The Season view: every episode of a file's season group, from markers.db only (no live server reads).
+    """The Season view: every episode of a file's season group, from markers.db (a server is read only for an episode
+    ``_left_to_servers`` asks about: one whose older answer the servers kept their own markers over).
 
     Args:
         canonical_path: An episode's local path (already validated by the caller).
@@ -1023,14 +1140,13 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         "Specials"); ``servers`` (the enabled servers owning the asked file, in registry order, with
         ``markers_enabled``: Intro & Credits on there and its library selected); ``episodes`` (the season group's
         files from every disk of the library, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``, ``duration_ms``, ``intro`` and
-        ``credits`` in ``item_payload``'s decision shape without ``shortened_by``, ``needs_review`` (any marker type
-        in Needs review) with ``review_reason`` (the first such type's reason, intro first), ``evidence`` chips
+        ``credits`` in ``item_payload``'s decision shape without ``shortened_by`` (read the same way: a type of
+        ``_left_to_servers`` has the kept status and doesn't count as ready), ``evidence`` chips
         ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``: ``off`` (Intro & Credits off
         there, or this episode's library not selected or excluded), ``ok`` (last publish wrote markers of ours),
         ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``); and
         ``counts``: ``episodes`` (the files listed), ``total_episodes`` (the season's size before the 40-nearest
-        cap), ``ready`` (at least one decided marker of any type: what Publish sends, even when another type is in
-        Needs review) and ``needs_review`` (any type in Needs review).
+        cap) and ``ready`` (at least one decided marker of any type: what Publish sends).
     """
     videos = season_videos(canonical_path, registry.configs())
     group = season_group(canonical_path, videos)
@@ -1044,27 +1160,23 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         }
         for cfg, _server, matches in owners
     ]
-    episodes, ready, review = [], 0, 0
+    episodes, ready = [], 0
+    unreadable: set[str] = set()
     for path in group.episodes:
         rec = store.get_file(path)
         decisions = store.get_decisions(rec.id) if rec else {}
         markers = store.get_markers(rec.id) if rec else {}
         lock_dates = store.locked_at(rec.id) if rec else {}
+        # Per episode: a server's exclude rules can leave out single files.
+        episode_owners = list(_owners(path, registry))
+        left = _left_to_servers(rec, markers, episode_owners, store, unreadable)
+        read, markers = _read_as_left(decisions, markers, left)
         types = {
-            mtype.value: _decision_dict(decisions.get(mtype), markers.get(mtype), lock_dates.get(mtype))
+            mtype.value: _decision_dict(read.get(mtype), markers.get(mtype), lock_dates.get(mtype))
             for mtype in _SEASON_TYPES
         }
-        # Counted over every type, not only the two columns: a job publishes each decided type of a file even while
-        # another type (a recap, say) is in Needs review, and that file's job row then says Needs review.
-        in_review = [
-            decisions[mtype]
-            for mtype in MarkerType
-            if mtype in decisions and decisions[mtype].status is DecisionStatus.NEEDS_REVIEW
-        ]
-        review += int(bool(in_review))
         ready += int(bool(markers))
-        # Per episode: a server's exclude rules can leave out single files.
-        matches_by_server = {cfg.id: matches for cfg, _server, matches in _owners(path, registry)}
+        matches_by_server = {cfg.id: matches for cfg, _server, matches in episode_owners}
         episodes.append(
             {
                 "path": path,
@@ -1073,8 +1185,6 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
                 "known": rec is not None,
                 "duration_ms": rec.duration_ms if rec else None,
                 **types,
-                "needs_review": bool(in_review),
-                "review_reason": next((d.reason for d in in_review if d.reason), ""),
                 "evidence": _chips(store.evidence_rows(rec.id)) if rec else [],
                 "servers": {
                     cfg.id: _dot(cfg, matches_by_server.get(cfg.id, []), rec, store) for cfg, _server, _m in owners
@@ -1092,6 +1202,5 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
             "episodes": len(episodes),
             "total_episodes": season_size(canonical_path, videos),
             "ready": ready,
-            "needs_review": review,
         },
     }

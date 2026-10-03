@@ -40,8 +40,8 @@
   height: 217
 - title: It waits for slow servers
   body: >-
-    A server that hasn't indexed the new file yet gets another try after 1, 2 and 5 minutes by
-    default. Next time, files whose previews are current are skipped.
+    A server that hasn't indexed the new file yet gets another try after 1, 2, 5, 15 and 60
+    minutes by default. Next time, files whose previews are current are skipped.
   image: tour-retry.webp
   alt: A Jellyfin job waiting to retry while the server indexes a new film
   path: /

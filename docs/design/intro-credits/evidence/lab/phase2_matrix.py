@@ -1375,9 +1375,12 @@ def row_10_reconcile_restores() -> dict:
 
 @row(11)
 def row_11_plex_version_drift() -> dict:
-    """Plex version drift (ledger L184) under the landed rules (spec §14 2026-09-15): a version only Plex can read is
-    added to S01E03's item. Check servers lists E03 (versions changed) and takes our markers off the item ("Waiting for
-    this item's other versions to agree"); a normal job keeps it waiting; with the copy gone, a normal job writes again."""
+    """Plex version drift (ledger L184) under the rule of 2026-10-02: a version only Plex can read is added to S01E03's
+    item. Check servers lists E03 (versions changed) and leaves our markers on the item (a version never decided takes
+    no part; nothing waits for it); a normal job keeps them; with the copy gone, they are still served.
+
+    Until 2026-10-02 Check servers took the markers off ("Waiting for this item's other versions to agree") and only the
+    copy's removal brought them back; the checks below replaced that expectation and have not been re-run."""
     e03 = p1.synth_path(3)
     name = e03.rsplit("/", 1)[-1]
     item = plex_item(e03)
@@ -1406,19 +1409,20 @@ def row_11_plex_version_drift() -> dict:
     back_job, back_files = run_job({"file_paths": [e03], "library_name": "Phase 2 row 11 copy removed"})
     back_row = server_row(back_files, name, "mlab-plex")
     served_back = p1.plex_served(item)
-    waiting = "Waiting for this item's other versions to agree"
+    settled = ("markers_written", "markers_up_to_date")
+    truth = p1.truth_everywhere(3)["mlab-plex"]
     checks = {
         "Plex served ours before": bool(served_before),
         "Check servers lists E03": e03 in [f["file"] for f in drift_files],
-        "then Plex serves none of ours and the row waits naming the versions": not served_drift
-        and drift_row.get("status") == "markers_waiting" and waiting in (drift_row.get("message") or ""),
-        "a normal job keeps it waiting, nothing served": normal_row.get("status") == "markers_waiting" and not served_normal,
-        "copy removed: a normal job writes again": back_row.get("status") == "markers_written" and p1.same_markers({"mlab-plex": served_back}, {"mlab-plex": p1.truth_everywhere(3)["mlab-plex"]})["mlab-plex"],
+        "then Plex still serves ours and the row is settled, not waiting": drift_row.get("status") in settled
+        and p1.same_markers({"mlab-plex": served_drift}, {"mlab-plex": truth})["mlab-plex"],
+        "a normal job keeps them served": normal_row.get("status") in settled and p1.same_markers({"mlab-plex": served_normal}, {"mlab-plex": truth})["mlab-plex"],
+        "copy removed: still served": back_row.get("status") in settled and p1.same_markers({"mlab-plex": served_back}, {"mlab-plex": truth})["mlab-plex"],
     }  # fmt: skip
     notes = [
         f"Check servers {drift_job['id'][:8]} row {drift_row}; normal {normal_job['id'][:8]} row {normal_row}; after removal {back_job['id'][:8]} row {back_row}",
         f"served before {served_before}; after Check servers {served_drift}; after normal {served_normal}; after removal {served_back}",
-        "expectation changed: the row predates Plex version drift (Task 9); a normal job no longer leaves our markers on a cut nobody checked",
+        "expectation changed 2026-10-02: a version never decided takes no part, so the item no longer waits for it and our markers stay",
     ]  # fmt: skip
     evidence = {"drift_files": drift_files, "normal_files": normal_files, "back_files": back_files}
     return checks_result(11, "Plex version drift: a version only Plex can read", checks, evidence, notes)

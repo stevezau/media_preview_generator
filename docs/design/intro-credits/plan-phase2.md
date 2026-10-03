@@ -6606,8 +6606,10 @@ mockup's "Publish 8 to 3 servers" button queues a normal (not forced) HIGH Intro
 decided episodes are sent to every server that doesn't show them yet, undecided ones are checked again. A second click
 while that job is queued or running returns the same job.
 
-Server dots come from `markers.db` only (no live server reads), so the Season view of a 26-episode season is one
-cheap request; the per-episode Inspector tab stays the place for live "what the server shows now".
+Server dots come from `markers.db` only, so the Season view of a 26-episode season is one cheap request; the
+per-episode Inspector tab stays the place for live "what the server shows now". One exception since 2026-10-02: an
+episode whose older answer the servers kept their own marker over is read live once, to confirm the server still
+shows that marker (a server that can't be read is asked once per page).
 
 **Files:**
 - Modify: `media_preview_generator/markers/store.py` (`EvidenceRow.label`), `media_preview_generator/markers/inspect.py`

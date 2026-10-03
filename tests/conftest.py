@@ -184,6 +184,24 @@ def _reset_frame_cache_between_tests():
     reset_frame_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_plex_partial_scan_throttle():
+    """Forget which Plex folders were just scanned: the throttle is process-wide and tests reuse the same folders."""
+    from media_preview_generator import plex_client
+
+    plex_client._partial_scan_sent_at.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_jellyfin_full_refresh_throttle():
+    """Forget which Jellyfin servers were just refreshed: the throttle is process-wide and tests reuse one URL."""
+    from media_preview_generator.servers import jellyfin
+
+    jellyfin._full_refresh_sent_at.clear()
+    yield
+
+
 @pytest.fixture
 def fixtures_dir():
     """Return path to fixtures directory."""
