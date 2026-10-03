@@ -134,3 +134,9 @@ existing `keep_published` / `_keep_published_before_rule_change` behaviour for t
 - [x] sflix live bug: 79 raw `needs_review` rows survived decide-again (`_decisions_changed` read them as
   NO_EVIDENCE = unchanged); `DecisionRow.legacy` now forces the rewrite (branch fix/legacy-review-rows)
 - [ ] owner OK to commit  - [ ] deploy + live sweep
+- [x] Lab phase 2 row 11 (Plex versions drifting) on the published dev image b7f98f7: PASS — Plex served
+  intro 25–55 s / credits 100–120 s at every step, no flapping, no versions-waiting lines (run 1 failed on setup
+  only: a fresh DB had never decided E03). Result `evidence/lab/results/p2-row-11.json`.
+- [x] DST-dependent scheduler test made deterministic (test bug, PEP 495 inter-zone compare).
+- Follow-ups, not part of this chunk: PR #341 (credit text v9, captions) matters more now that credit text wins
+  credits disagreements — rebase, re-measure, ship next; bigger test of lone IntroDB/TheIntroDB credits (24/24).
