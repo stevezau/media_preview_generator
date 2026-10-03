@@ -244,7 +244,7 @@ Settings for automatic preview generation when media is imported via Radarr or S
 | Setting | Default | Web UI | Description |
 |---------|---------|--------|-------------|
 | `webhook_enabled` | `true` | Yes | Master enable/disable for webhook processing |
-| `webhook_delay` | `60` | Yes | Delay before processing (10–300 s). Incoming webhooks are queued per source; a batch runs after this many seconds with no new imports, or 10 minutes after its first webhook, whichever comes first. |
+| `webhook_delay` | `60` | Yes | Default batching delay in seconds (UI slider: 10–300; runtime bounds: 1–3600). Each new file resets its source/server batch timer, capped by a maximum batch age of the greater of 10 minutes and its longest accepted delay. An optional `delay` URL parameter overrides this value for that request; see [Webhook delay parameter](#webhook-delay-parameter). |
 | `webhook_secret` | *(empty)* | Yes | Dedicated secret for webhook auth (falls back to API token) |
 | `plex_webhook_enabled` | `false` | Yes | Enable the Plex direct webhook (`/api/webhooks/plex`). Requires Plex Pass on the server-owner account. |
 | `plex_webhook_public_url` | *(empty)* | Yes | URL Plex Media Server should POST to. Defaults to the URL you registered through. Override for reverse-proxy / split-network setups. |
@@ -1389,6 +1389,16 @@ Inbound webhook endpoints for Radarr/Sonarr/Custom integration. Webhook endpoint
 
 > [!TIP]
 > The new **universal webhook URL** at `POST /api/webhooks/incoming` auto-detects the vendor (Plex / Emby / Jellyfin / Sonarr / Radarr / templated path) so you only need one URL across every server. Falls back to per-server URLs at `POST /api/webhooks/server/<server_id>` for ambiguous setups (rare). See [Multi-Media-Server — Webhook configuration](multi-server.md#webhook-configuration-per-vendor) for details.
+
+#### Webhook delay parameter
+
+`POST /api/webhooks/radarr`, `/sonarr`, `/sportarr`, `/custom`, and `/plex` accept optional `delay=<seconds>` in the URL query string. The value must be a whole number from **1 to 3600** (up to one hour); invalid values return **400**. Omission uses the current `webhook_delay` setting.
+
+Examples: `/api/webhooks/radarr?delay=30`, `/api/webhooks/sonarr?delay=300`, or `/api/webhooks/radarr?server_id=plex-main&delay=30` when another query parameter is already present.
+
+Each accepted new file resets its source/server batch deadline using that request's effective delay. The latest request sets the timer if values differ within one batch, subject to a maximum batch age equal to the greater of 600 seconds and the longest delay accepted into that batch. The age is measured from its first file, so late arrivals can receive less than the full delay; arrivals after the limit open a new batch. Ignored duplicates do not reset the deadline. The deadline and batch age limit are persisted with the job and restored by automatic restart recovery. Processing still honors pause and worker availability. **Fire now** skips the remaining initial wait; automatic retries use their separate retry backoff, and manual **Reprocess** starts without the original batching delay.
+
+`/api/webhooks/incoming` and `/api/webhooks/server/<server_id>` dispatch immediately and do not support `delay`. Initial media-server scan requests are also immediate, regardless of the batching delay.
 
 #### POST /api/webhooks/incoming
 

@@ -139,18 +139,24 @@ def _restart(app):
     with jobs_mod._job_lock:
         jobs_mod._job_manager = None
     jobs_mod.get_job_manager(app.config_dir)
-    app_mod._requeue_interrupted_on_startup(app.config_dir)
+    with patch.object(wh_mod.threading, "Timer", MagicMock()):
+        app_mod._requeue_interrupted_on_startup(app.config_dir)
 
 
 class TestRestartDuringTheDebounce:
     @pytest.mark.parametrize("pin", [None, "jf-1", "emby-1"], ids=["unpinned", "jellyfin-pin", "emby-pin"])
     def test_the_revived_preview_job_and_its_markers_job_both_exist(self, app, previews, markers_runs, pin):
+        from media_preview_generator.web import webhooks as wh
         from media_preview_generator.web.jobs import JobStatus, get_job_manager
 
         with app.app_context():
             preview_id = _open_batch("sonarr", EPISODE, server_id=pin)
             assert _markers_jobs() == []  # nothing queued before the batch runs
             _restart(app)
+            assert get_job_manager().get_job(preview_id).status is JobStatus.PENDING
+            assert previews == []
+            assert _markers_jobs() == []
+            assert wh._fire_pending_batch_now(wh.find_pending_batch_key_for_job(preview_id), job_id=preview_id)
 
         jm = get_job_manager()
         preview = jm.get_job(preview_id)
@@ -165,9 +171,13 @@ class TestRestartDuringTheDebounce:
         assert INTRO_CREDITS_FOLLOW_UP not in preview.config  # asked once, queued once
 
     def test_a_second_restart_queues_no_second_markers_job(self, app, previews, markers_runs):
+        from media_preview_generator.web import webhooks as wh
+
         with app.app_context():
-            _open_batch("radarr", EPISODE)
+            preview_id = _open_batch("radarr", EPISODE)
             _restart(app)
+            assert _markers_jobs() == []
+            assert wh._fire_pending_batch_now(wh.find_pending_batch_key_for_job(preview_id), job_id=preview_id)
             _restart(app)
         assert len(_markers_jobs()) == 1
 
@@ -234,6 +244,7 @@ class TestVendorWebhooks:
 
 class TestThePreviewRunnerQueuesItOnce:
     def test_a_later_start_of_the_same_job_queues_nothing_more(self, app, previews, markers_runs):
+        from media_preview_generator.web import webhooks as wh
         from media_preview_generator.web.jobs import get_job_manager
         from media_preview_generator.web.routes.job_runner import _start_job_async
 
@@ -241,9 +252,11 @@ class TestThePreviewRunnerQueuesItOnce:
             preview_id = _open_batch("sonarr", EPISODE)
             job = get_job_manager().get_job(preview_id)
             _start_job_async(preview_id, dict(job.config))
+            assert previews == []
+            assert wh._fire_pending_batch_now(wh.find_pending_batch_key_for_job(preview_id), job_id=preview_id)
             _start_job_async(preview_id, dict(job.config))  # e.g. Reprocess of a stale snapshot, resume drain
 
-        assert len(previews) == 2
+        assert previews == [{"job_id": preview_id, "webhook_paths": [EPISODE], "server_id_filter": None}]
         assert len(_markers_jobs()) == 1
 
     def test_a_job_that_never_asked_queues_nothing(self, app, previews, markers_runs):
@@ -257,6 +270,7 @@ class TestThePreviewRunnerQueuesItOnce:
         assert _markers_jobs() == []
 
     def test_a_follow_up_that_cant_be_queued_never_costs_the_previews(self, app, previews, markers_runs):
+        from media_preview_generator.web import webhooks as wh
         from media_preview_generator.web.jobs import JobStatus, get_job_manager
 
         with (
@@ -267,6 +281,7 @@ class TestThePreviewRunnerQueuesItOnce:
         ):
             preview_id = _open_batch("sonarr", EPISODE)
             _restart(app)
+            assert wh._fire_pending_batch_now(wh.find_pending_batch_key_for_job(preview_id), job_id=preview_id)
 
         submit.assert_called_once()
         preview = get_job_manager().get_job(preview_id)

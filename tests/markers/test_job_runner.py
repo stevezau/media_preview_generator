@@ -3871,7 +3871,7 @@ def test_start_job_async_delegates_by_kind(kind, delegated, monkeypatch):
 
 
 @pytest.mark.parametrize("lookup", [None, RuntimeError("jobs.db locked")])
-def test_start_job_async_falls_back_to_the_preview_thread_when_the_job_cant_be_read(lookup, monkeypatch):
+def test_start_job_async_does_not_start_when_the_job_cant_be_read(lookup, monkeypatch):
     from media_preview_generator.web.routes import job_runner as preview_runner
 
     jm = MagicMock()
@@ -3884,11 +3884,14 @@ def test_start_job_async_falls_back_to_the_preview_thread_when_the_job_cant_be_r
     with (
         patch("media_preview_generator.markers.job_runner.start_intro_credits_job_async") as start,
         patch.object(preview_runner, "threading") as threading_mod,
+        patch.object(preview_runner, "logger") as log,
     ):
         preview_runner._start_job_async(job_id, None)
-    preview_runner._inflight_jobs.discard(job_id)
     start.assert_not_called()
-    threading_mod.Thread.assert_called_once()
+    threading_mod.Thread.assert_not_called()
+    assert job_id not in preview_runner._inflight_jobs
+    if isinstance(lookup, Exception):
+        log.error.assert_called_once()
 
 
 class TestDecideAgainJob:

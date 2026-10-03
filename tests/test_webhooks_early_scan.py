@@ -198,6 +198,7 @@ def test_execute_uses_existing_batch_job_does_not_call_create_job(
     mock_job_mgr.return_value.create_job.return_value = mock_job
     mock_job_mgr.return_value.get_job.return_value = mock_job
     mock_settings.return_value.get.side_effect = lambda key, default=None: default
+    mock_settings.return_value.processing_paused = False
 
     wh._schedule_webhook_job("radarr", "Movie", "/m/x.mkv")
     create_count_before = mock_job_mgr.return_value.create_job.call_count
@@ -217,11 +218,10 @@ def test_execute_uses_existing_batch_job_does_not_call_create_job(
 @patch("media_preview_generator.web.webhooks.get_job_manager")
 @patch("media_preview_generator.web.webhooks.threading.Timer")
 @patch("media_preview_generator.web.routes._start_job_async")
-def test_execute_recreates_job_if_existing_was_deleted(
+def test_execute_does_not_recreate_job_if_existing_was_deleted(
     mock_start_job, mock_timer_cls, mock_job_mgr, mock_settings, mock_kick
 ):
-    """If the pre-created Job was deleted from the UI before the timer fired,
-    ``_execute_webhook_job`` falls back to creating a fresh Job rather than crashing."""
+    """Deleting a waiting job prevents its timer from recreating or dispatching it."""
     from media_preview_generator.web import webhooks as wh
 
     mock_timer = MagicMock()
@@ -230,20 +230,19 @@ def test_execute_recreates_job_if_existing_was_deleted(
 
     mock_job = MagicMock()
     mock_job.id = "job-1"
-    mock_replacement = MagicMock()
-    mock_replacement.id = "job-replacement"
-    mock_job_mgr.return_value.create_job.side_effect = [mock_job, mock_replacement]
+    mock_job_mgr.return_value.create_job.return_value = mock_job
     # get_job returns None (job was deleted) the first time _execute_webhook_job
     # looks it up.
     mock_job_mgr.return_value.get_job.return_value = None
     mock_settings.return_value.get.side_effect = lambda key, default=None: default
+    mock_settings.return_value.processing_paused = False
 
     wh._schedule_webhook_job("radarr", "Movie", "/m/x.mkv")
     wh._execute_webhook_job(wh._debounce_key("radarr"))
 
-    # First create_job at batch-open, second at recreate.
-    assert mock_job_mgr.return_value.create_job.call_count == 2
-    assert mock_start_job.call_args[0][0] == "job-replacement"
+    mock_job_mgr.return_value.create_job.assert_called_once()
+    mock_start_job.assert_not_called()
+    assert wh._debounce_key("radarr") not in wh._pending_batches
 
 
 # ---------------------------------------------------------------------------

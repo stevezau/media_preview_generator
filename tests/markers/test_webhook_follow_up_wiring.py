@@ -76,9 +76,8 @@ def _open_batch(source, path, *, fire, **kwargs):
         patch("media_preview_generator.web.webhooks.threading.Timer", side_effect=fake_timer),
     ):
         assert wh._schedule_webhook_job(source, "Show S02E04", path, early_scan=False, **kwargs) is True
-        fn, args, fn_kwargs = captured[-1]
         if fire:
-            fn(*args, **fn_kwargs)
+            assert wh._fire_pending_batch_now(wh._debounce_key(source, kwargs.get("server_id")))
     return next(iter(wh._pending_batches.values()))["job_id"] if not fire else None
 
 

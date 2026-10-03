@@ -208,6 +208,11 @@ The router auto-detects the vendor by payload shape and matches the source
 server by the identifier embedded in every vendor's payload (Plex's
 `Server.uuid`, Emby's `Server.Id`, Jellyfin's `ServerId`).
 
+For delayed batching, use the source-specific URLs instead, such as
+`/api/webhooks/radarr?delay=30` or `/api/webhooks/sonarr?delay=300`.
+The universal and per-server router URLs dispatch immediately and do not
+support `delay`. See [Set a delay per webhook URL](guides.md#set-a-delay-per-webhook-url).
+
 | Vendor | Webhook source |
 |---|---|
 | Plex | Server settings → Webhooks → Add webhook (Plex Pass required for outbound webhooks) |

@@ -119,9 +119,11 @@ def _auth_headers(token: str = "test-token-12345678") -> dict:
         (0, 1),  # zero would bypass debouncing → floor
         (1, 1),  # at the floor
         (60, 60),  # the default, untouched
-        (600, 600),  # at the ceiling
-        (601, 600),  # above ceiling → cap
-        (86400, 600),  # 24h foot-gun → cap
+        (600, 600),
+        (601, 601),  # above the former ceiling
+        (3600, 3600),  # at the ceiling
+        (3601, 3600),  # above ceiling → cap
+        (86400, 3600),  # 24h foot-gun → cap
         ("abc", 60),  # non-numeric → fall back to the default 60
         (None, 60),  # missing → fall back to the default 60
     ],
@@ -130,7 +132,7 @@ def test_schedule_webhook_job_clamps_webhook_delay(stored, expected, app):
     """``webhook_delay`` flows into ``threading.Timer(delay, …)``; an out-of-range
     setting (hand-edited settings.json, bogus API call) must not park the timer
     for hours or fire instantly. Server-side belt-and-suspenders clamp to
-    ``[1, 600]`` seconds; non-numeric / missing falls back to the default 60.
+    ``[1, 3600]`` seconds; non-numeric / missing falls back to the default 60.
     """
     import media_preview_generator.web.webhooks as wh
 
@@ -782,7 +784,7 @@ def test_execute_webhook_job_single_file_uses_title_for_library_display(
     mock_job.id = "job-1"
     mock_job_mgr.return_value.create_job.return_value = mock_job
 
-    mock_settings = MagicMock()
+    mock_settings = MagicMock(processing_paused=False)
     mock_settings.get.side_effect = lambda key, default=None: [] if key == "selected_libraries" else default
     mock_settings_mgr.return_value = mock_settings
 
@@ -822,7 +824,7 @@ def test_execute_webhook_job_uses_selected_libraries(
     mock_job.id = "test-job-id"
     mock_job_mgr.return_value.create_job.return_value = mock_job
 
-    mock_settings = MagicMock()
+    mock_settings = MagicMock(processing_paused=False)
     mock_settings.get.side_effect = lambda key, default=None: ["1", "2"] if key == "selected_libraries" else default
     mock_settings_mgr.return_value = mock_settings
 
@@ -849,7 +851,7 @@ def test_execute_webhook_job_includes_retry_settings(mock_start_job, mock_timer_
     mock_job.id = "retry-test-id"
     mock_job_mgr.return_value.create_job.return_value = mock_job
 
-    mock_settings = MagicMock()
+    mock_settings = MagicMock(processing_paused=False)
     mock_settings.get.side_effect = lambda key, default=None: {
         "selected_libraries": [],
         "webhook_retry_count": 5,
@@ -926,7 +928,7 @@ def test_triggered_history_entry_includes_batch_metadata(
     # creating a new one. Configure the lookup to return the same mock.
     mock_job_mgr.return_value.get_job.return_value = mock_job
 
-    mock_settings = MagicMock()
+    mock_settings = MagicMock(processing_paused=False)
     mock_settings.get.side_effect = lambda key, default=None: [] if key == "selected_libraries" else default
     mock_settings_mgr.return_value = mock_settings
 
@@ -1053,7 +1055,7 @@ def test_execute_webhook_job_records_dispatch_before_start(
     mock_job.id = "job-dedup-123"
     mock_job_mgr.return_value.create_job.return_value = mock_job
 
-    mock_settings = MagicMock()
+    mock_settings = MagicMock(processing_paused=False)
     mock_settings.get.side_effect = lambda key, default=None: [] if key == "selected_libraries" else default
     mock_settings_mgr.return_value = mock_settings
 
@@ -1129,7 +1131,7 @@ def test_duplicate_after_dispatch_is_dropped_end_to_end(
     mock_job.id = "job-e2e-1"
     mock_job_mgr.return_value.create_job.return_value = mock_job
 
-    mock_settings = MagicMock()
+    mock_settings = MagicMock(processing_paused=False)
     mock_settings.get.side_effect = lambda key, default=None: [] if key == "selected_libraries" else default
     mock_settings_mgr.return_value = mock_settings
 

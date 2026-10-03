@@ -18,6 +18,7 @@ from ...jobs.orchestrator import SUCCESS_OUTCOME_KEYS, count_successes
 from ..job_gate import format_wait_message
 from ..jobs import (
     PRIORITY_NORMAL,
+    JobStatus,
     WorkerStatus,
     get_job_manager,
     incoming_job_priority,
@@ -490,24 +491,43 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     try:
         queued = get_job_manager().get_job(job_id)
     except Exception as exc:
-        # The preview thread below reads the job again and reports the failure on the job.
-        logger.debug("Could not read job {} to pick its runner: {}", job_id, exc)
-        queued = None
-    if queued is not None and queued.kind == JOB_KIND_INTRO_CREDITS:
+        # Without its saved state we cannot safely select a runner or honor a
+        # webhook deadline. Leave it pending for a later resume/recovery call.
+        logger.error("Could not read job {} before starting; leaving it unchanged: {}", job_id, exc)
+        return
+    if queued is None:
+        return
+    if queued.kind == JOB_KIND_INTRO_CREDITS:
         from ...markers.job_runner import start_intro_credits_job_async
 
         start_intro_credits_job_async(job_id, config_overrides)
         return
+    from ..webhooks import ensure_pending_webhook
+
+    if ensure_pending_webhook(job_id):
+        return
+    if (config_overrides or {}).get("webhook_debounce_pending") is True:
+        # A timer can close the batch while restart/resume holds an earlier snapshot.
+        # Use the final paths; never reinstall that snapshot's obsolete deadline.
+        current = get_job_manager().get_job(job_id)
+        if current is None or current.status != JobStatus.PENDING:
+            return
+        config_overrides = dict(current.config)
     if config_overrides and INTRO_CREDITS_FOLLOW_UP in config_overrides:
         # Only the saved config asks for the follow-up (a revival passes a copy of it): the job's own writes below
         # must never put back a request already taken.
         config_overrides = {k: v for k, v in config_overrides.items() if k != INTRO_CREDITS_FOLLOW_UP}
     with _inflight_lock:
         duplicate = job_id in _inflight_jobs
+        terminal = False
         if not duplicate:
-            _inflight_jobs.add(job_id)
-    if duplicate:
-        logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
+            current = get_job_manager().get_job(job_id)
+            terminal = current is None or current.status in (JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED)
+            if not terminal:
+                _inflight_jobs.add(job_id)
+    if duplicate or terminal:
+        if duplicate:
+            logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
         _queue_intro_credits_follow_up(job_id, config_overrides)
         return
 
