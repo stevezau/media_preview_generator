@@ -2077,6 +2077,21 @@ html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.
     opacity: 0.6;
 }
 
+.scan-filters > summary {
+    list-style: none;
+    cursor: pointer;
+}
+.scan-filters > summary::-webkit-details-marker { display: none; }
+.scan-filters > summary:hover { background: var(--bs-tertiary-bg); }
+.scan-filters > summary:focus-visible {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 2px;
+}
+.scan-filters .scan-filters-hide,
+.scan-filters[open] .scan-filters-edit { display: none; }
+.scan-filters[open] .scan-filters-hide { display: inline; }
+.scan-filters[open] .scan-filters-chevron { transform: rotate(180deg); }
+
 /* Setup Health redesign — bucketed checks (Must fix / Recommended /
  * All good) plus side-by-side current/recommended diffs. The aim is
  * "one glance answers: do I need to act, and what value should it be?"
