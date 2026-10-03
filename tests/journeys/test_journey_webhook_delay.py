@@ -252,6 +252,42 @@ def test_resume_and_stale_timer_cannot_bypass_updated_deadline(delay_flow) -> No
     assert sorted(flow.run.call_args.args[0].webhook_paths) == ["/data/show/one.mkv", "/data/show/two.mkv"]
 
 
+def test_next_start_after_lookup_failure_preserves_pending_deadline(delay_flow) -> None:
+    flow = delay_flow
+    assert _post(flow, "sonarr", "?delay=30&server_id=plex-1").status_code == 202
+    manager = jobs.get_job_manager()
+    job = manager.get_all_jobs()[0]
+    deadline = job.config["webhook_fire_at"]
+    timer = flow.timers[-1]
+    real_get_job = manager.get_job
+    lookup_failed = False
+
+    def fail_once(job_id: str):
+        nonlocal lookup_failed
+        if not lookup_failed:
+            lookup_failed = True
+            raise RuntimeError("temporary job lookup failure")
+        return real_get_job(job_id)
+
+    with patch.object(manager, "get_job", side_effect=fail_once):
+        job_runner._start_job_async(job.id, None)
+        flow.run.assert_not_called()
+        assert job.id not in job_runner._inflight_jobs
+        job_runner._start_job_async(job.id, None)
+    flow.run.assert_not_called()
+    assert job.id not in job_runner._inflight_jobs
+    assert job.status == jobs.JobStatus.PENDING
+    assert job.config["webhook_fire_at"] == deadline
+    assert not timer.cancelled
+    flow.clock.now += timedelta(seconds=30)
+    timer.fire()
+    assert flow.run.call_count == 1
+    config = flow.run.call_args.args[0]
+    assert config.webhook_paths == ["/data/show/one.mkv"]
+    assert config.webhook_source == "sonarr"
+    assert config.server_id_filter == "plex-1"
+
+
 @pytest.mark.parametrize(
     "first_delay,next_delay,elapsed,cap,wait",
     [(30, 30, 590, 600, 10), (30, 3600, 20, 3600, 3580), (3600, 30, 3590, 3600, 10), (300, 900, 10, 900, 890)],

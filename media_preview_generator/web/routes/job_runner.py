@@ -492,10 +492,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     try:
         queued = get_job_manager().get_job(job_id)
     except Exception as exc:
-        # The preview thread below reads the job again and reports the failure on the job.
-        logger.debug("Could not read job {} to pick its runner: {}", job_id, exc)
-        queued = None
-    if queued is not None and queued.kind == JOB_KIND_INTRO_CREDITS:
+        # Without its saved state we cannot safely select a runner or honor a
+        # webhook deadline. Leave it pending for a later resume/recovery call.
+        logger.error("Could not read job {} before starting; leaving it unchanged: {}", job_id, exc)
+        return
+    if queued is None:
+        return
+    if queued.kind == JOB_KIND_INTRO_CREDITS:
         from ...markers.job_runner import start_intro_credits_job_async
 
         start_intro_credits_job_async(job_id, config_overrides)
