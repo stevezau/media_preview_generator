@@ -874,6 +874,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         eta=worker_eta,
                         ffmpeg_started=bool(worker_data.get("ffmpeg_started", False)),
                         current_phase=worker_data.get("current_phase", "") or "",
+                        fallback_active=bool(worker_data.get("fallback_active", False)),
+                        fallback_reason=worker_data.get("fallback_reason"),
+                        fallback_title=worker_data.get("fallback_title", "") or "",
                     )
                     job_manager.update_worker_status(worker_key, status)
                 job_manager.prune_worker_statuses(active_worker_keys)

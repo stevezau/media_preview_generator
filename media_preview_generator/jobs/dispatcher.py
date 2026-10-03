@@ -1307,6 +1307,7 @@ class JobDispatcher:
             else:
                 display_name = cpu_worker_label(idx)
 
+            fallback_active = bool(getattr(worker, "fallback_active", False))
             statuses.append(
                 {
                     "worker_id": worker.worker_id,
@@ -1318,8 +1319,10 @@ class JobDispatcher:
                     "progress_percent": (progress_data["progress_percent"] if is_busy else 0),
                     "speed": progress_data["speed"] if is_busy else "0.0x",
                     "remaining_time": (progress_data["remaining_time"] if is_busy else 0.0),
-                    "fallback_active": bool(getattr(worker, "fallback_active", False)),
+                    "fallback_active": fallback_active,
                     "fallback_reason": getattr(worker, "fallback_reason", None),
+                    # The fallback file's title outlives is_busy: a quick CPU rerun ends before the next poll.
+                    "fallback_title": (worker.media_title or "") if fallback_active else "",
                     # ffmpeg_started + current_phase drive the UI's pre-FFmpeg
                     # branch. When the dispatcher dropped these (the legacy
                     # process_items_headless path emitted them, this one did

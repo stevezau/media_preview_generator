@@ -334,6 +334,13 @@ class WorkerStatus:
     # worker is busy with — e.g. "Resolving item id on EmbyTest…"
     # explains a 30s gap that would otherwise look like a hang.
     current_phase: str = ""
+    # GPU→CPU fallback state of the worker's current (or just-finished)
+    # task. fallback_title names the file that fell back: current_title
+    # is blank once the task is done, and a short clip's CPU rerun can
+    # finish inside one poll interval, so the toast needs its own copy.
+    fallback_active: bool = False
+    fallback_reason: str | None = None
+    fallback_title: str = ""
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
