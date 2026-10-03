@@ -3845,8 +3845,8 @@ def test_start_job_async_delegates_by_kind(kind, delegated, monkeypatch):
         threading_mod.Thread.return_value.start.assert_called_once()
 
 
-@pytest.mark.parametrize("lookup", [None, RuntimeError("jobs.db locked")])
-def test_start_job_async_falls_back_to_the_preview_thread_when_the_job_cant_be_read(lookup, monkeypatch):
+@pytest.mark.parametrize(("lookup", "fallback"), [(None, False), (RuntimeError("jobs.db locked"), True)])
+def test_start_job_async_distinguishes_a_missing_job_from_a_failed_lookup(lookup, fallback, monkeypatch):
     from media_preview_generator.web.routes import job_runner as preview_runner
 
     jm = MagicMock()
@@ -3863,7 +3863,66 @@ def test_start_job_async_falls_back_to_the_preview_thread_when_the_job_cant_be_r
         preview_runner._start_job_async(job_id, None)
     preview_runner._inflight_jobs.discard(job_id)
     start.assert_not_called()
-    threading_mod.Thread.assert_called_once()
+    if fallback:
+        threading_mod.Thread.assert_called_once()
+    else:
+        threading_mod.Thread.assert_not_called()
+
+
+@pytest.mark.parametrize("current_status", [None, "cancelled", "completed", "failed", "pending"])
+def test_start_job_async_rechecks_terminal_or_deleted_job_before_spawning(current_status, monkeypatch):
+    from media_preview_generator.web.jobs import JobStatus
+    from media_preview_generator.web.routes import job_runner as preview_runner
+
+    queued = SimpleNamespace(kind=JOB_KIND_PREVIEWS, status=JobStatus.PENDING)
+    current = SimpleNamespace(status=JobStatus(current_status)) if current_status else None
+    jm = MagicMock()
+    jm.get_job.side_effect = [queued, current]
+    monkeypatch.setattr(preview_runner, "get_job_manager", lambda: jm)
+    job_id = f"job-reread-{current_status}"
+    with (
+        patch("media_preview_generator.web.webhooks.ensure_pending_webhook", return_value=False) as debounce,
+        patch.object(preview_runner, "_queue_intro_credits_follow_up"),
+        patch.object(preview_runner, "threading") as threading_mod,
+    ):
+        try:
+            preview_runner._start_job_async(job_id)
+            debounce.assert_called_once_with(job_id)
+            assert jm.get_job.call_args_list == [call(job_id), call(job_id)]
+            if current_status == "pending":
+                threading_mod.Thread.return_value.start.assert_called_once()
+            else:
+                threading_mod.Thread.assert_not_called()
+                assert job_id not in preview_runner._inflight_jobs
+        finally:
+            preview_runner._inflight_jobs.discard(job_id)
+
+
+@pytest.mark.parametrize("known_status", ["pending", "cancelled", "completed", "failed"])
+def test_start_job_async_uses_last_known_status_when_locked_reread_fails(known_status, monkeypatch):
+    from media_preview_generator.web.jobs import JobStatus
+    from media_preview_generator.web.routes import job_runner as preview_runner
+
+    queued = SimpleNamespace(kind=JOB_KIND_PREVIEWS, status=JobStatus(known_status))
+    jm = MagicMock()
+    jm.get_job.side_effect = [queued, RuntimeError("jobs.db locked")]
+    monkeypatch.setattr(preview_runner, "get_job_manager", lambda: jm)
+    job_id = f"job-reread-failure-{known_status}"
+    with (
+        patch("media_preview_generator.web.webhooks.ensure_pending_webhook", return_value=False),
+        patch.object(preview_runner, "_queue_intro_credits_follow_up"),
+        patch.object(preview_runner, "threading") as threading_mod,
+    ):
+        try:
+            preview_runner._start_job_async(job_id)
+            assert jm.get_job.call_args_list == [call(job_id), call(job_id)]
+            if known_status == "pending":
+                threading_mod.Thread.return_value.start.assert_called_once()
+            else:
+                threading_mod.Thread.assert_not_called()
+                assert job_id not in preview_runner._inflight_jobs
+        finally:
+            preview_runner._inflight_jobs.discard(job_id)
 
 
 class TestDecideAgainJob:

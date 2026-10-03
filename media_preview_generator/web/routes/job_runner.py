@@ -519,8 +519,22 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
         duplicate = job_id in _inflight_jobs
         terminal = False
         if not duplicate:
-            current = get_job_manager().get_job(job_id)
-            terminal = current is None or current.status in (JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED)
+            try:
+                current = get_job_manager().get_job(job_id)
+                terminal = current is None or current.status in (
+                    JobStatus.CANCELLED,
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                )
+            except Exception as exc:
+                logger.debug("Could not re-read job {} before starting its thread: {}", job_id, exc)
+                # A failed lookup is unknown, unlike a successful missing-row read. Let the preview thread
+                # report the error unless the last successful read already proved the job terminal.
+                terminal = queued is not None and queued.status in (
+                    JobStatus.CANCELLED,
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                )
             if not terminal:
                 _inflight_jobs.add(job_id)
     if duplicate or terminal:
