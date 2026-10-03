@@ -9,7 +9,7 @@ Those tests are kept intentionally narrow.
 The class :class:`TestRealProcessCanonicalPathIntegration` is the real
 integration test: it runs a live ``process_canonical_path`` end-to-end
 with mocks only at true system boundaries (FFmpeg subprocess, the BIF
-writer, filesystem isfile, and the per-server adapter so we don't write
+writer and the per-server adapter so we don't write
 into a real Plex bundle). Its job is to catch regressions like D31 where
 a bug deep in the pipeline went undetected because every test stubbed the
 function under test.
@@ -244,9 +244,10 @@ class TestRealProcessCanonicalPathIntegration:
       * ``generate_images`` (FFmpeg subprocess) — true subprocess boundary.
       * The per-server adapter — we don't write into a real Plex bundle
         directory; we capture the ``publish`` call and assert on its args.
-      * ``os.path.isfile`` for the source video (filesystem boundary).
       * ``os.makedirs`` / ``os.listdir`` of the FFmpeg output dir
         (filesystem boundary).
+
+    Source videos are real temporary files, so the source identity checks run.
     """
 
     def test_real_dispatch_publishes_via_adapter(self, tmp_path):
@@ -274,7 +275,10 @@ class TestRealProcessCanonicalPathIntegration:
         config.thumbnail_interval = 5
         config.server_display_name = "plex-1"
 
-        canonical = "/data/movies/Test (2024)/Test (2024).mkv"
+        source = tmp_path / "media" / "movies" / "Test (2024)" / "Test (2024).mkv"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"synthetic video source")
+        canonical = str(source)
 
         with (
             patch(
@@ -288,10 +292,6 @@ class TestRealProcessCanonicalPathIntegration:
             patch(
                 "media_preview_generator.processing.multi_server.outputs_fresh_for_source",
                 return_value=False,
-            ),
-            patch(
-                "media_preview_generator.processing.multi_server.os.path.isfile",
-                return_value=True,
             ),
             patch(
                 "media_preview_generator.processing.multi_server.generate_images",
@@ -331,6 +331,10 @@ class TestRealProcessCanonicalPathIntegration:
         item_id_arg = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("item_id")
         assert bundle_arg.canonical_path == canonical
         assert bundle_arg.frame_count == 12
+        assert call_args.args[1] == [out_path]
+        from media_preview_generator.output.plex_hash import get_source_fingerprint
+
+        assert bundle_arg.source_fingerprint == get_source_fingerprint(canonical)
         assert item_id_arg == "rk-1"
         # Item id must be the bare ratingKey, NOT the URL form (D31 guardrail).
         assert not str(item_id_arg).startswith("/library/metadata/"), (

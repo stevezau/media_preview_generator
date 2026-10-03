@@ -1301,7 +1301,8 @@ class TestRealEndToEndMultiServerFullScan:
       * the adapter's ``compute_output_paths`` / ``publish`` so we don't
         write to a real Plex bundle directory but DO capture every call
         the real publisher path makes,
-      * ``os.path.isfile`` / ``os.listdir`` filesystem boundary.
+      * ``os.listdir`` for the mocked FFmpeg output. Source media is a
+        real temporary file so the source identity checks run.
 
     The point: D31 shipped because every test stubbed the function with
     the bug. This test is the canary — if any future change reshapes the
@@ -1309,6 +1310,10 @@ class TestRealEndToEndMultiServerFullScan:
     """
 
     def test_full_scan_drives_real_publish_with_well_formed_inputs(self, tmp_path):
+        source = tmp_path / "media" / "movies" / "Real (2024)" / "Real (2024).mkv"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"synthetic video source")
+        canonical = str(source)
         cfg = _server_config("srv-real", ServerType.JELLYFIN)
         registry_real = MagicMock()
         registry_real.configs.return_value = [cfg]
@@ -1351,7 +1356,7 @@ class TestRealEndToEndMultiServerFullScan:
         proc.list_canonical_paths.return_value = iter(
             [
                 ProcessableItem(
-                    canonical_path="/data/movies/Real (2024)/Real (2024).mkv",
+                    canonical_path=canonical,
                     server_id="srv-real",
                     item_id_by_server={"srv-real": "12345"},
                     title="Real (2024)",
@@ -1395,10 +1400,6 @@ class TestRealEndToEndMultiServerFullScan:
                 return_value=False,
             ),
             patch(
-                "media_preview_generator.processing.multi_server.os.path.isfile",
-                return_value=True,
-            ),
-            patch(
                 "media_preview_generator.processing.multi_server.generate_images",
                 return_value=(True, 8, "h264", 320, 30.0, 320),
             ),
@@ -1428,14 +1429,14 @@ class TestRealEndToEndMultiServerFullScan:
         assert len(captured_publish_calls) == 1
 
         for call in captured_compute_calls:
-            assert call["canonical_path"] == "/data/movies/Real (2024)/Real (2024).mkv"
+            assert call["canonical_path"] == canonical
             assert call["item_id"] == "12345"
             assert not str(call["item_id"]).startswith("/library/metadata/"), (
                 f"D31 regression: URL-form item id leaked to compute_output_paths: {call['item_id']!r}"
             )
 
         publish_call = captured_publish_calls[0]
-        assert publish_call["canonical_path"] == "/data/movies/Real (2024)/Real (2024).mkv"
+        assert publish_call["canonical_path"] == canonical
         assert publish_call["item_id"] == "12345"
         assert not str(publish_call["item_id"]).startswith("/library/metadata/"), (
             f"D31 regression: URL-form item id leaked to publish: {publish_call['item_id']!r}"

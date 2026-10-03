@@ -1257,7 +1257,22 @@ class TestOutputStatus:
         assert data["exists"] is True
         assert data["missing_paths"] == []
 
-    def test_plex_requires_item_id(self, client, auth_headers):
+    def test_plex_derives_output_without_item_id(self, client, auth_headers, tmp_path, monkeypatch):
+        import requests
+
+        from media_preview_generator.output.plex_bundle import PlexBundleAdapter
+        from media_preview_generator.output.plex_hash import calculate_plex_hash
+
+        media_file = tmp_path / "video.mkv"
+        media_file.write_bytes(b"media contents")
+        destination = tmp_path / "plex"
+        requests_made = []
+
+        def reject_request(*args, **kwargs):
+            requests_made.append((args, kwargs))
+            raise requests.ConnectionError("Plex offline")
+
+        monkeypatch.setattr(requests.sessions.Session, "request", reject_request)
         _seed_media_servers(
             [
                 {
@@ -1267,17 +1282,21 @@ class TestOutputStatus:
                     "enabled": True,
                     "url": "http://plex:32400",
                     "auth": {"token": "t"},
-                    "output": {"adapter": "plex_bundle", "plex_config_folder": "/cfg"},
+                    "output": {"adapter": "plex_bundle", "plex_config_folder": str(destination)},
                 }
             ]
         )
         response = client.get(
             "/api/servers/plex-1/output-status",
             headers=auth_headers,
-            query_string={"path": "/m/foo.mkv"},
+            query_string={"path": str(media_file)},
         )
         data = response.get_json()
-        assert data["needs_item_id"] is True
+        assert response.status_code == 200
+        expected = str(PlexBundleAdapter.bundle_bif_path(str(destination), calculate_plex_hash(str(media_file))))
+        assert data["paths"] == [expected]
+        assert data["missing_paths"] == [expected]
+        assert requests_made == []
         assert data["exists"] is False
 
     def test_jellyfin_reports_missing_sheets_dir(self, client, auth_headers, tmp_path):
@@ -2168,18 +2187,7 @@ class TestDisabledServerGates:
         assert probe_spy.calls == []
 
     def test_output_status_short_circuits_when_disabled(self, client, auth_headers, monkeypatch):
-        """output-status must not wake a disabled Plex server.
-
-        The Plex branch of this route builds a live ``PlexServer`` via
-        ``ServerRegistry.from_settings(...).get(server_id)`` to look up
-        the per-item bundle hash. That instantiation hits Plex on
-        connect, so a disabled server must short-circuit BEFORE the
-        registry build.
-
-        Spies on ``ServerRegistry.from_settings`` (not ``_instantiate_for_probe``
-        — output-status takes a different code path through the
-        registry).
-        """
+        """Disabled output-status must stop before resolving paths or building clients."""
         self._seed_disabled_plex()
 
         from media_preview_generator.servers import registry as _registry_mod

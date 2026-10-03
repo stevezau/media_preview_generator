@@ -1,21 +1,9 @@
-"""Tests for the Plex bundle BIF output adapter.
-
-Verifies that:
-- the bundle-hash → on-disk path mapping matches what Plex expects,
-- multi-part items pick the matching bundle hash by basename,
-- "not yet indexed" cases raise the right exception so the dispatcher's
-  slow-backoff queue takes over,
-- ``publish`` packs frames into a real BIF on disk.
-
-Mocking philosophy: these tests deliberately mock at the system boundary
-(``plex.query``) and let the URL-construction code in ``get_bundle_metadata``
-run for real. Mocking the server method would defeat the purpose — the D31
-bug lived inside the URL string built right next to the query call. See
-``test_does_not_double_prefix_url_when_item_id_is_full_path``.
-"""
+"""Plex bundle output derives destinations from current media, without an API."""
 
 from __future__ import annotations
 
+import builtins
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
@@ -23,7 +11,12 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from media_preview_generator.output import BifBundle, PlexBundleAdapter
-from media_preview_generator.servers import LibraryNotYetIndexedError, PlexServer
+from media_preview_generator.output.plex_hash import (
+    SourceFileChangedError,
+    calculate_plex_hash,
+    get_source_fingerprint,
+)
+from media_preview_generator.servers import PlexServer
 
 
 def _make_bundle(
@@ -44,515 +37,184 @@ def _make_bundle(
     )
 
 
-def _wire_plex_query(server: PlexServer, *, parts: list[tuple[str, str]]) -> list[str]:
-    """Wire ``server._plex.query`` to return a /tree-shaped XML response built
-    from ``parts``. Returns the list that captures URLs requested. Lets the
-    real URL-construction in ``get_bundle_metadata`` run — this is the
-    boundary where mocks belong (D31 lived in the URL string itself)."""
-    captured_urls: list[str] = []
-    media_parts_xml = "".join(f'<MediaPart hash="{h}" file="{f}" />' for h, f in parts)
-    payload = f"<MediaContainer><MetadataItem><MediaItem>{media_parts_xml}</MediaItem></MetadataItem></MediaContainer>"
-
-    def fake_query(url):
-        captured_urls.append(url)
-        return ET.fromstring(payload)
-
-    plex = MagicMock()
-    plex.query = fake_query
-    server._plex = plex
-    return captured_urls
-
-
-class TestNeedsServerMetadata:
-    def test_returns_true(self):
+class TestComputeOutputPaths:
+    def test_no_server_metadata_required(self):
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        assert adapter.needs_server_metadata() is True
-
-    def test_name(self):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+        assert adapter.needs_server_metadata() is False
         assert adapter.name == "plex_bundle"
 
-
-class TestComputeOutputPaths:
-    def test_path_structure_matches_plex_bundle_layout(self, tmp_path, mock_config):
+    @pytest.mark.parametrize("item_id", [None, "42", "/library/metadata/42"])
+    def test_resolves_without_server_or_item_id(self, tmp_path, item_id):
+        media = tmp_path / "movie.mkv"
+        media.write_bytes(b"current media" * 20000)
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        urls = _wire_plex_query(server, parts=[("abcdef0123456789", "/m/foo.mkv")])
+        bundle_hash = calculate_plex_hash(media)
 
-        paths = adapter.compute_output_paths(
-            _make_bundle("/m/foo.mkv", tmp_path),
-            server,
-            item_id="42",
-        )
+        paths = adapter.compute_output_paths(_make_bundle(str(media), tmp_path), None, item_id)
 
-        assert len(paths) == 1
-        assert paths[0] == Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Indexes/index-sd.bif")
-        # Sanity: the URL was built correctly for the bare-id input.
-        assert urls == ["/library/metadata/42/tree"]
-
-    def test_picks_matching_part_by_basename(self, tmp_path, mock_config):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        _wire_plex_query(
-            server,
-            parts=[
-                ("aaaaaaaaaa", "/m/disc1.mkv"),
-                ("bbbbbbbbbb", "/m/disc2.mkv"),
-            ],
-        )
-
-        paths = adapter.compute_output_paths(
-            _make_bundle("/m/disc2.mkv", tmp_path),
-            server,
-            item_id="99",
-        )
-
-        # Should pick the second part's hash, not the first.
-        assert paths[0] == Path("/cfg/Media/localhost/b/bbbbbbbbb.bundle/Contents/Indexes/index-sd.bif")
-
-    def test_plex_multi_version_same_basename_picks_matching_path(self, tmp_path, mock_config):
-        """Issue #231: user has 4K + 1080p of the same movie in two
-        separate directories. Plex merges them into one ratingKey with
-        two MediaParts — identical basenames, different paths.
-
-        The selector MUST match on the FULL canonical path, not basename,
-        or the 4K file's BIF ends up at the 1080p bundle hash (and vice
-        versa). Symptom: Plex's PhotoTranscoder rejects the served BIF
-        frames as "we don't trust what we cached" because the preview
-        dimensions / aspect ratio / frame count don't match the version
-        Plex is trying to play.
-
-        Currently this test FAILS against the basename-matching selector
-        — both parts match on basename ``Dune (2021).mkv`` so first wins,
-        which is wrong when the webhook fired for the second path.
-        """
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        _wire_plex_query(
-            server,
-            parts=[
-                ("aaaaaaaaaa", "/mnt/4k/Movies/Dune (2021)/Dune (2021).mkv"),
-                ("bbbbbbbbbb", "/mnt/1080p/Movies/Dune (2021)/Dune (2021).mkv"),
-            ],
-        )
-
-        # Dispatching the 1080p file — must pick the 1080p hash (b...).
-        paths = adapter.compute_output_paths(
-            _make_bundle("/mnt/1080p/Movies/Dune (2021)/Dune (2021).mkv", tmp_path),
-            server,
-            item_id="99",
-        )
-
-        assert "bbbbbbbbb.bundle" in str(paths[0]), (
-            f"Multi-version selector picked the wrong MediaPart — got {paths[0]}. "
-            "With identical basenames across 4K and 1080p versions, the selector "
-            "must match on the full canonical path, not just basename. "
-            "Symptom in production: Plex rejects the BIF with 'we don't trust what we cached'."
-        )
-
-    def test_single_version_with_path_mapping_drift_still_matches(self, tmp_path, mock_config):
-        """The common case: one file, Plex reports its server-view path
-        (e.g. ``/data/Dune.mkv``) while our canonical is the local-view
-        path (``/mnt/media/Dune.mkv``). Same basename, different parent
-        prefix. Selector must still match on the shared trailing
-        segments and return the single hash. Regression guard for the
-        v3 longest-common-suffix selector."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        _wire_plex_query(
-            server,
-            parts=[("cccccccccc", "/data/Movies/Dune (2021)/Dune (2021).mkv")],
-        )
-
-        paths = adapter.compute_output_paths(
-            _make_bundle("/mnt/media/Movies/Dune (2021)/Dune (2021).mkv", tmp_path),
-            server,
-            item_id="77",
-        )
-        # Bundle path layout is /<h[0]>/<h[1:]>.bundle/… — so "cccccccccc"
-        # splits to /c/ccccccccc.bundle (9 c's after the first char).
-        assert "/c/ccccccccc.bundle" in str(paths[0]), f"got {paths[0]}"
-
-    def test_plex_multi_version_picks_correct_for_both_versions(self, tmp_path, mock_config):
-        """Matrix completion for the multi-version fix: dispatching the
-        4K file picks the 4K hash; dispatching the 1080p file picks the
-        1080p hash. Without both cells, a regression that always
-        returned the SECOND hash would pass the first test."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        parts = [
-            ("aaaaaaaaaa", "/mnt/4k/Movies/Dune (2021)/Dune (2021).mkv"),
-            ("bbbbbbbbbb", "/mnt/1080p/Movies/Dune (2021)/Dune (2021).mkv"),
+        assert paths == [
+            Path(f"/cfg/Media/localhost/{bundle_hash[0]}/{bundle_hash[1:]}.bundle/Contents/Indexes/index-sd.bif")
         ]
 
-        _wire_plex_query(server, parts=parts)
-        paths_4k = adapter.compute_output_paths(
-            _make_bundle("/mnt/4k/Movies/Dune (2021)/Dune (2021).mkv", tmp_path),
-            server,
-            item_id="99",
-        )
-        assert "aaaaaaaaa.bundle" in str(paths_4k[0]), f"4K picked wrong: {paths_4k[0]}"
-
-        _wire_plex_query(server, parts=parts)
-        paths_1080 = adapter.compute_output_paths(
-            _make_bundle("/mnt/1080p/Movies/Dune (2021)/Dune (2021).mkv", tmp_path),
-            server,
-            item_id="99",
-        )
-        assert "bbbbbbbbb.bundle" in str(paths_1080[0]), f"1080p picked wrong: {paths_1080[0]}"
-
-    def test_falls_back_to_first_hash_when_no_basename_match(self, tmp_path, mock_config):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+    @pytest.mark.parametrize("item_id", [None, "42", "/library/metadata/42"])
+    def test_never_contacts_plex(self, tmp_path, mock_config, item_id):
+        media = tmp_path / "movie.mkv"
+        media.write_bytes(b"current media" * 20000)
         server = PlexServer(mock_config)
-        _wire_plex_query(server, parts=[("zzzzzzzzzz", "/srv/different/path.mkv")])
-
-        paths = adapter.compute_output_paths(
-            _make_bundle("/m/foo.mkv", tmp_path),
-            server,
-            item_id="42",
-        )
-        assert paths[0].name == "index-sd.bif"
-        assert "zzzzzzzzz.bundle" in str(paths[0])
-
-    def test_tied_suffix_with_unrelated_part_first_picks_a_tied_part(self, tmp_path, mock_config):
-        """Tie-breaker bug: when multiple parts tie at the deepest suffix,
-        the selector must pick from the TIED parts — not from the head of
-        the parts list, which may be an unrelated part with a usable hash.
-
-        Pre-fix tier 3 iterates ``parts`` from index 0 and returns the
-        first hash with len>=2, ignoring whether that part actually
-        matched the target. With Plex's multi-version libraries the
-        tied parts share basename + parents while an unrelated multi-disc
-        part can sit ahead of them in iteration order — and Plex's /tree
-        XML order isn't a contract we control. Result: BIF written to a
-        bundle hash that has nothing to do with the dispatched file.
-
-        Live trigger 2026-05-14: Bandi (2026) S01E05/E06/E08 — three
-        items each warned "multiple MediaParts tied at the deepest path
-        suffix; picking the first usable hash". The warning reveals the
-        ambiguity but doesn't promise the picked hash is one of the
-        tied ones — pre-fix it can be any usable hash in the list.
-        """
+        server._ensure_connected = MagicMock(side_effect=AssertionError("must not connect"))
+        server.get_bundle_metadata = MagicMock(side_effect=AssertionError("must not request metadata"))
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+
+        paths = adapter.compute_output_paths(_make_bundle(str(media), tmp_path), server, item_id)
+
+        assert len(paths) == 1
+        server._ensure_connected.assert_not_called()
+        server.get_bundle_metadata.assert_not_called()
+
+    @pytest.mark.parametrize("metadata_kind", ["exact_stale", "ambiguous", "unrelated", "invalid"])
+    def test_prefetched_metadata_cannot_redirect_current_file(self, tmp_path, metadata_kind):
+        media = tmp_path / "movie.mkv"
+        media.write_bytes(b"replacement media" * 20000)
+        metadata = {
+            "exact_stale": (("a" * 40, str(media)),),
+            "ambiguous": (("a" * 40, "/4k/movie.mkv"), ("b" * 40, "/1080/movie.mkv")),
+            "unrelated": (("c" * 40, "/different/disc2.mkv"),),
+            "invalid": (("", str(media)),),
+        }[metadata_kind]
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+        bundle = _make_bundle(str(media), tmp_path, prefetched_bundle_metadata=metadata)
+
+        paths = adapter.compute_output_paths(bundle, None, "42")
+
+        assert paths == [adapter.bundle_bif_path("/cfg", calculate_plex_hash(media))]
+        assert paths[0] != adapter.bundle_bif_path("/cfg", "a" * 40)
+
+    def test_same_basename_versions_use_their_own_bytes(self, tmp_path):
+        paths = []
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+        for name, content in [("4k", b"4K video"), ("1080p", b"1080p video")]:
+            media = tmp_path / name / "movie.mkv"
+            media.parent.mkdir()
+            media.write_bytes(content * 20000)
+            output = adapter.compute_output_paths(_make_bundle(str(media), tmp_path), None, "42")
+            assert output == [adapter.bundle_bif_path("/cfg", calculate_plex_hash(media))]
+            paths.append(output[0])
+        assert paths[0] != paths[1]
+
+    def test_replaced_file_gets_new_bundle(self, tmp_path):
+        media = tmp_path / "movie.mkv"
+        media.write_bytes(b"old content" * 20000)
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+        bundle = _make_bundle(str(media), tmp_path)
+        previous = adapter.compute_output_paths(bundle, None, None)
+        replacement = tmp_path / "replacement.mkv"
+        replacement.write_bytes(b"new content" * 20000)
+        replacement.replace(media)
+
+        current = adapter.compute_output_paths(bundle, None, None)
+
+        assert current != previous
+        assert current == [adapter.bundle_bif_path("/cfg", calculate_plex_hash(media))]
+
+    def test_missing_source_does_not_use_stale_metadata(self, tmp_path):
+        media = tmp_path / "missing.mkv"
+        bundle = _make_bundle(str(media), tmp_path, prefetched_bundle_metadata=(("a" * 40, str(media)),))
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
+        with pytest.raises(FileNotFoundError):
+            adapter.compute_output_paths(bundle, None, "42")
+
+
+class TestGetBundleMetadata:
+    @pytest.mark.parametrize("item_id", ["557676", "/library/metadata/557676"])
+    def test_existing_server_api_does_not_double_prefix_metadata_url(self, mock_config, item_id):
         server = PlexServer(mock_config)
-        _wire_plex_query(
-            server,
-            parts=[
-                # Unrelated part FIRST in iteration order — different
-                # basename, different parent. Suffix walk gives 0.
-                ("ffffffffff", "/mnt/other/Documentary/disc1.mkv"),
-                # Two tied parts with identical basename + parent ("Movies/Dune (2021)").
-                # Differ only in mount prefix (4k vs 1080p) — common multi-version layout.
-                ("aaaaaaaaaa", "/mnt/4k/Movies/Dune (2021)/Dune (2021).mkv"),
-                ("bbbbbbbbbb", "/mnt/1080p/Movies/Dune (2021)/Dune (2021).mkv"),
-            ],
+        server._plex = MagicMock()
+        server._plex.query.return_value = ET.fromstring(
+            '<MediaContainer><MetadataItem><MediaItem><MediaPart hash="abcdef0123456789" '
+            'file="/m/foo.mkv" /></MediaItem></MetadataItem></MediaContainer>'
         )
 
-        paths = adapter.compute_output_paths(
-            _make_bundle("/cdn/Movies/Dune (2021)/Dune (2021).mkv", tmp_path),
-            server,
-            item_id="99",
-        )
-
-        # The picked hash MUST be one of the tied parts (a... or b...),
-        # not the unrelated f... — otherwise the BIF lands in a bundle
-        # for a completely different file and the user gets no preview
-        # for either Dune version.
-        bundle_segment = str(paths[0])
-        assert "aaaaaaaaa.bundle" in bundle_segment or "bbbbbbbbb.bundle" in bundle_segment, (
-            f"Tier-3 fallback picked an unrelated hash. Got {paths[0]}. "
-            f"With multiple parts tied at the deepest suffix, the picked hash must come "
-            f"from a tied part (a... or b...), not from the unrelated f... at the head "
-            f"of the parts list. Pre-fix this returned the f... hash because tier 3 "
-            f"iterated ``parts`` from index 0 instead of preferring the tracked "
-            f"``best_match`` hash."
-        )
-        assert "ffffffff.bundle" not in bundle_segment, (
-            f"Picked the unrelated multi-disc part's hash instead of one of the tied parts: {paths[0]}"
-        )
-
-    def test_empty_metadata_raises_not_yet_indexed(self, tmp_path, mock_config):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        # Empty MediaPart list — Plex returned a /tree but no parts yet.
-        _wire_plex_query(server, parts=[])
-
-        with pytest.raises(LibraryNotYetIndexedError):
-            adapter.compute_output_paths(
-                _make_bundle("/m/foo.mkv", tmp_path),
-                server,
-                item_id="42",
-            )
-
-    def test_invalid_hash_for_matching_part_raises_not_yet_indexed(self, tmp_path, mock_config):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        # MediaPart present but hash is too short for a bundle path — Plex's
-        # /tree sometimes returns a placeholder before bundle generation
-        # finishes. _select_hash_for_path's length>=2 guard rejects it.
-        _wire_plex_query(server, parts=[("a", "/m/foo.mkv")])
-
-        with pytest.raises(LibraryNotYetIndexedError):
-            adapter.compute_output_paths(
-                _make_bundle("/m/foo.mkv", tmp_path),
-                server,
-                item_id="42",
-            )
-
-    def test_missing_item_id_raises_value_error(self, tmp_path, mock_config):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        with pytest.raises(ValueError, match="item_id"):
-            adapter.compute_output_paths(
-                _make_bundle("/m/foo.mkv", tmp_path),
-                server,
-                item_id=None,
-            )
-
-    def test_non_plex_server_raises_type_error(self, tmp_path):
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        with pytest.raises(TypeError, match="PlexServer"):
-            adapter.compute_output_paths(
-                _make_bundle("/m/foo.mkv", tmp_path),
-                MagicMock(spec=object),  # not a MediaServer at all
-                item_id="42",
-            )
-
-    def test_does_not_double_prefix_url_when_item_id_is_full_path(self, tmp_path, mock_config):
-        """D31 — END-TO-END regression test that DOESN'T mock get_bundle_metadata
-        (which is what hid the bug for months).
-
-        The pre-D31 webhook router stuffed the URL form ``/library/metadata/<id>``
-        into ``item_id_by_server`` and passed it to ``compute_output_paths``.
-        Inside, ``get_bundle_metadata`` did ``f"/library/metadata/{item_id}/tree"``
-        which doubled the prefix → ``//library/metadata/<id>/tree`` → 404 →
-        silently swallowed → "no MediaPart with bundle hash yet" lie.
-
-        Every existing TestComputeOutputPaths test mocks get_bundle_metadata,
-        so they all PASSED while production was silently broken on every
-        Sonarr/Radarr → Plex webhook for at least 3 days. This test covers
-        that gap by exercising the real URL-construction path and capturing
-        the URL that hits Plex's API."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-
-        # Mock the underlying plex.query to capture the URL — this is the
-        # ONLY thing we mock; get_bundle_metadata's URL construction runs
-        # for real.
-        from xml.etree import ElementTree as ET
-
-        captured_urls: list[str] = []
-
-        def fake_query(url):
-            captured_urls.append(url)
-            return ET.fromstring(
-                "<MediaContainer><MetadataItem><MediaItem>"
-                '<MediaPart hash="abcdef0123456789" file="/m/foo.mkv" />'
-                "</MediaItem></MetadataItem></MediaContainer>"
-            )
-
-        plex = MagicMock()
-        plex.query = fake_query
-        server._plex = plex
-
-        # Pass the URL form (the buggy webhook router shape).
-        paths = adapter.compute_output_paths(
-            _make_bundle("/m/foo.mkv", tmp_path),
-            server,
-            item_id="/library/metadata/557676",
-        )
-
-        # The query URL must NOT have a doubled prefix — every Sonarr →
-        # Plex webhook for months silently failed because of exactly this.
-        assert len(captured_urls) == 1
-        assert captured_urls[0] == "/library/metadata/557676/tree", (
-            f"URL was {captured_urls[0]!r} — doubled prefix means 404, silent skip, "
-            "'not indexed yet' lie. This was the D31 bug."
-        )
-        assert "//library/metadata" not in captured_urls[0]
-        # And the bundle path was computed (would have raised
-        # LibraryNotYetIndexedError if the URL had failed).
-        assert paths[0] == Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Indexes/index-sd.bif")
-
-    def test_handles_bare_rating_key_input(self, tmp_path, mock_config):
-        """The same end-to-end path with the canonical input shape (bare
-        ratingKey) — must produce the SAME URL as the URL-form input. Pair
-        this with the previous test: both shapes converge on one correct URL."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-
-        from xml.etree import ElementTree as ET
-
-        captured_urls: list[str] = []
-
-        def fake_query(url):
-            captured_urls.append(url)
-            return ET.fromstring(
-                "<MediaContainer><MetadataItem><MediaItem>"
-                '<MediaPart hash="abcdef0123456789" file="/m/foo.mkv" />'
-                "</MediaItem></MetadataItem></MediaContainer>"
-            )
-
-        plex = MagicMock()
-        plex.query = fake_query
-        server._plex = plex
-
-        adapter.compute_output_paths(
-            _make_bundle("/m/foo.mkv", tmp_path),
-            server,
-            item_id="557676",  # bare ratingKey (the canonical shape)
-        )
-
-        assert captured_urls == ["/library/metadata/557676/tree"]
+        assert server.get_bundle_metadata(item_id) == [("abcdef0123456789", "/m/foo.mkv")]
+        server._plex.query.assert_called_once_with("/library/metadata/557676/tree")
 
 
-class TestPrefetchedBundleMetadata:
-    """Pre-fetched (hash, file) pairs from enumeration must short-circuit /tree.
-
-    plexapi's ``section.search()`` already returns
-    ``item.media[*].parts[*].(hash, file)`` so a 9981-item full-library scan
-    no longer needs 9981 sequential ``/library/metadata/{id}/tree``
-    round-trips. The processing pipeline captures those pairs at
-    enumeration time and threads them through ``BifBundle.prefetched_bundle_metadata``;
-    PlexBundleAdapter reads them first.
-    """
-
-    def test_prefetched_metadata_skips_tree_call(self, tmp_path, mock_config):
-        """When prefetched metadata is supplied, /tree must NOT be called."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        # Wire query to ASSERT it isn't called.
-        plex = MagicMock()
-        plex.query.side_effect = AssertionError(
-            "PlexBundleAdapter must not call /tree when prefetched metadata is supplied"
-        )
-        server._plex = plex
-
-        bundle = _make_bundle(
-            "/m/foo.mkv",
-            tmp_path,
-            prefetched_bundle_metadata=(("abcdef0123456789", "/m/foo.mkv"),),
-        )
-        paths = adapter.compute_output_paths(bundle, server, item_id="42")
-
-        assert paths == [Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Indexes/index-sd.bif")]
-        plex.query.assert_not_called()
-
-    def test_falls_back_to_tree_when_no_prefetch(self, tmp_path, mock_config):
-        """Empty prefetched metadata → /tree is called (the legacy webhook path)."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        urls = _wire_plex_query(server, parts=[("aaaaaaaaaa", "/m/foo.mkv")])
-
-        bundle = _make_bundle("/m/foo.mkv", tmp_path)  # no prefetch
-        paths = adapter.compute_output_paths(bundle, server, item_id="42")
-
-        assert urls == ["/library/metadata/42/tree"]
-        assert "aaaaaaaaa.bundle" in str(paths[0])
-
-    def test_prefetched_picks_matching_part_by_basename(self, tmp_path, mock_config):
-        """Multi-part item: still pick the basename-matching hash, but from the prefetch."""
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        server = PlexServer(mock_config)
-        plex = MagicMock()
-        plex.query.side_effect = AssertionError("must not call /tree")
-        server._plex = plex
-
-        bundle = _make_bundle(
-            "/m/disc2.mkv",
-            tmp_path,
-            prefetched_bundle_metadata=(
-                ("aaaaaaaaaa", "/m/disc1.mkv"),
-                ("bbbbbbbbbb", "/m/disc2.mkv"),
-            ),
-        )
-        paths = adapter.compute_output_paths(bundle, server, item_id="99")
-        assert "bbbbbbbbb.bundle" in str(paths[0]), (
-            "Prefetched-metadata path must apply the same basename selection "
-            "as the /tree path — otherwise multi-part items get the wrong bundle."
-        )
-
-
-_UFC = "/data/Sports/UFC/Season 2026/UFC Fight Night 273 (2026-04-18) E12"
-_BOXING = "/data/Sports/Boxing/Season 2026/Garcia vs Benn (2026-09-12) E94"
-
-# Shapes and hashes taken from a live Plex library DB (media_parts rows).
-# Stacked: one media item, one part per file, each part its own hash, and
-# Plex marks each part ``mi:indexes=sd`` — one index per part.
-_STACKED_PARTS = [
-    ("18fb60bf8e1b57b468adb39094dc196964d4ca17", f"{_UFC}/UFC - S2026E12 - pt1 - Fight Night 273.mp4"),
-    ("3cc93c9d5895af050a5bbef9fa7ff7fc5aaef42d", f"{_UFC}/UFC - S2026E12 - pt2 - Fight Night 273.mp4"),
-]
-# Copies: one item, two versions whose files are byte-identical. Plex's part
-# hash is taken from the content, so both parts carry the same hash and share
-# one bundle (and one index-sd.bif) in Plex itself.
+# Real source files model single-part items, stacked parts, and identical
+# copies. Expected hashes are fixed vectors, independent of the adapter.
+_STACKED_PARTS = [("episode-pt1.mp4", b"A" * 70000), ("episode-pt2.mp4", b"B" * 70000)]
 _COPY_PARTS = [
-    ("7bd4b8cfed7b096007252de23fe3b71150b1c3af", f"{_BOXING}/Boxing - S2026E94 - pt2 - Garcia vs Benn.mkv"),
-    ("7bd4b8cfed7b096007252de23fe3b71150b1c3af", f"{_BOXING}/Boxing - S2026E94 - Garcia vs Benn.mkv"),
-    ("6ebd8bebd35bf3d999c6235a509f8c8526eb7ee5", f"{_BOXING}/Boxing - S2026E94 - pt4 - Garcia vs Benn HDTV.mkv"),
+    ("copy-pt2.mkv", b"A" * 70000),
+    ("original.mkv", b"A" * 70000),
+    ("different-version.mkv", b"C" * 70000),
 ]
 
 
 class TestOutputPathPerPart:
-    """The exact BIF path for each file of single-part, stacked and copied items."""
+    """Each part uses its own bytes; identical copies share one Plex bundle."""
 
     @pytest.mark.parametrize(
-        ("parts", "canonical_path", "expected"),
+        ("parts", "selected", "expected_hash"),
         [
-            pytest.param(
-                [_STACKED_PARTS[0]],
-                _STACKED_PARTS[0][1],
-                "/cfg/Media/localhost/1/8fb60bf8e1b57b468adb39094dc196964d4ca17.bundle/Contents/Indexes/index-sd.bif",
-                id="single-part",
-            ),
-            pytest.param(
-                _STACKED_PARTS,
-                _STACKED_PARTS[0][1],
-                "/cfg/Media/localhost/1/8fb60bf8e1b57b468adb39094dc196964d4ca17.bundle/Contents/Indexes/index-sd.bif",
-                id="stacked-pt1",
-            ),
-            pytest.param(
-                _STACKED_PARTS,
-                _STACKED_PARTS[1][1],
-                "/cfg/Media/localhost/3/cc93c9d5895af050a5bbef9fa7ff7fc5aaef42d.bundle/Contents/Indexes/index-sd.bif",
-                id="stacked-pt2",
-            ),
-            pytest.param(
-                _COPY_PARTS,
-                _COPY_PARTS[0][1],
-                "/cfg/Media/localhost/7/bd4b8cfed7b096007252de23fe3b71150b1c3af.bundle/Contents/Indexes/index-sd.bif",
-                id="copy-pt2",
-            ),
-            pytest.param(
-                _COPY_PARTS,
-                _COPY_PARTS[1][1],
-                "/cfg/Media/localhost/7/bd4b8cfed7b096007252de23fe3b71150b1c3af.bundle/Contents/Indexes/index-sd.bif",
-                id="copy-original",
-            ),
-            pytest.param(
-                _COPY_PARTS,
-                _COPY_PARTS[2][1],
-                "/cfg/Media/localhost/6/ebd8bebd35bf3d999c6235a509f8c8526eb7ee5.bundle/Contents/Indexes/index-sd.bif",
-                id="different-version-of-copied-item",
-            ),
+            pytest.param([_STACKED_PARTS[0]], 0, "5fda157f4dfe306730d711ee01ae3279db0afe6c", id="single-part"),
+            pytest.param(_STACKED_PARTS, 0, "5fda157f4dfe306730d711ee01ae3279db0afe6c", id="stacked-pt1"),
+            pytest.param(_STACKED_PARTS, 1, "19588016240093667feb2b337ccafe4ae081a35a", id="stacked-pt2"),
+            pytest.param(_COPY_PARTS, 0, "5fda157f4dfe306730d711ee01ae3279db0afe6c", id="copy-pt2"),
+            pytest.param(_COPY_PARTS, 1, "5fda157f4dfe306730d711ee01ae3279db0afe6c", id="copy-original"),
+            pytest.param(_COPY_PARTS, 2, "b49d6c4a7413613eccc8985005c46a7d421efdd6", id="different-version"),
         ],
     )
-    @pytest.mark.parametrize("source", ["tree", "prefetched"])
-    def test_output_path_is_the_parts_own_bundle(self, tmp_path, mock_config, parts, canonical_path, expected, source):
+    @pytest.mark.parametrize("prefetched", [False, True])
+    def test_output_path_is_the_parts_own_bundle(
+        self, tmp_path, mock_config, parts, selected, expected_hash, prefetched
+    ):
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
         server = PlexServer(mock_config)
-        if source == "tree":
-            _wire_plex_query(server, parts=parts)
-            bundle = _make_bundle(canonical_path, tmp_path)
-        else:
-            server._plex = MagicMock()
-            server._plex.query.side_effect = AssertionError("must not call /tree")
-            bundle = _make_bundle(canonical_path, tmp_path, prefetched_bundle_metadata=tuple(parts))
+        server._plex = MagicMock()
+        server._plex.query.side_effect = AssertionError("must not call /tree")
+        local_paths = []
+        for filename, content in parts:
+            local_path = tmp_path / filename
+            local_path.write_bytes(content)
+            local_paths.append(str(local_path))
+        metadata = tuple(("f" * 40, path) for path in local_paths) if prefetched else ()
+        bundle = _make_bundle(local_paths[selected], tmp_path, prefetched_bundle_metadata=metadata)
+        expected = Path(
+            f"/cfg/Media/localhost/{expected_hash[0]}/{expected_hash[1:]}.bundle/Contents/Indexes/index-sd.bif"
+        )
 
-        assert adapter.compute_output_paths(bundle, server, item_id="689756") == [Path(expected)]
+        assert adapter.compute_output_paths(bundle, server, item_id="689756") == [expected]
+        server._plex.query.assert_not_called()
 
 
 class TestPublish:
+    def test_source_replacement_during_packing_preserves_old_preview(self, tmp_path, monkeypatch):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"old media" * 20000)
+        frames = tmp_path / "frames"
+        frames.mkdir()
+        frame = frames / "00000.jpg"
+        frame.write_bytes(b"jpeg content")
+        output = tmp_path / "index-sd.bif"
+        output.write_bytes(b"previous complete preview")
+        bundle = replace(
+            _make_bundle(str(source), frames),
+            source_fingerprint=get_source_fingerprint(source),
+        )
+        real_open = builtins.open
+
+        def replacing_open(file, mode="r", *args, **kwargs):
+            if Path(file) == frame and mode == "rb":
+                source.write_bytes(b"replacement media" * 20000)
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", replacing_open)
+        adapter = PlexBundleAdapter(str(tmp_path), frame_interval=10)
+
+        with pytest.raises(SourceFileChangedError, match="changed before publishing"):
+            adapter.publish(bundle, [output])
+
+        assert output.read_bytes() == b"previous complete preview"
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["frames", "index-sd.bif", "movie.mkv"]
+
     def test_creates_parent_dirs_and_writes_bif(self, tmp_path):
         # Arrange: a frame dir with three small JPGs.
         frame_dir = tmp_path / "frames"

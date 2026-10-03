@@ -86,7 +86,7 @@ A single inbound URL, `POST /api/webhooks/incoming`, handles every source.
                        ┌───────────────────────┼───────────────────────┐
                        ▼                       ▼                       ▼
             Plex bundle BIF         Emby sidecar BIF        Jellyfin trickplay
-            +scan trigger           +Library/Media/Updated  +Items/{id}/Refresh
+            +background notification +Library/Media/Updated +Items/{id}/Refresh
 ```
 
 Failures on one server don't take down the others — if Jellyfin's write fails the Emby sidecar still lands. The job log shows a per-server status row so you can see exactly what happened.
@@ -195,6 +195,42 @@ To install the plugin by hand instead, add this repository URL in Jellyfin → *
 https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
 
+### Plex generation without waiting for Plex
+
+Plex destinations are calculated from the current media file by default. No
+item ID or live Plex lookup is needed to write previews. Use **Manual
+Generation** to browse a file or folder, or send a webhook containing a media
+path. The server, enabled library roots, path mappings, and writable Plex
+config folder must already be configured. Title searches, library enumeration,
+and events that contain only a server item ID still need the server to resolve
+their input files.
+
+The hash calculation reads at most the first and last 64 KiB. It uses the
+current source instead of a hash from Plex's last scan, which may describe a
+file replaced at the same path. Files smaller than 65,536 bytes use decimal
+size followed by the file's hexadecimal SHA-1 digest. At 65,536 bytes and above,
+Plex uses SHA-1 of decimal size followed by both hexadecimal block digests,
+even when the two blocks overlap. These cases were checked against a live Plex
+server.
+
+After writing, a background queue requests analysis for a known item ID; without
+an ID, it first requests a scan and tries to resolve the file. Generation does
+not wait for that network work. The queue holds up to 128 pending files and
+coalesces duplicate notifications. It is not persisted across restarts and does
+not automatically retry failures. If it fills, the app logs a warning; a later
+generation request, including one that finds the preview already present, can
+notify Plex again.
+
+A written preview and Plex advertising it as available are separate steps:
+when Plex is offline or has not indexed the file, a later scan/analysis can be
+needed. Notification failures do not discard a successfully written preview.
+
+**Clean Bundles can delete previews for files Plex has not indexed yet.** Live
+testing confirmed deletion before indexing and preservation after indexing.
+When multiple Plex servers share the same `Media` directory, consider each
+server's library membership before running cleanup. Generating locally does
+not coordinate Plex's cleanup tasks.
+
 ---
 
 ## Webhook configuration per vendor
@@ -257,8 +293,8 @@ The dispatcher distinguishes three cases when a webhook fires:
 | Case | Response |
 |---|---|
 | 1. Path is under no enabled library on this server | **Skip permanently** (status `no_owners`) |
-| 2. Path is under an enabled library, but the server hasn't scanned the file yet | **Slow-backoff retry** queue (status `skipped_not_indexed`) |
-| 3. Server is unreachable | Tight transport retry, eventual failure |
+| 2. Path is under an enabled library, but the server hasn't scanned the file yet | Plex and Emby write from the local file; outputs needing a server item ID use the **slow-backoff retry** queue (`skipped_not_indexed`) |
+| 3. Server is unreachable | Plex and Emby path-based generation can continue; server-dependent discovery or output registration can fail or wait for a later scan |
 
 Ownership is decided from the cached `libraries[]` snapshot in each
 server config — no per-file index. Toggle a library off via the
@@ -271,25 +307,30 @@ that library cleanly with no retry storm.
 
 Two layers prevent the same file being processed twice:
 
-1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache holds the most recent files for a configurable window (default 1 hour). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
+1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache checks file identity, size, and nanosecond modification/change times so a replacement with preserved timestamps does not reuse the old frames. It holds the most recent files for a configurable window (default 1 hour). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
 
-2. **Long-term sidecar tracking** — every published output gets a small companion file (`<file>.bif.meta`) that records the source file's last-modified time and size. On any later webhook, the app checks this companion file first — if every output already exists, isn't empty, and the source hasn't changed, the whole pipeline is skipped. This handles "Sonarr fires immediately, then Plex's own webhook fires 30 minutes later for the same file."
+2. **Long-term sidecar tracking** — every published output gets a small companion file (`<file>.bif.meta`) that records the source file's last-modified time, size, and file identity/change markers. On any later webhook, the app checks this companion file first — if every output already exists, isn't empty, and the source hasn't changed, extraction is skipped. Plex notification can still run in the background so a preview written during an outage can become advertised after the server returns.
 
    Plex keeps one preview for byte-identical copies of a video (a re-grab saved next to the original, say), so the companion file records every copy that uses it, and the copies don't take turns rebuilding it.
 
-   When the source file *does* change (a Sonarr quality upgrade swaps the file in place), the size/mtime comparison fails and FFmpeg re-runs automatically. To force regeneration manually (e.g. you changed the thumbnail quality), tick **Regenerate** when starting a job — that bypasses both layers.
+   When the source file *does* change (a Sonarr quality upgrade swaps the file in place), the comparison fails and FFmpeg re-runs automatically. To force regeneration manually (e.g. you changed the thumbnail quality), tick **Regenerate** when starting a job — that bypasses both layers.
 
 Outputs created before this dedup system shipped don't have the sidecar — those get treated as fresh on the first post-upgrade webhook (no regeneration storm), then stamped on the next publish.
+
+Older tracking files retain their existing freshness behavior, but they are not
+used to copy frames into another server's missing output unless their source
+identity can be verified. BIF files are staged beside the destination and
+atomically replaced only after packing finishes; a failed write leaves the
+previous preview intact.
 
 ---
 
 ## Slow-backoff retry queue
 
-When a publisher returns `SKIPPED_NOT_INDEXED` (most commonly Plex,
-because publishing needs the bundle hash from `/library/metadata/{id}/tree`
-which only exists *after* Plex has scanned the file), the dispatcher
-schedules a retry instead of waiting for the user to fire a manual
-re-run.
+When a publisher returns `SKIPPED_NOT_INDEXED` because its output still needs
+server metadata, the dispatcher schedules a retry instead of waiting for a
+manual re-run. Plex bundle publishing calculates its hash locally and does
+not enter this queue merely because Plex has not indexed a file.
 
 The same retry also covers files no server knows yet, stale paths, and
 Emby/Jellyfin publishes still waiting for the server to register the item.

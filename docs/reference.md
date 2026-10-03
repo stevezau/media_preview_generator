@@ -1349,7 +1349,7 @@ For full design and per-vendor details see [Multi-Media-Server](multi-server.md)
 | POST | `/api/servers/test-connection` | Test a candidate config without saving |
 | POST | `/api/servers/<id>/refresh-libraries` | Re-fetch the server's library list |
 | GET | `/api/servers/owners?path=...` | Diagnose which servers own a given path |
-| GET | `/api/servers/<id>/output-status?path=...&item_id=...` | Whether publisher output files exist for a path on this server. `item_id` is required for **Plex** servers (the bundle hash is keyed by item id); optional for Emby and Jellyfin. Plex requests without `item_id` return `{"needs_item_id": true}`. |
+| GET | `/api/servers/<id>/output-status?path=...&item_id=...` | Whether publisher output files exist for a path on this server. Plex computes its bundle destination from the readable local source file and requires neither `item_id` nor a live connection. Emby also derives its path locally. Jellyfin off-media output requires `item_id`. |
 | POST | `/api/servers/auth/emby/password` | Username+password → Emby token |
 | POST | `/api/servers/auth/jellyfin/password` | Username+password → Jellyfin token |
 | POST | `/api/servers/auth/jellyfin/quick-connect/initiate` | Begin Quick Connect ceremony |

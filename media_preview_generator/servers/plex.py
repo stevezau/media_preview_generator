@@ -2111,13 +2111,37 @@ class PlexServer(MediaServer):
             server_display_name=getattr(self._config, "server_display_name", None) or self.name,
         )
 
+    def refresh_preview_metadata(self, canonical_path: str, item_id: str | None = None) -> None:
+        """Ask Plex to advertise a saved BIF, from the background notification queue.
+
+        A BIF is readable immediately at the part endpoint, but an already
+        indexed item's ``indexes`` flag can remain unset until Analyze runs.
+        Paths without an item hint get a best-effort scan and lookup first;
+        failure here never prevents local generation or publication.
+        """
+        if not item_id:
+            self.trigger_refresh(item_id=None, remote_path=canonical_path)
+            item_id = self.resolve_remote_path_to_item_id(canonical_path)
+        if not item_id:
+            logger.info(
+                "Previews saved for {}. {} has not indexed the file yet; a later Plex scan/analyze will activate them.",
+                canonical_path,
+                self.name,
+            )
+            return
+        bare_id = str(item_id).rsplit("/", 1)[-1]
+        if not bare_id.isdecimal():
+            raise ValueError("Plex preview notification requires a numeric item ID")
+        plex = self._connect()
+        plex.query(f"/library/metadata/{bare_id}/analyze", method=plex._session.put)
+
     def get_bundle_metadata(self, item_id: str) -> list[tuple[str, str]]:
         """Return ``(bundle_hash, remote_path)`` for every MediaPart of an item.
 
-        Plex-specific helper (not part of the abstract :class:`MediaServer`
-        interface) used by :class:`PlexBundleAdapter` to compute the BIF output
-        location. Plex's ``/library/metadata/{id}/tree`` endpoint returns XML;
-        we surface the relevant attributes as plain tuples.
+        Retained Plex metadata API for diagnostics and compatibility, outside
+        the abstract :class:`MediaServer` interface. The ``/tree`` endpoint
+        returns XML; we surface the relevant attributes as plain tuples.
+        Preview publishing calculates its bundle hash from local media instead.
 
         ``item_id`` may be either a bare ratingKey (``"557676"``) or a full
         Plex API path (``"/library/metadata/557676"``); we normalise both so
@@ -2127,9 +2151,7 @@ class PlexServer(MediaServer):
         used to be the silent root cause of every Sonarr/Radarr → Plex
         webhook returning ``skipped_not_indexed`` — see D31.
 
-        Returns an empty list when the lookup fails or the item has no parts —
-        the adapter translates that into a
-        :class:`~media_preview_generator.servers.LibraryNotYetIndexedError`.
+        Returns an empty list when the lookup fails or the item has no parts.
         Failures now WARN (not DEBUG) so the next time we malform a URL it
         shows up in logs without users having to grep at debug level.
         """
@@ -2147,9 +2169,7 @@ class PlexServer(MediaServer):
             data = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}/tree")
         except Exception as exc:
             logger.warning(
-                "Plex /tree query failed for item {!r} ({}: {}). The publisher "
-                "will be reported as 'not indexed yet' and retried, but the underlying "
-                "cause is this query — not Plex's analyzer.",
+                "Plex /tree query failed for item {!r} ({}: {}). Bundle metadata is unavailable.",
                 bare_id,
                 type(exc).__name__,
                 exc,

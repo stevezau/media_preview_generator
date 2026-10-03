@@ -14,6 +14,7 @@ from media_preview_generator.output.journal import (
     outputs_fresh_for_source,
     write_meta,
 )
+from media_preview_generator.output.plex_hash import get_source_fingerprint
 
 
 class TestMetaPath:
@@ -44,6 +45,7 @@ class TestWriteMeta:
         assert meta_a["publisher"] == "emby_sidecar"
         assert meta_a["schema"] == JOURNAL_SCHEMA_VERSION
         assert meta_b["source_size"] == 1234
+        assert meta_a["source_fingerprint"] == list(get_source_fingerprint(source))
 
     def test_silently_skips_when_source_missing(self, tmp_path):
         out = tmp_path / "a.bif"
@@ -67,6 +69,55 @@ class TestWriteMeta:
 
 
 class TestOutputsFreshForSource:
+    @pytest.mark.parametrize("require_fingerprint", [False, True])
+    def test_same_size_replacement_preserving_mtime_invalidates_new_journal(self, tmp_path, require_fingerprint):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"old bytes")
+        before = source.stat()
+        out = tmp_path / "out.bif"
+        out.write_bytes(b"old frames")
+        write_meta([out], str(source))
+        replacement = tmp_path / "replacement.mkv"
+        replacement.write_bytes(b"new bytes")
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, source)
+
+        assert not outputs_fresh_for_source([out], str(source), require_source_fingerprint=require_fingerprint)
+
+    @pytest.mark.parametrize("metadata", ["absent", "legacy", "corrupt", "strong"])
+    def test_cross_publisher_reuse_requires_strong_matching_metadata(self, tmp_path, metadata):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"source")
+        out = tmp_path / "out.bif"
+        out.write_bytes(b"frames")
+        if metadata in ("legacy", "strong"):
+            write_meta([out], str(source))
+        if metadata == "legacy":
+            payload = json.loads(_meta_path_for(out).read_text())
+            del payload["source_fingerprint"]
+            for source_record in payload["sources"]:
+                del source_record["source_fingerprint"]
+            _meta_path_for(out).write_text(json.dumps(payload))
+        if metadata == "corrupt":
+            _meta_path_for(out).write_text("not json")
+
+        assert outputs_fresh_for_source([out], str(source)) is True
+        assert outputs_fresh_for_source([out], str(source), require_source_fingerprint=True) is (metadata == "strong")
+
+    def test_journal_uses_extraction_snapshot_when_source_changes_before_stamping(self, tmp_path):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"old bytes")
+        expected = get_source_fingerprint(source)
+        out = tmp_path / "out.bif"
+        out.write_bytes(b"frames from old source")
+        source.write_bytes(b"new different bytes")
+
+        write_meta([out], str(source), source_fingerprint=expected)
+
+        payload = json.loads(_meta_path_for(out).read_text())
+        assert payload["source_fingerprint"] == list(expected)
+        assert not outputs_fresh_for_source([out], str(source))
+
     def test_fresh_when_meta_matches(self, tmp_path):
         source = tmp_path / "movie.mkv"
         source.write_bytes(b"x" * 100)
@@ -341,6 +392,27 @@ class TestOutputSharedByCopies:
             (str(original), 1_000_000, 500),
             (str(copy), 2_000_000, 500),
         ]
+
+    def test_replacing_one_shared_source_does_not_borrow_another_copys_fingerprint(self, tmp_path):
+        original = tmp_path / "a.mkv"
+        original.write_bytes(b"old bytes")
+        copy = _copy_of(original, tmp_path / "b.mkv", mtime=int(original.stat().st_mtime))
+        os.utime(original, ns=(copy.stat().st_atime_ns, copy.stat().st_mtime_ns))
+        bif = tmp_path / "index-sd.bif"
+        bif.write_bytes(b"frames")
+        write_meta([bif], str(original), publisher="plex_bundle")
+        write_meta([bif], str(copy), publisher="plex_bundle")
+        assert outputs_fresh_for_source([bif], str(original), require_source_fingerprint=True)
+        assert outputs_fresh_for_source([bif], str(copy), require_source_fingerprint=True)
+
+        replacement = tmp_path / "replacement.mkv"
+        replacement.write_bytes(b"new bytes")
+        os.utime(replacement, ns=(original.stat().st_atime_ns, original.stat().st_mtime_ns))
+        os.replace(replacement, original)
+
+        assert not outputs_fresh_for_source([bif], str(original))
+        assert not outputs_fresh_for_source([bif], str(original), require_source_fingerprint=True)
+        assert outputs_fresh_for_source([bif], str(copy), require_source_fingerprint=True)
 
     def test_copy_not_yet_recorded_is_not_fresh_when_output_has_another_source(self, tmp_path):
         original = tmp_path / "a.mkv"

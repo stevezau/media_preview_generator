@@ -73,55 +73,40 @@ class TestPlexBundleAdapterPathLayout:
             f"Plex bundle layout drifted from what Plex Media Server reads: {path}"
         )
 
-    def test_compute_output_paths_uses_prefetched_hash_when_present(self):
-        """When ``bundle.prefetched_bundle_metadata`` carries the hash,
-        ``compute_output_paths`` must use it (skipping the /tree call).
-
-        Pin the EXACT path layout so a regression that mangles the hash
-        split or the bundle directory name is caught.
-        """
-        adapter = PlexBundleAdapter(plex_config_folder="/config/plex", frame_interval=10)
-        # Hash matches the canonical_path basename; second tuple field is
-        # the file path Plex reported (used by the hash-selector).
-        bundle = _bundle(
-            "/data/movies/Test (2024).mkv",
-            prefetched=(("deadbeef" * 5, "/data/movies/Test (2024).mkv"),),
-        )
-
-        # Need a PlexServer instance to satisfy the isinstance check, but
-        # the prefetched metadata short-circuits the API call.
+    @pytest.mark.parametrize("server_kind", ["none", "plex", "other"])
+    @pytest.mark.parametrize("item_id", [None, "42"])
+    @pytest.mark.parametrize("prefetched", [False, True])
+    @pytest.mark.parametrize(
+        ("payload", "expected_suffix"),
+        [
+            (b"abc", "3/a9993e364706816aba3e25717850c26c9cd0d89d.bundle/Contents/Indexes/index-sd.bif"),
+            (b"x" * 65536, "f/3e85d3b5d67e0aec9077bfb95e3d0379c338cdf.bundle/Contents/Indexes/index-sd.bif"),
+        ],
+        ids=["small-file-signature", "64-kib-hash"],
+    )
+    def test_local_source_defines_layout_without_server_metadata(
+        self, tmp_path, server_kind, item_id, prefetched, payload, expected_suffix
+    ):
+        """Pin exact layout for local hashes, ignoring server hints even when stale."""
         from media_preview_generator.servers.plex import PlexServer
 
-        server = MagicMock(spec=PlexServer)
-
-        paths = adapter.compute_output_paths(bundle, server, item_id="rk-12345")
-        assert len(paths) == 1
-        # 8*5 = 40-char hash; first char "d", remainder "eadbeef..." — the
-        # split must split exactly at index 1, NOT at any other point.
-        expected = "/config/plex/Media/localhost/d/eadbeefdeadbeefdeadbeefdeadbeefdeadbeef.bundle/Contents/Indexes/index-sd.bif"
-        assert str(paths[0]) == expected, f"Plex path layout drift: {paths[0]}"
-
-    def test_compute_output_paths_raises_when_item_id_missing(self):
-        """The Plex bundle path requires the bundle hash, which requires
-        an item_id. Missing item_id → ValueError so the caller hits the
-        SKIPPED_NOT_IN_LIBRARY branch instead of cryptic downstream
-        attribute errors.
-        """
+        media = tmp_path / "Test (2024).mkv"
+        media.write_bytes(payload)
+        metadata = (("deadbeef" * 5, str(media)),) if prefetched else ()
+        bundle = _bundle(str(media), prefetched=metadata)
+        server = None
+        if server_kind == "plex":
+            server = MagicMock(spec=PlexServer)
+        elif server_kind == "other":
+            server = MagicMock()
         adapter = PlexBundleAdapter(plex_config_folder="/config/plex", frame_interval=10)
-        with pytest.raises(ValueError, match="item_id"):
-            adapter.compute_output_paths(_bundle("/data/x.mkv"), server=MagicMock(), item_id=None)
 
-    def test_compute_output_paths_raises_when_server_missing(self):
-        adapter = PlexBundleAdapter(plex_config_folder="/config/plex", frame_interval=10)
-        with pytest.raises(ValueError, match="PlexServer"):
-            adapter.compute_output_paths(_bundle("/data/x.mkv"), server=None, item_id="rk-1")
+        paths = adapter.compute_output_paths(bundle, server, item_id)
 
-    def test_compute_output_paths_raises_when_server_wrong_type(self):
-        adapter = PlexBundleAdapter(plex_config_folder="/config/plex", frame_interval=10)
-        # An EmbyServer-shaped object (not PlexServer) → TypeError.
-        not_plex = MagicMock()  # NOT spec=PlexServer
-        with pytest.raises(TypeError, match="PlexServer"):
-            adapter.compute_output_paths(_bundle("/data/x.mkv"), server=not_plex, item_id="rk-1")
+        assert paths == [Path("/config/plex/Media/localhost") / expected_suffix]
+        assert adapter.needs_server_metadata() is False
+        if server is not None:
+            assert server.mock_calls == []
 
 
 # ---------------------------------------------------------------------------

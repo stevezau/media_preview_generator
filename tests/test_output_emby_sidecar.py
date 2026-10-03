@@ -170,7 +170,7 @@ class TestPublishWriteDenied:
 
         def fake_open(file, mode="r", *args, **kwargs):
             # Any file written in the media folder: the BIF goes in beside the sidecar and is renamed over it.
-            if Path(file).parent == out_path.parent and "w" in mode:
+            if Path(file).parent == out_path.parent and ("w" in mode or "x" in mode):
                 raise OSError(err_no, os.strerror(err_no), str(file))
             return real_open(file, mode, *args, **kwargs)
 
@@ -287,12 +287,17 @@ class TestInterruptedWriteTempsSwept:
         ],
         ids=["plain", "unicode", "long"],
     )
-    def test_matcher_accepts_the_generators_temp_name(self, tmp_path, sidecar_name):
+    @pytest.mark.parametrize("unique", [False, True], ids=["legacy", "unique"])
+    def test_matcher_accepts_the_generators_temp_name(self, tmp_path, sidecar_name, unique):
         from media_preview_generator.output.emby_sidecar import _BIF_TEMP_NAME
 
-        assert _BIF_TEMP_NAME.fullmatch(_temp_name(tmp_path / sidecar_name))
+        name = _temp_name(tmp_path / sidecar_name)
+        if unique:
+            name = name.removesuffix(".bif-tmp") + "." + "a" * 32 + ".bif-tmp"
+        assert _BIF_TEMP_NAME.fullmatch(name)
 
-    def test_stale_temps_are_swept_with_unlink_only(self, folder, mock_config, monkeypatch):
+    @pytest.mark.parametrize("unique", [False, True], ids=["legacy", "unique"])
+    def test_stale_temps_are_swept_with_unlink_only(self, folder, mock_config, monkeypatch, unique):
         # A regeneration of a live video that crashed, and a first write whose video has since gone. Never listed as
         # orphans (the generic removal would rmtree a directory that took the name meanwhile): the adapter unlinks
         # them itself.
@@ -303,6 +308,9 @@ class TestInterruptedWriteTempsSwept:
 
         live_temp = folder / _temp_name(folder / "Movie-320-10.bif")
         gone_temp = folder / _temp_name(folder / "Gone-320-10.bif")
+        if unique:
+            live_temp = live_temp.with_name(live_temp.name.removesuffix(".bif-tmp") + "." + "a" * 32 + ".bif-tmp")
+            gone_temp = gone_temp.with_name(gone_temp.name.removesuffix(".bif-tmp") + "." + "b" * 32 + ".bif-tmp")
         for temp in (live_temp, gone_temp):
             temp.write_bytes(b"partial")
             _aged(temp, self.DAY)
@@ -383,6 +391,9 @@ class TestInterruptedWriteTempsSwept:
             f".{digest}.bif-tmp.old",
             f".{digest}.bif-tmp\n",
             f".{digest}.bif",
+            f".{digest}.{'a' * 31}.bif-tmp",
+            f".{digest}.{'a' * 33}.bif-tmp",
+            f".{digest}.{'G' * 32}.bif-tmp",
         ]
         for name in look_alikes:
             (folder / name).write_bytes(b"user")

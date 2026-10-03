@@ -5,7 +5,7 @@ succession (e.g. Sonarr fires on download, then Plex fires on its own
 ``library.new`` for the same file a few seconds later), the second hit
 should not pay for another FFmpeg pass. The :class:`FrameCache` keeps
 the extracted JPGs from the first call in a dedicated cache directory,
-keyed by canonical path + file mtime, with TTL- and size-based
+keyed by canonical path and a source fingerprint, with TTL- and size-based
 eviction.
 
 The dispatcher (:func:`processing.multi_server.process_canonical_path`)
@@ -18,9 +18,9 @@ cache is safe to share across the worker pool.
 
 Cache validity rules:
 
-- Entry is valid only when the source file's ``mtime`` matches the
-  recorded mtime. A file that's been re-encoded / replaced returns a
-  miss and the cache entry is evicted.
+- Entry is valid only when the source file's identity, size and nanosecond
+  modification/change times match. Replacing a file while preserving its
+  mtime must not reuse frames extracted from the old file.
 - Entry is valid only when the lookup's ``extraction_key`` (the settings
   that shape the frames: interval, JPEG quality, tone map) equals the
   one stored at ``put`` time. Frames made at a 10 s interval can't fill
@@ -52,6 +52,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from ..output.plex_hash import SourceFingerprint, get_source_fingerprint
+
 _DEFAULT_TTL_SECONDS = 3600  # 1 hour — covers cross-vendor webhook arrivals (e.g. Plex
 # fires immediately, Jellyfin fires 15-30 min later for the same file once the user has
 # both servers configured). Tunable via the ``frame_reuse`` block in settings.json.
@@ -72,6 +74,7 @@ class CacheEntry:
     source_mtime: float
     cached_at: float
     extraction_key: tuple
+    source_fingerprint: SourceFingerprint | None = None
 
 
 class FrameCache:
@@ -155,7 +158,7 @@ class FrameCache:
         - it exists in the in-memory map,
         - it was stored with the same ``extraction_key``,
         - its frame directory still exists on disk,
-        - the source file's mtime is unchanged since the entry was cached,
+        - the source file's identity and change markers match the extraction,
         - the entry is younger than ``ttl_seconds``.
 
         On any failure the entry is evicted (memory + disk) so a
@@ -202,20 +205,17 @@ class FrameCache:
                 return None
 
             try:
-                current_mtime = os.path.getmtime(canonical_path)
+                current_fingerprint = get_source_fingerprint(canonical_path)
             except OSError:
                 # Source file disappeared — invalidate the entry.
                 logger.info("Frame cache miss: source file no longer at {}; evicting", canonical_path)
                 self._evict(key)
                 return None
 
-            # Tolerate a sub-second mtime drift (some filesystems round).
-            if abs(current_mtime - entry.source_mtime) > 1.0:
+            if current_fingerprint != entry.source_fingerprint:
                 logger.info(
-                    "Frame cache miss: source changed for {} (mtime {} → {}); will re-extract",
+                    "Frame cache miss: source identity or change markers differ for {}; will re-extract",
                     canonical_path,
-                    entry.source_mtime,
-                    current_mtime,
                 )
                 self._evict(key)
                 return None
@@ -233,30 +233,35 @@ class FrameCache:
         frame_count: int,
         extraction_key: tuple,
         source_mtime: float | None = None,
+        source_fingerprint: SourceFingerprint | None = None,
     ) -> CacheEntry:
         """Record a freshly-generated frame directory in the cache.
 
         ``frame_dir`` must already exist and contain the JPG frames; we
         don't move or copy anything — the caller is expected to have
         used :meth:`frame_dir_for` to write directly into the cache
-        slot. We just record the metadata.
+        slot. Pass ``source_fingerprint`` captured before extraction so a
+        concurrent replacement cannot label old frames as belonging to the
+        new file. Entries lacking a readable source are never reusable.
 
         Args:
             canonical_path: Source media file the frames were extracted from.
             frame_dir: Directory holding the JPG frames.
             frame_count: Number of frames in ``frame_dir``.
-            extraction_key: The settings the frames were made with. A later
-                :meth:`get` only hits when it asks for the same key.
+            extraction_key: Settings the frames were made with; lookups must match.
             source_mtime: Source mtime at extraction; read from disk when omitted.
+            source_fingerprint: Source identity captured before extracting frames.
 
         Returns:
             The stored entry.
         """
-        if source_mtime is None:
+        if source_fingerprint is None:
             try:
-                source_mtime = os.path.getmtime(canonical_path)
+                source_fingerprint = get_source_fingerprint(canonical_path)
             except OSError:
-                source_mtime = 0.0
+                source_fingerprint = None
+        if source_mtime is None:
+            source_mtime = source_fingerprint[3] / 1_000_000_000 if source_fingerprint is not None else 0.0
 
         entry = CacheEntry(
             canonical_path=canonical_path,
@@ -265,6 +270,7 @@ class FrameCache:
             source_mtime=float(source_mtime),
             cached_at=time.time(),
             extraction_key=extraction_key,
+            source_fingerprint=source_fingerprint,
         )
         key = self._key(canonical_path)
         with self._lock:

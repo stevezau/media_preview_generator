@@ -1278,3 +1278,19 @@ def vcr_config():
         # missing cassette → strict failure → exactly the "fail
         # loudly when cassette missing" contract the user asked for.
     }
+
+
+@pytest.fixture(autouse=True)
+def queued_plex_refresh(monkeypatch):
+    """Keep daemon notifications inside their dedicated queue tests.
+
+    Pipeline tests can inspect this boundary to verify the exact server,
+    path and item hint without letting HTTP outlive fixture teardown.
+    """
+    from unittest.mock import Mock
+
+    from media_preview_generator.processing import multi_server
+
+    enqueue = Mock(spec=multi_server.enqueue_plex_refresh, return_value=True)
+    monkeypatch.setattr(multi_server, "enqueue_plex_refresh", enqueue)
+    return enqueue

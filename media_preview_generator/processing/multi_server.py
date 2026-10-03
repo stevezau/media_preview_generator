@@ -47,6 +47,7 @@ from ..markers.missing import disk_roots, library_folders
 from ..output import BifBundle, EmbyBifAdapter, JellyfinTrickplayAdapter, PlexBundleAdapter
 from ..output.base import OutputAdapter
 from ..output.journal import clear_meta, outputs_fresh_for_source, write_meta
+from ..output.plex_hash import SourceFileChangedError, get_source_fingerprint
 from ..servers.base import LibraryNotYetIndexedError, MediaServer, ServerConfig, ServerType
 from ..servers.ownership import find_library_matches
 from .frame_cache import get_frame_cache
@@ -59,6 +60,7 @@ from .generator import (
     generate_images,
     gpu_fallback_announcement,
 )
+from .plex_refresh import enqueue_plex_refresh
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -587,9 +589,8 @@ def _resolve_item_id_for(server: MediaServer, canonical_path: str, hint: str | N
     When the caller (webhook router, scan loop) already knows the
     server's item id we use it directly. Otherwise we ask the server
     via :meth:`MediaServer.resolve_remote_path_to_item_id`; servers
-    without a reverse-lookup implementation return ``None`` (only
-    Plex's bundle path and Jellyfin's manifest actually need the id,
-    and the corresponding adapters degrade gracefully when missing).
+    without a reverse-lookup implementation return ``None``. The resolver
+    policy calls this only when an ID is useful for output registration.
 
     INFO logs bracket the network call so an op tailing the log can
     tell *why* the dispatch is sitting idle when the lookup is slow.
@@ -667,8 +668,8 @@ def _make_item_id_resolver(canonical_path: str, phase_callback=None):
     Lookup policy depends on what each vendor's adapter actually needs
     and how much the lookup costs:
 
-    * **Plex** — bundle-hash path REQUIRES an item id. Always look up
-      (call is fast: Plex's ``/library/metadata/…`` search is O(log N)).
+    * **Plex** — derive the bundle hash from the local file. No reverse
+      lookup is needed to publish, even when metadata hints are stale.
     * **Emby** — sidecar BIF is filename-derived; the adapter never
       needs an id. ``trigger_refresh`` gracefully falls back to the
       path-based ``/Library/Media/Updated`` endpoint when id is None.
@@ -693,8 +694,8 @@ def _make_item_id_resolver(canonical_path: str, phase_callback=None):
       retry → exhaust) is the right no-op, not an unsatisfiable loop to
       paper over here.
 
-    Result is cached per-dispatch so the (still-slow-for-Plex-misses)
-    lookup doesn't re-burn across sub-phases.
+    Results are cached per dispatch so registration lookups do not repeat
+    across sub-phases.
     """
     cache: dict[str, str | None] = {}
 
@@ -706,15 +707,15 @@ def _make_item_id_resolver(canonical_path: str, phase_callback=None):
             return hint
 
         # Per-vendor lookup policy. See docstring.
-        if server.type is ServerType.EMBY:
+        if server.type in (ServerType.PLEX, ServerType.EMBY):
             cache[server.id] = None
             return None
         if server.type is ServerType.JELLYFIN and not _jellyfin_plugin_cached_installed(server):
             cache[server.id] = None
             return None
 
-        # Stamp the worker UI just before the (potentially slow) lookup
-        # — Plex misses can still burn seconds, and without this the
+        # Stamp the worker UI just before the potentially slow lookup;
+        # without this the
         # worker card sits on a generic "Working…" the whole time,
         # indistinguishable from a hung thread.
         if phase_callback:
@@ -813,7 +814,7 @@ def _try_reuse_existing_bif(
                 continue
             if not os.path.isfile(candidate_str):
                 continue
-            if not outputs_fresh_for_source([candidate], canonical_path):
+            if not outputs_fresh_for_source([candidate], canonical_path, require_source_fingerprint=True):
                 # The BIF exists but the source has changed since it was
                 # written — using these stale frames would give the user
                 # previews from the *previous* version of the file. Pass.
@@ -1195,20 +1196,34 @@ def _server_needs_item_registration(server: MediaServer) -> bool:
     ``any(... PENDING_REGISTRATION ...)`` continuation condition was
     permanently true.
 
-    Plex doesn't reach this code path with ``item_id=None`` because its
-    adapter declares :meth:`OutputAdapter.needs_server_metadata` =
-    True — we short-circuit upstream into ``SKIPPED_NOT_IN_LIBRARY``.
+    Plex reads BIFs from disk and does not require per-item registration.
     """
     if type(server)._trigger_item_refresh is MediaServer._trigger_item_refresh:
         return False
     # Mirror the resolver's no-lookup policy in ``_make_item_id_resolver``.
     # Without this guard, Emby (always) and Jellyfin-without-plugin chains
     # exhaust at attempt 5 with no path to terminate.
-    if server.type is ServerType.EMBY:
+    if server.type in (ServerType.PLEX, ServerType.EMBY):
         return False
     if server.type is ServerType.JELLYFIN and not _jellyfin_plugin_cached_installed(server):
         return False
     return True
+
+
+def _refresh_after_publish(
+    server: MediaServer,
+    item_id: str | None,
+    canonical_path: str,
+    deleted_paths: list[str] | None,
+) -> None:
+    """Notify servers after writing; Plex's network work runs outside the worker."""
+    if server.type is ServerType.PLEX:
+        enqueue_plex_refresh(server, canonical_path, item_id)
+        return
+    try:
+        server.trigger_refresh(item_id=item_id, remote_path=canonical_path, deleted_paths=deleted_paths)
+    except Exception as exc:
+        logger.debug("trigger_refresh failed for {}: {}", server.name, exc)
 
 
 def _publish_one(
@@ -1238,8 +1253,8 @@ def _publish_one(
     webhooks) is forwarded to ``server.trigger_refresh`` so the server
     drops its stale library row for the replaced source path.
     """
-    # Short-circuit when the adapter requires server metadata (Plex bundle
-    # hash, Jellyfin item id) and the upstream lookup returned None. This
+    # Off-media Jellyfin requires an item GUID; a missing lookup means
+    # its destination cannot yet be resolved. This
     # is the "the file isn't in this server's library" case — different
     # from a hard failure. Catching it here gives the user a clean, actionable
     # message instead of the cryptic "publish-time bookkeeping" ValueError
@@ -1270,6 +1285,11 @@ def _publish_one(
 
     try:
         output_paths = adapter.compute_output_paths(bundle, server, item_id)
+        if (
+            bundle.source_fingerprint is not None
+            and get_source_fingerprint(bundle.canonical_path) != bundle.source_fingerprint
+        ):
+            raise SourceFileChangedError("Source file changed while resolving preview output")
     except LibraryNotYetIndexedError as exc:
         return PublisherResult(
             server_id=server.id,
@@ -1317,26 +1337,18 @@ def _publish_one(
         #       chains exhausted at attempt 5 because the
         #       continuation condition was permanently true).
         #   (c) PENDING_REGISTRATION retry on a server where item_id
-        #       CAN resolve (Plex / Jellyfin-with-plugin) — outputs
+        #       CAN resolve (Jellyfin-with-plugin) — outputs
         #       are on disk but previous attempt's item_id was None
         #       so the plugin bridge / /Items/{id}/Refresh never
         #       fired. On retry, item_id may now resolve. Fire
         #       trigger_refresh so the registration completes and
         #       the next dispatch rolls over to plain
         #       SKIPPED_OUTPUT_EXISTS.
-        try:
-            server.trigger_refresh(
-                item_id=item_id,
-                remote_path=bundle.canonical_path,
-                deleted_paths=deleted_paths,
-            )
-        except Exception as exc:
-            logger.debug("trigger_refresh on skip-if-exists failed for {}: {}", server.name, exc)
+        _refresh_after_publish(server, item_id, bundle.canonical_path, deleted_paths)
         if item_id is None and _server_needs_item_registration(server):
             # Registration still didn't fire — re-arm the retry so
             # we try once the server indexes the file. Only reachable
-            # for Plex (via SKIPPED upstream) and Jellyfin-with-plugin
-            # — the discriminator excludes the unsatisfiable cases.
+            # for Jellyfin-with-plugin; other publishers need no registration.
             return PublisherResult(
                 server_id=server.id,
                 server_name=server.name,
@@ -1361,6 +1373,11 @@ def _publish_one(
 
     try:
         adapter.publish(bundle, output_paths, item_id)
+        if (
+            bundle.source_fingerprint is not None
+            and get_source_fingerprint(bundle.canonical_path) != bundle.source_fingerprint
+        ):
+            raise SourceFileChangedError("Source file changed while publishing previews")
     except (TypeError, ValueError, OSError, RuntimeError, requests.RequestException) as exc:
         logger.warning(
             "Failed to write preview output for media server {!r} (format: {}): {}. "
@@ -1382,17 +1399,14 @@ def _publish_one(
 
     # Stamp the journal so the next webhook for an unchanged source can
     # short-circuit. Best-effort — see ``write_meta``.
-    write_meta(output_paths, bundle.canonical_path, publisher=adapter.name)
+    write_meta(
+        output_paths,
+        bundle.canonical_path,
+        publisher=adapter.name,
+        source_fingerprint=bundle.source_fingerprint,
+    )
 
-    # Best-effort refresh; failures are logged but don't fail the publisher.
-    try:
-        server.trigger_refresh(
-            item_id=item_id,
-            remote_path=bundle.canonical_path,
-            deleted_paths=deleted_paths,
-        )
-    except Exception as exc:
-        logger.debug("trigger_refresh failed for {}: {}", server.name, exc)
+    _refresh_after_publish(server, item_id, bundle.canonical_path, deleted_paths)
 
     # When the server activates trickplay via per-item API but we
     # didn't have an item_id at publish time, the plugin-bridge /
@@ -1640,6 +1654,28 @@ def process_canonical_path(
         else:
             return _source_missing_result(canonical_path, registry, sibling_candidates)
 
+    try:
+        source_fingerprint = get_source_fingerprint(canonical_path)
+    except OSError as exc:
+        return MultiServerResult(
+            canonical_path=canonical_path,
+            status=MultiServerStatus.FAILED,
+            message=f"Could not inspect source file: {exc}",
+        )
+
+    def _source_changed() -> bool:
+        try:
+            return get_source_fingerprint(canonical_path) != source_fingerprint
+        except OSError:
+            return True
+
+    def _source_changed_result() -> MultiServerResult:
+        return MultiServerResult(
+            canonical_path=canonical_path,
+            status=MultiServerStatus.FAILED,
+            message="Source file changed during processing; publishing stopped. Retry after the file is stable.",
+        )
+
     # Pre-FFmpeg short-circuit: when every owning publisher's outputs
     # already exist AND the journal confirms the source hasn't changed
     # since the last publish, we can skip frame extraction entirely.
@@ -1650,18 +1686,16 @@ def process_canonical_path(
     # When ``regenerate=True`` we deliberately bypass this and force a
     # fresh run; we also clear stale ``.meta`` sidecars so the new run
     # writes them rather than running into mismatched fingerprints
-    # later. ``compute_output_paths`` may need to call the server (Plex
-    # bundle hash); we tolerate failures here and fall back to the full
+    # later. ``compute_output_paths`` may need to read the source file;
+    # we tolerate failures here and fall back to the full
     # pipeline rather than spuriously refusing to publish.
     # ``compute_output_paths`` only needs the canonical_path and frame_interval
     # from a BifBundle; the frame_dir/bif_path/dimensions are placeholders for
     # the probe path. Build one helper so the three call-sites below stay in
     # sync (a divergence here previously hid behind copy-pasted dataclass kwargs).
     probe_frame_interval = int(getattr(config, "thumbnail_interval", 10) or 10)
-    # Per-server pre-fetched (hash, file) pairs lifted from the calling
-    # ProcessableItem. Plex enumeration captures these from
-    # ``item.media[*].parts[*]`` so PlexBundleAdapter can skip the
-    # /library/metadata/{id}/tree round-trip per item.
+    # Preserve enumeration metadata for callers that inspect bundles;
+    # Plex output paths use the current file's hash, not these staleable hints.
     _bundle_meta_by_server = bundle_metadata_by_server or {}
 
     def _probe_bundle(server_id: str = "") -> BifBundle:
@@ -1675,6 +1709,7 @@ def process_canonical_path(
             height=180,
             frame_count=0,
             prefetched_bundle_metadata=prefetched,
+            source_fingerprint=source_fingerprint,
         )
 
     # Per-dispatch memoiser for server reverse-lookups. Without this,
@@ -1710,6 +1745,8 @@ def process_canonical_path(
                 all_fresh = False
                 break
         if all_fresh:
+            if _source_changed():
+                return _source_changed_result()
             # DEBUG: the job's "Processing complete: … already existed" line counts these.
             logger.debug(
                 "All publishers' outputs already fresh for {} — skipping FFmpeg",
@@ -1740,19 +1777,8 @@ def process_canonical_path(
                 # Cheap and idempotent: per-path nudge is a single POST
                 # with no rate limit, /Items/{id}/Refresh is a no-op
                 # when the item's metadata is current.
-                if _server_needs_item_registration(server) or deleted_paths:
-                    try:
-                        server.trigger_refresh(
-                            item_id=item_id,
-                            remote_path=canonical_path if _server_needs_item_registration(server) else None,
-                            deleted_paths=deleted_paths,
-                        )
-                    except Exception as exc:
-                        logger.debug(
-                            "trigger_refresh on all-fresh fast path failed for {}: {}",
-                            server.name,
-                            exc,
-                        )
+                if server.type is ServerType.PLEX or _server_needs_item_registration(server) or deleted_paths:
+                    _refresh_after_publish(server, item_id, canonical_path, deleted_paths)
                 if needs_registration:
                     results.append(
                         PublisherResult(
@@ -1937,6 +1963,8 @@ def process_canonical_path(
                 frame_interval_ms=config.plex_bif_frame_interval * 1000,
             )
             if recovered:
+                if _source_changed():
+                    return _source_changed_result()
                 tmp_path = unpack_dest
                 frame_count = recovered
                 cache_hit = True
@@ -1945,6 +1973,7 @@ def process_canonical_path(
                     frame_dir=Path(unpack_dest),
                     frame_count=recovered,
                     extraction_key=extraction_key,
+                    source_fingerprint=source_fingerprint,
                 )
                 _phase("Reusing sibling BIF")
                 logger.info(
@@ -2070,12 +2099,21 @@ def process_canonical_path(
                 message=ms_message,
             )
 
+        if _source_changed():
+            return _source_changed_result()
+
         # Store in cache only on a fresh generation; cache hits already
         # have an entry. Regenerate re-populates the slot too — that's
         # intended: it just re-extracted into the (now emptied) shared dir,
         # so the entry it writes describes exactly the frames on disk.
         if not cache_hit and use_frame_cache:
-            cache.put(canonical_path, frame_dir=Path(tmp_path), frame_count=frame_count, extraction_key=extraction_key)
+            cache.put(
+                canonical_path,
+                frame_dir=Path(tmp_path),
+                frame_count=frame_count,
+                extraction_key=extraction_key,
+                source_fingerprint=source_fingerprint,
+            )
 
         # ``width``/``height`` are documentation-only on BifBundle —
         # adapters that need real frame dimensions (Jellyfin tile-grid)
@@ -2086,13 +2124,8 @@ def process_canonical_path(
         # 320x180 the FFmpeg pass uses.
         gen_width = int(gen_result[3]) if isinstance(gen_result, tuple) and len(gen_result) > 3 else 320
 
-        # Per-server bundle factory: every publisher gets its own BifBundle
-        # populated with that server's pre-fetched bundle metadata (Plex
-        # only) and its display name (so generate_bif's log line can name
-        # the destination server). Sharing one bundle across publishers
-        # would force a single prefetched_bundle_metadata value, defeating
-        # the per-server hint. Building a fresh dataclass per publisher is
-        # cheap.
+        # Keep server attribution on each bundle while sharing frames and
+        # the source snapshot across all destinations.
         def _bundle_for_server(server: MediaServer) -> BifBundle:
             return BifBundle(
                 canonical_path=canonical_path,
@@ -2104,6 +2137,7 @@ def process_canonical_path(
                 frame_count=frame_count,
                 prefetched_bundle_metadata=_bundle_meta_by_server.get(server.id, ()),
                 server_display_name=server.name,
+                source_fingerprint=source_fingerprint,
             )
 
         # Tag each publisher's result with where its frames came from so
@@ -2115,6 +2149,8 @@ def process_canonical_path(
 
         results: list[PublisherResult] = []
         for server, adapter, item_id_hint in publishers:
+            if _source_changed():
+                return _source_changed_result()
             _phase(f"Publishing to {server.name}…")
             item_id = resolve_item_id(server, item_id_hint)
             outcome = _publish_one(

@@ -1146,6 +1146,9 @@ class TestCrossServerBifReuse:
         # _seed_canonical_file's touch happens after our BIF write.
         bif_mtime = existing_bif.stat().st_mtime
         os.utime(media_file, (bif_mtime - 1, bif_mtime - 1))
+        from media_preview_generator.output.journal import write_meta
+
+        write_meta([existing_bif], str(media_file), publisher="emby_sidecar")
 
         registry = ServerRegistry.from_settings(
             [
@@ -1274,6 +1277,9 @@ class TestCrossServerBifReuse:
         )
         if truncate_plex_bif_to is not None:
             plex_bif.write_bytes(plex_bif.read_bytes()[:truncate_plex_bif_to])
+        from media_preview_generator.output.journal import write_meta
+
+        write_meta([plex_bif], str(media_file), publisher="plex_bundle")
 
         library = Library(id="1", name="Movies", remote_paths=(str(media_root),), enabled=True)
         registry = ServerRegistry.from_settings(
@@ -1437,116 +1443,11 @@ class TestPartialFailureIsolation:
         assert statuses["jelly-1"] in _PUBLISHED_LIKE_STATUSES
 
 
-class TestNotYetIndexedRoutesToSkip:
-    def test_plex_returns_skipped_not_indexed_when_hash_missing(
-        self, mock_config_for_processing, tmp_path, mock_config
-    ):
-        media_dir = tmp_path / "data" / "movies"
-        media_file = _seed_canonical_file(media_dir)
+class TestJellyfinWithoutItemLookup:
+    """Default Jellyfin sidecar publishing does not require a server item ID.
 
-        registry = ServerRegistry.from_settings(
-            [
-                _server_config(
-                    server_id="plex-1",
-                    server_type=ServerType.PLEX,
-                    libraries=[
-                        Library(
-                            id="1",
-                            name="Movies",
-                            remote_paths=(str(media_dir),),
-                            enabled=True,
-                        )
-                    ],
-                    output={
-                        "adapter": "plex_bundle",
-                        "plex_config_folder": str(tmp_path / "plex"),
-                        "frame_interval": 10,
-                    },
-                )
-            ],
-            legacy_config=mock_config,
-        )
-
-        # D31-aware: stub the underlying plex.query (NOT get_bundle_metadata)
-        # so the URL-construction layer actually runs. Mocking get_bundle_metadata
-        # directly was the test pattern that hid D31 — every Sonarr/Radarr → Plex
-        # webhook silently malformed the /tree URL and got 404'd. By mocking one
-        # layer deeper we exercise the bare-id normalisation + URL builder.
-        from xml.etree import ElementTree as ET
-
-        plex_query_calls: list[str] = []
-
-        def fake_plex_query(url):
-            plex_query_calls.append(url)
-            # Return XML with NO MediaPart hash — same end-state as "not indexed"
-            # but proves get_bundle_metadata's URL was correctly formed.
-            return ET.fromstring("<MediaContainer></MediaContainer>")
-
-        def install_fake_plex(server_self):
-            mock_plex = MagicMock()
-            mock_plex.query = fake_plex_query
-            server_self._plex = mock_plex
-            return mock_plex
-
-        with patch.object(PlexServer, "_connect", autospec=True, side_effect=install_fake_plex):
-
-            def fake_generate_images(video_file, output_folder, *args, **kwargs):
-                _populate_frames(output_folder, count=3)
-                return (True, 3, "h264", 1.0, 30.0, None)
-
-            with patch(
-                "media_preview_generator.processing.multi_server.generate_images",
-                side_effect=fake_generate_images,
-            ):
-                result = process_canonical_path(
-                    canonical_path=str(media_file),
-                    registry=registry,
-                    config=mock_config_for_processing,
-                    item_id_by_server={"plex-1": "42"},
-                    # Don't schedule a real retry timer — pytest tears down
-                    # loguru sinks after the test, and a 30s-later retry
-                    # firing after teardown floods CI with
-                    # "ValueError: I/O operation on closed file".
-                    schedule_retry_on_not_indexed=False,
-                )
-
-        # Single skipped publisher — overall status is the dedicated
-        # SKIPPED_NOT_INDEXED (D13). Distinct from generic SKIPPED so
-        # the worker can map to ProcessingResult.SKIPPED_NOT_INDEXED and
-        # the file outcome chip matches the per-server pill ("Not
-        # Indexed Yet" everywhere) instead of falsely reading "Already
-        # Existed" — which used to confuse users into thinking the BIF
-        # was on disk when in fact the server was still scanning.
-        assert len(result.publishers) == 1
-        assert result.publishers[0].status is PublisherStatus.SKIPPED_NOT_INDEXED
-        from media_preview_generator.processing.multi_server import MultiServerStatus
-
-        assert result.status is MultiServerStatus.SKIPPED_NOT_INDEXED
-        # D16 — friendly user-facing message; no "publisher" jargon, no
-        # misleading "0 of 1 succeeded" wording.
-        assert "Waiting for 1 server" in result.message
-        assert "publisher" not in result.message.lower()
-        # D31 — confirm every URL we hit Plex with had the correct, single-prefix
-        # shape. Without this, a regression that doubled the prefix would still
-        # produce an empty MediaPart list and this test would silently pass.
-        # (The freshness pre-check + publisher path both query, hence multiple calls.)
-        assert plex_query_calls, "plex.query was never called — adapter never reached Plex"
-        for url in plex_query_calls:
-            assert url == "/library/metadata/42/tree", (
-                f"plex.query called with {url!r} — D31 regression "
-                "(doubled /library/metadata/ prefix) would slip past this test."
-            )
-
-
-class TestNotInLibraryRoutesToSkip:
-    """When ``resolve_remote_path_to_item_id`` returns None for an
-    adapter that needs an item id (Jellyfin trickplay, Plex bundle),
-    the publisher must report SKIPPED_NOT_IN_LIBRARY with a friendly
-    message — NOT a confusing FAILED with the "publish-time bookkeeping"
-    ValueError. Reproduces job b350d2ac where the user's Jellyfin had a
-    different release of the same episode on a different drive than the
-    canonical path, so the basename match returned None and every
-    publish attempt was reported as a hard failure.
+    Path-based refresh follows publication without a reverse lookup. An item
+    lookup remains necessary for Jellyfin's separate off-media output layout.
     """
 
     def test_jellyfin_publishes_without_item_id_lookup(self, mock_config_for_processing, tmp_path):
@@ -1623,84 +1524,6 @@ class TestNotInLibraryRoutesToSkip:
         assert refresh_calls, "trigger_refresh was never called post-publish"
         assert refresh_calls[0][0] is None  # no item_id → path-based nudge
         assert refresh_calls[0][1] == str(media_file)
-
-    def test_plex_returns_skipped_not_in_library_when_item_id_unresolvable(self, mock_config_for_processing, tmp_path):
-        """TEST_AUDIT P0.3 matrix completion — Plex bundle adapter.
-
-        Existing test (above) covers the Jellyfin path. Plex bundle adapter
-        ALSO returns ``needs_server_metadata=True`` (per output/plex_bundle.py
-        line 45 — bundle hash comes from /tree endpoint, no hash → no path).
-        Same code path (multi_server.py:536-552) handles both.
-
-        Without this matrix variant, a regression that ONLY fixed the Plex
-        branch (or only broke it) would slip through with the Jellyfin
-        test still passing. Per CLAUDE.md "Cover the matrix, not one cell."
-        """
-        from media_preview_generator.servers.plex import PlexServer
-
-        media_dir = tmp_path / "data" / "movies"
-        media_file = _seed_canonical_file(media_dir)
-
-        registry = ServerRegistry.from_settings(
-            [
-                _server_config(
-                    server_id="plex-1",
-                    server_type=ServerType.PLEX,
-                    libraries=[
-                        Library(
-                            id="1",
-                            name="Movies",
-                            remote_paths=(str(media_dir),),
-                            enabled=True,
-                        )
-                    ],
-                    output={"adapter": "plex_bundle", "plex_config_folder": "/cfg"},
-                )
-            ],
-        )
-
-        scan_nudges: list[tuple[str | None, str | None]] = []
-
-        def fake_trigger_refresh(self, *, item_id, remote_path, deleted_paths=None):
-            scan_nudges.append((item_id, remote_path))
-
-        def fake_generate_images(video_file, output_folder, *args, **kwargs):
-            _populate_frames(output_folder, count=3)
-            return (True, 3, "h264", 1.0, 30.0, None)
-
-        with (
-            patch.object(PlexServer, "resolve_remote_path_to_item_id", return_value=None),
-            patch.object(PlexServer, "trigger_refresh", autospec=True, side_effect=fake_trigger_refresh),
-            patch(
-                "media_preview_generator.processing.multi_server.generate_images",
-                side_effect=fake_generate_images,
-            ),
-        ):
-            result = process_canonical_path(
-                canonical_path=str(media_file),
-                registry=registry,
-                config=mock_config_for_processing,
-                schedule_retry_on_not_indexed=False,
-            )
-
-        assert len(result.publishers) == 1
-        assert result.publishers[0].status is PublisherStatus.SKIPPED_NOT_IN_LIBRARY, (
-            f"Plex bundle adapter with no item_id should SKIP_NOT_IN_LIBRARY, "
-            f"NOT {result.publishers[0].status}. Bug class: cryptic 'publish-time bookkeeping' "
-            f"ValueError leaking from compute_output_paths instead of graceful skip."
-        )
-        # Same user-facing message contract as the Jellyfin variant.
-        assert "library" in result.publishers[0].message.lower()
-        assert "bookkeeping" not in result.publishers[0].message.lower()
-        assert "valueerror" not in result.publishers[0].message.lower()
-        # Aggregate must collapse to SKIPPED_NOT_INDEXED so the file outcome
-        # chip matches the per-server pill (D13 contract).
-        assert result.status is MultiServerStatus.SKIPPED_NOT_INDEXED
-        # Scan was nudged with item_id=None (Plex falls back to a path-based
-        # /library/sections/{id}/refresh on the not-in-library branch).
-        assert scan_nudges, "trigger_refresh was never called for Plex not-in-library publisher"
-        assert scan_nudges[0][0] is None
-        assert scan_nudges[0][1] == str(media_file)
 
 
 class TestSkipIfExists:
@@ -1822,7 +1645,7 @@ class TestCopiesSharingOnePlexBundle:
                         item_id_by_server={"plex-1": "689756"},
                     )
                 )
-        assert {c.args[0] for c in tree.call_args_list} <= {"689756"}
+        tree.assert_not_called()
         return results
 
     def test_copies_are_not_regenerated_when_both_have_published(self, mock_config_for_processing, tmp_path):
@@ -1843,7 +1666,13 @@ class TestCopiesSharingOnePlexBundle:
                 )
             ],
         )
-        shared_bif = plex_config / "Media/localhost/7" / f"{self._HASH[1:]}.bundle/Contents/Indexes/index-sd.bif"
+        from media_preview_generator.output.plex_hash import calculate_plex_hash
+
+        local_hash = calculate_plex_hash(str(original))
+        assert calculate_plex_hash(str(copy)) == local_hash
+        shared_bif = (
+            plex_config / "Media/localhost" / local_hash[0] / f"{local_hash[1:]}.bundle/Contents/Indexes/index-sd.bif"
+        )
 
         first_night: list[str] = []
         results = self._scan(mock_config_for_processing, registry, [copy, original], first_night)
@@ -2576,7 +2405,6 @@ class TestItemIdResolverMemoisation:
         narrows the cache key, or adds a per-call short-circuit before
         the cache check is caught loudly.
         """
-        from unittest.mock import MagicMock
 
         from media_preview_generator.processing import multi_server as ms
 
@@ -2604,7 +2432,6 @@ class TestItemIdResolverMemoisation:
         (e.g. cached only by canonical_path) would return Plex's item-id
         when the dispatcher asked Jellyfin → publish to the wrong item.
         """
-        from unittest.mock import MagicMock
 
         from media_preview_generator.processing import multi_server as ms
 
@@ -2638,7 +2465,6 @@ class TestItemIdResolverMemoisation:
         but Jellyfin doesn't. Without caching the negative, the next
         sub-phase re-asks Jellyfin and pays another 30s. Pin it.
         """
-        from unittest.mock import MagicMock
 
         from media_preview_generator.processing import multi_server as ms
 
@@ -2667,7 +2493,6 @@ class TestItemIdResolverMemoisation:
         Jellyfin library refresh between dispatches would still see
         the cached "not in library" answer and never re-check.
         """
-        from unittest.mock import MagicMock
 
         from media_preview_generator.processing import multi_server as ms
 
@@ -2736,3 +2561,115 @@ class TestGpuHandOffAnnouncementNamesItsCause:
         assert all(fragment in announced for fragment in said) and str(media_file) in announced, announced
         if not_said:
             assert not_said not in announced
+
+
+class TestPlexLocalPublishing:
+    @pytest.mark.parametrize("regenerate", [False, True])
+    @pytest.mark.parametrize("check_only", [False, True])
+    @pytest.mark.parametrize("item_hint", [None, "42"])
+    def test_unindexed_file_needs_no_plex_calls(
+        self, mock_config_for_processing, tmp_path, monkeypatch, regenerate, check_only, item_hint, queued_plex_refresh
+    ):
+        import requests
+
+        from media_preview_generator.output.plex_bundle import PlexBundleAdapter
+        from media_preview_generator.output.plex_hash import calculate_plex_hash
+
+        media_file = _seed_canonical_file(tmp_path / "media")
+        destination = tmp_path / "plex"
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="plex-1",
+                    server_type=ServerType.PLEX,
+                    libraries=[Library(id="1", name="Movies", remote_paths=(str(media_file.parent),), enabled=True)],
+                    output={"adapter": "plex_bundle", "plex_config_folder": str(destination)},
+                )
+            ]
+        )
+        requests_made = []
+
+        def reject_request(*args, **kwargs):
+            requests_made.append((args, kwargs))
+            raise requests.ConnectionError("Plex offline")
+
+        monkeypatch.setattr(requests.sessions.Session, "request", reject_request)
+
+        def extract(video_file, output_folder, *args, **kwargs):
+            assert video_file == str(media_file)
+            _populate_frames(output_folder, count=3)
+            return (True, 3, "h264", 320, 30.0, None)
+
+        with patch("media_preview_generator.processing.multi_server.generate_images", side_effect=extract) as generate:
+            result = process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+                regenerate=regenerate,
+                check_only=check_only,
+                item_id_by_server={"plex-1": item_hint} if item_hint else None,
+            )
+        expected = PlexBundleAdapter.bundle_bif_path(str(destination), calculate_plex_hash(str(media_file)))
+        assert requests_made == []
+        if check_only:
+            assert result.status is MultiServerStatus.NEEDS_GENERATION
+            assert not expected.exists()
+            generate.assert_not_called()
+            queued_plex_refresh.assert_not_called()
+        else:
+            queued_plex_refresh.assert_called_once_with(registry.get("plex-1"), str(media_file), item_hint)
+            assert result.status is MultiServerStatus.PUBLISHED
+            assert result.publishers[0].status is PublisherStatus.PUBLISHED
+            assert result.publishers[0].output_paths == [expected]
+            assert expected.is_file()
+            assert generate.call_args.args[0] == str(media_file)
+            assert generate.call_args.args[4] is mock_config_for_processing
+            assert generate.call_args.kwargs["cancel_check"] is None
+            queued_plex_refresh.reset_mock()
+            with patch("media_preview_generator.processing.multi_server.generate_images") as second_generate:
+                second = process_canonical_path(
+                    canonical_path=str(media_file),
+                    registry=registry,
+                    config=mock_config_for_processing,
+                    item_id_by_server={"plex-1": item_hint} if item_hint else None,
+                )
+            assert second.status is MultiServerStatus.SKIPPED
+            second_generate.assert_not_called()
+            queued_plex_refresh.assert_called_once_with(registry.get("plex-1"), str(media_file), item_hint)
+
+    def test_source_replaced_during_extraction_is_not_published(self, mock_config_for_processing, tmp_path):
+        from media_preview_generator.processing.frame_cache import get_frame_cache
+
+        media_file = _seed_canonical_file(tmp_path / "media")
+        destination = tmp_path / "plex"
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="plex-1",
+                    server_type=ServerType.PLEX,
+                    libraries=[Library(id="1", name="Movies", remote_paths=(str(media_file.parent),), enabled=True)],
+                    output={"adapter": "plex_bundle", "plex_config_folder": str(destination)},
+                )
+            ]
+        )
+
+        def extract(video_file, output_folder, *args, **kwargs):
+            _populate_frames(output_folder, count=3)
+            media_file.write_bytes(b"replacement video contents")
+            return (True, 3, "h264", 320, 30.0, None)
+
+        with patch("media_preview_generator.processing.multi_server.generate_images", side_effect=extract):
+            result = process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+            )
+        assert result.status is MultiServerStatus.FAILED
+        assert "Source file changed" in result.message
+        assert not list(destination.rglob("*.bif"))
+        from media_preview_generator.processing.multi_server import _frame_extraction_key
+
+        assert (
+            get_frame_cache().get(str(media_file), extraction_key=_frame_extraction_key(mock_config_for_processing))
+            is None
+        )

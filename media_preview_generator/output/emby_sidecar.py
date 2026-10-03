@@ -7,9 +7,8 @@ naming exactly means our generated BIFs slot into Emby installations as
 if Emby had produced them itself ([forum discussion](
 https://emby.media/community/topic/112001-what-is-a-bif-file-and-why-do-all-have-320-10-at-end-of-filename/)).
 
-Unlike :class:`PlexBundleAdapter`, this adapter doesn't need any
-server-side metadata — the output path is derived purely from the
-canonical media path plus the configured width and interval.
+The output path is derived from the canonical media path plus the
+configured width and interval, without server-side metadata.
 """
 
 from __future__ import annotations
@@ -26,9 +25,9 @@ from loguru import logger
 from ..servers.base import MediaServer
 from .base import BifBundle, OutputAdapter
 
-# The exact name ``processing.generator._bif_temp_path`` writes a sidecar BIF under before renaming it into place:
-# a dot, the first 16 hex digits of the sidecar name's SHA-1, ``.bif-tmp``. Match it with ``fullmatch``.
-_BIF_TEMP_NAME = re.compile(r"\.[0-9a-f]{16}\.bif-tmp")
+# Short hashed staging names, with an optional 32-hex UUID for concurrent writes.
+# Keep accepting the legacy fixed name so interrupted writes from older releases are swept.
+_BIF_TEMP_NAME = re.compile(r"\.[0-9a-f]{16}(?:\.[0-9a-f]{32})?\.bif-tmp")
 
 # A write updates its temp file's mtime as it goes and finishes in seconds, so one untouched this long was left by a
 # crash. Younger ones may belong to another worker writing a sibling video's BIF in the same folder right now.

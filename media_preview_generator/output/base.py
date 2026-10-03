@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..servers.base import MediaServer
+from .plex_hash import SourceFingerprint
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class BifBundle:
         width: Pixel width of the extracted frames.
         height: Pixel height of the extracted frames.
         frame_count: Total number of frames extracted.
+        source_fingerprint: Source identity and change markers captured before
+            extraction, checked before publishing to reject replaced media.
     """
 
     canonical_path: str
@@ -39,15 +42,9 @@ class BifBundle:
     width: int
     height: int
     frame_count: int
-    # Vendor-specific pre-fetched ``(hash, file)`` pairs for the publisher.
-    # Plex populates this from ``ProcessableItem.bundle_metadata_by_server``
-    # (captured during enumeration via plexapi's ``section.search()`` which
-    # already returns ``item.media[*].parts[*].(hash, file)``). When set,
-    # PlexBundleAdapter skips its per-item ``/library/metadata/{id}/tree``
-    # round-trip — a 9981-item full-library scan previously paid 9981
-    # sequential round-trips for hashes the enumeration already had.
-    # Empty tuple for non-Plex adapters and for paths that didn't come
-    # from a fresh enumeration (e.g. Sonarr/Radarr webhooks).
+    # Enumeration metadata is retained for compatibility with job callers.
+    # Plex destinations use the current source bytes: these hints may refer
+    # to an older file replaced at the same path since Plex's last scan.
     prefetched_bundle_metadata: tuple[tuple[str, str], ...] = ()
     # Owning server's display name, threaded through purely for log
     # attribution in the BIF packing helper (``generate_bif`` prefixes its
@@ -55,6 +52,7 @@ class BifBundle:
     # reading the log can tell which server's BIF was just written without
     # cross-referencing the next "Publisher result:" line).
     server_display_name: str | None = None
+    source_fingerprint: SourceFingerprint | None = None
 
 
 class OutputAdapter(ABC):
@@ -74,9 +72,8 @@ class OutputAdapter(ABC):
     def needs_server_metadata(self) -> bool:
         """Whether ``compute_output_paths`` requires a live API call.
 
-        Plex returns ``True`` because publishing depends on the per-item
-        bundle hash. Sidecar adapters return ``False`` since the path is
-        derived purely from the canonical media path.
+        Plex and sidecar adapters return ``False`` because their output
+        paths can be derived from the local media file.
         """
 
     @abstractmethod
@@ -95,9 +92,8 @@ class OutputAdapter(ABC):
         ``output-status`` endpoint) only needs path computation and
         hasn't built a live client. Adapters that don't actually need
         the server (Emby sidecar, Jellyfin trickplay) accept ``None``
-        unconditionally; adapters that do (Plex bundle, which queries
-        the bundle hash from the API) raise ``ValueError`` when called
-        without one.
+        unconditionally. Plex derives its bundle hash from local bytes
+        and also accepts ``None``.
 
         Implementations may raise ``LibraryNotYetIndexedError`` when the
         server has not yet ingested the item the adapter needs metadata for;

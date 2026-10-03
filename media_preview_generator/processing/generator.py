@@ -36,7 +36,8 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
 from enum import Enum
 
 from loguru import logger
@@ -2244,10 +2245,11 @@ def _cleanup_temp_directory(tmp_path: str) -> None:
 
 
 def _bif_temp_path(bif_filename: str) -> str:
-    """Where a BIF is written before it's renamed over ``bif_filename``.
+    """Return the legacy fixed staging path for crash-leftover cleanup.
 
-    The same folder, so the rename is atomic. A short hidden name fixed per target: it can't push a long Emby sidecar
-    name past the filesystem's 255-byte limit, and a leftover from a crash is reused by the next write of that file.
+    New writes add a unique suffix so concurrent publishers of a shared Plex
+    bundle cannot remove or replace one another's staging file. Both names
+    stay short even when an Emby sidecar approaches the filesystem limit.
 
     Args:
         bif_filename: The BIF's final path.
@@ -2293,13 +2295,21 @@ def _keep_owner_and_mode(new_file: str, replaced_file: str) -> None:
             os.chown(new_file, -1, replaced.st_gid)
 
 
-def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
+def generate_bif(
+    bif_filename: str,
+    images_path: str,
+    config: Config,
+    *,
+    before_publish: Callable[[], None] | None = None,
+) -> None:
     """Build a .bif file from thumbnail images.
 
     Args:
         bif_filename: Path to output .bif file
         images_path: Directory containing .jpg thumbnail images
         config: Configuration object
+        before_publish: Optional source-stability check run after packing,
+            immediately before replacement. Raising preserves the old BIF.
 
     Raises:
         PermissionError: If permission denied accessing files or directories
@@ -2323,12 +2333,15 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
 
     # Written beside the target and renamed over it once complete, so a crash or error part-way never leaves a
     # short BIF where Plex/Emby read it.
-    tmp_filename = _bif_temp_path(bif_filename)
-    # A leftover from a crash may belong to another user (an earlier run as root); unlinking needs only the folder.
+    legacy_tmp_filename = _bif_temp_path(bif_filename)
+    # Clean the fixed name used by older releases. New workers use independent
+    # names even when two source paths produce the same content-addressed bundle.
     with contextlib.suppress(FileNotFoundError, PermissionError):
-        os.remove(tmp_filename)
+        os.remove(legacy_tmp_filename)
+    tmp_filename = f"{legacy_tmp_filename.removesuffix('.bif-tmp')}.{uuid.uuid4().hex}.bif-tmp"
     try:
-        f = open(tmp_filename, "wb")
+        # Exclusive creation retains normal 0666/umask permissions.
+        f = open(tmp_filename, "xb")
     except PermissionError as e:
         logger.error(
             "Cannot write the preview file at {}: permission denied ({}). "
@@ -2398,6 +2411,8 @@ def generate_bif(bif_filename: str, images_path: str, config: Config) -> None:
             except OSError as exc:
                 logger.debug("fsync failed for {}: {}", tmp_filename, exc)
         _keep_owner_and_mode(tmp_filename, bif_filename)
+        if before_publish is not None:
+            before_publish()
         os.replace(tmp_filename, bif_filename)
     except BaseException:
         # The target keeps what it had; only the partial write goes.
