@@ -27,6 +27,7 @@ import requests
 import urllib3
 from loguru import logger
 
+from ..scan_filters import metadata_id, metadata_integer, parse_added_at
 from ._mediabrowser_auth import _AUTH_DEVICE_ID, mediabrowser_authorization_header
 from .base import (
     ConnectionResult,
@@ -35,6 +36,7 @@ from .base import (
     MediaServer,
     MediaSuggestion,
     ServerConfig,
+    ServerType,
 )
 
 # How long the per-instance reverse-lookup cache holds a result before
@@ -841,7 +843,7 @@ class EmbyApiClient(MediaServer):
         # Fall back to the primary path if the sources fetch failed or was empty.
         return versions or ([(item_id, top_path)] if top_path else [])
 
-    def list_items(self, library_id: str) -> Iterator[MediaItem]:
+    def list_items(self, library_id: str, *, sort_by: str | None = None) -> Iterator[MediaItem]:
         """Yield every video :class:`MediaItem` inside the given library.
 
         Pages through ``/Items`` via ``StartIndex`` until exhausted —
@@ -868,6 +870,11 @@ class EmbyApiClient(MediaServer):
         they're real and need processing; the re-raise only flags that
         the **library is incomplete**.
         """
+        fields = "Path,MediaSourceCount,DateCreated"
+        if self.type is ServerType.EMBY:
+            # Emby omits release years unless requested; Jellyfin includes
+            # them in the base DTO and does not define this ItemFields value.
+            fields += ",ProductionYear"
         start_index = 0
         while True:
             params = {
@@ -877,10 +884,13 @@ class EmbyApiClient(MediaServer):
                 # MediaSourceCount is a cheap scalar — it lets us emit one
                 # MediaItem per *version* (see media_item_versions) without
                 # paying a heavy Fields=MediaSources fetch on every row.
-                "Fields": "Path,MediaSourceCount",
+                "Fields": fields,
                 "Limit": _LIST_ITEMS_PAGE_SIZE,
                 "StartIndex": start_index,
             }
+            if sort_by in ("newest", "oldest"):
+                params["SortBy"] = "DateCreated"
+                params["SortOrder"] = "Descending" if sort_by == "newest" else "Ascending"
             payload = None
             last_exc: Exception | None = None
             for attempt in range(1, _LIST_ITEMS_MAX_ATTEMPTS + 1):
@@ -999,6 +1009,11 @@ class EmbyApiClient(MediaServer):
                         library_id=library_id,
                         title=title,
                         remote_path=version_path,
+                        added_at=parse_added_at(raw.get("DateCreated"), naive_is_utc=True),
+                        media_type=str(raw.get("Type") or "").lower() or None,
+                        series_id=metadata_id(raw.get("SeriesId")),
+                        season_number=metadata_integer(raw.get("ParentIndexNumber")),
+                        year=metadata_integer(raw.get("ProductionYear"), minimum=1),
                     )
 
             if len(raw_items) < _LIST_ITEMS_PAGE_SIZE:

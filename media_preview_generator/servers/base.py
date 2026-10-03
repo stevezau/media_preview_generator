@@ -11,6 +11,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, TypedDict
 
@@ -141,6 +142,11 @@ class MediaItem:
             don't have an analogous concept (Emby, Jellyfin) and for paths
             that didn't come from a fresh enumeration (Sonarr/Radarr
             webhook payloads carrying only a path).
+        added_at: Date added to the media server, normalized to aware UTC.
+        media_type: Movie, episode, or another vendor item type in lowercase.
+        series_id: Stable show identifier; never a title-based grouping.
+        season_number: Episode season number; zero denotes specials.
+        year: Movie release year from the media server.
     """
 
     id: str
@@ -148,6 +154,11 @@ class MediaItem:
     title: str
     remote_path: str
     bundle_metadata: tuple[tuple[str, str], ...] = ()
+    added_at: datetime | None = None
+    media_type: str | None = None
+    series_id: str | None = None
+    season_number: int | None = None
+    year: int | None = None
 
 
 @dataclass(frozen=True)
@@ -284,9 +295,11 @@ class MediaServer(ABC):
         """
 
     @abstractmethod
-    def list_items(self, library_id: str) -> Iterator[MediaItem]:
+    def list_items(self, library_id: str, *, sort_by: str | None = None) -> Iterator[MediaItem]:
         """Yield every item in the named library.
 
+        Newest/oldest order by when items were added to this library. Other
+        values retain server order; callers shuffle combined lists for random.
         Implementations may stream results; callers are expected to iterate.
         """
 

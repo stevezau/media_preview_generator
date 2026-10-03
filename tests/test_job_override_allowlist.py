@@ -204,3 +204,37 @@ class TestEveryStartPathIgnoresDisallowedKeys:
             run_scheduled_job(library_name="Movies", config=dict(MALICIOUS))
 
         _assert_only_allowed_keys_applied(captured_run)
+
+
+@pytest.mark.parametrize("start_path", ["manual", "scheduled"])
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {"added_filter": "last_days", "added_last_days": 30, "latest_seasons": 2},
+        {
+            "added_filter": "date_range",
+            "added_from": "2026-09-01",
+            "added_to": "2026-09-30",
+            "movie_year_from": 1990,
+            "movie_year_to": 2020,
+        },
+        {"added_filter": "all", "latest_seasons": None, "movie_year_from": None, "movie_year_to": None},
+    ],
+)
+def test_full_scan_filters_reach_processing(app, captured_run, start_path, filters):
+    """The real runtime bridge must retain filters from both full-scan entry points."""
+    if start_path == "manual":
+        response = app.test_client().post(
+            "/api/jobs", headers=_headers(), json={"library_name": "Movies", "config": filters}
+        )
+        assert response.status_code == 201, response.get_data(as_text=True)
+    else:
+        from media_preview_generator.web.app import run_scheduled_job
+
+        with app.app_context():
+            run_scheduled_job(library_name="Movies", config=filters)
+
+    captured, done = captured_run
+    assert done.wait(timeout=5), "run_processing was not called"
+    for key, expected in filters.items():
+        assert getattr(captured[0], key) == expected, f"{start_path} runtime dropped {key}"

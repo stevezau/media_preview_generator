@@ -14,11 +14,13 @@ keeping every byte of duplicated code out of the per-vendor modules.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterator
 from typing import Any
 
 from loguru import logger
 
+from ..scan_filters import ScanFilters
 from ..servers.base import Library, MediaServer, ServerConfig
 from ..servers.ownership import apply_path_mappings
 from .types import ProcessableItem
@@ -72,6 +74,8 @@ class _MediaServerProcessor:
         server_config: ServerConfig,
         *,
         library_ids: list[str] | None = None,
+        sort_by: str | None = None,
+        filters: ScanFilters | None = None,
         cancel_check: Callable[[], bool] | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> Iterator[ProcessableItem]:
@@ -130,7 +134,7 @@ class _MediaServerProcessor:
                 )
 
             try:
-                items_iter = client.list_items(library.id)
+                items_iter = client.list_items(library.id, sort_by=sort_by)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Could not list items in {} library {} ({!r}): {}. Continuing with the next library.",
@@ -141,6 +145,11 @@ class _MediaServerProcessor:
                 )
                 continue
 
+            excluded: Counter[str] = Counter()
+            if filters is not None and filters.active:
+                items_iter = filters.select(
+                    items_iter, excluded=excluded, cancel_check=cancel_check, library_kind=library.kind
+                )
             items_yielded = 0
             for media_item in items_iter:
                 if cancel_check is not None and cancel_check():
@@ -149,6 +158,14 @@ class _MediaServerProcessor:
                 for processable in self._yield_processable_for(media_item, library, server_config):
                     items_yielded += 1
                     yield processable
+            if filters is not None and filters.active:
+                logger.info(
+                    "Filters kept {} and excluded {} item(s) in {!r}: {}",
+                    items_yielded,
+                    sum(excluded.values()),
+                    library.name,
+                    ", ".join(f"{reason}: {count}" for reason, count in sorted(excluded.items())) or "no exclusions",
+                )
             # Post-library summary so the log tells a complete story:
             # "Querying TV Shows…" → "Found 12,458 items in TV Shows".
             logger.info(

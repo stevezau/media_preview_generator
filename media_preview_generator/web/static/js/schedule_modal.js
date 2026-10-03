@@ -61,6 +61,7 @@ function onScanModeChange() {
     if (sortByGroup) {
         sortByGroup.style.display = selected === 'full_library' ? '' : 'none';
     }
+    MediaScanFilters.refresh('schedule');
     // When flipping to recently-added in "Add" mode with untouched defaults,
     // nudge the trigger type to Interval and pre-fill 15 minutes — that's
     // the canonical shape of a Recently Added scanner.
@@ -88,6 +89,9 @@ function _getSelectedScheduleType() {
 }
 
 function _resetScheduleForm() {
+    MediaScanFilters.reset('schedule');
+    MediaScanFilters.setLoading('schedule', false);
+    document.getElementById('scheduleLibraryAll').checked = true;
     document.getElementById('scheduleName').value = '';
     const srvSel = document.getElementById('scheduleServer');
     if (srvSel) srvSel.value = '';
@@ -104,7 +108,10 @@ function _resetScheduleForm() {
     if (findMarkers) findMarkers.checked = true;
     document.getElementById('scheduleLookback').value = '1';
     const sortByEl = document.getElementById('scheduleSortBy');
-    if (sortByEl) sortByEl.value = '';
+    if (sortByEl) {
+        sortByEl.querySelector('option[value="inherit"]')?.remove();
+        sortByEl.value = 'default';
+    }
     onScanModeChange();
 
     // Reset schedule type to Specific Time
@@ -137,9 +144,8 @@ function showNewScheduleModal() {
     document.getElementById('scheduleSubmitBtn').innerHTML =
         '<i class="bi bi-check me-1"></i>Create Schedule';
 
-    _populateScheduleServerPicker();
-    // Render the multi-select library checkboxes from the current global cache.
-    _renderScheduleLibraryList(libraries, '');
+    MediaScanFilters.setLoading('schedule', true);
+    _populateScheduleServerPicker().then(onScheduleServerChange);
     const modal = new bootstrap.Modal(document.getElementById('newScheduleModal'));
     modal.show();
 }
@@ -172,11 +178,16 @@ function showEditScheduleModal(scheduleId) {
         : (schedule.library_id ? [String(schedule.library_id)] : []);
 
     function _applyLibraryPreselect() {
+        if (document.getElementById('scheduleEditId').value !== scheduleId
+            || document.getElementById('scheduleServer').value !== (schedule.server_id || '')) return;
+        MediaScanFilters.setLoading('schedule', false);
         const allCb = document.getElementById('scheduleLibraryAll');
         if (!wantIds.length) {
             // "All Libraries" semantics — leave master checkbox checked.
             if (allCb) allCb.checked = true;
             onScheduleLibraryAllChange(allCb);
+            MediaScanFilters.reset('schedule', schedule.config || {});
+            MediaScanFilters.refresh('schedule');
             return;
         }
         if (allCb) allCb.checked = false;
@@ -185,18 +196,16 @@ function showEditScheduleModal(scheduleId) {
             cb.disabled = false;
             cb.checked = wantIds.includes(String(cb.value));
         });
+        MediaScanFilters.reset('schedule', schedule.config || {});
+        MediaScanFilters.refresh('schedule');
     }
 
     // Populate server picker, then refresh libraries scoped to it, then
     // pre-select the saved library_ids.
-    _populateScheduleServerPicker(schedule.server_id || '').then(() => {
-        if (schedule.server_id) {
-            onScheduleServerChange().then(_applyLibraryPreselect);
-        } else {
-            _renderScheduleLibraryList(libraries, '');
-            _applyLibraryPreselect();
-        }
-    });
+    MediaScanFilters.setLoading('schedule', true);
+    _populateScheduleServerPicker(schedule.server_id || '')
+        .then(onScheduleServerChange)
+        .then(_applyLibraryPreselect);
 
     // Pre-fill scan mode + lookback from the schedule's config
     const cfg = schedule.config || {};
@@ -215,11 +224,15 @@ function showEditScheduleModal(scheduleId) {
     }
     const sortBySelect = document.getElementById('scheduleSortBy');
     if (sortBySelect) {
-        const savedSortBy = cfg.sort_by || '';
+        const savedSortBy = Object.prototype.hasOwnProperty.call(cfg, 'sort_by')
+            ? (cfg.sort_by || 'default') : 'inherit';
+        if (savedSortBy === 'inherit') {
+            sortBySelect.add(new Option('Use configured order', 'inherit'));
+        }
         if (Array.from(sortBySelect.options).some(o => o.value === savedSortBy)) {
             sortBySelect.value = savedSortBy;
         } else {
-            sortBySelect.value = '';
+            sortBySelect.value = 'default';
         }
     }
     onScanModeChange();
@@ -314,9 +327,12 @@ async function saveSchedule() {
         scheduleConfig.lookback_hours = parseFloat(document.getElementById('scheduleLookback').value) || 1;
     } else if (scanMode === 'full_library') {
         // Processing order only applies to full-library scans
+        const scanFilters = MediaScanFilters.read('schedule');
+        if (scanFilters === null) return;
+        Object.assign(scheduleConfig, scanFilters);
         const sortByEl = document.getElementById('scheduleSortBy');
         const sortBy = sortByEl ? sortByEl.value : '';
-        if (sortBy) {
+        if (sortBy && sortBy !== 'inherit') {
             scheduleConfig.sort_by = sortBy;
         }
     }

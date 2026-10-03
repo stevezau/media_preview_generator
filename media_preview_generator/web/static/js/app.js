@@ -652,6 +652,10 @@ async function loadLibraries() {
         libraries = data.libraries || [];
         librariesLoadError = null;
         await updateLibraryList();
+        if (document.getElementById('newJobModal')?.classList.contains('show')) {
+            _renderJobLibraryList(libraries);
+            _updateJobScopeBadge();
+        }
         updateMediaServersStatus();
     } catch (error) {
         console.error('Failed to load libraries:', error);
@@ -1260,16 +1264,24 @@ async function onScheduleServerChange() {
     const sel = document.getElementById('scheduleServer');
     if (!sel) return;
     const serverId = sel.value;
+    MediaScanFilters.setLoading('schedule', true);
+    const listEl = document.getElementById('scheduleLibraryList');
+    if (listEl) listEl.innerHTML = '<div class="text-muted small">Loading libraries…</div>';
     try {
         const url = serverId
             ? `/api/libraries?server_id=${encodeURIComponent(serverId)}`
             : '/api/libraries';
         const data = await apiGet(url);
+        if (sel.value !== serverId) return;
         libraries = data.libraries || [];
         _renderScheduleLibraryList(libraries, serverId || null);
     } catch (e) {
+        if (sel.value !== serverId) return;
         console.warn('Failed to refresh libraries for server change:', e);
+        if (listEl) listEl.innerHTML = '<div class="text-warning small">Could not load libraries.</div>';
         showToast('Schedules', 'Could not load libraries for the selected server', 'warning');
+    } finally {
+        if (sel.value === serverId) MediaScanFilters.setLoading('schedule', false);
     }
 }
 
@@ -1281,13 +1293,16 @@ function _renderScheduleLibraryList(libs, filterServerId) {
     if (!listEl) return;
     if (!libs || libs.length === 0) {
         listEl.innerHTML = '<div class="text-muted small">No libraries available for this selection.</div>';
+        MediaScanFilters.refresh('schedule');
         return;
     }
     const allDisabled = document.getElementById('scheduleLibraryAll').checked;
     const renderRow = (lib, indent) => `
         <div class="form-check ${indent ? 'ms-2' : ''}">
             <input class="form-check-input schedule-library-checkbox" type="checkbox"
-                   value="${lib.id}" id="schedLib_${lib.id}" ${allDisabled ? 'disabled' : ''}>
+                   value="${lib.id}" id="schedLib_${lib.id}" ${allDisabled ? 'disabled' : ''}
+                   data-library-kind="${escapeHtml(lib.type || lib.kind || '')}"
+                   onchange="MediaScanFilters.refresh('schedule')">
             <label class="form-check-label" for="schedLib_${lib.id}">
                 ${escapeHtml(lib.name)} <span class="text-muted small">(${libraryTypeLabel(lib)})</span>
             </label>
@@ -1295,6 +1310,7 @@ function _renderScheduleLibraryList(libs, filterServerId) {
     `;
     if (filterServerId) {
         listEl.innerHTML = libs.map(l => renderRow(l, false)).join('');
+        MediaScanFilters.refresh('schedule');
         return;
     }
     const groups = new Map();
@@ -1313,6 +1329,7 @@ function _renderScheduleLibraryList(libs, filterServerId) {
         sections.push(head + grp.libs.map(l => renderRow(l, true)).join(''));
     }
     listEl.innerHTML = sections.join('');
+    MediaScanFilters.refresh('schedule');
 }
 
 function onScheduleLibraryAllChange(checkbox) {
@@ -1320,6 +1337,7 @@ function onScheduleLibraryAllChange(checkbox) {
         cb.disabled = checkbox.checked;
         if (checkbox.checked) cb.checked = false;
     });
+    MediaScanFilters.refresh('schedule');
 }
 
 function setScheduleLibrariesChecked(checked) {
@@ -1332,6 +1350,7 @@ function setScheduleLibrariesChecked(checked) {
         cb.disabled = false;
         cb.checked = checked;
     });
+    MediaScanFilters.refresh('schedule');
 }
 
 // Populate the Schedules modal's "Media Server" dropdown from /api/servers.
@@ -3041,8 +3060,9 @@ function showNotification(title, body, type = 'info') {
 // Action Functions
 function showNewJobModal() {
     document.getElementById('jobLibraryAll').checked = true;
+    MediaScanFilters.reset('job');
     const sortByEl = document.getElementById('jobSortBy');
-    if (sortByEl) sortByEl.value = '';
+    if (sortByEl) sortByEl.value = 'default';
     // Back to Previews; the priority is only reset when the last open left it on the Intro & Credits default.
     const wasMarkers = _jobKindIsMarkers();
     const previewsKind = document.getElementById('jobKindPreviews');
@@ -3125,7 +3145,8 @@ function _renderJobLibraryList(libs) {
                 <input class="form-check-input job-library-checkbox" type="checkbox"
                        value="${lib.id}" id="jobLib_${lib.id}"
                        data-server-id="${escapeHtml(lib.server_id || '')}"
-                       data-server-name="${escapeHtml(lib.server_name || '')}" disabled>
+                       data-server-name="${escapeHtml(lib.server_name || '')}"
+                       data-library-kind="${escapeHtml(lib.type || lib.kind || '')}" disabled>
                 <label class="form-check-label" for="jobLib_${lib.id}">
                     ${escapeHtml(lib.name)} <span class="text-muted small">(${libraryTypeLabel(lib)})</span>
                 </label>
@@ -3149,6 +3170,7 @@ function _renderJobLibraryList(libs) {
 // ``_infer_server_from_library_ids`` is a refusing fallback for clients
 // that don't send server_id (see issue #244).
 function _updateJobScopeBadge() {
+    MediaScanFilters.refresh('job');
     const badge = document.getElementById('jobScopeBadge');
     if (!badge) return;
 
@@ -3396,7 +3418,9 @@ async function startNewJob() {
     const sortByEl = document.getElementById('jobSortBy');
     const sortBy = sortByEl ? sortByEl.value : '';
 
-    const jobConfig = { force_generate: forceRegenerate };
+    const scanFilters = MediaScanFilters.read('job');
+    if (scanFilters === null) return;
+    const jobConfig = { force_generate: forceRegenerate, ...scanFilters };
     if (sortBy) {
         jobConfig.sort_by = sortBy;
     }

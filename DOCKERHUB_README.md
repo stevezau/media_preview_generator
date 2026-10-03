@@ -76,6 +76,11 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 - **Each server's own format.** A BIF in Plex's data folder, a BIF next to the video for Emby, and Jellyfin trickplay tiles (next to the video, or in Jellyfin's data folder with the companion plugin).
 - **Setup Health.** Checks each server's settings and offers fixes one library at a time.
 
+**Choose what to generate.** Filter manual or scheduled library scans by date
+added, keep the most recent X available TV seasons, or select a movie release-year
+range. Combine filters while keeping existing previews. See the
+[library-scan guide](https://mediapreviewgenerator.dev/guides/#choosing-media-for-a-library-scan).
+
 **Right colours**
 - **HDR tone mapping.** Tone-maps HDR10, HLG and HDR10+, and uses the HDR10 layer of Dolby Vision profiles 7 and 8. Profile 5 needs a GPU with a hardware Vulkan driver.
 

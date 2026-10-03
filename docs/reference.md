@@ -125,7 +125,45 @@ GPU settings are configured per-GPU in **Settings** → **Processing Options**. 
 | `thumbnail_quality` | Yes | `4` | Preview quality 1-10, lower = better quality (2 = highest) |
 | `thumbnail_interval` | Yes | `10` | Interval between preview images (1–60 s). Matches Plex/BIF community convention (see sidecar `-{width}-10.bif` files). |
 | `selected_libraries` | Yes | All | Library IDs to process |
-| `sort_by` (per-run) | Yes | `newest` | Order items are processed: `newest`, `oldest`, `random`, or empty for Plex's natural order. Set per manual run (New Job modal) or per schedule — not a global setting. |
+| `sort_by` (per-run) | Yes | `newest` | Full-scan queue order: `newest`/`oldest` use the date added to the library, within each library, on Plex, Emby, and Jellyfin. `default` preserves server order; `random` shuffles the combined selected libraries and servers. Parallel checks and workers may start or finish out of order. Set per manual run or schedule. The UI sends `default` explicitly; the configuration fallback remains `newest`. Existing schedules without an override continue to inherit the configured order. |
+
+### Per-job media filters
+
+**Start New Job → Filter media** and scheduled **Full library scans** can limit
+the media selected for a run. All filters are optional and default to unrestricted.
+They are stored in the job or schedule's `config`, not in global settings.
+
+- **Shared — Added to library:** `added_filter` is `all` (default), `last_days`, or
+  `date_range`. `last_days` requires a positive integer `added_last_days`; its
+  rolling window is calculated once when the job starts. `date_range` requires
+  `added_from` and `added_to` as `YYYY-MM-DD`. Both calendar dates are included,
+  using the app's timezone (`TZ` or the container's local timezone).
+- **TV shows — Most recent available seasons:** `latest_seasons` is a positive
+  integer, or `null`/omitted for all seasons. It counts distinct, positive season
+  numbers available for each show in each selected server library. For example,
+  the most recent two of seasons 1, 3, and 5 are seasons 3 and 5. Specials (season
+  0) are excluded when this filter is active. Movies are unaffected.
+- **Movies — Release year:** `movie_year_from` and `movie_year_to` are inclusive
+  integer bounds from 1 to 9999. Either bound may be omitted or `null`; both
+  omitted means all years. Episodes are unaffected.
+
+The added date is the media server's catalog date (`addedAt` on Plex,
+`DateCreated` on Emby/Jellyfin), not the release date or file modification time.
+Applicable filters combine with **AND**. The latest available seasons are
+determined before applying added-date filters or checking existing previews;
+older seasons are never substituted when the latest ones have no matches.
+All versions of qualifying media remain eligible.
+
+Items missing metadata required by an active filter are excluded; the scan logs
+aggregate exclusion counts. Library enumeration is still needed to select the
+latest seasons, even though excluded files are not queued for generation.
+Changing library selection in the UI clears filters for media types no longer
+selected. **Clear** restores unrestricted selection.
+
+These options apply only to full-library jobs. **Manual Trigger** file/folder
+jobs, webhooks, **Recently Added** scanner schedules, and **Intro & Credits**
+jobs and schedules retain their existing selection behavior. Relative windows on scheduled full scans are recalculated
+for each execution; a saved date range stays fixed.
 
 ### Frame Reuse Cache (frame_reuse)
 
@@ -1172,6 +1210,33 @@ An optional `config` object may set `force_generate`, `regenerate_thumbnails`, `
 
 **Response:** `{"id": "job-123", "status": "pending", "message": "Job created successfully"}`
 
+Optional [media filters](#per-job-media-filters) go in `config`. For example,
+process movies added in the last 30 days and released in 2020 or later:
+
+```json
+{
+  "library_id": "1",
+  "library_name": "Movies",
+  "config": {
+    "sort_by": "newest",
+    "added_filter": "last_days",
+    "added_last_days": 30,
+    "movie_year_from": 2020
+  }
+}
+```
+
+For TV libraries, `"latest_seasons": 2` selects the most recent two available
+seasons per show. In mixed selections, movie-year restrictions affect only
+movies and season restrictions affect only episodes. Shared added-date
+restrictions apply to both.
+
+Invalid filter values return HTTP 400 before a job is created. Days and season
+counts must be positive JSON integers, not strings, booleans, or fractions.
+Date ranges need both valid endpoints in chronological order; a movie-year
+range may have one bound, but cannot have its lower bound exceed its upper bound.
+Fields belonging to an inactive added-date mode are cleared during normalization.
+
 #### GET /api/jobs/{id}
 
 ```json
@@ -1253,9 +1318,13 @@ explicit `null` clears it.
 
 `config.job_type` accepts:
 
-- `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
+- `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing matching items in `library_id` that are missing previews. Its `config` accepts the same [media filters](#per-job-media-filters) as `POST /api/jobs`.
 - `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), counted back from when the job was created (a job that waited for a slot, or was revived after a restart, still covers that window; a tick while the schedule's last scan hasn't started queues nothing, widening that scan's window when this tick looks further back), as one preview job with a Files-panel row per file, the usual retry for files a server hasn't indexed yet, and revival after a restart. Its files also get an Intro & Credits follow-up (`source: "recently_added"`) when a server with Intro & Credits on holds them. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
 - `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. A schedule with a `server_id` publishes to that server only (the job's `server_id`), as a scheduled preview job does. Skipped while an earlier Find markers job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running. A start tick (or `POST /api/schedules/{id}/run`) first resumes every Intro & Credits job of the schedule that its stop time paused, whichever of the two it is (the schedule may have been switched since), and then queues nothing that tick; the check above applies only when it resumed nothing. A job paused by hand (`POST /api/jobs/{id}/pause`) is never resumed by a tick, and a stop tick doesn't take over a pause made by hand; the job's config carries `paused_by_schedule: true` from a stop-time pause until the next resume, pause by hand, or the job's end. Deleting a schedule leaves its paused jobs paused and logs a WARNING naming each; so does a `PUT` that switches `config.job_type` to a kind its start ticks don't resume (`intro_credits` ↔ `full_library`, or either to `recently_added`), for each job its stop time paused. While a Check servers job runs, its config also carries `check_servers_listing` (the files it listed), so a run revived after a restart checks those same files; the key is dropped when the job ends.
+
+Full-scan media filters are cleared when saving a Recently Added or Intro & Credits schedule. Filter
+validation also runs before creating or updating a full-library schedule; invalid
+values return HTTP 400 without changing the saved schedule.
 
 ### System Endpoints
 

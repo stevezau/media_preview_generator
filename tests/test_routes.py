@@ -6746,3 +6746,103 @@ class TestSettingsManagerWebhookMigration:
         sm = SettingsManager(config_dir=str(cfg))
         assert sm.get("plex_webhook_public_url") is None
         assert sm.get("media_servers") == []
+
+
+class TestFullScanFilterAPI:
+    @pytest.mark.parametrize("endpoint", ["jobs", "schedules", "schedule_update"])
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"added_filter": "last_days", "added_last_days": True},
+            {"added_filter": "last_days", "added_last_days": 0},
+            {"added_filter": "last_days", "added_last_days": 10**100},
+            {"added_filter": "date_range", "added_from": "2026-02-30", "added_to": "2026-03-01"},
+            {"latest_seasons": 1.5},
+            {"movie_year_from": 2026, "movie_year_to": 2025},
+        ],
+    )
+    def test_rejects_invalid_filter_before_mutating_job_or_schedule(self, client, endpoint: str, config: dict) -> None:
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.scheduler import get_schedule_manager
+
+        manager = get_schedule_manager()
+        old_schedule = manager.create_schedule(name="Original", cron_expression="0 3 * * *", enabled=False)
+        before = manager.get_all_schedules()
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async") as start:
+            if endpoint == "schedule_update":
+                response = client.put(
+                    f"/api/schedules/{old_schedule['id']}", headers=_api_headers(), json={"config": config}
+                )
+            else:
+                response = client.post(
+                    f"/api/{endpoint}",
+                    headers=_api_headers(),
+                    json={"name": "Filtered", "cron_expression": "0 3 * * *", "config": config},
+                )
+        assert response.status_code == 400, response.get_json()
+        assert response.get_json()["error"]
+        start.assert_not_called()
+        assert get_job_manager().get_all_jobs() == []
+        assert manager.get_all_schedules() == before
+
+    def test_valid_filter_config_roundtrips_job_overrides_and_schedule_edits(self, client) -> None:
+        filters = {"added_filter": "last_days", "added_last_days": 30, "latest_seasons": 2, "movie_year_from": 2020}
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async") as start:
+            response = client.post("/api/jobs", headers=_api_headers(), json={"config": filters})
+        assert response.status_code == 201, response.get_json()
+        stored = response.get_json()["config"]
+        overrides = start.call_args.args[1]
+        for key, value in filters.items():
+            assert stored[key] == overrides[key] == value
+        assert stored["added_from"] is stored["added_to"] is stored["movie_year_to"] is None
+
+        response = client.post(
+            "/api/schedules",
+            headers=_api_headers(),
+            json={"name": "Filtered", "cron_expression": "0 3 * * *", "enabled": False, "config": filters},
+        )
+        assert response.status_code == 201, response.get_json()
+        schedule = response.get_json()
+        from media_preview_generator.scan_filters import FILTER_CONFIG_KEYS
+
+        assert schedule["config"] == {key: stored[key] for key in FILTER_CONFIG_KEYS}
+        reset = client.put(
+            f"/api/schedules/{schedule['id']}",
+            headers=_api_headers(),
+            json={"config": {"added_filter": "all", "added_last_days": 30, "added_from": "invalid"}},
+        )
+        assert reset.status_code == 200, reset.get_json()
+        reset_config = reset.get_json()["config"]
+        assert reset_config["added_filter"] == "all"
+        assert all(
+            reset_config[key] is None
+            for key in (
+                "added_last_days",
+                "added_from",
+                "added_to",
+                "latest_seasons",
+                "movie_year_from",
+                "movie_year_to",
+            )
+        )
+
+    @pytest.mark.parametrize("job_type", ["recently_added", "intro_credits"])
+    def test_non_full_scan_schedule_drops_full_scan_filters(self, client, job_type: str) -> None:
+        response = client.post(
+            "/api/schedules",
+            headers=_api_headers(),
+            json={
+                "name": "Recent",
+                "interval_minutes": 60,
+                "enabled": False,
+                "config": {
+                    "job_type": job_type,
+                    "lookback_hours": 1,
+                    "latest_seasons": -1,
+                    "added_filter": "last_days",
+                    "added_last_days": False,
+                },
+            },
+        )
+        assert response.status_code == 201, response.get_json()
+        assert response.get_json()["config"] == {"job_type": job_type, "lookback_hours": 1}

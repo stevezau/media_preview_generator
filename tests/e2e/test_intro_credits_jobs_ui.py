@@ -336,7 +336,7 @@ class TestStartJobModalIntroCredits:
         assert posts[0]["priority"] == 1
         assert posts[0]["library_name"] == "Intro & Credits: All Libraries"
 
-    def test_previews_still_post_the_old_body_to_the_jobs_endpoint(self, dashboard) -> None:
+    def test_previews_post_to_jobs_with_unrestricted_filters_and_server_order(self, dashboard) -> None:
         page = dashboard()
         markers_posts = _capture_posts(page, "**/api/markers/jobs", {"id": "ic-1"})
         preview_posts = _capture_posts(page, "**/api/jobs", {"id": "job-1"})
@@ -354,7 +354,7 @@ class TestStartJobModalIntroCredits:
                 "library_ids": ["2"],
                 "library_name": "TV Shows",
                 "priority": 2,
-                "config": {"force_generate": True},
+                "config": {"force_generate": True, "sort_by": "default", "added_filter": "all"},
                 "server_id": "plex-1",
             }
         ]

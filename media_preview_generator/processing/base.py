@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from typing import Protocol
 
+from ..scan_filters import ScanFilters
 from ..servers.base import Library, ServerConfig
 from .types import ProcessableItem
 
@@ -45,6 +46,8 @@ class VendorProcessor(Protocol):
         server_config: ServerConfig,
         *,
         library_ids: list[str] | None = None,
+        sort_by: str | None = None,
+        filters: ScanFilters | None = None,
         cancel_check: Callable[[], bool] | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> Iterator[ProcessableItem]:
@@ -53,6 +56,10 @@ class VendorProcessor(Protocol):
         Args:
             server_config: Persisted server config (auth, URL, path mappings).
             library_ids: Optional whitelist; ``None`` means every enabled library.
+            sort_by: Added-to-library order within each library: newest, oldest,
+                or None/default for server order. Random is applied by the caller
+                after combining libraries.
+            filters: Optional full-scan filters with one cutoff shared by the job.
             cancel_check: Optional callable returning True when the caller wants
                 the iteration to stop. Implementations should poll this between
                 items so user-cancelled jobs don't drag.

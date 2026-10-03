@@ -45,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 JS_DIR = REPO_ROOT / "media_preview_generator" / "web" / "static" / "js"
 SCHEDULES_JS = JS_DIR / "schedules.js"
 SCHEDULE_MODAL_JS = JS_DIR / "schedule_modal.js"
+SCAN_FILTERS_JS = JS_DIR / "scan_filters.js"
 APP_JS = JS_DIR / "app.js"
 
 # Skip everything if node isn't on PATH. This file is the only one in
@@ -99,6 +100,14 @@ function makeElementStub() {
         // <select> stubs need an iterable options list — the edit modal
         // checks membership before assigning a lookback value.
         options: [],
+        querySelector(selector) {
+            const match = selector.match(/^option\[value="([^"]+)"\]$/);
+            return match ? this.options.find(option => option.value === match[1]) || null : null;
+        },
+        add(option) {
+            option.remove = () => { this.options = this.options.filter(item => item !== option); };
+            this.options.push(option);
+        },
     };
 }
 
@@ -128,6 +137,8 @@ function loadSchedulesContext(formValues) {
         removeEventListener: function () {},
         getElementById: (id) => {
             if (elements[id]) return elements[id];
+            // Cron tests omit the optional filter panel, as a page without it does.
+            if (id === 'scheduleScanFilters') return null;
             if (!autoStub) return null;
             elements[id] = makeElementStub();
             return elements[id];
@@ -179,6 +190,7 @@ function loadSchedulesContext(formValues) {
     const ctx = {
         document: docStub,
         window: { _scheduleQuietHoursOverlap: undefined, appConfirm: async () => true },
+        Option: class { constructor(text, value) { this.text = text; this.value = value; } },
         bootstrap: { Modal: class { static getInstance() { return { hide: () => {} }; } show() {} } },
         // app.js's dialog helpers, which schedule_modal.js loads after.
         modalOpening: () => null,
@@ -223,6 +235,9 @@ function loadSchedulesContext(formValues) {
     // module scope, fine inside a vm context.
     const schedulesSrc = fs.readFileSync(__SCHEDULES_PATH__, 'utf8');
     const modalSrc = fs.readFileSync(__SCHEDULE_MODAL_PATH__, 'utf8');
+    vm.runInContext(fs.readFileSync(__SCAN_FILTERS_PATH__, 'utf8'), ctx);
+    // Browser window properties are globals; the VM's window stub is separate.
+    ctx.MediaScanFilters = ctx.window.MediaScanFilters;
     vm.runInContext(schedulesSrc, ctx);
     vm.runInContext(modalSrc, ctx);
     return ctx;
@@ -231,8 +246,10 @@ function loadSchedulesContext(formValues) {
 
 
 def _vm_prelude() -> str:
-    return _VM_PRELUDE.replace("__SCHEDULES_PATH__", json.dumps(str(SCHEDULES_JS))).replace(
-        "__SCHEDULE_MODAL_PATH__", json.dumps(str(SCHEDULE_MODAL_JS))
+    return (
+        _VM_PRELUDE.replace("__SCHEDULES_PATH__", json.dumps(str(SCHEDULES_JS)))
+        .replace("__SCHEDULE_MODAL_PATH__", json.dumps(str(SCHEDULE_MODAL_JS)))
+        .replace("__SCAN_FILTERS_PATH__", json.dumps(str(SCAN_FILTERS_JS)))
     )
 
 

@@ -3,6 +3,7 @@
 from flask import current_app, jsonify, request
 from loguru import logger
 
+from ...scan_filters import normalize_scan_filter_config
 from ..auth import api_token_required
 from ..scheduler import (
     _QUIET_HOURS_DAYS,
@@ -67,6 +68,13 @@ def get_schedule(schedule_id):
 def create_schedule():
     """Create a new schedule."""
     data = request.get_json() or {}
+    if "config" in data and data["config"] is not None:
+        try:
+            raw_config = data["config"]
+            full_scan = not isinstance(raw_config, dict) or raw_config.get("job_type", "full_library") == "full_library"
+            data["config"] = normalize_scan_filter_config(raw_config, full_scan=full_scan)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     if not data.get("name"):
         return jsonify({"error": "Name is required"}), 400
@@ -144,6 +152,13 @@ def create_schedule():
 def update_schedule(schedule_id):
     """Update a schedule."""
     data = request.get_json() or {}
+    if "config" in data and data["config"] is not None:
+        try:
+            raw_config = data["config"]
+            full_scan = not isinstance(raw_config, dict) or raw_config.get("job_type", "full_library") == "full_library"
+            data["config"] = normalize_scan_filter_config(raw_config, full_scan=full_scan)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     schedule_manager = get_schedule_manager()
     try:

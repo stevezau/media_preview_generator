@@ -15,6 +15,7 @@ from loguru import logger
 
 from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
 from ...jobs.orchestrator import SUCCESS_OUTCOME_KEYS, count_successes
+from ...scan_filters import FILTER_CONFIG_KEYS
 from ..job_gate import format_wait_message
 from ..jobs import (
     PRIORITY_NORMAL,
@@ -36,7 +37,7 @@ _inflight_lock = threading.Lock()
 # The only Config attributes a job override may set directly; the other overrides are the named keys the
 # override loop in run_job translates itself. Anything else that names a Config attribute (ffmpeg_path,
 # plex_token, ...) is ignored, since the saved job config is replayed on every start path.
-_CONFIG_ATTRIBUTE_OVERRIDES = frozenset({"regenerate_thumbnails", "sort_by"})
+_CONFIG_ATTRIBUTE_OVERRIDES = frozenset({"regenerate_thumbnails", "sort_by"}) | FILTER_CONFIG_KEYS
 
 
 def _not_found_message(not_found: int, total: int, *, nothing_succeeded: bool, retry_scheduled: bool) -> str:

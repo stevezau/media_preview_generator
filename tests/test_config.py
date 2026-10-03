@@ -1368,6 +1368,10 @@ class TestLoadConfig:
         assert config.plex_url == ""
         assert config.plex_token == ""
 
+    @pytest.mark.parametrize(
+        ("sort_by", "expected"),
+        [("newest", "newest"), ("oldest", "oldest"), ("random", "random"), ("default", "default"), ("", "newest")],
+    )
     @patch("shutil.which")
     @patch("subprocess.run")
     @patch("os.path.exists")
@@ -1376,7 +1380,7 @@ class TestLoadConfig:
     @patch("os.access")
     @patch("os.statvfs", create=True)
     @patch("media_preview_generator.logging_config.setup_logging")
-    def test_load_config_accepts_sort_by_random(
+    def test_load_config_accepts_processing_order(
         self,
         mock_logging,
         mock_statvfs,
@@ -1386,8 +1390,10 @@ class TestLoadConfig:
         mock_exists,
         mock_run,
         mock_which,
+        sort_by,
+        expected,
     ):
-        """sort_by='random' must load without a validation error."""
+        """Explicit default and legacy empty values keep distinct meanings."""
         from media_preview_generator.config import clear_config_cache
         from media_preview_generator.web.settings_manager import get_settings_manager
 
@@ -1416,13 +1422,13 @@ class TestLoadConfig:
                 "plex_url": "http://localhost:32400",
                 "plex_token": "test_token",
                 "plex_config_folder": "/config/plex/Library/Application Support/Plex Media Server",
-                "sort_by": "random",
+                "sort_by": sort_by,
             }
         )
         clear_config_cache()
 
         config = load_config()
-        assert config.sort_by == "random"
+        assert config.sort_by == expected
 
     @patch("shutil.which")
     @patch("subprocess.run")

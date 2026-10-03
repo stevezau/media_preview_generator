@@ -1,0 +1,70 @@
+<details class="mb-3 border rounded p-3" id="{{ filter_prefix }}ScanFilters">
+    <summary class="fw-semibold d-flex align-items-start justify-content-between gap-2">
+        <span><i class="bi bi-funnel me-1" aria-hidden="true"></i>Filter media
+            <span class="d-block small fw-normal text-muted mt-1" data-filter-summary aria-live="polite">All selected media</span>
+        </span>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-filter-clear aria-label="Clear media filters">Clear</button>
+    </summary>
+    <div class="mt-3">
+        <p class="small text-muted mb-2">Filters combine. Only matching media is included in this run.</p>
+        <p class="small text-muted" data-filter-scope-note hidden></p>
+        <fieldset data-filter-fields>
+            <div class="mb-3">
+                <label for="{{ filter_prefix }}AddedFilter" class="form-label">Added to library</label>
+                <select id="{{ filter_prefix }}AddedFilter" class="form-select" data-filter="added_filter">
+                    <option value="all">Any time</option>
+                    <option value="last_days">Last X days</option>
+                    <option value="date_range">Date range</option>
+                </select>
+                <div class="mt-2" data-filter-section="days" hidden>
+                    <label for="{{ filter_prefix }}AddedLastDays" class="form-label">Number of days</label>
+                    <input id="{{ filter_prefix }}AddedLastDays" class="form-control" type="number" min="1" step="1" value="30" data-filter="added_last_days">
+                </div>
+                <div class="row g-2 mt-1" data-filter-section="dates" hidden>
+                    <div class="col-sm-6">
+                        <label for="{{ filter_prefix }}AddedFrom" class="form-label">From</label>
+                        <input id="{{ filter_prefix }}AddedFrom" class="form-control" type="date" data-filter="added_from">
+                    </div>
+                    <div class="col-sm-6">
+                        <label for="{{ filter_prefix }}AddedTo" class="form-label">Through</label>
+                        <input id="{{ filter_prefix }}AddedTo" class="form-control" type="date" data-filter="added_to">
+                    </div>
+                </div>
+                <div class="form-text">Uses the date recorded by your media server, not the release date. Date ranges include both days in the app timezone.</div>
+            </div>
+            <fieldset class="mb-3" data-filter-type="tv">
+                <legend class="fs-6 fw-semibold">TV shows</legend>
+                <label for="{{ filter_prefix }}SeasonMode" class="form-label">Seasons to include</label>
+                <select id="{{ filter_prefix }}SeasonMode" class="form-select" data-filter="season_mode">
+                    <option value="all">All seasons</option>
+                    <option value="latest">Most recent available seasons</option>
+                </select>
+                <div class="mt-2" data-filter-section="seasons" hidden>
+                    <label for="{{ filter_prefix }}LatestSeasons" class="form-label">Number of seasons per show</label>
+                    <input id="{{ filter_prefix }}LatestSeasons" class="form-control" type="number" min="1" step="1" value="1" data-filter="latest_seasons">
+                    <div class="form-text">Highest numbered seasons in the library; excludes specials. Applies only to TV shows, including ended shows.</div>
+                </div>
+            </fieldset>
+            <fieldset class="mb-0" data-filter-type="movie">
+                <legend class="fs-6 fw-semibold">Movies</legend>
+                <label for="{{ filter_prefix }}MovieYearMode" class="form-label">Release year</label>
+                <select id="{{ filter_prefix }}MovieYearMode" class="form-select" data-filter="movie_year_mode">
+                    <option value="all">All release years</option>
+                    <option value="range">Year range</option>
+                </select>
+                <div class="row g-2 mt-1" data-filter-section="years" hidden>
+                    <div class="col-sm-6">
+                        <label for="{{ filter_prefix }}MovieYearFrom" class="form-label">From year</label>
+                        <input id="{{ filter_prefix }}MovieYearFrom" class="form-control" type="number" min="1" max="9999" step="1" placeholder="Any" data-filter="movie_year_from">
+                    </div>
+                    <div class="col-sm-6">
+                        <label for="{{ filter_prefix }}MovieYearTo" class="form-label">Through year</label>
+                        <input id="{{ filter_prefix }}MovieYearTo" class="form-control" type="number" min="1" max="9999" step="1" placeholder="Any" data-filter="movie_year_to">
+                    </div>
+                    <div class="col-12 form-text">Inclusive release years, for movies only. Enter at least one year; leave the other blank for no limit.</div>
+                </div>
+            </fieldset>
+        </fieldset>
+        <p class="small text-muted mt-3 mb-0">Media missing a date, season or year needed by an active filter is excluded. Existing previews are checked after selection.</p>
+    </div>
+</details>

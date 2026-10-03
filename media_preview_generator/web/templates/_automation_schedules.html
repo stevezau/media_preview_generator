@@ -143,7 +143,7 @@
 
 <!-- Schedule Modal (Create / Edit) -->
 <div class="modal fade" id="newScheduleModal" tabindex="-1">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="scheduleModalTitle"><i class="bi bi-calendar-plus me-2"></i>Add Schedule</h5>
@@ -329,14 +329,16 @@
                         </select>
                         <div class="form-text">Priority assigned to jobs created by this schedule. <strong>Default</strong> lets Recently Added sweeps follow the global <em>Incoming job priority</em> setting; full-library scans stay at Normal.</div>
                     </div>
+                    {% with filter_prefix='schedule' %}{% include '_scan_filters.html' %}{% endwith %}
                     <div class="mb-3" id="scheduleSortByGroup">
                         <label for="scheduleSortBy" class="form-label">Processing Order</label>
                         <select class="form-select" id="scheduleSortBy">
-                            <option value="" selected>Default (server order)</option>
-                            <option value="newest">Newest first</option>
-                            <option value="oldest">Oldest first</option>
+                            <option value="default" selected>Default (server order)</option>
+                            <option value="newest">Newest added first</option>
+                            <option value="oldest">Oldest added first</option>
                             <option value="random">Random</option>
                         </select>
+                        <div class="form-text">Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</div>
                         <div class="form-text">Pick <strong>Random</strong> if your library spans multiple physical disks (e.g. unraid shfs, mergerfs) — parallel workers will read from different disks at once instead of hammering one.</div>
                     </div>
                     <div class="mb-3">

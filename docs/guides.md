@@ -92,6 +92,41 @@ In the top bar, **Automation** and **Settings** open their page when clicked, an
 > concurrent-job cap is above 1, the last slot is reserved for High-priority
 > work so an incoming webhook never has to wait out a multi-hour scan.
 
+### Choosing media for a library scan
+
+In **Start New Job**, select your libraries and open **Filter media**. The
+controls follow your library selection:
+
+- **Added to library** applies to all selected media. Choose any time, the last
+  X days, or a date range including both endpoints. Calendar dates use the app's
+  timezone. This is the date Plex, Emby, or Jellyfin added the item to its catalog,
+  not its release date or filesystem modification time.
+- **TV shows** can keep all seasons or the most recent X available seasons per
+  show. The default count is 1 when you enable the limit. Season numbers decide
+  which are latest; an ended show's final season still qualifies. Specials are
+  excluded when limiting seasons.
+- **Movies** can keep all release years or use an inclusive year range. Leave
+  either bound blank for an open-ended range, such as 2020 onwards.
+
+All applicable filters must match. If season 10 is the latest available but
+season 9 was added yesterday, selecting "latest 1 season" and "last 7 days"
+does not select season 9. If the latest season already has previews, missing
+previews in older seasons do not make those older seasons eligible.
+
+The summary shows active restrictions. **Clear** restores all selected
+media; changing to movie-only or TV-only libraries clears restrictions for the
+other type. **Generate missing previews** remains the default processing mode.
+
+Use **Processing Order** to decide the queue order independently of these
+filters. Newest/oldest refer to the library-added date and apply within each
+library. Random mixes the selected files; parallel checks and workers can start
+or finish out of order.
+
+The same filters are available on scheduled **Full library scans**. A "last
+30 days" schedule moves its window forward on every run; a date range stays
+fixed. Webhooks, **Recently Added** scanners, and **Manual Trigger** selections
+continue to use their own selection rules.
+
 ### Letting new imports jump the queue
 
 A full-library regeneration can run for hours. **Settings → Processing Options →

@@ -81,6 +81,7 @@ class TestNewJobModal:
         submit.click()
         dashboard_page.wait_for_timeout(500)
         assert captured, "POST /api/jobs never fired"
+        assert captured[0]["config"]["sort_by"] == "default"
 
 
 @pytest.mark.e2e

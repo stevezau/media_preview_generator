@@ -20,6 +20,7 @@ import urllib3
 from loguru import logger
 
 from ..config import resolve_frame_interval
+from ..scan_filters import metadata_id, metadata_integer, parse_added_at
 from .base import (
     ConnectionResult,
     FlagTarget,
@@ -1509,7 +1510,7 @@ class PlexServer(MediaServer):
             "sections": sections,
         }
 
-    def list_items(self, library_id: str) -> Iterator[MediaItem]:
+    def list_items(self, library_id: str, *, sort_by: str | None = None) -> Iterator[MediaItem]:
         """Yield :class:`MediaItem` objects for a single library by id.
 
         Wraps the per-library scan logic from
@@ -1547,6 +1548,11 @@ class PlexServer(MediaServer):
             )
             return
 
+        search_kwargs = {}
+        if sort_by == "newest":
+            search_kwargs["sort"] = "addedAt:desc"
+        elif sort_by == "oldest":
+            search_kwargs["sort"] = "addedAt:asc"
         try:
             # ``plexapi.LibrarySection.search()`` handles HTTP pagination
             # internally (default container_size=100) and returns the
@@ -1562,7 +1568,7 @@ class PlexServer(MediaServer):
                     "(plexapi paginates internally; this can take a while for large libraries)…",
                     target.title,
                 )
-                results = retry_plex_call(target.search, libtype="episode")
+                results = retry_plex_call(target.search, libtype="episode", **search_kwargs)
                 logger.info(
                     "Plex library {!r}: received {} episode(s) from server, starting to yield items.",
                     target.title,
@@ -1588,6 +1594,11 @@ class PlexServer(MediaServer):
                             title=title,
                             remote_path=str(location),
                             bundle_metadata=bundle_md,
+                            added_at=parse_added_at(getattr(m, "addedAt", None), naive_is_utc=False),
+                            media_type=target.METADATA_TYPE,
+                            series_id=metadata_id(getattr(m, "grandparentRatingKey", None)),
+                            season_number=metadata_integer(getattr(m, "parentIndex", None)),
+                            year=metadata_integer(getattr(m, "year", None), minimum=1),
                         )
             elif target.METADATA_TYPE == "movie":
                 logger.info(
@@ -1595,7 +1606,7 @@ class PlexServer(MediaServer):
                     "(plexapi paginates internally; this can take a while for large libraries)…",
                     target.title,
                 )
-                results = retry_plex_call(target.search)
+                results = retry_plex_call(target.search, **search_kwargs)
                 logger.info(
                     "Plex library {!r}: received {} movie(s) from server, starting to yield items.",
                     target.title,
@@ -1616,6 +1627,11 @@ class PlexServer(MediaServer):
                             title=title,
                             remote_path=str(location),
                             bundle_metadata=bundle_md,
+                            added_at=parse_added_at(getattr(m, "addedAt", None), naive_is_utc=False),
+                            media_type=target.METADATA_TYPE,
+                            series_id=metadata_id(getattr(m, "grandparentRatingKey", None)),
+                            season_number=metadata_integer(getattr(m, "parentIndex", None)),
+                            year=metadata_integer(getattr(m, "year", None), minimum=1),
                         )
             else:
                 logger.info(

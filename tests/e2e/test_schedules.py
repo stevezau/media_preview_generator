@@ -191,6 +191,46 @@ class TestScheduleNonPlex:
         cfg = body.get("config") or {}
         # Either omitted (defaults to full_library) or explicitly set.
         assert cfg.get("job_type") in (None, "full_library"), body
+        assert cfg["sort_by"] == "default", body
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize(
+    ("config", "expected_order"),
+    [
+        ({}, "inherit"),
+        ({"sort_by": None}, "default"),
+        ({"sort_by": ""}, "default"),
+        ({"sort_by": "default"}, "default"),
+        ({"sort_by": "newest"}, "newest"),
+        ({"sort_by": "oldest"}, "oldest"),
+        ({"sort_by": "random"}, "random"),
+    ],
+)
+def test_edit_schedule_preserves_processing_order(
+    authed_page: Page, app_url: str, config: dict, expected_order: str
+) -> None:
+    """Older schedules with no override keep inheriting the configured order."""
+    _seed_servers_for_schedule_modal(authed_page)
+    authed_page.route(
+        "**/api/schedules",
+        lambda route: _fulfill_json(
+            route,
+            {"schedules": [{"id": "order", "name": "Order", "config": config, "cron_expression": "0 3 * * *"}]},
+        ),
+    )
+    authed_page.goto(f"{app_url}/automation#schedules")
+    authed_page.wait_for_function("schedules.some(s => s.id === 'order')")
+    authed_page.evaluate("showEditScheduleModal('order')")
+    expect(authed_page.locator("#scheduleSortBy")).to_have_value(expected_order)
+    authed_page.route("**/api/schedules/order", lambda route: _fulfill_json(route, {"id": "order"}))
+    with authed_page.expect_request("**/api/schedules/order") as saved:
+        authed_page.locator("#scheduleSubmitBtn").click()
+    saved_config = saved.value.post_data_json["config"]
+    if expected_order == "inherit":
+        assert "sort_by" not in saved_config
+    else:
+        assert saved_config["sort_by"] == expected_order
 
 
 @pytest.mark.e2e
@@ -431,4 +471,4 @@ class TestScheduleIntroCredits:
 
         _save_schedule(authed_page, "/api/schedules")
 
-        assert captured[0][1]["config"] == {"job_type": "full_library", "sort_by": "random"}
+        assert captured[0][1]["config"] == {"job_type": "full_library", "sort_by": "random", "added_filter": "all"}

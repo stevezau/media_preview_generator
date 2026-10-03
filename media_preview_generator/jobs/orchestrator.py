@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from loguru import logger
 
 from ..processing.generator import ProcessingResult, clear_failures, log_failure_summary
+from ..scan_filters import ScanFilters
 from ..servers.ownership import find_owning_servers, webhook_path_candidates
 from .worker import JOB_LOG_SKIP, WorkerPool
 
@@ -546,6 +547,8 @@ def _enumerate_plex_full_scan_items(
             logger.debug("progress_callback raised during Plex enumeration banner: {}", exc)
     yield from plex_processor.list_canonical_paths(
         plex_cfg,
+        sort_by=getattr(config, "sort_by", None),
+        filters=ScanFilters.from_config(config),
         library_ids=library_ids,
         cancel_check=cancel_check,
         progress_callback=progress_callback,
@@ -891,10 +894,13 @@ def _run_full_scan_multi_server(
         )
         return counts
 
+    filters = ScanFilters.from_config(config)
     all_items, enumeration_errors = _enumerate_items_for_servers(
         candidates,
         enumerate_one=lambda processor, server_cfg: processor.list_canonical_paths(
             server_cfg,
+            sort_by=getattr(config, "sort_by", None),
+            filters=filters,
             library_ids=library_ids,
             cancel_check=cancel_check,
             progress_callback=progress_callback,
@@ -931,6 +937,10 @@ def _run_full_scan_multi_server(
                 f"Retry the scan once the server is healthy."
             )
 
+    if not all_items and filters.active and not enumeration_errors:
+        logger.info("No items matched the selected full-scan filters across {} server(s)", len(candidates))
+        return counts
+
     if not all_items:
         # Was INFO. WARN it: a "successful" scan that processed nothing is
         # the worst-of-both — the job UI shows green, but the user wonders why
@@ -949,6 +959,10 @@ def _run_full_scan_multi_server(
             library_ids,
         )
         return counts
+
+    if getattr(config, "sort_by", None) == "random":
+        random.Random().shuffle(all_items)
+        logger.info("Shuffled {} items for random processing order", len(all_items))
 
     return _dispatch_processable_items(
         all_items,
@@ -1717,7 +1731,7 @@ def _run_plex_full_scan_phase(
         return True
 
     if not all_media_items:
-        logger.info("No media items found across selected libraries")
+        logger.info("No matching media items found across selected libraries")
         return True
 
     # When sort_by is "random", shuffle the combined cross-library list so

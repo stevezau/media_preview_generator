@@ -12,6 +12,7 @@ from loguru import logger
 
 from ...config import MAX_CPU_THREADS
 from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS
+from ...scan_filters import FILTER_CONFIG_KEYS, normalize_scan_filter_config
 from ..auth import (
     api_token_required,
     get_auth_method,
@@ -683,6 +684,10 @@ def create_job():
         return blocked
 
     data = request.get_json() or {}
+    try:
+        raw_config = normalize_scan_filter_config(data.get("config"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     library_ids = list(data.get("library_ids") or [])
     library_names = list(data.get("library_names") or [])
@@ -721,13 +726,13 @@ def create_job():
     # is saved: revival, resume and Reprocess replay the saved config as
     # overrides, so a key saved here would reach the worker's Config later.
     _ALLOWED_OVERRIDES = {
+        *FILTER_CONFIG_KEYS,
         "force_generate",
         "regenerate_thumbnails",
         "sort_by",
         "selected_libraries",
         "selected_library_ids",
     }
-    raw_config = data.get("config") or {}
     config_overrides = {k: v for k, v in raw_config.items() if k in _ALLOWED_OVERRIDES}
     dropped = sorted(str(k) for k in raw_config if k not in _ALLOWED_OVERRIDES)
     if dropped:
