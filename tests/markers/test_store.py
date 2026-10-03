@@ -1889,3 +1889,33 @@ class TestGoneItemsAndDriftTurns:
             assert store.drift_listed_at("plex-1", ["b"]) == {}
         finally:
             store.close()
+
+
+def test_a_legacy_needs_review_row_counts_as_changed_so_deciding_again_rewrites_it(store):
+    """sflix 2026-10-03: 79 rows kept the raw ``needs_review`` after the decide-again job. The stored row loaded as no
+    evidence equalled the new no-evidence verdict (same reason, proposal and fingerprint), so it was never rewritten
+    and ``files_with_legacy_review_decisions`` listed the file again on every trigger."""
+    from media_preview_generator.markers.pipeline import _decisions_changed
+
+    legacy = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+    store._conn.execute(
+        "INSERT INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
+        "settings_fingerprint, decided_at, decided_by) VALUES (?, 'intro', 'needs_review', 'sources disagree', "
+        "1000, 30000, 'fp', '2026-09-01T00:00:00+00:00', '[\"skipdb\"]')",
+        (legacy.id,),
+    )
+    store._conn.commit()
+    same = {
+        T.INTRO: TypeDecision(
+            T.INTRO, DecisionStatus.NO_EVIDENCE, None, Marker(T.INTRO, 1000, 30_000, ("skipdb",)), "sources disagree"
+        )
+    }
+
+    assert _decisions_changed(store, legacy.id, same, "fp")
+    store.save_decisions(legacy.id, same, settings_fingerprint="fp")
+
+    raw = store._conn.execute("SELECT status FROM decisions WHERE file_id=?", (legacy.id,)).fetchone()["status"]
+    assert raw == "no_evidence"
+    assert store.files_with_legacy_review_decisions() == []
+    # Once written under today's rules the same verdict is not written again.
+    assert not _decisions_changed(store, legacy.id, same, "fp")

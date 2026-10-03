@@ -1643,10 +1643,16 @@ def _decisions_changed(
     for mtype, d in decisions.items():
         row = stored.get(mtype)
         proposed = (d.proposed.start_ms, d.proposed.end_ms) if d.proposed else (None, None)
-        if row is None or (row.status, row.reason, (row.proposed_start_ms, row.proposed_end_ms)) != (
-            d.status,
-            d.reason,
-            proposed,
+        # A legacy "needs_review" row reads as no evidence, so an identical verdict would leave the raw status on disk.
+        if (
+            row is None
+            or row.legacy
+            or (row.status, row.reason, (row.proposed_start_ms, row.proposed_end_ms))
+            != (
+                d.status,
+                d.reason,
+                proposed,
+            )
         ):
             return True
         if row.settings_fingerprint != fingerprint:

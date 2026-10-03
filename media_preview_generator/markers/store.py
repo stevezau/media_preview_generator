@@ -438,6 +438,9 @@ class DecisionRow:
     settings_fingerprint: str
     decided_at: str
     decided_by: tuple[str, ...] = ()
+    # Stored under the removed ``needs_review`` status: ``status`` reads as no evidence, but the row must be rewritten
+    # by the next decision even when nothing else differs, or ``files_with_legacy_review_decisions`` lists it forever.
+    legacy: bool = False
 
 
 def _same_identity_on_disk(path: str, size: int, mtime_ns: int) -> bool:
@@ -1741,6 +1744,7 @@ class MarkerStore:
                 r["settings_fingerprint"],
                 r["decided_at"],
                 tuple(json.loads(r["decided_by"] or "[]")),
+                legacy=r["status"] == LEGACY_NEEDS_REVIEW,
             )
             for r in rows
         }

@@ -116,5 +116,16 @@ existing `keep_published` / `_keep_published_before_rule_change` behaviour for t
   to `no-review-after`; prod replay differs from after only on Westworld S03E07 intro (back to nothing, intended)
 - [x] full suite 16882 passed, 1 failed: `test_scheduler.py::…cron_schedule_fires` — date-dependent, the next
   02:00 Sydney fire lands on the 2026-10-04 DST gap; unrelated to this change
-- [ ] lab rows  - [ ] sflix deploy + live sweep  - [ ] commit + PR  - [ ] owner OK to merge  - [ ] #332 reply
+- [x] lab row 8 on plex-previews:no-review-20261003: Plex wrote the original's markers without waiting, served
+  correct per version; marked "fail" only by A2/B2 "Jellyfin 12.0 written for the second version" — harness flake:
+  an Emby not-indexed-yet retry job's rows (JF "Already up to date") supersede the job's own rows in
+  `/api/jobs/<id>/files` (web/jobs.py:2752-2754); the job log shows JF12 "Added". FOLLOW-UP: make that check read
+  the job's own log line or accept written|up_to_date plus served-per-source. Row 11 not run.
+- Owner switched to the fast path (2026-10-03): commit → PR → CI → merge → upgrade sflix → live sweep.
+- [x] PR #349 all green, squash-merged into dev as 4617b74  - [ ] dev image  - [ ] sflix upgrade + live sweep
+- [ ] #332 reply (show owner the text first)
+- [x] lab check follow-up: `phase1_matrix.py` `_version_case` A2/B2 accepts written|up_to_date and requires the
+  served segments per media source (branch fix/legacy-review-rows)
+- [x] sflix live bug: 79 raw `needs_review` rows survived decide-again (`_decisions_changed` read them as
+  NO_EVIDENCE = unchanged); `DecisionRow.legacy` now forces the rewrite (branch fix/legacy-review-rows)
 - [ ] owner OK to commit  - [ ] deploy + live sweep

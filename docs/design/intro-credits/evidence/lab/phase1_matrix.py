@@ -1293,6 +1293,7 @@ def _version_case(label: str, original: str, second: str, source: Path, episode:
     }
     steps.append(both)
     parts = part_markers(both["plex"])
+    jf12_truth = truth_everywhere(episode)["mlab-jf12"]
     checks = {
         # Since 2026-10-02 the item never waits for a version not yet decided: the original's decision is served.
         f"{label}1 Plex writes the original's markers without waiting for the second version": first["rows"][0][
@@ -1304,8 +1305,14 @@ def _version_case(label: str, original: str, second: str, source: Path, episode:
         f"{label}2 both parts carry the same pv:intros and pv:credits": len(parts) == 2
         and all(v == next(iter(parts.values())) and "pv:intros" in v and "pv:credits" in v for v in parts.values()),
         f"{label}2 Plex serves the chapters": _served_is_truth(both["plex"]["served"][item], episode),
+        # /api/jobs/<id>/files keeps the last row per path, so a later retry job's "Already up to date" can hide this
+        # job's "markers_written" (seen 2026-10-03): accept either, and require the served segments per media source.
         f"{label}2 Jellyfin 12.0 written for the second version": both["rows"][0]["servers"].get("mlab-jf12")
-        == "markers_written",
+        in ("markers_written", "markers_up_to_date")
+        and all(
+            same_markers({"mlab-jf12": both["jellyfin"]["mlab-jf12"][p]}, {"mlab-jf12": jf12_truth})["mlab-jf12"]
+            for p in (original, second)
+        ),
     }
     return {"item": item, "steps": steps, "checks": checks}
 
