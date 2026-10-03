@@ -953,7 +953,8 @@ def captioned_tail(story_every: int, blank_s: int) -> list[rule_j.Row]:
 class TestCaptionsAllThrough:
     """Rule J version 9: a captioned story's own captions chained into a run by the 24 s join are not a roll (the
     2026-09-29 audit's variety show: 47 of 48 answers wrong, 29 skipping story). No answer when 40 % or more of the
-    keyframes before the start carry text and the run holds more than one join of lit keyframes without any."""
+    keyframes before the start carry text and the run holds more than one join of lit keyframes without any, each
+    counted at most at the run's usual keyframe spacing."""
 
     @pytest.mark.parametrize(
         ("story_every", "blank_s", "start"),
@@ -998,6 +999,31 @@ class TestCaptionsAllThrough:
     def test_only_lit_keyframes_without_text_count_as_story(self, between, refused):
         story = [bright(t, 1) for t in range(100)]
         run = [bright(100, 3), *between, bright(between[-1][0] + 1, 3)]
+        rows, coarse, end_s = self._run(story, run)
+        assert rule_j.captions_all_through(rows, rows, coarse, end_s) is refused
+
+    @pytest.mark.parametrize(
+        ("between", "last_s", "refused"),
+        [
+            # A roll of 4 s cards with 1 s fades between them after a story captioned on every keyframe, keyframes 1 s
+            # apart: 20 fades are 20 s of text-free lit keyframes, within one join, and the roll keeps its answer; 25
+            # fades are more than a join.
+            ([bright(t, 0 if t % 5 == 0 else 2) for t in range(101, 201)], 201, False),
+            ([bright(t, 0 if t % 5 == 0 else 2) for t in range(101, 226)], 226, True),
+            # Keyframes at scene cuts: one text-free keyframe before a 30 s gap counts for the run's usual spacing
+            # (1 s), not for the gap, so a stray fade frame can't refuse the roll by itself.
+            ([*[bright(t, 2) for t in range(101, 121)], bright(121), *[bright(t, 2) for t in range(151, 171)]], 171, False),
+            # The boundary with one long gap among the text-free keyframes: 24 of them are 24 s, one join, however long
+            # the gap after the last (33 s by gap length); 25 are more.
+            ([bright(t) for t in range(101, 125)], 134, False),
+            ([bright(t) for t in range(101, 126)], 135, True),
+            # The variety show's shape: captions every few seconds on lit story, 60 text-free keyframes between them.
+            ([bright(t, 3) if t % 4 == 0 else bright(t) for t in range(101, 181)], 181, True),
+        ],
+    )  # fmt: skip
+    def test_a_text_free_keyframe_counts_for_the_runs_usual_spacing(self, between, last_s, refused):
+        story = [bright(t, 1) for t in range(100)]
+        run = [bright(100, 3), *between, bright(last_s, 3)]
         rows, coarse, end_s = self._run(story, run)
         assert rule_j.captions_all_through(rows, rows, coarse, end_s) is refused
 

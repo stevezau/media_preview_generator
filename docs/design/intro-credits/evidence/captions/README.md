@@ -34,6 +34,15 @@ decoded, the share `text_all_through` counts) **and the lit keyframes without an
 latest credit keyframe add up to more than one join (24 s)** (read without the overlays, so a channel bug boxed on a
 story keyframe is no text on it). The tail is then read at 640×360, as any tail without an answer is.
 
+Review 2026-10-03: each such keyframe counts for the footage up to the next one at most at the run's usual (median)
+keyframe spacing, so one stray text-free keyframe before a long gap can't refuse a roll by itself. The longest
+*contiguous* text-free stretch was tried first and loses 39 of the show's 40 catches (its captions come every few
+seconds: longest stretch 1–27 s, only S2024E537 over 24 s). The cap keeps all 40 (keyframes 1.001 s apart at both
+readings, so cap = sum), refuses nothing on Killer Cases (30 answers at 320×180) or the 1,539 sflix files still on disk
+(1,334 at 320×180; 32 reach the share, the largest 16.5 s by gap length → 8.4 s by spacing, Nai Nai and Wai Po), and
+the three 640×360 changes re-run the same (Beavis and Butt-Head S03E03/S03E15 no answer, Legend of the White Dragon
+5305–5564 s).
+
 Swept on the stored rows of every answered file of the sets and the show (`feat2.py`; the rule applied to the stored
 rows reproduces the detector's refusals file for file, `predict.py`):
 

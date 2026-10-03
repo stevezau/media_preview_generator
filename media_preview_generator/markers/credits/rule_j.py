@@ -108,8 +108,8 @@ TEXT_ALL_THROUGH_SHARE = 0.8
 # story): a story that carries text on this share of its keyframes or more -- burned-in captions on most shots -- makes
 # credit frames of its own captions wherever three boxes land on one lit frame, and the 24 s join chains them into a run
 # minutes long that ends on the real credits. Such a run is its captions, not a roll, when the lit keyframes without any
-# text inside it add up to more than one join (``RuleParams.gap_s``): story the join glued in
-# (:func:`captions_all_through`).
+# text inside it add up to more than one join (``RuleParams.gap_s``), each counted at most at the run's usual keyframe
+# spacing: story the join glued in (:func:`captions_all_through`).
 # Measured on the harness's sets and every sflix file with a credit text answer (1,387 answers read at 320x180): every
 # run holding more than a join of text-free lit keyframes follows a story texted on at most 37 % of its keyframes
 # (credits over closing footage), the variety show's on 43-69 %. Every share from 0.37 to 0.43, and at 0.4 every length
@@ -873,8 +873,19 @@ def captions_all_through(
     is the story the join glued together, and there is no answer. Credits over closing footage after an uncaptioned
     story keep theirs however much footage they hold, as do captioned stories whose roll holds less story than a join.
 
+    Each such keyframe counts for the footage up to the next one, at most the run's usual keyframe spacing: it vouches
+    for its own keyframe, not for a long gap after it (keyframes at scene cuts, a card held for half a minute), so one
+    stray text-free keyframe can't refuse a roll by itself. Nai Nai and Wai Po's roll, the nearest right answer (share
+    0.42), holds 16.5 s of such story by gap length and 8.4 s by spacing; on the variety show's 1 s keyframes the two
+    are the same.
+
+    The share is counted on the rows as decoded, overlays included, as :func:`text_all_through` counts it, while the
+    story inside the run is read without them: a broadcast recording whose channel bug is boxed on most story
+    keyframes reaches the share on the bug alone, and that is meant -- its bug glues its own story into a fake roll
+    the same way (``test_rule_j.TestCaptionsAllThrough.test_a_keyframe_whose_only_box_is_an_overlay_is_story``).
+
     Args:
-        rows: Keyframe rows of the tail, in decode order, as decoded (the share is :func:`text_all_through`'s).
+        rows: Keyframe rows of the tail, in decode order, as decoded.
         shown: The same rows without the overlays' boxes (:func:`without_overlays`): a channel bug boxed on a story
             keyframe is no text on it.
         coarse: The coarse start.
@@ -888,7 +899,11 @@ def captions_all_through(
     if not before or sum(1 for row in before if row[1] >= 1) < CAPTIONED_STORY_SHARE * len(before):
         return False
     span = sorted((row for row in shown if coarse.pts_s <= row[0] <= end_s), key=lambda row: row[0])
-    story_s = sum(b[0] - a[0] for a, b in zip(span, span[1:], strict=False) if a[2] >= params.dark and a[1] == 0)
+    spacing = [b[0] - a[0] for a, b in zip(span, span[1:], strict=False)]
+    usual = median(spacing) if spacing else 0.0
+    story_s = sum(
+        min(gap, usual) for row, gap in zip(span, spacing, strict=False) if row[2] >= params.dark and row[1] == 0
+    )
     return story_s > params.gap_s
 
 

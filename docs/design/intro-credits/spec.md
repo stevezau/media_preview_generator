@@ -709,8 +709,10 @@ inside it: lit keyframes that show no text at all, 34–153 s of them where the 
 such a story shows text or black. `rule_j.captions_all_through`: when 40 % or more of the keyframes before the start
 carry any text (`CAPTIONED_STORY_SHARE`, counted as step 8 counts, on the rows as decoded) and the lit keyframes
 without any text from the start to the run's latest credit keyframe (on the rows as decoded less step 4's overlays)
-add up to more than one join (24 s), there is no answer, and the tail is read at 640×360 as any tail without an answer
-is; the larger reading runs the same check. Credits over closing footage after an uncaptioned story keep theirs however
+add up to more than one join (24 s), each counted for the footage up to the next keyframe at most at the run's usual
+keyframe spacing (keyframes at scene cuts: one stray text-free keyframe before a long gap can't refuse a roll by itself;
+Nai Nai and Wai Po, the nearest right answer at share 0.42, holds 16.5 s by gap length and 8.4 s by spacing), there is
+no answer, and the tail is read at 640×360 as any tail without an answer is; the larger reading runs the same check. Credits over closing footage after an uncaptioned story keep theirs however
 much footage they hold (A Trip to Infinity: 77 s after a story texted on 4 % of its keyframes), and so does a captioned
 story whose roll holds less than a join of it (the show's one right answer: 1.6 s). On the 1,387 answers of the sets and
 sflix read at 320×180, every run holding more than a join of such keyframes follows a story texted on at most 37 %;
@@ -919,8 +921,8 @@ and its answer is version 2's (`rule_j.boxes_of`).
    ones the step removed (`evidence/eval/phase3-harness.md`). It counts the rows **as they were decoded**, step 4's
    overlays included — it is the step that catches a file whose overlay step 4 doesn't find, and counting them out
    would take those answers away. **Version 9:** a run is refused too when 40 % or more of the keyframes before it
-   carry text and its lit keyframes without any text add up to more than one join (`rule_j.captions_all_through`;
-   "Version 9, captioned stories" above).
+   carry text and its lit keyframes without any text, each counted at most at the run's usual keyframe spacing, add up
+   to more than one join (`rule_j.captions_all_through`; "Version 9, captioned stories" above).
 9. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
    then back over the fade (luma < 12, steps ≤ 4 s). The 1 fps rows are read without step 4's overlays too, so the
    walk can't step back over a bug the keyframes already dropped. **Version 7:** a walk over the roll's own frames
@@ -3791,7 +3793,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   credits markers wrong, 29 skipping 10–400 s of story, all credit text alone: the show's burned-in captions make credit
   frames wherever three boxes land on a lit keyframe, the 24 s join chains them into runs of up to 515 s, and the
   story's keyframes, texted at 43–69 %, stay under step 8's 80 %. No answer now when 40 % or more of the keyframes
-  before the start carry text and the run's lit keyframes without any text add up to more than one join. Measured
+  before the start carry text and the run's lit keyframes without any text add up to more than one join (each counted
+  at most at the run's usual keyframe spacing; review 2026-10-03, no measured answer moves). Measured
   (useful / wrong / skips story): the show 1 / 47 / 29 → 1 / 7 / 1; the final audit's other verdicts on today's markers
   (115), the fresh sample (75 judged), the 09-27 answer key (credits wrong 12 of 88, held out 4 of 27; Plex comparison
   11 of 81), the 80, the 205, Accused and I Survived unchanged; every sflix file with a credit text answer (1,452): 43
