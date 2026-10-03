@@ -95,7 +95,7 @@ def test_known_item_analyze_uses_normalized_id_and_put(mock_config, item_id):
     plex = MagicMock()
     server._plex = plex
 
-    server.refresh_preview_metadata("/media/video.mkv", item_id)
+    assert server.refresh_preview_metadata("/media/video.mkv", item_id) is True
 
     plex.query.assert_called_once_with("/library/metadata/42/analyze", method=plex._session.put)
     plex.library.sections.assert_not_called()
@@ -130,7 +130,7 @@ def test_hintless_notification_scans_then_analyzes_only_when_indexed(mock_config
     }
     scanned = MagicMock(status_code=200)
     with patch("requests.get", side_effect=[sections, scanned]) as request:
-        server.refresh_preview_metadata("/media/video.mkv")
+        assert server.refresh_preview_metadata("/media/video.mkv") is indexed
     assert request.call_args_list == [
         call(
             "http://plex:32400/library/sections",
@@ -151,3 +151,151 @@ def test_hintless_notification_scans_then_analyzes_only_when_indexed(mock_config
         plex.query.assert_called_once_with("/library/metadata/42/analyze", method=plex._session.put)
     else:
         plex.query.assert_not_called()
+
+
+def _pending_output(tmp_path):
+    from media_preview_generator.output.journal import mark_plex_refresh_pending, write_meta
+    from media_preview_generator.output.plex_hash import get_source_fingerprint
+
+    source = tmp_path / "video.mkv"
+    source.write_bytes(b"source")
+    output = tmp_path / "index-sd.bif"
+    output.write_bytes(b"preview")
+    fingerprint = get_source_fingerprint(str(source))
+    write_meta([output], str(source), publisher="plex_bundle", source_fingerprint=fingerprint)
+    token = mark_plex_refresh_pending([output], str(source), "plex", source_fingerprint=fingerprint)
+    assert token is not None
+    return str(source), (output,), fingerprint, token
+
+
+def _join_worker(queue):
+    worker = queue._worker
+    if worker is not None:
+        worker.join(2)
+        assert not worker.is_alive(), "notification worker did not finish"
+
+
+@pytest.mark.parametrize("outcome", [True, False, "offline"])
+def test_only_successful_analyze_acknowledges_the_persisted_notification(tmp_path, outcome):
+    from media_preview_generator.output.journal import get_plex_refresh_pending
+
+    path, outputs, fingerprint, token = _pending_output(tmp_path)
+
+    def refresh(canonical_path, item_id):
+        assert (canonical_path, item_id) == (path, "42")
+        if outcome == "offline":
+            raise ConnectionError("offline")
+        return outcome
+
+    server = SimpleNamespace(id="plex", name="Plex", refresh_preview_metadata=refresh)
+    queue = PlexRefreshQueue(idle_seconds=0.01)
+    try:
+        assert queue.enqueue(
+            server,
+            path,
+            "42",
+            output_paths=outputs,
+            notification_token=token,
+            source_fingerprint=fingerprint,
+        )
+        _join_worker(queue)
+        pending = get_plex_refresh_pending(outputs, path, "plex", source_fingerprint=fingerprint)
+        assert pending == (None if outcome is True else token)
+    finally:
+        queue.close()
+
+
+def test_overflow_notification_survives_queue_restart_and_retries(tmp_path):
+    from media_preview_generator.output.journal import get_plex_refresh_pending
+
+    path, outputs, fingerprint, token = _pending_output(tmp_path)
+    server = SimpleNamespace(id="plex", name="Plex", refresh_preview_metadata=MagicMock(return_value=True))
+    full_queue = PlexRefreshQueue(capacity=0)
+    assert not full_queue.enqueue(
+        server,
+        path,
+        None,
+        output_paths=outputs,
+        notification_token=token,
+        source_fingerprint=fingerprint,
+    )
+    full_queue.close()
+    server.refresh_preview_metadata.assert_not_called()
+    persisted = get_plex_refresh_pending(outputs, path, "plex", source_fingerprint=fingerprint)
+    assert persisted == token
+    restarted = PlexRefreshQueue(idle_seconds=0.01)
+    try:
+        assert restarted.enqueue(
+            server,
+            path,
+            "42",
+            output_paths=outputs,
+            notification_token=persisted,
+            source_fingerprint=fingerprint,
+        )
+        _join_worker(restarted)
+        server.refresh_preview_metadata.assert_called_once_with(path, "42")
+        assert get_plex_refresh_pending(outputs, path, "plex", source_fingerprint=fingerprint) is None
+    finally:
+        restarted.close()
+
+
+def test_old_inflight_ack_does_not_clear_new_publication_token(tmp_path):
+    from media_preview_generator.output.journal import get_plex_refresh_pending, mark_plex_refresh_pending
+
+    path, outputs, fingerprint, token = _pending_output(tmp_path)
+    first_started, release_first, second_started, release_second = Event(), Event(), Event(), Event()
+    calls = []
+
+    def refresh(canonical_path, item_id):
+        calls.append((canonical_path, item_id))
+        if len(calls) == 1:
+            first_started.set()
+            assert release_first.wait(2)
+        else:
+            second_started.set()
+            assert release_second.wait(2)
+        return True
+
+    server = SimpleNamespace(id="plex", name="Plex", refresh_preview_metadata=refresh)
+    queue = PlexRefreshQueue(idle_seconds=0.01)
+    try:
+        assert queue.enqueue(
+            server,
+            path,
+            "42",
+            output_paths=outputs,
+            notification_token=token,
+            source_fingerprint=fingerprint,
+        )
+        assert first_started.wait(2)
+        newer = mark_plex_refresh_pending(outputs, path, "plex", source_fingerprint=fingerprint)
+        assert newer and newer != token
+        assert queue.enqueue(
+            server,
+            path,
+            "42",
+            output_paths=outputs,
+            notification_token=newer,
+            source_fingerprint=fingerprint,
+        )
+        # Duplicate pending work coalesces without losing the latest token or hint.
+        assert queue.enqueue(
+            server,
+            path,
+            None,
+            output_paths=outputs,
+            notification_token=newer,
+            source_fingerprint=fingerprint,
+        )
+        release_first.set()
+        assert second_started.wait(2)
+        assert get_plex_refresh_pending(outputs, path, "plex", source_fingerprint=fingerprint) == newer
+        release_second.set()
+        _join_worker(queue)
+        assert calls == [(path, "42"), (path, "42")]
+        assert get_plex_refresh_pending(outputs, path, "plex", source_fingerprint=fingerprint) is None
+    finally:
+        release_first.set()
+        release_second.set()
+        queue.close()

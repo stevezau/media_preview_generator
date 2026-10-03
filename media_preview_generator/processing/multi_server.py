@@ -46,8 +46,14 @@ from ..markers.fs import gone_from_disk
 from ..markers.missing import disk_roots, library_folders
 from ..output import BifBundle, EmbyBifAdapter, JellyfinTrickplayAdapter, PlexBundleAdapter
 from ..output.base import OutputAdapter
-from ..output.journal import clear_meta, outputs_fresh_for_source, write_meta
-from ..output.plex_hash import SourceFileChangedError, get_source_fingerprint
+from ..output.journal import (
+    clear_meta,
+    get_plex_refresh_pending,
+    mark_plex_refresh_pending,
+    outputs_fresh_for_source,
+    write_meta,
+)
+from ..output.plex_hash import SourceFileChangedError, SourceFingerprint, get_source_fingerprint
 from ..servers.base import LibraryNotYetIndexedError, MediaServer, ServerConfig, ServerType
 from ..servers.ownership import find_library_matches
 from .frame_cache import get_frame_cache
@@ -1215,10 +1221,24 @@ def _refresh_after_publish(
     item_id: str | None,
     canonical_path: str,
     deleted_paths: list[str] | None,
+    *,
+    output_paths: list[Path],
+    source_fingerprint: SourceFingerprint | None,
+    new_output: bool = False,
 ) -> None:
-    """Notify servers after writing; Plex's network work runs outside the worker."""
+    """Notify Plex only for newly written or durably pending previews."""
     if server.type is ServerType.PLEX:
-        enqueue_plex_refresh(server, canonical_path, item_id)
+        marker = mark_plex_refresh_pending if new_output else get_plex_refresh_pending
+        token = marker(output_paths, canonical_path, server.id, source_fingerprint=source_fingerprint)
+        if new_output or token is not None:
+            enqueue_plex_refresh(
+                server,
+                canonical_path,
+                item_id,
+                output_paths=tuple(output_paths),
+                notification_token=token,
+                source_fingerprint=source_fingerprint,
+            )
         return
     try:
         server.trigger_refresh(item_id=item_id, remote_path=canonical_path, deleted_paths=deleted_paths)
@@ -1323,7 +1343,8 @@ def _publish_one(
     # regeneration. Falls through to publish if the meta is missing
     # (older publishes pre-journal) or if it doesn't match.
     if skip_if_exists and output_paths and outputs_fresh_for_source(output_paths, bundle.canonical_path):
-        # Three distinct sub-cases when we land here:
+        # Plex retries only a persisted pending notification; ordinary fresh
+        # outputs stay silent. Other servers retain their refresh behavior:
         #   (a) duplicate webhook for an already-published file with
         #       item_id known — fire trigger_refresh so the path-based
         #       scan nudge re-runs (an in-place re-encode that left the
@@ -1344,7 +1365,14 @@ def _publish_one(
         #       trigger_refresh so the registration completes and
         #       the next dispatch rolls over to plain
         #       SKIPPED_OUTPUT_EXISTS.
-        _refresh_after_publish(server, item_id, bundle.canonical_path, deleted_paths)
+        _refresh_after_publish(
+            server,
+            item_id,
+            bundle.canonical_path,
+            deleted_paths,
+            output_paths=output_paths,
+            source_fingerprint=bundle.source_fingerprint,
+        )
         if item_id is None and _server_needs_item_registration(server):
             # Registration still didn't fire — re-arm the retry so
             # we try once the server indexes the file. Only reachable
@@ -1406,7 +1434,15 @@ def _publish_one(
         source_fingerprint=bundle.source_fingerprint,
     )
 
-    _refresh_after_publish(server, item_id, bundle.canonical_path, deleted_paths)
+    _refresh_after_publish(
+        server,
+        item_id,
+        bundle.canonical_path,
+        deleted_paths,
+        output_paths=output_paths,
+        source_fingerprint=bundle.source_fingerprint,
+        new_output=True,
+    )
 
     # When the server activates trickplay via per-item API but we
     # didn't have an item_id at publish time, the plugin-bridge /
@@ -1778,7 +1814,14 @@ def process_canonical_path(
                 # with no rate limit, /Items/{id}/Refresh is a no-op
                 # when the item's metadata is current.
                 if server.type is ServerType.PLEX or _server_needs_item_registration(server) or deleted_paths:
-                    _refresh_after_publish(server, item_id, canonical_path, deleted_paths)
+                    _refresh_after_publish(
+                        server,
+                        item_id,
+                        canonical_path,
+                        deleted_paths,
+                        output_paths=paths,
+                        source_fingerprint=source_fingerprint,
+                    )
                 if needs_registration:
                     results.append(
                         PublisherResult(
@@ -1856,7 +1899,10 @@ def process_canonical_path(
         for server, adapter, item_id_hint in publishers:
             try:
                 item_id = resolve_item_id(server, item_id_hint)
-                clear_meta(adapter.compute_output_paths(_probe_bundle(server.id), server, item_id))
+                clear_meta(
+                    adapter.compute_output_paths(_probe_bundle(server.id), server, item_id),
+                    preserve_plex_refresh_pending=True,
+                )
             except Exception:
                 continue
 

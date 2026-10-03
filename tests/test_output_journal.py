@@ -653,3 +653,159 @@ class TestMetaForcedToDisk:
         assert json.loads(_meta_path_for(bif).read_text())["source_size"] == 100
         assert outputs_fresh_for_source([bif], str(source)) is True
         assert sorted(p.name for p in tmp_path.iterdir()) == ["index-sd.bif", "index-sd.bif.meta", "movie.mkv"]
+
+
+class TestPlexPendingNotifications:
+    @pytest.fixture
+    def publication(self, tmp_path):
+        source = tmp_path / "movie.mkv"
+        source.write_bytes(b"video")
+        output = tmp_path / "index-sd.bif"
+        output.write_bytes(b"frames")
+        write_meta([output], str(source), publisher="plex_bundle")
+        return source, output
+
+    @pytest.mark.parametrize("journal", ["absent", "legacy", "unmarked", "corrupt"])
+    def test_existing_output_without_marker_never_requests_analyze(self, publication, journal):
+        from media_preview_generator.output.journal import get_plex_refresh_pending
+
+        source, output = publication
+        meta = _meta_path_for(output)
+        if journal == "absent":
+            meta.unlink()
+        elif journal == "legacy":
+            meta.write_text(json.dumps({"schema": 1, "source_size": 5, "source_mtime": int(source.stat().st_mtime)}))
+        elif journal == "corrupt":
+            meta.write_text("broken json")
+        assert get_plex_refresh_pending([output], str(source), "plex-a") is None
+
+    def test_acknowledgement_clears_only_matching_source_and_server(self, publication, tmp_path):
+        from media_preview_generator.output.journal import (
+            clear_plex_refresh_pending,
+            get_plex_refresh_pending,
+            mark_plex_refresh_pending,
+        )
+
+        source, output = publication
+        first = mark_plex_refresh_pending([output], str(source), "plex-a")
+        second = mark_plex_refresh_pending([output], str(source), "plex-b")
+        copy = tmp_path / "copy.mkv"
+        copy.write_bytes(source.read_bytes())
+        write_meta([output], str(copy), publisher="plex_bundle")
+        copied = mark_plex_refresh_pending([output], str(copy), "plex-a")
+        assert first and second and copied
+        assert len({first, second, copied}) == 3
+        assert get_plex_refresh_pending([output], str(source), "plex-a") == first
+        clear_plex_refresh_pending([output], str(copy), "plex-b", first)
+        assert get_plex_refresh_pending([output], str(source), "plex-a") == first
+        clear_plex_refresh_pending([output], str(source), "plex-a", first)
+        assert get_plex_refresh_pending([output], str(source), "plex-a") is None
+        assert get_plex_refresh_pending([output], str(source), "plex-b") == second
+        assert get_plex_refresh_pending([output], str(copy), "plex-a") == copied
+        assert outputs_fresh_for_source([output], str(source), require_source_fingerprint=True)
+        assert outputs_fresh_for_source([output], str(copy), require_source_fingerprint=True)
+
+    def test_late_ack_cannot_clear_regenerated_same_source(self, publication):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        from media_preview_generator.output.journal import (
+            clear_plex_refresh_pending,
+            get_plex_refresh_pending,
+            mark_plex_refresh_pending,
+        )
+
+        source, output = publication
+        fingerprint = get_source_fingerprint(source)
+        old = mark_plex_refresh_pending([output], str(source), "plex", source_fingerprint=fingerprint)
+        waiting, analyzed = Event(), Event()
+
+        def old_request():
+            waiting.set()
+            assert analyzed.wait(5)
+            clear_plex_refresh_pending([output], str(source), "plex", old, source_fingerprint=fingerprint)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(old_request)
+            assert waiting.wait(5)
+            write_meta([output], str(source), publisher="plex_bundle", source_fingerprint=fingerprint)
+            new = mark_plex_refresh_pending([output], str(source), "plex", source_fingerprint=fingerprint)
+            assert old and new and old != new
+            analyzed.set()
+            future.result(timeout=5)
+        assert get_plex_refresh_pending([output], str(source), "plex") == new
+
+    def test_replaced_source_does_not_reuse_marker_or_ack_wrong_fingerprint(self, publication):
+        from media_preview_generator.output.journal import (
+            clear_plex_refresh_pending,
+            get_plex_refresh_pending,
+            mark_plex_refresh_pending,
+        )
+
+        source, output = publication
+        old_fingerprint = get_source_fingerprint(source)
+        old = mark_plex_refresh_pending([output], str(source), "plex")
+        source.write_bytes(b"replacement")
+        assert get_plex_refresh_pending([output], str(source), "plex") is None
+        assert mark_plex_refresh_pending([output], str(source), "plex") is None
+        write_meta([output], str(source), publisher="plex_bundle")
+        new = mark_plex_refresh_pending([output], str(source), "plex")
+        assert new and new != old
+        clear_plex_refresh_pending([output], str(source), "plex", new, source_fingerprint=old_fingerprint)
+        assert get_plex_refresh_pending([output], str(source), "plex") == new
+
+    def test_unrecorded_source_cannot_claim_shared_output(self, publication, tmp_path):
+        from media_preview_generator.output.journal import get_plex_refresh_pending, mark_plex_refresh_pending
+
+        source, output = publication
+        other = tmp_path / "other.mkv"
+        other.write_bytes(source.read_bytes())
+        assert mark_plex_refresh_pending([output], str(other), "plex") is None
+        assert get_plex_refresh_pending([output], str(other), "plex") is None
+
+    def test_regeneration_retains_other_pending_markers_but_invalidates_freshness(self, publication):
+        from media_preview_generator.output.journal import get_plex_refresh_pending, mark_plex_refresh_pending
+
+        source, output = publication
+        token = mark_plex_refresh_pending([output], str(source), "other-plex")
+        clear_meta([output], preserve_plex_refresh_pending=True)
+        assert not outputs_fresh_for_source([output], str(source))
+        assert get_plex_refresh_pending([output], str(source), "other-plex") == token
+        write_meta([output], str(source), publisher="plex_bundle")
+        assert get_plex_refresh_pending([output], str(source), "other-plex") == token
+        assert outputs_fresh_for_source([output], str(source))
+
+    def test_failed_marker_update_keeps_previous_journal(self, publication, monkeypatch):
+        from media_preview_generator.output import journal
+
+        source, output = publication
+        before = _meta_path_for(output).read_bytes()
+
+        def fail_replace(*args):
+            raise PermissionError("read-only journal")
+
+        monkeypatch.setattr(journal.os, "replace", fail_replace)
+        assert journal.mark_plex_refresh_pending([output], str(source), "plex") is None
+        assert _meta_path_for(output).read_bytes() == before
+        assert not _meta_path_for(output).with_suffix(".meta.tmp").exists()
+
+    def test_concurrent_servers_retain_both_pending_markers(self, publication):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        from media_preview_generator.output.journal import get_plex_refresh_pending, mark_plex_refresh_pending
+
+        source, output = publication
+        ready = Barrier(2)
+
+        def mark(server_id):
+            ready.wait(timeout=5)
+            return mark_plex_refresh_pending([output], str(source), server_id)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a = pool.submit(mark, "plex-a")
+            b = pool.submit(mark, "plex-b")
+            first, second = a.result(timeout=5), b.result(timeout=5)
+        assert first and second and first != second
+        assert get_plex_refresh_pending([output], str(source), "plex-a") == first
+        assert get_plex_refresh_pending([output], str(source), "plex-b") == second

@@ -81,6 +81,7 @@ def main() -> None:
     os.environ["CONFIG_DIR"] = str(root / "appconfig")
     from media_preview_generator.config import Config
     from media_preview_generator.output import BifBundle, PlexBundleAdapter
+    from media_preview_generator.output.journal import get_plex_refresh_pending
     from media_preview_generator.output.plex_hash import calculate_plex_hash
     from media_preview_generator.processing.generator import failure_scope
     from media_preview_generator.processing.multi_server import (
@@ -278,7 +279,97 @@ def main() -> None:
             assert result.status is PublisherStatus.PUBLISHED
             wait_until(lambda filename=filename: find_part(filename)[1].get("indexes") == "sd")
             served = verify_served(filename, result.output_paths[0])
-            report["queued_activation"].append({"hinted": hinted, "publish_seconds": seconds, **served})
+            wait_until(
+                lambda result=result, source=source: get_plex_refresh_pending(
+                    result.output_paths, str(source), server.id
+                )
+                is None
+            )
+            report["queued_activation"].append(
+                {"hinted": hinted, "publish_seconds": seconds, "pending_notification_cleared": True, **served}
+            )
+
+        replacement_key, _ = find_part(before.name)
+        old_hash = calculate_plex_hash(before)
+        replacement = root / "replacement.mkv"
+        command(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=24",
+            "-vf",
+            "hue=h=90",
+            "-t",
+            "19",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            str(replacement),
+        )
+        replacement.replace(before)
+        replacement_frames = root / "replacement-frames"
+        replacement_frames.mkdir()
+        command(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(before),
+            "-vf",
+            "fps=1/5,scale=320:-1",
+            str(replacement_frames / "%010d.jpg"),
+        )
+        new_hash = calculate_plex_hash(before)
+        assert new_hash != old_hash
+        replacement_bundle = BifBundle(
+            str(before),
+            replacement_frames,
+            None,
+            5,
+            320,
+            180,
+            len(list(replacement_frames.glob("*.jpg"))),
+            prefetched_bundle_metadata=((old_hash, "/media/" + before.name),),
+        )
+        replacement_result = _publish_one(
+            server,
+            adapter,
+            replacement_bundle,
+            replacement_key,
+            skip_if_exists=False,
+        )
+        assert replacement_result.status is PublisherStatus.PUBLISHED
+        assert replacement_result.output_paths[0] != before_bif
+
+        def indexed_replacement_hash() -> str | None:
+            tree = xml(f"/library/metadata/{replacement_key}/tree")
+            return next(
+                part.get("hash")
+                for part in tree.findall(".//MediaPart")
+                if Path(part.get("file", "")).name == before.name
+            )
+
+        report["same_path_replacement"] = {"old_hash": old_hash, "new_local_hash": new_hash}
+        try:
+            wait_until(lambda: indexed_replacement_hash() == new_hash, timeout=30)
+        except AssertionError:
+            report["same_path_replacement"]["observed_plex_hash"] = indexed_replacement_hash()
+            if args.report:
+                args.report.write_text(json.dumps(report, indent=2) + "\n")
+            print(json.dumps(report["same_path_replacement"]), flush=True)
+            raise
+        report["same_path_replacement"].update(
+            plex_hash=indexed_replacement_hash(),
+            **verify_served(before.name, replacement_result.output_paths[0]),
+        )
+        wait_until(lambda: get_plex_refresh_pending(replacement_result.output_paths, str(before), server.id) is None)
+        report["same_path_replacement"]["pending_notification_cleared"] = True
 
         offline = media / "OfflinePipeline (2026).mkv"
         command(
@@ -344,10 +435,12 @@ def main() -> None:
                 str(offline), registry, config, use_frame_cache=False, schedule_retry_on_not_indexed=False
             )
         assert outcome.status is MultiServerStatus.PUBLISHED, outcome
+        assert get_plex_refresh_pending(outcome.publishers[0].output_paths, str(offline), "isolated") is not None
         report["offline_pipeline"] = {
             "status": outcome.status.value,
             "frames": outcome.frame_count,
             "seconds": round(time.monotonic() - began, 3),
+            "pending_notification_retained": True,
         }
         command("docker", "start", name)
         port = command("docker", "port", name, "32400/tcp").rsplit(":", 1)[1]

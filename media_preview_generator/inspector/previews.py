@@ -238,6 +238,46 @@ def _row(cfg: ServerConfig, kind: str) -> dict:
     }
 
 
+def _indexed_plex_hash(parts: list[tuple[str, str]], path: str, mappings: list[dict]) -> str:
+    """Select the indexed part's hash for reading Plex's existing preview.
+
+    The source may have changed since Plex indexed it: the writer's current
+    local hash would point at a different preview. Prefer an exact mapped
+    path, then preserve the reader's longest-suffix and first-part fallbacks.
+    """
+    target = path.replace("\\", "/").rstrip("/")
+    target_parts = target.split("/")
+    best_hash = ""
+    best_depth = 0
+    ties = 0
+    for bundle_hash, remote in parts:
+        candidates = [remote, *(apply_path_mappings(remote, mappings) or [])]
+        if any(candidate.replace("\\", "/").rstrip("/") == target for candidate in candidates):
+            if bundle_hash and len(bundle_hash) >= 2:
+                return bundle_hash
+            raise ValueError("The indexed part has no bundle hash")
+        depth = 0
+        for left, right in zip(
+            reversed(target_parts), reversed(remote.replace("\\", "/").rstrip("/").split("/")), strict=False
+        ):
+            if left != right:
+                break
+            depth += 1
+        if depth > best_depth:
+            best_depth, best_hash, ties = depth, bundle_hash, 1
+        elif depth and depth == best_depth:
+            ties += 1
+    if best_depth:
+        if best_hash and len(best_hash) >= 2:
+            return best_hash
+        if ties == 1:
+            raise ValueError("The matching indexed part has no bundle hash")
+    for bundle_hash, _remote in parts:
+        if bundle_hash and len(bundle_hash) >= 2:
+            return bundle_hash
+    raise ValueError("No indexed part has a bundle hash")
+
+
 def _plex_preview(cfg: ServerConfig, server: Any, path: str, matches: list[OwnershipMatch], fallback: str) -> dict:
     from ..output.plex_bundle import PlexBundleAdapter
 
@@ -260,8 +300,8 @@ def _plex_preview(cfg: ServerConfig, server: Any, path: str, matches: list[Owner
                 row["versions"].append(local)
                 break
     try:
-        bundle_hash = PlexBundleAdapter._select_hash_for_path(parts, path, str(item_id))
-    except Exception:
+        bundle_hash = _indexed_plex_hash(parts, path, mappings)
+    except ValueError:
         row["note"] = NOT_ANALYSED_NOTE
         return row
     row["path"] = str(PlexBundleAdapter.bundle_bif_path(config_folder, bundle_hash))

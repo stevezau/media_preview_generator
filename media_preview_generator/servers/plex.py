@@ -2111,13 +2111,14 @@ class PlexServer(MediaServer):
             server_display_name=getattr(self._config, "server_display_name", None) or self.name,
         )
 
-    def refresh_preview_metadata(self, canonical_path: str, item_id: str | None = None) -> None:
+    def refresh_preview_metadata(self, canonical_path: str, item_id: str | None = None) -> bool:
         """Ask Plex to advertise a saved BIF, from the background notification queue.
 
         A BIF is readable immediately at the part endpoint, but an already
         indexed item's ``indexes`` flag can remain unset until Analyze runs.
         Paths without an item hint get a best-effort scan and lookup first;
         failure here never prevents local generation or publication.
+        Return True only after Plex accepts Analyze; unresolved items remain pending.
         """
         if not item_id:
             self.trigger_refresh(item_id=None, remote_path=canonical_path)
@@ -2128,12 +2129,13 @@ class PlexServer(MediaServer):
                 canonical_path,
                 self.name,
             )
-            return
+            return False
         bare_id = str(item_id).rsplit("/", 1)[-1]
         if not bare_id.isdecimal():
             raise ValueError("Plex preview notification requires a numeric item ID")
         plex = self._connect()
         plex.query(f"/library/metadata/{bare_id}/analyze", method=plex._session.put)
+        return True
 
     def get_bundle_metadata(self, item_id: str) -> list[tuple[str, str]]:
         """Return ``(bundle_hash, remote_path)`` for every MediaPart of an item.

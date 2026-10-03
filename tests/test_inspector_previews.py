@@ -300,6 +300,64 @@ class TestPlex:
         assert row["versions"] == [video, uhd]
         assert os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(row["path"])))) == "bcdef0123.bundle"
 
+    def test_replaced_source_still_inspects_the_preview_plex_currently_indexes(self, plex, video):
+        from pathlib import Path
+
+        from media_preview_generator.output.plex_bundle import PlexBundleAdapter
+        from media_preview_generator.output.plex_hash import calculate_plex_hash
+
+        cfg, server = plex
+        folder = cfg.output["plex_config_folder"]
+        indexed_bif = PlexBundleAdapter.bundle_bif_path(folder, "abcdef0123")
+        _write_bif(indexed_bif, frames=9)
+        Path(video).write_bytes(b"replacement not yet indexed by Plex")
+        current_bif = PlexBundleAdapter.bundle_bif_path(folder, calculate_plex_hash(video))
+        assert current_bif != indexed_bif
+        _write_bif(current_bif, frames=3)
+
+        row = server_preview(cfg, server, video, _matches("plex-1", "1"))
+
+        assert row["path"] == str(indexed_bif)
+        assert row["frame_count"] == 9
+        server.get_bundle_metadata.assert_called_once_with("123")
+
+    def test_exact_mapped_part_wins_when_versions_have_the_same_filename(self, plex, video):
+        cfg, server = plex
+        cfg.path_mappings = [{"remote_prefix": "/server/uhd", "local_prefix": os.path.dirname(video)}]
+        filename = os.path.basename(video)
+        server.get_bundle_metadata.return_value = [
+            ("aaaa1111", f"/server/hd/{filename}"),
+            ("bbbb2222", f"/server/uhd/{filename}"),
+        ]
+
+        row = server_preview(cfg, server, video, _matches("plex-1", "1"))
+
+        assert "/b/bbb2222.bundle/" in row["path"]
+        assert row["versions"] == [video]
+
+    @pytest.mark.parametrize(
+        ("parts", "expected"),
+        [
+            ([("aa", "/remote/hd/Film.mkv"), ("bb", "/remote/uhd/Film.mkv")], "bb"),
+            ([("aa", "/one/Film.mkv"), ("bb", "/two/Film.mkv")], "aa"),
+            ([("aa", "/remote/Other.mkv")], "aa"),
+            ([("aa", "/remote/Other.mkv"), ("", "/remote/uhd/Film.mkv")], None),
+            ([("", "/remote/Other.mkv")], None),
+        ],
+    )
+    def test_indexed_reader_preserves_suffix_and_fallback_selection(self, plex, parts, expected):
+        cfg, server = plex
+        cfg.path_mappings = []
+        server.get_bundle_metadata.return_value = parts
+
+        row = server_preview(cfg, server, "/local/uhd/Film.mkv", _matches("plex-1", "1"))
+
+        if expected is None:
+            assert row["note"] == NOT_ANALYSED_NOTE
+            assert row["path"] == ""
+        else:
+            assert f"/{expected[0]}/{expected[1:]}.bundle/" in row["path"]
+
 
 class TestFilePreviews:
     def test_a_server_that_raises_marks_only_its_own_row(self, video):

@@ -1,4 +1,4 @@
-"""Bounded, best-effort Plex notifications after local preview publication."""
+"""Bounded Plex notifications, with acknowledgements stored in output journals."""
 
 from __future__ import annotations
 
@@ -6,9 +6,13 @@ import atexit
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
+
+from ..output.journal import clear_plex_refresh_pending
+from ..output.plex_hash import SourceFingerprint
 
 if TYPE_CHECKING:
     from ..servers.plex import PlexServer
@@ -19,6 +23,9 @@ class _Refresh:
     server: PlexServer
     canonical_path: str
     item_id: str | None
+    output_paths: tuple[Path, ...]
+    notification_token: str | None
+    source_fingerprint: SourceFingerprint | None
 
 
 class PlexRefreshQueue:
@@ -37,7 +44,16 @@ class PlexRefreshQueue:
         self._worker: threading.Thread | None = None
         self._closed = False
 
-    def enqueue(self, server: PlexServer, canonical_path: str, item_id: str | None) -> bool:
+    def enqueue(
+        self,
+        server: PlexServer,
+        canonical_path: str,
+        item_id: str | None,
+        *,
+        output_paths: tuple[Path, ...] = (),
+        notification_token: str | None = None,
+        source_fingerprint: SourceFingerprint | None = None,
+    ) -> bool:
         """Queue a notification, returning False when capacity is exhausted."""
         key = (server.id, canonical_path)
         with self._condition:
@@ -46,13 +62,20 @@ class PlexRefreshQueue:
             if key not in self._pending and len(self._pending) >= self._capacity:
                 logger.warning(
                     "Plex notification queue is full; previews for {} were saved, but {} must scan/analyze "
-                    "the file later to advertise them to clients.",
+                    "the file later to advertise them to clients. Pending notifications retry on the next job.",
                     canonical_path,
                     server.name,
                 )
                 return False
             previous = self._pending.get(key)
-            self._pending[key] = _Refresh(server, canonical_path, item_id or (previous.item_id if previous else None))
+            self._pending[key] = _Refresh(
+                server,
+                canonical_path,
+                item_id or (previous.item_id if previous else None),
+                output_paths,
+                notification_token,
+                source_fingerprint,
+            )
             if self._worker is None:
                 self._worker = threading.Thread(target=self._run, name="plex-preview-notifications", daemon=True)
                 self._worker.start()
@@ -69,7 +92,15 @@ class PlexRefreshQueue:
                     return
                 _, request = self._pending.popitem(last=False)
             try:
-                request.server.refresh_preview_metadata(request.canonical_path, request.item_id)
+                notified = request.server.refresh_preview_metadata(request.canonical_path, request.item_id)
+                if notified is True and request.notification_token is not None:
+                    clear_plex_refresh_pending(
+                        request.output_paths,
+                        request.canonical_path,
+                        request.server.id,
+                        request.notification_token,
+                        source_fingerprint=request.source_fingerprint,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Previews saved for {}, but {} could not be notified: {}. Plex can activate them on a later analyze.",
@@ -79,7 +110,7 @@ class PlexRefreshQueue:
                 )
 
     def close(self) -> None:
-        """Discard pending best-effort work on application shutdown."""
+        """Discard memory work; journal markers retry on a later job after restart."""
         with self._condition:
             self._closed = True
             self._pending.clear()
@@ -90,6 +121,21 @@ _queue = PlexRefreshQueue()
 atexit.register(_queue.close)
 
 
-def enqueue_plex_refresh(server: PlexServer, canonical_path: str, item_id: str | None) -> bool:
-    """Notify Plex asynchronously after a successful local write."""
-    return _queue.enqueue(server, canonical_path, item_id)
+def enqueue_plex_refresh(
+    server: PlexServer,
+    canonical_path: str,
+    item_id: str | None,
+    *,
+    output_paths: tuple[Path, ...] = (),
+    notification_token: str | None = None,
+    source_fingerprint: SourceFingerprint | None = None,
+) -> bool:
+    """Notify Plex asynchronously, acknowledging only this journal token."""
+    return _queue.enqueue(
+        server,
+        canonical_path,
+        item_id,
+        output_paths=output_paths,
+        notification_token=notification_token,
+        source_fingerprint=source_fingerprint,
+    )

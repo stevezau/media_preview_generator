@@ -2617,7 +2617,23 @@ class TestPlexLocalPublishing:
             generate.assert_not_called()
             queued_plex_refresh.assert_not_called()
         else:
-            queued_plex_refresh.assert_called_once_with(registry.get("plex-1"), str(media_file), item_hint)
+            from media_preview_generator.output.journal import clear_plex_refresh_pending, get_plex_refresh_pending
+            from media_preview_generator.output.plex_hash import get_source_fingerprint
+
+            fingerprint = get_source_fingerprint(str(media_file))
+            token = get_plex_refresh_pending([expected], str(media_file), "plex-1", source_fingerprint=fingerprint)
+            assert token is not None
+            notification_kwargs = {
+                "output_paths": (expected,),
+                "notification_token": token,
+                "source_fingerprint": fingerprint,
+            }
+            queued_plex_refresh.assert_called_once_with(
+                registry.get("plex-1"),
+                str(media_file),
+                item_hint,
+                **notification_kwargs,
+            )
             assert result.status is MultiServerStatus.PUBLISHED
             assert result.publishers[0].status is PublisherStatus.PUBLISHED
             assert result.publishers[0].output_paths == [expected]
@@ -2631,11 +2647,33 @@ class TestPlexLocalPublishing:
                     canonical_path=str(media_file),
                     registry=registry,
                     config=mock_config_for_processing,
+                    check_only=True,
                     item_id_by_server={"plex-1": item_hint} if item_hint else None,
                 )
             assert second.status is MultiServerStatus.SKIPPED
             second_generate.assert_not_called()
-            queued_plex_refresh.assert_called_once_with(registry.get("plex-1"), str(media_file), item_hint)
+            queued_plex_refresh.assert_called_once_with(
+                registry.get("plex-1"),
+                str(media_file),
+                item_hint,
+                **notification_kwargs,
+            )
+            clear_plex_refresh_pending([expected], str(media_file), "plex-1", token, source_fingerprint=fingerprint)
+            # Ordinary full-scan preflight and duplicate jobs must not Analyze
+            # already-acknowledged outputs again or fill the bounded queue.
+            for fresh_check_only in (True, False):
+                queued_plex_refresh.reset_mock()
+                with patch("media_preview_generator.processing.multi_server.generate_images") as fresh_generate:
+                    fresh = process_canonical_path(
+                        canonical_path=str(media_file),
+                        registry=registry,
+                        config=mock_config_for_processing,
+                        check_only=fresh_check_only,
+                        item_id_by_server={"plex-1": item_hint} if item_hint else None,
+                    )
+                assert fresh.status is MultiServerStatus.SKIPPED
+                fresh_generate.assert_not_called()
+                queued_plex_refresh.assert_not_called()
 
     def test_source_replaced_during_extraction_is_not_published(self, mock_config_for_processing, tmp_path):
         from media_preview_generator.processing.frame_cache import get_frame_cache

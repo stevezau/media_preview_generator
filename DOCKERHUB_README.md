@@ -70,6 +70,7 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 - **Webhooks.** Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex (Plex Pass), Emby (Premiere) and Jellyfin, or any JSON with a path. Sonarr, Radarr and the three servers can share one URL.
 - **Schedules.** Recently Added polling, plus cron and interval schedules.
 - **Manual Generation.** Search your servers by title (a whole show, a movie or one episode), or browse the media folders, and make previews for just those.
+- **Plex without waiting for a scan.** File/folder jobs and path-based webhooks generate from the media itself, even while Plex is offline or has not indexed the file.
 - **Retries and skips.** Retries after 1, 2, 5, 15 and 60 minutes by default while a server indexes a new file, and skips files whose previews are current.
 
 **Every server from one decode**

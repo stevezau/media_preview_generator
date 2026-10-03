@@ -216,10 +216,12 @@ server.
 After writing, a background queue requests analysis for a known item ID; without
 an ID, it first requests a scan and tries to resolve the file. Generation does
 not wait for that network work. The queue holds up to 128 pending files and
-coalesces duplicate notifications. It is not persisted across restarts and does
-not automatically retry failures. If it fills, the app logs a warning; a later
-generation request, including one that finds the preview already present, can
-notify Plex again.
+coalesces duplicate notifications. Each output's tracking file records which
+Plex notifications are still pending. Failures, unresolved items, and a full
+queue leave that record intact, including across app restarts. A later
+generation request retries those pending notifications even if the preview is
+already present. Ordinary scans skip completed previews without sending
+unnecessary Analyze requests. There is no separate automatic retry timer.
 
 A written preview and Plex advertising it as available are separate steps:
 when Plex is offline or has not indexed the file, a later scan/analysis can be
