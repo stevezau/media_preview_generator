@@ -789,6 +789,31 @@ class TestRun:
         env.jm.prune_worker_statuses.assert_called_once_with({"GPU_0"})
         env.jm.emit_worker_statuses.assert_called_once()
 
+    def test_worker_callback_carries_the_cpu_fallback_state(self, env):
+        def during_wait(timeout=None):
+            env.dispatcher.submit_items.call_args.kwargs["callbacks"]["worker_callback"](
+                [
+                    {
+                        "worker_id": 0,
+                        "worker_type": "GPU",
+                        "worker_name": "GPU 0",
+                        "status": "idle",
+                        "current_title": "",
+                        "fallback_active": True,
+                        "fallback_reason": "GPU processing failed (exit code 255)",
+                        "fallback_title": "Intro & Credits · a.mkv",
+                    }
+                ]
+            )
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        self._run()
+        _key, status = env.jm.update_worker_status.call_args.args
+        assert status.fallback_active is True
+        assert status.fallback_reason == "GPU processing failed (exit code 255)"
+        assert status.fallback_title == "Intro & Credits · a.mkv"
+
     def test_file_results_are_recorded_on_this_job(self, env):
         with patch.object(job_runner, "set_file_result_callback") as set_cb:
             self._run()

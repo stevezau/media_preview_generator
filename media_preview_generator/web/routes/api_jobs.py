@@ -1723,6 +1723,7 @@ def _build_idle_workers_from_config():
         "remaining_time": 0.0,
         "fallback_active": False,
         "fallback_reason": None,
+        "fallback_title": "",
         "ffmpeg_started": False,
         "current_phase": "",
     }

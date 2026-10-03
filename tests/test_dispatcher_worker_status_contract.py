@@ -79,6 +79,7 @@ class TestBuildWorkerStatusesContract:
                 "remaining_time",
                 "fallback_active",
                 "fallback_reason",
+                "fallback_title",
                 "ffmpeg_started",
                 "current_phase",
             }
@@ -129,5 +130,45 @@ class TestBuildWorkerStatusesContract:
             assert payload["current_phase"] == "", (
                 f"Idle workers must clear current_phase; got {payload['current_phase']!r}"
             )
+        finally:
+            dispatcher.shutdown()
+
+    @pytest.mark.parametrize("is_busy", [True, False], ids=["mid-rerun", "rerun-finished"])
+    def test_fallback_payload_names_the_file_that_fell_back(self, is_busy):
+        """The "Switched to CPU" toast quotes ``fallback_title``. It must survive
+        the task finishing: a short clip's CPU rerun ends inside one 1s poll, so
+        the first poll that sees ``fallback_active`` already finds the worker
+        idle with ``current_title`` blanked (live: ``fell back to CPU for "this file"``).
+        """
+        pool = WorkerPool(cpu_workers=0, gpu_workers=1, selected_gpus=[("nvidia", "/dev/nvidia0", {})])
+        dispatcher = JobDispatcher(pool)
+        try:
+            worker = pool._snapshot_workers()[0]
+            worker.is_busy = is_busy
+            worker.media_title = "AV1 Clip 3 (2019)"
+            worker.fallback_active = True
+            worker.fallback_reason = "GPU processing failed (exit code 255)"
+
+            payload = dispatcher._build_worker_statuses()[0]
+
+            assert payload["fallback_active"] is True
+            assert payload["fallback_reason"] == "GPU processing failed (exit code 255)"
+            assert payload["fallback_title"] == "AV1 Clip 3 (2019)"
+            assert payload["current_title"] == ("AV1 Clip 3 (2019)" if is_busy else "")
+        finally:
+            dispatcher.shutdown()
+
+    def test_fallback_title_is_blank_without_a_fallback(self):
+        pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+        dispatcher = JobDispatcher(pool)
+        try:
+            worker = pool._snapshot_workers()[0]
+            worker.is_busy = True
+            worker.media_title = "Some movie"
+
+            payload = dispatcher._build_worker_statuses()[0]
+
+            assert payload["fallback_active"] is False
+            assert payload["fallback_title"] == ""
         finally:
             dispatcher.shutdown()

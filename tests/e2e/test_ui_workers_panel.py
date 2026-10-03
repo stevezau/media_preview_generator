@@ -293,3 +293,41 @@ class TestWorkerCardPhaseRendering:
         assert result["noteText"] and "HEVC" in result["noteText"], (
             f"Fallback note must include the reason text so op can diagnose; got {result['noteText']!r}"
         )
+
+    def test_fallback_toast_quotes_the_file_that_fell_back(self, authed_page: Page, app_url: str) -> None:
+        """A short clip's CPU rerun finishes inside one poll, so the first poll
+        that sees ``fallback_active`` finds the worker idle with ``current_title``
+        blank. The toast must still name the file (live bug: ``for "this file"``).
+        """
+        mock_dashboard_defaults(authed_page)
+        authed_page.goto(f"{app_url}/")
+        authed_page.wait_for_load_state("domcontentloaded")
+
+        reason = (
+            "GPU processing failed (...) for /media/proof/Proof Movies/AV1 Clip 3 (2019)/AV1 Clip 3 (2019).mkv "
+            "(exit code 255)"
+        )
+        result = authed_page.evaluate(
+            """
+            (reason) => {
+                window.updateWorkerStatuses([{
+                    worker_id: 1, worker_type: 'GPU', worker_name: 'GPU Worker 1 (Quadro P5000)',
+                    status: 'idle',
+                    current_title: '',
+                    fallback_active: true,
+                    fallback_reason: reason,
+                    fallback_title: 'AV1 Clip 3 (2019)',
+                    ffmpeg_started: false,
+                    progress_percent: 0,
+                }]);
+                return {
+                    title: document.getElementById('toastTitle').textContent,
+                    body: document.getElementById('toastBody').textContent,
+                };
+            }
+            """,
+            reason,
+        )
+
+        assert result["title"] == "Switched to CPU"
+        assert result["body"] == f'GPU Worker 1 (Quadro P5000) fell back to CPU for "AV1 Clip 3 (2019)" — {reason}'

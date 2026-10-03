@@ -1206,6 +1206,7 @@ class TestJobsAPI:
             "remaining_time",
             "fallback_active",
             "fallback_reason",
+            "fallback_title",
             "ffmpeg_started",
             "current_phase",
         }
@@ -2425,6 +2426,66 @@ class TestJobConfigPathMappings:
         assert len(captured_configs) == 1
         expected = normalize_path_mappings({"path_mappings": settings_path_mappings})
         assert captured_configs[0].path_mappings == expected
+
+    def test_worker_callback_carries_the_cpu_fallback_state_to_the_workers_api(self, client, tmp_path):
+        """Mid-job the Workers panel reads ``job_manager`` rows, not the dispatcher's
+        dicts. Dropping the fallback fields there meant the browser first saw
+        ``fallback_active`` after the job ended, when the title was already blank.
+        """
+        from media_preview_generator.web.jobs import get_job_manager
+
+        seen: list[dict] = []
+        done = threading.Event()
+
+        def capture_run_processing(config, *args, **kwargs):
+            kwargs["worker_callback"](
+                [
+                    {
+                        "worker_id": 1,
+                        "worker_type": "GPU",
+                        "worker_name": "GPU Worker 1 (Quadro P5000)",
+                        "status": "processing",
+                        "current_title": "AV1 Clip 3 (2019)",
+                        "fallback_active": True,
+                        "fallback_reason": "GPU processing failed (exit code 255)",
+                        "fallback_title": "AV1 Clip 3 (2019)",
+                    }
+                ]
+            )
+            seen.extend(w.to_dict() for w in get_job_manager().get_worker_statuses())
+            done.set()
+
+        mock_config = MagicMock()
+        mock_config.path_mappings = []
+        mock_config.tmp_folder = str(tmp_path)
+        mock_config.plex_url = "http://test"
+        mock_config.plex_token = "token"
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator.run_processing",
+                side_effect=capture_run_processing,
+            ),
+            patch("media_preview_generator.config.load_config", return_value=mock_config),
+            patch(
+                "media_preview_generator.processing.generator._verify_tmp_folder_health",
+                return_value=(True, []),
+            ),
+            patch(
+                "media_preview_generator.utils.setup_working_directory",
+                return_value=str(tmp_path / "work"),
+            ),
+            patch("media_preview_generator.gpu.detect.detect_all_gpus", return_value=[]),
+        ):
+            resp = client.post("/api/jobs", headers=_api_headers(), json={})
+            assert resp.status_code == 201
+            assert done.wait(timeout=2.0), "run_processing was not called"
+
+        assert len(seen) == 1, seen
+        assert seen[0]["worker_name"] == "GPU Worker 1 (Quadro P5000)"
+        assert seen[0]["fallback_active"] is True
+        assert seen[0]["fallback_reason"] == "GPU processing failed (exit code 255)"
+        assert seen[0]["fallback_title"] == "AV1 Clip 3 (2019)"
 
     def test_start_job_does_NOT_accept_path_mappings_override(self, client, tmp_path):
         """``path_mappings`` is a Settings-level concept, not a per-job override.

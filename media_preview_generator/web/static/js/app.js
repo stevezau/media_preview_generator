@@ -2751,7 +2751,7 @@ function updateWorkerStatuses(workers, options = {}) {
         const prev = _fallbackStateByWorker.get(w.worker_id) || false;
         const now = !!w.fallback_active;
         if (now && !prev) {
-            const title = w.current_title || 'this file';
+            const title = w.fallback_title || w.current_title || 'this file';
             const reason = w.fallback_reason || 'GPU processing failed';
             showToast(
                 'Switched to CPU',
