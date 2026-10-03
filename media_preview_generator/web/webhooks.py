@@ -12,25 +12,28 @@ import re
 import secrets
 import threading
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 from loguru import logger
 
 from ..job_kinds import INTRO_CREDITS_FOLLOW_UP
 from ..processing.retry_queue import retry_policy
 from .auth import api_token_required, validate_token
-from .jobs import get_job_manager, incoming_job_priority
+from .jobs import JobStatus, get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
 
 webhooks_bp = Blueprint("webhooks_bp", __name__, url_prefix="/api/webhooks")
 
-# Debounce timers and payload batches keyed by source (radarr / sonarr / custom).
+_MAX_WEBHOOK_DELAY_SECONDS = 3600
+
+# Debounce timers and payload batches keyed by source and optional server id.
 _pending_timers: dict[str, threading.Timer] = {}
 _pending_batches: dict[str, dict[str, object]] = {}
-_pending_lock = threading.Lock()
+_pending_lock = threading.RLock()
 
 # Recently dispatched (source, normalized_path) entries, used to drop
 # duplicate webhook deliveries that arrive after the debounce batch has
@@ -43,8 +46,8 @@ _RECENT_DISPATCH_TTL_SECONDS = 600
 # are reported long before the event, well past _RECENT_DISPATCH_TTL_SECONDS.
 _import_file_events: dict[tuple[str, str, str, str], float] = {}
 _IMPORT_FILE_EVENT_TTL_SECONDS = 6 * 3600
-# Longest a batch waits, counted from its first webhook. Each webhook restarts the delay, so without a cap a steady
-# stream of imports held its batch until the stream stopped (342 files waited 55 minutes in job 7d24a00b).
+# Default maximum batch age, extended to the longest accepted delay when explicitly longer. Without a cap a
+# steady stream of imports held its batch until the stream stopped (342 files waited 55 minutes in job 7d24a00b).
 _WEBHOOK_BATCH_MAX_WAIT_SECONDS = 600
 
 
@@ -828,6 +831,109 @@ def _format_plex_title_from_item(item) -> str | None:
     return _format_plex_title_from_metadata(synthetic)
 
 
+def _validate_webhook_delay(handler: Callable) -> Callable:
+    """Validate the optional URL override after authentication, including test events."""
+
+    @wraps(handler)
+    def decorated(*args: object, **kwargs: object) -> object:
+        values = request.args.getlist("delay")
+        g.webhook_delay = None
+        if values:
+            try:
+                if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
+                    raise ValueError
+                delay = int(values[0])
+                if not 1 <= delay <= _MAX_WEBHOOK_DELAY_SECONDS:
+                    raise ValueError
+            except ValueError:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": f"delay must be a single integer from 1 to {_MAX_WEBHOOK_DELAY_SECONDS} seconds",
+                        }
+                    ),
+                    400,
+                )
+            g.webhook_delay = delay
+        return handler(*args, **kwargs)
+
+    return decorated
+
+
+def _webhook_job_kwargs(server_id: str | None) -> dict:
+    kwargs = {"server_id": server_id} if server_id else {}
+    delay = getattr(g, "webhook_delay", None)
+    if delay is not None:
+        kwargs["delay"] = delay
+    return kwargs
+
+
+def _arm_webhook_timer(key: str, batch: dict, delay: float | None = None) -> None:
+    """Arm a wakeup bound to this exact batch revision; caller holds the pending lock."""
+    old_timer = _pending_timers.pop(key, None)
+    if old_timer is not None:
+        old_timer.cancel()
+    token = object()
+    batch["timer_token"] = token
+    if delay is None:
+        delay = max(0, batch["fire_at"] - datetime.now(UTC).timestamp())
+    timer = threading.Timer(delay, _execute_webhook_job, args=[key, token])
+    timer.daemon = True
+    _pending_timers[key] = timer
+    timer.start()
+
+
+def ensure_pending_webhook(job_id: str) -> bool:
+    """Restore a waiting webhook batch instead of letting restart/resume start it early.
+
+    Returns:
+        True when the job is owned by the debounce scheduler.
+    """
+    with _pending_lock:
+        manager = get_job_manager()
+        job = manager.get_job(job_id)
+        if job is None or job.config.get("webhook_debounce_pending") is not True:
+            return False
+        if job.config.get("is_retry") or job.config.get("is_retry_chain"):
+            return False
+        if job.status != JobStatus.PENDING:
+            return True
+        source = job.config.get("source", "unknown")
+        server_id = job.config.get("webhook_server_id")
+        key = _debounce_key(source, server_id)
+        batch = _pending_batches.get(key)
+        if batch is not None:
+            if batch["job_id"] != job_id:
+                logger.warning("Cannot restore webhook job {}: batch {} belongs to {}", job_id, key, batch["job_id"])
+            return True
+        try:
+            deadline = datetime.fromisoformat(job.config["webhook_fire_at"])
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            fire_at = deadline.timestamp()
+            opened_at = float(job.config.get("webhook_batch_opened_at", fire_at))
+            max_wait = float(job.config.get("webhook_batch_max_wait", _WEBHOOK_BATCH_MAX_WAIT_SECONDS))
+        except (KeyError, TypeError, ValueError):
+            manager.complete_job(job_id, error="Stored webhook processing deadline is invalid; reprocess this job.")
+            return True
+        batch = {
+            "source": source,
+            "server_id": server_id,
+            "job_id": job_id,
+            "file_paths": set(job.config.get("webhook_paths") or []),
+            "deleted_paths": set(job.config.get("webhook_deleted_paths") or []),
+            "titles": [job.library_name],
+            "fire_at": fire_at,
+            "opened_at": opened_at,
+            "max_wait": max_wait,
+            "server_id_pin": job.config.get("server_id"),
+        }
+        _pending_batches[key] = batch
+        _arm_webhook_timer(key, batch)
+        return True
+
+
 def _schedule_webhook_job(
     source: str,
     title: str,
@@ -836,6 +942,7 @@ def _schedule_webhook_job(
     *,
     deleted_paths: list[str] | None = None,
     early_scan: bool = True,
+    delay: int | None = None,
 ) -> bool:
     """Schedule a debounced single-file webhook job and batch paths per (source, server_id).
 
@@ -862,16 +969,14 @@ def _schedule_webhook_job(
         return False
 
     settings = get_settings_manager()
-    # Server-side defense: clamp to [1, 600] so a hand-edited settings.json
-    # or bogus API call can't park the threading.Timer at line below for
-    # 24h (huge delay) or fire instantly and bypass debouncing entirely
-    # (delay <= 0). The UI form validates separately; this is the
-    # belt-and-suspenders pin for everything that doesn't go through it.
-    try:
-        _raw_delay = int(settings.get("webhook_delay", 60))
-    except (TypeError, ValueError):
-        _raw_delay = 60
-    delay = max(1, min(600, _raw_delay))
+    # Apply the same bound to settings and URL overrides so accepted delays
+    # are never silently shortened by the scheduler.
+    if delay is None:
+        try:
+            delay = int(settings.get("webhook_delay", 60))
+        except (TypeError, ValueError):
+            delay = 60
+    delay = max(1, min(_MAX_WEBHOOK_DELAY_SECONDS, delay))
     debounce_key = _debounce_key(safe_source, server_id)
     normalized_path = os.path.normpath(normalized_input_path).replace("\\", "/")
     basename = os.path.basename(normalized_path)
@@ -890,14 +995,24 @@ def _schedule_webhook_job(
     # ``update_job_library_name`` to refresh the displayed state.
     early_scan_job_id: str | None = None
     with _pending_lock:
+        job_manager = get_job_manager()
+        batch = _pending_batches.get(debounce_key)
+        if batch is not None:
+            pending_job = job_manager.get_job(batch["job_id"])
+            if pending_job is None or pending_job.status in (
+                JobStatus.CANCELLED,
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.RUNNING,
+            ):
+                _pending_batches.pop(debounce_key)
+                timer = _pending_timers.pop(debounce_key, None)
+                if timer is not None:
+                    timer.cancel()
         age_sec = _check_and_record_dedup(safe_source, server_id, normalized_path)
         dedup_skip = age_sec is not None
 
         if not dedup_skip:
-            existing = _pending_timers.get(debounce_key)
-            if existing:
-                existing.cancel()
-
             batch = _pending_batches.get(debounce_key)
             is_fresh_batch = batch is None
 
@@ -912,7 +1027,8 @@ def _schedule_webhook_job(
             now_ts = datetime.now(UTC).timestamp()
             opened_at = now_ts if is_fresh_batch else float(batch.get("opened_at", now_ts))
             elapsed = now_ts - opened_at
-            wait_s = min(delay, max(0.0, _WEBHOOK_BATCH_MAX_WAIT_SECONDS - elapsed))
+            max_wait = max(_WEBHOOK_BATCH_MAX_WAIT_SECONDS, delay, float(batch.get("max_wait", 0)) if batch else 0)
+            wait_s = min(delay, max(0.0, max_wait - elapsed))
             fire_at_ts = now_ts + wait_s
             fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
 
@@ -952,6 +1068,11 @@ def _schedule_webhook_job(
                         # preview runner when it starts the job).
                         **({"server_id": b_sid} if b_sid else {}),
                         INTRO_CREDITS_FOLLOW_UP: True,
+                        "webhook_debounce_pending": True,
+                        "webhook_batch_opened_at": opened_at,
+                        "webhook_batch_max_wait": max_wait,
+                        "webhook_server_id": server_id,
+                        "webhook_deleted_paths": sorted({p for p in (deleted_paths or []) if p}),
                     },
                     server_id=b_sid,
                     server_name=b_sname,
@@ -971,6 +1092,7 @@ def _schedule_webhook_job(
                     "deleted_paths": set(),
                     "job_id": job.id,
                     "opened_at": opened_at,
+                    "max_wait": max_wait,
                 }
                 _pending_batches[debounce_key] = batch
 
@@ -996,6 +1118,7 @@ def _schedule_webhook_job(
                 job_manager.update_job_config(
                     batch["job_id"],
                     {
+                        **job_manager.get_job(batch["job_id"]).config,
                         "source": source,
                         "path_count": path_count,
                         "webhook_basenames": batch_basenames[:_HISTORY_FILES_PREVIEW_CAP],
@@ -1004,17 +1127,18 @@ def _schedule_webhook_job(
                         # batch had accumulated. See the matching
                         # comment in the fresh-batch branch above.
                         "webhook_paths": batch_paths_sorted,
-                        # Refresh the countdown anchor: the old timer
-                        # was cancelled at the top of this branch and a
-                        # new one is queued below, so the Job's stored
-                        # fire_at must move forward in lockstep — else
-                        # the row's countdown would tick into the past
-                        # while Plex is still waiting.
+                        # Persist the new countdown before replacing the timer
+                        # below so recovery and the job row share its deadline.
                         "webhook_fire_at": fire_at_iso,
                         # This call replaces the config: keep what batch-open
                         # persisted for a revival (see the fresh-batch branch).
                         **({"server_id": batch["server_id_pin"]} if batch.get("server_id_pin") else {}),
                         INTRO_CREDITS_FOLLOW_UP: True,
+                        "webhook_debounce_pending": True,
+                        "webhook_batch_opened_at": opened_at,
+                        "webhook_batch_max_wait": max_wait,
+                        "webhook_server_id": server_id,
+                        "webhook_deleted_paths": sorted(batch["deleted_paths"]),
                     },
                 )
                 # Flip single-title → "N files" once the batch grows past 1.
@@ -1031,16 +1155,14 @@ def _schedule_webhook_job(
                     job_manager.add_log(
                         batch["job_id"],
                         f"INFO - Batch runs in {round(wait_s)}s: a batch waits at most "
-                        f"{_WEBHOOK_BATCH_MAX_WAIT_SECONDS // 60} minutes from its first webhook; "
+                        f"{round(max_wait / 60)} minutes from its first webhook; "
                         "webhooks after that start a new batch",
                     )
 
             batch["fire_at"] = fire_at_ts
+            batch["max_wait"] = max_wait
 
-            timer = threading.Timer(wait_s, _execute_webhook_job, args=[debounce_key])
-            timer.daemon = True
-            _pending_timers[debounce_key] = timer
-            timer.start()
+            _arm_webhook_timer(debounce_key, batch, wait_s)
             early_scan_job_id = batch["job_id"]
 
     if dedup_skip:
@@ -1134,25 +1256,30 @@ def _kick_early_scan(path: str, server_id_filter: str | None, job_id: str) -> No
     threading.Thread(target=_run, daemon=True, name=f"early-scan-{job_id[:8]}").start()
 
 
-def _execute_webhook_job(debounce_key: str) -> None:
-    """Execute a debounced batch of webhook file paths.
-
-    Runs inside a threading.Timer callback, so all exceptions must be caught
-    here — unhandled errors would be silently swallowed by the thread.
-    """
-    from .routes import _start_job_async
-
+def _execute_webhook_job(debounce_key: str, token: object | None = None) -> None:
+    """Claim the matching batch once; cancelled timer callbacks cannot claim its replacement."""
     with _pending_lock:
-        batch = _pending_batches.pop(debounce_key, None)
-        _pending_timers.pop(debounce_key, None)
+        batch = _pending_batches.get(debounce_key)
+        if batch is None or (token is not None and batch.get("timer_token") is not token):
+            return
+        if token is not None and batch["fire_at"] > datetime.now(UTC).timestamp():
+            _arm_webhook_timer(debounce_key, batch)
+            return
+        job = get_job_manager().get_job(batch.get("job_id"))
+        _pending_batches.pop(debounce_key)
+        timer = _pending_timers.pop(debounce_key, None)
+        if timer is not None:
+            timer.cancel()
+        if job is None or job.status in (JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.RUNNING):
+            return
+        # Keep release and async-start registration under the same lock as resume's
+        # pending-state check. The starter re-enters this lock on the same thread.
+        _dispatch_webhook_batch(debounce_key, batch)
 
-    if not batch:
-        logger.warning(
-            "Webhook batch '{}' fired but the pending list was already empty — "
-            "this usually happens when two debounce timers race; safe to ignore unless it repeats often.",
-            debounce_key,
-        )
-        return
+
+def _dispatch_webhook_batch(debounce_key: str, batch: dict) -> None:
+    """Persist the complete executable job before handing the claimed batch to the runner."""
+    from .routes import _start_job_async
 
     source = str(batch.get("source", "unknown"))
     batch_titles = batch.get("titles") or []
@@ -1185,45 +1312,11 @@ def _execute_webhook_job(debounce_key: str) -> None:
         batch_server_id = batch.get("server_id")
         b_sid, b_sname, b_stype = _resolve_webhook_server_context(batch_server_id)
 
-        # Job-at-batch-open: ``_schedule_webhook_job`` created the Job up
-        # front so the early scan-nudge could log to it. Look it up here
-        # rather than creating a new one. The library_name and config get
-        # one final refresh in case the batch grew or shrank since open.
         job_manager = get_job_manager()
-        existing_job_id = batch.get("job_id")
-        job = job_manager.get_job(existing_job_id) if existing_job_id else None
+        job = job_manager.get_job(batch["job_id"])
         if job is None:
-            logger.warning(
-                "Webhook batch '{}' references missing job {!r} — recreating. "
-                "Most likely the Job was deleted from the UI before the debounce timer fired.",
-                debounce_key,
-                existing_job_id,
-            )
-            job = job_manager.create_job(
-                library_name=library_display,
-                config={
-                    "source": source,
-                    "path_count": len(webhook_paths),
-                    "webhook_basenames": basenames[:_HISTORY_FILES_PREVIEW_CAP],
-                    INTRO_CREDITS_FOLLOW_UP: True,
-                },
-                server_id=b_sid,
-                server_name=b_sname,
-                server_type=b_stype,
-                priority=incoming_job_priority(),
-            )
-        else:
-            job_manager.update_job_library_name(job.id, library_display)
-            job_manager.update_job_config(
-                job.id,
-                {
-                    "source": source,
-                    "path_count": len(webhook_paths),
-                    "webhook_basenames": basenames[:_HISTORY_FILES_PREVIEW_CAP],
-                    # The preview runner queues the batch's Intro & Credits job when it starts the job below.
-                    INTRO_CREDITS_FOLLOW_UP: True,
-                },
-            )
+            return
+        job_manager.update_job_library_name(job.id, library_display)
         settings = get_settings_manager()
         # ``selected_libraries`` is a Plex-only filter (the dispatch path
         # uses it to scope a Plex full-scan to specific Section IDs).
@@ -1271,7 +1364,25 @@ def _execute_webhook_job(debounce_key: str) -> None:
             overrides["server_id"] = b_sid
         if webhook_deleted_paths:
             overrides["webhook_deleted_paths"] = webhook_deleted_paths
-        _start_job_async(job.id, overrides)
+        config = {
+            **job.config,
+            **overrides,
+            "path_count": len(webhook_paths),
+            "webhook_basenames": basenames[:_HISTORY_FILES_PREVIEW_CAP],
+        }
+        for key in (
+            "webhook_debounce_pending",
+            "webhook_fire_at",
+            "webhook_server_id",
+            "webhook_batch_opened_at",
+            "webhook_batch_max_wait",
+        ):
+            config.pop(key, None)
+        job_manager.update_job_config(job.id, config)
+        # A paused batch is ready for resume without creating an in-flight worker
+        # that could absorb the resume signal just before exiting for the pause.
+        if not settings.processing_paused:
+            _start_job_async(job.id, config)
         _add_history_entry(
             source,
             "Download",
@@ -1304,6 +1415,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
 
 @webhooks_bp.route("/radarr", methods=["POST"])
 @_authenticate_webhook
+@_validate_webhook_delay
 def radarr_webhook():
     """Receive Radarr webhook payloads."""
     data = request.get_json(force=True, silent=True)
@@ -1342,7 +1454,7 @@ def radarr_webhook():
     deleted_paths = _extract_radarr_deleted_paths(data)
 
     server_id = (request.args.get("server_id") or "").strip() or None
-    kwargs = {"server_id": server_id} if server_id else {}
+    kwargs = _webhook_job_kwargs(server_id)
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
     was_queued = _schedule_webhook_job("radarr", movie_title, movie_file_path, **kwargs)
@@ -1435,7 +1547,7 @@ def _handle_sonarr_compatible_webhook(source: str):
             _remember_import_file_event(
                 source, server_id, download_id, _dedupe_normalised_paths([episode_file_path])[0]
             )
-    kwargs = {"server_id": server_id} if server_id else {}
+    kwargs = _webhook_job_kwargs(server_id)
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
     was_queued = _schedule_webhook_job(source, display_title, episode_file_path, **kwargs)
@@ -1493,7 +1605,7 @@ def _handle_sonarr_import_complete(
             if not _was_recently_dispatched(source, server_id, path)
             and not (download_id and _reported_by_import_file_event(source, server_id, download_id, path))
         ]
-    kwargs = {"server_id": server_id} if server_id else {}
+    kwargs = _webhook_job_kwargs(server_id)
     queued = [path for path in fresh if _schedule_webhook_job(source, display_title, path, early_scan=False, **kwargs)]
     if not queued:
         logger.debug(
@@ -1522,6 +1634,7 @@ def _handle_sonarr_import_complete(
 
 @webhooks_bp.route("/sonarr", methods=["POST"])
 @_authenticate_webhook
+@_validate_webhook_delay
 def sonarr_webhook():
     """Receive Sonarr webhook payloads."""
     return _handle_sonarr_compatible_webhook("sonarr")
@@ -1529,6 +1642,7 @@ def sonarr_webhook():
 
 @webhooks_bp.route("/sportarr", methods=["POST"])
 @_authenticate_webhook
+@_validate_webhook_delay
 def sportarr_webhook():
     """Receive Sportarr webhook payloads (Sonarr-compatible format)."""
     return _handle_sonarr_compatible_webhook("sportarr")
@@ -1912,6 +2026,7 @@ def _resolve_plex_webhook_paths_and_title(
 
 @webhooks_bp.route("/plex", methods=["POST"])
 @_authenticate_webhook
+@_validate_webhook_delay
 def plex_webhook():
     """Receive native Plex webhook payloads (Plex Pass).
 
@@ -2012,9 +2127,7 @@ def plex_webhook():
     #      this the gate's ``enabled_plex_count >= 2`` branch fans the
     #      path out to both Plex servers (double processing).
     # Mirrors the Sonarr handler at line 1325-1329.
-    job_kwargs: dict = {}
-    if resolved_server_id:
-        job_kwargs["server_id"] = resolved_server_id
+    job_kwargs = _webhook_job_kwargs(resolved_server_id)
     # Schedule EVERY resolved path. A list comprehension (not a generator)
     # is load-bearing here: ``any(generator)`` short-circuits on the first
     # truthy result, so when one library.new resolves to multiple episode
@@ -2044,6 +2157,7 @@ def plex_webhook():
 
 @webhooks_bp.route("/custom", methods=["POST"])
 @_authenticate_webhook
+@_validate_webhook_delay
 def custom_webhook():
     """Receive custom webhook payloads (e.g. from Tdarr, scripts, or other tools).
 
@@ -2101,7 +2215,7 @@ def custom_webhook():
     title = str(data.get("title", "")).strip() or os.path.basename(paths[0])
 
     server_id = (request.args.get("server_id") or "").strip() or None
-    kwargs = {"server_id": server_id} if server_id else {}
+    kwargs = _webhook_job_kwargs(server_id)
     for path in paths:
         _schedule_webhook_job("custom", title, path, **kwargs)
 
@@ -2190,36 +2304,19 @@ def get_pending_webhooks():
     return jsonify({"pending": pending})
 
 
-def _fire_pending_batch_now(debounce_key: str) -> bool:
-    """Cancel the debounce timer for ``debounce_key`` and dispatch the
-    batch on a daemon thread.
-
-    Returns True when the key matched a live batch (timer cancelled +
-    daemon spawned), False when no such batch exists. Shared between
-    the debounce-key route below and the per-job route in
-    ``api_jobs.py`` so the two surfaces never drift in behaviour.
-    """
-    cancelled_timer = False
+def _fire_pending_batch_now(debounce_key: str, job_id: str | None = None) -> bool:
+    """Atomically close a batch now; its processing still runs asynchronously."""
     with _pending_lock:
-        if debounce_key not in _pending_batches:
+        batch = _pending_batches.get(debounce_key)
+        if batch is None or (job_id is not None and batch["job_id"] != job_id):
             return False
-        existing = _pending_timers.pop(debounce_key, None)
-        if existing is not None:
-            try:
-                existing.cancel()
-                cancelled_timer = True
-            except Exception:
-                logger.debug("fire-now: could not cancel timer for {}", debounce_key, exc_info=True)
-
-    logger.info(
-        "Webhook batch {!r}: user requested fire-now (cancelled_timer={}); dispatching immediately.",
-        debounce_key,
-        cancelled_timer,
-    )
-    threading.Thread(
-        target=_execute_webhook_job, args=[debounce_key], daemon=True, name=f"webhook-firenow-{debounce_key[:24]}"
-    ).start()
-    return True
+        job = get_job_manager().get_job(batch.get("job_id"))
+        if job is None or job.status in (JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.RUNNING):
+            _execute_webhook_job(debounce_key)
+            return False
+        logger.info("Webhook batch {!r}: user requested fire-now; dispatching immediately.", debounce_key)
+        _execute_webhook_job(debounce_key)
+        return True
 
 
 def find_pending_batch_key_for_job(job_id: str) -> str | None:

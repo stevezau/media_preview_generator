@@ -1132,7 +1132,7 @@ def fire_webhook_now(job_id):
             404,
         )
 
-    if not _fire_pending_batch_now(debounce_key):
+    if not _fire_pending_batch_now(debounce_key, job_id=job_id):
         # Race: another caller fired between the lookup and the
         # cancel. Return 404 so the frontend re-fetches.
         return jsonify({"error": "Batch already fired"}), 404
@@ -1872,6 +1872,14 @@ def reprocess_job(job_id):
     new_config.pop(INTRO_CREDITS_FOLLOW_UP, None)
     # The new job hasn't waited for a slot yet: a restart must age it from its own wait, not the old job's.
     new_config.pop(SLOT_WAIT_SINCE, None)
+    for key in (
+        "webhook_debounce_pending",
+        "webhook_fire_at",
+        "webhook_server_id",
+        "webhook_batch_opened_at",
+        "webhook_batch_max_wait",
+    ):
+        new_config.pop(key, None)
     new_job = job_manager.create_job(
         library_id=job.library_id,
         library_name=library_name,
