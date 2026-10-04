@@ -84,7 +84,7 @@ def chapter_readiness_section(
         native_reason = (
             "Plex may repeat this app's work and replace its chapter images. "
             "Review Generate chapter thumbnails in Plex Settings → Library; "
-            "Never stops Plex's own generation for all libraries."
+            "Never disables automatic chapter generation for all libraries."
         )
     native = {
         "id": "chapter_native_generation",
@@ -93,7 +93,7 @@ def chapter_readiness_section(
         "tooltip": "Plex's server-wide Generate chapter thumbnails setting.",
         "explanation": (
             "<p>This is separate from Plex's video preview thumbnail setting. Both scheduled modes "
-            "let Plex generate chapter images itself. Never stops that native work; "
+            "let Plex generate chapter images itself. Never disables that automatic work; "
             "it does not switch off this app's chapter generation.</p>"
             "<p>This check does not change Plex settings. A change in Plex affects all its libraries.</p>"
         ),

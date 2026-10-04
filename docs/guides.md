@@ -227,6 +227,14 @@ without that base layer, such as Profile 5, reports unsupported chapters while p
 The job's Files panel reports scrubber and chapter results separately. A file Plex has not indexed yet can have
 its scrubber preview ready while chapters wait for a retry. Chapter retries reuse completed output, so they do not
 need to regenerate a current scrubber preview. A file with no chapters has no chapter images to generate.
+Plex's normal file checks can rewrite chapter image references even when its own generation is set to **Never**.
+A later Previews job reconciles those references without decoding current images again. This is separate from
+Plex generating and replacing the images itself.
+
+**Plex cache limitation:** Plex can continue showing an older chapter image after regeneration, including
+after reloading Plex Web. This also occurs with Plex's own generator. Setting **Never** does not clear these
+cached images, and another generation job does not guarantee that clients immediately show the replacements.
+
 On the first enabled run, chapter images previously made by Plex are rebuilt once: the app has no saved source
 fingerprint proving they match the current video. Their replacements use Plex's existing chapter times; chapter
 rows and other marker types are preserved. Current scrubber previews are still reused.

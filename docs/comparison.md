@@ -56,7 +56,7 @@ The mounts depend on the server: Plex's data folder read-write for Plex, and the
 - **HDR or Dolby Vision thumbnails look wrong:** see [HDR and Dolby Vision thumbnails](hdr-dolby-vision-thumbnails.md).
 - **Windows with an AMD or Intel GPU, or any Mac:** Docker can't reach those GPUs, so this project runs on CPU there. The built-in is simpler unless you run the container on a Linux host.
 - **No Docker, or you can't give a container write access to where previews are stored:** use the built-in. For Jellyfin, [off-media mode](guides/previews-readiness.md#jellyfin-config-folder) needs write access to Jellyfin's config folder instead of the media.
-- **You need chapter thumbnails:** this project doesn't make them.
+- **You need Plex chapter thumbnails:** optional CPU generation is available for Plex **1.43.4.x**, off by default. Check the [chapter thumbnail requirements and limits](guides.md#plex-chapter-thumbnails).
 - **You need a single BIF for a Roku app or one file:** a small tool such as [bifgen](https://github.com/entrez/bifgen) is enough.
 
 > [!NOTE]

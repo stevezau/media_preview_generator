@@ -1,6 +1,9 @@
 # Plex chapter thumbnails: implementation plan
 
-Status: minimal live registration and cache-replacement proof passed; implementation in progress.
+Status: implemented and deployed; real Plex Web displays app-generated images. Plex can
+rewrite the revision URLs and retain older transformed images after regeneration, including
+with its own native generator. This verified cache limitation also survived a Plex Web reload
+and owner-profile reselection in the same browser context; there is no general recovery guarantee.
 
 Replacement branch: `stevezau/plex-chapter-thumbnails`, based on `f7063a8`.
 Original PR: #287, head `5a26236`, base `ef145a3`. Preserve its attribution and useful
@@ -11,7 +14,9 @@ research, but do not transplant its old dispatcher or bundle-hash assumptions.
 Use a common guarded chapter-reference writer, **locally on the Plex host or through the
 existing Plex-side helper**. The investigator proved the minimal database update live: only
 existing `taggings.thumb_url` values change; immediate API responses and image hashes match;
-a content-hash query revision bypasses a primed PhotoTranscoder cache after replacement.
+a content-hash query revision bypasses a primed PhotoTranscoder cache when requested directly.
+Ordinary Plex metadata checks can subsequently remove that query revision; this does not
+establish durable client cache invalidation.
 The default app feature remains off. A locally writable, positively identified Plex database
 or a compatible configured helper beside that database is required. Do not require Intro & Credits generation, its
 marker-specific database confirmation, or its Plex Pass check to use chapter thumbnails.
@@ -68,8 +73,9 @@ digest must cover the full expected chapter map and old references, not just row
   UI/settings checks, final verification. Coordinate test-file ownership before edits.
 
 The DB proof passed before feature work began. Authentication and transactions remain
-necessary infrastructure; live image-serving and cache-replacement evidence establishes
-that the narrowly bounded update activates playback.
+necessary infrastructure; live image-serving and actual Plex Web evidence establish
+that the narrowly bounded update activates chapter images. The direct versioned-request
+cache test does not guarantee that a client will keep using that URL.
 
 ## Evidence and release gate
 
@@ -79,8 +85,23 @@ Sanitized live records: [registration matrix](chapter-thumbnails/evidence/regist
 [source-absent scanner](chapter-thumbnails/evidence/source-absent-isolated.json), and
 [restart and partial-scan persistence](chapter-thumbnails/evidence/persistence.json).
 The tested restart and partial scan preserved references and image hashes. Reanalysis can
-replace chapter rows; the implementation reconciles references again rather than promising
-that every Plex reanalysis preserves them.
+replace chapter rows. Ordinary metadata requests with `checkFiles=1` or `asyncCheckFiles=1`
+also replace versioned references with native static paths, including when native chapter
+generation is `never`. These checks preserved the app's JPEG bytes and modification times.
+The implementation reconciles references on a later job without decoding current images;
+it does not promise that Plex will retain the revision URLs.
+
+The final cache control warmed the actual Plex Web PhotoTranscoder request with a magenta
+chapter image, then replaced that JPEG with a source-derived frame. The direct image endpoint
+served the new bytes, but replaying the exact warmed URL and headers still returned magenta.
+Plex's own forced chapter generator produced a new JPEG with the same stale-cache result.
+All of these controls ran with automatic native chapter generation set to `never`.
+In the same browser context, reloading, reselecting the authorized owner profile, and reopening
+the chapter menu still displayed magenta with the identical cache key and response hash.
+A fresh browser context displayed the new image, but it received a different delegated token
+inside the image URL and therefore used a different cache key. That is not proof that a normal
+refresh invalidates a client's existing cached image. No cache purge or global preference change
+is part of the feature.
 
 - PR #287 writes `Contents/Chapters/chapter<N>.jpg` next to `Contents/Indexes/index-sd.bif`.
   The owner reported that the files alone did not activate thumbnails in Plex.
@@ -105,7 +126,9 @@ that every Plex reanalysis preserves them.
   used forced extraction. None is an adequate remote registration mechanism for this feature.
 - Native before/after snapshots showed only existing `taggings.thumb_url` changed. A guarded
   minimal update reproduced visible chapter metadata and served correct bytes without restart
-  or native extraction. Content-hash query revisions also replaced previously cached images.
+  or native extraction. Direct requests using content-hash query revisions also returned
+  replacement images instead of previously cached images; this test does not establish
+  persistent cache invalidation for normal Plex client requests.
   The initial writer supports only the tested Plex 1.43.4.x build family.
 - Public request contract checked independently: the [Plex API documentation](https://developer.plex.tv/pms/)
   specifies `PUT /library/metadata/{ids}/chapterThumbs`, user-token authentication, optional
@@ -165,9 +188,10 @@ parts after obtaining the write lock, and rollback on every unsuccessful transac
 `plex-marker-agent/plex_marker_agent.py` authenticates/version-checks typed per-item calls.
 Its image already supplies SQLite; a pure reference update would not require Plex binaries.
 
-The native before/after diff and immediate/cache-replacement proof underpin this mechanism.
+The native before/after diff and immediate image-serving proof underpin this mechanism.
 Verify restart, Plex reanalysis and multiple media versions in acceptance testing. Existing
 marker writes do not explicitly invalidate Plex caches, so chapter URLs include image revisions.
+These revisions are transient: normal Plex file checks restore the native static URLs.
 
 Keep the mutation narrowly defined: exact existing chapter row IDs, their native
 tag classification, index/timestamps, item/media version and hash, expected previous values,

@@ -89,6 +89,10 @@ Both **As a scheduled task** and **As a scheduled task and when media is added**
 and replace them. Change this manually in **Plex Settings → Library**; it affects all Plex libraries.
 The app does not change it when saving its own toggle. If the preference cannot be read or has an unknown
 value, the check says **Unable to verify** rather than reporting success.
+**Never** disables automatic native chapter generation, but it does not stop Plex's ordinary file checks from rewriting
+chapter image references. A later Previews job can reconcile those references without decoding current images.
+That does not clear Plex's image cache: clients can continue showing older images after regeneration,
+including when Plex generates the replacements itself. See the [cache limitation](../guides.md#plex-chapter-thumbnails).
 
 Turning this app's chapter option off removes these checks and preserves previously generated images.
 See [Plex chapter thumbnails](../guides.md#plex-chapter-thumbnails) for job behavior.

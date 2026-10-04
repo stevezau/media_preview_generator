@@ -212,7 +212,8 @@ This tool's main job is **video preview thumbnails** — the small frames you
 see when you drag the scrub bar. Plex stores them as **BIF bundles**, Emby
 reads a **BIF sidecar** next to the media file, and Jellyfin reads a folder of
 JPG tile sheets called **trickplay** next to the media file. The app writes
-the right format for each. It does **not** generate chapter thumbnails. It can
+the right format for each. Optional CPU generation of [Plex chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails)
+is also available for Plex **1.43.4.x**, off by default. It can
 also send **Skip Intro / Skip Credits markers** to your servers, off until you
 turn it on per server (see the [Intro & Credits guide](https://mediapreviewgenerator.dev/guides/#intro--credits)).
 
@@ -789,7 +790,7 @@ The mounts depend on the server: Plex's data folder read-write for Plex, and the
 - **HDR or Dolby Vision thumbnails look wrong:** see [HDR and Dolby Vision thumbnails](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/).
 - **Windows with an AMD or Intel GPU, or any Mac:** Docker can't reach those GPUs, so this project runs on CPU there. The built-in is simpler unless you run the container on a Linux host.
 - **No Docker, or you can't give a container write access to where previews are stored:** use the built-in. For Jellyfin, [off-media mode](https://mediapreviewgenerator.dev/guides/previews-readiness/#jellyfin-config-folder) needs write access to Jellyfin's config folder instead of the media.
-- **You need chapter thumbnails:** this project doesn't make them.
+- **You need Plex chapter thumbnails:** optional CPU generation is available for Plex **1.43.4.x**, off by default. Check the [chapter thumbnail requirements and limits](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails).
 - **You need a single BIF for a Roku app or one file:** a small tool such as [bifgen](https://github.com/entrez/bifgen) is enough.
 
 > [!NOTE]
@@ -918,7 +919,7 @@ Once it is running, set Plex's **Settings → Library → Generate video preview
 
 - It runs only in Docker. It has a web UI and no CLI.
 - Plex must scan a new file before its preview can be written, because the file's location in Plex's data folder only exists after the scan. The app retries automatically after 1, 2, 5, 15 and 60 minutes by default. See [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
-- It makes video preview thumbnails only, not chapter thumbnails.
+- Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**; they are separate from GPU-accelerated scrubber previews.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are. Those setups run on CPU.
 
 ## Related
@@ -1017,7 +1018,7 @@ If many of your files always fall back, raise **CPU Workers** above 0. Those fil
 
 - Docker only, with a web UI and no CLI.
 - Plex must scan a new file before its BIF can be written. The app retries after 1, 2, 5, 15 and 60 minutes by default ([retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue)).
-- Video preview thumbnails only, not chapter thumbnails.
+- GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**.
 
 ## Related
 
@@ -1614,6 +1615,14 @@ without that base layer, such as Profile 5, reports unsupported chapters while p
 The job's Files panel reports scrubber and chapter results separately. A file Plex has not indexed yet can have
 its scrubber preview ready while chapters wait for a retry. Chapter retries reuse completed output, so they do not
 need to regenerate a current scrubber preview. A file with no chapters has no chapter images to generate.
+Plex's normal file checks can rewrite chapter image references even when its own generation is set to **Never**.
+A later Previews job reconciles those references without decoding current images again. This is separate from
+Plex generating and replacing the images itself.
+
+**Plex cache limitation:** Plex can continue showing an older chapter image after regeneration, including
+after reloading Plex Web. This also occurs with Plex's own generator. Setting **Never** does not clear these
+cached images, and another generation job does not guarantee that clients immediately show the replacements.
+
 On the first enabled run, chapter images previously made by Plex are rebuilt once: the app has no saved source
 fingerprint proving they match the current video. Their replacements use Plex's existing chapter times; chapter
 rows and other marker types are preserved. Current scrubber previews are still reused.
@@ -3121,6 +3130,10 @@ Both **As a scheduled task** and **As a scheduled task and when media is added**
 and replace them. Change this manually in **Plex Settings → Library**; it affects all Plex libraries.
 The app does not change it when saving its own toggle. If the preference cannot be read or has an unknown
 value, the check says **Unable to verify** rather than reporting success.
+**Never** disables automatic native chapter generation, but it does not stop Plex's ordinary file checks from rewriting
+chapter image references. A later Previews job can reconcile those references without decoding current images.
+That does not clear Plex's image cache: clients can continue showing older images after regeneration,
+including when Plex generates the replacements itself. See the [cache limitation](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails).
 
 Turning this app's chapter option off removes these checks and preserves previously generated images.
 See [Plex chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for job behavior.
@@ -5878,7 +5891,7 @@ Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you hav
 
 ### Does it make chapter thumbnails too?
 
-No. It makes **video preview thumbnails** (the timeline-scrubbing strip) and, once you turn it on for a server, Skip Intro and Skip Credits markers ([Intro & Credits guide](https://mediapreviewgenerator.dev/guides/#intro--credits)). It doesn't make chapter thumbnails.
+Yes, optionally for Plex Media Server **1.43.4.x**. Chapter generation is off by default and uses CPU, separately from GPU-accelerated scrubber previews. It requires one media version and one part per item; see the [chapter thumbnail guide](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for setup and limits.
 
 ### Do I need a GPU to use Media Preview Generator?
 

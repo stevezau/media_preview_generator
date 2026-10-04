@@ -88,7 +88,7 @@ If many of your files always fall back, raise **CPU Workers** above 0. Those fil
 
 - Docker only, with a web UI and no CLI.
 - Plex must scan a new file before its BIF can be written. The app retries after 1, 2, 5, 15 and 60 minutes by default ([retry queue](multi-server.md#slow-backoff-retry-queue)).
-- Video preview thumbnails only, not chapter thumbnails.
+- GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](guides.md#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**.
 
 ## Related
 

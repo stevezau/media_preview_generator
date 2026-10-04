@@ -48,6 +48,8 @@ The experiment began with three empty chapter references, registered red/green/b
 sentinels, checked all directly served SHA-256 hashes, and primed PhotoTranscoder.
 Replacing red with yellow changed the URL's content revision; PhotoTranscoder then
 returned yellow `(255, 255, 0)` without restarting Plex or purging its image cache.
+This was a direct request using the new revision URL, not proof that a Plex client
+continues using that URL after its own metadata checks.
 
 The ordinary pipeline additionally generated actual source frames through FFmpeg,
 published BIF and chapter artifacts, repaired a missing JPEG without regenerating
@@ -82,6 +84,28 @@ All three references and directly served hashes survived a restart of the dispos
 Plex container and a partial scan of its synthetic directory. Actual metadata
 re-analysis can rebuild chapter rows; registration is therefore reconciled from a
 fresh snapshot on a later run rather than inferred from existing JPEGs.
+
+Subsequent real Plex Web testing exposed another reference change: metadata
+requests with `checkFiles=1` or `asyncCheckFiles=1` normalize the revision URLs to
+Plex's static chapter image paths. Isolated requests reproduced both triggers;
+the other tested asynchronous metadata refresh flags did not. This also occurs
+with native chapter generation set to `never`. App JPEG hashes and modification
+times remain unchanged, and a later normal job repairs references without decoding.
+
+The final client-cache control then warmed the exact Plex Web PhotoTranscoder request
+with a magenta JPEG and replaced it with a frame extracted from the synthetic video.
+The direct JPEG endpoint served the new bytes; the exact warmed URL and headers still
+returned magenta. Repeating the control with Plex's own forced chapter generator also
+returned the older cached image despite a newly generated JPEG on disk. Automatic native
+generation remained `never` throughout, so that preference does not prevent this behavior.
+
+Reloading the same browser context led to Plex's owner-profile chooser. Selecting the
+authorized owner again and reopening the synthetic chapter menu still displayed magenta,
+with the same transformed response hash and cache key. A fresh browser context displayed
+the replacement, but used a different delegated token in the inner image URL, hence a
+different cache key. Neither a general reload workaround nor reliable cache invalidation
+for every client is established by these tests. All original synthetic lab JPEGs and their
+ownership were restored afterward; no unrelated library or global preference was changed.
 
 Only synthetic IDs, image digests, operation results, and the narrow native column
 delta are retained here. Tokens, server preferences, full logs, and database copies
