@@ -1590,6 +1590,36 @@ Access settings at `/settings` to manage:
 
 The Settings page and the Automation page's **Triggers** tab **save automatically as you edit** — there's no Save button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
 
+### Plex chapter thumbnails
+
+Chapter thumbnails are optional images for the chapters Plex already knows about. They are separate from the
+scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x**,
+with one media version and one part per item. Multiple versions and multipart items report an unsupported result.
+Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
+without that base layer, such as Profile 5, reports unsupported chapters while preserving the scrubber result.
+
+1. Open **Servers → your Plex → Edit → General**, enable **Generate chapter thumbnails**, and save. It is off by
+   default. Enabling it lets this app write chapter images and update their references in Plex's database; it does
+   not change your videos, create chapters, or change chapter times.
+2. Open **Setup Health**. The app needs a supported, positively identified Plex database on the same machine, or a
+   compatible [Plex helper](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) beside Plex. If a helper is needed,
+   **Configure Plex helper** takes you directly to the shared connection controls. **Intro & Credits can stay off**.
+3. In Plex's **Settings → Library → Generate chapter thumbnails**, select **Never** to avoid Plex repeating the work
+   and replacing these images. This Plex setting affects all its libraries. The app checks it but does not change it.
+4. Run your usual **Previews** job. Existing schedules and webhooks also include chapters while the toggle is on;
+   there is no separate chapter schedule. Chapter extraction uses CPU within the existing worker and thread limits.
+   A normal run keeps current scrubber previews and fills missing or stale
+   chapter images. **Regenerate** rebuilds the enabled outputs.
+
+The job's Files panel reports scrubber and chapter results separately. A file Plex has not indexed yet can have
+its scrubber preview ready while chapters wait for a retry. Chapter retries reuse completed output, so they do not
+need to regenerate a current scrubber preview. A file with no chapters has no chapter images to generate.
+On the first enabled run, chapter images previously made by Plex are rebuilt once: the app has no saved source
+fingerprint proving they match the current video. Their replacements use Plex's existing chapter times; chapter
+rows and other marker types are preserved. Current scrubber previews are still reused.
+Turning the toggle off preserves images already written. See [chapter Setup Health checks](https://mediapreviewgenerator.dev/guides/previews-readiness/#chapter-thumbnails)
+for connection and native-generation problems.
+
 ### Automatic GPU → CPU Fallback
 
 Every GPU worker includes automatic CPU fallback — no extra configuration
@@ -2426,14 +2456,17 @@ don't run it.
    `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
 2. In the app: **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**. Switch it on, enter its **Address**
    (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
-   once saved. The one-time database-write confirmation still applies.
+   once saved. The one-time database-write confirmation applies when enabling Intro & Credits. Chapter thumbnails
+   have their own opt-in under General and can use this connection while Intro & Credits is off.
 3. The line under the address shows the state: **Connected**, **Can't reach it**, **Key refused** or **Update needed**.
    **Check again** asks now. The agent has its own version, and a version the app doesn't accept is refused on the first
    call, in either direction, with a message saying which side to update.
 
-The agent only ever writes the marker rows of one item into Plex's library database. It refuses a database that isn't
+For Intro & Credits, the agent writes the marker rows of one item into Plex's library database. A compatible agent
+also supports [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails), updating only existing chapter image references.
+It refuses a database that isn't
 on a local disk of its own machine, a database schema it doesn't know, and a Plex that has no marker list yet, with the
-same messages a same-machine setup gives. While it isn't answering, markers wait in this app and the next Intro &
+same messages a same-machine setup gives. Chapter registration does not require a marker list. While it isn't answering, markers wait in this app and the next Intro &
 Credits run sends them. Setup Health shows a row for it (see
 [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits)).
 
@@ -3019,6 +3052,8 @@ Each row lives in one of three sections:
 
 A server with **Intro & Credits** switched on also gets an
 [Intro & Credits section](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits) (Plex) or plugin rows (Jellyfin, Emby).
+A Plex server with **Generate chapter thumbnails** switched on also gets a
+[Chapter thumbnails section](https://mediapreviewgenerator.dev/guides/previews-readiness/#chapter-thumbnails).
 
 Every row carries an ⓘ tooltip (the one-liner), a direct link to
 **this page** anchored at the relevant check, and — where applicable —
@@ -3054,7 +3089,8 @@ next to the badge.
 ## Server version
 
 **What it checks:** Jellyfin must be 10.10 or newer; Plex and Emby
-are informational (any recent release works).
+are informational for scrubber previews (any recent release works). Optional Plex chapter
+registration has a separate version check and currently supports **1.43.4.x**.
 
 **Why it matters:** pre-10.10 Jellyfin ignores the
 `SaveTrickplayWithMedia` flag and looks for trickplay under
@@ -3063,6 +3099,31 @@ the only fix.
 
 **Enable / disable:** read-only — upgrade via your container / package
 manager.
+
+---
+
+## Chapter thumbnails
+*Plex only — shown when Generate chapter thumbnails is on*
+
+**Registration:** checks that this app can safely update the image references on Plex's existing chapters.
+It requires a supported Plex version and database schema, a positive server identity match, and a writer on
+Plex's machine. A safe local database connection works directly; when Plex is on another machine, configure
+the compatible Plex helper beside it. A network-mounted database alone is not enough.
+
+The failure row gives the reason. **Configure Plex helper** opens the shared connection controls under
+**Intro & Credits**; you can enter the helper address and key while Intro & Credits stays off.
+See the [helper setup guide](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent).
+This check reads capability only and does not change chapter rows.
+
+**Plex's own generation:** reads the server-wide **Generate chapter thumbnails** preference
+(`GenerateChapterThumbBehavior`). **Never** avoids duplicate native work and lets this app supply the images.
+Both **As a scheduled task** and **As a scheduled task and when media is added** can make Plex regenerate
+and replace them. Change this manually in **Plex Settings → Library**; it affects all Plex libraries.
+The app does not change it when saving its own toggle. If the preference cannot be read or has an unknown
+value, the check says **Unable to verify** rather than reporting success.
+
+Turning this app's chapter option off removes these checks and preserves previously generated images.
+See [Plex chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for job behavior.
 
 ---
 
@@ -3979,6 +4040,13 @@ Per-vendor notes:
 | Plex | `token` (OAuth is the *acquisition* flow — the result is stored as `auth.token`) | `plex_config_folder` (where BIF bundles are written), `server_identity` (Plex's `clientIdentifier`, used to disambiguate webhooks) |
 | Emby | `password`, `api_key` | `auth.user_id`, `auth.access_token` |
 | Jellyfin | `password`, `quick_connect`, `api_key` | `auth.user_id`, `auth.access_token` |
+
+Plex's optional `media_servers[].output.chapter_thumbnails` setting is a JSON boolean, default `false`.
+The API rejects strings such as `"false"` and numeric values. The **Generate chapter thumbnails** switch in
+**Servers → Edit → General** controls it. It adds chapter images to existing Previews jobs and updates existing
+chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
+Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
+See the [chapter thumbnail guide](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for setup and retry behavior.
 
 > **Runtime state, not persisted.** Jellyfin's Media Preview Bridge plugin
 > presence is probed live via `JellyfinServer.check_plugin_installed()` and

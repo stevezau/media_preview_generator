@@ -53,6 +53,63 @@ def _read_media_servers() -> list[dict]:
     return get_settings_manager().get("media_servers") or []
 
 
+class TestChapterThumbnailSettings:
+    def _seed(self):
+        _seed_media_servers(
+            [
+                {
+                    "id": "plex-chapters",
+                    "type": "plex",
+                    "name": "Plex",
+                    "enabled": True,
+                    "url": "http://plex:32400",
+                    "auth": {"token": "test-token"},
+                    "output": {},
+                    "markers": {"enabled": False},
+                }
+            ]
+        )
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_boolean_round_trips_without_enabling_markers(self, client, auth_headers, enabled):
+        self._seed()
+
+        response = client.put(
+            "/api/servers/plex-chapters",
+            headers=auth_headers,
+            json={"output": {"chapter_thumbnails": enabled}},
+        )
+
+        assert response.status_code == 200
+        stored = _read_media_servers()[0]
+        assert stored["output"]["chapter_thumbnails"] is enabled
+        assert stored["markers"]["enabled"] is False
+        public = client.get("/api/servers", headers=auth_headers).get_json()["servers"][0]
+        assert public["output"]["chapter_thumbnails"] is enabled
+
+    @pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
+    def test_non_boolean_rejected_even_without_config_folder(self, client, auth_headers, invalid):
+        self._seed()
+
+        response = client.put(
+            "/api/servers/plex-chapters",
+            headers=auth_headers,
+            json={"output": {"chapter_thumbnails": invalid}},
+        )
+
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "output.chapter_thumbnails must be a boolean"
+        assert "chapter_thumbnails" not in _read_media_servers()[0]["output"]
+
+    def test_unrelated_save_keeps_default_off(self, client, auth_headers):
+        self._seed()
+
+        response = client.put("/api/servers/plex-chapters", headers=auth_headers, json={"name": "Renamed Plex"})
+
+        assert response.status_code == 200
+        assert _read_media_servers()[0]["output"].get("chapter_thumbnails", False) is False
+
+
 class TestListServers:
     def test_empty_when_no_servers_configured(self, client, auth_headers):
         response = client.get("/api/servers", headers=auth_headers)

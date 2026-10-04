@@ -32,11 +32,17 @@ from loguru import logger
 
 from media_preview_generator.markers.publishers import plex_remote
 from media_preview_generator.markers.publishers.base import PublishError
+from media_preview_generator.markers.publishers.plex_chapters import (
+    CHAPTER_CAPABILITY,
+    LocalChapters,
+    target_from_json,
+    target_to_json,
+)
 from media_preview_generator.markers.publishers.plex_db import LocalPlexDb, plex_db_path
 
 # This build's version. The app refuses an agent older than its ``plex_remote.MIN_AGENT_VERSION`` and says both
 # numbers, so an image left behind on the Plex host is a message, never a wrong write.
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.0"
 # The wire contracts this build implements. Add to it (never replace) while older apps are still in the wild.
 PROTOCOLS = [plex_remote.AGENT_PROTOCOL]
 # A request body is a marker set and one item's parts: kilobytes. Anything larger is refused before it is parsed.
@@ -73,7 +79,7 @@ def machine_identifier(config_dir: str) -> str:
 
 
 def _agent_block() -> dict:
-    return {"version": AGENT_VERSION, "protocols": list(PROTOCOLS)}
+    return {"version": AGENT_VERSION, "protocols": list(PROTOCOLS), "capabilities": [CHAPTER_CAPABILITY]}
 
 
 def _ok(result: dict) -> Any:
@@ -133,6 +139,7 @@ def create_app(
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
     database = LocalPlexDb(lambda: plex_db_path(folder), label="agent", mountinfo_path=mountinfo_path)
+    chapters = LocalChapters(folder, mountinfo_path=mountinfo_path)
     shared_key_bytes = shared_key.encode("utf-8", "surrogateescape")
 
     def authorised() -> bool:
@@ -184,8 +191,8 @@ def create_app(
     def ping() -> Any:
         """A shell check (`curl -H "Authorization: Bearer $AGENT_TOKEN" .../v1/ping`): the version, which Plex this
         agent serves, and whether the database file is even there. It answers whatever protocol the caller speaks,
-        so it still works when an app and an agent disagree. The app doesn't call it — its own "Check again" runs
-        the two checks below.
+        so it still works when an app and an agent disagree. Chapter operations call it first to require
+        their optional capability before sending a request.
         """
         return _ok(
             {"db_present": os.path.isfile(plex_db_path(folder)), "machine_identifier": machine_identifier(folder)}
@@ -206,6 +213,50 @@ def create_app(
         body = request.get_json(silent=True) or {}
         report = database.db_checks(deadline=_deadline(body))
         return _ok({"report": plex_remote.report_to_json(report)})
+
+    @app.post("/v1/chapters/<operation>")
+    def chapter_operation(operation: str) -> Any:
+        """Fixed chapter snapshot/registration requests; no caller paths or SQL are executed."""
+        if operation not in {"check", "read", "register"}:
+            return _bad_request("Unknown chapter operation")
+        body = request.get_json(silent=True) or {}
+        machine, version = body.get("machine_identifier"), body.get("pms_version")
+        if not isinstance(machine, str) or not machine or not isinstance(version, str) or not version:
+            return _bad_request("A positive server identity and PMS version are required")
+        deadline = _deadline(body)
+        try:
+            result: dict = {"capability": CHAPTER_CAPABILITY}
+            if operation == "check":
+                result["report"] = plex_remote.report_to_json(chapters.capability(machine, version, deadline=deadline))
+            elif operation == "read":
+                source, hint = body.get("source_path"), body.get("item_id_hint")
+                if not isinstance(source, str) or not source or len(source) > 32768:
+                    raise ValueError("A source path is required")
+                if hint is not None and (type(hint) is not int or hint < 1):
+                    raise ValueError("item_id_hint must be a positive whole number")
+                result["target"] = target_to_json(
+                    chapters.read(source, machine, version, item_id_hint=hint, deadline=deadline)
+                )
+            else:
+                target = target_from_json(body.get("target"))
+                if target.machine_identifier != machine:
+                    raise ValueError("Snapshot belongs to another server")
+                raw = body.get("revisions")
+                if not isinstance(raw, list) or len(raw) != len(target.chapters):
+                    raise ValueError("Expected every chapter revision")
+                revisions = {}
+                for revision in raw:
+                    index = revision["index"]
+                    if type(index) is not int or index < 1 or index in revisions:
+                        raise ValueError("Invalid or duplicated chapter index")
+                    revisions[index] = revision["sha256"]
+                chapters.register(target, revisions, version, deadline=deadline)
+                result["registered"] = True
+            return _ok(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _bad_request(str(exc))
+        except PublishError as exc:
+            return _refused(exc)
 
     @app.post("/v1/item/read")
     def item_read() -> Any:

@@ -2516,11 +2516,22 @@ class JobManager:
     #
     # Per-outcome (not a single shared cap) so a 95k-row flood of
     # ``generated`` can't push out the user's 47 ``failed`` rows. With
-    # 9 outcome values and 5000 each, worst-case JSONL is ~22 MB; in
+    # outcome buckets of 5000 each, JSONL stays bounded; in
     # practice rare outcomes (failed, unresolved_vendor, etc.) sit at
     # double-digit row counts while only the noisy happy-path outcomes
     # (generated, skipped_bif_exists) ever hit cap.
     _FILE_RESULTS_PER_OUTCOME_CAP = 5000
+
+    @staticmethod
+    def _file_result_bucket(outcome: str, servers: list[dict] | None) -> str:
+        """Keep incomplete chapter rows independently of routine scrubber successes."""
+        if any(
+            isinstance(server, dict)
+            and server.get("status") in {"published_pending_chapters", "published_chapters_failed"}
+            for server in servers or []
+        ):
+            return "chapter_incomplete"
+        return outcome
 
     def record_file_result(
         self,
@@ -2556,6 +2567,7 @@ class JobManager:
                 result, which the retry scan then retries until the chain runs out (scan 55b098af).
         """
         path = self._file_results_path(job_id)
+        bucket = self._file_result_bucket(outcome, servers)
 
         # Soft-cap check is O(1) via an in-memory per-job, per-outcome
         # counter, lazily seeded from disk on the first call. The naive
@@ -2566,6 +2578,8 @@ class JobManager:
         # ``generated`` rows can't crowd out the rare-but-interesting
         # ``failed`` / ``unresolved_vendor`` rows the user actually
         # filters to in the Files panel.
+        # Incomplete chapters get their own bounded bucket even though
+        # their successful scrubber makes the file's outcome ``generated``.
         with self._file_result_counts_lock:
             if job_id not in self._file_result_counts:
                 seeded: dict[str, int] = {}
@@ -2587,13 +2601,14 @@ class JobManager:
                                 rec_outcome = rec.get("outcome", "")
                                 if not rec_outcome:
                                     continue
-                                seeded[rec_outcome] = seeded.get(rec_outcome, 0) + 1
+                                rec_bucket = self._file_result_bucket(rec_outcome, rec.get("servers"))
+                                seeded[rec_bucket] = seeded.get(rec_bucket, 0) + 1
                     except OSError as e:
                         logger.debug("Could not seed file-results counter for {}: {}", path, e)
                 self._file_result_counts[job_id] = seeded
 
             counts = self._file_result_counts[job_id]
-            current = counts.get(outcome, 0)
+            current = counts.get(bucket, 0)
             if current >= self._FILE_RESULTS_PER_OUTCOME_CAP and not uncapped:
                 # One-shot per-outcome truncation marker on the first
                 # dropped record only; subsequent calls for the same
@@ -2601,13 +2616,13 @@ class JobManager:
                 # accepting rows independently. Its own key, not the row
                 # count, says it is written: uncapped rows take the count
                 # past the cap without dropping anything.
-                marker_key = f"truncated:{outcome}"
+                marker_key = f"truncated:{bucket}"
                 if not counts.get(marker_key):
                     marker = {
                         "file": "",
                         "outcome": marker_key,
                         "reason": (
-                            f"per-outcome file-results cap reached for {outcome!r} "
+                            f"per-outcome file-results cap reached for {bucket!r} "
                             f"({self._FILE_RESULTS_PER_OUTCOME_CAP} entries) — later items "
                             "with this outcome processed normally but not listed here. "
                             "Aggregate counts in the job summary remain accurate."
@@ -2664,6 +2679,8 @@ class JobManager:
                 fs = s.get("frame_source") or ""
                 if fs and fs != "extracted":
                     entry["frame_source"] = fs
+                if isinstance(s.get("artifacts"), dict) and s["artifacts"]:
+                    entry["artifacts"] = s["artifacts"]
                 # Why a row is waiting (e.g. the server hasn't indexed the file yet); preview rows carry none.
                 if s.get("reason_code"):
                     entry["reason_code"] = s["reason_code"]
@@ -2702,7 +2719,7 @@ class JobManager:
                 # Counter dict is guaranteed to exist after the
                 # cap-check block above seeded it under the same lock.
                 counts = self._file_result_counts.setdefault(job_id, {})
-                counts[outcome] = counts.get(outcome, 0) + 1
+                counts[bucket] = counts.get(bucket, 0) + 1
         except OSError as e:
             logger.debug("Could not append file result to {}: {}", path, e)
 

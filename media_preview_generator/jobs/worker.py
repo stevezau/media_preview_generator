@@ -631,6 +631,7 @@ class Worker:
                             # that can mis-resolve episodes (e.g. "S04E17"
                             # mishandled by the title-stripping regex).
                             "output_paths": [str(op) for op in (p.output_paths or [])],
+                            "artifacts": getattr(p, "artifacts", {}),
                         }
                     )
                 self.last_publishers = rows

@@ -102,6 +102,44 @@ def _file_problem_clauses(failure_count: int, outcome: dict | None, *, retry_sch
     return clauses
 
 
+def _chapter_completion_warning(
+    publishers: list[dict] | None, *, include_pending: bool, truncated: bool = False
+) -> str | None:
+    """Summarize incomplete chapter artifacts while preserving successful scrubber counts.
+
+    Args:
+        publishers: The current run's aggregates, or merged latest chain aggregates.
+        include_pending: Include waiting chapters when no retry message already explains them.
+        truncated: Some incomplete chapter rows exceeded their own retention cap and could not be retried.
+
+    Returns:
+        A completion warning, or None when all enabled chapter work is complete.
+    """
+    failed = pending = 0
+    for publisher in publishers or []:
+        if not isinstance(publisher, dict) or not isinstance(publisher.get("counts"), dict):
+            continue
+        counts = publisher["counts"]
+        for status, is_pending in (("published_chapters_failed", False), ("published_pending_chapters", True)):
+            count = counts.get(status, 0)
+            if type(count) is not int or count < 1:
+                continue
+            if is_pending:
+                pending += count
+            else:
+                failed += count
+    parts = []
+    if failed:
+        parts.append(f"chapter thumbnails failed for {failed:,} server item(s)")
+    if include_pending and pending:
+        parts.append(f"chapter thumbnails are still pending for {pending:,} server item(s)")
+    if truncated:
+        parts.append("additional chapter thumbnails remain incomplete; run the library again after resolving the cause")
+    if not parts:
+        return None
+    return "Scrubber previews ready; " + "; ".join(parts) + ". See the Files panel for details."
+
+
 _FILE_COUNT_NAME = re.compile(r"\d+ files?$")
 
 
@@ -1731,19 +1769,19 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 # the modal displayed "already existed"
                                 # everywhere for freshly-generated previews.
                                 _chain_publishers = None
+                                _chapter_rows_truncated = False
                                 try:
                                     from ...jobs.orchestrator import merge_chain_publishers_best_per_path
 
+                                    _chain_file_results = list(
+                                        job_manager.get_file_results(_chain_parent_id, dedup_by_path=False)
+                                    )
+                                    _chapter_rows_truncated = any(
+                                        row.get("outcome") == "truncated:chapter_incomplete"
+                                        for row in _chain_file_results
+                                    )
                                     _chain_publishers = (
-                                        merge_chain_publishers_best_per_path(
-                                            list(
-                                                job_manager.get_file_results(
-                                                    _chain_parent_id,
-                                                    dedup_by_path=False,
-                                                )
-                                            )
-                                        )
-                                        or None
+                                        merge_chain_publishers_best_per_path(_chain_file_results) or None
                                     )
                                 except Exception as exc:
                                     logger.debug(
@@ -1752,6 +1790,14 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                         type(exc).__name__,
                                         exc,
                                     )
+
+                                chapter_warning = _chapter_completion_warning(
+                                    _chain_publishers,
+                                    include_pending=not bool(retry_paths),
+                                    truncated=_chapter_rows_truncated,
+                                )
+                                if chapter_warning:
+                                    _chain_reason = " ".join(part for part in (_chain_reason, chapter_warning) if part)
 
                                 try:
                                     job_manager.upsert_retry_chain_job(
@@ -1805,6 +1851,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 len(failures), outcome, retry_scheduled=bool(spawned_retry_id and stale_inputs)
                             )
                         )
+
+                        chapter_warning = _chapter_completion_warning(
+                            current_job.publishers if current_job else None,
+                            include_pending=not bool(spawned_retry_id),
+                        )
+                        if chapter_warning:
+                            error_parts.append(chapter_warning)
 
                         if spawned_retry_id:
                             error_parts.append(f"{len(retry_paths)} path(s) sent for retry")

@@ -81,6 +81,13 @@ Per-vendor notes:
 | Emby | `password`, `api_key` | `auth.user_id`, `auth.access_token` |
 | Jellyfin | `password`, `quick_connect`, `api_key` | `auth.user_id`, `auth.access_token` |
 
+Plex's optional `media_servers[].output.chapter_thumbnails` setting is a JSON boolean, default `false`.
+The API rejects strings such as `"false"` and numeric values. The **Generate chapter thumbnails** switch in
+**Servers → Edit → General** controls it. It adds chapter images to existing Previews jobs and updates existing
+chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
+Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
+See the [chapter thumbnail guide](guides.md#plex-chapter-thumbnails) for setup and retry behavior.
+
 > **Runtime state, not persisted.** Jellyfin's Media Preview Bridge plugin
 > presence is probed live via `JellyfinServer.check_plugin_installed()` and
 > surfaced in the `/previews-readiness` payload — it isn't stored on the

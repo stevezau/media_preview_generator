@@ -20,6 +20,8 @@ Each row lives in one of three sections:
 
 A server with **Intro & Credits** switched on also gets an
 [Intro & Credits section](#intro-credits) (Plex) or plugin rows (Jellyfin, Emby).
+A Plex server with **Generate chapter thumbnails** switched on also gets a
+[Chapter thumbnails section](#chapter-thumbnails).
 
 Every row carries an ⓘ tooltip (the one-liner), a direct link to
 **this page** anchored at the relevant check, and — where applicable —
@@ -55,7 +57,8 @@ next to the badge.
 ## Server version  <a id="version"></a>
 
 **What it checks:** Jellyfin must be 10.10 or newer; Plex and Emby
-are informational (any recent release works).
+are informational for scrubber previews (any recent release works). Optional Plex chapter
+registration has a separate version check and currently supports **1.43.4.x**.
 
 **Why it matters:** pre-10.10 Jellyfin ignores the
 `SaveTrickplayWithMedia` flag and looks for trickplay under
@@ -64,6 +67,31 @@ the only fix.
 
 **Enable / disable:** read-only — upgrade via your container / package
 manager.
+
+---
+
+## Chapter thumbnails  <a id="chapter-thumbnails"></a>
+*Plex only — shown when Generate chapter thumbnails is on*
+
+**Registration:** checks that this app can safely update the image references on Plex's existing chapters.
+It requires a supported Plex version and database schema, a positive server identity match, and a writer on
+Plex's machine. A safe local database connection works directly; when Plex is on another machine, configure
+the compatible Plex helper beside it. A network-mounted database alone is not enough.
+
+The failure row gives the reason. **Configure Plex helper** opens the shared connection controls under
+**Intro & Credits**; you can enter the helper address and key while Intro & Credits stays off.
+See the [helper setup guide](../guides.md#plex-on-another-machine-the-plex-marker-agent).
+This check reads capability only and does not change chapter rows.
+
+**Plex's own generation:** reads the server-wide **Generate chapter thumbnails** preference
+(`GenerateChapterThumbBehavior`). **Never** avoids duplicate native work and lets this app supply the images.
+Both **As a scheduled task** and **As a scheduled task and when media is added** can make Plex regenerate
+and replace them. Change this manually in **Plex Settings → Library**; it affects all Plex libraries.
+The app does not change it when saving its own toggle. If the preference cannot be read or has an unknown
+value, the check says **Unable to verify** rather than reporting success.
+
+Turning this app's chapter option off removes these checks and preserves previously generated images.
+See [Plex chapter thumbnails](../guides.md#plex-chapter-thumbnails) for job behavior.
 
 ---
 

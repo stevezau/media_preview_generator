@@ -160,6 +160,15 @@
                                 <div class="valid-feedback small">Path exists</div>
                             </div>
                             <div class="form-text">Where this Plex server's preview bundles will be written. Mirrors the <a href="{{ url_for('main.setup_wizard') }}">Setup wizard</a> &rarr; Step 3 field.</div>
+                            <div class="form-check form-switch mt-3">
+                                <input class="form-check-input" type="checkbox" role="switch" id="editPlexChapterThumbnails" aria-describedby="editPlexChapterThumbnailsHelp">
+                                <label class="form-check-label" for="editPlexChapterThumbnails">Generate chapter thumbnails</label>
+                            </div>
+                            <div class="form-text" id="editPlexChapterThumbnailsHelp">
+                                Adds images to Plex's chapter view alongside scrubber previews. This updates existing chapter image references in Plex's database. Intro &amp; Credits can stay off.
+                                The first run rebuilds existing chapter images; current scrubber previews are kept.
+                                Check <a href="#" id="editPlexChapterHealthLink">Setup Health</a> for this server's requirements. Turning this off keeps existing images.
+                            </div>
                         </div>
 
                         <!-- Jellyfin-only: store trickplay off the media drive -->
@@ -750,8 +759,8 @@
                             <div>
                                 <label class="fw-semibold" for="markersAgentEnabled">Plex marker agent</label>
                                 <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="A small container you run next to Plex. It is the only supported way to write markers to a Plex on another machine."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Only needed when this app and Plex are on different machines</div>
+                                        title="Runs next to Plex on another machine. Writes chapter image references and intro or credits markers. Each feature is enabled separately."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Shared by chapter thumbnails and Intro &amp; Credits when Plex runs on another machine. Intro &amp; Credits can stay off.</div>
                             </div>
                             <div class="form-check form-switch markers-switch">
                                 <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">

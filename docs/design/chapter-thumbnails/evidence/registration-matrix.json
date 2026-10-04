@@ -1,0 +1,105 @@
+{
+  "pms_version": "1.43.4.10903-e5521bd8c",
+  "arms": [
+    {
+      "arm": "files-only",
+      "chapters_with_thumb": 0,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "partial-scan",
+      "chapters_with_thumb": 0,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "metadata-refresh",
+      "chapters_with_thumb": 0,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "analyze",
+      "chapters_with_thumb": 0,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "chapter-api-nonforce",
+      "chapters_with_thumb": 0,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "api-scheduled-omit-force",
+      "chapters_with_thumb": 0,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "api-asap-omit-force",
+      "chapters_with_thumb": 3,
+      "jpeg_hashes_unchanged": false,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "analyze-asap",
+      "chapters_with_thumb": 3,
+      "jpeg_hashes_unchanged": false,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "butler-scheduled",
+      "chapters_with_thumb": 3,
+      "jpeg_hashes_unchanged": false,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "arm": "scanner-existing-nonforce",
+      "chapters_with_thumb": 3,
+      "jpeg_hashes_unchanged": true,
+      "direct_image_statuses": [
+        200,
+        200,
+        200
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "ffmpeg_path": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+  "ffmpeg_version": "ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers",
+  "color_transfers": [
+    {
+      "kind": "sdr",
+      "detected_transfer": null,
+      "size": [
+        1280,
+        720
+      ],
+      "bytes": 40300
+    },
+    {
+      "kind": "pq",
+      "detected_transfer": "PQ",
+      "size": [
+        1280,
+        720
+      ],
+      "bytes": 27445
+    },
+    {
+      "kind": "hlg",
+      "detected_transfer": "HLG",
+      "size": [
+        1280,
+        720
+      ],
+      "bytes": 28574
+    }
+  ],
+  "cancelled_processes_reaped": 1,
+  "source_replacement_after_real_decode": {
+    "status": "pending",
+    "completed": 0,
+    "total": 1,
+    "message": "Source changed during chapter processing; retry when the file is stable."
+  },
+  "image_id": "sha256:52316a8154006f8a305b2f6f76da9fd0d49d3bd0998be07ca997267e7e131dfd",
+  "runtime_health_status": 200,
+  "source_hashes": {
+    "media_preview_generator/processing/chapters.py": "efe97ac1600d1761eca635fef57b721ad1cdbb4a8b2effde8109774613145a2a",
+    "media_preview_generator/processing/ffmpeg_runner.py": "08cb10d2edd7b8e974d9995a6647f4b0eb2a41c716b1f92e5e8579b6cd2e1aa6",
+    "media_preview_generator/processing/multi_server.py": "3f13f2affe6b9fe8198e5ef96792148cf73a51c6ca9d14f37710dac4700bc417",
+    "media_preview_generator/markers/publishers/plex_chapters.py": "9cce3cfa61bb1dd4a65924c364d2d5693af382d96917b05f4e7071ce6555cdf3",
+    "media_preview_generator/markers/publishers/plex_remote.py": "29eaa076fc27471d7f6547fcd76cb6b4a206561779afe248c53904c74f9df41b",
+    "media_preview_generator/servers/plex_chapters.py": "18f052613bb7d2aa6fa94f53b95be00fef073673f3a1ff4ac7cae2cab4a20b4b",
+    "media_preview_generator/servers/chapter_readiness.py": "7b6d7bad16b8c81d9e49d7b6beabbe0051500900447daa22059a37f34cdeb811",
+    "media_preview_generator/web/static/js/servers.js": "24bac52db1558a0bdbb9f5ea1daa4df1512ff24090c8435615543abfc69027e4",
+    "media_preview_generator/web/templates/servers.html": "742ef4e8830921ffb82d04ace3ad99f82e8a547c405f4c88dc7325ad1de85d15"
+  },
+  "source_matches_checkout": true
+}

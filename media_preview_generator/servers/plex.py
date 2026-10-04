@@ -1086,6 +1086,12 @@ class PlexServer(MediaServer):
             except Exception as exc:
                 logger.debug("Plex prefs probe failed for {!r}: {}", self.name, exc)
 
+        from .chapter_readiness import chapter_readiness_section
+
+        chapter_section = chapter_readiness_section(self, self._server_config, current_by_id)
+        if chapter_section is not None:
+            sections.append(chapter_section)
+
         for pref_id, label, recommended, severity, rationale in self._PLEX_RECOMMENDED_PREFS:
             current = current_by_id.get(pref_id)
             row_ok = current == recommended

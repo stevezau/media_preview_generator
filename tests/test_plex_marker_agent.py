@@ -211,12 +211,20 @@ class TestTheGuards:
     def test_the_health_check_needs_nothing_and_says_nothing(self, agent):
         payload = agent.get("/v1/health").get_json()
         assert payload["ok"] is True
-        assert payload["agent"] == {"version": plex_marker_agent.AGENT_VERSION, "protocols": [1]}
+        assert payload["agent"] == {
+            "version": plex_marker_agent.AGENT_VERSION,
+            "protocols": [1],
+            "capabilities": ["chapters_v1"],
+        }
         assert "db" not in str(payload)
 
     def test_every_answer_carries_the_agents_version_so_skew_is_seen_on_the_first_call(self, agent):
         for response in (agent.get("/v1/ping", headers=AUTH), agent.post("/v1/checks/file", json={}, headers=AUTH)):
-            assert response.get_json()["agent"] == {"version": plex_marker_agent.AGENT_VERSION, "protocols": [1]}
+            assert response.get_json()["agent"] == {
+                "version": plex_marker_agent.AGENT_VERSION,
+                "protocols": [1],
+                "capabilities": ["chapters_v1"],
+            }
 
     @pytest.mark.parametrize(
         ("path", "body"),

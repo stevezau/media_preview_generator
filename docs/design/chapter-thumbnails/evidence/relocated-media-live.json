@@ -1,0 +1,127 @@
+{
+  "real_plex_media_root_relocated_outside_config": true,
+  "initial": {
+    "status": "published",
+    "counts": {
+      "bif": 1,
+      "chapter": 3
+    },
+    "publishers": [
+      {
+        "status": "published_pending_chapters",
+        "artifacts": {
+          "bif": {
+            "status": "published"
+          },
+          "chapters": {
+            "status": "pending",
+            "completed": 3,
+            "total": 3,
+            "message": "Plex source or chapters changed while images were generated"
+          }
+        }
+      }
+    ]
+  },
+  "backfill": {
+    "status": "published",
+    "counts": {
+      "bif": 0,
+      "chapter": 1
+    },
+    "publishers": [
+      {
+        "status": "published",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ]
+  },
+  "real_flask_job": {
+    "status": "completed",
+    "files": 1,
+    "artifacts": {
+      "bif": {
+        "status": "skipped_output_exists"
+      },
+      "chapters": {
+        "completed": 3,
+        "message": "Chapter thumbnails ready",
+        "status": "ready",
+        "total": 3
+      }
+    },
+    "bif_unchanged": true,
+    "missing_chapter_recovered": true,
+    "browser_helper_navigation_markers_disabled": true
+  },
+  "analyze_repair": {
+    "status": "published",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "published",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ],
+    "references_changed_by_analyze": true
+  },
+  "idempotent": {
+    "status": "skipped",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "skipped_output_exists",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ]
+  },
+  "disabled": {
+    "status": "skipped",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "skipped_output_exists",
+        "artifacts": {}
+      }
+    ]
+  }
+}

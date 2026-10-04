@@ -391,6 +391,15 @@ _ERROR_KINDS: dict[type[PublishError], str] = {ItemNotFoundError: "item_not_foun
 
 def error_to_json(exc: PublishError) -> dict:
     """Serialise a refusal so the app can raise the very same exception."""
+    from .plex_chapters import ChapterError
+
+    if isinstance(exc, ChapterError):
+        return {
+            "kind": "chapter",
+            "code": exc.code,
+            "message": str(exc),
+            "state": exc.state.value if exc.state else None,
+        }
     return {
         "kind": next((name for cls, name in _ERROR_KINDS.items() if isinstance(exc, cls)), "publish"),
         "message": str(exc),
@@ -417,6 +426,10 @@ def error_from_json(raw: Any) -> PublishError:
             state = Capability(str(with_state))
         except ValueError:
             state = None
+    if raw.get("kind") == "chapter":
+        from .plex_chapters import ChapterError
+
+        return ChapterError(message, code=str(raw.get("code") or "registration"), state=state)
     kind = next((cls for cls, name in _ERROR_KINDS.items() if raw.get("kind") == name), PublishError)
     return kind(message, state=state)
 
@@ -442,6 +455,7 @@ class AgentClient:
         self.state = AGENT_UNREACHABLE
         # Plex's own machine identifier, as the agent reads it beside the database it would write.
         self.machine_identifier = ""
+        self.capabilities: list[str] = []
 
     def describe(self) -> str:
         """The address, for messages the user reads."""
@@ -481,6 +495,18 @@ class AgentClient:
             ) from exc
         return self._read(response)
 
+    def ping(self, *, timeout: float) -> dict:
+        """Read advertised optional capabilities before sending their typed operations."""
+        try:
+            response = self._session.get(
+                f"{self.url}/v1/ping",
+                headers={"Authorization": f"Bearer {self._token}", PROTOCOL_HEADER: str(AGENT_PROTOCOL)},
+                timeout=(CONNECT_TIMEOUT_S, max(1.0, timeout)),
+            )
+        except requests.RequestException as exc:
+            raise AgentError("Cannot reach the Plex-side helper", state=Capability.AGENT_UNAVAILABLE) from exc
+        return self._read(response)
+
     def _read(self, response: Any) -> dict:
         try:
             payload = response.json()
@@ -489,6 +515,8 @@ class AgentClient:
         if not isinstance(payload, dict):
             payload = {}
         agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+        advertised = agent.get("capabilities")
+        self.capabilities = advertised if isinstance(advertised, list) else []
         self.version = str(agent.get("version") or "")
         protocols = agent.get("protocols") if isinstance(agent.get("protocols"), list) else []
         if response.status_code == 401:

@@ -1,0 +1,233 @@
+{
+  "pms_version": "1.43.4.10903-e5521bd8c",
+  "native_before": {
+    "None": {
+      "media": [
+        {
+          "id": "3",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 480p.mkv"
+          ]
+        },
+        {
+          "id": "4",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 720p.mkv"
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "index": "1",
+          "startTimeOffset": "0",
+          "endTimeOffset": "5000",
+          "thumb": null
+        },
+        {
+          "index": "2",
+          "startTimeOffset": "5000",
+          "endTimeOffset": "15000",
+          "thumb": null
+        },
+        {
+          "index": "3",
+          "startTimeOffset": "15000",
+          "endTimeOffset": "30000",
+          "thumb": null
+        }
+      ]
+    },
+    "0": {
+      "media": [
+        {
+          "id": "3",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 480p.mkv"
+          ]
+        },
+        {
+          "id": "4",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 720p.mkv"
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "index": "1",
+          "startTimeOffset": "0",
+          "endTimeOffset": "5000",
+          "thumb": null
+        },
+        {
+          "index": "2",
+          "startTimeOffset": "5000",
+          "endTimeOffset": "15000",
+          "thumb": null
+        },
+        {
+          "index": "3",
+          "startTimeOffset": "15000",
+          "endTimeOffset": "30000",
+          "thumb": null
+        }
+      ]
+    },
+    "1": {
+      "media": [
+        {
+          "id": "3",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 480p.mkv"
+          ]
+        },
+        {
+          "id": "4",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 720p.mkv"
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "index": "1",
+          "startTimeOffset": "0",
+          "endTimeOffset": "5000",
+          "thumb": null
+        },
+        {
+          "index": "2",
+          "startTimeOffset": "5000",
+          "endTimeOffset": "15000",
+          "thumb": null
+        },
+        {
+          "index": "3",
+          "startTimeOffset": "15000",
+          "endTimeOffset": "30000",
+          "thumb": null
+        }
+      ]
+    }
+  },
+  "native_after": {
+    "None": {
+      "media": [
+        {
+          "id": "3",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 480p.mkv"
+          ]
+        },
+        {
+          "id": "4",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 720p.mkv"
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "index": "1",
+          "startTimeOffset": "0",
+          "endTimeOffset": "5000",
+          "thumb": "/library/media/4/chapterImages/1"
+        },
+        {
+          "index": "2",
+          "startTimeOffset": "5000",
+          "endTimeOffset": "15000",
+          "thumb": "/library/media/4/chapterImages/2"
+        },
+        {
+          "index": "3",
+          "startTimeOffset": "15000",
+          "endTimeOffset": "30000",
+          "thumb": "/library/media/4/chapterImages/3"
+        }
+      ]
+    },
+    "0": {
+      "media": [
+        {
+          "id": "3",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 480p.mkv"
+          ]
+        },
+        {
+          "id": "4",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 720p.mkv"
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "index": "1",
+          "startTimeOffset": "0",
+          "endTimeOffset": "5000",
+          "thumb": "/library/media/4/chapterImages/1"
+        },
+        {
+          "index": "2",
+          "startTimeOffset": "5000",
+          "endTimeOffset": "15000",
+          "thumb": "/library/media/4/chapterImages/2"
+        },
+        {
+          "index": "3",
+          "startTimeOffset": "15000",
+          "endTimeOffset": "30000",
+          "thumb": "/library/media/4/chapterImages/3"
+        }
+      ]
+    },
+    "1": {
+      "media": [
+        {
+          "id": "3",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 480p.mkv"
+          ]
+        },
+        {
+          "id": "4",
+          "parts": [
+            "/media/Version Spike (2026)/Version Spike (2026) - 720p.mkv"
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "index": "1",
+          "startTimeOffset": "0",
+          "endTimeOffset": "5000",
+          "thumb": "/library/media/4/chapterImages/1"
+        },
+        {
+          "index": "2",
+          "startTimeOffset": "5000",
+          "endTimeOffset": "15000",
+          "thumb": "/library/media/4/chapterImages/2"
+        },
+        {
+          "index": "3",
+          "startTimeOffset": "15000",
+          "endTimeOffset": "30000",
+          "thumb": "/library/media/4/chapterImages/3"
+        }
+      ]
+    }
+  },
+  "app_refusals": [
+    {
+      "code": "unsupported",
+      "message": "Chapter registration does not yet support multiple versions or multipart items"
+    },
+    {
+      "code": "unsupported",
+      "message": "Chapter registration does not yet support multiple versions or multipart items"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "pms_version": "1.43.4.10903-e5521bd8c",
+  "agent_version": "1.1.0",
+  "marker_feature_enabled": false,
+  "capability": "ready",
+  "first_registration": true,
+  "all_direct_hashes_verified": true,
+  "replacement_cache_verified": true,
+  "replacement_pixel": [
+    255,
+    255,
+    0
+  ],
+  "initial_revisions": {
+    "1": "bc790502d69efb9a1226dcd06e4a382e76253fb6fd9ffa27513d5e9aefa7ce7f",
+    "2": "96b71e68a73288c810707429874f2b0e05d9141c6228af826f2dae5f377be1be",
+    "3": "0f634388b493aa4c9b60e5683fd15dec4dd7006e5eac88a2365415ce7f20ea10"
+  },
+  "replacement_revisions": {
+    "1": "ccd3ff862d041ead707714bed4905e1bbdbf97db17fc1b1976fe39861a96e95f",
+    "2": "96b71e68a73288c810707429874f2b0e05d9141c6228af826f2dae5f377be1be",
+    "3": "0f634388b493aa4c9b60e5683fd15dec4dd7006e5eac88a2365415ce7f20ea10"
+  },
+  "first_refs": [
+    "/library/media/1/chapterImages/1?mpgChapter=bc790502d69efb9a1226dcd06e4a382e76253fb6fd9ffa27513d5e9aefa7ce7f",
+    "/library/media/1/chapterImages/2?mpgChapter=96b71e68a73288c810707429874f2b0e05d9141c6228af826f2dae5f377be1be",
+    "/library/media/1/chapterImages/3?mpgChapter=0f634388b493aa4c9b60e5683fd15dec4dd7006e5eac88a2365415ce7f20ea10"
+  ],
+  "replacement_refs": [
+    "/library/media/1/chapterImages/1?mpgChapter=ccd3ff862d041ead707714bed4905e1bbdbf97db17fc1b1976fe39861a96e95f",
+    "/library/media/1/chapterImages/2?mpgChapter=96b71e68a73288c810707429874f2b0e05d9141c6228af826f2dae5f377be1be",
+    "/library/media/1/chapterImages/3?mpgChapter=0f634388b493aa4c9b60e5683fd15dec4dd7006e5eac88a2365415ce7f20ea10"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "client": "Plex Web hosted at app.plex.tv",
+  "pms_version": "1.43.4.10903-e5521bd8c",
+  "synthetic_section": 8,
+  "synthetic_item": 1443,
+  "real_chapter_drawer_visible": true,
+  "sentinel_colors": [
+    "red",
+    "green",
+    "blue"
+  ],
+  "chapter_starts_ms": [
+    0,
+    10000,
+    20000
+  ],
+  "transport": "Only this lab server advertised connection transparently forwarded to localhost:32402; real responses and existing in-memory token; no metadata or images mocked",
+  "screenshot": "plex-web-chapter-menu.png"
+}

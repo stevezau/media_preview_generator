@@ -1,0 +1,59 @@
+{
+  "baseline_thumb_refs_empty": true,
+  "source_absent_inside_container": true,
+  "source_absent_on_host": true,
+  "command": [
+    "docker",
+    "exec",
+    "--user",
+    "plex",
+    "--env",
+    "PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR=/config/Library/Application Support",
+    "pr287-chapter-spike",
+    "/usr/lib/plexmediaserver/Plex Media Scanner",
+    "--generate",
+    "--chapter-thumbs-only",
+    "--item",
+    "1",
+    "--log-file-suffix",
+    " PR287 Source Absent Proof"
+  ],
+  "returncode": 0,
+  "rows_before_source_restore": [
+    [
+      1,
+      1,
+      4,
+      1,
+      0,
+      10000,
+      "/library/media/1/chapterImages/1",
+      9
+    ],
+    [
+      2,
+      1,
+      5,
+      2,
+      10000,
+      20000,
+      "/library/media/1/chapterImages/2",
+      9
+    ],
+    [
+      3,
+      1,
+      6,
+      3,
+      20000,
+      30000,
+      "/library/media/1/chapterImages/3",
+      9
+    ]
+  ],
+  "sentinel_hashes": {
+    "chapter3.jpg": "245e5bf3ace8cc8660d67ad81487b7bfd996ff5e30e0eb3dee24ce672c4bd5b2",
+    "chapter2.jpg": "196a0af08e388623098a4dc99c8c349518c5d151a0e952897b955b28aeb0dcbe",
+    "chapter1.jpg": "83ff06cf71d38bbd7c6c98d955e0b1e172d888d0d5622fbf528c9b4910608ac6"
+  }
+}

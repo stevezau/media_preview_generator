@@ -27,6 +27,7 @@ classifiers = [
 keywords = ["plex", "emby", "jellyfin", "media-server", "video", "thumbnails", "previews", "trickplay", "bif", "ffmpeg", "gpu", "acceleration"]
 dependencies = [
     "requests==2.33.0",
+    "defusedxml>=0.7.1,<1",
     # urllib3 >=2.6.3 covers CVE-2025-50181/50182 (redirect-handling),
     # CVE-2025-66418/66471 (chunked encoding), CVE-2026-21441
     # (proxy-auth). python>=3.11 is already required so dropping 1.x

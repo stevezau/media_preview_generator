@@ -1,0 +1,10 @@
+{
+  "pms_version": "1.43.4.10903-e5521bd8c",
+  "restart_refs_and_hashes_preserved": true,
+  "partial_scan_refs_and_hashes_preserved": true,
+  "sha256": [
+    "abb52b60da1fea5b7e310b02c5733320ff30ea82c0585ca3b70093bc594b1705",
+    "7accb4b2aced0a00967d886414697fc291163f7565980dfc72af02bc119e57c1",
+    "329ccaf8685c43ab2e9232e0ad59e8871fd674b940ae001ad678bd58eec3f7cb"
+  ]
+}

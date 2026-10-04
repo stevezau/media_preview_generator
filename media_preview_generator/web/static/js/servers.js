@@ -1320,6 +1320,12 @@
         }
         if (isPlex) {
             const out = server.output || {};
+            $('#editPlexChapterThumbnails').checked = out.chapter_thumbnails === true;
+            $('#editPlexChapterHealthLink').onclick = (event) => {
+                event.preventDefault();
+                const tab = document.querySelector('#editServerModal [data-bs-target="#edit-tab-health"]');
+                if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
+            };
             const cfgInput = $('#editPlexConfigFolder');
             cfgInput.value = out.plex_config_folder || '';
             cfgInput.classList.remove('is-valid', 'is-invalid');
@@ -1633,6 +1639,7 @@
                 ...(server.output || {}),
                 adapter: 'plex_bundle',
                 plex_config_folder: $('#editPlexConfigFolder').value.trim(),
+                chapter_thumbnails: $('#editPlexChapterThumbnails').checked,
             };
         }
 
@@ -2515,6 +2522,14 @@
         }
     }
 
+    function _showPlexHelperConfiguration(event) {
+        if (event) event.preventDefault();
+        const tab = document.querySelector('#editServerModal [data-bs-target="#edit-tab-markers"]');
+        const group = document.getElementById('markersPlexAgentGroup');
+        if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
+        if (group) requestAnimationFrame(() => group.scrollIntoView({ block: 'center' }));
+    }
+
     // A note under a row offering a different fix than the row's own
     // (Plex: "Set server-wide to Never" beneath a library whose own marker
     // setting is off). ``check.note``: {text, tooltip, button, action}.
@@ -2532,6 +2547,14 @@
         text.className = 'text-body-secondary';
         text.textContent = note.text;
         body.appendChild(text);
+        if (note.configure_plex_helper) {
+            const link = document.createElement('a');
+            link.href = '#edit-tab-markers';
+            link.className = 'd-inline-block mt-1 chapter-helper-link';
+            link.textContent = 'Configure Plex helper';
+            link.addEventListener('click', _showPlexHelperConfiguration);
+            body.appendChild(link);
+        }
         if (note.action && note.button) {
             const btn = document.createElement('button');
             btn.type = 'button';

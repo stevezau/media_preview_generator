@@ -1527,6 +1527,8 @@ const STATUS_META = {
     // Success — file generated this run OR successfully published to a server.
     generated:              { label: 'Generated',     cls: 'bg-success', tip: 'Preview was generated' },
     published:              { label: 'Generated',     cls: 'bg-success', tip: 'Preview was published to this server' },
+    published_pending_chapters: { label: 'Chapters pending', cls: 'bg-warning text-dark', tip: 'Scrubber previews are ready; chapter thumbnails still need work. The job retries according to your retry policy; see the file details.' },
+    published_chapters_failed: { label: 'Chapters failed', cls: 'bg-warning text-dark', tip: 'Scrubber previews are ready, but chapter thumbnails could not be completed. See the file details for the reason.' },
     // Tiles / sidecar are on disk, but the server hadn't indexed the file at publish
     // time so the per-item registration call (Jellyfin Media Preview Bridge plugin or
     // /Items/{id}/Refresh) was skipped. The retry queue picks this back up — once the
@@ -1894,11 +1896,11 @@ function _renderPublishersBlock(job) {
                 .forEach(function (s) { if (fs[s[0]] > 0) badgeSpecs.push({label: s[1], cls: s[2], count: fs[s[0]], tip: s[3]}); });
             // Plus attention-worthy statuses NOT captured by frame provenance
             // (failures, pending registration, index issues).
-            ['failed', 'published_pending_registration', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'no_owners', 'no_frames']
+            ['failed', 'published_pending_registration', 'published_pending_chapters', 'published_chapters_failed', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'no_owners', 'no_frames']
                 .forEach(function (k) { if (counts[k] > 0) { const m = _statusMeta(k); badgeSpecs.push({label: m.label, cls: m.cls, count: counts[k], tip: m.tip}); } });
         } else {
             // Fallback for jobs recorded before per-server frame_sources existed.
-            const statusOrder = ['published', 'published_pending_registration', 'skipped_output_exists', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'skipped', 'no_owners', 'no_frames', 'failed'];
+            const statusOrder = ['published', 'published_pending_registration', 'published_pending_chapters', 'published_chapters_failed', 'skipped_output_exists', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'skipped', 'no_owners', 'no_frames', 'failed'];
             const seen = new Set();
             statusOrder.filter(function (k) { seen.add(k); return counts[k] > 0; })
                 .concat(Object.keys(counts).filter(function (k) { return !seen.has(k) && counts[k] > 0; }))

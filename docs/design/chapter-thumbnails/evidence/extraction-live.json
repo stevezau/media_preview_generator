@@ -1,0 +1,38 @@
+{
+  "color_transfers": [
+    {
+      "kind": "sdr",
+      "detected_transfer": null,
+      "size": [
+        1280,
+        720
+      ],
+      "bytes": 40300
+    },
+    {
+      "kind": "pq",
+      "detected_transfer": "PQ",
+      "size": [
+        1280,
+        720
+      ],
+      "bytes": 27445
+    },
+    {
+      "kind": "hlg",
+      "detected_transfer": "HLG",
+      "size": [
+        1280,
+        720
+      ],
+      "bytes": 28574
+    }
+  ],
+  "cancelled_processes_reaped": 1,
+  "source_replacement_after_real_decode": {
+    "status": "pending",
+    "completed": 0,
+    "total": 1,
+    "message": "Source changed during chapter processing; retry when the file is stable."
+  }
+}

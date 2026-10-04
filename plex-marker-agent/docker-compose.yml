@@ -17,7 +17,7 @@
 # Servers → your Plex → Edit → Intro & Credits → Plex marker agent.
 services:
   plex-marker-agent:
-    image: ghcr.io/stevezau/plex-marker-agent:1.0.0
+    image: ghcr.io/stevezau/plex-marker-agent:1.1.0
     container_name: plex-marker-agent
     restart: unless-stopped
     # The user that owns Plex's database — the same PUID/PGID Plex's own container runs as. The agent can't write

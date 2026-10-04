@@ -1,0 +1,9 @@
+{
+  "image_id": "sha256:af62081699ccdff3590d80a436668124cbfb6deb5729be214d41c989ba158446",
+  "agent_version": "1.1.0",
+  "capability": "chapters_v1",
+  "real_http_tiny_file_registration": true,
+  "all_served_digests_match": true,
+  "backend_matches_frozen_checkout": true,
+  "backend_sha256": "9cce3cfa61bb1dd4a65924c364d2d5693af382d96917b05f4e7071ce6555cdf3"
+}

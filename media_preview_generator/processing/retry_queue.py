@@ -90,6 +90,7 @@ def scaled_backoff_delay(attempt: int, retry_delay_sec: int) -> int:
 PENDING_PUBLISHER_STATUSES: frozenset[str] = frozenset(
     {
         "published_pending_registration",
+        "published_pending_chapters",
         "skipped_not_indexed",
         "skipped_not_in_library",
     }

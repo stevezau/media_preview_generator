@@ -78,6 +78,8 @@ class PublisherStatus(str, Enum):
 
     PUBLISHED = "published"
     PUBLISHED_PENDING_REGISTRATION = "published_pending_registration"
+    PUBLISHED_PENDING_CHAPTERS = "published_pending_chapters"
+    PUBLISHED_CHAPTERS_FAILED = "published_chapters_failed"
     SKIPPED_NOT_INDEXED = "skipped_not_indexed"
     SKIPPED_NOT_IN_LIBRARY = "skipped_not_in_library"
     SKIPPED_OUTPUT_EXISTS = "skipped_output_exists"
@@ -124,6 +126,7 @@ class PublisherResult:
     output_paths: list[Path] = field(default_factory=list)
     message: str = ""
     frame_source: str = "extracted"  # one of: "extracted", "cache_hit", "output_existed"
+    artifacts: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -149,6 +152,8 @@ _PUBLISHED_LIKE_STATUSES: frozenset[PublisherStatus] = frozenset(
         # to a retry. From the user's "did the file generate?" angle it
         # counts as published.
         PublisherStatus.PUBLISHED_PENDING_REGISTRATION,
+        PublisherStatus.PUBLISHED_PENDING_CHAPTERS,
+        PublisherStatus.PUBLISHED_CHAPTERS_FAILED,
     }
 )
 
@@ -1475,7 +1480,7 @@ def _publish_one(
     )
 
 
-def process_canonical_path(
+def _process_canonical_path_previews(
     canonical_path: str,
     registry: ServerRegistry,
     config: Config,
@@ -2343,3 +2348,164 @@ def process_canonical_path(
         # populated cache.
         if generation_lock is not None:
             generation_lock.release()
+
+
+def process_canonical_path(
+    canonical_path: str,
+    registry: ServerRegistry,
+    config: Config,
+    *,
+    item_id_by_server: dict[str, str] | None = None,
+    bundle_metadata_by_server: dict[str, tuple[tuple[str, str], ...]] | None = None,
+    gpu: str | None = None,
+    gpu_device_path: str | None = None,
+    progress_callback=None,
+    ffmpeg_threads_override: int | None = None,
+    cancel_check=None,
+    pause_check=None,
+    regenerate: bool = False,
+    use_frame_cache: bool = True,
+    schedule_retry_on_not_indexed: bool = True,
+    retry_attempt: int = 0,
+    server_id_filter: str | None = None,
+    phase_callback=None,
+    deleted_paths: list[str] | None = None,
+    display_name: str | None = None,
+    source: str | None = None,
+    originating_job_id: str | None = None,
+    check_only: bool = False,
+) -> MultiServerResult:
+    """Publish scrubber previews and independently complete enabled Plex chapters.
+
+    Chapter planning never makes an indexed Plex item a prerequisite for
+    BIF generation. Checking is read-only for chapters; a chapter-only job
+    retains the existing worker permit without extracting interval frames.
+    """
+    options = dict(
+        item_id_by_server=item_id_by_server,
+        bundle_metadata_by_server=bundle_metadata_by_server,
+        gpu=gpu,
+        gpu_device_path=gpu_device_path,
+        progress_callback=progress_callback,
+        ffmpeg_threads_override=ffmpeg_threads_override,
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+        regenerate=regenerate,
+        use_frame_cache=use_frame_cache,
+        schedule_retry_on_not_indexed=schedule_retry_on_not_indexed,
+        retry_attempt=retry_attempt,
+        server_id_filter=server_id_filter,
+        phase_callback=phase_callback,
+        deleted_paths=deleted_paths,
+        display_name=display_name,
+        source=source,
+        originating_job_id=originating_job_id,
+        check_only=check_only,
+    )
+    enabled = {
+        cfg.id: cfg
+        for cfg in registry.configs()
+        if cfg.enabled
+        and cfg.type is ServerType.PLEX
+        and cfg.output.get("chapter_thumbnails") is True
+        and (not server_id_filter or server_id_filter == cfg.id)
+    }
+    if not enabled:
+        return _process_canonical_path_previews(canonical_path, registry, config, **options)
+
+    from .chapters import ChapterOutcome, _failure, chapter_work_needed, prepare_chapters, publish_chapters
+
+    # Retry jobs complete the still-missing artifacts, even when their
+    # original dispatch was an explicit regeneration.
+    force = regenerate and retry_attempt == 0
+    options["regenerate"] = force
+    plans = {}
+    planning_failures = {}
+
+    def prepare(path: str) -> None:
+        for server, _adapter, hint in _resolve_publishers(path, registry, item_id_by_server=item_id_by_server):
+            if server.id not in enabled:
+                continue
+            try:
+                bare_hint = int(str(hint).rsplit("/", 1)[-1]) if hint else None
+                plans[server.id] = prepare_chapters(
+                    server, enabled[server.id], path, config, item_id_hint=bare_hint, cancel_check=cancel_check
+                )
+            except CancellationError:
+                raise
+            except (OSError, ValueError, RuntimeError, requests.RequestException) as exc:
+                planning_failures[server.id] = _failure(exc)
+
+    if os.path.isfile(canonical_path):
+        prepare(canonical_path)
+    result = _process_canonical_path_previews(canonical_path, registry, config, **options)
+    if result.status not in {
+        MultiServerStatus.PUBLISHED,
+        MultiServerStatus.SKIPPED,
+        MultiServerStatus.NEEDS_GENERATION,
+    }:
+        return result
+    if result.canonical_path != canonical_path:
+        plans.clear()
+        planning_failures.clear()
+        prepare(result.canonical_path)
+    needs_chapters = any(chapter_work_needed(plan, regenerate=force) for plan in plans.values())
+    if check_only and (result.status is MultiServerStatus.NEEDS_GENERATION or needs_chapters):
+        return MultiServerResult(
+            result.canonical_path,
+            MultiServerStatus.NEEDS_GENERATION,
+            message="Enabled preview outputs need generation or registration",
+        )
+    if cancel_check and cancel_check():
+        raise CancellationError("Chapter processing cancelled")
+    changed = False
+    incomplete = False
+    for publisher in result.publishers:
+        publisher_changed = False
+        plan = plans.get(publisher.server_id)
+        if plan is None and publisher.server_id not in planning_failures:
+            continue
+        if publisher.status not in _PUBLISHED_LIKE_STATUSES | {PublisherStatus.SKIPPED_OUTPUT_EXISTS}:
+            continue
+        if plan is None:
+            outcome = planning_failures[publisher.server_id]
+        elif check_only:
+            outcome = (
+                plan.outcome
+                if plan.target is None or not plan.target.chapters
+                else ChapterOutcome(
+                    "ready", len(plan.target.chapters), len(plan.target.chapters), "Chapter thumbnails ready"
+                )
+            )
+        else:
+            if phase_callback:
+                phase_callback(f"Chapter thumbnails for {publisher.server_name}…")
+            had_work = chapter_work_needed(plan, regenerate=force)
+            outcome = publish_chapters(
+                plan,
+                config,
+                regenerate=force,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+                ffmpeg_threads_override=ffmpeg_threads_override,
+            )
+            publisher_changed = had_work and outcome.status == "ready"
+            changed = changed or publisher_changed
+        publisher.artifacts = {"bif": {"status": publisher.status.value}, "chapters": outcome.to_dict()}
+        if outcome.status in {"pending", "failed"}:
+            publisher.status = (
+                PublisherStatus.PUBLISHED_PENDING_CHAPTERS
+                if outcome.status == "pending"
+                else PublisherStatus.PUBLISHED_CHAPTERS_FAILED
+            )
+            publisher.message = f"Scrubber ready; chapters {outcome.status}: {outcome.message}"
+            incomplete = True
+        elif publisher_changed and publisher.status is PublisherStatus.SKIPPED_OUTPUT_EXISTS:
+            publisher.status = PublisherStatus.PUBLISHED
+            publisher.message = "Scrubber ready; chapter thumbnails ready"
+    if incomplete or changed:
+        result.status = MultiServerStatus.PUBLISHED
+        result.message = (
+            "Scrubber previews ready; chapter work incomplete" if incomplete else "Enabled preview outputs ready"
+        )
+    return result

@@ -1628,6 +1628,28 @@ function renderFileResultsTable(files) {
 function _renderFileServerNotes(servers, showMessages) {
     return servers.map(function (s) {
         if (!s) return '';
+        var artifacts = s.artifacts || {};
+        if (artifacts.chapters) {
+            var chapter = artifacts.chapters;
+            var bifStatus = (artifacts.bif || {}).status;
+            var bifReady = bifStatus === 'published' || bifStatus === 'skipped_output_exists';
+            var labels = { ready: 'ready', pending: 'pending', failed: 'failed', none: 'no chapters' };
+            var chapterText = labels[chapter.status] || 'checking';
+            if (Number.isFinite(chapter.total) && chapter.total > 0 && Number.isFinite(chapter.completed)) {
+                chapterText += ' (' + Math.max(0, Math.floor(chapter.completed))
+                    + '/' + Math.floor(chapter.total) + ')';
+            }
+            var artifactText = (s.name || 'Server') + ': Scrubber: '
+                + (bifReady ? 'ready' : (_fileOutcomeMeta(bifStatus).label || 'pending'))
+                + '; Chapters: ' + chapterText;
+            if (chapter.message && (chapter.status === 'pending' || chapter.status === 'failed')) {
+                artifactText += ' — ' + chapter.message;
+            }
+            var artifactCls = chapter.status === 'pending' || chapter.status === 'failed'
+                ? 'text-warning-emphasis' : 'text-muted';
+            return '<div class="small chapter-server-note ' + artifactCls + '">'
+                + escapeHtml(artifactText) + '</div>';
+        }
         var text;
         var cls = 'text-muted';
         if (s.reason_code === MARKERS_NOT_IN_LIBRARY) {

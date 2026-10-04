@@ -1,0 +1,166 @@
+{
+  "initial_real_generation": {
+    "status": "published",
+    "counts": {
+      "bif": 1,
+      "chapter": 3
+    },
+    "publishers": [
+      {
+        "status": "published",
+        "artifacts": {
+          "bif": {
+            "status": "published"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ]
+  },
+  "chapter_backfill": {
+    "status": "published",
+    "counts": {
+      "bif": 0,
+      "chapter": 1
+    },
+    "publishers": [
+      {
+        "status": "published",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ]
+  },
+  "registration_repair": {
+    "status": "published",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "published",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ]
+  },
+  "after_real_plex_analyze": {
+    "status": "published",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "published",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ],
+    "references_changed_by_analyze": true
+  },
+  "idempotent_replay": {
+    "status": "skipped",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "skipped_output_exists",
+        "artifacts": {
+          "bif": {
+            "status": "skipped_output_exists"
+          },
+          "chapters": {
+            "status": "ready",
+            "completed": 3,
+            "total": 3,
+            "message": "Chapter thumbnails ready"
+          }
+        }
+      }
+    ]
+  },
+  "real_flask_manual_job": {
+    "status": "completed",
+    "files": 1,
+    "artifacts": {
+      "bif": {
+        "status": "skipped_output_exists"
+      },
+      "chapters": {
+        "completed": 3,
+        "message": "Chapter thumbnails ready",
+        "status": "ready",
+        "total": 3
+      }
+    },
+    "bif_unchanged": true,
+    "missing_chapter_recovered": true,
+    "browser_helper_navigation_markers_disabled": true
+  },
+  "disabled": {
+    "status": "skipped",
+    "counts": {
+      "bif": 0,
+      "chapter": 0
+    },
+    "publishers": [
+      {
+        "status": "skipped_output_exists",
+        "artifacts": {}
+      }
+    ]
+  },
+  "served_source_frames": [
+    {
+      "index": 1,
+      "direct_sha256": "abb52b60da1fea5b7e310b02c5733320ff30ea82c0585ca3b70093bc594b1705",
+      "photo_bytes": 8021
+    },
+    {
+      "index": 2,
+      "direct_sha256": "7accb4b2aced0a00967d886414697fc291163f7565980dfc72af02bc119e57c1",
+      "photo_bytes": 8690
+    },
+    {
+      "index": 3,
+      "direct_sha256": "329ccaf8685c43ab2e9232e0ad59e8871fd674b940ae001ad678bd58eec3f7cb",
+      "photo_bytes": 8961
+    }
+  ]
+}

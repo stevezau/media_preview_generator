@@ -203,6 +203,36 @@ Access settings at `/settings` to manage:
 
 The Settings page and the Automation page's **Triggers** tab **save automatically as you edit** — there's no Save button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
 
+### Plex chapter thumbnails
+
+Chapter thumbnails are optional images for the chapters Plex already knows about. They are separate from the
+scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x**,
+with one media version and one part per item. Multiple versions and multipart items report an unsupported result.
+Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
+without that base layer, such as Profile 5, reports unsupported chapters while preserving the scrubber result.
+
+1. Open **Servers → your Plex → Edit → General**, enable **Generate chapter thumbnails**, and save. It is off by
+   default. Enabling it lets this app write chapter images and update their references in Plex's database; it does
+   not change your videos, create chapters, or change chapter times.
+2. Open **Setup Health**. The app needs a supported, positively identified Plex database on the same machine, or a
+   compatible [Plex helper](#plex-on-another-machine-the-plex-marker-agent) beside Plex. If a helper is needed,
+   **Configure Plex helper** takes you directly to the shared connection controls. **Intro & Credits can stay off**.
+3. In Plex's **Settings → Library → Generate chapter thumbnails**, select **Never** to avoid Plex repeating the work
+   and replacing these images. This Plex setting affects all its libraries. The app checks it but does not change it.
+4. Run your usual **Previews** job. Existing schedules and webhooks also include chapters while the toggle is on;
+   there is no separate chapter schedule. Chapter extraction uses CPU within the existing worker and thread limits.
+   A normal run keeps current scrubber previews and fills missing or stale
+   chapter images. **Regenerate** rebuilds the enabled outputs.
+
+The job's Files panel reports scrubber and chapter results separately. A file Plex has not indexed yet can have
+its scrubber preview ready while chapters wait for a retry. Chapter retries reuse completed output, so they do not
+need to regenerate a current scrubber preview. A file with no chapters has no chapter images to generate.
+On the first enabled run, chapter images previously made by Plex are rebuilt once: the app has no saved source
+fingerprint proving they match the current video. Their replacements use Plex's existing chapter times; chapter
+rows and other marker types are preserved. Current scrubber previews are still reused.
+Turning the toggle off preserves images already written. See [chapter Setup Health checks](guides/previews-readiness.md#chapter-thumbnails)
+for connection and native-generation problems.
+
 ### Automatic GPU → CPU Fallback
 
 Every GPU worker includes automatic CPU fallback — no extra configuration
@@ -1039,14 +1069,17 @@ don't run it.
    `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
 2. In the app: **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**. Switch it on, enter its **Address**
    (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
-   once saved. The one-time database-write confirmation still applies.
+   once saved. The one-time database-write confirmation applies when enabling Intro & Credits. Chapter thumbnails
+   have their own opt-in under General and can use this connection while Intro & Credits is off.
 3. The line under the address shows the state: **Connected**, **Can't reach it**, **Key refused** or **Update needed**.
    **Check again** asks now. The agent has its own version, and a version the app doesn't accept is refused on the first
    call, in either direction, with a message saying which side to update.
 
-The agent only ever writes the marker rows of one item into Plex's library database. It refuses a database that isn't
+For Intro & Credits, the agent writes the marker rows of one item into Plex's library database. A compatible agent
+also supports [chapter thumbnails](#plex-chapter-thumbnails), updating only existing chapter image references.
+It refuses a database that isn't
 on a local disk of its own machine, a database schema it doesn't know, and a Plex that has no marker list yet, with the
-same messages a same-machine setup gives. While it isn't answering, markers wait in this app and the next Intro &
+same messages a same-machine setup gives. Chapter registration does not require a marker list. While it isn't answering, markers wait in this app and the next Intro &
 Credits run sends them. Setup Health shows a row for it (see
 [Setup Health](guides/previews-readiness.md#intro-credits)).
 

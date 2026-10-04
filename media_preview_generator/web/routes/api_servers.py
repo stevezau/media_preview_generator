@@ -277,6 +277,8 @@ def _validate_plex_output(output: dict) -> str:
     """
     if not isinstance(output, dict):
         return "output must be an object"
+    if "chapter_thumbnails" in output and not isinstance(output["chapter_thumbnails"], bool):
+        return "output.chapter_thumbnails must be a boolean"
     folder = str(output.get("plex_config_folder") or "").strip()
     if not folder:
         return ""  # caller may save without populating output yet

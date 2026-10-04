@@ -92,6 +92,8 @@ def create_ffmpeg_runner(
     base_scale: str,
     fps_filter: str,
     hdr10_zscale_chain: str,
+    chapter_start_ms: int | None = None,
+    chapter_output: str | None = None,
 ) -> Callable[..., tuple[int, float, float, list[str]]]:
     """Factory: return a configured ffmpeg-runner closure for one media item.
 
@@ -219,7 +221,7 @@ def create_ffmpeg_runner(
         effective_ffmpeg_threads = (
             ffmpeg_threads_override if ffmpeg_threads_override is not None else config.ffmpeg_threads
         )
-        if effective_gpu is not None and effective_ffmpeg_threads > 0:
+        if (effective_gpu is not None or chapter_start_ms is not None) and effective_ffmpeg_threads > 0:
             args += [
                 "-threads",
                 str(effective_ffmpeg_threads),
@@ -382,6 +384,10 @@ def create_ffmpeg_runner(
         else:
             effective_vf = _assemble_vf(effective_gpu, hw_decode_active, effective_kind)
 
+        # Chapter grabs reuse the managed process lifecycle but seek directly
+        # and stop after one frame rather than decoding an interval sequence.
+        if chapter_start_ms is not None:
+            args += ["-ss", f"{chapter_start_ms / 1000:.3f}"]
         # Add input file and output options
         args += [
             "-i",
@@ -393,8 +399,10 @@ def create_ffmpeg_runner(
             str(config.thumbnail_quality),
             "-vf",
             effective_vf,
-            f"{output_folder}/img-%06d.jpg",
         ]
+        if chapter_start_ms is not None:
+            args += ["-map", "0:V:0", "-frames:v", "1", "-threads:v", str(max(1, effective_ffmpeg_threads))]
+        args += [chapter_output or f"{output_folder}/img-%06d.jpg"]
 
         start_local = time.time()
         hw_label = "GPU" if gpu else "CPU"
