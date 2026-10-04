@@ -391,7 +391,7 @@ publishing fails silently.
 ## Intro & Credits  <a id="intro-credits"></a>
 
 These rows appear only for a server that has **Send intro & credits markers to this server** switched on (Servers →
-Edit → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
+Configure → Processing → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
 good", and nothing about markers is checked or contacted. The rows are read from the same check the Intro & Credits
 tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
 another machine says nothing about Plex Pass until that is fixed.
@@ -416,7 +416,7 @@ other row says what to change and where.
   own disks.
 - **The Plex marker agent** (critical), shown only when an agent is switched on for this server. **…is connected**,
   or one of: **isn't answering** (markers wait, nothing is lost), **refused this app's key** (set the same shared key
-  on both sides), **and this app are different versions** (the Intro & Credits tab says which to update), **is
+  on both sides), **and this app are different versions** (the Processing → Intro & Credits section says which to update), **is
   beside a different Plex** (check the address: markers would have gone into the wrong database). While it is red,
   no marker reaches this server, and its badge reads **Fix on the agent** instead of **Change in Plex UI**.
 - **TV Shows — skip buttons are hidden** (critical, one row per library, named after it) / **Plex shows skip buttons
@@ -445,7 +445,7 @@ other row says what to change and where.
 - **Media Preview Bridge plugin** (Jellyfin) and **Media Preview Bridge for Emby plugin** (Emby), critical. Neither
   server has an API for markers, so the plugin is the only way they reach it. Previews are not affected. The row
   offers **Install** where the app can do it; on an Emby whose plugin catalogue doesn't list the plugin (or whose
-  catalogue couldn't be read) it says to install it by hand and the Intro & Credits tab links the guide. Emby and
+  catalogue couldn't be read) it says to install it by hand and the Processing → Intro & Credits section links the guide. Emby and
   Jellyfin restart once.
 - **The plugin is too old for intro and credits markers** (recommended). The installed build works for previews but
   doesn't answer the markers feature, so markers wait. Update the plugin; nothing already published is lost.

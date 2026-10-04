@@ -141,7 +141,7 @@ def capture_servers_save(
         # PATCH /api/servers/<id> — used by the E/J wizard Step 3 to attach
         # path mappings + exclude paths to the just-added server. Returns
         # the updated record shape the route normally produces.
-        if route.request.method in ("PATCH", "PUT"):
+        if route.request.method in ("GET", "PATCH", "PUT"):
             _fulfill_json(route, response)
         else:
             route.continue_()
@@ -486,7 +486,7 @@ def mock_setup_state(page: Page, *, current_step: int = 1, state: dict | None = 
 
     def handler(route: Route) -> None:
         if route.request.method == "GET":
-            _fulfill_json(route, {"current_step": current_step, "state": state or {}})
+            _fulfill_json(route, {"step": current_step, "data": state or {}})
         else:
             _fulfill_json(route, {"success": True})
 

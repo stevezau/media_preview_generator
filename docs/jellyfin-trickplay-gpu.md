@@ -68,7 +68,7 @@ What that needs:
 > [!WARNING]
 > Don't turn trickplay extraction off on a library. When `EnableTrickplayImageExtraction` is off, Jellyfin deletes the `.trickplay` folders on its next refresh, including ones this app wrote. The app asks you to type a confirmation before it will flip that setting.
 
-The **Setup Health** tab (Servers → edit the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](guides/previews-readiness.md).
+The **Setup Health** tab (Servers → Configure for the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](guides/previews-readiness.md).
 
 ## When you need the Media Preview Bridge plugin
 
@@ -84,6 +84,18 @@ Install it with one click from the Servers page. Or add this repository in Jelly
 ```text
 https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
+
+## Verify one file before a full library
+
+After [installing the container](getting-started.md), open **Servers → Configure → Setup Health**
+for Jellyfin. Fix the checks for the output mode you chose, then use **Manual Generation** to process
+one movie or episode. In **All jobs → Job details**, check Jellyfin's result; **Open logs and files**
+shows the per-file reason if it is waiting or failed. Finally, scrub the video in Jellyfin's player.
+
+If the tiles exist but the player does not show them, check plugin status, library scan timing and
+tile geometry before regenerating the whole library. These affect adoption of existing tiles;
+changing worker counts will not fix them. For remote processing, follow the
+[shared-media and output-mount checklist](multi-server.md#offload-preview-generation-to-another-machine).
 
 ## Triggering from Jellyfin
 

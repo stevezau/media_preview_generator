@@ -186,6 +186,7 @@ def _open_tab(page: Page, app_url: str, server: dict, tab: str = "markers") -> N
 
 
 def _switch_tab(page: Page, tab: str) -> None:
+    tab = "processing" if tab in {"markers", "loudness"} else tab
     section = page.locator("#editServerSectionSelect")
     if section.is_visible():
         section.select_option(f"edit-tab-{tab}")
@@ -245,25 +246,24 @@ def _save_and_get_put(page: Page, captured: dict) -> dict:
 
 @pytest.mark.e2e
 class TestPlexTab:
-    def test_intro_and_credits_is_the_third_tab(self, authed_page: Page, app_url: str) -> None:
+    def test_processing_groups_all_features_in_the_third_tab(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server()
         status = _status(server, "ready", "Written into this Plex server's database", _plex_ready_details())
         _mock_server_page(authed_page, server, status)
         _open_tab(authed_page, app_url, server, tab="general")
 
         tabs = authed_page.locator("#editServerModal .nav-tabs .nav-link")
-        expect(tabs.nth(7)).to_be_visible()  # Webhook & Scanner, un-hidden once the vendor is known
+        expect(tabs.nth(6)).to_be_visible()  # Webhook & Scanner, un-hidden once the vendor is known
         assert tabs.evaluate_all("els => els.map((el) => el.dataset.bsTarget)") == [
             "#edit-tab-general",
             "#edit-tab-health",
-            "#edit-tab-markers",
-            "#edit-tab-loudness",
+            "#edit-tab-processing",
             "#edit-tab-libraries",
             "#edit-tab-paths",
             "#edit-tab-excludes",
             "#edit-tab-automation",
         ]
-        expect(tabs.nth(2)).to_have_text("Intro & Credits")
+        expect(tabs.nth(2)).to_have_text("Processing")
 
     def test_ready_status_renders(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server()
@@ -602,7 +602,9 @@ class TestPlexTab:
         _open_tab(authed_page, app_url, server)
 
         # Switched on live in the form, unsaved — the dialog reads the switch the user just flipped.
+        _switch_tab(authed_page, "general")
         authed_page.locator("label[for='markersAgentEnabled']").click()
+        _switch_tab(authed_page, "processing")
         _flip_switch_on(authed_page)
         modal = authed_page.locator("#markersPlexConfirmModal")
         expect(modal).to_be_visible(timeout=5000)

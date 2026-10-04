@@ -386,7 +386,7 @@
                         <div class="d-flex flex-wrap gap-1">
                             <button class="btn btn-sm btn-outline-primary edit-server-btn"
                                     data-id="${escapeHtml(server.id)}">
-                                <i class="bi bi-pencil me-1"></i>Edit
+                                <i class="bi bi-pencil me-1"></i>Configure
                             </button>
                             <button class="btn btn-sm btn-outline-secondary refresh-libraries-btn"
                                     data-id="${escapeHtml(server.id)}">
@@ -395,7 +395,7 @@
                         </div>
                         <button class="btn btn-sm btn-outline-danger delete-server-btn"
                                 data-id="${escapeHtml(server.id)}"
-                                data-name="${escapeHtml(server.name)}">
+                                data-name="${escapeHtml(server.name)}" aria-label="Delete ${escapeHtml(server.name)}">
                             <i class="bi bi-trash"></i>
                         </button>
                     </div>
@@ -474,6 +474,20 @@
     }
 
     document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('[data-feature-jump]').forEach((link) => {
+            link.addEventListener('click', (event) => {
+                event.preventDefault();
+                const heading = document.querySelector(link.getAttribute('href'));
+                if (heading) { heading.focus({ preventScroll: true }); heading.scrollIntoView({ block: 'start' }); }
+            });
+        });
+        document.querySelectorAll('.processing-section-link').forEach((link) => {
+            link.addEventListener('click', (event) => {
+                event.preventDefault();
+                const trigger = document.querySelector(`#editServerModal [data-bs-target="#edit-tab-${link.dataset.section}"]`);
+                if (trigger && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+            });
+        });
         const editSectionSelect = document.getElementById('editServerSectionSelect');
         if (editSectionSelect) {
             editSectionSelect.addEventListener('change', () => {
@@ -1262,6 +1276,15 @@
         // Plex-only: show the config folder field + wire its inline validator.
         const isPlex = (server.type || '').toLowerCase() === 'plex';
         $('#editPlexConfigGroup').classList.toggle('d-none', !isPlex);
+        $('#processingChapters').classList.toggle('d-none', !isPlex);
+        document.querySelectorAll('.processing-plex-link').forEach((link) => link.classList.toggle('d-none', !isPlex));
+        const previewOutput = $('#processingPreviewOutput');
+        const previewDescriptions = {
+            plex: 'Plex BIF preview bundles are written to the Plex config folder in Connection.',
+            emby: 'Emby BIF previews are written beside each video. The media mount must be writable.',
+            jellyfin: 'Jellyfin trickplay tiles are written beside each video, or to the config folder selected in Connection. Setup Health checks the plugin and storage requirements.',
+        };
+        previewOutput.textContent = previewDescriptions[(server.type || '').toLowerCase()] || 'Preview output follows this server’s configuration.';
 
         // Jellyfin-only: "store trickplay off the media drive" toggle + the
         // config-folder field it reveals. Mirrors the Plex config-folder block.
@@ -1329,8 +1352,9 @@
             const tabMap = {
                 general: 'edit-tab-general',
                 health: 'edit-tab-health',
-                markers: 'edit-tab-markers',
-                loudness: 'edit-tab-loudness',
+                processing: 'edit-tab-processing',
+                markers: 'edit-tab-processing',
+                loudness: 'edit-tab-processing',
             };
             const paneId = tabMap[openTab] || 'edit-tab-general';
             const activeTab = document.querySelector(`#editServerModal [data-bs-target="#${paneId}"]`);
@@ -1383,13 +1407,6 @@
         renderEditExcludePaths(server.exclude_paths || []);
         if (window.loadMarkersTab) window.loadMarkersTab(server);
         if (window.loadLoudnessTab) window.loadLoudnessTab(server);
-        const loudnessOption = document.querySelector('#editServerSectionSelect option[value="edit-tab-loudness"]');
-        const loudnessTabItem = document.getElementById('editTabLoudnessLi');
-        if (loudnessOption && loudnessTabItem) {
-            const unavailable = loudnessTabItem.classList.contains('d-none');
-            loudnessOption.disabled = unavailable;
-            loudnessOption.hidden = unavailable;
-        }
         $('#editServerResult').className = 'd-none';
         $('#editServerResult').innerHTML = '';
 
@@ -2564,7 +2581,7 @@
 
     function _showPlexHelperConfiguration(event) {
         if (event) event.preventDefault();
-        const tab = document.querySelector('#editServerModal [data-bs-target="#edit-tab-markers"]');
+        const tab = document.querySelector('#editServerModal [data-bs-target="#edit-tab-general"]');
         const group = document.getElementById('markersPlexAgentGroup');
         if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
         if (group) requestAnimationFrame(() => group.scrollIntoView({ block: 'center' }));
@@ -2589,7 +2606,7 @@
         body.appendChild(text);
         if (note.configure_plex_helper) {
             const link = document.createElement('a');
-            link.href = '#edit-tab-markers';
+            link.href = '#edit-tab-general';
             link.className = 'd-inline-block mt-1 chapter-helper-link';
             link.textContent = 'Configure Plex helper';
             link.addEventListener('click', _showPlexHelperConfiguration);

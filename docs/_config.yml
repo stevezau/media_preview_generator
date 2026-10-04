@@ -24,6 +24,10 @@ demo_host: 192.168.1.10:8080
 docker_image: stevezzau/media_preview_generator
 docker_image_url: https://hub.docker.com/r/stevezzau/media_preview_generator
 
+# Dedicated Media Preview Generator site, verified during the 2026-10-05 setup.
+# Empty disables counting entirely; development builds and other hosts never count.
+goatcounter_endpoint: "https://mediapreviewgenerator.goatcounter.com/count"
+
 permalink: pretty
 
 # og:image for every page. jekyll-seo-tag reads page.image, never site.image, hence defaults.
@@ -31,7 +35,11 @@ defaults:
   - scope:
       path: ""
     values:
-      image: /images/social-preview.jpg
+      image:
+        path: /images/social-preview.jpg
+        width: 1280
+        height: 640
+        alt: Media Preview Generator — GPU preview thumbnails and Skip Intro and Skip Credits for Plex, Emby and Jellyfin
       layout: doc
 
 # Reading order: drives the sidebar, prev/next, breadcrumbs, the footer and llms-full.txt.

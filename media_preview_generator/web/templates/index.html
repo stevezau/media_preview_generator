@@ -2,6 +2,10 @@
 
 {% block title %}Dashboard - Media Preview Generator{% endblock %}
 
+{% block head %}
+<link href="{{ url_for('static', filename='css/processing_jobs.css') }}" rel="stylesheet">
+{% endblock %}
+
 {% block content %}
 <!-- Setup Required Banner (hidden by default) -->
 <div id="setupRequiredBanner" class="alert alert-info d-none mb-4">

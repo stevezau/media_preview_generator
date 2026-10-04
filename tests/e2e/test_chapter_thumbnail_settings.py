@@ -33,6 +33,7 @@ def test_chapter_toggle_persists_without_enabling_markers_or_losing_helper_key(b
         page.goto(url + "/servers")
         page.locator(".edit-server-btn[data-id='plex-edit-test']").click()
         expect(page.locator("#editServerModal")).to_be_visible()
+        page.locator("[data-bs-target='#edit-tab-processing']").click()
         toggle = page.locator("#editPlexChapterThumbnails")
         expect(toggle).to_be_checked(checked=previous)
         toggle.set_checked(desired)

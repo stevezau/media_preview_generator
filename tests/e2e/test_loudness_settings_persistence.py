@@ -25,7 +25,7 @@ def test_loudness_toggle_persists_without_marker_consent_or_changing_chapters(ba
         page.goto(url + "/servers")
         page.locator(".edit-server-btn[data-id='plex-edit-test']").click()
         expect(page.locator("#editServerModal")).to_be_visible()
-        page.locator("[data-bs-target='#edit-tab-loudness']").click()
+        page.locator("[data-bs-target='#edit-tab-processing']").click()
         toggle = page.locator("#loudnessEnabled")
         expect(toggle).to_be_enabled()
         expect(toggle).to_be_checked(checked=previous)

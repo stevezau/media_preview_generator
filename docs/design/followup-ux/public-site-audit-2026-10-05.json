@@ -1,0 +1,291 @@
+{
+  "date": "2026-10-05",
+  "sitemap": 200,
+  "robots": "User-agent: *\nAllow: /\n\nSitemap: https://mediapreviewgenerator.dev/sitemap.xml\n",
+  "pages": [
+    {
+      "url": "https://mediapreviewgenerator.dev/comparison/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/comparison/",
+      "canonical": "https://mediapreviewgenerator.dev/comparison/",
+      "title": [
+        "Plex, Jellyfin and Emby preview thumbnail generation compared | Media Preview Generator"
+      ],
+      "description": "Built-in generators need no setup. Media Preview Generator adds GPU decoding, per-file triggers and one decode for several servers, but needs Docker.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/credits/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/credits/",
+      "canonical": "https://mediapreviewgenerator.dev/credits/",
+      "title": [
+        "Credits for the films and images on this site | Media Preview Generator"
+      ],
+      "description": "The open films in this site's screenshots and preview thumbnails, their licences and authors, and the work this site builds on.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/emby-bif-thumbnails-gpu/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/emby-bif-thumbnails-gpu/",
+      "canonical": "https://mediapreviewgenerator.dev/emby-bif-thumbnails-gpu/",
+      "title": [
+        "Emby preview thumbnails (BIF) with GPU acceleration | Media Preview Generator"
+      ],
+      "description": "Emby's thumbnail extraction has no GPU option. Media Preview Generator makes Emby BIF files on a GPU and saves them next to each video.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/faq/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/faq/",
+      "canonical": "https://mediapreviewgenerator.dev/faq/",
+      "title": [
+        "FAQ | Media Preview Generator"
+      ],
+      "description": "Answers to common Media Preview Generator questions: Plex, Emby and Jellyfin support, Windows and Docker, GPU choice, speed, RAM use and skipped files.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/getting-started/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/getting-started/",
+      "canonical": "https://mediapreviewgenerator.dev/getting-started/",
+      "title": [
+        "Getting Started | Media Preview Generator"
+      ],
+      "description": "Install Media Preview Generator with Docker or Docker Compose, then set up NVIDIA, Intel or AMD GPU acceleration, Unraid, volume mounts and networking.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/guides/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/guides/",
+      "canonical": "https://mediapreviewgenerator.dev/guides/",
+      "title": [
+        "Guides &amp; Troubleshooting | Media Preview Generator"
+      ],
+      "description": "Use the Media Preview Generator web UI, trigger jobs from Sonarr, Radarr or Plex webhooks, handle HDR and Dolby Vision, and fix common problems.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/",
+      "canonical": "https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/",
+      "title": [
+        "HDR and Dolby Vision preview thumbnails for Plex, Jellyfin and Emby | Media Preview Generator"
+      ],
+      "description": "Washed-out or green previews come from HDR frames not tone-mapped. This app tone-maps HDR10, HLG and Dolby Vision; DV Profile 5 needs a Vulkan GPU.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/how-to/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/how-to/",
+      "canonical": "https://mediapreviewgenerator.dev/how-to/",
+      "title": [
+        "Plex, Jellyfin and Emby preview thumbnail how-to guides | Media Preview Generator"
+      ],
+      "description": "Short guides for slow Plex previews, GPU thumbnails for Plex and Emby, faster Jellyfin trickplay, Sonarr and Radarr, HDR, and skip buttons.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/",
+      "canonical": "https://mediapreviewgenerator.dev/",
+      "title": [
+        "GPU preview thumbnails and Skip Intro for Plex, Emby, Jellyfin | Media Preview Generator"
+      ],
+      "description": "Media Preview Generator makes Plex, Emby and Jellyfin preview thumbnails on your GPU, plus Skip Intro and Skip Credits markers. Install guide and FAQ.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/",
+      "canonical": "https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/",
+      "title": [
+        "Faster Jellyfin trickplay generation with a GPU | Media Preview Generator"
+      ],
+      "description": "Speed up Jellyfin trickplay with its own settings first (threads, key frames, hardware decode, tone mapping), then offload it to a GPU container.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/multi-server/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/multi-server/",
+      "canonical": "https://mediapreviewgenerator.dev/multi-server/",
+      "title": [
+        "Preview thumbnails for Plex, Emby and Jellyfin from one instance | Media Preview Generator"
+      ],
+      "description": "Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook routing, retries and the Jellyfin plugin.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/plex-loudness-normalization/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/plex-loudness-normalization/",
+      "canonical": "https://mediapreviewgenerator.dev/plex-loudness-normalization/",
+      "title": [
+        "Plex loudness analysis on your workers, for Normalize Loudness | Media Preview Generator"
+      ],
+      "description": "Analyses audio tracks on this app's workers and stores loudness measurements in Plex, for Normalize Loudness.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/",
+      "canonical": "https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/",
+      "title": [
+        "Generate Plex preview thumbnails with a GPU | Media Preview Generator"
+      ],
+      "description": "Plex has no documented GPU option for preview thumbnails. Run Media Preview Generator in Docker with an NVIDIA, Intel or AMD GPU to make them.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/",
+      "canonical": "https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/",
+      "title": [
+        "Why Plex video preview thumbnails take so long | Media Preview Generator"
+      ],
+      "description": "Plex makes preview thumbnails on the CPU inside the server, at a frame every 2 seconds by default. How to tune Plex, or move the work to a GPU.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/guides/previews-readiness/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/guides/previews-readiness/",
+      "canonical": "https://mediapreviewgenerator.dev/guides/previews-readiness/",
+      "title": [
+        "Setup Health | Media Preview Generator"
+      ],
+      "description": "What each Setup Health check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails this app generates.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/reference/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/reference/",
+      "canonical": "https://mediapreviewgenerator.dev/reference/",
+      "title": [
+        "Configuration &amp; API Reference | Media Preview Generator"
+      ],
+      "description": "Every Media Preview Generator setting, environment variable, path mapping and REST API endpoint, with defaults, request and response examples.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/skip-intro-credits/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/skip-intro-credits/",
+      "canonical": "https://mediapreviewgenerator.dev/skip-intro-credits/",
+      "title": [
+        "Skip Intro and Skip Credits detection for Plex, Emby and Jellyfin | Media Preview Generator"
+      ],
+      "description": "Detects intros and end credits once per file and adds Skip Intro and Skip Credits to Plex, and to Jellyfin and Emby through its own plugin.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/",
+      "canonical": "https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/",
+      "title": [
+        "Plex, Emby and Jellyfin previews when Sonarr or Radarr import a file | Media Preview Generator"
+      ],
+      "description": "Add a Sonarr or Radarr webhook for import and upgrade. Previews are made after a 60 s quiet period, with retries while the server indexes the file.",
+      "image": "https://mediapreviewgenerator.dev/images/social-preview.jpg",
+      "noindex": false,
+      "x_robots": null,
+      "h1": 1
+    }
+  ],
+  "redirects": [
+    {
+      "url": "http://mediapreviewgenerator.dev/getting-started/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/getting-started/",
+      "chain": [
+        301
+      ]
+    },
+    {
+      "url": "https://stevezau.github.io/media_preview_generator/getting-started/",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/getting-started/",
+      "chain": [
+        301
+      ]
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/getting-started",
+      "status": 200,
+      "final": "https://mediapreviewgenerator.dev/getting-started/",
+      "chain": [
+        301
+      ]
+    },
+    {
+      "url": "https://mediapreviewgenerator.dev/not-a-real-doc-page-20261005/",
+      "status": 404,
+      "final": "https://mediapreviewgenerator.dev/not-a-real-doc-page-20261005/",
+      "chain": []
+    }
+  ]
+}

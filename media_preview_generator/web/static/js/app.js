@@ -1793,7 +1793,8 @@ function _renderJobFileIssues(outcome) {
         if (!n || n <= 0) return '';
         const meta = _statusMeta(k);
         const tip = meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '';
-        return `<span class="badge ${meta.cls}"${tip}>${escapeHtmlText(meta.label)} × ${n.toLocaleString()}</span>`;
+        const tone = meta.cls.includes('danger') ? 'job-result-error' : meta.cls.includes('warning') ? 'job-result-warning' : 'job-result-muted';
+        return `<span class="job-result-item ${tone}"${tip}><span>${escapeHtmlText(meta.label)}</span> <strong>× ${n.toLocaleString()}</strong></span>`;
     }).filter(Boolean).join(' ');
 }
 
@@ -1890,7 +1891,7 @@ function _renderPublishersBlock(job) {
     if (!rows.length && !fileIssues && !sourcesBlock && !cpuLine) return '';
     const lines = rows.map(function (entry) {
         const stype = (entry.server_type || '').toLowerCase();
-        const logo = _vendorLogo(stype, 12) || '';
+        const logo = _vendorLogo(stype, 18) || '';
         const sname = entry.server_name || stype.toUpperCase() || 'Server';
         const counts = (entry && typeof entry.counts === 'object' && entry.counts) ? entry.counts : {};
         const fs = (entry && typeof entry.frame_sources === 'object' && entry.frame_sources) ? entry.frame_sources : null;
@@ -1973,55 +1974,21 @@ function _renderPublishersBlock(job) {
         const badges = badgeSpecs.map(function (b) {
             const tip = b.tip ? ` title="${escapeHtmlAttr(b.tip)}"` : '';
             const suffix = b.suffix ? ` · ${escapeHtmlText(b.suffix)}` : '';
-            return `<span class="badge ${b.cls}"${tip}>${escapeHtmlText(b.label)} × ${b.count}${suffix}</span>`;
+            const tone = b.cls.includes('danger') ? 'job-result-error' : b.cls.includes('warning') ? 'job-result-warning' : '';
+            return `<div class="job-result-item ${tone}"${tip}><span>${escapeHtmlText(b.label)}${suffix}</span> <strong>× ${b.count}</strong></div>`;
         }).join(' ');
-        // Stack server-name pill, an arrow separator, and the per-status
-        // badges with explicit gap-2 spacing so the visual hierarchy is
-        // unambiguous. Without this, "Plex" + "1 not indexed yet" run
-        // together visually and users misread it as "Plex1 not indexed yet"
-        // (and the SVG alt-text used to compound the confusion — see
-        // _vendorLogo for the alt="" aria-hidden fix).
-        return (
-            `<div class="mt-1 d-flex flex-wrap align-items-center gap-2">` +
-            `<span class="badge bg-light text-dark border">${logo}${escapeHtmlText(sname)}</span>` +
-            `<span class="text-muted small" aria-hidden="true">→</span>` +
-            badges +
-            `</div>`
-        );
+        return `<section class="job-server-results"><h4 class="job-detail-heading">${logo}${escapeHtmlText(sname)}</h4><div class="job-result-list">${badges}</div></section>`;
     }).filter(Boolean).join('');
-    if (!lines && !sourcesBlock && !cpuLine) return '';
-    // The verbose "Auto-retrying — Tiles are on disk… backs off 30s →
-    // 2m → 5m → 15m → 1h…" alert previously rendered here was
-    // redundant with (a) the per-server badge tooltip on "Generated
-    // (auto-retrying)" and (b) the inline countdown + retry-chain
-    // status row that the modal's Attempts block now renders directly
-    // below this section. Removed — the publisher row stays compact.
-    //
-    // Label: single word ``Servers`` either way. For chain heads the
-    // publishers object reflects the *latest aggregate* (post-final-
-    // attempt state), so we add a hover-tooltip explaining the scope
-    // when the modal targets a chain — quieter than a bold parenthetical
-    // count in the visible label. True per-attempt scoping requires
-    // per-attempt publisher persistence at the JobManager level — out
-    // of scope here.
+    if (!lines && !fileIssues && !sourcesBlock && !cpuLine) return '';
     const cfg = (job && job.config) || {};
-    const isChain = !!cfg.is_retry_chain;
-    let tipAttr = '';
-    if (isChain) {
-        const ra = cfg.retry_attempt || 0;
-        const totalRuns = ra + 1;
-        tipAttr = ' title="Aggregated across all ' + totalRuns + ' run'
-            + (totalRuns === 1 ? '' : 's') + ' of this chain"';
-    }
-    const header = lines ? `<strong class="me-2"${tipAttr}>Servers</strong>${lines}` : '';
-    // File-level issues laid out like a server row — a "Files" pill, arrow,
-    // then the same badge chips — so they read as part of the breakdown.
-    const noteLine = fileIssues
-        ? `<div class="mt-1 d-flex flex-wrap align-items-center gap-2">` +
-          `<span class="badge bg-light text-dark border"><i class="bi bi-exclamation-triangle me-1"></i>Files</span>` +
-          `<span class="text-muted small" aria-hidden="true">→</span>${fileIssues}</div>`
-        : '';
-    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}${cpuLine}${sourcesBlock}</div>`;
+    const totalRuns = (cfg.retry_attempt || 0) + 1;
+    const scope = cfg.is_retry_chain
+        ? `<p class="small text-muted mb-2">Counts include results recorded across all ${totalRuns} ${totalRuns === 1 ? 'run' : 'runs'} of this retry chain.</p>` : '';
+    const header = '<h3 class="job-detail-heading">Results recorded so far</h3>' + scope;
+    const servers = lines ? `<div class="job-server-grid">${lines}</div>` : '';
+    const issues = fileIssues
+        ? `<section class="job-file-issues"><h4 class="job-detail-heading">File issues</h4><div class="job-result-list">${fileIssues}</div></section>` : '';
+    return `<div class="job-results">${header}${servers}${issues}${cpuLine}${sourcesBlock}</div>`;
 }
 
 // Pick the retry-chain info-modal template matching the Job's server
@@ -2281,21 +2248,14 @@ function updateJobQueue(force) {
             webhookBasenames = job.config.webhook_paths.map(function (p) { return p.split('/').pop() || p; });
         }
         const hasMultiFile = webhookBasenames.length > 1;
-        // Phase H5: also show the toggle when publisher rows exist, so single-file
-        // jobs surface their per-server publish breakdown. An Intro & Credits job always lists its files.
-        const hasPublishers = Array.isArray(job.publishers) && job.publishers.length > 0;
-        const hasExpandableDetail = hasMultiFile || hasPublishers || ownRunner;
         const isFilesExpanded = expandedJobFileRows.has(String(job.id));
         const libraryTitle = webhookBasenames.length > 0
             ? ` title="${escapeHtml(webhookBasenames.join(', '))}"`
             : '';
-        const toggleTitle = hasMultiFile || ownRunner ? 'Show files' : 'Show publishers';
-        const filesToggleBtn = hasExpandableDetail
-            ? ` <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline" id="job-files-toggle-${escapeHtml(job.id)}"
-                        onclick="toggleJobFiles('${escapeHtml(job.id)}')" aria-expanded="${isFilesExpanded ? 'true' : 'false'}" aria-controls="job-detail-${escapeHtml(job.id)}" title="${toggleTitle}">
-                   <i class="bi ${isFilesExpanded ? 'bi-chevron-up' : 'bi-chevron-down'}"></i>
-                 </button>`
-            : '';
+        const filesToggleBtn = ` <button type="button" class="btn btn-sm btn-outline-secondary job-details-toggle" id="job-files-toggle-${escapeHtml(job.id)}"
+                        onclick="toggleJobFiles('${escapeHtml(job.id)}')" aria-expanded="${isFilesExpanded ? 'true' : 'false'}" aria-controls="job-detail-${escapeHtml(job.id)}" title="Job details">
+                   <span>Job details</span><i class="bi ${isFilesExpanded ? 'bi-chevron-up' : 'bi-chevron-down'}"></i>
+                 </button>`;
         const retryLabel = _renderRetryChip(job) || (isMarkers ? _renderMarkersRetryChip(job) : '');
         const priorityCell = renderPriorityCell(job);
         const scheduledAt = job.config && job.config.scheduled_at;
@@ -2377,28 +2337,35 @@ function updateJobQueue(force) {
                 </td>
             </tr>
         `;
-        if (hasExpandableDetail) {
-            const filesList = hasMultiFile
-                ? webhookBasenames.map(function (b) { return `<div class="text-muted">${escapeHtml(b)}</div>`; }).join('')
-                : '';
-            const overflow = hasMultiFile && job.config.path_count > webhookBasenames.length
-                ? `<div class="text-muted mt-1">(+${job.config.path_count - webhookBasenames.length} more)</div>`
-                : '';
-            let filesBlock = hasMultiFile
-                ? `<strong>Files:</strong><div class="mt-1">${filesList}${overflow}</div>`
-                : '';
-            if (ownRunner) filesBlock = _markersFilesBlock(job);
-            // Phase H5: per-server publisher block. Empty for legacy jobs.
-            const publishersBlock = _renderPublishersBlock(job);
-            html += `
-            <tr id="job-detail-${escapeHtml(job.id)}" class="${isFilesExpanded ? '' : 'd-none'} job-files-detail" aria-hidden="${isFilesExpanded ? 'false' : 'true'}">
-                <td colspan="7" class="bg-body-tertiary small py-2 ps-4">
-                    ${filesBlock}
+        const filesList = hasMultiFile
+            ? webhookBasenames.map(function (b) { return `<div class="text-muted">${escapeHtml(b)}</div>`; }).join('')
+            : '';
+        const overflow = hasMultiFile && job.config.path_count > webhookBasenames.length
+            ? `<div class="text-muted mt-1">(+${job.config.path_count - webhookBasenames.length} more)</div>`
+            : '';
+        let filesBlock = hasMultiFile
+            ? `<strong>Files:</strong><div class="mt-1">${filesList}${overflow}</div>`
+            : '';
+        if (ownRunner) filesBlock = _markersFilesBlock(job);
+        // Phase H5: per-server publisher block. Empty for legacy jobs.
+        const publishersBlock = _renderPublishersBlock(job) || '<p class="small text-muted mb-0">No results recorded yet.</p>';
+        const currentItem = job.progress && job.progress.current_item;
+        const activity = currentItem && job.status === 'running'
+            ? `<section class="job-current-activity"><h3 class="job-detail-heading">Current activity</h3><p class="mb-0">${escapeHtml(currentItem)}</p></section>` : '';
+        html += `
+        <tr id="job-detail-${escapeHtml(job.id)}" class="${isFilesExpanded ? '' : 'd-none'} job-files-detail" aria-hidden="${isFilesExpanded ? 'false' : 'true'}">
+            <td colspan="7" class="bg-body-tertiary job-expanded-cell">
+                <div class="job-expanded-content">
+                    ${activity}
                     ${publishersBlock}
-                </td>
-            </tr>
-            `;
-        }
+                    ${filesBlock ? `<section class="job-detail-files">${filesBlock}</section>` : ''}
+                    <div class="job-detail-actions">
+                        <button class="btn btn-sm btn-outline-secondary" onclick="showLogsModal('${escapeHtml(job.id)}')"><i class="bi bi-file-text me-1"></i>Open logs and files</button>
+                    </div>
+                </div>
+            </td>
+        </tr>
+        `;
     }
 
     _disposeBootstrapTooltips(tbody);
@@ -2574,8 +2541,8 @@ function updateActiveJobs(runningJobs, force) {
             webhookFilesHtml = `
                 <div class="mt-1 small">
                     <strong>Files:</strong> ${pathCount} file(s)
-                    <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline" onclick="toggleActiveJobFiles('${jid}')"
-                            aria-expanded="${isExpanded}" title="Show files">
+                    <button type="button" class="btn btn-sm btn-outline-secondary job-details-toggle" onclick="toggleActiveJobFiles('${jid}')"
+                            aria-expanded="${isExpanded}" title="Show files"><span>Show files</span>
                         <i class="bi ${isExpanded ? 'bi-chevron-up' : 'bi-chevron-down'}"></i>
                     </button>
                     <div id="${filesId}" class="${isExpanded ? '' : 'd-none'} mt-1 ms-3">${filesList}${overflow}</div>
@@ -2665,9 +2632,9 @@ function updateActiveJobs(runningJobs, force) {
             <div class="mb-2 small">
                 <strong>Job:</strong> ${libraryDisplay}${_serverBadge(job)}${webhookFilesHtml}
             </div>
-            <div id="activeJobPublishers-${jid}">${_renderPublishersBlock(job)}</div>
             ${startedLine ? `<div class="mb-2">${startedLine}</div>` : ''}
-            ${progressBlock}
+            <div class="job-current-activity"><h3 class="job-detail-heading">Current activity</h3>${progressBlock}</div>
+            <div id="activeJobPublishers-${jid}">${_renderPublishersBlock(job)}</div>
         </div>`;
     }
 

@@ -934,6 +934,69 @@ def validate_local_path():
     return jsonify({"exists": True, "readable": True, "error": None})
 
 
+@api.route("/setup/preview-file-path", methods=["POST"])
+@setup_or_auth_required
+def preview_file_path():
+    """Resolve one sample media path using draft mappings without opening or processing it."""
+    from ...config.paths import path_to_canonical_local
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Provide a file path and mapping rows."}), 400
+    raw = data.get("path")
+    rows = data.get("path_mappings", [])
+    if not isinstance(raw, str) or not raw.strip() or len(raw) > 4096 or "\x00" in raw:
+        return jsonify({"error": "Enter a valid absolute media file path."}), 400
+    if not isinstance(rows, list) or len(rows) > 100:
+        return jsonify({"error": "Path mappings must be a list of at most 100 rows."}), 400
+    mappings = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return jsonify({"error": "Each mapping must be an object."}), 400
+        remote = row.get("remote_prefix") or row.get("plex_prefix") or ""
+        local = row.get("local_prefix", "")
+        aliases = row.get("webhook_prefixes", [])
+        if not isinstance(aliases, list) or len(aliases) > 100:
+            return jsonify({"error": "Webhook prefixes must be a list."}), 400
+        values = [remote, local, *aliases]
+        if any(not isinstance(value, str) or len(value) > 4096 or "\x00" in value for value in values):
+            return jsonify({"error": "Mapping paths must be valid text."}), 400
+        if not remote and not local and not aliases:
+            continue
+        if not remote.strip() or not os.path.isabs(local):
+            return jsonify({"error": "Each mapping needs a server prefix and an absolute local folder."}), 400
+        if any(".." in value.replace("\\", "/").split("/") for value in values):
+            return jsonify({"error": "Use absolute paths without parent-directory segments."}), 400
+        mappings.append({"remote_prefix": remote.strip(), "local_prefix": local.strip(), "webhook_prefixes": aliases})
+    path = raw.strip().replace("\\", "/")
+    if not (path.startswith("/") or (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/")):
+        return jsonify({"error": "Enter an absolute path reported by your media server or webhook."}), 400
+    if ".." in path.split("/"):
+        return jsonify({"error": "Use a file path without parent-directory segments."}), 400
+    mapped = path_to_canonical_local(path, mappings)
+    if not os.path.isabs(mapped):
+        return jsonify({"error": "The resulting path must be absolute inside this container. Check the mapping."}), 400
+    resolved = _safe_resolve_within(mapped, MEDIA_ROOT)
+    if resolved is None:
+        return jsonify({"error": "The resulting path is outside the allowed media root."}), 400
+    try:
+        exists = os.path.exists(resolved)
+        is_file = os.path.isfile(resolved)
+        readable = is_file and os.access(resolved, os.R_OK)
+    except OSError:
+        return jsonify({"error": "This container could not check the resulting path."}), 400
+    return jsonify(
+        {
+            "input_path": path,
+            "local_path": mapped,
+            "mapping_applied": mapped != path,
+            "exists": exists,
+            "is_file": is_file,
+            "readable": readable,
+        }
+    )
+
+
 @api.route("/settings/validate-plex-config-folder", methods=["POST"])
 @setup_or_auth_required
 def validate_plex_config_folder():

@@ -39,7 +39,7 @@
                     <div class="logo-container">
                         <i class="bi bi-film"></i>
                         <h1>Media Preview Generator</h1>
-                        <p class="text-muted small mb-0">Sign in to continue</p>
+                        <p class="text-muted mb-0">Sign in to manage your media processing.</p>
                     </div>
 
                     {% if rate_limited %}
@@ -65,12 +65,13 @@
                         <div class="fw-semibold">
                             <i class="bi bi-exclamation-triangle me-2"></i>That token didn&rsquo;t work.
                         </div>
+                        <div class="small mt-1">Check the token in your config volume or the configured WEB_AUTH_TOKEN, then try again.</div>
                     </div>
                     {% endif %}
 
                     <div class="form-floating mb-3">
                         <input type="password" class="form-control" id="token" name="token"
-                               placeholder=" " required autofocus autocomplete="current-password">
+                               placeholder=" " required autofocus autocomplete="current-password" aria-describedby="loginTokenHelp"{% if error %} aria-invalid="true"{% endif %}>
                         <label for="token"><i class="bi bi-key me-2"></i>Authentication Token</label>
                     </div>
 
@@ -79,7 +80,7 @@
                     </button>
                 </form>
 
-                <div class="mt-4 text-start login-help">
+                <div class="mt-4 text-start login-help" id="loginTokenHelp">
                     <p class="text-muted small mb-2">
                         <i class="bi bi-question-circle me-1"></i><strong>How do I find my token?</strong>
                     </p>

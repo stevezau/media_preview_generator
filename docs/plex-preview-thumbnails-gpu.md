@@ -1,8 +1,7 @@
 ---
 title: Generate Plex preview thumbnails with a GPU
 heading: Generate Plex preview thumbnails with a GPU (NVIDIA, Intel, AMD)
-description: Plex has no documented GPU option for preview thumbnails. Run Media Preview Generator in Docker with an NVIDIA,
-  Intel or AMD GPU to make them.
+description: Generate Plex video preview thumbnails with NVIDIA, Intel or AMD in Docker. Check GPU passthrough, mounts, CPU fallback and the first result.
 ---
 
 Plex's built-in preview thumbnail generator documents no GPU option. Plex describes it as a CPU-intensive job. To make Plex's preview thumbnails on a GPU, run Media Preview Generator in Docker and pass the GPU through:
@@ -77,6 +76,17 @@ Then open `http://YOUR_IP:8080`, log in with the token saved in `auth.json` in y
 
 If many of your files always fall back, raise **CPU Workers** above 0. Those files then go straight to CPU workers instead of tying up a GPU worker first.
 
+## Verify one file before a full library
+
+Use **Manual Generation** to choose one movie or episode, or **Process a file or folder** on the
+Dashboard. Watch **Active work** and the worker cards, then open the job's **Job details** in
+**All jobs**. The server results distinguish generated or reused scrubber previews from chapter work.
+Open **Open logs and files** for the file's saved result or error, and scrub the same video in Plex to check
+the preview appears. A completed extraction is not the same as successful publication to every server.
+
+For a separate GPU machine, first check the shared-media and output mounts in
+[Offload preview generation](multi-server.md#offload-preview-generation-to-another-machine).
+
 ## Tuning
 
 - Start with one worker per GPU, then raise it while watching load. See [Performance Tuning](getting-started.md#performance-tuning).
@@ -87,7 +97,7 @@ If many of your files always fall back, raise **CPU Workers** above 0. Those fil
 ## Limits
 
 - Docker only, with a web UI and no CLI.
-- Plex must scan a new file before its BIF can be written. The app retries after 1, 2, 5, 15 and 60 minutes by default ([retry queue](multi-server.md#slow-backoff-retry-queue)).
+- File/folder jobs and path-based webhooks can generate previews before Plex scans a file, including while Plex is offline. Publication and Plex's ability to serve the result still depend on the file's server state; see [generation without waiting for Plex](multi-server.md#plex-generation-without-waiting-for-plex). Work that must wait for indexing uses the [retry queue](multi-server.md#slow-backoff-retry-queue).
 - GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](guides.md#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**.
 
 ## Related

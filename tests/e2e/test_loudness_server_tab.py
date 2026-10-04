@@ -119,7 +119,7 @@ class TestLoudnessTab:
         server = _vendor_server("jellyfin", "jf-1")
         _mock_server_page(page, server, _status(server, "ready"))
         _open_tab(page, app_url, server, tab="general")
-        expect(page.locator("#editTabLoudnessLi")).to_be_hidden()
+        expect(page.locator("#edit-tab-loudness")).to_be_hidden()
 
     def test_music_library_is_not_selectable(self, authed_page: Page, app_url: str) -> None:
         server = _confirmed_plex({"enabled": True, "library_ids": ["1", "music"]})

@@ -20,7 +20,7 @@ Every docs page in one fetch: https://mediapreviewgenerator.dev/llms-full.txt
 
 **What sets it apart: each new file is decoded once, on the GPU if there is one, and every server that holds it gets its own native output in the place it reads from (a Plex BIF in Plex's data folder, an Emby BIF next to the video, Jellyfin trickplay tiles).** The comparison page says when the built-ins are the better choice: https://mediapreviewgenerator.dev/comparison/
 
-Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. It does not make chapter images or transcode for playback.
+Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. Optional Plex chapter thumbnails and Plex loudness analysis use CPU and currently support Plex 1.43.4.x. The app does not transcode for playback.
 
 ## How it works
 
@@ -38,6 +38,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - HDR10, HLG and HDR10+ are tone-mapped; Dolby Vision 7 and 8 use their HDR10 layer; Dolby Vision 5 needs a hardware Vulkan driver in the container.
 - Frame interval 1-60 s (default 10; Plex's own default is 2); thumbnail quality 1-10 (default 4; lower = sharper).
 - Intro & Credits: finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
+- Remote processing: previews can run on another machine with access to shared media and the required writable output mounts. The Plex helper supports marker and chapter operations beside Plex. Loudness instead requires this app on the same machine as Plex with a local database; helper and network-mounted databases are unsupported.
 
 # Full documentation
 
@@ -906,7 +907,7 @@ Source: https://mediapreviewgenerator.dev/how-to/
 
 Short guides for slow Plex previews, GPU thumbnails for Plex and Emby, faster Jellyfin trickplay, Sonarr and Radarr, HDR, and skip buttons.
 
-Each guide starts from one problem people search for, then shows the setting or the container change that fixes it.
+Choose the task you need to complete. Each guide explains the relevant settings, requirements and how to check the result.
 
 - [Why Plex video preview thumbnails take so long](https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/)
 - [Generate Plex preview thumbnails with a GPU](https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/)
@@ -915,6 +916,7 @@ Each guide starts from one problem people search for, then shows the setting or 
 - [Previews as soon as Sonarr or Radarr imports a file](https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/)
 - [HDR and Dolby Vision preview thumbnails](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/)
 - [Skip Intro and Skip Credits for Plex, Emby and Jellyfin](https://mediapreviewgenerator.dev/skip-intro-credits/)
+- [Offload preview generation to another machine](https://mediapreviewgenerator.dev/multi-server/#offload-preview-generation-to-another-machine)
 
 ---
 
@@ -980,7 +982,7 @@ Once it is running, set Plex's **Settings → Library → Generate video preview
 # Generate Plex preview thumbnails with a GPU
 Source: https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/
 
-Plex has no documented GPU option for preview thumbnails. Run Media Preview Generator in Docker with an NVIDIA, Intel or AMD GPU to make them.
+Generate Plex video preview thumbnails with NVIDIA, Intel or AMD in Docker. Check GPU passthrough, mounts, CPU fallback and the first result.
 
 Plex's built-in preview thumbnail generator documents no GPU option. Plex describes it as a CPU-intensive job. To make Plex's preview thumbnails on a GPU, run Media Preview Generator in Docker and pass the GPU through:
 
@@ -1054,6 +1056,17 @@ Then open `http://YOUR_IP:8080`, log in with the token saved in `auth.json` in y
 
 If many of your files always fall back, raise **CPU Workers** above 0. Those files then go straight to CPU workers instead of tying up a GPU worker first.
 
+## Verify one file before a full library
+
+Use **Manual Generation** to choose one movie or episode, or **Process a file or folder** on the
+Dashboard. Watch **Active work** and the worker cards, then open the job's **Job details** in
+**All jobs**. The server results distinguish generated or reused scrubber previews from chapter work.
+Open **Open logs and files** for the file's saved result or error, and scrub the same video in Plex to check
+the preview appears. A completed extraction is not the same as successful publication to every server.
+
+For a separate GPU machine, first check the shared-media and output mounts in
+[Offload preview generation](https://mediapreviewgenerator.dev/multi-server/#offload-preview-generation-to-another-machine).
+
 ## Tuning
 
 - Start with one worker per GPU, then raise it while watching load. See [Performance Tuning](https://mediapreviewgenerator.dev/getting-started/#performance-tuning).
@@ -1064,7 +1077,7 @@ If many of your files always fall back, raise **CPU Workers** above 0. Those fil
 ## Limits
 
 - Docker only, with a web UI and no CLI.
-- Plex must scan a new file before its BIF can be written. The app retries after 1, 2, 5, 15 and 60 minutes by default ([retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue)).
+- File/folder jobs and path-based webhooks can generate previews before Plex scans a file, including while Plex is offline. Publication and Plex's ability to serve the result still depend on the file's server state; see [generation without waiting for Plex](https://mediapreviewgenerator.dev/multi-server/#plex-generation-without-waiting-for-plex). Work that must wait for indexing uses the [retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
 - GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**.
 
 ## Related
@@ -1143,7 +1156,7 @@ What that needs:
 > [!WARNING]
 > Don't turn trickplay extraction off on a library. When `EnableTrickplayImageExtraction` is off, Jellyfin deletes the `.trickplay` folders on its next refresh, including ones this app wrote. The app asks you to type a confirmation before it will flip that setting.
 
-The **Setup Health** tab (Servers → edit the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/).
+The **Setup Health** tab (Servers → Configure for the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/).
 
 ## When you need the Media Preview Bridge plugin
 
@@ -1159,6 +1172,18 @@ Install it with one click from the Servers page. Or add this repository in Jelly
 ```text
 https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
+
+## Verify one file before a full library
+
+After [installing the container](https://mediapreviewgenerator.dev/getting-started/), open **Servers → Configure → Setup Health**
+for Jellyfin. Fix the checks for the output mode you chose, then use **Manual Generation** to process
+one movie or episode. In **All jobs → Job details**, check Jellyfin's result; **Open logs and files**
+shows the per-file reason if it is waiting or failed. Finally, scrub the video in Jellyfin's player.
+
+If the tiles exist but the player does not show them, check plugin status, library scan timing and
+tile geometry before regenerating the whole library. These affect adoption of existing tiles;
+changing worker counts will not fix them. For remote processing, follow the
+[shared-media and output-mount checklist](https://mediapreviewgenerator.dev/multi-server/#offload-preview-generation-to-another-machine).
 
 ## Triggering from Jellyfin
 
@@ -1397,7 +1422,7 @@ Dolby Vision Profile 5 is the slowest format to process. How long it takes depen
 # Skip Intro and Skip Credits detection for Plex, Emby and Jellyfin
 Source: https://mediapreviewgenerator.dev/skip-intro-credits/
 
-Detects intros and end credits once per file and adds Skip Intro and Skip Credits to Plex, and to Jellyfin and Emby through its own plugin.
+Set up Skip Intro and Skip Credits for Plex, Jellyfin and Emby. Check subscriptions, helper or plugin requirements, then inspect one file.
 
 Media Preview Generator detects where each file's intro and end credits are and sends those points to Plex, Emby and Jellyfin, so viewers get a skip button. It detects each file once and sends the same answer to every server that has the file. On Jellyfin and Emby it works through its own plugin. It runs in the same Docker container that makes your preview thumbnails, and it stays off until you turn it on for a server.
 
@@ -1408,6 +1433,17 @@ Media Preview Generator detects where each file's intro and end credits are and 
 - **Emby 4.9 or 4.10.** Skip Intro, and Skip Credits through Emby's Up Next prompt. It works through this app's [Media Preview Bridge for Emby plugin](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin). Skip Intro also needs Emby Premiere, which is Emby's rule; the credits prompt works without it. Emby has no credits end, so skipping credits goes to the end of the file, past any scene after the credits.
 
 Plex and Emby can have markers of their own. With **Use ours**, the default, the app's markers replace them. **Keep Plex's** or **Keep Emby's** leaves them alone. For what each server offers by itself, see the [comparison](https://mediapreviewgenerator.dev/comparison/).
+
+## Set up and check the first result
+
+1. [Install Media Preview Generator](https://mediapreviewgenerator.dev/getting-started/) and connect your server. In **Servers → Configure → Processing → Intro & Credits**, enable **Send intro & credits markers to this server**. Complete that server's database-write confirmation or plugin setup before starting work.
+2. Choose the libraries in the same server's **Libraries** section. The **Intro & Credits** and **Previews** selections are independent. Use **Setup Health** to check the server's requirements.
+3. Review detection sources under **Settings → Intro & Credits**, then start an Intro & Credits job for the libraries you chose. [The full guide](https://mediapreviewgenerator.dev/guides/#intro--credits) explains source choices and publishing rules.
+4. Open **Tools → Intro & Credits** and inspect a known episode or movie. Compare the detected positions with the video and each server's published result. Adjust or lock a marker when needed; an uncertain result may intentionally have no skip button.
+
+To process away from Plex, the [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent)
+must run beside Plex. This is different from [Plex loudness](https://mediapreviewgenerator.dev/plex-loudness-normalization/), which
+requires a local database and does not support the helper or network-mounted databases.
 
 ## How it detects intros and credits
 
@@ -1466,7 +1502,7 @@ unlock the playback feature. See Plex's [Audio Track Enhancements for Video](htt
 
 1. Run this app on the same machine as Plex and mount Plex's config folder locally. Plex must be running. This release
    supports Plex **1.43.4.x** and does not support loudness through the Plex helper or a network-mounted database.
-2. On the server's **Loudness** tab, switch on **Analyse loudness for this server**.
+2. On the server's **Processing → Loudness** section, switch on **Analyse loudness for this server**.
 3. On the **Libraries** tab, choose movie and TV libraries in the **Loudness** column. Both start on; music and other
    non-video libraries cannot be selected.
 
@@ -1618,12 +1654,20 @@ When you first access the web interface, you'll be guided through a **Setup Wiza
    - **Plex** — sign in via Plex OAuth (no manual token copying), or paste a URL + token if you prefer.
    - **Emby** — enter the server URL and an API key.
    - **Jellyfin** — enter the URL and run a **Quick Connect** ceremony (or paste an API key).
-2. **Server & Libraries** *(Plex only)* — pick which Plex server (if you have several) and which libraries to enable. Emby/Jellyfin flows skip this step; libraries are managed later from **Settings → Media Servers**.
-3. **Path Configuration** *(Plex only)* — confirm the Plex application data folder where BIF files are written, plus any media path mappings. Emby and Jellyfin write their previews next to each video (so the media must be mounted read-write for them), and only nudge the server over HTTP, so this step is skipped for those flows.
+2. **Server & libraries** — finish the selected server's connection. Plex includes server and library selection; Emby/Jellyfin manage libraries later from **Servers → Configure → Libraries**.
+3. **Paths** — confirm the server's output location and media path mappings. Plex needs a writable data folder for BIFs; Emby and Jellyfin's default layout need writable media. Jellyfin off-media output has its own config-mount and plugin requirements.
 4. **Processing Options** — per-GPU enable/workers/FFmpeg threads, CPU workers, thumbnail interval, and quality.
 5. **Security** — view or replace your access token (optional).
 
-After setup completes, you'll land on the dashboard. You can add additional servers (any vendor, any number) at any time from **Settings → Media Servers** without re-running the wizard.
+After setup completes, you'll land on the dashboard. You can add additional servers (any vendor, any number) at any time from **Servers → Add Server** without re-running the wizard.
+
+Reopening incomplete setup resumes the saved step and server. Saved path choices return; unsaved field edits do
+not. The app restores this context from its setup state rather than storing access tokens in browser storage.
+
+In **Paths → Check a real file**, paste a **File path on the server or webhook** and choose **Check file**.
+The check applies the mappings currently in the form and reports the resulting container path and whether it
+is a readable file, missing, a folder or unreadable. It does not start a job, read file contents or establish
+which server library owns the file. Use **Setup Health** and a one-file job to verify the complete output path.
 
 ### Accessing the Dashboard
 
@@ -1695,7 +1739,7 @@ or finish out of order.
 
 The same filters are available on scheduled **Full library scans**. A "last
 30 days" schedule moves its window forward on every run; a date range stays
-fixed. Webhooks, **Recently Added** scanners, and **Manual Trigger** selections
+fixed. Webhooks, **Recently Added** scanners, and **Process a file or folder** selections
 continue to use their own selection rules.
 
 ### Letting new imports jump the queue
@@ -1729,7 +1773,7 @@ you pin to High by hand can still overtake a running scan.
 
 **Manual Generation:**
 
-The **Manual Trigger** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
+The **Process a file or folder** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
 
 - **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to generate previews for every episode in it; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
 - **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.
@@ -1737,11 +1781,20 @@ The **Manual Trigger** button generates previews for specific media on demand �
 
 Each pick becomes a removable chip; **Start Job** processes them all. The **Publish to which server?** dropdown scopes both the search and where previews are published — leave it on *All servers* to publish to whoever owns each file, or pick one server to limit both.
 
+**Job details:**
+
+**All jobs** keeps queued, running and finished work in one list. **Job details** expands a job in place.
+**Results recorded so far** groups outcomes by server, with file issues, detection sources and CPU fallback
+information when available. A pending or retried job may already have saved results; these counts are not a
+claim that the current queue entry has finished. **Current activity** shows the current item when the job
+provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
+The full worker grid remains above the list, including idle workers.
+
 **Pause / Resume (global):**
 
 - **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
 - **Resume Processing** — Clears the global pause; new jobs can start and the current job resumes dispatching.
-- Controls appear in the **Current Job** header and to the left of **Clear Jobs** in the Job Queue. State is persisted and survives restarts.
+- One global control appears beside **Clear Jobs** in **All jobs**. State is persisted and survives restarts.
 - An **Intro & Credits** job also has its own **Pause** button on its row: files already in progress finish, the job
   hands its slot back so other jobs can run, and it waits until you click its **Resume**. **Pause Processing**, quiet
   hours and a schedule's stop time hold it too, and stop its files in progress where they are, as they do previews.
@@ -1758,6 +1811,21 @@ The Dashboard shows a compact "Schedules" teaser with the next upcoming run and 
 
 > **Legacy URL note:** `/schedules` and `/webhooks` still work — they 302-redirect to `/automation#schedules` and `/automation#webhooks` respectively, so existing bookmarks and shared links keep working.
 
+### Logs and webhook activity
+
+Open **Tools → Logs** to follow application output. **View** switches between **Structured** rows and
+**Raw** text; the **Source** filter narrows the loaded records and **Wrap lines** controls long messages.
+**Group by source** is optional and keeps records chronological within each source group.
+**Copy** and **Download** keep the timestamp, level, module, function, line and message for the visible
+loaded records. They do not export older records that have not been loaded. Live/follow status tells you
+whether new entries are arriving and whether the view follows them; log text alone is not a diagnosis.
+
+Open **Tools → Webhook Activity** to inspect recent incoming deliveries. Filter by **Title or file**,
+**Source**, **Outcome** or **Server**. Filters apply to the received in-memory history before pagination;
+they are not a durable archive. **Reset filters** restores the full received list and **Refresh** fetches
+the current history. A no-match message means the filters excluded the available deliveries; a load error
+means history could not be fetched. Neither proves that no webhook was sent.
+
 ### Settings Page
 
 Access settings at `/settings` to manage:
@@ -1769,7 +1837,7 @@ Access settings at `/settings` to manage:
 
 > For per-server settings audits (Plex FSEvent flags, Jellyfin trickplay flags,
 > Media Preview Bridge plugin presence, Plex config folder writability, path
-> mappings), open **Servers → Edit → Setup Health**. Full per-check reference:
+> mappings), open **Servers → Configure → Setup Health**. Full per-check reference:
 > [Setup Health guide](https://mediapreviewgenerator.dev/guides/previews-readiness/).
 
 The Settings page and the Automation page's **Triggers** tab **save automatically as you edit** — there's no Save button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
@@ -1782,7 +1850,7 @@ with one media version and one part per item. Multiple versions and multipart it
 Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
 without that base layer, such as Profile 5, reports unsupported chapters while preserving the scrubber result.
 
-1. Open **Servers → your Plex → Edit → General**, enable **Generate chapter thumbnails**, and save. It is off by
+1. Open **Servers → your Plex → Configure → Processing → Chapter thumbnails**, enable **Generate chapter thumbnails**, and save. It is off by
    default. Enabling it lets this app write chapter images and update their references in Plex's database; it does
    not change your videos, create chapters, or change chapter times.
 2. Open **Setup Health**. The app needs a supported, positively identified Plex database on the same machine, or a
@@ -2333,7 +2401,7 @@ wrong one isn't, so a marker only ships when the evidence clears the bar below.
 ### Turning it on
 
 Detection settings are shared by every server: **Settings → Intro & Credits**. What each server actually *receives*
-is controlled per server: **Servers → (server) → Edit → Intro & Credits tab → "Send intro & credits markers to this
+is controlled per server: **Servers → (server) → Configure → Processing → Intro & Credits → "Send intro & credits markers to this
 server"**. A server is off by default even after you turn the shared settings on.
 
 Once the switch is on, the same server's **Libraries** tab gets an **Intro & Credits** column beside **Previews**:
@@ -2647,7 +2715,7 @@ first time you turn it on for a Plex server:
   run asks again.
 - **Don't turn off a library's own *Intro markers* / *Credits markers* setting** (Edit library → Advanced). While
   it is off, Plex hides every skip marker of that type in the library, ours included, so nobody sees a skip button
-  there. **Servers → Edit → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
+  there. **Servers → Configure → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
   Plex detecting on its own, set its server-wide *Generate intro video markers* / *Generate credits video markers*
   (Settings → Library) to **Never** instead: Setup Health offers **Set server-wide to Never** for that. With **Keep
   Plex's** it doesn't suggest it. See [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits).
@@ -2674,7 +2742,7 @@ don't run it.
 
 1. Run the agent as its [README](https://github.com/stevezau/media_preview_generator/blob/dev/plex-marker-agent/README.md) says: the compose file, the settings (`AGENT_TOKEN`,
    `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
-2. In the app: **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**. Switch it on, enter its **Address**
+2. In the app: **Servers → your Plex → Configure → Connection → Plex helper**. Switch it on, enter its **Address**
    (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
    once saved. The one-time database-write confirmation applies when enabling Intro & Credits. Chapter thumbnails
    have their own opt-in under General and can use this connection while Intro & Credits is off.
@@ -2987,7 +3055,7 @@ or the `/etc/localtime` you mounted), the same clock as the app's own log.
 
 ### Troubleshooting Intro & Credits
 
-Each server's Edit → Intro & Credits tab checks whether that server can actually receive markers right now. This
+Each server's Configure → Processing → Intro & Credits section checks whether that server can actually receive markers right now. This
 table covers every state the check can report, using its exact wording:
 
 | What you see | Why | What to do |
@@ -3040,7 +3108,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
 | **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
 | **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |
-| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was switched off for Intro & Credits, or removed from the server, while the job ran | Switch it back on in Edit → Libraries → Intro & Credits column |
+| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was switched off for Intro & Credits, or removed from the server, while the job ran | Switch it back on in Configure → Libraries → Intro & Credits column |
 | **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
 | **Up to date**: "Keeping Emby's intro" (or credits; also added to other rows, e.g. "1 marker(s); keeping Emby's intro") | This Emby server is set to **Keep Emby's**, and Emby shows its own markers of that type | Switch it to **Use ours** if you want ours |
 | **Written**: "… Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins." (Emby says the same about Emby's) | You adjusted or locked that marker in the Inspector, so it was written over the server's own although the server is set to keep its own | Nothing; unlock the marker if you want the server's own back |
@@ -3643,7 +3711,7 @@ publishing fails silently.
 ## Intro & Credits
 
 These rows appear only for a server that has **Send intro & credits markers to this server** switched on (Servers →
-Edit → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
+Configure → Processing → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
 good", and nothing about markers is checked or contacted. The rows are read from the same check the Intro & Credits
 tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
 another machine says nothing about Plex Pass until that is fixed.
@@ -3668,7 +3736,7 @@ other row says what to change and where.
   own disks.
 - **The Plex marker agent** (critical), shown only when an agent is switched on for this server. **…is connected**,
   or one of: **isn't answering** (markers wait, nothing is lost), **refused this app's key** (set the same shared key
-  on both sides), **and this app are different versions** (the Intro & Credits tab says which to update), **is
+  on both sides), **and this app are different versions** (the Processing → Intro & Credits section says which to update), **is
   beside a different Plex** (check the address: markers would have gone into the wrong database). While it is red,
   no marker reaches this server, and its badge reads **Fix on the agent** instead of **Change in Plex UI**.
 - **TV Shows — skip buttons are hidden** (critical, one row per library, named after it) / **Plex shows skip buttons
@@ -3697,7 +3765,7 @@ other row says what to change and where.
 - **Media Preview Bridge plugin** (Jellyfin) and **Media Preview Bridge for Emby plugin** (Emby), critical. Neither
   server has an API for markers, so the plugin is the only way they reach it. Previews are not affected. The row
   offers **Install** where the app can do it; on an Emby whose plugin catalogue doesn't list the plugin (or whose
-  catalogue couldn't be read) it says to install it by hand and the Intro & Credits tab links the guide. Emby and
+  catalogue couldn't be read) it says to install it by hand and the Processing → Intro & Credits section links the guide. Emby and
   Jellyfin restart once.
 - **The plugin is too old for intro and credits markers** (recommended). The installed build works for previews but
   doesn't answer the markers feature, so markers wait. Update the plugin; nothing already published is lost.
@@ -3728,17 +3796,41 @@ other row says what to change and where.
 
 ---
 
-# Preview thumbnails for Plex, Emby and Jellyfin from one instance
+# Offload previews for Plex, Emby and Jellyfin to one GPU container
 Source: https://mediapreviewgenerator.dev/multi-server/
 
-Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook routing, retries and the Jellyfin plugin.
-
-> [Back to Docs](https://mediapreviewgenerator.dev/)
+Offload preview generation to another machine and reuse one decode across Plex, Emby and Jellyfin. Check media mounts, output paths and server results.
 
 The tool can drive any number of **Plex**, **Emby**, and **Jellyfin** servers
 from a single instance. A new file is processed exactly once (one FFmpeg pass
 on the GPU) and the resulting frames are published to **every** configured
 server that owns it, in the format that server expects.
+
+## Connect and check your servers
+
+1. [Install the container](https://mediapreviewgenerator.dev/getting-started/) where you want the processing to run. Its media paths and output mounts must reach the same files your servers use.
+2. Open **Servers → Add Server**, choose Plex, Emby or Jellyfin, and complete the connection flow. Repeat for each server. The **Connection** section holds authentication and Plex helper settings.
+3. Open **Configure → Libraries** to select preview output for each server. Use **Processing** for that server's chapter thumbnails, Intro & Credits and, on a supported local Plex server, loudness.
+4. Check **Path mappings** when the server and container use different paths. Run **Setup Health** for each server and resolve the relevant output and library checks.
+5. Process one shared movie or episode with **Manual Generation**. Expand **All jobs → Job details** to check results for each server, then inspect the output in its player. **Open logs and files** preserves the per-file result when one server is waiting or failed.
+
+Connection, library choice and output health are separate checks: a reachable server may still need
+a writable output mount or a plugin before it can use the result.
+
+## Offload preview generation to another machine
+
+The container can run on a separate GPU machine while Plex, Emby or Jellyfin stays on the media
+server. Both machines must reach the same source files, and the container needs network access to
+each server's API. Map the server's media paths to the paths inside this container.
+
+- **Plex previews:** mount Plex's data folder read-write for BIF output. The media mount may be read-only. Follow [the Plex mount checks](https://mediapreviewgenerator.dev/guides/previews-readiness/#plex-config-folder).
+- **Emby previews:** the container needs write access beside each video for the BIF sidecar.
+- **Jellyfin trickplay:** the default writes beside the video. [Off-media mode](https://mediapreviewgenerator.dev/guides/previews-readiness/#jellyfin-config-folder) needs a writable Jellyfin config mount and the Media Preview Bridge plugin; the media may then stay read-only.
+- **Plex markers and chapter thumbnails:** the relevant [Plex helper setup](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) supports operations that must happen beside Plex. Check each feature's requirements before enabling it.
+- **Plex loudness:** this is a same-machine exception. It requires local Plex 1.43.4.x database access; helper and network-mounted database configurations are unsupported. See [Plex loudness requirements](https://mediapreviewgenerator.dev/plex-loudness-normalization/).
+
+Start with one file and watch both the worker's activity and each server's saved result. A network
+share, slow disk or server indexing delay can be the limit even when the GPU has spare capacity.
 
 ![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](https://mediapreviewgenerator.dev/images/tour-resolve.webp)
 
@@ -3746,9 +3838,9 @@ server that owns it, in the format that server expects.
 > The universal webhook URL is configured on the **Automation** page
 > (top nav, between Servers and Settings) under **Webhooks** — not on the
 > Servers page. The per-server Plex Direct webhook lives under
-> **Servers → edit your Plex server → Webhook & Scanner**.
+> **Servers → Configure → Webhook & Scanner** for the Plex server.
 
-This page covers:
+Output details and advanced integration:
 
 - [Why this exists](https://mediapreviewgenerator.dev/multi-server/#why-this-exists)
 - [How a webhook fires through the system](https://mediapreviewgenerator.dev/multi-server/#how-a-webhook-fires-through-the-system)
@@ -3828,7 +3920,8 @@ Failures on one server don't take down the others — if Jellyfin's write fails 
 
 ## Adding a server
 
-Three vendors, three slightly different UX paths. All three terminate at
+Use the [connection steps above](https://mediapreviewgenerator.dev/multi-server/#connect-and-check-your-servers) for the web UI.
+The API examples below are for scripted integrations. All three terminate at
 `POST /api/servers` with an auth token already in hand.
 
 ### Plex
@@ -4290,7 +4383,7 @@ Per-vendor notes:
 
 Plex's optional `media_servers[].output.chapter_thumbnails` setting is a JSON boolean, default `false`.
 The API rejects strings such as `"false"` and numeric values. The **Generate chapter thumbnails** switch in
-**Servers → Edit → General** controls it. It adds chapter images to existing Previews jobs and updates existing
+**Servers → Configure → Processing → Chapter thumbnails** controls it. It adds chapter images to existing Previews jobs and updates existing
 chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
 Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
 See the [chapter thumbnail guide](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for setup and retry behavior.
@@ -4374,7 +4467,7 @@ latest seasons, even though excluded files are not queued for generation.
 Changing library selection in the UI clears filters for media types no longer
 selected. **Clear** restores unrestricted selection.
 
-These options apply only to full-library jobs. **Manual Trigger** file/folder
+These options apply only to full-library jobs. **Process a file or folder** file/folder
 jobs, webhooks, **Recently Added** scanner schedules, and **Intro & Credits**
 jobs and schedules retain their existing selection behavior. Relative windows on scheduled full scans are recalculated
 for each execution; a saved date range stays fixed.
@@ -4584,7 +4677,7 @@ every server a batch takes nothing.
 
 ### Per-server settings (`media_servers[].markers`)
 
-Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Edit → Intro &
+Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Configure → Processing → Intro &
 Credits tab**; `library_ids` from the **Libraries tab's Intro & Credits column** (shown while `enabled` is on), which
 is separate from the Previews column's `libraries[].enabled`.
 
@@ -4608,10 +4701,10 @@ An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of
 | `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
 | `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
 | `emby` | object | *(Emby servers only)* | Absent on Plex/Jellyfin entries. |
-| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
+| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Configure → Processing → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
-| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
-| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Edit → Intro & Credits → Plex marker agent: a [Plex marker agent](https://mediapreviewgenerator.dev/reference/#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Configure → Processing → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
+| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Configure → Connection → Plex helper: a [Plex marker agent](https://mediapreviewgenerator.dev/reference/#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
 | `plex.agent.enabled` | bool | `false` | `true` needs `url` and `token` set (400 otherwise: "Set the Plex marker agent's address and shared key before turning it on"). The database-write confirmation (`plex.db_write_confirmed_at`) still applies. |
 | `plex.agent.url` | string | `""` | `http` or `https` address, e.g. `http://plex-host.lan:9494`. A trailing `/` is dropped. 400 for a query string, fragment, or a username/password in it. |
 | `plex.agent.token` | string | `""` | The key both sides share (the agent's `AGENT_TOKEN`). Printable ASCII, no spaces. `GET`/`POST` return a set key as `****`; posting `****` (or leaving `token` out) keeps the stored key. Never logged. |
@@ -5094,7 +5187,7 @@ Without mapping, the app can't find the files and jobs report them as not found.
 
 ### Configuration (Web UI)
 
-Open **Servers → Edit** on the server that needs mapping, and add rows in the
+Open **Servers → Configure** on the server that needs mapping, and add rows in the
 Path Mappings section. Each row has:
 
 - **Path on server** — The folder path the media server reports for the file
@@ -5251,6 +5344,34 @@ Save setup wizard progress.
   }
 }
 ```
+
+#### POST /api/setup/preview-file-path
+
+Check one real file against draft path mappings, without saving the mappings, opening file contents,
+contacting a media server or starting work. Available during initial setup; authentication is required
+after setup completes. The normal setup request/CSRF protections apply.
+
+**Request:**
+
+```json
+{
+  "path": "/server/media/Movies/Example.mkv",
+  "path_mappings": [
+    {"remote_prefix": "/server/media", "local_prefix": "/media", "webhook_prefixes": []}
+  ]
+}
+```
+
+`path_mappings` is optional and defaults to an empty list. `plex_prefix` is accepted as the legacy name
+for `remote_prefix`. Absolute Windows drive and UNC source paths can be mapped to container paths.
+The resolved path must stay within the configured `MEDIA_ROOT`, including symlink resolution.
+
+**Response:** HTTP 200 with `input_path`, `local_path`, `mapping_applied`, `exists`, `is_file` and
+`readable`. A missing file or directory is a valid check result, not an HTTP error. `readable` reports
+the container's read-access check; it does not validate video contents, exclusions or library ownership.
+HTTP 400 with `error` rejects invalid paths/mappings or paths outside the permitted root. Paths are
+limited to 4,096 characters, with at most 100 mapping rows and 100 webhook aliases per row. Parent-directory
+segments and NUL characters are rejected; the normal 1 MiB request-body limit applies.
 
 #### POST /api/setup/complete
 
@@ -6042,6 +6163,7 @@ unless noted.
 | POST | `/api/settings/backups/restore` | Restore a prior settings.json snapshot |
 | POST | `/api/setup/skip` | Skip the setup wizard (advanced — saves `setup_complete=true` with minimal state) |
 | POST | `/api/setup/validate-paths` | Pre-flight wizard path fields in bulk |
+| POST | `/api/setup/preview-file-path` | Resolve one real file against draft mappings and report container file/read-access status; does not save or start processing |
 
 ### Servers (beyond the basics in [Multi-Media-Server Endpoints](https://mediapreviewgenerator.dev/reference/#multi-media-server-endpoints))
 

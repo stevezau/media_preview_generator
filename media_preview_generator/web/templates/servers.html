@@ -2,12 +2,16 @@
 
 {% block title %}Servers · Media Preview Generator{% endblock %}
 
+{% block head %}
+<link href="{{ url_for('static', filename='css/processing_jobs.css') }}" rel="stylesheet">
+{% endblock %}
+
 {% block content %}
 <div class="container py-4">
     <header class="page-header">
         <div>
             <h1 class="page-title"><i class="bi bi-hdd-stack me-2"></i>Media Servers</h1>
-            <p class="page-subtitle mb-0">Plex, Emby, and Jellyfin servers this app publishes previews to.</p>
+            <p class="page-subtitle mb-0">Plex, Emby, and Jellyfin servers this app prepares previews and media analysis for.</p>
         </div>
         <div class="page-actions">
             <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addServerModal">
@@ -55,10 +59,9 @@
                 <div class="server-edit-mobile-nav">
                     <label class="form-label" for="editServerSectionSelect">Edit section</label>
                     <select class="form-select" id="editServerSectionSelect">
-                        <option value="edit-tab-general">General</option>
+                        <option value="edit-tab-general">Connection</option>
                         <option value="edit-tab-health">Setup Health</option>
-                        <option value="edit-tab-markers">Intro &amp; Credits</option>
-                        <option value="edit-tab-loudness">Loudness</option>
+                        <option value="edit-tab-processing">Processing</option>
                         <option value="edit-tab-libraries">Libraries</option>
                         <option value="edit-tab-paths">Path mappings</option>
                         <option value="edit-tab-excludes">Exclude paths</option>
@@ -69,7 +72,7 @@
                 <ul class="nav nav-tabs mb-3" role="tablist">
                     <li class="nav-item">
                         <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#edit-tab-general" type="button">
-                            <i class="bi bi-sliders me-1"></i>General
+                            <i class="bi bi-plug me-1"></i>Connection
                         </button>
                     </li>
                     <li class="nav-item">
@@ -82,14 +85,9 @@
                             <span class="ms-1 d-none" id="editHealthTabMarker" aria-hidden="true"></span>
                         </button>
                     </li>
-                    <li class="nav-item" id="editTabMarkersLi">
-                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-markers" type="button">
-                            <i class="bi bi-skip-forward me-1"></i>Intro &amp; Credits
-                        </button>
-                    </li>
-                    <li class="nav-item d-none" id="editTabLoudnessLi">
-                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-loudness" type="button">
-                            <i class="bi bi-volume-up me-1"></i>Loudness
+                    <li class="nav-item">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-processing" type="button">
+                            <i class="bi bi-gear me-1"></i>Processing
                         </button>
                     </li>
                     <li class="nav-item">
@@ -179,15 +177,7 @@
                                 <div class="valid-feedback small">Path exists</div>
                             </div>
                             <div class="form-text">Where this Plex server's preview bundles will be written. Mirrors the <a href="{{ url_for('main.setup_wizard') }}">Setup wizard</a> &rarr; Step 3 field.</div>
-                            <div class="form-check form-switch mt-3">
-                                <input class="form-check-input" type="checkbox" role="switch" id="editPlexChapterThumbnails" aria-describedby="editPlexChapterThumbnailsHelp">
-                                <label class="form-check-label" for="editPlexChapterThumbnails">Generate chapter thumbnails</label>
-                            </div>
-                            <div class="form-text" id="editPlexChapterThumbnailsHelp">
-                                Adds pictures to Plex's chapter menu and updates Plex's database.
-                                Plex may still show older cached images.
-                                Check <a href="#" id="editPlexChapterHealthLink">Setup Health</a>.
-                            </div>
+
                         </div>
 
                         <!-- Jellyfin-only: store trickplay off the media drive -->
@@ -218,6 +208,40 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Plex only: the marker agent beside a Plex on another machine. Its address and shared
+                             key are stored in markers.plex.agent; the key comes back masked and is posted back
+                             masked unless the user types a new one. -->
+                        <div class="markers-opt d-none border-top pt-3 mt-3" id="markersPlexAgentGroup">
+                            <div>
+                                <label class="fw-semibold" for="markersAgentEnabled">Plex helper</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="Runs next to Plex on another machine. Writes chapter image references and intro or credits markers. Each feature is enabled separately."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Shared by chapter thumbnails and Intro &amp; Credits when Plex runs on another machine. Intro &amp; Credits can stay off.</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">
+                            </div>
+                        </div>
+                        <div class="d-none mb-3" id="markersPlexAgentFields">
+                            <div class="row g-2">
+                                <div class="col-md-7">
+                                    <label class="form-label small mb-1" for="markersAgentUrl">Address</label>
+                                    <input type="url" class="form-control form-control-sm" id="markersAgentUrl"
+                                           placeholder="http://plex-host.lan:9494" autocomplete="off">
+                                </div>
+                                <div class="col-md-5">
+                                    <label class="form-label small mb-1" for="markersAgentToken">Shared key
+                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button>
+                                    </label>
+                                    <input type="password" class="form-control form-control-sm" id="markersAgentToken"
+                                           autocomplete="new-password">
+                                </div>
+                            </div>
+                            <div id="markersAgentState" class="small mt-2"></div>
+                        </div>
+
 
                         <details class="mb-3">
                             <summary class="text-muted small">Re-authenticate (only if needed)</summary>
@@ -736,37 +760,39 @@
                         </div>
                     </div>
 
-                    <!-- Loudness (Plex only): this server's switch. Filled by loudness_server_tab.js; its library choice is
-                         the Libraries tab's Loudness column. -->
-                    <div class="tab-pane fade" id="edit-tab-loudness">
-                        <div class="markers-opt mb-2">
-                            <div>
-                                <label class="fw-semibold" for="loudnessEnabled">Analyse loudness for this server</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Analyses each audio track on this app's workers and stores its loudness measurements in Plex for Normalize Loudness."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Viewers on this server get Normalize Loudness sooner</div>
+                    <div class="tab-pane fade" id="edit-tab-processing">
+                        <nav class="processing-feature-nav" aria-label="Processing features">
+                            <a href="#processingPreviewsTitle" data-feature-jump>Previews</a>
+                            <a href="#processingChaptersTitle" data-feature-jump class="processing-plex-link d-none">Chapter thumbnails</a>
+                            <a href="#processingMarkersTitle" data-feature-jump>Intro &amp; Credits</a>
+                            <a href="#processingLoudnessTitle" data-feature-jump class="processing-plex-link d-none">Loudness</a>
+                        </nav>
+                        <p class="text-muted mb-3">Choose what this server receives. Select libraries for each feature in <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Libraries</a>.</p>
+                        <section class="processing-feature" aria-labelledby="processingPreviewsTitle">
+                            <h3 id="processingPreviewsTitle" class="h5" tabindex="-1">Previews</h3>
+                            <p class="small mb-2" id="processingPreviewOutput"></p>
+                            <p class="small text-muted mb-0">Selected libraries receive scrubber previews. <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Choose libraries</a> or <a href="{{ url_for('main.settings') }}#section-processing">edit shared quality and processing settings</a>.</p>
+                        </section>
+                        <section class="processing-feature d-none" id="processingChapters" aria-labelledby="processingChaptersTitle">
+                            <h3 id="processingChaptersTitle" class="h5" tabindex="-1">Chapter thumbnails <span class="small text-muted">Plex only · CPU</span></h3>
+                            <p class="small text-muted mb-2">Included in preview jobs for the selected preview libraries. Separate from scrubber images; off by default.</p>
+                            <div class="form-check form-switch mt-3">
+                                <input class="form-check-input" type="checkbox" role="switch" id="editPlexChapterThumbnails" aria-describedby="editPlexChapterThumbnailsHelp">
+                                <label class="form-check-label" for="editPlexChapterThumbnails">Generate chapter thumbnails</label>
                             </div>
-                            <div class="form-check form-switch markers-switch">
-                                <input class="form-check-input" type="checkbox" role="switch" id="loudnessEnabled">
+                            <div class="form-text" id="editPlexChapterThumbnailsHelp">
+                                Adds pictures to Plex's chapter menu and updates Plex's database.
+                                Plex may still show older cached images.
+                                Check <a href="#" id="editPlexChapterHealthLink">Setup Health</a>.
                             </div>
-                        </div>
-                        <p class="small text-muted mb-2">
-                            Requires this app and Plex on the same machine, with Plex's config folder mounted locally.
-                            Enabling this writes loudness measurements to Plex's database. Intro &amp; Credits can stay off.
-                        </p>
-                        <p class="small text-warning mb-2 d-none" id="loudnessHelperHint">
-                            The Plex helper does not support loudness analysis. Use a local Plex database to enable it.
-                        </p>
-                        <p class="small text-muted mb-3" id="loudnessLibrariesPointer">
-                            Choose movie and TV libraries on the <a href="#" class="loudness-libraries-link">Libraries</a> tab once this is on.
-                            Music libraries are not supported.
-                        </p>
-                    </div>
-
+                            <p class="small text-muted mt-2 mb-0">Requires Plex 1.43.4.x and supported chapter data. For Plex on another machine, configure the <a href="#edit-tab-general" class="processing-section-link" data-section="general">Plex helper in Connection</a>.</p>
+                        </section>
                     <!-- Intro & Credits: this server's switch and status. Filled by markers_server_tab.js; its library
                          choice is the Libraries tab's Intro & Credits column; detection settings shared by every
                          server live in Settings. -->
-                    <div class="tab-pane fade" id="edit-tab-markers">
+                    <section class="processing-feature" id="edit-tab-markers" aria-labelledby="processingMarkersTitle">
+                        <h3 id="processingMarkersTitle" class="h5" tabindex="-1">Intro &amp; Credits</h3>
+                        <p class="small text-muted">Detection is shared across servers. <a href="{{ url_for('main.settings') }}#section-markers">Edit detection settings</a>.</p>
                         <div class="markers-opt mb-2">
                             <div>
                                 <label class="fw-semibold" for="markersEnabled">Send intro &amp; credits markers to this server</label>
@@ -802,39 +828,6 @@
                             </div>
                         </div>
 
-                        <!-- Plex only: the marker agent beside a Plex on another machine. Its address and shared
-                             key are stored in markers.plex.agent; the key comes back masked and is posted back
-                             masked unless the user types a new one. -->
-                        <div class="markers-opt d-none border-top pt-3 mt-3" id="markersPlexAgentGroup">
-                            <div>
-                                <label class="fw-semibold" for="markersAgentEnabled">Plex marker agent</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Runs next to Plex on another machine. Writes chapter image references and intro or credits markers. Each feature is enabled separately."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Shared by chapter thumbnails and Intro &amp; Credits when Plex runs on another machine. Intro &amp; Credits can stay off.</div>
-                            </div>
-                            <div class="form-check form-switch markers-switch">
-                                <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">
-                            </div>
-                        </div>
-                        <div class="d-none mb-3" id="markersPlexAgentFields">
-                            <div class="row g-2">
-                                <div class="col-md-7">
-                                    <label class="form-label small mb-1" for="markersAgentUrl">Address</label>
-                                    <input type="url" class="form-control form-control-sm" id="markersAgentUrl"
-                                           placeholder="http://plex-host.lan:9494" autocomplete="off">
-                                </div>
-                                <div class="col-md-5">
-                                    <label class="form-label small mb-1" for="markersAgentToken">Shared key
-                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                                title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button>
-                                    </label>
-                                    <input type="password" class="form-control form-control-sm" id="markersAgentToken"
-                                           autocomplete="new-password">
-                                </div>
-                            </div>
-                            <div id="markersAgentState" class="small mt-2"></div>
-                        </div>
-
                         <div class="markers-opt d-none" id="markersEmbyRedetectGroup">
                             <div class="fw-semibold small">When Emby has its own markers
                                 <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
@@ -847,6 +840,36 @@
                                 <label class="btn btn-outline-secondary" for="markersEmbyRedetectKeep">Keep Emby's</label>
                             </div>
                         </div>
+                    </section>
+
+                    <!-- Loudness (Plex only): this server's switch. Filled by loudness_server_tab.js; its library choice is
+                         the Libraries tab's Loudness column. -->
+                    <section class="processing-feature d-none" id="edit-tab-loudness" aria-labelledby="processingLoudnessTitle">
+                        <h3 id="processingLoudnessTitle" class="h5" tabindex="-1">Loudness <span class="small text-muted">Plex only · CPU</span></h3>
+                        <div class="markers-opt mb-2">
+                            <div>
+                                <label class="fw-semibold" for="loudnessEnabled">Analyse loudness for this server</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="Analyses each audio track on this app's workers and stores its loudness measurements in Plex for Normalize Loudness."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Viewers on this server get Normalize Loudness sooner</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="loudnessEnabled">
+                            </div>
+                        </div>
+                        <p class="small text-muted mb-2">
+                            Requires Plex 1.43.4.x on the same machine, with Plex's config folder mounted locally. Network-mounted databases are not supported. Analysis runs on CPU, including on GPU workers, and does not rewrite source media.
+                            Enabling this writes loudness measurements to Plex's database. Intro &amp; Credits can stay off.
+                        </p>
+                        <p class="small text-warning mb-2 d-none" id="loudnessHelperHint">
+                            The Plex helper does not support loudness analysis. Use a local Plex database to enable it.
+                        </p>
+                        <p class="small text-muted mb-3" id="loudnessLibrariesPointer">
+                            Choose movie and TV libraries on the <a href="#" class="loudness-libraries-link">Libraries</a> tab once this is on.
+                            Music libraries are not supported. Playback Normalize Loudness requires Plex Pass or Plex Home access and Plex audio transcoding.
+                        </p>
+                    </section>
+
                     </div>
                 </div>
 
@@ -854,7 +877,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-success" id="editServerSave">
+                <button type="button" class="btn btn-primary" id="editServerSave">
                     <i class="bi bi-save me-1"></i>Save changes
                 </button>
             </div>

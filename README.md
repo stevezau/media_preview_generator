@@ -119,6 +119,12 @@ range. Combine filters while keeping existing previews. See the
 
 ## Where it fits
 
+The container can [run on a separate GPU machine](https://mediapreviewgenerator.dev/multi-server/#offload-preview-generation-to-another-machine)
+and reuse the same extraction across servers that share a file. Plex chapter thumbnails and loudness analysis
+are separate CPU tasks: [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails)
+can use the Plex helper, while [loudness](https://mediapreviewgenerator.dev/plex-loudness-normalization/)
+requires this app beside a local Plex 1.43.4.x database and does not support a helper or network-mounted database.
+
 It sits next to Sonarr, Radarr and Tdarr and takes over the media server's own preview job. Once it
 runs, the server's own generation is the same work done twice. The app's
 [Setup Health](docs/guides/previews-readiness.md) tab says which setting to turn off on each

@@ -1,17 +1,40 @@
 ---
-title: Preview thumbnails for Plex, Emby and Jellyfin from one instance
-heading: Multi-Media-Server Support (Plex / Emby / Jellyfin)
-description: 'Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook
-  routing, retries and the Jellyfin plugin.'
+title: Offload previews for Plex, Emby and Jellyfin to one GPU container
+heading: One preview job for Plex, Emby and Jellyfin
+description: Offload preview generation to another machine and reuse one decode across Plex, Emby and Jellyfin. Check media mounts, output paths and server results.
 render_with_liquid: false
 ---
-
-> [Back to Docs](README.md)
 
 The tool can drive any number of **Plex**, **Emby**, and **Jellyfin** servers
 from a single instance. A new file is processed exactly once (one FFmpeg pass
 on the GPU) and the resulting frames are published to **every** configured
 server that owns it, in the format that server expects.
+
+## Connect and check your servers
+
+1. [Install the container](getting-started.md) where you want the processing to run. Its media paths and output mounts must reach the same files your servers use.
+2. Open **Servers → Add Server**, choose Plex, Emby or Jellyfin, and complete the connection flow. Repeat for each server. The **Connection** section holds authentication and Plex helper settings.
+3. Open **Configure → Libraries** to select preview output for each server. Use **Processing** for that server's chapter thumbnails, Intro & Credits and, on a supported local Plex server, loudness.
+4. Check **Path mappings** when the server and container use different paths. Run **Setup Health** for each server and resolve the relevant output and library checks.
+5. Process one shared movie or episode with **Manual Generation**. Expand **All jobs → Job details** to check results for each server, then inspect the output in its player. **Open logs and files** preserves the per-file result when one server is waiting or failed.
+
+Connection, library choice and output health are separate checks: a reachable server may still need
+a writable output mount or a plugin before it can use the result.
+
+## Offload preview generation to another machine
+
+The container can run on a separate GPU machine while Plex, Emby or Jellyfin stays on the media
+server. Both machines must reach the same source files, and the container needs network access to
+each server's API. Map the server's media paths to the paths inside this container.
+
+- **Plex previews:** mount Plex's data folder read-write for BIF output. The media mount may be read-only. Follow [the Plex mount checks](guides/previews-readiness.md#plex-config-folder).
+- **Emby previews:** the container needs write access beside each video for the BIF sidecar.
+- **Jellyfin trickplay:** the default writes beside the video. [Off-media mode](guides/previews-readiness.md#jellyfin-config-folder) needs a writable Jellyfin config mount and the Media Preview Bridge plugin; the media may then stay read-only.
+- **Plex markers and chapter thumbnails:** the relevant [Plex helper setup](guides.md#plex-on-another-machine-the-plex-marker-agent) supports operations that must happen beside Plex. Check each feature's requirements before enabling it.
+- **Plex loudness:** this is a same-machine exception. It requires local Plex 1.43.4.x database access; helper and network-mounted database configurations are unsupported. See [Plex loudness requirements](plex-loudness-normalization.md).
+
+Start with one file and watch both the worker's activity and each server's saved result. A network
+share, slow disk or server indexing delay can be the limit even when the GPU has spare capacity.
 
 ![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/tour-resolve.webp)
 
@@ -19,9 +42,9 @@ server that owns it, in the format that server expects.
 > The universal webhook URL is configured on the **Automation** page
 > (top nav, between Servers and Settings) under **Webhooks** — not on the
 > Servers page. The per-server Plex Direct webhook lives under
-> **Servers → edit your Plex server → Webhook & Scanner**.
+> **Servers → Configure → Webhook & Scanner** for the Plex server.
 
-This page covers:
+Output details and advanced integration:
 
 - [Why this exists](#why-this-exists)
 - [How a webhook fires through the system](#how-a-webhook-fires-through-the-system)
@@ -101,7 +124,8 @@ Failures on one server don't take down the others — if Jellyfin's write fails 
 
 ## Adding a server
 
-Three vendors, three slightly different UX paths. All three terminate at
+Use the [connection steps above](#connect-and-check-your-servers) for the web UI.
+The API examples below are for scripted integrations. All three terminate at
 `POST /api/servers` with an auth token already in hand.
 
 ### Plex

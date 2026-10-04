@@ -136,7 +136,7 @@ def test_server_section_selector_tracks_tabs_when_viewport_changes(authed_page: 
     selector = page.locator("#editServerSectionSelect")
     selector.select_option(label="Libraries")
     expect(page.locator("#edit-tab-libraries")).to_be_visible()
-    selector.select_option(label="Loudness")
+    selector.select_option(label="Processing")
     expect(page.locator("#edit-tab-loudness")).to_be_visible()
 
     page.set_viewport_size({"width": 1440, "height": 900})
@@ -156,8 +156,12 @@ def test_setup_progress_name_updates_after_forward_and_back(wizard_page: Page, a
     expect(progress).to_have_accessible_name("Setup progress: step 3 of 5, Paths")
     expect(progress).to_have_attribute("aria-valuenow", "3")
     page.locator("#step3Back").click()
-    expect(progress).to_have_accessible_name("Setup progress: step 2 of 5, Connect")
+    expect(progress).to_have_accessible_name("Setup progress: step 2 of 5, Server & libraries")
     expect(progress).to_have_attribute("aria-valuenow", "2")
+    expect(progress.locator('[data-step="2"] span')).to_have_text("Server & libraries")
+    expect(page.locator("#setupProgressCurrent")).to_have_text("Step 2 of 5 · Server & libraries")
+    page.set_viewport_size({"width": 768, "height": 900})
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
 
 
 def test_mobile_inspector_jumps_only_offer_sections_present_in_the_file(authed_page: Page, app_url: str) -> None:

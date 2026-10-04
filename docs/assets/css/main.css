@@ -1576,6 +1576,11 @@ figcaption {
   font-size: 0.85rem;
 }
 
+.footer__usage { max-width: 68ch; }
+.footer__usage summary { cursor: pointer; min-height: 44px; padding-block: 0.7rem; }
+.footer__usage p { margin-block: 0.3rem 0.75rem; }
+.footer__usage [role="status"] { display: block; margin-top: 0.5rem; }
+
 /* ---------------------------------------------------------- docs layout -- */
 
 .docs {

@@ -49,7 +49,6 @@ def verify_helper_navigation(url, token, root, raw):
             page.locator('button[type="submit"]').click()
             page.goto(url + "/servers")
             page.locator('.edit-server-btn[data-id="chapter-lab"]').click()
-            page.locator('[data-bs-target="#edit-tab-markers"]').click()
             expect(page.locator("#markersEnabled")).not_to_be_checked()
             page.locator("#markersAgentUrl").fill("http://127.0.0.1:1")
             page.locator("#editServerSave").click()
@@ -58,12 +57,13 @@ def verify_helper_navigation(url, token, root, raw):
             assert saved["markers"]["enabled"] is False
             assert saved["markers"]["plex"]["agent"]["token"] == raw["markers"]["plex"]["agent"]["token"]
             page.locator('.edit-server-btn[data-id="chapter-lab"]').click()
+            page.locator('[data-bs-target="#edit-tab-processing"]').click()
             page.locator("#editPlexChapterHealthLink").click()
             expect(page.locator("#edit-tab-health")).to_be_visible()
             link = page.locator(".chapter-helper-link")
             expect(link).to_be_visible(timeout=30000)
             link.click()
-            expect(page.locator("#edit-tab-markers")).to_be_visible()
+            expect(page.locator("#edit-tab-general")).to_be_visible()
             expect(page.locator("#markersPlexAgentGroup")).to_be_visible()
             expect(page.locator("#markersEnabled")).not_to_be_checked()
         finally:

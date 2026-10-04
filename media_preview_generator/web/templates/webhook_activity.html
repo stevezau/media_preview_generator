@@ -2,17 +2,23 @@
 
 {% block title %}Webhook Activity - Media Preview Generator{% endblock %}
 
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation_triggers.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/webhook_activity.css') }}">
+{% endblock %}
+
 {% block content %}
 <div class="container-xxl py-3">
-    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <header class="page-header">
         <div>
-            <h1 class="h4 mb-0"><i class="bi bi-clock-history me-2"></i>Webhook Activity</h1>
-            <p class="text-muted small mb-0">
+            <h1 class="page-title"><i class="bi bi-clock-history me-2"></i>Webhook Activity</h1>
+            <p class="page-subtitle mb-0">
                 Inbound webhook events and their outcomes. Configure trigger sources under
                 <a href="{{ url_for('main.automation_page') }}#section-webhooks-overview">Automation → Triggers</a>.
             </p>
         </div>
-    </div>
+        <button class="btn btn-outline-secondary" type="button" id="historyRefresh" onclick="loadHistory()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+    </header>
 
     <div class="card section-card" id="section-webhooks-activity">
         <div class="card-header d-flex justify-content-between align-items-center">
@@ -22,6 +28,16 @@
             </button>
         </div>
         <div class="card-body">
+            <form class="history-filters" id="historyFilters" role="search" aria-label="Filter webhook activity">
+                <div><label class="form-label" for="historySearch">Title or file</label><input type="search" class="form-control" id="historySearch" placeholder="Search received events"></div>
+                <div><label class="form-label" for="historySource">Source</label><select class="form-select" id="historySource"><option value="">All sources</option></select></div>
+                <div><label class="form-label" for="historyStatus">Outcome</label><select class="form-select" id="historyStatus"><option value="">All outcomes</option></select></div>
+                <div><label class="form-label" for="historyServer">Server</label><select class="form-select" id="historyServer"><option value="">All destinations</option></select></div>
+                <button type="reset" class="btn btn-outline-secondary">Reset filters</button>
+            </form>
+            <p class="small text-muted" id="historyFilterCount" role="status"></p>
+            <div id="historyError" class="alert alert-danger d-none" role="alert">Could not load webhook activity. Check the connection and try Refresh again.</div>
+            <div id="historyNoMatches" class="d-none text-center py-4" role="status">No events match these filters. Change a filter or reset them to see received events.</div>
             <div id="historyLoading" class="text-center py-3">
                 <div class="spinner-border spinner-border-sm" role="status"></div>
                 <span class="ms-2">Loading...</span>
@@ -71,23 +87,67 @@
 // page's Triggers tab; relies on the global helpers from app.js (apiGet,
 // apiDelete, escapeHtml, showToast, appConfirm).
 let allHistoryEvents = [];
+let filteredHistoryEvents = [];
 let historyPage = 1;
 let historyPerPage = parseInt(localStorage.getItem('historyPerPage') || '25', 10);
+if (![10, 25, 50].includes(historyPerPage)) historyPerPage = 25;
 
 document.addEventListener('DOMContentLoaded', function() {
     var hpSelect = document.getElementById('historyPerPageSelect');
     if (hpSelect) hpSelect.value = String(historyPerPage);
+    const filters = document.getElementById('historyFilters');
+    filters.addEventListener('submit', event => event.preventDefault());
+    filters.addEventListener('input', () => { historyPage = 1; renderHistoryPage(); });
+    filters.addEventListener('reset', () => setTimeout(() => { historyPage = 1; renderHistoryPage(); }, 0));
     loadHistory();
 });
 
+function historyServerKey(evt) {
+    return evt.server_id || evt.server_name || (evt.server_type ? evt.server_type :
+        (new Date(evt.timestamp).getTime() < new Date('2026-04-29').getTime() ? '__unknown' : '__all'));
+}
+
+function populateHistoryFilters() {
+    [['historySource', evt => evt.source, evt => evt.source],
+     ['historyStatus', evt => evt.status, evt => evt.status.replaceAll('_', ' ')],
+     ['historyServer', historyServerKey, evt => evt.server_name || evt.server_type || (historyServerKey(evt) === '__unknown' ? 'Unattributed older events' : 'All owning servers')]
+    ].forEach(([id, key, label]) => {
+        const select = document.getElementById(id);
+        const value = select.value;
+        select.querySelectorAll('option:not(:first-child)').forEach(option => option.remove());
+        const choices = new Map();
+        allHistoryEvents.forEach(evt => { if (key(evt)) choices.set(String(key(evt)), String(label(evt))); });
+        Array.from(choices).sort((a, b) => a[1].localeCompare(b[1])).forEach(([value, label]) => select.add(new Option(label, value)));
+        if (choices.has(value)) select.value = value;
+    });
+}
+
+function filterHistoryEvents() {
+    const search = document.getElementById('historySearch').value.trim().toLowerCase();
+    const source = document.getElementById('historySource').value;
+    const status = document.getElementById('historyStatus').value;
+    const server = document.getElementById('historyServer').value;
+    return allHistoryEvents.filter(evt => (!source || evt.source === source) && (!status || evt.status === status) &&
+        (!server || String(historyServerKey(evt)) === server) &&
+        (!search || [evt.title, evt.path, ...(evt.files_preview || [])].filter(Boolean).join(' ').toLowerCase().includes(search)));
+}
+
 async function loadHistory() {
+    const refresh = document.getElementById('historyRefresh');
+    refresh.disabled = true;
+    document.getElementById('historyError').classList.add('d-none');
+    document.getElementById('historyLoading').classList.remove('d-none');
     try {
         const data = await apiGet('/api/webhooks/history');
         allHistoryEvents = data.events || [];
+        populateHistoryFilters();
         renderHistoryPage();
     } catch (e) {
         console.error('Failed to load history:', e);
         document.getElementById('historyLoading').classList.add('d-none');
+        document.getElementById('historyError').classList.remove('d-none');
+    } finally {
+        refresh.disabled = false;
     }
 }
 
@@ -98,6 +158,9 @@ function renderHistoryPage() {
     const tbody = document.getElementById('historyBody');
 
     loading.classList.add('d-none');
+    filteredHistoryEvents = filterHistoryEvents();
+    document.getElementById('historyFilterCount').textContent = `${filteredHistoryEvents.length} of ${allHistoryEvents.length} received events`;
+    document.getElementById('historyNoMatches').classList.toggle('d-none', !allHistoryEvents.length || !!filteredHistoryEvents.length);
 
     if (allHistoryEvents.length === 0) {
         empty.classList.remove('d-none');
@@ -107,14 +170,14 @@ function renderHistoryPage() {
     }
 
     empty.classList.add('d-none');
-    table.classList.remove('d-none');
+    table.classList.toggle('d-none', !filteredHistoryEvents.length);
     tbody.innerHTML = '';
 
-    const total = allHistoryEvents.length;
+    const total = filteredHistoryEvents.length;
     const totalPages = Math.max(1, Math.ceil(total / historyPerPage));
     if (historyPage > totalPages) historyPage = totalPages;
     const start = (historyPage - 1) * historyPerPage;
-    const pageEvents = allHistoryEvents.slice(start, start + historyPerPage);
+    const pageEvents = filteredHistoryEvents.slice(start, start + historyPerPage);
 
     pageEvents.forEach(function(evt, localIdx) {
         const idx = start + localIdx;
@@ -126,7 +189,7 @@ function renderHistoryPage() {
         var sourceBadgeMap = {radarr: 'Radarr', sonarr: 'Sonarr', sportarr: 'Sportarr', custom: 'Custom', plex: 'Plex', emby: 'Emby', jellyfin: 'Jellyfin', recently_added: 'Recently Added'};
         var sourceBadgeClass = sourceBadgeMap[evt.source] ? evt.source : 'custom';
         var sourceBadgeLabel = sourceBadgeMap[evt.source] || evt.source;
-        const sourceBadge = '<span class="badge source-badge ' + sourceBadgeClass + '">' + sourceBadgeLabel + '</span>';
+        const sourceBadge = '<span class="badge source-badge ' + sourceBadgeClass + '">' + escapeHtml(sourceBadgeLabel || 'Unknown') + '</span>';
 
         const statusLabelMap = {
             queued: 'Queued',
@@ -204,7 +267,7 @@ function renderHistoryPagination() {
     const perPageSelect = document.getElementById('historyPerPageSelect');
     if (!footer) return;
 
-    const total = allHistoryEvents.length;
+    const total = filteredHistoryEvents.length;
     if (total === 0) {
         footer.classList.add('d-none');
         return;
@@ -252,7 +315,7 @@ function renderHistoryPagination() {
 }
 
 function goToHistoryPage(page) {
-    var totalPages = Math.max(1, Math.ceil(allHistoryEvents.length / historyPerPage));
+    var totalPages = Math.max(1, Math.ceil(filteredHistoryEvents.length / historyPerPage));
     if (page < 1 || page > totalPages) return;
     historyPage = page;
     renderHistoryPage();

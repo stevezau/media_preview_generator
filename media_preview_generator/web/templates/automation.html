@@ -13,10 +13,10 @@
         <nav id="automation-sidebar" class="automation-sidebar sticky-top">
             <div class="nav flex-column nav-pills">
                 <!-- Triggers group -->
-                <div class="sidebar-group active" id="sidebar-group-triggers"
+                <button type="button" class="sidebar-group active text-start border-0 bg-transparent" id="sidebar-group-triggers"
                      onclick="showAutomationTab('triggers')">
                     <i class="bi bi-broadcast me-2"></i>Triggers
-                </div>
+                </button>
                 <div id="sidebar-triggers-links">
                     <a class="nav-link" href="#section-webhooks-overview"><i class="bi bi-info-circle me-2"></i>Overview</a>
                     <a class="nav-link" href="#section-webhooks-sonarr-radarr"><i class="bi bi-download me-2"></i>*arr apps</a>
@@ -26,10 +26,10 @@
                 </div>
 
                 <!-- Schedules group -->
-                <div class="sidebar-group" id="sidebar-group-schedules"
+                <button type="button" class="sidebar-group text-start border-0 bg-transparent" id="sidebar-group-schedules"
                      onclick="showAutomationTab('schedules')">
                     <i class="bi bi-calendar-event me-2"></i>Schedules
-                </div>
+                </button>
                 <div id="sidebar-schedules-links" class="d-none">
                     <a class="nav-link" href="#section-schedules-overview"><i class="bi bi-info-circle me-2"></i>Overview</a>
                     <a class="nav-link" href="#section-schedules-quiet-hours"><i class="bi bi-moon-stars me-2"></i>Quiet Hours</a>

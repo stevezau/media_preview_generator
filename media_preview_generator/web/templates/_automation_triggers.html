@@ -3,7 +3,7 @@
         <!-- Section 1: Overview -->
         <div class="card section-card" id="section-webhooks-overview">
             <div role="heading" aria-level="2" class="card-header">
-                <i class="bi bi-info-circle me-2"></i>Overview
+                <i class="bi bi-info-circle me-2"></i>Choose a trigger
             </div>
             <div class="card-body">
                 <p class="mb-3">
@@ -11,8 +11,15 @@
                 </p>
 
                 <h3 class="automation-subheading mb-2"><i class="bi bi-signpost me-1"></i>How do you add media?</h3>
+                <nav class="trigger-jump mb-3" aria-label="Trigger instructions">
+                    <a href="#section-webhooks-sonarr-radarr" class="btn btn-sm btn-outline-secondary">Sonarr / Radarr / Sportarr</a>
+                    <a href="#section-webhooks-custom" class="btn btn-sm btn-outline-secondary">Tdarr / scripts</a>
+                    <a href="#trigger-plex" class="btn btn-sm btn-outline-secondary">Plex</a>
+                    <a href="#trigger-emby" class="btn btn-sm btn-outline-secondary">Emby</a>
+                    <a href="#trigger-jellyfin" class="btn btn-sm btn-outline-secondary">Jellyfin</a>
+                </nav>
                 <div class="decision-list mb-4">
-                    <div class="decision-row">
+                    <div class="decision-row" id="trigger-arr">
                         <div class="decision-scenario">
                             Sonarr / Radarr / Sportarr grab your media
                             <div class="text-muted small">Sportarr is the Sonarr fork for sports content. Works for any server.</div>
@@ -20,17 +27,17 @@
                         <div class="decision-arrow">→</div>
                         <div class="decision-recommendation"><a href="#section-webhooks-sonarr-radarr"><i class="bi bi-arrow-right-circle me-1"></i>Use the *arr webhook</a></div>
                     </div>
-                    <div class="decision-row">
+                    <div class="decision-row" id="trigger-custom">
                         <div class="decision-scenario">Tdarr, FileFlows, or a script transcodes files
                             <div class="text-muted small">Works for any server.</div>
                         </div>
                         <div class="decision-arrow">→</div>
                         <div class="decision-recommendation"><a href="#section-webhooks-custom"><i class="bi bi-arrow-right-circle me-1"></i>Use the Custom webhook</a></div>
                     </div>
-                    <div class="decision-row">
+                    <div class="decision-row" id="trigger-plex">
                         <div class="decision-scenario">
                             You add media manually to <strong>Plex</strong> (drag &amp; drop, Plex import, etc.)
-                            <div class="text-muted small">Plex-only — Plex is the only server vendor that exposes a server-side webhook we can subscribe to.</div>
+                            <div class="text-muted small">Plex-only — register the Plex Direct webhook from this app.</div>
                         </div>
                         <div class="decision-arrow">→</div>
                         <div class="decision-recommendation">
@@ -38,7 +45,7 @@
                             <span class="text-muted small d-block">Plex Direct webhook + Recently Added Scanner</span>
                         </div>
                     </div>
-                    <div class="decision-row">
+                    <div class="decision-row" id="trigger-emby">
                         <div class="decision-scenario">
                             You add media manually to <strong>Emby</strong>
                             <div class="text-muted small">Emby has built-in server-side webhooks (Premiere). Dashboard &rarr; Webhooks &rarr; Add Webhook, point it at <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code> and tick the <strong>Library &rarr; New Media Added</strong> event.</div>
@@ -49,7 +56,7 @@
                             <span class="text-muted small d-block">Posts to the same <code>/incoming</code> URL — vendor auto-detected.</span>
                         </div>
                     </div>
-                    <div class="decision-row">
+                    <div class="decision-row" id="trigger-jellyfin">
                         <div class="decision-scenario">
                             You add media manually to <strong>Jellyfin</strong>
                             <div class="text-muted small">Install the official <strong>Webhook</strong> plugin (Dashboard &rarr; Plugins &rarr; Catalog). Add a <em>Generic</em> destination &rarr; URL <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code>, subscribe to the <strong>Item Added</strong> notification.</div>

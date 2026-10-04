@@ -84,7 +84,7 @@ Per-vendor notes:
 
 Plex's optional `media_servers[].output.chapter_thumbnails` setting is a JSON boolean, default `false`.
 The API rejects strings such as `"false"` and numeric values. The **Generate chapter thumbnails** switch in
-**Servers → Edit → General** controls it. It adds chapter images to existing Previews jobs and updates existing
+**Servers → Configure → Processing → Chapter thumbnails** controls it. It adds chapter images to existing Previews jobs and updates existing
 chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
 Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
 See the [chapter thumbnail guide](guides.md#plex-chapter-thumbnails) for setup and retry behavior.
@@ -168,7 +168,7 @@ latest seasons, even though excluded files are not queued for generation.
 Changing library selection in the UI clears filters for media types no longer
 selected. **Clear** restores unrestricted selection.
 
-These options apply only to full-library jobs. **Manual Trigger** file/folder
+These options apply only to full-library jobs. **Process a file or folder** file/folder
 jobs, webhooks, **Recently Added** scanner schedules, and **Intro & Credits**
 jobs and schedules retain their existing selection behavior. Relative windows on scheduled full scans are recalculated
 for each execution; a saved date range stays fixed.
@@ -378,7 +378,7 @@ every server a batch takes nothing.
 
 ### Per-server settings (`media_servers[].markers`)
 
-Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Edit → Intro &
+Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Configure → Processing → Intro &
 Credits tab**; `library_ids` from the **Libraries tab's Intro & Credits column** (shown while `enabled` is on), which
 is separate from the Previews column's `libraries[].enabled`.
 
@@ -402,10 +402,10 @@ An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of
 | `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
 | `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
 | `emby` | object | *(Emby servers only)* | Absent on Plex/Jellyfin entries. |
-| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
+| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Configure → Processing → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
-| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
-| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Edit → Intro & Credits → Plex marker agent: a [Plex marker agent](#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Configure → Processing → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
+| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Configure → Connection → Plex helper: a [Plex marker agent](#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
 | `plex.agent.enabled` | bool | `false` | `true` needs `url` and `token` set (400 otherwise: "Set the Plex marker agent's address and shared key before turning it on"). The database-write confirmation (`plex.db_write_confirmed_at`) still applies. |
 | `plex.agent.url` | string | `""` | `http` or `https` address, e.g. `http://plex-host.lan:9494`. A trailing `/` is dropped. 400 for a query string, fragment, or a username/password in it. |
 | `plex.agent.token` | string | `""` | The key both sides share (the agent's `AGENT_TOKEN`). Printable ASCII, no spaces. `GET`/`POST` return a set key as `****`; posting `****` (or leaving `token` out) keeps the stored key. Never logged. |
@@ -888,7 +888,7 @@ Without mapping, the app can't find the files and jobs report them as not found.
 
 ### Configuration (Web UI)
 
-Open **Servers → Edit** on the server that needs mapping, and add rows in the
+Open **Servers → Configure** on the server that needs mapping, and add rows in the
 Path Mappings section. Each row has:
 
 - **Path on server** — The folder path the media server reports for the file
@@ -1045,6 +1045,34 @@ Save setup wizard progress.
   }
 }
 ```
+
+#### POST /api/setup/preview-file-path
+
+Check one real file against draft path mappings, without saving the mappings, opening file contents,
+contacting a media server or starting work. Available during initial setup; authentication is required
+after setup completes. The normal setup request/CSRF protections apply.
+
+**Request:**
+
+```json
+{
+  "path": "/server/media/Movies/Example.mkv",
+  "path_mappings": [
+    {"remote_prefix": "/server/media", "local_prefix": "/media", "webhook_prefixes": []}
+  ]
+}
+```
+
+`path_mappings` is optional and defaults to an empty list. `plex_prefix` is accepted as the legacy name
+for `remote_prefix`. Absolute Windows drive and UNC source paths can be mapped to container paths.
+The resolved path must stay within the configured `MEDIA_ROOT`, including symlink resolution.
+
+**Response:** HTTP 200 with `input_path`, `local_path`, `mapping_applied`, `exists`, `is_file` and
+`readable`. A missing file or directory is a valid check result, not an HTTP error. `readable` reports
+the container's read-access check; it does not validate video contents, exclusions or library ownership.
+HTTP 400 with `error` rejects invalid paths/mappings or paths outside the permitted root. Paths are
+limited to 4,096 characters, with at most 100 mapping rows and 100 webhook aliases per row. Parent-directory
+segments and NUL characters are rejected; the normal 1 MiB request-body limit applies.
 
 #### POST /api/setup/complete
 
@@ -1836,6 +1864,7 @@ unless noted.
 | POST | `/api/settings/backups/restore` | Restore a prior settings.json snapshot |
 | POST | `/api/setup/skip` | Skip the setup wizard (advanced — saves `setup_complete=true` with minimal state) |
 | POST | `/api/setup/validate-paths` | Pre-flight wizard path fields in bulk |
+| POST | `/api/setup/preview-file-path` | Resolve one real file against draft mappings and report container file/read-access status; does not save or start processing |
 
 ### Servers (beyond the basics in [Multi-Media-Server Endpoints](#multi-media-server-endpoints))
 

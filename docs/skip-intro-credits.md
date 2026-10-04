@@ -1,8 +1,7 @@
 ---
 title: Skip Intro and Skip Credits detection for Plex, Emby and Jellyfin
 heading: Skip Intro and Skip Credits
-description: Detects intros and end credits once per file and adds Skip Intro and Skip Credits to Plex, and to Jellyfin and
-  Emby through its own plugin.
+description: Set up Skip Intro and Skip Credits for Plex, Jellyfin and Emby. Check subscriptions, helper or plugin requirements, then inspect one file.
 ---
 
 Media Preview Generator detects where each file's intro and end credits are and sends those points to Plex, Emby and Jellyfin, so viewers get a skip button. It detects each file once and sends the same answer to every server that has the file. On Jellyfin and Emby it works through its own plugin. It runs in the same Docker container that makes your preview thumbnails, and it stays off until you turn it on for a server.
@@ -14,6 +13,17 @@ Media Preview Generator detects where each file's intro and end credits are and 
 - **Emby 4.9 or 4.10.** Skip Intro, and Skip Credits through Emby's Up Next prompt. It works through this app's [Media Preview Bridge for Emby plugin](guides.md#emby-the-media-preview-bridge-for-emby-plugin). Skip Intro also needs Emby Premiere, which is Emby's rule; the credits prompt works without it. Emby has no credits end, so skipping credits goes to the end of the file, past any scene after the credits.
 
 Plex and Emby can have markers of their own. With **Use ours**, the default, the app's markers replace them. **Keep Plex's** or **Keep Emby's** leaves them alone. For what each server offers by itself, see the [comparison](comparison.md).
+
+## Set up and check the first result
+
+1. [Install Media Preview Generator](getting-started.md) and connect your server. In **Servers → Configure → Processing → Intro & Credits**, enable **Send intro & credits markers to this server**. Complete that server's database-write confirmation or plugin setup before starting work.
+2. Choose the libraries in the same server's **Libraries** section. The **Intro & Credits** and **Previews** selections are independent. Use **Setup Health** to check the server's requirements.
+3. Review detection sources under **Settings → Intro & Credits**, then start an Intro & Credits job for the libraries you chose. [The full guide](guides.md#intro--credits) explains source choices and publishing rules.
+4. Open **Tools → Intro & Credits** and inspect a known episode or movie. Compare the detected positions with the video and each server's published result. Adjust or lock a marker when needed; an uncertain result may intentionally have no skip button.
+
+To process away from Plex, the [Plex marker agent](guides.md#plex-on-another-machine-the-plex-marker-agent)
+must run beside Plex. This is different from [Plex loudness](plex-loudness-normalization.md), which
+requires a local database and does not support the helper or network-mounted databases.
 
 ## How it detects intros and credits
 

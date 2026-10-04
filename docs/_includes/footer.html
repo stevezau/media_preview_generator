@@ -81,6 +81,17 @@
       <span>MIT licensed · © {{ 'now' | date: "%Y" }} Steven Adams</span>
       <span>Not affiliated with Plex, Emby or Jellyfin. Their names are trademarks of their owners.</span>
       <span>Films in the screenshots: Blender Foundation (CC BY) and Netflix Open Content (CC BY 4.0). <a href="{{ '/credits/' | relative_url }}">Credits</a></span>
+      {% if jekyll.environment == 'production' and site.goatcounter_endpoint != '' and site.goatcounter_endpoint and site.url == 'https://mediapreviewgenerator.dev' and page.url != '/404.html' %}
+      <details class="footer__usage" hidden>
+        <summary>Usage counts and privacy</summary>
+        <p>GoatCounter counts public documentation visits, referring sites, and clicks to installation pages.
+          No app activity, media paths, search terms, URL queries or cookies are sent by this integration.
+          Like other web services, GoatCounter receives connection information such as your IP address and browser.
+          <a href="https://www.goatcounter.com/privacy">GoatCounter privacy policy</a>.</p>
+        <button type="button" class="btn btn--ghost" id="docs-analytics-toggle">Exclude my visits</button>
+        <span id="docs-analytics-status" role="status" aria-live="polite"></span>
+      </details>
+      {% endif %}
     </div>
   </div>
 </footer>

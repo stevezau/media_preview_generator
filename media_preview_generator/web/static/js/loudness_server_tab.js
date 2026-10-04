@@ -1,4 +1,4 @@
-// Servers → Edit → "Loudness" tab (Plex only): this server's switch, and the Libraries tab's Loudness column
+// Servers → Configure → Processing → Loudness (Plex only): this server's switch, and the Libraries tab's Loudness column
 // (loudness.library_ids), shown while the switch is on. Same library-choice rules as the Intro & Credits column
 // (markers_server_tab.js). servers.js calls the window globals exported at the bottom.
 
@@ -101,7 +101,7 @@
         tab.server = server;
         tab.libraryChoices = new Map();
         const plex = isPlex(server);
-        const li = $('#editTabLoudnessLi');
+        const li = $('#edit-tab-loudness');
         if (li) li.classList.toggle('d-none', !plex);
         const toggle = $('#loudnessEnabled');
         if (toggle) toggle.checked = plex && stored(server).enabled === true;
@@ -139,7 +139,7 @@
                 if (trigger && window.bootstrap && window.bootstrap.Tab) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
             });
         }
-        const tabButton = $('#editServerModal [data-bs-target="#edit-tab-loudness"]');
+        const tabButton = $('#editServerModal [data-bs-target="#edit-tab-processing"]');
         if (tabButton) tabButton.addEventListener('shown.bs.tab', syncSwitch);
     }
 

@@ -653,10 +653,10 @@ class TestQueueRows:
         expect(detail).to_contain_text("Markers written × 8")
         expect(detail).to_contain_text("No markers found × 3")
         expect(detail).to_contain_text("Up to date × 3")
-        expect(detail).to_contain_text("Skipped × 11 · Emby plugin not installed")
+        expect(detail).to_contain_text("Skipped · Emby plugin not installed × 11")
         expect(detail).not_to_contain_text("Generated")
         expect(detail).not_to_contain_text("Reused")
-        plex_line = detail.locator("div", has_text="Home Plex").last
+        plex_line = detail.locator(".job-server-results", has_text="Home Plex")
         expect(plex_line).to_contain_text(re.compile(r"Markers written × 8\s*No markers found × 3"))
 
     def test_a_quote_in_a_webhook_file_name_stays_inside_the_name_cell_title(self, dashboard) -> None:
@@ -717,9 +717,9 @@ class TestQueueRows:
 
         page.locator(f"#job-files-toggle-{preview['id']}").click()
         detail = page.locator(f"#job-detail-{preview['id']}")
-        gone = detail.locator(".badge", has_text="Gone from disk")
+        gone = detail.locator(".job-result-item", has_text="Gone from disk")
         expect(gone).to_have_text("Gone from disk × 2")
-        expect(gone).to_have_class(re.compile(r"\bbg-secondary\b"))
+        expect(gone).to_have_class(re.compile(r"\bjob-result-muted\b"))
         assert gone.get_attribute("title") == (
             "Replaced by a newer file before this job reached it; the newer file is run on its own."
         )
@@ -1002,7 +1002,7 @@ class TestRowFilesAndLibraries:
         expect(row).to_be_visible(timeout=5000)
 
         toggle = page.locator(f"#job-files-toggle-{job['id']}")
-        assert toggle.get_attribute("title") == "Show files"
+        assert toggle.get_attribute("title") == "Job details"
         toggle.click()
         files = page.locator(f"#job-file-list-{job['id']}")
         expect(files.locator(".job-file")).to_have_text(
@@ -1573,9 +1573,11 @@ class TestFilesPanel:
         expect(row).not_to_contain_text(
             re.compile(r"Chapters pending|Waiting for Plex|auto-retrying|retry scheduled", re.I)
         )
-        incomplete = row.locator(".badge", has_text="Chapters incomplete")
+        incomplete = row.locator(".job-result-item", has_text="Chapters incomplete")
         expect(incomplete).to_have_attribute("title", re.compile("open Files for each file’s status and reason"))
-        expect(row.locator(".badge", has_text="Chapters failed")).to_have_class(re.compile(r"\bbg-danger\b"))
+        expect(row.locator(".job-result-item", has_text="Chapters failed")).to_have_class(
+            re.compile(r"\bjob-result-error\b")
+        )
         self._open_files(page, preview, [])
         expect(page.locator("#logsModal")).to_contain_text("Chapters incomplete × 2")
         expect(page.locator("#logsModal")).to_contain_text("Chapters failed × 3")
@@ -1601,7 +1603,7 @@ class TestFilesPanel:
             "No chapters × 1892",
         ]:
             expect(details).to_contain_text(text)
-        expect(details.locator(".badge", has_text="Chapters updated")).to_have_attribute(
+        expect(details.locator(".job-result-item", has_text="Chapters updated")).to_have_attribute(
             "title", "Chapter images were generated or their Plex references were repaired for these files."
         )
         self._open_files(page, preview, [])
@@ -1632,7 +1634,7 @@ class TestFilesPanel:
             "Chapters failed × 3",
             "Chapters ready × 4",
         ]:
-            expect(details.locator(".badge", has_text=label)).to_have_count(1)
+            expect(details.locator(".job-result-item", has_text=label)).to_have_count(1)
         expect(details).not_to_contain_text("Chapters incomplete × 5")
         expect(details).not_to_contain_text("Chapters updated")
         expect(details).not_to_contain_text("Chapters already existed")
@@ -1653,7 +1655,7 @@ class TestFilesPanel:
         expect(details).to_contain_text("Scrubber already existed × 2388")
         expect(details).to_contain_text("Previews updated × 9")
         expect(details).not_to_contain_text("Chapters")
-        expect(details.locator(".badge", has_text="Previews updated")).to_have_attribute(
+        expect(details.locator(".job-result-item", has_text="Previews updated")).to_have_attribute(
             "title",
             "This run completed publication for these files. Older results do not record which preview output changed.",
         )

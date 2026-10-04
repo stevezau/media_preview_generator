@@ -8,6 +8,7 @@
 
 {% block content %}
 <div class="log-page">
+    <header class="log-heading"><h1 class="page-title mb-1">Logs</h1><p class="page-subtitle mb-0">Live application messages. Filter by level, source or text; select a message for its full source location.</p></header>
     <div class="log-toolbar bg-body-tertiary">
         <div class="d-flex flex-wrap align-items-center gap-2">
             <div class="btn-group btn-group-sm" role="group" aria-label="Minimum level to show">
@@ -19,7 +20,7 @@
 
             <div class="input-group input-group-sm" style="max-width: 300px;">
                 <span class="input-group-text"><i class="bi bi-search"></i></span>
-                <input type="text" class="form-control" id="logSearch" placeholder="Filter logs..." autocomplete="off">
+                <input type="text" class="form-control" id="logSearch" placeholder="Filter logs..." aria-label="Search log messages" autocomplete="off">
                 <button class="btn btn-outline-secondary" type="button" id="logSearchRegex" title="Toggle regex mode">.*</button>
                 <button class="btn btn-outline-secondary" type="button" id="logSearchClear" title="Clear search">
                     <i class="bi bi-x"></i>
@@ -32,6 +33,11 @@
             <button class="btn btn-sm btn-outline-secondary" id="logCopyBtn" title="Copy visible logs to clipboard">
                 <i class="bi bi-clipboard"></i> Copy
             </button>
+            <button class="btn btn-sm btn-outline-secondary" id="logDownloadBtn"><i class="bi bi-download me-1"></i>Download</button>
+            <label class="log-select-label" for="logView">View<select class="form-select form-select-sm" id="logView"><option value="structured">Structured</option><option value="raw">Raw</option></select></label>
+            <label class="log-select-label" for="logSource">Source<select class="form-select form-select-sm" id="logSource"><option value="">All sources</option></select></label>
+            <label class="form-check-label small"><input class="form-check-input me-1" type="checkbox" id="logWrap" checked>Wrap lines</label>
+            <label class="form-check-label small"><input class="form-check-input me-1" type="checkbox" id="logGroupSource">Group by source</label>
 
             <!-- Right-side status group: server-side level + visible-line
                  count + live socket indicator + connection state. Grouped
@@ -40,10 +46,11 @@
                  right" instead of mixed. -->
             <span id="serverLevelBadge" class="badge bg-secondary ms-auto" title="Server log level (change in Settings)">…</span>
             <span id="logCount" class="text-muted small">0 lines</span>
-            <span id="liveIndicator" class="text-success small"><span class="live-dot"></span>Live</span>
+            <span id="liveIndicator" class="text-muted small">Connecting</span>
             <span id="logConnStatus" class="badge bg-secondary">connecting...</span>
         </div>
     </div>
+    <div id="logFeedback" class="log-feedback d-none" role="status"></div>
 
     <div class="log-scroll-wrap">
         <div id="logContainer" class="bg-body-tertiary text-body">
@@ -53,9 +60,9 @@
             <span id="logPlaceholder" class="text-muted">Loading log history...</span>
         </div>
 
-        <span id="followPill" class="badge rounded-pill bg-info text-dark px-3 py-2">
+        <button type="button" id="followPill" class="badge rounded-pill bg-info text-dark px-3 py-2">
             <i class="bi bi-arrow-down-short"></i> New logs — click to follow
-        </span>
+        </button>
 
         <div class="log-nav-btns">
             <button class="btn btn-sm btn-outline-secondary opacity-75" id="logScrollTop" title="Scroll to top">
@@ -89,6 +96,42 @@
     const liveIndicator = document.getElementById('liveIndicator');
     const serverLevelBadge = document.getElementById('serverLevelBadge');
     const placeholder = document.getElementById('logPlaceholder');
+    const sourceSelect = document.getElementById('logSource');
+    const feedback = document.getElementById('logFeedback');
+
+    function showFeedback(message) {
+        feedback.textContent = message;
+        feedback.classList.toggle('d-none', !message);
+    }
+    document.getElementById('logView').addEventListener('change', event => container.classList.toggle('log-raw-view', event.target.value === 'raw'));
+    document.getElementById('logWrap').addEventListener('change', event => container.classList.toggle('log-no-wrap', !event.target.checked));
+    sourceSelect.addEventListener('change', applySearch);
+    document.getElementById('logGroupSource').addEventListener('change', () => { regroupLogs(); applySearch(); });
+
+    function regroupLogs() {
+        const grouped = document.getElementById('logGroupSource').checked;
+        if (!grouped && !container.querySelector('.log-source-group')) return;
+        const lines = Array.from(container.querySelectorAll('.log-line')).sort((a, b) => a.dataset.ts.localeCompare(b.dataset.ts));
+        const fragment = document.createDocumentFragment();
+        const groups = new Map();
+        lines.forEach(line => {
+            if (!grouped) { fragment.appendChild(line); return; }
+            const source = line.dataset.source || 'Unknown source';
+            if (!groups.has(source)) {
+                const group = document.createElement('section');
+                group.className = 'log-source-group';
+                const heading = document.createElement('h2');
+                heading.className = 'log-source-heading';
+                heading.textContent = source;
+                group.appendChild(heading);
+                groups.set(source, group);
+                fragment.appendChild(group);
+            }
+            groups.get(source).appendChild(line);
+        });
+        container.querySelectorAll('.log-source-group').forEach(group => group.remove());
+        container.appendChild(fragment);
+    }
 
     let following = true;   // auto-scroll active
     let lineCount = 0;
@@ -101,6 +144,7 @@
     let hasMore = false;
     let loadingOlder = false;
     let suppressScroll = 0;
+    let historyError = '';
 
     const LEVEL_CLASS = {
         DEBUG: 'log-level-debug',
@@ -190,6 +234,7 @@
         newWhileAway = 0;
         followPill.style.display = 'none';
         liveIndicator.style.opacity = '1';
+        if (socket && socket.connected) liveIndicator.innerHTML = '<span class="live-dot"></span>Live';
         scrollToBottom();
     }
 
@@ -197,6 +242,7 @@
         if (!following) return;
         following = false;
         liveIndicator.style.opacity = '0.3';
+        if (socket && socket.connected) { liveIndicator.textContent = 'Follow paused'; liveIndicator.style.opacity = '1'; }
     }
 
     function showFollowPill() {
@@ -222,19 +268,27 @@
         const level = data.level || 'INFO';
         const span = document.createElement('span');
         span.className = 'log-line ' + (LEVEL_CLASS[level] || '');
-        span.dataset.raw = (data.ts || '') + ' ' + level + ' ' + (data.mod || '') + ' ' + (data.msg || '');
+        span.dataset.source = data.mod || '';
+        span.dataset.ts = data.ts || '';
+        span.dataset.raw = (data.ts || '') + ' ' + level + ' ' + (data.mod || '') + '.' + (data.func || '') + ':' + (data.line || '') + ' ' + (data.msg || '');
+        span.tabIndex = 0;
+        span.setAttribute('role', 'button');
+        span.setAttribute('aria-expanded', 'false');
+        if (data.mod && !Array.from(sourceSelect.options).some(option => option.value === data.mod)) sourceSelect.add(new Option(data.mod, data.mod));
 
         const ts = '<span class="log-ts">' + esc(data.ts || '') + '</span>';
         const lvl = '<span class="log-lvl">' + esc(level) + '</span>';
         const mod = data.mod ? '<span class="log-mod">[' + esc(data.mod) + ']</span>' : '';
         const msg = '<span class="log-msg">' + esc(data.msg || '') + '</span>';
-        const detail = '<div class="log-detail">' + esc(data.mod || '') + '.' + esc(data.func || '') + ':' + (data.line || '') + '</div>';
+        const detail = '<span class="log-detail">' + esc(data.mod || '') + '.' + esc(data.func || '') + ':' + esc(String(data.line || '')) + '</span>';
 
-        span.innerHTML = ts + lvl + mod + msg + detail;
-        span.addEventListener('click', () => span.classList.toggle('expanded'));
+        span.innerHTML = ts + lvl + mod + msg + detail + '<span class="log-raw">' + esc(span.dataset.raw) + '</span>';
+        const toggleDetail = () => { span.classList.toggle('expanded'); span.setAttribute('aria-expanded', String(span.classList.contains('expanded'))); };
+        span.addEventListener('click', toggleDetail);
+        span.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleDetail(); } });
 
         const q = searchInput.value;
-        if (q && !matchesSearch(span.dataset.raw, q)) {
+        if (!matchesSearch(span.dataset.raw, q) || (sourceSelect.value && sourceSelect.value !== span.dataset.source)) {
             span.classList.add('log-line-hidden');
         }
         return span;
@@ -246,16 +300,24 @@
         if (before) params.set('before', before);
         try {
             const resp = await fetch('/api/logs/history?' + params.toString());
-            if (!resp.ok) return { lines: [], has_more: false, oldest_ts: '' };
-            return await resp.json();
+            if (!resp.ok) throw new Error('History request failed');
+            const data = await resp.json();
+            return { ...data, lines: data.lines || [] };
         } catch {
-            return { lines: [], has_more: false, oldest_ts: '' };
+            return { lines: [], has_more: false, oldest_ts: '', error: true };
         }
     }
 
     async function loadInitialHistory() {
         const data = await loadHistory();
         if (placeholder) placeholder.remove();
+        if (data.error) {
+            historyError = 'Log history could not be loaded. Choose a level again to retry; live messages will reconnect automatically.';
+            showFeedback(historyError);
+            return;
+        }
+        historyError = '';
+        showFeedback('');
 
         if (data.lines.length > 0) {
             const frag = document.createDocumentFragment();
@@ -266,11 +328,13 @@
             container.appendChild(frag);
             oldestTs = data.oldest_ts || '';
             hasMore = data.has_more;
-            loadOlderBtn.style.display = hasMore ? '' : 'none';
+            loadOlderBtn.style.display = hasMore ? 'block' : 'none';
             countEl.textContent = lineCount.toLocaleString() + ' log lines';
+            regroupLogs();
             scrollToBottom();
+            applySearch();
         } else {
-            container.insertAdjacentHTML('beforeend', '<span class="text-muted">No log history available. New messages will appear here.</span>');
+            container.insertAdjacentHTML('beforeend', '<span id="logEmpty" class="text-muted">No log history available. New messages will appear here.</span>');
         }
     }
 
@@ -282,6 +346,7 @@
 
         const scrollBefore = container.scrollHeight;
         const data = await loadHistory(oldestTs);
+        historyError = data.error ? 'Older messages could not be loaded. Try Load older again.' : '';
 
         if (data.lines.length > 0) {
             const refNode = loadOlderBtn.nextSibling;
@@ -298,10 +363,12 @@
             container.scrollTop += container.scrollHeight - scrollBefore;
         }
 
-        loadOlderBtn.style.display = hasMore ? '' : 'none';
+        loadOlderBtn.style.display = hasMore ? 'block' : 'none';
         loadOlderBtn.disabled = false;
         loadOlderBtn.innerHTML = '<i class="bi bi-clock-history me-1"></i>Load older...';
         loadingOlder = false;
+        regroupLogs();
+        applySearch();
     });
 
     // --- SocketIO connection ---
@@ -317,17 +384,23 @@
         socket.on('connect', () => {
             connBadge.textContent = 'connected';
             connBadge.className = 'badge bg-success';
+            liveIndicator.className = 'text-success small';
+            liveIndicator.innerHTML = following ? '<span class="live-dot"></span>Live' : 'Follow paused';
             socket.emit('set_level', { level: currentLevel });
         });
 
         socket.on('disconnect', () => {
             connBadge.textContent = 'disconnected';
             connBadge.className = 'badge bg-danger';
+            liveIndicator.className = 'text-muted small';
+            liveIndicator.textContent = 'Reconnecting';
         });
 
         socket.on('connect_error', () => {
             connBadge.textContent = 'error';
             connBadge.className = 'badge bg-danger';
+            liveIndicator.className = 'text-muted small';
+            liveIndicator.textContent = 'Waiting for connection';
         });
 
         socket.on('log_message', onLogMessage);
@@ -335,16 +408,19 @@
 
     // --- Live log message ---
     function onLogMessage(data) {
+        document.getElementById('logEmpty')?.remove();
         container.appendChild(buildLogLine(data));
         lineCount++;
 
         while (lineCount > MAX_LINES) {
-            const first = container.querySelector('.log-line');
+            const first = Array.from(container.querySelectorAll('.log-line')).sort((a, b) => a.dataset.ts.localeCompare(b.dataset.ts))[0];
             if (first) { first.remove(); lineCount--; }
             else break;
         }
 
         countEl.textContent = lineCount.toLocaleString() + ' log lines';
+        regroupLogs();
+        applySearch();
 
         if (following) {
             scrollToBottom();
@@ -358,6 +434,7 @@
         container.querySelectorAll('.log-line, .text-muted').forEach(el => {
             if (el.id !== 'logPlaceholder') el.remove();
         });
+        container.querySelectorAll('.log-source-group').forEach(group => group.remove());
         lineCount = 0;
         oldestTs = '';
         hasMore = false;
@@ -385,28 +462,23 @@
 
     function applySearch() {
         const q = searchInput.value;
+        if (regexMode && q) {
+            try { new RegExp(q, 'i'); }
+            catch { showFeedback('This regular expression is invalid. Correct it or turn off regex mode.'); return; }
+        }
+        let visible = 0;
         for (const line of container.querySelectorAll('.log-line')) {
-            if (!q) {
-                line.classList.remove('log-line-hidden');
-                line.querySelectorAll('.log-msg').forEach(el => {
-                    el.innerHTML = esc(el.textContent);
-                });
-                continue;
-            }
             const raw = line.dataset.raw || '';
-            if (matchesSearch(raw, q)) {
+            if (matchesSearch(raw, q) && (!sourceSelect.value || sourceSelect.value === line.dataset.source)) {
                 line.classList.remove('log-line-hidden');
-                if (!regexMode) {
-                    line.querySelectorAll('.log-msg').forEach(el => {
-                        const text = el.textContent;
-                        const re = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
-                        el.innerHTML = esc(text).replace(re, '<mark class="log-highlight">$1</mark>');
-                    });
-                }
+                visible++;
             } else {
                 line.classList.add('log-line-hidden');
             }
         }
+        countEl.textContent = `${visible.toLocaleString()} of ${lineCount.toLocaleString()} lines`;
+        container.querySelectorAll('.log-source-group').forEach(group => { group.hidden = !group.querySelector('.log-line:not(.log-line-hidden)'); });
+        showFeedback(historyError || (lineCount && !visible ? 'No loaded messages match these filters.' : ''));
     }
 
     let searchDebounce = null;
@@ -457,16 +529,21 @@
     });
 
     // --- Copy visible logs to clipboard ---
+    function visibleLogText() {
+        return Array.from(container.querySelectorAll('.log-line:not(.log-line-hidden)')).map(line => line.dataset.raw).join('\n');
+    }
+    document.getElementById('logDownloadBtn').addEventListener('click', () => {
+        const url = URL.createObjectURL(new Blob([visibleLogText()], { type: 'text/plain;charset=utf-8' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'media-preview-generator-logs.txt';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
     copyBtn.addEventListener('click', async () => {
         const lines = container.querySelectorAll('.log-line:not(.log-line-hidden)');
         if (!lines.length) return;
-        const text = Array.from(lines).map(el => {
-            const ts = el.querySelector('.log-ts')?.textContent || '';
-            const lvl = el.querySelector('.log-lvl')?.textContent || '';
-            const mod = el.querySelector('.log-mod')?.textContent || '';
-            const msg = el.querySelector('.log-msg')?.textContent || '';
-            return (ts + ' ' + lvl + ' ' + mod + ' ' + msg).trim();
-        }).join('\n');
+        const text = visibleLogText();
 
         const wrapped = '```\n' + text + '\n```';
         try {

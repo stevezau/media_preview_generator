@@ -20,7 +20,7 @@ Every docs page in one fetch: https://mediapreviewgenerator.dev/llms-full.txt
 
 **What sets it apart: each new file is decoded once, on the GPU if there is one, and every server that holds it gets its own native output in the place it reads from (a Plex BIF in Plex's data folder, an Emby BIF next to the video, Jellyfin trickplay tiles).** The comparison page says when the built-ins are the better choice: https://mediapreviewgenerator.dev/comparison/
 
-Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. It does not make chapter images or transcode for playback.
+Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. Optional Plex chapter thumbnails and Plex loudness analysis use CPU and currently support Plex 1.43.4.x. The app does not transcode for playback.
 
 ## How it works
 
@@ -38,6 +38,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - HDR10, HLG and HDR10+ are tone-mapped; Dolby Vision 7 and 8 use their HDR10 layer; Dolby Vision 5 needs a hardware Vulkan driver in the container.
 - Frame interval 1-60 s (default 10; Plex's own default is 2); thumbnail quality 1-10 (default 4; lower = sharper).
 - Intro & Credits: finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
+- Remote processing: previews can run on another machine with access to shared media and the required writable output mounts. The Plex helper supports marker and chapter operations beside Plex. Loudness instead requires this app on the same machine as Plex with a local database; helper and network-mounted databases are unsupported.
 
 ## Docs
 
@@ -45,7 +46,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - [Home](https://mediapreviewgenerator.dev/): what it does, how it works, quick start and common questions
 - [Getting started](https://mediapreviewgenerator.dev/getting-started/): Docker, GPU setup, volume mounts, Unraid, networking
 - [How it compares](https://mediapreviewgenerator.dev/comparison/): Plex, Jellyfin and Emby built-in generation side by side, dated and sourced
-- [How-to](https://mediapreviewgenerator.dev/how-to/): the seven problem-first guides below
+- [How-to](https://mediapreviewgenerator.dev/how-to/): guides for previews, skip markers and remote processing
 - [Why Plex preview thumbnails take so long](https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/): Plex's CPU job, its settings, and moving it to a GPU
 - [Plex preview thumbnails with a GPU](https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/): NVIDIA, Intel or AMD in Docker
 - [Faster Jellyfin trickplay](https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/): Jellyfin's own settings first, then a GPU container

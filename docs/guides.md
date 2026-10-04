@@ -47,12 +47,20 @@ When you first access the web interface, you'll be guided through a **Setup Wiza
    - **Plex** — sign in via Plex OAuth (no manual token copying), or paste a URL + token if you prefer.
    - **Emby** — enter the server URL and an API key.
    - **Jellyfin** — enter the URL and run a **Quick Connect** ceremony (or paste an API key).
-2. **Server & Libraries** *(Plex only)* — pick which Plex server (if you have several) and which libraries to enable. Emby/Jellyfin flows skip this step; libraries are managed later from **Settings → Media Servers**.
-3. **Path Configuration** *(Plex only)* — confirm the Plex application data folder where BIF files are written, plus any media path mappings. Emby and Jellyfin write their previews next to each video (so the media must be mounted read-write for them), and only nudge the server over HTTP, so this step is skipped for those flows.
+2. **Server & libraries** — finish the selected server's connection. Plex includes server and library selection; Emby/Jellyfin manage libraries later from **Servers → Configure → Libraries**.
+3. **Paths** — confirm the server's output location and media path mappings. Plex needs a writable data folder for BIFs; Emby and Jellyfin's default layout need writable media. Jellyfin off-media output has its own config-mount and plugin requirements.
 4. **Processing Options** — per-GPU enable/workers/FFmpeg threads, CPU workers, thumbnail interval, and quality.
 5. **Security** — view or replace your access token (optional).
 
-After setup completes, you'll land on the dashboard. You can add additional servers (any vendor, any number) at any time from **Settings → Media Servers** without re-running the wizard.
+After setup completes, you'll land on the dashboard. You can add additional servers (any vendor, any number) at any time from **Servers → Add Server** without re-running the wizard.
+
+Reopening incomplete setup resumes the saved step and server. Saved path choices return; unsaved field edits do
+not. The app restores this context from its setup state rather than storing access tokens in browser storage.
+
+In **Paths → Check a real file**, paste a **File path on the server or webhook** and choose **Check file**.
+The check applies the mappings currently in the form and reports the resulting container path and whether it
+is a readable file, missing, a folder or unreadable. It does not start a job, read file contents or establish
+which server library owns the file. Use **Setup Health** and a one-file job to verify the complete output path.
 
 ### Accessing the Dashboard
 
@@ -124,7 +132,7 @@ or finish out of order.
 
 The same filters are available on scheduled **Full library scans**. A "last
 30 days" schedule moves its window forward on every run; a date range stays
-fixed. Webhooks, **Recently Added** scanners, and **Manual Trigger** selections
+fixed. Webhooks, **Recently Added** scanners, and **Process a file or folder** selections
 continue to use their own selection rules.
 
 ### Letting new imports jump the queue
@@ -158,7 +166,7 @@ you pin to High by hand can still overtake a running scan.
 
 **Manual Generation:**
 
-The **Manual Trigger** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
+The **Process a file or folder** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
 
 - **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to generate previews for every episode in it; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
 - **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.
@@ -166,11 +174,20 @@ The **Manual Trigger** button generates previews for specific media on demand �
 
 Each pick becomes a removable chip; **Start Job** processes them all. The **Publish to which server?** dropdown scopes both the search and where previews are published — leave it on *All servers* to publish to whoever owns each file, or pick one server to limit both.
 
+**Job details:**
+
+**All jobs** keeps queued, running and finished work in one list. **Job details** expands a job in place.
+**Results recorded so far** groups outcomes by server, with file issues, detection sources and CPU fallback
+information when available. A pending or retried job may already have saved results; these counts are not a
+claim that the current queue entry has finished. **Current activity** shows the current item when the job
+provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
+The full worker grid remains above the list, including idle workers.
+
 **Pause / Resume (global):**
 
 - **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
 - **Resume Processing** — Clears the global pause; new jobs can start and the current job resumes dispatching.
-- Controls appear in the **Current Job** header and to the left of **Clear Jobs** in the Job Queue. State is persisted and survives restarts.
+- One global control appears beside **Clear Jobs** in **All jobs**. State is persisted and survives restarts.
 - An **Intro & Credits** job also has its own **Pause** button on its row: files already in progress finish, the job
   hands its slot back so other jobs can run, and it waits until you click its **Resume**. **Pause Processing**, quiet
   hours and a schedule's stop time hold it too, and stop its files in progress where they are, as they do previews.
@@ -187,6 +204,21 @@ The Dashboard shows a compact "Schedules" teaser with the next upcoming run and 
 
 > **Legacy URL note:** `/schedules` and `/webhooks` still work — they 302-redirect to `/automation#schedules` and `/automation#webhooks` respectively, so existing bookmarks and shared links keep working.
 
+### Logs and webhook activity
+
+Open **Tools → Logs** to follow application output. **View** switches between **Structured** rows and
+**Raw** text; the **Source** filter narrows the loaded records and **Wrap lines** controls long messages.
+**Group by source** is optional and keeps records chronological within each source group.
+**Copy** and **Download** keep the timestamp, level, module, function, line and message for the visible
+loaded records. They do not export older records that have not been loaded. Live/follow status tells you
+whether new entries are arriving and whether the view follows them; log text alone is not a diagnosis.
+
+Open **Tools → Webhook Activity** to inspect recent incoming deliveries. Filter by **Title or file**,
+**Source**, **Outcome** or **Server**. Filters apply to the received in-memory history before pagination;
+they are not a durable archive. **Reset filters** restores the full received list and **Refresh** fetches
+the current history. A no-match message means the filters excluded the available deliveries; a load error
+means history could not be fetched. Neither proves that no webhook was sent.
+
 ### Settings Page
 
 Access settings at `/settings` to manage:
@@ -198,7 +230,7 @@ Access settings at `/settings` to manage:
 
 > For per-server settings audits (Plex FSEvent flags, Jellyfin trickplay flags,
 > Media Preview Bridge plugin presence, Plex config folder writability, path
-> mappings), open **Servers → Edit → Setup Health**. Full per-check reference:
+> mappings), open **Servers → Configure → Setup Health**. Full per-check reference:
 > [Setup Health guide](guides/previews-readiness.md).
 
 The Settings page and the Automation page's **Triggers** tab **save automatically as you edit** — there's no Save button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
@@ -211,7 +243,7 @@ with one media version and one part per item. Multiple versions and multipart it
 Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
 without that base layer, such as Profile 5, reports unsupported chapters while preserving the scrubber result.
 
-1. Open **Servers → your Plex → Edit → General**, enable **Generate chapter thumbnails**, and save. It is off by
+1. Open **Servers → your Plex → Configure → Processing → Chapter thumbnails**, enable **Generate chapter thumbnails**, and save. It is off by
    default. Enabling it lets this app write chapter images and update their references in Plex's database; it does
    not change your videos, create chapters, or change chapter times.
 2. Open **Setup Health**. The app needs a supported, positively identified Plex database on the same machine, or a
@@ -762,7 +794,7 @@ wrong one isn't, so a marker only ships when the evidence clears the bar below.
 ### Turning it on
 
 Detection settings are shared by every server: **Settings → Intro & Credits**. What each server actually *receives*
-is controlled per server: **Servers → (server) → Edit → Intro & Credits tab → "Send intro & credits markers to this
+is controlled per server: **Servers → (server) → Configure → Processing → Intro & Credits → "Send intro & credits markers to this
 server"**. A server is off by default even after you turn the shared settings on.
 
 Once the switch is on, the same server's **Libraries** tab gets an **Intro & Credits** column beside **Previews**:
@@ -1076,7 +1108,7 @@ first time you turn it on for a Plex server:
   run asks again.
 - **Don't turn off a library's own *Intro markers* / *Credits markers* setting** (Edit library → Advanced). While
   it is off, Plex hides every skip marker of that type in the library, ours included, so nobody sees a skip button
-  there. **Servers → Edit → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
+  there. **Servers → Configure → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
   Plex detecting on its own, set its server-wide *Generate intro video markers* / *Generate credits video markers*
   (Settings → Library) to **Never** instead: Setup Health offers **Set server-wide to Never** for that. With **Keep
   Plex's** it doesn't suggest it. See [Setup Health](guides/previews-readiness.md#intro-credits).
@@ -1103,7 +1135,7 @@ don't run it.
 
 1. Run the agent as its [README](https://github.com/stevezau/media_preview_generator/blob/dev/plex-marker-agent/README.md) says: the compose file, the settings (`AGENT_TOKEN`,
    `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
-2. In the app: **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**. Switch it on, enter its **Address**
+2. In the app: **Servers → your Plex → Configure → Connection → Plex helper**. Switch it on, enter its **Address**
    (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
    once saved. The one-time database-write confirmation applies when enabling Intro & Credits. Chapter thumbnails
    have their own opt-in under General and can use this connection while Intro & Credits is off.
@@ -1416,7 +1448,7 @@ or the `/etc/localtime` you mounted), the same clock as the app's own log.
 
 ### Troubleshooting Intro & Credits
 
-Each server's Edit → Intro & Credits tab checks whether that server can actually receive markers right now. This
+Each server's Configure → Processing → Intro & Credits section checks whether that server can actually receive markers right now. This
 table covers every state the check can report, using its exact wording:
 
 | What you see | Why | What to do |
@@ -1469,7 +1501,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
 | **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
 | **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |
-| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was switched off for Intro & Credits, or removed from the server, while the job ran | Switch it back on in Edit → Libraries → Intro & Credits column |
+| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was switched off for Intro & Credits, or removed from the server, while the job ran | Switch it back on in Configure → Libraries → Intro & Credits column |
 | **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
 | **Up to date**: "Keeping Emby's intro" (or credits; also added to other rows, e.g. "1 marker(s); keeping Emby's intro") | This Emby server is set to **Keep Emby's**, and Emby shows its own markers of that type | Switch it to **Use ours** if you want ours |
 | **Written**: "… Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins." (Emby says the same about Emby's) | You adjusted or locked that marker in the Inspector, so it was written over the server's own although the server is set to keep its own | Nothing; unlock the marker if you want the server's own back |

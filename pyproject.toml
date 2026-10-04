@@ -8,7 +8,7 @@ dynamic = ["version"]
 authors = [
     {name = "Steve Adams", email = "stevezau@gmail.com"},
 ]
-description = "GPU-accelerated preview thumbnails and Skip Intro/Credits markers for Plex, Emby and Jellyfin"
+description = "GPU previews, intro/credits and shared results for Plex, Emby and Jellyfin. Self-hosted Docker."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

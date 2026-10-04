@@ -1,0 +1,5 @@
+{% if jekyll.environment == 'production' and site.goatcounter_endpoint != '' and site.goatcounter_endpoint and site.url == 'https://mediapreviewgenerator.dev' and page.url != '/404.html' %}
+<script src="{{ '/assets/js/analytics.js' | relative_url }}" defer
+        data-endpoint="{{ site.goatcounter_endpoint | escape }}"
+        data-page="{{ page.url | escape }}"></script>
+{% endif %}

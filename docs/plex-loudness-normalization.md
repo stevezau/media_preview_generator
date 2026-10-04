@@ -30,7 +30,7 @@ unlock the playback feature. See Plex's [Audio Track Enhancements for Video](htt
 
 1. Run this app on the same machine as Plex and mount Plex's config folder locally. Plex must be running. This release
    supports Plex **1.43.4.x** and does not support loudness through the Plex helper or a network-mounted database.
-2. On the server's **Loudness** tab, switch on **Analyse loudness for this server**.
+2. On the server's **Processing → Loudness** section, switch on **Analyse loudness for this server**.
 3. On the **Libraries** tab, choose movie and TV libraries in the **Loudness** column. Both start on; music and other
    non-video libraries cannot be selected.
 

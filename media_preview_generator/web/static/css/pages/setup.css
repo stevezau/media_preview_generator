@@ -89,10 +89,12 @@
 }
 
 .step-connector {
-    width: 48px;
+    flex: 1 1 1rem;
+    min-width: 0.5rem;
+    max-width: 2rem;
     height: 2px;
     background-color: var(--surface-border, rgba(255, 255, 255, 0.12));
-    margin: 0 0.6rem;
+    margin: 0 0.35rem;
     border-radius: 1px;
 }
 
@@ -106,6 +108,22 @@
 
 .setup-step.active {
     display: block;
+}
+.setup-path-preview { padding: 1rem 0; border-block: 1px solid var(--bs-border-color); }
+.setup-path-preview p { max-width: 70ch; }
+#setupPathPreviewResult { overflow-wrap: anywhere; }
+.setup-progress-current { display: block; text-align: center; margin-bottom: 1.25rem; }
+.setup-progress { margin-bottom: .75rem; }
+@media (max-width: 575.98px) {
+    .setup-container { padding: 1.25rem .5rem; }
+    .setup-path-preview .input-group { display: flex; flex-direction: column; gap: .5rem; }
+    .setup-path-preview .input-group > * { width: 100%; border-radius: var(--bs-border-radius) !important; margin: 0; min-height: 44px; }
+    #setupPathMappingsContainer { overflow-x: auto; }
+    #setupPathMappingsContainer table, #setupPathMappingsContainer tbody, #setupPathMappingsContainer tr, #setupPathMappingsContainer td { display: block; width: 100%; }
+    #setupPathMappingsContainer thead { display: none; }
+    #setupPathMappingsContainer td { border: 0; padding: .4rem 0; }
+    #setupPathMappingsContainer td[data-label]::before { content: attr(data-label); display: block; margin-bottom: .3rem; font-size: .875rem; color: var(--bs-secondary-color); }
+    #setupPathMappingsContainer tr { border-bottom: 1px solid var(--bs-border-color); padding-bottom: .5rem; }
 }
 
 .plex-sign-in-btn {

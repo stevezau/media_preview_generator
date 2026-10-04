@@ -7,6 +7,12 @@ main.container-fluid { padding: 0 !important; }
     height: calc(100vh - 56px); /* below navbar */
     overflow: hidden;
 }
+.log-heading { padding: 1rem 1.25rem .75rem; }
+.log-heading .page-title { font-size: 1.5rem; }
+.log-select-label { display: flex; align-items: center; gap: .4rem; font-size: .875rem; }
+.log-select-label select { width: auto; max-width: 13rem; }
+.log-feedback { padding: .6rem 1rem; background: var(--bs-tertiary-bg); font-size: .875rem; }
+.log-source-heading { font: 600 .9rem var(--bs-font-sans-serif); margin: 1rem 0 .25rem; padding: .5rem .35rem; color: inherit; }
 .log-toolbar {
     flex-shrink: 0;
     padding: 0.5rem 0.75rem;
@@ -24,10 +30,33 @@ main.container-fluid { padding: 0 !important; }
     padding: 0 0.75rem 2rem;
 }
 #logContainer .log-line {
-    padding: 1px 10px;
-    border-left: 3px solid transparent;
+    display: grid;
+    grid-template-columns: 11.5rem 5rem minmax(8rem, 15rem) minmax(0, 1fr);
+    gap: .25rem .65rem;
+    padding: .5rem .35rem;
+    border-bottom: 1px solid var(--bs-border-color);
     cursor: pointer;
 }
+#logContainer .log-line:focus-visible { outline: 2px solid var(--plex-orange); outline-offset: -2px; }
+#logContainer .log-line-hidden { display: none; }
+.log-line .log-msg { overflow-wrap: anywhere; white-space: pre-wrap; }
+#logContainer .log-msg, #logContainer .log-raw { color: #e2e8f0; }
+#logContainer .log-ts, #logContainer .log-mod { color: #b8c3d1; }
+#logContainer .log-lvl { color: #83dbc0; }
+#logContainer .log-level-error .log-lvl, #logContainer .log-level-critical .log-lvl { color: #ff9ca6; }
+#logContainer .log-level-warning .log-lvl { color: #f5cc7a; }
+.log-toolbar .btn-outline-secondary { color: #cbd5e1; border-color: #64748b; }
+.log-toolbar .btn-outline-danger { color: #ff9ca6; border-color: #b95a67; }
+.log-toolbar .form-control::placeholder { color: #b8c3d1; }
+.log-line .log-detail { grid-column: 1 / -1; }
+.log-line .log-mod { overflow-wrap: anywhere; }
+.log-line .log-raw { display: none; }
+#logContainer.log-raw-view .log-line { display: block; font-family: var(--bs-font-monospace); }
+#logContainer.log-raw-view .log-line-hidden { display: none; }
+.log-raw-view .log-line > :not(.log-raw) { display: none; }
+.log-raw-view .log-line .log-raw { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+#logContainer.log-no-wrap .log-msg, #logContainer.log-no-wrap .log-raw { white-space: pre; overflow-wrap: normal; }
+.log-no-wrap .log-line { min-width: max-content; }
 #logContainer .log-line.log-level-debug   { border-left-color: #6c757d; }
 #logContainer .log-line.log-level-info    { border-left-color: #20c997; }
 #logContainer .log-line.log-level-warning { border-left-color: #ffc107; }
@@ -38,6 +67,7 @@ main.container-fluid { padding: 0 !important; }
 .log-line .log-mod   { color: var(--bs-tertiary-color); margin-right: 6px; }
 .log-line .log-detail { display: none; font-size: 0.78rem; color: var(--bs-tertiary-color); padding-top: 2px; }
 .log-line.expanded .log-detail { display: block; }
+.log-raw-view .log-line.expanded .log-detail { display: none; }
 #logCount { font-size: 0.82rem; }
 #loadOlderBtn { display: none; }
 
@@ -117,7 +147,7 @@ html[data-bs-theme="light"] .log-toolbar .input-group-text {
     color: #e2e8f0;
 }
 html[data-bs-theme="light"] .log-toolbar .form-control::placeholder {
-    color: #64748b;
+    color: #94a3b8;
 }
 html[data-bs-theme="light"] .log-toolbar .btn-outline-secondary {
     color: #cbd5e1;
@@ -130,3 +160,17 @@ html[data-bs-theme="light"] .log-toolbar .btn-outline-secondary:hover {
 html[data-bs-theme="light"] .log-toolbar .text-muted {
     color: #94a3b8 !important;
 }
+html[data-bs-theme="light"] .log-toolbar { color: #e2e8f0; }
+html[data-bs-theme="light"] .log-toolbar .form-select { background-color: #0f172a; color: #e2e8f0; }
+html[data-bs-theme="light"] #logContainer { color: #e2e8f0 !important; }
+html[data-bs-theme="light"] #logContainer .log-line { border-bottom-color: #334155; }
+html[data-bs-theme="light"] .log-line .log-detail { color: #cbd5e1; }
+@media (max-width: 767.98px) {
+    .log-page { height: calc(100dvh - 56px); }
+    .log-heading { padding: .75rem; }
+    .log-heading .page-subtitle { font-size: .875rem; }
+    #logContainer .log-line { grid-template-columns: minmax(0, 1fr) auto; }
+    .log-line .log-mod, .log-line .log-msg { grid-column: 1 / -1; }
+    .log-toolbar .btn, .log-toolbar .form-select { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) { #liveIndicator .live-dot { animation: none; } }

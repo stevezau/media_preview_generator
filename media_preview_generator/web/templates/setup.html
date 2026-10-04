@@ -22,7 +22,7 @@
         <div class="step-connector"></div>
         <div class="progress-step" data-step="2">
             <div class="step-number">2</div>
-            <span class="d-none d-md-inline">Connect</span>
+            <span class="d-none d-md-inline">Server &amp; libraries</span>
         </div>
         <div class="step-connector"></div>
         <div class="progress-step" data-step="3">
@@ -316,6 +316,17 @@
                     </button>
                 </div>
 
+                <section class="setup-path-preview mt-4" aria-labelledby="setupPathPreviewHeading">
+                    <h3 class="h6" id="setupPathPreviewHeading">Check a real file</h3>
+                    <p class="small text-muted">Paste a media file path reported by your server or webhook. This uses the mapping rows above, including unsaved edits, and checks whether this container can read that file. It does not generate previews or confirm library ownership.</p>
+                    <label class="form-label small" for="setupSamplePath">File path on the server or webhook</label>
+                    <div class="input-group">
+                        <input class="form-control" id="setupSamplePath" type="text" placeholder="/media/movies/Example.mkv" autocomplete="off" maxlength="4096">
+                        <button class="btn btn-outline-primary" type="button" id="setupCheckFile">Check file</button>
+                    </div>
+                    <div id="setupPathPreviewResult" class="small mt-2" role="status" aria-live="polite"></div>
+                </section>
+
                 <hr class="my-4">
                 <details>
                     <summary class="fw-semibold text-muted mb-2" style="cursor:pointer;">
@@ -548,6 +559,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // hoist like `var` would.
     let chosenEjServerId = '';
     let chosenEjServerName = '';
+    let navigationSequence = 0;
 
     // Elements
     const steps = document.querySelectorAll('.setup-step');
@@ -571,14 +583,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function goToStep(step) {
         currentStep = step;
+        const sequence = ++navigationSequence;
         const progress = document.querySelector('.setup-progress');
-        const stepLabels = ['Server type', 'Connect', 'Paths', 'Processing', 'Security'];
+        const stepLabels = ['Server type', 'Server & libraries', 'Paths', 'Processing', 'Security'];
+        const flowSteps = chosenEjServerId ? [1, 3, 4, 5] : [1, 2, 3, 4, 5];
+        const stepPosition = flowSteps.indexOf(step) + 1;
         if (progress) {
-            progress.setAttribute('aria-valuenow', String(step));
-            progress.setAttribute('aria-label', `Setup progress: step ${step} of 5, ${stepLabels[step - 1]}`);
+            progress.setAttribute('aria-valuenow', String(stepPosition));
+            progress.setAttribute('aria-valuemax', String(flowSteps.length));
+            progress.setAttribute('aria-label', `Setup progress: step ${stepPosition} of ${flowSteps.length}, ${stepLabels[step - 1]}`);
         }
         const currentLabel = document.getElementById('setupProgressCurrent');
-        if (currentLabel) currentLabel.textContent = `Step ${step} of 5 · ${stepLabels[step - 1]}`;
+        if (currentLabel) currentLabel.textContent = `Step ${stepPosition} of ${flowSteps.length} · ${stepLabels[step - 1]}`;
 
         // Update step visibility
         steps.forEach(s => {
@@ -595,6 +611,8 @@ document.addEventListener('DOMContentLoaded', function() {
             p.classList.toggle('d-none', skipStep2 && stepNum === 2);
             p.classList.toggle('active', stepNum === step);
             p.classList.toggle('completed', stepNum < step);
+            const number = p.querySelector('.step-number');
+            if (number && flowSteps.includes(stepNum)) number.textContent = String(flowSteps.indexOf(stepNum) + 1);
         });
 
         // Update connectors. When we're hiding Step 2, hide the connector
@@ -634,20 +652,30 @@ document.addEventListener('DOMContentLoaded', function() {
                 loadServers();
             }
         } else if (step === 3) {
+            document.getElementById('step3Next').disabled = true;
             if (chosenEjServerId) {
-                // E/J wizard path — render the per-server rows (which start
-                // empty for a freshly added server). Skip the global Plex
-                // settings lookup; those belong to Plex, not to the server
-                // the user just added.
-                setupRenderPathMappingRows([]);
-                setupRenderExcludePathRows([]);
+                fetch(`/api/servers/${encodeURIComponent(chosenEjServerId)}`).then(response => {
+                    if (!response.ok) throw new Error('Server could not be loaded');
+                    return response.json();
+                }).then(server => {
+                    if (sequence !== navigationSequence) return;
+                    setupRenderPathMappingRows(server.path_mappings || []);
+                    setupRenderExcludePathRows(server.exclude_paths || []);
+                    document.getElementById('step3Next').disabled = false;
+                }).catch(() => {
+                    if (sequence !== navigationSequence) return;
+                    showSetupResumeMessage('Could not load this server’s saved paths. Go back and reconnect the server before continuing.', true);
+                });
             } else {
                 settingsManager.get().then(settings => {
+                    if (sequence !== navigationSequence) return;
+                    document.getElementById('wizardPlexConfigFolder').value = settings.plex_config_folder || '/plex';
                     setupRenderPathMappingRows(settings.path_mappings || setupLegacyToPathMappings(settings));
                     setupRenderExcludePathRows(settings.exclude_paths || []);
+                    document.getElementById('step3Next').disabled = false;
                 }).catch(() => {
-                    setupRenderPathMappingRows([]);
-                    setupRenderExcludePathRows([]);
+                    if (sequence !== navigationSequence) return;
+                    showSetupResumeMessage('Could not load the saved Plex paths. Go back and try again before continuing.', true);
                 });
             }
             // Re-run validation against the prefilled Plex config folder so
@@ -716,6 +744,7 @@ document.addEventListener('DOMContentLoaded', function() {
     //     and jumps to wizard step 4 (GPU). servers.js's pickVendor helper
     //     primes the form for the chosen vendor.
     function _showVendorPicker() {
+        navigationSequence++;
         chosenVendor = null;
         // Clear E/J wizard state too — without this, an "Emby add then
         // Back then switch to Plex" sequence leaves chosenEjServerId set,
@@ -736,7 +765,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     document.querySelectorAll('.wizard-vendor-btn').forEach((btn) => {
         btn.addEventListener('click', () => {
+            navigationSequence++;
             const vendor = btn.dataset.vendor;
+            if (vendor !== chosenVendor) {
+                chosenEjServerId = '';
+                chosenEjServerName = '';
+                document.getElementById('step3PlexConfigSection').classList.toggle('d-none', vendor !== 'plex');
+            }
             chosenVendor = vendor;
             document.getElementById('vendorPicker').classList.add('d-none');
             if (vendor === 'plex') {
@@ -780,6 +815,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         isAuthenticated = true;
+        chosenVendor = t;
         const added = event.detail && event.detail.server;
         if (added && added.id) {
             chosenEjServerId = added.id;
@@ -994,12 +1030,15 @@ document.addEventListener('DOMContentLoaded', function() {
                     <br><small class="text-muted">${escapeHtml(libraryTypeLabel(lib))}</small>
                 `;
                 const checkbox = card.querySelector('input[type="checkbox"]');
+                checkbox.checked = selectedLibraries.map(String).includes(String(lib.id));
+                card.classList.toggle('selected', checkbox.checked);
                 checkbox.addEventListener('change', () => {
                     card.classList.toggle('selected', checkbox.checked);
                     updateSelectedLibraries();
                 });
                 grid.appendChild(card);
             });
+            updateSelectedLibraries();
 
         } catch (error) {
             loading.classList.add('d-none');
@@ -1055,14 +1094,14 @@ document.addEventListener('DOMContentLoaded', function() {
         return plexList.length ? [{ plex_prefix: plexList[0], local_prefix: localList[0] || local, webhook_prefixes: [] }] : [];
     }
 
-    function setupCollectPathMappingRows() {
+    function setupCollectPathMappingRows(includeIncomplete = false) {
         const container = document.querySelector('#setupPathMappingsContainer .path-mapping-rows');
         if (!container) return [];
         const rows = [];
         container.querySelectorAll('.path-mapping-row').forEach(rowEl => {
             const plex = (rowEl.querySelector('.path-mapping-plex')?.value || '').trim();
             const local = (rowEl.querySelector('.path-mapping-local')?.value || '').trim();
-            if (!plex || !local) return;
+            if (!includeIncomplete && (!plex || !local)) return;
             const webRaw = (rowEl.querySelector('.path-mapping-webhook')?.value || '').trim();
             const webhook_prefixes = webRaw ? webRaw.split(/[;,]/).map(s => s.trim()).filter(Boolean) : [];
             // Both keys: this build reads remote_prefix first; older builds' path resolvers read only plex_prefix.
@@ -1089,12 +1128,12 @@ document.addEventListener('DOMContentLoaded', function() {
         tr.className = 'path-mapping-row';
         const webhookVal = Array.isArray(row.webhook_prefixes) ? row.webhook_prefixes.join('; ') : (row.webhook_prefixes || '');
         tr.innerHTML = `
-            <td>
-                <input type="text" class="form-control form-control-sm path-mapping-plex" placeholder="e.g. /data" value="${_esc(row.remote_prefix || row.plex_prefix)}">
+            <td data-label="Path on the server">
+                <input type="text" class="form-control form-control-sm path-mapping-plex" aria-label="Path on the server" placeholder="e.g. /data" value="${_esc(row.remote_prefix || row.plex_prefix)}">
             </td>
-            <td>
+            <td data-label="Path in this app">
                 <div class="input-group input-group-sm">
-                    <input type="text" class="form-control form-control-sm path-mapping-local" placeholder="e.g. /mnt/data" value="${_esc(row.local_prefix)}">
+                    <input type="text" class="form-control form-control-sm path-mapping-local" aria-label="Path in this app" placeholder="e.g. /mnt/data" value="${_esc(row.local_prefix)}">
                     <button type="button" class="btn btn-outline-secondary path-mapping-browse" title="Browse folders">
                         <i class="bi bi-folder2-open"></i>
                     </button>
@@ -1102,8 +1141,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     <div class="valid-feedback small">Path exists</div>
                 </div>
             </td>
-            <td>
-                <input type="text" class="form-control form-control-sm path-mapping-webhook" placeholder="Leave blank if same as server" value="${_esc(webhookVal)}">
+            <td data-label="Path on Sonarr / Radarr / Webhooks">
+                <input type="text" class="form-control form-control-sm path-mapping-webhook" aria-label="Path on Sonarr / Radarr / Webhooks" placeholder="Leave blank if same as server" value="${_esc(webhookVal)}">
             </td>
             <td class="text-end">
                 <button type="button" class="btn btn-outline-danger btn-sm path-mapping-remove" title="Remove this row"><i class="bi bi-dash-lg"></i></button>
@@ -1197,6 +1236,48 @@ document.addEventListener('DOMContentLoaded', function() {
         // jump them back to Step 1 instead of dropping them on an unused
         // tab. Plex flows go back to Step 2 as before.
         goToStep(chosenEjServerId ? 1 : 2);
+    });
+
+    let filePreviewSequence = 0;
+    const samplePathInput = document.getElementById('setupSamplePath');
+    const previewResult = document.getElementById('setupPathPreviewResult');
+    const checkFileButton = document.getElementById('setupCheckFile');
+    function invalidateFilePreview() {
+        filePreviewSequence++;
+        previewResult.textContent = '';
+        checkFileButton.disabled = false;
+    }
+    samplePathInput.addEventListener('input', invalidateFilePreview);
+    document.getElementById('setupPathMappingsContainer').addEventListener('input', invalidateFilePreview);
+    document.getElementById('setupPathMappingsContainer').addEventListener('click', invalidateFilePreview);
+    checkFileButton.addEventListener('click', async () => {
+        const sequence = ++filePreviewSequence;
+        checkFileButton.disabled = true;
+        previewResult.className = 'small mt-2 text-muted';
+        previewResult.textContent = 'Checking the mapped file…';
+        try {
+            const response = await fetch('/api/setup/preview-file-path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+                body: JSON.stringify({ path: samplePathInput.value, path_mappings: setupCollectPathMappingRows(true) })
+            });
+            const result = await response.json();
+            if (sequence !== filePreviewSequence) return;
+            if (!response.ok) throw new Error(result.error || 'Could not check the file.');
+            previewResult.replaceChildren();
+            const path = document.createElement('code');
+            path.textContent = result.local_path;
+            previewResult.append('Path in this container: ', path, document.createElement('br'));
+            const outcome = result.readable ? 'File found and readable.' : !result.exists ? 'File not found. Check the mapping and Docker media mount.' : !result.is_file ? 'This is a folder, not a media file. Include the filename.' : 'File found but not readable. Check the container’s permissions.';
+            previewResult.append(outcome + (result.mapping_applied ? ' A mapping was applied.' : ' No mapping matched; the original path was checked.'));
+            previewResult.className = `small mt-2 ${result.readable ? 'text-success' : 'text-warning'}`;
+        } catch (error) {
+            if (sequence !== filePreviewSequence) return;
+            previewResult.className = 'small mt-2 text-danger';
+            previewResult.textContent = `${error.message} Check the path and try again.`;
+        } finally {
+            if (sequence === filePreviewSequence) checkFileButton.disabled = false;
+        }
     });
 
     document.getElementById('setupAddPathMappingBtn').addEventListener('click', function() {
@@ -1521,11 +1602,40 @@ document.addEventListener('DOMContentLoaded', function() {
     // =========================================================================
 
     async function loadSavedState() {
+        const restoreSequence = navigationSequence;
         try {
             const settings = await settingsManager.get();
+            if (restoreSequence !== navigationSequence) return;
             document.getElementById('setupPlexVerifySsl').checked = settings.plex_verify_ssl !== false;
-
             const status = await setupManager.getStatus();
+            const state = await setupManager.getState();
+            if (restoreSequence !== navigationSequence) return;
+            const saved = state.data || {};
+            selectedLibraries = Array.isArray(saved.selectedLibraries) ? saved.selectedLibraries : (settings.selected_libraries || []);
+            const requestedStep = Math.min(5, Math.max(1, Number(Object.keys(saved).length ? state.step : status.current_step) || 1));
+
+            if (saved.chosenEjServerId && ['emby', 'jellyfin'].includes(saved.chosenVendor)) {
+                const response = await fetch(`/api/servers/${encodeURIComponent(saved.chosenEjServerId)}`);
+                if (restoreSequence !== navigationSequence) return;
+                if (!response.ok) {
+                    showSetupResumeMessage('The server from your previous setup is unavailable. Choose a server to continue. Existing settings are kept.', true);
+                    return;
+                }
+                const server = await response.json();
+                if (restoreSequence !== navigationSequence) return;
+                if (server.type !== saved.chosenVendor || server.id !== saved.chosenEjServerId) {
+                    showSetupResumeMessage('Your saved setup no longer matches this server. Choose a server to continue.', true);
+                    return;
+                }
+                chosenVendor = server.type;
+                chosenEjServerId = server.id;
+                chosenEjServerName = server.name || server.type;
+                isAuthenticated = true;
+                document.getElementById('step3PlexConfigSection').classList.add('d-none');
+                showSetupResumeMessage(`Continuing setup for ${chosenEjServerName}. Your saved connection and paths are restored.`);
+                goToStep(requestedStep === 2 ? 3 : requestedStep);
+                return;
+            }
 
             if (status.plex_authenticated) {
                 isAuthenticated = true;
@@ -1534,35 +1644,38 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('step1Next').disabled = false;
             }
 
-            if (status.current_step && status.current_step > 1) {
-                // Emby / Jellyfin resume guard. ``chosenEjServerId`` is a
-                // wizard-session local that isn't persisted in saveState
-                // today, so an E/J user who reloaded mid-flow on Step 3 or
-                // Step 4 would land back there as if they were a Plex user
-                // — Step 3 would show the Plex config folder block and
-                // overwrite the Plex server's path_mappings on Save. Until
-                // saveState captures the E/J server id, clamp resumes to
-                // Step 1 unless we have evidence the user was on the Plex
-                // path (status.plex_authenticated). The user just re-picks
-                // the vendor; their already-saved server stays untouched.
-                const looksPlex = !!status.plex_authenticated;
-                goToStep(looksPlex ? status.current_step : 1);
+            if (requestedStep > 1) {
+                const looksPlex = !!status.plex_authenticated && (!saved.chosenVendor || saved.chosenVendor === 'plex');
+                chosenVendor = looksPlex ? 'plex' : null;
+                if (looksPlex) showSetupResumeMessage('Continuing your Plex setup. Saved settings are restored; unsaved field edits need to be entered again.');
+                goToStep(looksPlex ? requestedStep : 1);
             }
         } catch (error) {
-            console.log('No saved state found');
+            if (restoreSequence !== navigationSequence) return;
+            showSetupResumeMessage('Saved setup could not be loaded. Reload to retry, or choose a server to continue.', true);
         }
+    }
+
+    function showSetupResumeMessage(message, warning = false) {
+        let notice = document.getElementById('setupResumeNotice');
+        if (!notice) {
+            notice = document.createElement('div');
+            notice.id = 'setupResumeNotice';
+            notice.setAttribute('role', 'status');
+            document.querySelector('.setup-progress').before(notice);
+        }
+        notice.className = `alert ${warning ? 'alert-warning' : 'alert-info'} small`;
+        notice.textContent = message;
     }
 
     async function saveState() {
         try {
-            // chosenEjServerId is intentionally not persisted yet — pairing
-            // that with loadSavedState requires a regression test that
-            // resumes a status with current_step >= 3 after an E/J add and
-            // verifies the right vendor path is taken. Punted to a follow-up.
             await setupManager.saveState(currentStep, {
                 isAuthenticated,
-                selectedServer,
-                selectedLibraries
+                selectedLibraries,
+                chosenVendor,
+                chosenEjServerId,
+                chosenEjServerName
             });
         } catch (error) {
             console.warn('Failed to save state:', error);

@@ -41,7 +41,7 @@
     background: var(--bs-tertiary-bg);
 }
 .decision-list .decision-scenario { flex: 1 1 50%; min-width: 0; }
-.decision-list .decision-arrow { color: var(--bs-secondary); font-weight: 700; }
+.decision-list .decision-arrow { color: var(--bs-secondary-color); font-weight: 700; }
 .decision-list .decision-recommendation { flex: 1 1 40%; min-width: 0; }
 .decision-list .decision-recommendation a { text-decoration: none; }
 .decision-list .decision-recommendation a:hover { text-decoration: underline; }
@@ -75,3 +75,16 @@
 
 /* History table */
 .history-table { font-size: 0.875rem; }
+.trigger-jump { display: flex; flex-wrap: wrap; gap: .5rem; }
+.trigger-jump a { align-content: center; min-height: 40px; }
+.decision-list .decision-row { padding: 1rem 0; border: 0; border-bottom: 1px solid var(--bs-border-color); border-radius: 0; background: transparent; align-items: flex-start; }
+.decision-list .decision-scenario { line-height: 1.6; }
+.decision-list .decision-recommendation { padding-top: .15rem; }
+.upgrade-caveat { border-left-width: 1px; }
+@media (max-width: 767.98px) {
+    .decision-list .decision-row { display: block; }
+    .decision-list .decision-arrow { display: none; }
+    .decision-list .decision-recommendation { margin-top: .6rem; }
+    .decision-list code { overflow-wrap: anywhere; }
+    .webhook-url { overflow-wrap: anywhere; }
+}
