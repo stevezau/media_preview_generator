@@ -75,12 +75,52 @@ def test_final_frame_retry_is_bounded_and_keeps_runner_controls(extraction, empt
     cancel = MagicMock(return_value=False)
     pause = MagicMock(return_value=False)
     extract(10002, cancel_check=cancel, pause_check=pause, ffmpeg_threads_override=3)
-    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == [10002, 9000]
+    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == [10002, 9002]
     for call in factory.call_args_list:
         assert call.kwargs["cancel_check"] is cancel
         assert call.kwargs["pause_check"] is pause
         assert call.kwargs["ffmpeg_threads_override"] == 3
         assert call.kwargs["gpu"] is None
+
+
+def test_endpoint_retry_reaches_video_ending_before_container_duration(extraction):
+    track, factory, extract, success, output = extraction
+    track.duration = "5458458"
+    last_frame_ms = 5457410
+
+    def runner_for_seek(**options):
+        if options["chapter_start_ms"] > last_frame_ms:
+            return lambda **kwargs: (234, 0, "", ["No filtered frames for output stream"])
+        return success
+
+    factory.side_effect = runner_for_seek
+    extract(5458240)
+    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == [5458240, 5457240]
+    assert factory.call_args.kwargs["base_scale"] == "scale=w=1280:h=-2"
+    assert factory.call_args.kwargs["chapter_output"] == str(output)
+
+
+@pytest.mark.parametrize(
+    "duration,start,expected",
+    [(10000, 9750, 8750), (10000, 10250, 9250), (10000, 11000, 10000), (1200, 500, 0)],
+)
+def test_endpoint_retry_stays_within_one_second_before_chapter(extraction, duration, start, expected):
+    track, factory, extract, success, _ = extraction
+    track.duration = duration
+    factory.side_effect = [lambda **kwargs: (234, 0, "", ["No filtered frames"]), success]
+    extract(start)
+    seeks = [call.kwargs["chapter_start_ms"] for call in factory.call_args_list]
+    assert seeks == [start, expected]
+    assert 0 < start - seeks[-1] <= 1000
+
+
+def test_endpoint_retry_does_not_repeat_zero_timestamp(extraction):
+    track, factory, extract, _, _ = extraction
+    track.duration = 1000
+    factory.return_value = lambda **kwargs: (234, 0, "", ["No filtered frames"])
+    with pytest.raises(RuntimeError):
+        extract(0)
+    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == [0]
 
 
 @pytest.mark.parametrize("duration", [None, "unknown", float("nan"), float("inf"), 0, -10, 999])

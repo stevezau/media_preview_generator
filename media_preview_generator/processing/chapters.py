@@ -359,10 +359,10 @@ def extract_chapter_frame(
         duration_ms = float(track.duration)
     except (AttributeError, TypeError, ValueError):
         duration_ms = 0
-    # Plex can round a final chapter past the last video frame. Stay within
-    # the final second; do not disguise truncation as a successful extraction.
+    # Plex can round a final chapter past the last video frame. Seek at most
+    # one second before the chapter; container duration can extend past video.
     if no_frame and not premature_end and 1000 <= duration_ms < float("inf") and abs(start_ms - duration_ms) <= 1000:
-        fallback_ms = int(duration_ms - 1000)
+        fallback_ms = max(0, start_ms - 1000)
         if fallback_ms < start_ms:
             if cancel_check and cancel_check():
                 raise CancellationError("Chapter extraction cancelled")
