@@ -41,6 +41,7 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
         const isFailed = gpu.status === 'failed';
 
         if (isFailed) {
+            const failedToggleId = `gpuEnable_${deviceId}`;
             const card = document.createElement('div');
             card.className = 'card mb-2 border-danger';
             card.style.opacity = '0.85';
@@ -52,8 +53,8 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
                 <div class="d-flex flex-column">
                     <div class="d-flex align-items-center mb-1">
                         <div class="form-check form-switch mb-0">
-                            <input class="form-check-input" type="checkbox" disabled>
-                            <label class="form-check-label fw-semibold text-muted">
+                            <input class="form-check-input" id="${failedToggleId}" type="checkbox" disabled>
+                            <label class="form-check-label fw-semibold text-muted" for="${failedToggleId}">
                                 ${_gpuPanelEscapeHtml(gpu.name || 'Unknown GPU')}
                             </label>
                         </div>
@@ -105,22 +106,22 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
                         <small class="text-muted">${_gpuPanelVendorMark(gpu.type)}${safeDeviceOrNa}</small>
                     </div>
                     <div class="col-md-4 gpu-settings-${deviceId}" ${enabled ? '' : 'style="opacity:0.5;pointer-events:none"'}>
-                        <label class="form-label form-label-sm mb-1">Workers
+                        <label class="form-label form-label-sm mb-1" for="gpuWorkers_${deviceId}">Workers
                             <button type="button" class="info-icon ms-1" tabindex="0"
                                     data-bs-toggle="tooltip" data-bs-placement="top"
                                     title="How many files this GPU works on at once. Each one uses GPU memory, so start with 1."><i class="bi bi-info-circle"></i></button>
                         </label>
-                        <input type="number" class="form-control form-control-sm gpu-workers has-stepper"
+                        <input type="number" id="gpuWorkers_${deviceId}" class="form-control form-control-sm gpu-workers has-stepper"
                                data-device="${safeDevice}" min="1" max="16"
                                value="${workers}" onchange="onGpuWorkersChange(this, '${deviceId}')">
                     </div>
                     <div class="col-md-4 gpu-settings-${deviceId}" ${enabled ? '' : 'style="opacity:0.5;pointer-events:none"'}>
-                        <label class="form-label form-label-sm mb-1">FFmpeg Threads
+                        <label class="form-label form-label-sm mb-1" for="gpuFfmpegThreads_${deviceId}">FFmpeg Threads
                             <button type="button" class="info-icon ms-1" tabindex="0"
                                     data-bs-toggle="tooltip" data-bs-placement="top"
                                     title="CPU cores FFmpeg may use per worker for decoding and filtering. Lower values leave more for other workers."><i class="bi bi-info-circle"></i></button>
                         </label>
-                        <input type="number" class="form-control form-control-sm gpu-ffmpeg-threads has-stepper"
+                        <input type="number" id="gpuFfmpegThreads_${deviceId}" class="form-control form-control-sm gpu-ffmpeg-threads has-stepper"
                                data-device="${safeDevice}" min="0" max="32"
                                value="${ffmpegThreads}" onchange="markDirty()">
                         <small class="text-muted">0 = use all CPU cores &middot; recommended: 2</small>

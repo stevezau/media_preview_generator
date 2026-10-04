@@ -119,6 +119,11 @@ nothing: no trail beats a trail with a blank name in it.
       {%- if page.facts_checked %}<p class="prose__facts">Facts checked {{ page.facts_checked | date: "%-d %B %Y" }}.</p>{% endif -%}
     </div>
 
+    <details class="mobile-toc" id="mobile-toc" hidden>
+      <summary>On this page</summary>
+      <ul id="mobile-toc-list"></ul>
+    </details>
+
     {{ content }}
 
     <a class="edit-link" href="{{ site.repo }}/edit/dev/docs/{{ page.path | remove_first: 'docs/' }}">

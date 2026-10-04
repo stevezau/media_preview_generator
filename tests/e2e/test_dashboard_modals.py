@@ -1,4 +1,4 @@
-"""E2E tests for the dashboard's "Start New Job" + "Manual Trigger" modals."""
+"""E2E tests for the dashboard's "Start New Job" + "Process a file or folder" modals."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class TestNewJobModal:
 @pytest.mark.e2e
 class TestManualTriggerModal:
     def test_manual_trigger_modal_opens(self, dashboard_page: Page) -> None:
-        dashboard_page.locator('button:has-text("Manual Trigger")').click()
+        dashboard_page.get_by_role("button", name="Process a file or folder").click()
         # The primary controls are now the media-search box + browse button;
         # the server-scope picker is still present.
         expect(dashboard_page.locator("#manualSearchInput")).to_be_visible(timeout=2000)
@@ -126,7 +126,7 @@ class TestManualTriggerModal:
         }
         dashboard_page.route("**/api/media/search**", lambda route: _fulfill_json(route, results))
 
-        dashboard_page.locator('button:has-text("Manual Trigger")').click()
+        dashboard_page.get_by_role("button", name="Process a file or folder").click()
         dashboard_page.locator("#manualSearchInput").fill("ben")
         # Debounced search renders one checkbox per result.
         checks = dashboard_page.locator("#manualSearchResults .manual-row-check")
@@ -429,7 +429,7 @@ class TestServerDropdownVendorBadges:
         mock_servers_list(authed_page, servers=servers)
         authed_page.goto(f"{app_url}/")
         authed_page.wait_for_load_state("domcontentloaded")
-        authed_page.locator('button:has-text("Manual Trigger")').click()
+        authed_page.get_by_role("button", name="Process a file or folder").click()
         expect(authed_page.locator("#manualServerScope")).to_be_visible(timeout=2000)
         authed_page.wait_for_timeout(500)
 

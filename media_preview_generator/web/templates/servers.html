@@ -52,6 +52,20 @@
                 <input type="hidden" id="editServerId">
                 <input type="hidden" id="editServerType">
 
+                <div class="server-edit-mobile-nav">
+                    <label class="form-label" for="editServerSectionSelect">Edit section</label>
+                    <select class="form-select" id="editServerSectionSelect">
+                        <option value="edit-tab-general">General</option>
+                        <option value="edit-tab-health">Setup Health</option>
+                        <option value="edit-tab-markers">Intro &amp; Credits</option>
+                        <option value="edit-tab-loudness">Loudness</option>
+                        <option value="edit-tab-libraries">Libraries</option>
+                        <option value="edit-tab-paths">Path mappings</option>
+                        <option value="edit-tab-excludes">Exclude paths</option>
+                        <option value="edit-tab-automation">Webhook &amp; Scanner</option>
+                    </select>
+                </div>
+
                 <ul class="nav nav-tabs mb-3" role="tablist">
                     <li class="nav-item">
                         <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#edit-tab-general" type="button">

@@ -11,12 +11,21 @@ someone actually opens search.
 {%- endcomment -%}
 [
 {%- assign pages = site.html_pages | where_exp: "p", "p.title" -%}
-{%- for p in pages -%}
+{%- for p in pages -%}{%- unless forloop.first -%},{%- endunless -%}
 {
   "title": {{ p.heading | default: p.title | jsonify }},
   "url": {{ p.url | relative_url | jsonify }},
   "description": {{ p.description | default: "" | jsonify }},
   "content": {{ p.content | strip_html | normalize_whitespace | strip | jsonify }}
-}{%- unless forloop.last -%},{%- endunless -%}
+}
+{%- for section in p.search_sections -%},
+{
+  "title": {{ section.title | jsonify }},
+  "parent": {{ p.heading | default: p.title | jsonify }},
+  "url": {{ section.url | relative_url | jsonify }},
+  "description": {{ p.description | default: "" | jsonify }},
+  "content": {{ section.content | jsonify }}
+}
+{%- endfor -%}
 {%- endfor -%}
 ]

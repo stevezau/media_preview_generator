@@ -25,6 +25,18 @@
     justify-content: center;
     margin-bottom: 2.25rem;
 }
+.setup-progress-current { display: none; }
+@media (max-width: 767.98px) {
+    .setup-progress { margin-bottom: 0.65rem; }
+    .setup-progress-current {
+        display: block;
+        margin: 0 0 1.5rem;
+        text-align: center;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: var(--bs-body-color);
+    }
+}
 
 .progress-step {
     display: flex;

@@ -5,16 +5,60 @@ description: Install Media Preview Generator with Docker or Docker Compose, then
   Unraid, volume mounts and networking.
 ---
 
-> [Back to Docs](README.md)
+<section class="setup-path" aria-labelledby="setup-path-title">
+  <div class="setup-path__head">
+    <p class="eyebrow">Start with your setup</p>
+    <h2 id="setup-path-title">Choose the instructions that apply</h2>
+    <p>These choices point to the existing instructions below. They do not change or generate a container command.</p>
+  </div>
+  <div class="setup-path__choices">
+    <label>Container host
+      <select id="setup-host">
+        <option value="linux">Linux</option>
+        <option value="unraid">Unraid</option>
+        <option value="windows">Windows with Docker Desktop</option>
+        <option value="macos">macOS</option>
+      </select>
+    </label>
+    <label>Processing hardware
+      <select id="setup-gpu">
+        <option value="intel">Intel GPU</option>
+        <option value="amd">AMD GPU</option>
+        <option value="nvidia">NVIDIA GPU</option>
+        <option value="cpu">CPU only</option>
+      </select>
+    </label>
+    <label>Media server output
+      <select id="setup-server">
+        <option value="plex">Plex</option>
+        <option value="emby">Emby</option>
+        <option value="jellyfin">Jellyfin</option>
+      </select>
+    </label>
+  </div>
+  <div class="setup-path__result" id="setup-path-result" aria-live="polite"></div>
+  <ol class="setup-path__steps" aria-label="First-run sequence">
+    <li>Check prerequisites</li>
+    <li>Run the container</li>
+    <li>Get the access token</li>
+    <li>Complete the setup wizard</li>
+    <li>Check server settings</li>
+    <li>Add webhooks or a schedule</li>
+  </ol>
+</section>
 
-Get preview thumbnails generating in minutes — for **Plex, Emby, Jellyfin**, or any combination of them.
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="README.md">Docs</a> <span aria-hidden="true">/</span> Getting Started</nav>
+
+Generate preview thumbnails for **Plex, Emby, Jellyfin**, or any combination of them.
 
 > [!IMPORTANT]
 > This page is the source of truth for installation and first-time setup.
 > For operations and troubleshooting, use [Guides & Troubleshooting](guides.md).
 > For exact settings and API contracts, use [Configuration & API Reference](reference.md).
 
-## Contents
+<details class="page-toc" id="contents">
+<summary>On this page</summary>
+<div markdown="1">
 
 - [Prerequisites](#prerequisites)
 - [Quick Start (Docker)](#quick-start-docker)
@@ -28,12 +72,8 @@ Get preview thumbnails generating in minutes — for **Plex, Emby, Jellyfin**, o
 - [Common Operations](#common-operations)
 - [Next Steps](#next-steps)
 
-## Related Docs
-
-- [Guides & Troubleshooting](guides.md)
-- [Configuration & API Reference](reference.md)
-- [FAQ](faq.md)
-- [Contributing & Development](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md)
+</div>
+</details>
 
 ---
 
@@ -622,6 +662,13 @@ SHA against the `dev` branch HEAD on GitHub.
 - Run and monitor jobs from the [Web Interface Guide](guides.md#web-interface)
 - Configure webhooks in [Webhook Integration](guides.md#webhook-integration)
 - Review all tunables in [Configuration & API Reference](reference.md)
+
+## Related Docs
+
+- [Guides & Troubleshooting](guides.md)
+- [Configuration & API Reference](reference.md)
+- [FAQ](faq.md)
+- [Contributing & Development](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md)
 
 ---
 

@@ -54,27 +54,6 @@ width/height at half its 2x capture's pixels (tested).
     </div>
   </section>
 
-  {%- comment -%}
-  Only numbers you can check on this site. A speed number comes from docs/benchmark/summary.json and
-  nowhere else, and its link below needs docs/benchmark.md (both tests/test_site_claims.py). site.js
-  counts them up on first view; the real value is in the HTML, so with the script blocked the strip
-  still reads correctly. The modifier class lets three facts fill one row until a fourth (the
-  benchmark) exists.
-  {%- endcomment %}
-  <section class="stats-band" aria-label="Media Preview Generator at a glance">
-    <div class="wrap">
-      <ul class="stats stats--{{ site.data.stats | size }}" role="list">
-        {%- for s in site.data.stats %}
-        <li class="stat">
-          <p class="stat__value"><span data-countup>{{ s.value }}</span>{% if s.unit %}<span class="stat__unit">{{ s.unit }}</span>{% endif %}</p>
-          <p class="stat__label">{{ s.label }}</p>
-          <p class="stat__note">{{ s.note }}{% if s.source == "benchmark" %} <a href="{{ '/benchmark/' | relative_url }}">How it was measured</a>{% endif %}</p>
-        </li>
-        {%- endfor %}
-      </ul>
-    </div>
-  </section>
-
   <section class="section section--tint">
     <div class="wrap reveal">
       <div class="section__head section__head--center" style="margin-bottom:0">
@@ -128,6 +107,25 @@ width/height at half its 2x capture's pixels (tested).
         </figure>
         {%- endfor %}
       </div>
+    </div>
+  </section>
+
+  {%- comment -%} Verifiable product facts follow the walkthrough, where they confirm the flow
+  instead of repeating the hero. The real values remain in the HTML when animation is unavailable. {%- endcomment -%}
+  <section class="stats-band" aria-label="Media Preview Generator at a glance">
+    <div class="wrap">
+      <ul class="stats stats--{{ site.data.stats | size }}" role="list">
+        {%- for s in site.data.stats %}
+        <li class="stat">
+          <p class="stat__value"><span data-countup>{{ s.value }}</span>{% if s.unit %}<span class="stat__unit">{{ s.unit }}</span>{% endif %}</p>
+          <p class="stat__label">{{ s.label }}</p>
+          <p class="stat__note">{{ s.note }}{% if s.source == "benchmark" %} <a href="{{ '/benchmark/' | relative_url }}">How it was measured</a>{% endif %}</p>
+        </li>
+        {%- endfor %}
+      </ul>
+      <p class="center mt-lg"><a class="btn btn--ghost" href="{{ '/getting-started/' | relative_url }}">Choose your setup path
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+      </a></p>
     </div>
   </section>
 

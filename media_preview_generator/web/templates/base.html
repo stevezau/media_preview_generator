@@ -40,6 +40,9 @@
 </head>
 <body>
     {% if request.endpoint != 'main.login' %}
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    {% endif %}
+    {% if request.endpoint != 'main.login' %}
     <!-- Navigation -->
     <nav class="navbar navbar-expand-xl border-bottom sticky-top">
         <div class="container-fluid">
@@ -385,7 +388,7 @@
     {% endif %}
 
     <!-- Main Content -->
-    <main class="{% if request.endpoint != 'main.login' %}container-fluid py-4{% endif %}">
+    <main id="main-content" tabindex="-1" class="{% if request.endpoint != 'main.login' %}container-fluid py-4{% endif %}">
         {% block content %}{% endblock %}
     </main>
 

@@ -352,7 +352,7 @@
             <div class="col-md-6 col-lg-4">
                 <div class="card card-interactive h-100">
                     <div class="card-body">
-                        <h5 class="card-title mb-2 d-flex align-items-center" style="min-width:0;">
+                        <h2 class="h5 card-title mb-2 d-flex align-items-center" style="min-width:0;">
                             <span style="white-space:nowrap;">${vendorLogo}</span>
                             <span class="text-truncate">${escapeHtml(server.name)}</span>
                             <!-- Inline Setup Health glyph next to the server name.
@@ -365,7 +365,7 @@
                                   role="button"
                                   tabindex="0"
                                   style="cursor:pointer;"></span>
-                        </h5>
+                        </h2>
                         <div class="text-muted small mb-2 text-truncate" title="${escapeHtml(server.url)}">${escapeHtml(server.url)}</div>
                         <div class="d-flex align-items-center justify-content-between mb-2 gap-2 flex-wrap">
                             <span class="badge bg-secondary" id="${statusPillId}" title="Connection status">
@@ -474,6 +474,18 @@
     }
 
     document.addEventListener('DOMContentLoaded', () => {
+        const editSectionSelect = document.getElementById('editServerSectionSelect');
+        if (editSectionSelect) {
+            editSectionSelect.addEventListener('change', () => {
+                const tab = document.querySelector(`#editServerModal [data-bs-target="#${editSectionSelect.value}"]`);
+                if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
+            });
+            document.querySelectorAll('#editServerModal [data-bs-toggle="tab"]').forEach((tab) => {
+                tab.addEventListener('shown.bs.tab', (event) => {
+                    editSectionSelect.value = (event.target.dataset.bsTarget || '').replace(/^#/, '');
+                });
+            });
+        }
         // The Add Server modal is a shared partial included from both
         // /servers and /setup. The /servers-only setup (server list,
         // webhook URL, edit modal) only runs when those elements exist
@@ -1295,6 +1307,15 @@
         // for every vendor.
         if (recentlyAddedCard) recentlyAddedCard.classList.remove('d-none');
         _renderVendorWebhookSection(server);
+        const editSectionSelect = document.getElementById('editServerSectionSelect');
+        if (editSectionSelect) {
+            Array.from(editSectionSelect.options).forEach((option) => {
+                const tab = document.querySelector(`#editServerModal [data-bs-target="#${option.value}"]`);
+                const unavailable = !tab || tab.closest('.nav-item').classList.contains('d-none');
+                option.disabled = unavailable;
+                option.hidden = unavailable;
+            });
+        }
         // Always force the General tab active on open. Without this, opening a
         // Plex server, clicking "Webhook & Scanner", closing, then opening a
         // non-Plex server leaves the now-hidden Plex pane visible because
@@ -1316,6 +1337,7 @@
             const activePane = document.getElementById(paneId);
             if (activeTab) activeTab.classList.add('active');
             if (activePane) activePane.classList.add('show', 'active');
+            if (editSectionSelect) editSectionSelect.value = paneId;
         } catch (_e) {
             // Best-effort — Bootstrap not available shouldn't break Edit.
         }
@@ -1361,6 +1383,13 @@
         renderEditExcludePaths(server.exclude_paths || []);
         if (window.loadMarkersTab) window.loadMarkersTab(server);
         if (window.loadLoudnessTab) window.loadLoudnessTab(server);
+        const loudnessOption = document.querySelector('#editServerSectionSelect option[value="edit-tab-loudness"]');
+        const loudnessTabItem = document.getElementById('editTabLoudnessLi');
+        if (loudnessOption && loudnessTabItem) {
+            const unavailable = loudnessTabItem.classList.contains('d-none');
+            loudnessOption.disabled = unavailable;
+            loudnessOption.hidden = unavailable;
+        }
         $('#editServerResult').className = 'd-none';
         $('#editServerResult').innerHTML = '';
 

@@ -26,7 +26,7 @@ html {
     background-color: var(--bs-tertiary-bg);
 }
 .automation-sidebar .nav-link.active {
-    color: var(--plex-orange);
+    color: var(--plex-orange-text);
     background-color: rgba(229, 160, 13, 0.1);
     border-left-color: var(--plex-orange);
     font-weight: 500;
@@ -50,6 +50,42 @@ html {
     color: var(--plex-orange);
 }
 .automation-sidebar .sidebar-group.active {
-    color: var(--plex-orange);
+    color: var(--plex-orange-text);
 }
 .automation-content { padding-bottom: 40vh; }
+.automation-mobile-nav { display: none; }
+.automation-mobile-feedback { display: none; }
+.automation-subheading {
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+@media (max-width: 991.98px) {
+    html { scroll-padding-top: 10rem; }
+    .automation-mobile-nav {
+        position: sticky;
+        top: 4.4rem;
+        z-index: 1010;
+        display: flex;
+        gap: 0.3rem;
+        margin-bottom: 1rem;
+        padding: 0.4rem;
+        border: 1px solid var(--bs-border-color);
+        border-radius: var(--radius);
+        background: color-mix(in srgb, var(--bs-body-bg) 94%, transparent);
+        backdrop-filter: blur(8px);
+    }
+    .automation-mobile-feedback { display: block; margin: -0.7rem 0 0.8rem; }
+    .automation-mobile-nav button {
+        flex: 1;
+        min-height: 44px;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--bs-secondary-color);
+    }
+    .automation-mobile-nav button[aria-current] {
+        background: var(--plex-orange);
+        color: #17130b;
+        font-weight: 600;
+    }
+}

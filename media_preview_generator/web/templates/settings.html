@@ -33,9 +33,22 @@
             </div>
         </header>
 
+        <div class="settings-mobile-nav">
+            <label for="settingsMobileSection" class="form-label">Settings section</label>
+            <select id="settingsMobileSection" class="form-select">
+                <option value="section-processing">Processing options</option>
+                <option value="section-markers">Intro &amp; Credits</option>
+                <option value="section-logging">Logging</option>
+                <option value="section-auth">Authentication</option>
+                <option value="section-backups">Backups</option>
+                <option value="section-about">About</option>
+            </select>
+            <div id="settingsMobileSectionFeedback" class="form-text" aria-live="polite">Showing Processing options</div>
+        </div>
+
         <!-- Processing Options -->
         <div class="card section-card" id="section-processing">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-speedometer2 me-2"></i>Processing Options
             </div>
             <div class="card-body">
@@ -47,7 +60,7 @@
                      webhook-specific; the labels just inherited the old
                      "webhook_*" config key names. Keys are unchanged in
                      settings.json so existing values carry over silently. -->
-                <h6 class="mb-3"><i class="bi bi-layers me-2"></i>Job Execution</h6>
+                <h3 class="settings-subheading mb-3"><i class="bi bi-layers me-2"></i>Job Execution</h3>
 
                 <div class="mb-3">
                     <label for="maxConcurrentJobs" class="form-label">
@@ -117,11 +130,11 @@
                     </ul>
                 </template>
 
-                <h6 class="mb-2 mt-4">Retry policy
+                <h3 class="settings-subheading mb-2 mt-4">Retry policy
                     <button type="button" class="info-icon ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
                             title="How every job retries a file the media server can't find yet." data-explain-title="Retry policy" data-explain-template="infoRetryPolicyTpl"><i class="bi bi-info-circle"></i></button>
-                </h6>
+                </h3>
                 <p class="form-text mt-0 mb-3">
                     Applies to all job types — webhook, scheduled, manual reprocess, and recently-added scans.
                 </p>
@@ -149,11 +162,11 @@
                     </div>
                 </div>
 
-                <h6 class="mb-2 mt-3">Restart recovery
+                <h3 class="settings-subheading mb-2 mt-3">Restart recovery
                     <button type="button" class="info-icon ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
                             title="What happens to in-flight jobs when the container restarts. Affects every job type, not just webhooks."><i class="bi bi-info-circle"></i></button>
-                </h6>
+                </h3>
 
                 <div class="mb-3">
                     <div class="form-check form-switch">
@@ -181,7 +194,7 @@
                 <hr>
 
                 <!-- GPU Configuration -->
-                <h6 class="mb-3" id="gpu-configuration"><i class="bi bi-gpu-card me-2"></i>GPU Configuration</h6>
+                <h3 class="settings-subheading mb-3" id="gpu-configuration"><i class="bi bi-gpu-card me-2"></i>GPU Configuration</h3>
                 <div id="gpuConfigContainer">
                     <div class="text-muted mb-3" id="gpuDetecting">
                         <div class="spinner-border spinner-border-sm me-2" role="status">
@@ -197,7 +210,7 @@
                 </button>
 
                 <!-- CPU Workers -->
-                <h6 class="mb-3"><i class="bi bi-cpu me-2"></i>CPU Workers</h6>
+                <h3 class="settings-subheading mb-3"><i class="bi bi-cpu me-2"></i>CPU Workers</h3>
                 <div class="row mb-4">
                     <div class="col-md-6 mb-3">
                         <label for="cpuThreads" class="form-label">
@@ -217,7 +230,7 @@
                 </div>
 
                 <!-- Library Scanning -->
-                <h6 class="mb-3"><i class="bi bi-search me-2"></i>Library Scanning</h6>
+                <h3 class="settings-subheading mb-3"><i class="bi bi-search me-2"></i>Library Scanning</h3>
                 <div class="row mb-2">
                     <div class="col-md-6 mb-3">
                         <label for="scanWorkers" class="form-label">
@@ -231,7 +244,7 @@
                 </div>
 
                 <!-- Thumbnail Settings -->
-                <h6 class="mb-3"><i class="bi bi-image me-2"></i>Thumbnail Settings</h6>
+                <h3 class="settings-subheading mb-3"><i class="bi bi-image me-2"></i>Thumbnail Settings</h3>
                 <div class="row">
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailInterval" class="form-label">
@@ -354,7 +367,7 @@
                      to lead with the user benefit; per-knob detail moved into
                      ⓘ tooltips so the form scans cleanly. -->
                 <hr>
-                <h6 class="mb-2">Smart caching across servers
+                <h3 class="settings-subheading mb-2">Smart caching across servers
                     <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
                             title="How cache reuse works across servers."
@@ -363,7 +376,7 @@
                             aria-label="Explain smart caching">
                         <i class="bi bi-info-circle"></i>
                     </button>
-                </h6>
+                </h3>
 
                 <!-- Rich explanation for the Smart Caching ⓘ modal. -->
                 <template id="infoSmartCachingTpl">
@@ -459,7 +472,7 @@
         <!-- Intro & Credits: detection settings shared by every server (a file is detected once). Each server's
              switch lives in Servers → Edit → Intro & Credits, its libraries in Servers → Edit → Libraries. -->
         <div class="card section-card" id="section-markers">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits
             </div>
             <div class="card-body">
@@ -469,7 +482,7 @@
                 </p>
                 <div class="markers-settings-grid">
                     <div>
-                        <h6 class="mb-3">What to detect</h6>
+                        <h3 class="settings-subheading mb-3">What to detect</h3>
                         <div class="markers-opt mb-3">
                             <div>
                                 <label for="markersDetectIntro">Intros</label>
@@ -504,7 +517,7 @@
 
                     <div>
                         <div class="d-flex justify-content-between align-items-baseline gap-2 mb-2">
-                            <h6 class="mb-0"><span id="markersSourcesLabel">Where we check</span><button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The places we look for intro and credits times, in the order they&#39;re asked."><i class="bi bi-info-circle"></i></button></h6>
+                            <h3 class="settings-subheading mb-0"><span id="markersSourcesLabel">Where we check</span><button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The places we look for intro and credits times, in the order they&#39;re asked."><i class="bi bi-info-circle"></i></button></h3>
                             <span class="small text-muted">drag to reorder</span>
                         </div>
                         <!-- Order is the order sources are checked and which one's times win. Reordered by the grip
@@ -632,7 +645,7 @@
                 <!-- Each card, and the modal's detail below, mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium")
                      and pipeline.py's source order; change both together. -->
                 <section class="mt-4" id="markersHowItDecides" aria-labelledby="markersHowItDecidesLabel">
-                    <h6 class="mb-1" id="markersHowItDecidesLabel">How it decides</h6>
+                    <h3 class="settings-subheading mb-1" id="markersHowItDecidesLabel">How it decides</h3>
                     <p class="small text-muted mb-3">Every file goes through the same four steps. Each marker type (intro,
                         credits) is decided on its own, so one can be sent when the other isn&#39;t found.</p>
                     <ol class="markers-steps list-unstyled mb-2">
@@ -665,7 +678,7 @@
 
                 <!-- "See how decisions are made": opens in #globalInfoModal. Same source of truth as the cards above. -->
                 <template id="markersDecisionsTpl">
-                    <h6>Who can decide alone</h6>
+                    <h3 class="settings-subheading">Who can decide alone</h3>
                     <table class="table table-sm align-middle mb-1 markers-decide-alone">
                         <tbody>
                             <tr><td>Chapters in the file</td><td class="text-end"><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">Alone</span></td></tr>
@@ -679,7 +692,7 @@
                     <p class="small text-muted">IntroDB and TheIntroDB count as one source. A plugin&#39;s imported copy of
                         IntroDB or SkipDB counts as that database, not as a second opinion.</p>
 
-                    <h6 class="mt-4">The two outcomes</h6>
+                    <h3 class="settings-subheading mt-4">The two outcomes</h3>
                     <dl class="markers-outcomes">
                         <dt><i class="bi bi-circle-fill text-success me-2" aria-hidden="true"></i>Decided and sent</dt>
                         <dd>A chapter nobody contradicts · two independent sources agree · one file-reading source
@@ -691,7 +704,7 @@
                             adjust one in the Inspector.</dd>
                     </dl>
 
-                    <h6 class="mt-4">Rules that surprise people</h6>
+                    <h3 class="settings-subheading mt-4">Rules that surprise people</h3>
                     <ul class="mb-0 markers-surprises">
                         <li><strong>Credit text moves a “Credits” chapter</strong> to the first credit card, unless another source agrees with the chapter.</li>
                         <li><strong>Credits with no end run to the end of the file.</strong> Online credits that overshoot the end by up to 5&nbsp;s are cut there.</li>
@@ -711,19 +724,19 @@
                 </template>
 
                 <div class="markers-advanced border-top mt-4 pt-3">
-                    <h6 class="mb-0">
+                    <h3 class="settings-subheading mb-0">
                         <button class="btn btn-link p-0 text-reset text-decoration-none fw-semibold markers-advanced-toggle" type="button"
                                 data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false"
                                 aria-controls="markersAdvanced" id="markersAdvancedToggle">
                             <i class="bi bi-chevron-right collapse-chevron me-1" aria-hidden="true"></i>Advanced
                         </button>
-                    </h6>
+                    </h3>
                     <p class="small text-muted mt-1 mb-0">Only change this if you know what you&#39;re doing.</p>
                     <div class="collapse" id="markersAdvanced">
                         <div class="pt-3">
-                            <h6 class="mb-3">Where to look for credits
+                            <h3 class="settings-subheading mb-3">Where to look for credits
                                 <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Automatic starts with the last 7½ minutes of an episode and 15 of a film, and reads back 2 minutes at a time while the credits are already rolling at that window&#39;s start."><i class="bi bi-info-circle"></i></button>
-                            </h6>
+                            </h3>
                             <div class="markers-opt mb-3">
                                 <label for="markersCreditsWindowTv">TV episodes</label>
                                 <select class="form-select form-select-sm w-auto" id="markersCreditsWindowTv"><option value="" selected>Automatic (last 7½ min)</option><option value="300">5 min</option><option value="600">10 min</option><option value="900">15 min</option><option value="1200">20 min</option><option value="1800">30 min</option></select>
@@ -740,7 +753,7 @@
 
         <!-- Logging -->
         <div class="card section-card" id="section-logging">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-journal-text me-2"></i>Logging
             </div>
             <div class="card-body">
@@ -762,7 +775,7 @@
                     <i class="bi bi-arrow-repeat me-1"></i>Apply Log Level Now
                 </button>
 
-                <h6 class="text-muted mb-2"><i class="bi bi-file-earmark-text me-1"></i>System Log File</h6>
+                <h3 class="settings-subheading text-muted mb-2"><i class="bi bi-file-earmark-text me-1"></i>System Log File</h3>
                 <p class="form-text mt-0 mb-2">
                     A structured log file is kept at <code>/config/logs/app.log</code> in JSONL format
                     at the log level configured above. The <a href="/logs">Logs</a> page reads from this file
@@ -792,7 +805,7 @@
                 </div>
                 <div class="form-text mb-3">Rotation &amp; retention changes take effect on next restart.</div>
 
-                <h6 class="text-muted mb-2"><i class="bi bi-list-task me-1"></i>Job History</h6>
+                <h3 class="settings-subheading text-muted mb-2"><i class="bi bi-list-task me-1"></i>Job History</h3>
                 <p class="form-text mt-0 mb-2">
                     Each job keeps its own log file in <code>/config/logs/jobs/</code>.
                     Completed, failed, and cancelled jobs older than this are automatically removed along with their logs.
@@ -813,7 +826,7 @@
 
         <!-- Authentication Token -->
         <div class="card section-card" id="section-auth">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-key me-2"></i>Web Authentication
             </div>
             <div class="card-body">
@@ -821,7 +834,7 @@
                     The authentication token secures access to this web interface.
                 </p>
 
-                <h6 class="mb-2"><i class="bi bi-pencil-square me-1"></i>Set a custom token</h6>
+                <h3 class="settings-subheading mb-2"><i class="bi bi-pencil-square me-1"></i>Set a custom token</h3>
                 <p class="form-text mt-0 mb-2">
                     Use your own static passphrase instead of the auto-generated random token. Useful when
                     sharing a token with scripts or password managers. Minimum 8 characters.
@@ -845,7 +858,7 @@
 
                 <hr class="my-3">
 
-                <h6 class="mb-2"><i class="bi bi-arrow-repeat me-1"></i>Regenerate token</h6>
+                <h3 class="settings-subheading mb-2"><i class="bi bi-arrow-repeat me-1"></i>Regenerate token</h3>
                 <p class="form-text mt-0 mb-2">
                     Generate a fresh random token. Useful when you suspect the existing token has leaked.
                 </p>
@@ -858,7 +871,7 @@
                    this stays visible (and selectable) until the explicit
                    "I've copied it, log me out" button is clicked. #}
                 <div id="newTokenPanel" class="alert alert-success d-none mt-3" role="alert">
-                    <h6 class="alert-heading mb-2"><i class="bi bi-check-circle-fill me-1"></i>New token generated</h6>
+                    <h3 class="settings-subheading alert-heading mb-2"><i class="bi bi-check-circle-fill me-1"></i>New token generated</h3>
                     <p class="small mb-2">Copy this token now — it&rsquo;s the only time it&rsquo;s shown.</p>
                     <div class="input-group input-group-sm mb-2">
                         <input type="text" id="newTokenValue" class="form-control font-monospace" readonly>
@@ -879,7 +892,7 @@
 
         <!-- Backups -->
         <div class="card section-card" id="section-backups">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-clock-history me-2"></i>Backups
             </div>
             <div class="card-body">
@@ -924,7 +937,7 @@
 
         <!-- About -->
         <div class="card section-card" id="section-about">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-info-circle me-2"></i>About
             </div>
             <div class="card-body">
@@ -1680,4 +1693,5 @@ async function applyLogLevel() {
 }
 
 </script>
+<script src="{{ url_for('static', filename='js/settings_ui.js') }}"></script>
 {% endblock %}

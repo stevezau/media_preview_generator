@@ -253,6 +253,11 @@ hr {
   border-radius: 7px;
 }
 
+.brand__name--short,
+.nav__support {
+  display: none;
+}
+
 .nav__links {
   display: flex;
   align-items: center;
@@ -427,6 +432,10 @@ hr {
   .nav__links.is-open .nav__link {
     padding: 0.8rem 0.2rem;
   }
+
+  .nav__links.is-open .nav__support {
+    display: contents;
+  }
 }
 
 /* Measured at 320: the brand, a worded search button and four 34px icons want
@@ -449,8 +458,15 @@ hr {
 }
 
 @media (max-width: 600px) {
+  .icon-btn,
+  .search-btn,
+  .nav-pill,
+  .nav__burger {
+    width: 44px;
+    height: 44px;
+  }
+
   .search-btn {
-    width: 34px;
     padding: 0;
     justify-content: center;
   }
@@ -465,6 +481,15 @@ hr {
   }
   .nav-pill--coffee {
     display: none;
+  }
+  .nav-pill--star {
+    display: none;
+  }
+  .brand__name--full {
+    display: none;
+  }
+  .brand__name--short {
+    display: inline;
   }
 }
 
@@ -1086,9 +1111,11 @@ figcaption {
   .js-tour-ready .tour__rail-fill {
     display: block;
     width: 100%;
-    height: 0;
+    height: 100%;
+    transform: scaleY(0);
+    transform-origin: top;
     background: var(--accent);
-    transition: height 0.12s linear;
+    transition: transform 0.12s linear;
   }
 
   .js-tour-ready .tour-step {
@@ -1442,24 +1469,57 @@ figcaption {
   margin-bottom: 2.25rem;
 }
 
-.footer h4 a {
+.footer__heading a {
   /* "Plex how-to" is both a column heading and a real page, so its heading is a link. It must still
      read as a heading rather than as the first item in its own list. */
   color: inherit;
   text-decoration: none;
 }
 
-.footer h4 a:hover {
+.footer__heading a:hover {
   color: var(--text);
 }
 
-.footer h4 {
+.footer__heading {
   font-size: 0.78rem;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--muted);
   margin-bottom: 0.85rem;
   font-weight: 640;
+}
+
+.mobile-toc {
+  display: none;
+}
+
+.mobile-toc[hidden] {
+  display: none;
+}
+
+@media (max-width: 1180px) {
+  .mobile-toc {
+    display: block;
+    margin: 0 0 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+  }
+  .mobile-toc summary {
+    min-height: 44px;
+    padding: 0.7rem 0.9rem;
+    cursor: pointer;
+    font-weight: 620;
+  }
+  .mobile-toc ul {
+    list-style: none;
+    margin: 0;
+    padding: 0 0.9rem 0.9rem;
+  }
+  .mobile-toc a {
+    display: block;
+    padding: 0.35rem 0;
+  }
 }
 
 .footer ul {
@@ -1649,6 +1709,112 @@ figcaption {
 
 /* ---------------------------------------------------------------- prose -- */
 
+.setup-path {
+  margin: 0 0 1.5rem;
+  padding: clamp(1rem, 2.5vw, 1.5rem);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: linear-gradient(145deg, var(--accent-quiet), var(--surface) 55%);
+}
+.setup-path__head h2 { margin: 0.2rem 0 0.35rem; font-size: clamp(1.25rem, 1rem + 1vw, 1.65rem); }
+.setup-path__head p:last-child { margin: 0; color: var(--muted); }
+.setup-path__choices {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+.setup-path label { color: var(--text-soft); font-size: 0.82rem; font-weight: 620; }
+.setup-path select {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 0.3rem;
+  padding: 0 2rem 0 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.setup-path__result {
+  margin-top: 0.9rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.setup-path__result p { margin: 0; }
+.setup-path__result a { font-weight: 620; }
+.setup-path__steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.25rem 1.5rem;
+  margin: 0.75rem 0 0;
+  padding-left: 1.35rem;
+  color: var(--text-soft);
+  font-size: 0.8rem;
+}
+.breadcrumbs { margin: 0 0 1rem; color: var(--muted); font-size: 0.86rem; }
+.breadcrumbs span { margin-inline: 0.35rem; }
+.task-links {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0 0 1.5rem;
+}
+.task-links a {
+  display: block;
+  min-height: 44px;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  text-decoration: none;
+}
+.task-links strong, .task-links span { display: block; }
+.task-links span { margin-top: 0.2rem; color: var(--muted); font-size: 0.78rem; line-height: 1.4; }
+.page-toc {
+  margin: 1.25rem 0 2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.page-toc summary { min-height: 44px; padding: 0.75rem 0.9rem; cursor: pointer; font-weight: 620; }
+.page-toc > div { padding: 0 1rem 0.9rem; }
+
+@media (max-width: 700px) {
+  .prose { padding-top: 1.5rem; }
+  .prose__head { margin-bottom: 1.25rem; padding-bottom: 1rem; }
+  .setup-path { padding: 0.85rem; }
+  .setup-path__head p:last-child, .setup-path__result { font-size: 0.8rem; }
+  .setup-path__choices { grid-template-columns: 1fr; gap: 0.45rem; margin-top: 0.7rem; }
+  .setup-path select { margin-top: 0.15rem; }
+  .task-links { grid-template-columns: 1fr; }
+  .prose table.decision-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .prose table.decision-table,
+  .prose table.decision-table tbody,
+  .prose table.decision-table tr,
+  .prose table.decision-table td { display: block; width: 100%; }
+  .prose table.decision-table tr {
+    margin-bottom: 0.75rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+  }
+  .prose table.decision-table td { padding: 0.3rem 0; border: 0; }
+  .prose table.decision-table td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+}
+
 .prose {
   padding-block: 2.5rem 4rem;
   min-width: 0;
@@ -1675,6 +1841,12 @@ figcaption {
   color: var(--muted);
   font-size: 1.05rem;
   text-wrap: pretty;
+}
+
+@media (max-width: 700px) {
+  .prose { padding-top: 1rem; }
+  .prose__head { margin-bottom: 0.8rem; padding-bottom: 0.7rem; }
+  .setup-path__steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .prose h2 {
@@ -1929,6 +2101,16 @@ figcaption {
   min-width: 0;
 }
 
+.search-statusbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.45rem 1rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .search-results {
   overflow-y: auto;
   max-height: calc(min(70vh, 34rem) - 4rem);
@@ -1955,6 +2137,13 @@ figcaption {
   display: block;
   font-size: 0.93rem;
   color: var(--text);
+}
+
+.search-result__parent {
+  display: block;
+  color: var(--accent-text);
+  font-size: 0.76rem;
+  margin-top: 0.08rem;
 }
 
 .search-results small {
@@ -2069,8 +2258,11 @@ figcaption {
 
 /* Three words of brand name push the nav buttons off the bar on a phone. */
 @media (max-width: 520px) {
-  .nav .brand__name {
+  .nav .brand__name--full {
     display: none;
+  }
+  .nav .brand__name--short {
+    display: inline;
   }
 }
 

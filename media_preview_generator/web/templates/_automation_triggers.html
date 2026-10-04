@@ -2,7 +2,7 @@
 
         <!-- Section 1: Overview -->
         <div class="card section-card" id="section-webhooks-overview">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-info-circle me-2"></i>Overview
             </div>
             <div class="card-body">
@@ -10,7 +10,7 @@
                     Webhooks generate previews automatically when new media lands in Plex, Emby, or Jellyfin. Pick the trigger source below that matches how your media gets in.
                 </p>
 
-                <h6 class="mb-2"><i class="bi bi-signpost me-1"></i>How do you add media?</h6>
+                <h3 class="automation-subheading mb-2"><i class="bi bi-signpost me-1"></i>How do you add media?</h3>
                 <div class="decision-list mb-4">
                     <div class="decision-row">
                         <div class="decision-scenario">
@@ -78,7 +78,7 @@
 
         <!-- Section 4: *arr apps (Sonarr / Radarr / Sportarr) -->
         <div class="card section-card" id="section-webhooks-sonarr-radarr">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-download me-2"></i>*arr apps
                 <span class="badge bg-secondary ms-2">Per-import trigger</span>
             </div>
@@ -134,11 +134,11 @@
                         <label class="form-label">Sonarr Webhook URL</label>
                         <div class="input-group mb-3">
                             <input type="text" class="form-control webhook-url" id="sonarrUrl" readonly>
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('sonarrUrl')">
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('sonarrUrl')" aria-label="Copy Sonarr webhook URL" title="Copy Sonarr webhook URL">
                                 <i class="bi bi-clipboard"></i>
                             </button>
                         </div>
-                        <h6 class="small text-muted mb-2">Setup in Sonarr</h6>
+                        <h3 class="automation-subheading small text-muted mb-2">Setup in Sonarr</h3>
                         <ol class="small mb-0">
                             <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
                             <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
@@ -158,11 +158,11 @@
                         <label class="form-label">Radarr Webhook URL</label>
                         <div class="input-group mb-3">
                             <input type="text" class="form-control webhook-url" id="radarrUrl" readonly>
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('radarrUrl')">
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('radarrUrl')" aria-label="Copy Radarr webhook URL" title="Copy Radarr webhook URL">
                                 <i class="bi bi-clipboard"></i>
                             </button>
                         </div>
-                        <h6 class="small text-muted mb-2">Setup in Radarr</h6>
+                        <h3 class="automation-subheading small text-muted mb-2">Setup in Radarr</h3>
                         <ol class="small mb-0">
                             <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
                             <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
@@ -182,11 +182,11 @@
                         <label class="form-label">Sportarr Webhook URL</label>
                         <div class="input-group mb-3">
                             <input type="text" class="form-control webhook-url" id="sportarrUrl" readonly>
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('sportarrUrl')">
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('sportarrUrl')" aria-label="Copy Sportarr webhook URL" title="Copy Sportarr webhook URL">
                                 <i class="bi bi-clipboard"></i>
                             </button>
                         </div>
-                        <h6 class="small text-muted mb-2">Setup in Sportarr</h6>
+                        <h3 class="automation-subheading small text-muted mb-2">Setup in Sportarr</h3>
                         <ol class="small mb-0">
                             <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
                             <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
@@ -213,7 +213,7 @@
 
         <!-- Section 5: Custom Webhook -->
         <div class="card section-card" id="section-webhooks-custom">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-plug me-2"></i>Custom Webhook
                 <span class="badge bg-secondary ms-2">Any HTTP client</span>
             </div>
@@ -223,7 +223,7 @@
                 <label class="form-label">Custom Webhook URL</label>
                 <div class="input-group mb-2">
                     <input type="text" class="form-control webhook-url" id="customUrl" readonly>
-                    <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('customUrl')">
+                    <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('customUrl')" aria-label="Copy custom webhook URL" title="Copy custom webhook URL">
                         <i class="bi bi-clipboard"></i>
                     </button>
                 </div>
@@ -236,12 +236,12 @@
                     if the URL already contains <code>?</code>); omit it to use the default below.
                 </div>
 
-                <h6 class="small text-muted">Payload — single file</h6>
+                <h3 class="automation-subheading small text-muted">Payload — single file</h3>
                 <pre class="bg-body-tertiary p-2 rounded small mb-2"><code>{% raw %}{
   "file_path": "/media/movies/Movie (2024)/Movie.mkv"
 }{% endraw %}</code></pre>
 
-                <h6 class="small text-muted">Payload — multiple files</h6>
+                <h3 class="automation-subheading small text-muted">Payload — multiple files</h3>
                 <pre class="bg-body-tertiary p-2 rounded small mb-2"><code>{% raw %}{
   "file_paths": ["/media/tv/Show/S01E01.mkv", "/media/tv/Show/S01E02.mkv"],
   "title": "Optional display label"
@@ -313,7 +313,7 @@
 
         <!-- Section 6: Settings -->
         <div class="card section-card" id="section-webhooks-settings">
-            <div class="card-header">
+            <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-sliders me-2"></i>Settings
             </div>
             <div class="card-body">

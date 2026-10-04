@@ -564,9 +564,21 @@
     function fold(folded) {
         $('inspSearch').hidden = folded;
         $('inspFolded').hidden = !folded;
+        $('inspSectionNav').hidden = !folded;
         $('inspFile').hidden = !folded;
         $('inspShowResultsText').textContent = state.query && !state.query.startsWith('/')
             ? `Results for “${state.query}”` : 'New search';
+    }
+
+    function syncSectionNav() {
+        const nav = $('inspSectionNav');
+        let available = 0;
+        nav.querySelectorAll('a[href^="#"]').forEach(function (link) {
+            const target = document.querySelector(link.getAttribute('href'));
+            link.hidden = !target;
+            if (target) available += 1;
+        });
+        nav.hidden = !available || !$('inspSearch').hidden;
     }
 
     function showSearch(push) {
@@ -873,6 +885,7 @@
             }
         }
         root.replaceChildren.apply(root, parts);
+        syncSectionNav();
         if (timeline && timeline.node.isConnected) timeline.mount();
         tidyAxes(root);
         tooltips(root);
@@ -1227,7 +1240,24 @@
         }
         const sentences = serverSentences().join(' ');
         const need = attention();
-        if (need.length) return stat('servers', label, `${need.length} need${need.length === 1 ? 's' : ''} attention`, sentences, 'warn');
+        if (need.length) {
+            const tile = stat('servers', label, `${need.length} need${need.length === 1 ? 's' : ''} attention`, sentences, 'warn');
+            tile.tabIndex = 0;
+            tile.setAttribute('role', 'link');
+            tile.setAttribute('aria-label', `${need.length} server${need.length === 1 ? '' : 's'} need attention. Go to server details.`);
+            const goToServers = function () {
+                const target = document.getElementById('inspServers');
+                if (!target) return;
+                target.tabIndex = -1;
+                target.scrollIntoView({ behavior: 'smooth' });
+                target.focus({ preventScroll: true });
+            };
+            tile.addEventListener('click', goToServers);
+            tile.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); goToServers(); }
+            });
+            return tile;
+        }
         const ours = list.filter(function (s) { return s.plan === 'up_to_date'; }).length;
         return stat('servers', label, `${ours} of ${list.length} show${ours === 1 ? 's' : ''} ours`, sentences);
     }
@@ -3294,6 +3324,15 @@
     }
 
     function init() {
+        $('inspSectionNav').addEventListener('click', function (event) {
+            const link = event.target.closest('a[href^="#"]');
+            if (!link || link.hidden) return;
+            const target = document.querySelector(link.getAttribute('href'));
+            if (!target) return;
+            event.preventDefault();
+            target.scrollIntoView({ behavior: 'instant', block: 'start' });
+            history.replaceState(history.state, '', link.getAttribute('href'));
+        });
         $('inspQuery').addEventListener('input', queryChanged);
         $('inspQuery').addEventListener('keydown', function (e) {
             if (e.key !== 'Enter') return;

@@ -2419,6 +2419,10 @@ button.insp-season-row:focus-visible {
 
 /* --- Narrow screens ------------------------------------------------------- */
 
+.insp-section-nav { display: none; }
+.insp-stat[role="link"] { cursor: pointer; }
+.insp-stat[role="link"]:focus-visible { outline: 2px solid var(--plex-orange); outline-offset: 3px; }
+
 @media (max-width: 1199.98px) {
     .insp-stats {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2459,6 +2463,43 @@ button.insp-season-row:focus-visible {
 @media (max-width: 767.98px) {
     .insp {
         --insp-gutter: 76px;
+    }
+
+    .insp-section-nav {
+        position: sticky;
+        top: 4.4rem;
+        z-index: 20;
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        margin: 0 0 12px;
+        padding: 4px;
+        border: 1px solid var(--insp-line);
+        border-radius: 8px;
+        background: var(--insp-bg);
+    }
+    .insp-section-nav[hidden] { display: none; }
+    .insp-section-nav a {
+        flex: 1 0 auto;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 10px;
+        color: var(--insp-text);
+        text-decoration: none;
+        border-radius: 6px;
+    }
+    #inspTimeline,
+    #inspLoudness,
+    #inspEvidence,
+    #inspServers { scroll-margin-top: 8rem; }
+    .insp button,
+    .insp [role="button"],
+    .insp .info-icon,
+    .insp select {
+        min-width: 44px;
+        min-height: 44px;
     }
 
     .insp-title {

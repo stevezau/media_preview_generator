@@ -9,10 +9,12 @@
   /* ---------------------------------------------------------------- theme */
 
   var toggle = document.getElementById("theme-toggle");
+  var themeColor = document.getElementById("theme-color");
   if (toggle) {
     toggle.addEventListener("click", function () {
       var next = root.dataset.theme === "dark" ? "light" : "dark";
       root.dataset.theme = next;
+      if (themeColor) themeColor.content = next === "light" ? "#fcfcfb" : "#08080a";
       try {
         localStorage.setItem("mpg-theme", next);
       } catch (e) {
@@ -114,6 +116,8 @@
 
   var tocList = document.getElementById("toc-list");
   var toc = document.getElementById("toc");
+  var mobileToc = document.getElementById("mobile-toc");
+  var mobileTocList = document.getElementById("mobile-toc-list");
   if (tocList && toc) {
     var headings = document.querySelectorAll(".prose h2[id], .prose h3[id]");
     if (headings.length > 2) {
@@ -126,7 +130,9 @@
         a.dataset.level = heading.tagName === "H3" ? "3" : "2";
         li.appendChild(a);
         tocList.appendChild(li);
+        if (mobileTocList) mobileTocList.appendChild(li.cloneNode(true));
       });
+      if (mobileToc && !document.querySelector(".page-toc")) mobileToc.hidden = false;
 
       /* Highlight the heading currently at the top of the viewport. rootMargin
          pins the trigger line just below the sticky nav. */
@@ -246,7 +252,7 @@
         var box = tour.getBoundingClientRect();
         if (!box.height) return;
         var progress = (window.innerHeight / 2 - box.top) / box.height;
-        rail.style.height = Math.max(0, Math.min(1, progress)) * 100 + "%";
+        rail.style.transform = "scaleY(" + Math.max(0, Math.min(1, progress)) + ")";
       };
       var queueRail = function () {
         if (railQueued) return;
@@ -299,6 +305,64 @@
     });
   }
 
+  /* The Getting Started chooser narrows the reader's route through the complete guide. It links
+     to existing sections and never attempts to synthesize a container command. */
+  var setupHost = document.getElementById("setup-host");
+  var setupGpu = document.getElementById("setup-gpu");
+  var setupServer = document.getElementById("setup-server");
+  var setupResult = document.getElementById("setup-path-result");
+  if (setupHost && setupGpu && setupServer && setupResult) {
+    var setupLinks = {
+      host: {
+        linux: ["GPU acceleration", "#gpu-acceleration", "Linux uses /dev/dri for Intel and AMD."],
+        unraid: ["Unraid instructions", "#unraid", "Use Unraid's device and path conventions."],
+        windows: ["Windows instructions", "#windows", "Docker Desktop supports NVIDIA GPU passthrough; Intel and AMD use CPU processing."],
+        macos: ["macOS instructions", "#macos", "Docker Desktop on macOS uses CPU processing."],
+      },
+      gpu: {
+        intel: ["Intel QuickSync", "#intel-igpu-quicksync"],
+        amd: ["AMD GPU", "#amd-gpu"],
+        nvidia: ["NVIDIA GPU", "#nvidia-gpu"],
+        cpu: ["CPU worker configuration", "#worker-configuration"],
+      },
+      server: {
+        plex: ["Plex volume mounts", "#volume-mounts", "Plex writes to /plex, so its media mount can remain read-only."],
+        emby: ["Emby volume mounts", "#volume-mounts", "Emby writes its BIF beside the video, so media must be read-write."],
+        jellyfin: ["Jellyfin volume mounts", "#volume-mounts", "Default Jellyfin trickplay writes beside the video; off-media mode has separate requirements."],
+      },
+    };
+    var updateSetupPath = function () {
+      var host = setupLinks.host[setupHost.value];
+      var gpu = setupLinks.gpu[setupGpu.value];
+      var server = setupLinks.server[setupServer.value];
+      var gpuNote = "";
+      if (setupHost.value === "windows" && setupGpu.value !== "nvidia" && setupGpu.value !== "cpu")
+        gpuNote = " Choose CPU processing on Windows for this GPU.";
+      if (setupHost.value === "macos" && setupGpu.value !== "cpu")
+        gpuNote = " Choose CPU processing on macOS.";
+      setupResult.innerHTML =
+        '<p><a href="' + host[1] + '">' + host[0] + '</a> · <a href="' + gpu[1] + '">' + gpu[0] +
+        '</a> · <a href="' + server[1] + '">' + server[0] + '</a><br>' + host[2] + " " + server[2] + gpuNote + "</p>";
+    };
+    [setupHost, setupGpu, setupServer].forEach(function (select) {
+      select.addEventListener("change", updateSetupPath);
+    });
+    updateSetupPath();
+  }
+
+  document.querySelectorAll(".prose table").forEach(function (table) {
+    var headings = Array.prototype.map.call(table.querySelectorAll("thead th"), function (th) {
+      return th.textContent.trim();
+    });
+    if (!headings.length || headings.length > 4) return;
+    table.classList.add("decision-table");
+    table.querySelectorAll("tbody tr").forEach(function (row) {
+      row.querySelectorAll("td").forEach(function (cell, index) {
+        cell.dataset.label = headings[index] || "Value";
+      });
+    });
+  });
+
   /* Anchor links on prose headings, so a section can be linked to directly. */
   document
     .querySelectorAll(".prose h2[id], .prose h3[id]")
@@ -318,8 +382,10 @@
   var closeBtn = document.getElementById("search-close");
   var input = document.getElementById("search-input");
   var results = document.getElementById("search-results");
+  var status = document.getElementById("search-status");
   var index = null;
   var activeIdx = -1;
+  var searchOpener = null;
 
   if (
     dialog &&
@@ -345,8 +411,10 @@
     };
 
     var openSearch = function () {
+      searchOpener = document.activeElement;
       loadIndex();
       dialog.showModal();
+      input.setAttribute("aria-expanded", "true");
       input.value = "";
       render([]);
       input.focus();
@@ -357,6 +425,15 @@
       closeBtn.addEventListener("click", function () {
         dialog.close();
       });
+    dialog.addEventListener("close", function () {
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+      if (searchOpener && searchOpener.focus) searchOpener.focus();
+    });
+    dialog.addEventListener("cancel", function (event) {
+      event.preventDefault();
+      dialog.close();
+    });
 
     document.addEventListener("keydown", function (e) {
       var typing =
@@ -381,9 +458,11 @@
     var render = function (matches, query) {
       results.innerHTML = "";
       activeIdx = -1;
+      input.removeAttribute("aria-activedescendant");
       if (!query) {
         results.innerHTML =
           '<li class="search-empty">Type to search the documentation.</li>';
+        if (status) status.textContent = "Type to search the documentation.";
         return;
       }
       if (!matches.length) {
@@ -391,16 +470,23 @@
           '<li class="search-empty">No matches for “' +
           escapeHtml(query) +
           "”.</li>";
+        if (status) status.textContent = "No results for " + query + ".";
         return;
       }
-      matches.forEach(function (m) {
+      if (status) status.textContent = matches.length + (matches.length === 1 ? " result" : " results");
+      matches.forEach(function (m, i) {
         var li = document.createElement("li");
+        li.id = "search-option-" + i;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", "false");
         li.innerHTML =
           '<a href="' +
           m.url +
           '"><strong>' +
           escapeHtml(m.title) +
-          "</strong><small>" +
+          "</strong>" +
+          (m.parent ? '<span class="search-result__parent">' + escapeHtml(m.parent) + "</span>" : "") +
+          "<small>" +
           m.snippet +
           "</small></a>";
         results.appendChild(li);
@@ -416,6 +502,8 @@
         .map(function (page) {
           var haystack = (
             page.title +
+            " " +
+            (page.parent || "") +
             " " +
             page.description +
             " " +
@@ -451,6 +539,7 @@
           var score = page.title.toLowerCase().indexOf(terms[0]) !== -1 ? 0 : 1;
           return {
             title: page.title,
+            parent: page.parent,
             url: page.url,
             snippet: snippet,
             score: score,
@@ -473,6 +562,11 @@
     input.addEventListener("input", run);
 
     input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        dialog.close();
+        return;
+      }
       var items = results.querySelectorAll("li a");
       if (!items.length) return;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -482,7 +576,9 @@
         if (activeIdx >= items.length) activeIdx = 0;
         results.querySelectorAll("li").forEach(function (li, i) {
           li.classList.toggle("is-active", i === activeIdx);
+          li.setAttribute("aria-selected", String(i === activeIdx));
         });
+        input.setAttribute("aria-activedescendant", items[activeIdx].parentNode.id);
         items[activeIdx].scrollIntoView({ block: "nearest" });
       } else if (e.key === "Enter" && activeIdx >= 0) {
         e.preventDefault();

@@ -943,16 +943,14 @@ function renderGlobalPauseResume() {
     // mobile (xs <576px) — keep the icon. Title attr + aria-label keep
     // it accessible and tooltip-discoverable. On desktop the full label
     // returns via .d-sm-inline.
-    const pauseBtn = `<button class="btn btn-sm btn-outline-warning text-nowrap" onclick="pauseProcessing()" title="${escapeHtml(pauseTitle)}" aria-label="Pause processing">
+    const pauseBtn = `<button class="btn btn-sm btn-outline-warning text-nowrap" onclick="pauseProcessing()" title="${escapeHtml(pauseTitle)}" aria-label="Pause all processing after current tasks finish">
         <i class="bi bi-pause-fill"></i><span class="d-none d-sm-inline ms-1">Pause Processing</span>
     </button>`;
-    const resumeBtn = `<button class="btn btn-sm btn-outline-success text-nowrap" onclick="resumeProcessing()" title="${escapeHtml(resumeTitle)}" aria-label="Resume processing">
+    const resumeBtn = `<button class="btn btn-sm btn-outline-success text-nowrap" onclick="resumeProcessing()" title="${escapeHtml(resumeTitle)}" aria-label="Resume all processing">
         <i class="bi bi-play-fill"></i><span class="d-none d-sm-inline ms-1">Resume Processing</span>
     </button>`;
     const html = processingPaused ? resumeBtn : pauseBtn;
-    const elCurrent = document.getElementById('globalPauseResumeCurrentJob');
     const elQueue = document.getElementById('globalPauseResumeQueue');
-    if (elCurrent) elCurrent.innerHTML = html;
     if (elQueue) elQueue.innerHTML = html;
 }
 
@@ -4588,7 +4586,8 @@ async function refreshBackupsPanel() {
             const selectHtml = backups.length
                 ? `
                     <div class="d-flex align-items-center gap-2 mt-2">
-                        <select id="${selectId}" class="form-select form-select-sm" style="max-width: 320px;">
+                        <select id="${selectId}" class="form-select form-select-sm" style="max-width: 320px;"
+                                aria-label="Backup snapshot for ${escapeHtmlAttr(f.name)}">
                             ${backups.map((b) => {
                                 const label = escapeHtmlText(_formatBackupLabel(b))
                                     + (b.legacy ? ' (legacy)' : '');

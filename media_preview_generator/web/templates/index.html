@@ -28,10 +28,16 @@
     </div>
 </div>
 
-<div class="row">
+<nav class="dashboard-mobile-jump" aria-label="Dashboard sections">
+    <a href="#dashboard-active-work">Active work</a>
+    <a href="#dashboard-workers">Workers</a>
+    <a href="#dashboard-all-jobs">All jobs</a>
+</nav>
+
+<div class="row dashboard-summary-row">
     <!-- System & Workers Card -->
-    <div class="col-lg-4 col-md-6 mb-4">
-        <div class="card h-100">
+    <div class="col-lg-6 mb-4">
+        <div class="card dashboard-system-card">
             <div class="card-header">
                 <i class="bi bi-pc-display me-2"></i>System &amp; Workers
             </div>
@@ -83,8 +89,8 @@
     </div>
 
     <!-- Quick Actions Card -->
-    <div class="col-lg-4 col-md-6 mb-4">
-        <div class="card h-100">
+    <div class="col-lg-3 col-md-6 mb-4">
+        <div class="card">
             <div class="card-header">
                 <i class="bi bi-lightning me-2"></i>Quick Actions
             </div>
@@ -94,7 +100,7 @@
                         <i class="bi bi-play-fill me-2"></i>Start New Job
                     </button>
                     <button class="btn btn-outline-primary" onclick="showManualTriggerModal()">
-                        <i class="bi bi-file-earmark-play me-2"></i>Manual Trigger
+                        <i class="bi bi-file-earmark-play me-2"></i>Process a file or folder
                     </button>
                 </div>
 
@@ -115,8 +121,8 @@
     </div>
 
     <!-- Job Stats Card -->
-    <div class="col-lg-4 col-md-6 mb-4">
-        <div class="card h-100">
+    <div class="col-lg-3 col-md-6 mb-4">
+        <div class="card">
             <div class="card-header">
                 <i class="bi bi-bar-chart me-2"></i>Job Statistics
             </div>
@@ -172,36 +178,18 @@
 
 
 
-<!-- Worker Status Cards -->
-<div class="row">
-    <div class="col-12 mb-4">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-cpu me-2"></i>Workers</span>
-                <span class="badge bg-secondary" id="workersHeaderCount" style="text-transform: none; letter-spacing: 0;">—</span>
-            </div>
-            <div class="card-body" id="workerStatusContainer">
-                <div class="text-muted text-center py-3">
-                    <span>No active workers</span>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- (Pending-webhooks indicator moved into the Job Queue card header
      below — see ``pendingWebhooksChip``. Was previously a full-width
      yellow banner; per-row countdown + Fire-now lives in the queue
      itself now post-issue-237 UX consolidation.) -->
 
-<!-- Active Jobs -->
-<div class="row">
+<!-- Active work -->
+<div class="row" id="dashboard-active-work">
     <div class="col-12 mb-4">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-activity me-2"></i>Active Jobs</span>
+                <span><i class="bi bi-activity me-2"></i>Active Work</span>
                 <div class="d-flex align-items-center gap-2">
-                    <span id="globalPauseResumeCurrentJob"></span>
                     <span class="badge bg-secondary" id="activeJobsCount">No active jobs</span>
                 </div>
             </div>
@@ -215,12 +203,27 @@
     </div>
 </div>
 
-<!-- Job Queue -->
-<div class="row">
+<!-- Worker Status Cards -->
+<div class="row" id="dashboard-workers">
+    <div class="col-12 mb-4">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-cpu me-2"></i>Workers</span>
+                <span class="badge bg-secondary" id="workersHeaderCount" style="text-transform: none; letter-spacing: 0;">—</span>
+            </div>
+            <div class="card-body" id="workerStatusContainer">
+                <div class="text-muted text-center py-3"><span>No active workers</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Unified job list -->
+<div class="row" id="dashboard-all-jobs">
     <div class="col-12">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-list-task me-2"></i>Job Queue</span>
+                <span><i class="bi bi-list-task me-2"></i>All jobs <small class="dashboard-list-scope">Queue and history</small></span>
                 <div class="d-flex align-items-center gap-2">
                     <!-- Pending-webhooks chip — at-a-glance "N waiting"
                          counter, click to scroll to the first row. Per-row
@@ -440,7 +443,7 @@
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-file-earmark-play me-2"></i>Manual Trigger</h5>
+                <h5 class="modal-title"><i class="bi bi-file-earmark-play me-2"></i>Process a file or folder</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">

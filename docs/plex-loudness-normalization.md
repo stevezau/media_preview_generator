@@ -5,6 +5,13 @@ description: Analyses audio tracks on this app's workers and stores loudness mea
   Normalize Loudness.
 ---
 
+<nav class="task-links" aria-label="Plex loudness tasks">
+  <a href="#turning-it-on"><strong>Turn it on</strong><span>Requirements, server switch and library selection</span></a>
+  <a href="#checking-the-results"><strong>Check results</strong><span>Inspector status and native Plex analysis</span></a>
+  <a href="#what-it-runs"><strong>Analysis details</strong><span>FFmpeg filter, stored fields and CPU processing</span></a>
+  <a href="#undoing-it"><strong>Undo app writes</strong><span>Journal safeguards and restore command</span></a>
+</nav>
+
 Plex's **Normalize Loudness** needs each audio track analysed first. This app runs FFmpeg's loudness analysis on its
 workers, alongside previews and Intro & Credits, and stores the measurements where Plex keeps them. Plex then treats
 the completed tracks as analysed.
@@ -12,40 +19,12 @@ the completed tracks as analysed.
 It is for Plex movie and TV libraries, and it stays off until you turn it on for a server. Music libraries are not
 supported: Plex's music analysis includes album gain and fades that this video feature does not produce.
 
+Loudness is off by default for each Plex server. When you enable it, all supported movie and TV libraries are selected
+by default; you can narrow that selection on the **Libraries** tab.
+
 Plex's playback requirements still apply: the player account needs Plex Pass, or membership of a Plex Home whose
 admin has Plex Pass. Enabling Normalize Loudness causes audio transcoding; generating measurements here does not
 unlock the playback feature. See Plex's [Audio Track Enhancements for Video](https://support.plex.tv/articles/audio-track-enhancements-for-video/).
-
-## What it runs
-
-For every audio track that Plex has no loudness for yet, the app uses the loudnorm filter observed in Plex Media Server
-1.43.4:
-
-```
-ffmpeg -i FILE -map 0:TRACK -af loudnorm=I=-16:TP=-1:LRA=9:print_format=json -f null -
-```
-
-and stores loudnorm's measurements in the track's `extra_data`, under the names Plex uses: `ln:loudness`, `ln:peak`,
-`ln:lra`, `ln:threshold`, `ln:gainOffset` and `ln:loudnessAnalysisVersion`. The values are the ones loudnorm prints,
-as Plex stores them, and the rest of the track's data is kept. Decoding audio gains nothing from a GPU, so the
-analysis runs on the CPU even on a GPU worker. The entire audio track is measured; the source media is never rewritten.
-Silent tracks and audio too short for an integrated measurement use Plex's observed `-inf` loudness and `inf` gain
-values, with the remaining fields validated. Invalid or incomplete reports are not stored.
-
-Once every original indexed audio track of a movie or episode (across its live versions) has loudness, the app also marks the item itself, as
-Plex does: `ln:loudnessAnalysisVersion` in the item's `extra_data` (`metadata_items`). Plex checks that mark, not the
-tracks, before it analyses an item, so without it Plex would analyse the item again. Only that field is written; Plex's
-title-search triggers on the table don't fire on it, and the app refuses to write if a trigger could.
-
-EAC3 (Dolby Digital Plus) tracks are the one exception. Plex decodes them with its own Dolby decoder, which only runs
-inside Plex and applies no dynamic range compression, so the app adds `-drc_scale 0` for them. FFmpeg and Plex use
-different decoder builds, so measurements need not be identical for every codec or source.
-
-Tracks Plex (or an earlier job) already analysed are skipped: a file whose tracks and item are all done never reaches
-a worker, and one whose tracks are done but whose item isn't marked yet is only marked.
-The same file listed twice in Plex is analysed once and written to both.
-Existing partial or unrecognised loudness metadata is also preserved. Such a track reports a failure with advice to
-run Plex's native analysis, instead of overwriting data the app cannot verify.
 
 ## Turning it on
 
@@ -97,6 +76,37 @@ separately confirmed action. It changes Plex's server-wide schedule, including m
 it does not enable this app, extend its library selection or erase existing measurements. Keep native analysis on
 if those other libraries need it. The app checks its selection and writer readiness again when the action runs.
 The control is excluded from bulk fixes, and installing or upgrading the app never changes this Plex preference.
+
+## What it runs
+
+For every audio track that Plex has no loudness for yet, the app uses the loudnorm filter observed in Plex Media Server
+1.43.4:
+
+```
+ffmpeg -i FILE -map 0:TRACK -af loudnorm=I=-16:TP=-1:LRA=9:print_format=json -f null -
+```
+
+and stores loudnorm's measurements in the track's `extra_data`, under the names Plex uses: `ln:loudness`, `ln:peak`,
+`ln:lra`, `ln:threshold`, `ln:gainOffset` and `ln:loudnessAnalysisVersion`. The values are the ones loudnorm prints,
+as Plex stores them, and the rest of the track's data is kept. Decoding audio gains nothing from a GPU, so the
+analysis runs on the CPU even on a GPU worker. The entire audio track is measured; the source media is never rewritten.
+Silent tracks and audio too short for an integrated measurement use Plex's observed `-inf` loudness and `inf` gain
+values, with the remaining fields validated. Invalid or incomplete reports are not stored.
+
+Once every original indexed audio track of a movie or episode (across its live versions) has loudness, the app also marks the item itself, as
+Plex does: `ln:loudnessAnalysisVersion` in the item's `extra_data` (`metadata_items`). Plex checks that mark, not the
+tracks, before it analyses an item, so without it Plex would analyse the item again. Only that field is written; Plex's
+title-search triggers on the table don't fire on it, and the app refuses to write if a trigger could.
+
+EAC3 (Dolby Digital Plus) tracks are the one exception. Plex decodes them with its own Dolby decoder, which only runs
+inside Plex and applies no dynamic range compression, so the app adds `-drc_scale 0` for them. FFmpeg and Plex use
+different decoder builds, so measurements need not be identical for every codec or source.
+
+Tracks Plex (or an earlier job) already analysed are skipped: a file whose tracks and item are all done never reaches
+a worker, and one whose tracks are done but whose item isn't marked yet is only marked.
+The same file listed twice in Plex is analysed once and written to both.
+Existing partial or unrecognised loudness metadata is also preserved. Such a track reports a failure with advice to
+run Plex's native analysis, instead of overwriting data the app cannot verify.
 
 ## Undoing it
 

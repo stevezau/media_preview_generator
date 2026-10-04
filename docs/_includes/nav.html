@@ -2,7 +2,8 @@
   <div class="nav__inner">
     <a class="brand" href="{{ '/' | relative_url }}">
       <img class="brand__mark" src="{{ '/assets/img/logo.svg' | relative_url }}" alt="" width="27" height="27">
-      <span class="brand__name">Media Preview Generator</span>
+      <span class="brand__name brand__name--full">Media Preview Generator</span>
+      <span class="brand__name brand__name--short">MPG Docs</span>
     </a>
 
     <nav class="nav__links" aria-label="Main">
@@ -12,6 +13,11 @@
            {% if page.url contains item.url %}aria-current="page"{% endif %}>{{ item.title }}</a>
         {%- endif -%}
       {%- endfor -%}
+      <span class="nav__support">
+        <a class="nav__link" href="{{ site.repo }}">Source on GitHub</a>
+        <a class="nav__link" href="{{ site.repo }}/discussions">Ask a question</a>
+        <a class="nav__link" href="https://ko-fi.com/stevezau">Buy me a coffee</a>
+      </span>
     </nav>
 
     <button class="search-btn" id="search-open" type="button" aria-label="Search the docs">

@@ -14,15 +14,15 @@
     </div>
 
     <!-- Progress Indicator -->
-    <div class="setup-progress">
+    <div class="setup-progress" role="progressbar" aria-valuemin="1" aria-valuemax="5" aria-valuenow="1" aria-label="Setup progress: step 1 of 5, Server type">
         <div class="progress-step active" data-step="1">
             <div class="step-number">1</div>
-            <span class="d-none d-md-inline">Sign In</span>
+            <span class="d-none d-md-inline">Server type</span>
         </div>
         <div class="step-connector"></div>
         <div class="progress-step" data-step="2">
             <div class="step-number">2</div>
-            <span class="d-none d-md-inline">Server</span>
+            <span class="d-none d-md-inline">Connect</span>
         </div>
         <div class="step-connector"></div>
         <div class="progress-step" data-step="3">
@@ -32,7 +32,7 @@
         <div class="step-connector"></div>
         <div class="progress-step" data-step="4">
             <div class="step-number">4</div>
-            <span class="d-none d-md-inline">Options</span>
+            <span class="d-none d-md-inline">Processing</span>
         </div>
         <div class="step-connector"></div>
         <div class="progress-step" data-step="5">
@@ -40,6 +40,7 @@
             <span class="d-none d-md-inline">Security</span>
         </div>
     </div>
+    <p class="setup-progress-current" id="setupProgressCurrent">Step 1 of 5 · Server type</p>
 
     <!-- Step 1: Choose your media server (vendor picker → vendor-specific flow) -->
     <div class="setup-step active" data-step="1">
@@ -570,6 +571,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function goToStep(step) {
         currentStep = step;
+        const progress = document.querySelector('.setup-progress');
+        const stepLabels = ['Server type', 'Connect', 'Paths', 'Processing', 'Security'];
+        if (progress) {
+            progress.setAttribute('aria-valuenow', String(step));
+            progress.setAttribute('aria-label', `Setup progress: step ${step} of 5, ${stepLabels[step - 1]}`);
+        }
+        const currentLabel = document.getElementById('setupProgressCurrent');
+        if (currentLabel) currentLabel.textContent = `Step ${step} of 5 · ${stepLabels[step - 1]}`;
 
         // Update step visibility
         steps.forEach(s => {

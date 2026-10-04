@@ -19,7 +19,7 @@
         balances against Project and Related instead of towering over them.
       {%- endcomment -%}
       <div>
-        <h4>Documentation</h4>
+        <h2 class="footer__heading">Documentation</h2>
         <ul>
           {%- for item in site.nav -%}
             {%- unless item.title == 'How-to' -%}
@@ -35,7 +35,7 @@
       {%- for item in site.nav -%}
         {%- if item.title == 'How-to' -%}
           <div>
-            <h4><a href="{{ item.url | relative_url }}">{{ item.title }}</a></h4>
+            <h2 class="footer__heading"><a href="{{ item.url | relative_url }}">{{ item.title }}</a></h2>
             <ul>
               {%- for kid in item.children -%}
                 <li><a href="{{ kid.url | relative_url }}">{{ kid.title }}</a></li>
@@ -46,7 +46,7 @@
       {%- endfor -%}
 
       <div>
-        <h4>Project</h4>
+        <h2 class="footer__heading">Project</h2>
         <ul>
           <li><a href="{{ site.repo }}">Source on GitHub</a></li>
           <li><a href="{{ site.repo }}/releases">Releases</a></li>
@@ -65,7 +65,7 @@
       </div>
 
       <div>
-        <h4>Related</h4>
+        <h2 class="footer__heading">Related</h2>
         <ul>
           <li><a href="https://www.plex.tv/">Plex</a></li>
           <li><a href="https://jellyfin.org/">Jellyfin</a></li>
