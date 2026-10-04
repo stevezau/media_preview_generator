@@ -98,7 +98,12 @@ def _open(page: Page, native_server):
     page.context.add_cookies([native_server.cookie])
     page.goto(f"{native_server.url}/servers")
     page.locator(".edit-server-btn[data-id='plex-1']").click()
-    page.locator('#editServerModal [data-bs-target="#edit-tab-health"]').click()
+    expect(page.locator("#editServerModal")).to_be_visible()
+    section = page.locator("#editServerSectionSelect")
+    if section.is_visible():
+        section.select_option("edit-tab-health")
+    else:
+        page.locator('#editServerModal [data-bs-target="#edit-tab-health"]').click()
     expect(page.locator("#edit-tab-health")).to_have_css("opacity", "1")
     body = page.locator("#editReadinessBody")
     expect(body).to_contain_text("Plex's own loudness schedule")

@@ -430,7 +430,7 @@ class TestIntroCreditsSettings:
         _open_settings(authed_page, app_url, _default_markers())
         section = authed_page.locator("#section-markers #markersHowItDecides")
         expect(section).to_be_visible()
-        expect(section.locator("h6")).to_have_text("How it decides")
+        expect(section.get_by_role("heading", level=3)).to_have_text("How it decides")
         expect(section.locator(".markers-step-num")).to_have_text(["1", "2", "3", "4"])
         expect(section.locator(".markers-step-title")).to_have_text(
             ["Ask the sources, in your order", "Check who agrees", "Decide", "Send to your servers"]
@@ -448,7 +448,7 @@ class TestIntroCreditsSettings:
         link.click()
         expect(authed_page.locator("#globalInfoModal")).to_be_visible(timeout=5000)
         expect(authed_page.locator("#globalInfoTitle")).to_have_text("How decisions are made")
-        expect(authed_page.locator("#globalInfoBody h6")).to_have_text(
+        expect(authed_page.locator("#globalInfoBody").get_by_role("heading", level=3)).to_have_text(
             ["Who can decide alone", "The two outcomes", "Rules that surprise people"]
         )
         expect(authed_page.locator("#globalInfoBody .markers-outcomes dt")).to_have_text(
@@ -559,7 +559,7 @@ class TestIntroCreditsSettings:
         _open_settings(authed_page, app_url, _default_markers())
         toggle = authed_page.locator("#markersAdvancedToggle")
         expect(toggle).to_have_text("Advanced")
-        expect(authed_page.locator("h6:has(> #markersAdvancedToggle)")).to_be_visible()
+        expect(authed_page.get_by_role("heading", name="Advanced", level=3, exact=True)).to_be_visible()
         expect(authed_page.locator(".markers-advanced > p")).to_have_text(
             "Only change this if you know what you're doing."
         )
@@ -569,7 +569,9 @@ class TestIntroCreditsSettings:
         toggle.click()
         expect(authed_page.locator("#markersAdvanced")).to_be_visible(timeout=5000)
         expect(toggle).to_have_attribute("aria-expanded", "true")
-        expect(authed_page.locator("#markersAdvanced h6")).to_contain_text("Where to look for credits")
+        expect(authed_page.locator("#markersAdvanced").get_by_role("heading", level=3)).to_contain_text(
+            "Where to look for credits"
+        )
 
     def test_credits_window_selects_show_automatic_and_offer_every_window(
         self, authed_page: Page, app_url: str
@@ -594,7 +596,7 @@ class TestIntroCreditsSettings:
 
     def test_credits_window_tooltip_is_the_approved_text(self, authed_page: Page, app_url: str) -> None:
         _open_settings(authed_page, app_url, _default_markers())
-        icon = authed_page.locator("#markersAdvanced h6 .info-icon")
+        icon = authed_page.locator("#markersAdvanced h3 .info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
             # frames.EPISODE_TAIL_S / MOVIE_TAIL_S, and detector.find_credits's steps of rule_j.READ_BEFORE_TAIL_S.

@@ -186,7 +186,11 @@ def _open_tab(page: Page, app_url: str, server: dict, tab: str = "markers") -> N
 
 
 def _switch_tab(page: Page, tab: str) -> None:
-    page.locator(f'#editServerModal [data-bs-target="#edit-tab-{tab}"]').click()
+    section = page.locator("#editServerSectionSelect")
+    if section.is_visible():
+        section.select_option(f"edit-tab-{tab}")
+    else:
+        page.locator(f'#editServerModal [data-bs-target="#edit-tab-{tab}"]').click()
     expect(page.locator(f"#edit-tab-{tab}")).to_be_visible(timeout=5000)
 
 
