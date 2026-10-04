@@ -142,13 +142,13 @@ A new protocol number is only ever *added* to the agent, never swapped, so an ag
 update them one at a time. Update the agent first: a newer agent still speaks the older app's protocol.
 
 An optional field added to a request doesn't change the protocol: an older agent ignores it and behaves as before.
-**Needs the next agent release:** the file's limits a write now carries (`limits`, the file's duration). With them
+The agent supports the file limits carried by a write (`limits`, the file's duration). With them
 "Keep Plex's" drops a Plex marker that can't be right for the file, such as credits that start after it ends, and
-writes ours. Agent 1.0.0 ignores them and keeps such markers until it is updated.
+writes ours.
 
-**Needs the next agent release too:** the item read now answers `stale_types` (the types whose markers Plex made for
+Item reads include `stale_types` (the types whose markers Plex made for
 an earlier file at the path, from `taggings.created_at`, `media_parts.updated_at` and the parts' `pv:` records) and
-each part's `updated_at`. Agent 1.0.0 leaves both out, which the app reads as "can't tell": every Plex marker counts
+each part's `updated_at`. If an agent omits these fields, the app reads that as "can't tell": every Plex marker counts
 as before, and its "Keep Plex's" keeps stale markers even where the app has an answer of its own.
 
 `AGENT_VERSION` in `plex_marker_agent.py` is the one place that version is decided. The image tag in
@@ -165,7 +165,7 @@ Everything is `POST` with a JSON body, except `/v1/health` and `/v1/ping`. Every
 | Endpoint | What it does | Answers |
 |---|---|---|
 | `GET /v1/health` | Liveness for the container's health check. No key, nothing about your library. | `{"ok": true, "agent": …}` |
-| `GET /v1/ping` | A shell check with curl: the version, which Plex this agent serves, and whether the database file is there. Needs the key but no protocol header, so it still answers when the two sides disagree. The app doesn't call it — "Check again" runs the two checks below. | `result.db_present`, `result.machine_identifier` |
+| `GET /v1/ping` | The version, advertised capabilities, which Plex this agent serves, and whether the database file is there. Needs the key but no protocol header, so it still answers when the two sides disagree. The app checks it before chapter operations; marker "Check again" runs the two checks below. | `agent.capabilities`, `result.db_present`, `result.machine_identifier` |
 | `POST /v1/checks/file` | Is the database found, on a local disk, writable, and open in Plex's process? Also which Plex this is. | `result.report` (a capability report), `result.machine_identifier` |
 | `POST /v1/checks/db` | Is it the tested schema, is its marker data readable, is Plex's marker tag row there? | `result.report` |
 | `POST /v1/item/read` | One item's live parts (schema and tag row checked first). | `result.item` |
@@ -205,5 +205,7 @@ Each request requires a positive match between the connected Plex identity and t
 `ProcessedMachineIdentifier`. Registration rechecks the exact item, media part, source hash, size, modification
 timestamp, chapter rows, and previous thumbnail references inside the same SQLite transaction. All expected
 JPEGs must exist and match their submitted SHA-256 digests. The helper derives every output path itself.
-A content revision in each native image URL prevents an old transformed thumbnail from hiding a replacement.
+The helper adds content revisions to image URLs, but Plex's normal file checks can remove them.
+Plex may continue serving older cached thumbnails after replacement, including after its own native generation;
+these revisions do not guarantee cache invalidation. See the [chapter thumbnail cache limitation](../docs/guides.md#plex-chapter-thumbnails).
 Multipart and multiple-version items are refused until their chapter ownership has been verified.
