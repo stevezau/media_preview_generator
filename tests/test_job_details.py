@@ -10,7 +10,12 @@ import pytest
 
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS
 from media_preview_generator.markers.titles import TITLE_CACHE
-from media_preview_generator.web.job_details import job_file_list, job_library_names, saved_server_configs
+from media_preview_generator.web.job_details import (
+    job_file_list,
+    job_library_names,
+    job_library_scope,
+    saved_server_configs,
+)
 from media_preview_generator.web.jobs import Job, JobProgress
 
 
@@ -115,6 +120,90 @@ class TestJobLibraryNames:
         assert [c.id for c in configs] == ["jf-1"]
 
 
+class TestJobLibraryScope:
+    def test_origin_is_not_a_target_pin(self, configs):
+        job = _job({"webhook_paths": ["/data/tv/Show/a.mkv"]}, server_id="plex-1")
+        assert [(row["server_id"], row["library_id"]) for row in job_library_scope(job, configs)] == [
+            ("plex-1", "2"),
+            ("emby-1", "9"),
+        ]
+
+    def test_explicit_pin_limits_path_scope(self, configs):
+        job = _job({"file_paths": ["/data/tv/a.mkv"], "server_id": "emby-1"}, server_id="plex-1")
+        assert [(row["server_id"], row["library_id"]) for row in job_library_scope(job, configs)] == [("emby-1", "9")]
+
+    def test_same_ids_are_distinct_explicit_library_pairs(self, configs):
+        job = _job(
+            {"libraries": [{"server_id": "plex-1", "library_id": "1"}, {"server_id": "jf-1", "library_id": "1"}]}
+        )
+        scope = job_library_scope(job, configs)
+        assert [(row["server_id"], row["library_id"], row["library_name"]) for row in scope] == [
+            ("plex-1", "1", "Movies"),
+            ("jf-1", "1", "Anime"),
+        ]
+
+    def test_ambiguous_legacy_library_id_stays_unknown(self, configs):
+        assert job_library_scope(_job({"selected_library_ids": ["1"]}), configs) == []
+
+    def test_publisher_outcomes_do_not_invent_library_associations(self, configs):
+        job = _job(publishers=[{"server_id": "plex-1", "status": "published"}])
+        assert job_library_scope(job, configs) == []
+
+    def test_all_requested_paths_count_with_one_lookup_per_directory(self, configs):
+        from media_preview_generator.web import job_details
+
+        paths = [f"/data/movies/Archive/movie-{i}.mkv" for i in range(10000)] + ["/data/anime/Show/episode.mkv"]
+        with patch.object(job_details, "_library_matches", wraps=job_details._library_matches) as lookup:
+            scope = job_library_scope(_job({"file_paths": paths}), configs)
+        assert [(row["server_id"], row["library_id"]) for row in scope] == [("plex-1", "1"), ("jf-1", "1")]
+        assert lookup.call_count == 2
+        assert [call.args[0] for call in lookup.call_args_list] == [paths[0], paths[-1]]
+
+    def test_exact_folder_mapping_boundaries_do_not_share_directory_cache(self):
+        server = _server(
+            "plex",
+            "plex",
+            [
+                {"id": "1", "name": "Movies", "remote_paths": ["/media"], "enabled": True},
+                {"id": "2", "name": "Shows", "remote_paths": ["/archive"], "enabled": True},
+            ],
+        )
+        server["path_mappings"] = [
+            {
+                "remote_prefix": "/incoming/Movies",
+                "local_prefix": "/media/movies",
+                "webhook_prefixes": ["/sender/Movies"],
+            },
+            {
+                "remote_prefix": "/incoming/Shows",
+                "local_prefix": "/archive/shows",
+                "webhook_prefixes": ["/sender/Shows"],
+            },
+        ]
+        configs = saved_server_configs([server])
+        cache = {}
+        for prefix in ("/incoming", "/sender"):
+            for folder, expected in (("Movies", "1"), ("Shows", "2")):
+                scope = job_library_scope(_job({"file_paths": [f"{prefix}/{folder}"]}), configs, cache)
+                assert [row["library_id"] for row in scope] == [expected]
+
+    def test_unknown_paths_and_unknown_legacy_names_stay_unknown(self, configs):
+        assert job_library_scope(_job({"file_paths": ["/unknown/file.mkv"]}), configs) == []
+        assert job_library_scope(_job({"selected_libraries": ["Not saved"]}), configs) == []
+
+    def test_explicit_removed_library_identity_is_preserved_without_guessing_name(self, configs):
+        scope = job_library_scope(_job({"libraries": [{"server_id": "removed", "library_id": "old-id"}]}), configs)
+        assert scope == [
+            {
+                "server_id": "removed",
+                "server_name": "removed",
+                "server_type": "",
+                "library_id": "old-id",
+                "library_name": "old-id",
+            }
+        ]
+
+
 class TestJobFileList:
     EPISODE = "/data/tv/Rick and Morty (2013)/Season 01/Rick.and.Morty.S01E02.1080p.mkv"
     FILM = "/data/movies/Heat (1995)/Heat.1995.2160p.mkv"
@@ -179,6 +268,113 @@ _HEADERS = {"Authorization": "Bearer test-token-12345678"}
 
 
 class TestJobsApi:
+    def test_all_filters_intersect_before_pagination_and_keep_chain_heads(self, app):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set("media_servers", SERVERS)
+        jm = get_job_manager()
+        for index in range(12):
+            jm.create_job(library_name=f"Other {index}", config={"server_id": "plex-1", "selected_library_ids": ["1"]})
+        matched = []
+        for index in range(3):
+            matched.append(
+                jm.create_job(
+                    library_name=f"Needle {index}",
+                    kind="intro_credits",
+                    server_id="plex-1",
+                    config={"file_paths": ["/data/tv/Show/a.mkv"], "source": "sonarr", "is_retry_chain": True},
+                )
+            )
+        jm.create_job(
+            library_name="Needle retry child",
+            kind="intro_credits",
+            config={"file_paths": ["/data/tv/Show/a.mkv"], "is_retry": True, "parent_job_id": matched[0].id},
+        )
+        params = {
+            "q": "needle",
+            "status": "pending",
+            "kind": "intro_credits",
+            "server_id": "emby-1",
+            "library_server_id": "emby-1",
+            "library_id": "9",
+            "page": 2,
+            "per_page": 2,
+        }
+        response = app.test_client().get("/api/jobs", query_string=params, headers=_HEADERS)
+        assert response.status_code == 200
+        body = response.get_json()
+        assert body["total"] == 3
+        assert body["pages"] == 2
+        assert [row["id"] for row in body["jobs"]] == [matched[2].id]
+        assert {(pair["server_id"], pair["library_id"]) for pair in body["jobs"][0]["library_scope"]} == {
+            ("plex-1", "2"),
+            ("emby-1", "9"),
+        }
+        params["include_retry_attempts"] = "1"
+        assert app.test_client().get("/api/jobs", query_string=params, headers=_HEADERS).get_json()["total"] == 4
+
+    def test_same_named_libraries_use_server_and_library_ids(self, app):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        servers = [
+            SERVERS[0],
+            {**SERVERS[1], "libraries": [{"id": "1", "name": "Movies", "remote_paths": ["/jellyfin/movies"]}]},
+        ]
+        get_settings_manager().set("media_servers", servers)
+        jm = get_job_manager()
+        plex = jm.create_job(config={"server_id": "plex-1", "selected_library_ids": ["1"]})
+        jellyfin = jm.create_job(config={"server_id": "jf-1", "selected_library_ids": ["1"]})
+        for server_id, expected in (("plex-1", plex), ("jf-1", jellyfin)):
+            body = (
+                app.test_client()
+                .get("/api/jobs", query_string={"library_server_id": server_id, "library_id": "1"}, headers=_HEADERS)
+                .get_json()
+            )
+            assert [row["id"] for row in body["jobs"]] == [expected.id]
+            assert body["total"] == 1
+            assert len([lib for lib in body["filter_options"]["libraries"] if lib["name"] == "Movies"]) == 2
+
+    @pytest.mark.parametrize("params", [{"kind": "chapters"}, {"library_id": "1"}, {"library_server_id": "plex-1"}])
+    def test_invalid_filter_contract_returns_a_clear_error(self, app, params):
+        response = app.test_client().get("/api/jobs", query_string=params, headers=_HEADERS)
+        assert response.status_code == 400
+        assert response.get_json()["error"]
+
+    def test_server_filter_accepts_origin_even_when_another_server_is_pinned(self, app):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set("media_servers", SERVERS)
+        job = get_job_manager().create_job(
+            server_id="plex-1", config={"server_id": "emby-1", "file_paths": ["/data/tv/a.mkv"]}
+        )
+        for server_id in ("plex-1", "emby-1"):
+            body = (
+                app.test_client().get("/api/jobs", query_string={"server_id": server_id}, headers=_HEADERS).get_json()
+            )
+            assert [row["id"] for row in body["jobs"]] == [job.id]
+        body = (
+            app.test_client()
+            .get(
+                "/api/jobs",
+                query_string={"server_id": "plex-1", "library_server_id": "emby-1", "library_id": "9"},
+                headers=_HEADERS,
+            )
+            .get_json()
+        )
+        assert [row["id"] for row in body["jobs"]] == [job.id]
+
+    def test_search_finds_visible_associated_owner_without_publisher_results(self, app):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set("media_servers", SERVERS)
+        job = get_job_manager().create_job(server_id="plex-1", config={"file_paths": ["/data/tv/a.mkv"]})
+        body = app.test_client().get("/api/jobs", query_string={"q": "EMBY-1"}, headers=_HEADERS).get_json()
+        assert [row["id"] for row in body["jobs"]] == [job.id]
+
     def test_the_jobs_list_carries_each_jobs_library_names(self, app):
         from media_preview_generator.web.jobs import get_job_manager
         from media_preview_generator.web.settings_manager import get_settings_manager

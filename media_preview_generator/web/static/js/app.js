@@ -25,6 +25,11 @@ let jobTotalPages = 1;
 let jobTotal = 0;
 let jobSearch = '';
 let jobStatusFilter = '';
+let jobServerFilter = '';
+let jobLibraryFilter = '';
+let jobKindFilter = '';
+let jobFilterOptions = {servers: [], libraries: []};
+let _jobFilterOptionsSignature = '';
 let _jobSearchTimer = null;
 let _jobsLoadSequence = 0;
 
@@ -33,6 +38,7 @@ function changeJobSearch(value) {
     jobPage = 1;
     _jobsLoadSequence += 1;
     clearTimeout(_jobSearchTimer);
+    updateJobFilterSummary();
     _jobSearchTimer = setTimeout(() => loadJobs({force: true}), 250);
 }
 
@@ -40,6 +46,79 @@ function changeJobStatus(value) {
     jobStatusFilter = value;
     jobPage = 1;
     loadJobs({force: true});
+}
+
+function jobFiltersActive() {
+    return !!(jobSearch || jobStatusFilter || jobServerFilter || jobLibraryFilter || jobKindFilter);
+}
+
+function updateJobFilterSummary() {
+    const clear = document.getElementById('clearJobFilters');
+    const count = document.getElementById('jobFilterCount');
+    if (clear) clear.hidden = !jobFiltersActive();
+    if (count) {
+        count.hidden = !jobFiltersActive();
+        count.textContent = `${jobTotal.toLocaleString()} ${jobTotal === 1 ? 'job matches' : 'jobs match'} these filters`;
+    }
+}
+
+function updateJobLibraryChoices(resetSelection = false) {
+    const select = document.getElementById('jobLibraryFilter');
+    if (!select) return;
+    const previousLabel = select.selectedOptions[0]?.textContent || 'Previously selected library';
+    const choices = jobFilterOptions.libraries.filter(lib => !jobServerFilter || String(lib.server_id) === jobServerFilter);
+    select.replaceChildren(new Option('All libraries', ''), ...choices.map(lib => new Option(`${lib.name} · ${lib.server_name || lib.server_id}`, JSON.stringify([String(lib.server_id), String(lib.id)]))));
+    if (jobLibraryFilter && ![...select.options].some(option => option.value === jobLibraryFilter)) {
+        if (resetSelection) jobLibraryFilter = '';
+        else select.add(new Option(previousLabel, jobLibraryFilter));
+    }
+    select.value = jobLibraryFilter;
+    select.title = select.selectedOptions[0]?.textContent || '';
+}
+
+function updateJobFilterOptions(options) {
+    if (!options || !document.getElementById('jobServerFilter')) return;
+    const signature = JSON.stringify(options);
+    if (signature === _jobFilterOptionsSignature) return;
+    _jobFilterOptionsSignature = signature;
+    jobFilterOptions = {servers: options.servers || [], libraries: options.libraries || []};
+    const select = document.getElementById('jobServerFilter');
+    select.replaceChildren(new Option('All servers', ''), ...jobFilterOptions.servers.map(server => new Option(server.name || server.id, String(server.id))));
+    if (jobServerFilter && ![...select.options].some(option => option.value === jobServerFilter)) select.add(new Option(jobServerFilter, jobServerFilter));
+    select.value = jobServerFilter;
+    updateJobLibraryChoices();
+}
+
+function _reloadFilteredJobs() {
+    jobPage = 1;
+    clearTimeout(_jobSearchTimer);
+    updateJobFilterSummary();
+    loadJobs({force: true});
+}
+
+function changeJobServer(value) {
+    jobServerFilter = value;
+    updateJobLibraryChoices(true);
+    _reloadFilteredJobs();
+}
+
+function changeJobLibrary(value) {
+    jobLibraryFilter = value;
+    const select = document.getElementById('jobLibraryFilter');
+    if (select) select.title = select.selectedOptions[0]?.textContent || '';
+    _reloadFilteredJobs();
+}
+
+function changeJobKind(value) { jobKindFilter = value; _reloadFilteredJobs(); }
+
+function clearJobFilters() {
+    jobSearch = jobStatusFilter = jobServerFilter = jobLibraryFilter = jobKindFilter = '';
+    for (const id of ['jobSearch', 'jobStatusFilter', 'jobServerFilter', 'jobKindFilter']) {
+        const control = document.getElementById(id);
+        if (control) control.value = '';
+    }
+    updateJobLibraryChoices();
+    _reloadFilteredJobs();
 }
 
 
@@ -588,6 +667,36 @@ function _gpuVendorLogo(type, size) {
 window.MPGShared = window.MPGShared || {};
 window.MPGShared.gpuVendorLogo = _gpuVendorLogo;
 
+function updateSystemDisclosure() {
+    const card = document.querySelector('.dashboard-system-card');
+    const toggle = card?.querySelector('.system-details-toggle');
+    if (!toggle) return;
+    const expanded = window.innerWidth >= 768 || !card.classList.contains('system-details-collapsed');
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.setAttribute('aria-label', `${expanded ? 'Hide' : 'Show'} system details, ${document.getElementById('systemConnectionSummary').textContent}`);
+    toggle.querySelector('i').className = `bi bi-chevron-${expanded ? 'up' : 'down'}`;
+}
+
+function toggleSystemDetails() {
+    document.querySelector('.dashboard-system-card')?.classList.toggle('system-details-collapsed');
+    updateSystemDisclosure();
+}
+
+function updateSystemConnections(servers, failed = false) {
+    const card = document.querySelector('.dashboard-system-card');
+    const summary = document.getElementById('systemConnectionSummary');
+    if (!card || !summary) return;
+    const connected = servers.filter(server => server.status === 'connected').length;
+    const issue = failed || !servers.length || servers.some(server => !['connected', 'checking', 'connecting'].includes(server.status));
+    summary.textContent = failed ? 'Connection details need attention' : servers.length ?
+        `${connected} of ${servers.length} connected` : 'No servers configured';
+    if (issue && card.dataset.connectionIssue !== 'true') card.classList.remove('system-details-collapsed');
+    card.dataset.connectionIssue = String(issue);
+    updateSystemDisclosure();
+}
+
+window.matchMedia('(max-width: 767.98px)').addEventListener('change', updateSystemDisclosure);
+
 // Refresh the dashboard "Media Servers" rows from /api/system/media-servers.
 // Renders one row per configured server with vendor icon + status badge.
 // Empty state nudges the user to /servers.
@@ -606,10 +715,12 @@ async function updateMediaServersStatus() {
             '<i class="bi bi-exclamation-triangle me-2"></i>' +
             'Failed to load media-server status' +
             '</div>';
+        updateSystemConnections([], true);
         return;
     }
 
     const servers = (payload && payload.servers) || [];
+    updateSystemConnections(servers);
     if (servers.length === 0) {
         // Show the dashboard empty-state card (Phase H1) and a small inline note.
         if (emptyCard) emptyCard.classList.remove('d-none');
@@ -709,11 +820,20 @@ async function loadJobs(options) {
         const params = new URLSearchParams({page: jobPage, per_page: jobPerPage});
         if (jobSearch) params.set('q', jobSearch);
         if (jobStatusFilter) params.set('status', jobStatusFilter);
+        if (jobServerFilter) params.set('server_id', jobServerFilter);
+        if (jobKindFilter) params.set('kind', jobKindFilter);
+        if (jobLibraryFilter) {
+            const [serverId, libraryId] = JSON.parse(jobLibraryFilter);
+            params.set('library_server_id', serverId);
+            params.set('library_id', libraryId);
+        }
         const data = await apiGet('/api/jobs?' + params.toString());
         if (sequence !== _jobsLoadSequence) return;
         jobs = data.jobs || [];
         jobTotal = data.total || 0;
         jobTotalPages = data.pages || 1;
+        updateJobFilterOptions(data.filter_options);
+        updateJobFilterSummary();
         if (jobPage > jobTotalPages) {
             jobPage = jobTotalPages;
         }
@@ -1009,10 +1129,6 @@ function updateSystemStatus(status) {
         cachedDetectedGpus = [];
     }
 
-    // Status row — matches the .system-section-title pattern of its
-    // sibling sections (Media Servers, Worker Pool) so it doesn't read
-    // as an orphan h6 between them.
-    html += '<h6 class="system-section-title">Status</h6>';
     html += '<div class="d-flex align-items-center">';
     if (status.running_job) {
         html += `<span class="badge bg-primary">Processing</span>`;
@@ -1519,6 +1635,7 @@ function _serverBadge(item) {
         jellyfin:    { cls: 'bg-info text-dark',    label: 'Jellyfin Webhook' },
         custom:      { cls: 'bg-secondary',         label: 'Custom Webhook' },
         scheduled:   { cls: 'bg-secondary',         label: 'Scheduled' },
+        schedule:    { cls: 'bg-secondary',         label: 'Scheduled' },
         recently_added: { cls: 'bg-secondary',      label: 'Recently Added' },
         scheduled_recently_added: { cls: 'bg-secondary', label: 'Scheduled scan' },
         theintrodb_recheck: { cls: 'bg-secondary',  label: 'TheIntroDB recheck' },
@@ -1647,6 +1764,25 @@ function _jobKindBadgeHtml(job) {
     return `<span class="badge text-bg-dark me-1 job-kind-badge"><i class="bi ${icon} me-1" aria-hidden="true"></i>${escapeHtml(label)}</span>`;
 }
 window._jobKindBadgeHtml = _jobKindBadgeHtml;
+
+function _queueMetadataHtml(job, title) {
+    const primaryId = String(job.server_id || '');
+    const seen = new Set(primaryId ? [primaryId] : []);
+    const associated = (job.library_scope || []).filter(pair => {
+        const id = String(pair.server_id || '');
+        if (!id || seen.has(id)) return false;
+        seen.add(id); return true;
+    });
+    const hasOrigin = !!(job.server_name || job.server_type || job.server);
+    const primary = hasOrigin ? `<span title="Originating server">${_serverBadge(job)}</span>` : '';
+    const ownerBadge = pair => _serverBadge({server_name: pair.server_name || pair.server_id, server_type: pair.server_type});
+    let owners = '';
+    if (associated.length === 1) owners = `<span class="queue-additional-owner" title="Associated library server">${hasOrigin ? '+ ' : ''}${ownerBadge(associated[0])}</span>`;
+    else if (associated.length > 1) owners = `<details class="queue-owner-details"><summary aria-label="Show associated library servers">${hasOrigin ? '+' : ''}${associated.length} servers</summary><div class="queue-owner-list">${associated.map(pair => `<div>${ownerBadge(pair)}</div>`).join('')}</div></details>`;
+    const servers = primary || owners ? `<span class="queue-server-group">${primary}${owners}</span>` : '';
+    const source = job.config?.source ? `<span class="queue-trigger-context">${_serverBadge({config: job.config})}</span>` : '';
+    return _jobKindBadgeHtml(job) + _libraryTagHtml(job, title) + servers + source;
+}
 
 // 'own' = paused on its own (it has handed its job slot back), 'all' = held by Pause all (keeps its slot), '' = neither.
 // Pause all doesn't set an Intro & Credits job's own flag, so the global flag is read here; a job paused before a
@@ -2176,8 +2312,8 @@ function updateJobQueue(force) {
                 <tr>
                     <td colspan="7" class="text-center text-muted py-5">
                         <i class="bi bi-inbox fs-2 d-block mb-2 opacity-50"></i>
-                        <div>${jobSearch || jobStatusFilter ? 'No jobs match these filters.' : 'Nothing queued.'}</div>
-                        <div class="small">${jobSearch || jobStatusFilter ? 'Change the search or status to see other jobs.' : 'New jobs will show up here once you start one.'}</div>
+                        <div>${jobFiltersActive() ? 'No jobs match these filters.' : 'Nothing queued.'}</div>
+                        <div class="small">${jobFiltersActive() ? 'Change a filter or use Clear filters to see other jobs.' : 'New jobs will show up here once you start one.'}</div>
                     </td>
                 </tr>
             `;
@@ -2347,7 +2483,7 @@ function updateJobQueue(force) {
             const total = Number(job.progress.total_items) || 0;
             const hasProgress = total > 0 || Number(progress) > 0;
             progressCell = job.status === 'pending' && !processed && Number(progress) === 0
-                ? `<span class="small text-body-secondary">Queued${total ? ` · ${total.toLocaleString()} items` : ''}</span>`
+                ? `<span class="small text-body-secondary">Queued${total ? ` · ${total.toLocaleString()} ${total === 1 ? 'item' : 'items'}` : ''}</span>`
                 : hasProgress
                 ? `<div class="queue-progress-label"><span data-queue-percent>${progress}%</span><span data-queue-items>${processed.toLocaleString()} / ${total ? total.toLocaleString() : '?'}</span></div>
                     <div class="progress queue-progress" data-status="${escapeHtml(job.status)}"><div class="progress-bar ${barClass}" role="progressbar" aria-label="Job progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" style="width: ${Math.min(100, Math.max(0, Number(progress)))}%"></div></div>`
@@ -2364,17 +2500,23 @@ function updateJobQueue(force) {
         const nameHtml = (followsId
             ? `<i class="bi bi-arrow-return-right job-follow-arrow" tabindex="0" data-bs-toggle="tooltip" title="${escapeHtmlAttr(followTip)}" aria-label="${escapeHtmlAttr(followTip)}"></i>` : '')
             + `<span class="queue-job-title">${escapeHtml(rowTitle) || 'All Libraries'}</span>` + _versionRerunInfoHtml(job);
-        const sourceBadge = (job.server_name || job.server_type || job.server) && job.config?.source
-            ? _serverBadge({config: job.config}) : '';
         const wait = job.config?.resource_wait;
         const activityText = wait?.reason || (['running', 'pending'].includes(job.status) ? job.progress.current_item : '');
-        const phase = activityText ? `<span class="queue-phase text-body-secondary">${escapeHtml(activityText)}</span>` : '';
+        const genericWait = job.status === 'pending' && !markersPause && !wait && !job.config?.is_retry_chain
+            && !job.config?.retry_attempt && !isWaitingRetryRow && !isWaitingWebhookRow
+            && !Number(job.progress.processed_items) && !Number(progress)
+            && ['Waiting for an available worker', 'Waiting for available worker'].includes(activityText);
+        if (genericWait) {
+            const total = Number(job.progress.total_items) || 0;
+            progressCell = `<span class="small text-body-secondary" tabindex="0" title="${escapeHtmlAttr(activityText)}">${total ? `${total.toLocaleString()} ${total === 1 ? 'item' : 'items'} · ` : ''}Awaiting worker</span>`;
+        }
+        const phase = activityText && !genericWait ? `<span class="queue-phase text-body-secondary">${escapeHtml(activityText)}</span>` : '';
         html += `
             <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}">
                 <td class="queue-id" data-label="ID"><code title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
                 <td class="queue-job" data-label="Job">
                     <div class="queue-job-main">${filesToggleBtn}<div class="queue-job-copy"><div class="queue-title-line">${nameHtml}</div>
-                    <div class="queue-metadata">${_jobKindBadgeHtml(job)}${_libraryTagHtml(job, rowTitle)}${_serverBadge(job)}${sourceBadge}</div></div></div>
+                    <div class="queue-metadata">${_queueMetadataHtml(job, rowTitle)}</div></div></div>
                 </td>
                 <td class="queue-status" data-label="Status">${statusBadge}${retryLabel}</td>
                 <td class="queue-priority" data-label="Priority">${priorityCell}</td>
@@ -2402,9 +2544,14 @@ function updateJobQueue(force) {
     const openPaths = Array.from(tbody.querySelectorAll('details[data-file-index][open]')).map(el => ({
         row: el.closest('tr').id, index: el.dataset.fileIndex,
     }));
+    const openOwners = Array.from(tbody.querySelectorAll('.queue-owner-details[open]')).map(el => el.closest('tr').id);
+    const focusedOwnerRow = tbody.contains(document.activeElement) && document.activeElement.matches('.queue-owner-details > summary')
+        ? document.activeElement.closest('tr').id : null;
     _disposeBootstrapTooltips(tbody);
     tbody.innerHTML = html;
     openPaths.forEach(({row, index}) => document.getElementById(row)?.querySelector(`details[data-file-index="${CSS.escape(index)}"]`)?.setAttribute('open', ''));
+    openOwners.forEach(row => document.getElementById(row)?.querySelector('.queue-owner-details')?.setAttribute('open', ''));
+    if (focusedOwnerRow) document.getElementById(focusedOwnerRow)?.querySelector('.queue-owner-details > summary')?.focus({preventScroll: true});
     jobs.forEach(function (job) {
         if (expandedJobFileRows.has(String(job.id)) && document.getElementById('job-file-list-' + job.id)) _loadJobFileList(job);
     });
@@ -2847,11 +2994,13 @@ function updateWorkerStatuses(workers, options = {}) {
             col.innerHTML = `
                 <article class="card bg-body-tertiary workers-panel-card" data-card data-status="idle">
                     <div class="card-body">
-                        <div class="worker-card-heading"><span data-name-wrap><i class="bi" data-icon></i><strong data-name></strong></span><span class="badge" data-status-badge></span></div>
-                        <div class="worker-card-context"><span data-worker-id></span><span data-library></span><span data-worker-kind></span><button type="button" class="worker-job-link" data-worker-job></button></div>
+                        <div class="worker-card-heading"><span data-name-wrap><i class="bi" data-icon></i><strong data-name></strong></span><span class="worker-id" data-worker-id></span><span class="badge" data-status-badge></span></div>
                         <span class="badge bg-warning text-dark d-none" data-fallback-badge><i class="bi bi-arrow-down-circle me-1"></i>CPU fallback</span>
                         <div class="small text-warning d-none" data-fallback-note><i class="bi bi-exclamation-triangle me-1"></i><span data-fallback-reason></span></div>
-                        <details class="worker-file" data-file><summary data-title></summary><div class="queue-full-path" data-file-path></div></details>
+                        <div class="worker-current-job" data-current-job>
+                            <details class="worker-file" data-file><summary data-title></summary><div class="queue-full-path" data-file-path></div></details>
+                            <div class="worker-card-context"><span data-library></span><span class="worker-job-type"><i class="bi" data-kind-icon aria-hidden="true"></i><span data-worker-kind></span></span><button type="button" class="worker-job-link" data-worker-job></button></div>
+                        </div>
                         <div class="worker-card-metrics" data-metrics><span data-percent></span><span class="d-none" data-chapter-stage></span><span class="worker-speed"><span class="text-body-secondary">Speed </span><strong data-speed></strong></span><span class="worker-eta"><span class="text-body-secondary">ETA </span><strong data-eta></strong></span></div>
                         <div class="progress" data-progress-wrap><div class="progress-bar" data-progress></div></div>
                     </div>
@@ -2913,16 +3062,24 @@ function _patchWorkerCard(col, worker) {
     progressWrap.hidden = !isProcessing;
     metrics.hidden = !isProcessing;
     card.dataset.paused = String(!!paused);
-    col.querySelector('[data-worker-id]').textContent = `Worker ID ${worker.worker_id}`;
+    const workerId = col.querySelector('[data-worker-id]');
+    workerId.textContent = `#${worker.worker_id}`;
+    workerId.setAttribute('aria-label', `Worker ID ${worker.worker_id}`);
+    workerId.title = `Worker ID ${worker.worker_id}`;
     const library = col.querySelector('[data-library]');
     library.textContent = isProcessing ? worker.library_name || '' : '';
     const kind = col.querySelector('[data-worker-kind]');
     kind.textContent = isProcessing && worker.job_kind ? (JOB_KIND_LABELS[worker.job_kind] || worker.job_kind) : '';
+    kind.parentElement.hidden = !kind.textContent;
+    col.querySelector('[data-kind-icon]').className = 'bi ' +
+        (worker.job_kind === 'loudness' ? 'bi-soundwave' : worker.job_kind === 'intro_credits' ? 'bi-skip-forward' : 'bi-film');
+    col.querySelector('[data-current-job]').hidden = !isProcessing;
     const jobLink = col.querySelector('[data-worker-job]');
     jobLink.hidden = !isProcessing || !worker.job_id;
     jobLink.dataset.jobId = isProcessing ? worker.job_id || '' : '';
     jobLink.textContent = worker.job_id ? 'Job ' + String(worker.job_id).substring(0, 8) : '';
     jobLink.title = worker.job_id ? 'Open job ' + worker.job_id : '';
+    jobLink.setAttribute('aria-label', worker.job_id ? 'Open job ' + worker.job_id : 'Job details');
     const file = col.querySelector('[data-file]');
     file.hidden = !isProcessing;
     const fullPath = worker.current_file || worker.current_title || '';
@@ -2966,6 +3123,7 @@ function _patchWorkerCard(col, worker) {
     if (statusEl.textContent !== workerStatus) {
         statusEl.textContent = workerStatus;
     }
+    card.classList.toggle('worker-long-status', !!worker.retiring);
 
     const title = isProcessing ? worker.current_title || worker.current_file || 'Processing…' : '';
     if (titleEl.textContent !== title) titleEl.textContent = title;

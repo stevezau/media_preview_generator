@@ -204,15 +204,17 @@ def test_dashboard_group_configuration_is_read_only_and_links_to_its_editor(
     page.goto(app_url + "/")
     row = page.locator('#workerGroupDashboard [data-group-id="cpu-night"]')
     expect(row).to_contain_text("2 running")
-    expect(row).to_contain_text("2 configured · Enabled")
+    expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
+        "aria-label", "2 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+    )
     expect(page.locator("#workerGroupDashboard [data-scale], #workerGroupDashboard [data-enable]")).to_have_count(0)
-    expect(row.get_by_role("link", name="Edit group Overnight loudness")).to_have_attribute(
+    expect(row.get_by_role("link", name="Edit Overnight loudness")).to_have_attribute(
         "href", "/settings?worker_group=cpu-night#section-workers"
     )
     group_api["state"]["groups"][0]["enabled"] = False
     group_api["state"]["capacity"]["groups"][0].update(busy=0, finishing=2, state="disabled")
     page.evaluate("WorkerGroups.load()")
-    expect(row).to_contain_text("2 configured · Disabled")
+    expect(row).to_contain_text("Disabled")
     expect(row).to_contain_text("2 finishing")
     assert group_api["writes"] == []
 
@@ -328,7 +330,7 @@ def test_quiet_hours_has_one_editor_and_schedules_links_to_it(authed_page: Page,
 @pytest.mark.parametrize(
     ("state", "enabled", "expected"),
     [
-        ("active", True, "Within group hours"),
+        ("active", True, "Mon 23:00–07:00 next day"),
         ("off_hours", True, "Outside hours"),
         ("draining", True, "Outside hours"),
         ("hardware_unavailable", True, "Hardware unavailable"),
@@ -350,9 +352,11 @@ def test_worker_wait_states_remain_distinct(
     if state in ("off_hours", "draining"):
         expect(row).to_contain_text("Next")
         expect(row).to_contain_text("Australia/Sydney")
-        expect(row).to_contain_text("2 configured")
+        expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
+            "aria-label", "2 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+        )
     else:
-        expect(row.locator(".worker-group-state")).not_to_contain_text("Next")
+        expect(row).not_to_contain_text("Next")
 
 
 @pytest.mark.parametrize(
@@ -622,8 +626,10 @@ def test_paused_idle_groups_show_one_hold_and_no_redundant_zero_activity(
     expect(authed_page.locator("#workerGroupDashboard")).not_to_contain_text("Globally paused")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
     assert gpu.locator(".worker-group-description").inner_text().count("NVIDIA card") == 1
-    expect(gpu).to_contain_text("2 configured · Enabled")
-    expect(gpu.get_by_role("link", name="Edit group NVIDIA card", exact=True)).to_have_attribute(
+    expect(gpu.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
+        "aria-label", "2 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+    )
+    expect(gpu.get_by_role("link", name="Edit NVIDIA card", exact=True)).to_have_attribute(
         "href", "/settings?worker_group=gpu-video#section-workers"
     )
 
@@ -634,7 +640,7 @@ def test_named_gpu_keeps_full_hardware_accessible_on_demand(authed_page: Page, a
     authed_page.goto(app_url + "/")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
     expect(gpu.locator(".worker-group-hardware > span")).not_to_be_visible()
-    gpu.locator("summary").click()
+    gpu.locator(".worker-group-hardware summary").click()
     expect(gpu.locator(".worker-group-hardware > span")).to_be_visible()
     expect(gpu.locator(".worker-group-hardware > span")).to_have_text("NVIDIA card")
 

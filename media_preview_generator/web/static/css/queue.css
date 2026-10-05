@@ -1,0 +1,46 @@
+/* Queue metadata keeps native icons and colours subordinate to the job title. */
+#jobQueue .queue-metadata { align-items:center; gap:3px 6px; line-height:1.4; }
+#jobQueue .queue-metadata .badge {
+    display:inline-flex; align-items:center; gap:.25rem; box-sizing:border-box;
+    min-height:20px; padding:0; line-height:1.4; vertical-align:middle; font-weight:400;
+    background:transparent!important; border:0!important; color:var(--bs-secondary-color)!important; border-radius:0;
+}
+#jobQueue .queue-metadata .badge>svg,
+#jobQueue .queue-metadata .badge>img {
+    width:12px!important; height:12px!important; max-height:12px; flex:none;
+    vertical-align:middle!important; margin:0!important; align-self:center;
+}
+#jobQueue .queue-metadata .badge>.bi { line-height:1; margin:0!important; flex:none; }
+#jobQueue .queue-metadata .job-library-tag>.bi { display:none; }
+#jobQueue .queue-metadata .job-library-tag::before,
+#jobQueue .queue-trigger-context>.badge::before { content:'·'; margin-right:2px; }
+#jobQueue .queue-server-group {
+    display:inline-flex; flex-wrap:wrap; align-items:center; gap:2px 4px; max-width:100%;
+    padding:0 5px; border:1px solid var(--bs-border-color); border-radius:4px;
+    color:var(--bs-secondary-color); font-size:.75rem; line-height:1.4;
+}
+#jobQueue .queue-server-group>span,
+#jobQueue .queue-additional-owner { display:inline-flex; align-items:center; gap:4px; max-width:100%; }
+#jobQueue .queue-owner-details>summary { cursor:pointer; min-height:44px; padding:12px 0; list-style-position:inside; }
+#jobQueue .queue-owner-list { padding:0 0 .35rem .75rem; line-height:1.65; }
+.dashboard-layout .queue-toolbar {
+    display:grid; grid-template-columns:minmax(220px,1.5fr) minmax(145px,1fr) minmax(185px,1.2fr) minmax(145px,.9fr) minmax(135px,.85fr) auto;
+    align-items:end; gap:.65rem;
+}
+.dashboard-layout .queue-search { min-width:0; max-width:none; }
+.dashboard-layout .queue-filter-status,.dashboard-layout .queue-filter { min-width:0; }
+.dashboard-layout .queue-toolbar .form-select { width:100%; min-width:0; }
+.dashboard-layout .queue-clear-filters { align-self:end; min-height:44px; white-space:nowrap; padding-left:.5rem; padding-right:.5rem; }
+.dashboard-layout .queue-filter-count { grid-column:1/-1; color:var(--bs-secondary-color); font-size:.8125rem; line-height:1.4; margin-top:-.15rem; }
+.dashboard-layout .queue-toolbar [hidden] { display:none!important; }
+@media(max-width:1199.98px) {
+    .dashboard-layout .queue-toolbar { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .dashboard-layout .queue-search { grid-column:span 2; }
+    .dashboard-layout .queue-clear-filters { justify-self:start; }
+}
+@media(max-width:767.98px) {
+    .dashboard-layout .queue-toolbar { grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65rem; }
+    .dashboard-layout .queue-search,.dashboard-layout .queue-filter-server,.dashboard-layout .queue-filter-library { grid-column:1/-1; }
+    .dashboard-layout .queue-clear-filters { grid-column:1/-1; }
+    .dashboard-layout .queue-filter-status { width:auto; }
+}

@@ -194,11 +194,11 @@ function _renderModalHeader(job) {
         +     '<i class="bi bi-file-text me-2"></i>' + escapeHtmlText(title)
         +   '</h5>'
         +   statusBadge
-        +   jidBlock
         + '</div>'
         + (chips.length
             ? '<div class="job-details-meta d-flex flex-wrap gap-2 small mt-1">' + chips.join('') + '</div>'
-            : '');
+            : '')
+        + '<details class="job-identity-disclosure"><summary>Job ID</summary>' + jidBlock + '</details>';
 }
 
 function _renderModalContext(job) {
@@ -514,6 +514,13 @@ async function showLogsModal(jobId) {
         _disposeBootstrapTooltips(_hdr);
         _hdr.innerHTML = _job ? _renderPublishersBlock(_job) : '';
         _initBootstrapTooltips(_hdr);
+    }
+    const resultDetails = document.getElementById('jobServerResults');
+    if (resultDetails) {
+        resultDetails.hidden = !_hdr?.textContent.trim();
+        resultDetails.open = !window.matchMedia('(max-width:767.98px)').matches;
+        const count = _hdr?.querySelectorAll('.job-server-results').length || 0;
+        document.getElementById('jobServerResultsCount').textContent = count ? `${count} ${count === 1 ? 'server' : 'servers'}` : '';
     }
     // Clear any leftover attempt-scope subtitle from a previous modal
     // open. _loadAttemptsDropdown re-renders it for chains.

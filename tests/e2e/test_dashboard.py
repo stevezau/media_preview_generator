@@ -96,10 +96,11 @@ class TestDashboardWorkerGroups:
         legacy = capture_settings_save(authed_page)
         authed_page.goto(app_url + "/")
         row = authed_page.locator('[data-group-id="cpu"]')
-        expect(row).to_contain_text("1 configured")
-        expect(row).to_contain_text("Enabled")
+        expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
+            "aria-label", "1 configured worker. Worker counts set simultaneous tasks, not CPU cores."
+        )
         expect(row.locator('[data-scale], input[type="checkbox"]')).to_have_count(0)
-        expect(row.get_by_role("link", name="Edit group", exact=False)).to_have_attribute(
+        expect(row.get_by_role("link", name="Edit CPU workers", exact=True)).to_have_attribute(
             "href", "/settings?worker_group=cpu#section-workers"
         )
         assert not groups["writes"]
@@ -110,7 +111,9 @@ class TestDashboardWorkerGroups:
         groups = mock_worker_groups(authed_page, cpu_count=32)
         authed_page.goto(app_url + "/")
         row = authed_page.locator('[data-group-id="cpu"]')
-        expect(row).to_contain_text("32 configured")
+        expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
+            "aria-label", "32 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+        )
         expect(row.locator("[data-scale]")).to_have_count(0)
         assert not groups["writes"]
 

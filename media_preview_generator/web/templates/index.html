@@ -5,6 +5,7 @@
 {% block head %}
 <link href="{{ url_for('static', filename='css/processing_jobs.css') }}" rel="stylesheet">
 <link href="{{ url_for('static', filename='css/dashboard.css') }}" rel="stylesheet">
+<link href="{{ url_for('static', filename='css/queue.css') }}" rel="stylesheet">
 <link href="{{ url_for('static', filename='css/job_details.css') }}" rel="stylesheet">
 <link href="{{ url_for('static', filename='css/job_dialogs.css') }}" rel="stylesheet">
 {% endblock %}
@@ -39,11 +40,13 @@
 <div class="row dashboard-summary-row">
     <!-- System & Workers Card -->
     <div class="col-lg-6 mb-4">
-        <div class="card dashboard-system-card">
-            <div class="card-header">
-                <i class="bi bi-pc-display me-2"></i>System &amp; Workers
+        <div class="card dashboard-system-card system-details-collapsed">
+            <div class="card-header dashboard-system-header">
+                <span class="dashboard-system-heading"><span><i class="bi bi-pc-display me-2"></i>System &amp; Workers</span><span id="systemConnectionSummary" class="system-connection-summary">Checking connections</span></span>
+                <div id="systemStatus"></div>
+                <button type="button" class="btn btn-link text-body-secondary system-details-toggle" onclick="toggleSystemDetails()" aria-controls="systemDetails" aria-expanded="false" aria-label="Show system details"><i class="bi bi-chevron-down" aria-hidden="true"></i></button>
             </div>
-            <div class="card-body system-card-body">
+            <div class="card-body system-card-body" id="systemDetails">
                 <!-- Media Servers Status (one row per configured server) -->
                 <section class="system-section">
                     <h6 class="system-section-title">Media Servers</h6>
@@ -54,9 +57,6 @@
                         </div>
                     </div>
                 </section>
-
-                <!-- Dynamic Status (GPU info + processing state, replaced by app.js) -->
-                <div id="systemStatus" class="system-section"></div>
 
                 <!-- Version Info -->
                 <div class="d-flex justify-content-between align-items-center pt-2 border-top system-version-row">
@@ -174,7 +174,7 @@
     <div class="col-12 mb-4">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-cpu me-2"></i>Workers</span>
+                <span class="workers-heading"><i class="bi bi-cpu me-2"></i>Workers<details class="worker-group-disclosure worker-group-help"><summary aria-label="How worker groups behave" data-bs-toggle="tooltip" data-bs-title="How worker groups behave"><i class="bi bi-info-circle" aria-hidden="true"></i></summary><div class="worker-group-disclosure-panel"><p>Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.</p><a href="/settings#section-workers">Manage groups and availability</a></div></details></span>
                 <div class="d-flex align-items-center gap-3"><span class="badge bg-secondary" id="workersHeaderCount" style="text-transform: none; letter-spacing: 0;">—</span><a class="small" href="/settings#section-workers">Manage groups</a></div>
             </div>
             <div class="card-body" id="workerStatusContainer">
@@ -235,7 +235,12 @@
             <div class="card-body p-0">
                 <div class="queue-toolbar" role="search" aria-label="Find jobs">
                     <div class="queue-search"><label for="jobSearch">Search jobs</label><input type="search" class="form-control form-control-sm" id="jobSearch" placeholder="Title, ID, library, source, or server" oninput="changeJobSearch(this.value)"></div>
+                    <div class="queue-filter queue-filter-server"><label for="jobServerFilter">Server</label><select id="jobServerFilter" class="form-select form-select-sm" onchange="changeJobServer(this.value)" title="Matches the originating server or a library associated with the job; it does not indicate publication success."><option value="">All servers</option></select></div>
+                    <div class="queue-filter queue-filter-library"><label for="jobLibraryFilter">Library</label><select id="jobLibraryFilter" class="form-select form-select-sm" onchange="changeJobLibrary(this.value)"><option value="">All libraries</option></select></div>
+                    <div class="queue-filter"><label for="jobKindFilter">Job type</label><select id="jobKindFilter" class="form-select form-select-sm" onchange="changeJobKind(this.value)"><option value="">All job types</option><option value="previews">Previews</option><option value="intro_credits">Intro &amp; Credits</option><option value="loudness">Plex loudness</option></select></div>
                     <div class="queue-filter-status"><label for="jobStatusFilter">Status</label><select id="jobStatusFilter" class="form-select form-select-sm" onchange="changeJobStatus(this.value)"><option value="">All statuses</option><option value="running">Running</option><option value="pending">Pending</option><option value="paused">Job paused</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
+                    <button type="button" class="btn btn-link btn-sm queue-clear-filters" id="clearJobFilters" onclick="clearJobFilters()" hidden>Clear filters</button>
+                    <span class="queue-filter-count" id="jobFilterCount" role="status" aria-live="polite" hidden></span>
                 </div>
                 <div class="queue-table-wrap">
                     <table class="table table-hover align-middle mb-0 jobs-table">

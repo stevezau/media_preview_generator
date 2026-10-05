@@ -3,31 +3,35 @@
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header pb-2">
-                <!-- Header is a two-row block:
-                       Row 1 — entity title (library_name / retry_basename) + status badge
-                               + Job-ID (right-aligned, small monospace, copy-on-click)
-                       Row 2 — quick-glance metadata chips (source · server · duration · runs)
-                     Renderer: ``_renderModalHeader(job)`` in job_modal.js. Falls back to
-                     a generic "Job Details" title when the job is missing
-                     (undefined/null — e.g. modal re-opened after the job was
-                     cleaned from history mid-poll). -->
+                <!-- Dynamic title, status and metadata retain a separate Job ID disclosure. -->
                 <div class="modal-title flex-grow-1" id="logsModalHeader">
                     <h5 class="mb-0"><i class="bi bi-file-text me-2" aria-hidden="true"></i>Job Details</h5>
                 </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
-                <!-- Per-publisher status strip above the tabs so a user diagnosing
-                     a multi-server job sees "Plex ✓, Emby ✗" before having to
-                     scan the log stream. Empty for legacy jobs. ``mb-3`` keeps
-                     the gap consistent with the attempts strip below. -->
-                <div id="logsModalPublishers" class="mb-3"></div>
+                <ul class="nav nav-tabs mb-3" id="jobDetailTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="logsTab" data-bs-toggle="tab" data-bs-target="#logsTabPane" type="button" role="tab" onclick="onLogsTabActivated()">
+                            <i class="bi bi-terminal me-1" aria-hidden="true"></i>Logs
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="filesTab" data-bs-toggle="tab" data-bs-target="#filesTabPane" type="button" role="tab" onclick="onFilesTabActivated()">
+                            <i class="bi bi-files me-1" aria-hidden="true"></i>Files
+                        </button>
+                    </li>
+                </ul>
+                <details id="jobServerResults" class="job-server-results-disclosure" hidden>
+                    <summary>Results by server <small id="jobServerResultsCount"></small></summary>
+                    <div id="logsModalPublishers"></div>
+                </details>
                 <details id="jobDetailsContext" class="job-details-context mb-3" hidden>
                     <summary>Job information</summary>
                     <div id="jobDetailsContextBody" class="mt-2"></div>
                 </details>
                 <!-- Attempts switcher for retry-chain rows — sits ABOVE
-                     the tabs strip so it scopes BOTH Logs and Files.
+                     the tab content. It selects Logs from each attempt; Files keeps the chain’s accumulated outcomes.
                      Hidden by default; ``showLogsModal`` un-hides
                      only for chain rows (``is_retry_chain``).
                      Layout: pills on the left, attempt count + chain
@@ -61,23 +65,6 @@
                          class="d-none small text-muted mt-2"
                          role="status" aria-live="polite"></div>
                 </div>
-                <!-- Tabs — Logs is the default landing. The simplification
-                     pass dropped a separate "Overview" tab whose four
-                     cards duplicated content already visible above the
-                     tabs (header / Servers strip / Attempts pills /
-                     chain-state chip). -->
-                <ul class="nav nav-tabs mb-3" id="jobDetailTabs" role="tablist">
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link active" id="logsTab" data-bs-toggle="tab" data-bs-target="#logsTabPane" type="button" role="tab" onclick="onLogsTabActivated()">
-                            <i class="bi bi-terminal me-1" aria-hidden="true"></i>Logs
-                        </button>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="filesTab" data-bs-toggle="tab" data-bs-target="#filesTabPane" type="button" role="tab" onclick="onFilesTabActivated()">
-                            <i class="bi bi-files me-1" aria-hidden="true"></i>Files
-                        </button>
-                    </li>
-                </ul>
                 <div class="tab-content" id="jobDetailTabContent">
                     <!-- Logs Tab Pane -->
                     <div class="tab-pane fade show active" id="logsTabPane" role="tabpanel">

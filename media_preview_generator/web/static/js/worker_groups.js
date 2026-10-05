@@ -18,6 +18,10 @@
     let requestedEditor = new URLSearchParams(window.location.search).get('worker_group');
     const dashboardGroups = new Map();
     let pausedByGroup = {};
+    let occupiedWorkerGroups = new Set();
+    let groupSearch = '';
+    let occupiedOnly = false;
+    let showAllGroups = false;
     const settings = () => document.getElementById('workerGroupSettings');
     const dashboard = () => document.getElementById('workerGroupDashboard');
 
@@ -154,7 +158,24 @@
         if (!mount) return null;
         if (!document.getElementById('workerGroupLiveRows')) {
             dashboardGroups.clear();
-            mount.innerHTML = '<p id="workerGroupHold" class="worker-group-hold small text-warning-emphasis mb-2" role="status" hidden></p><div id="workerGroupLiveRows"></div><p id="workerGroupEmpty" class="text-body-secondary" hidden>No worker groups configured. Jobs wait until a compatible group is available.</p><div id="workerGroupLiveWarnings" class="small text-warning-emphasis mt-2"></div><div id="workerGroupLiveMessage" role="status" aria-live="polite"></div><details class="worker-group-help small text-body-secondary"><summary>How worker groups behave</summary><p>Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.</p><a href="/settings#section-workers">Manage groups and availability</a></details>';
+            mount.innerHTML = `<p id="workerGroupHold" class="worker-group-hold small text-warning-emphasis mb-2" role="status" hidden></p>
+                <div id="workerGroupFilters" class="worker-group-filters" hidden>
+                    <div class="worker-group-filter-row"><label class="worker-group-search"><span class="visually-hidden">Search worker groups</span><input type="search" class="form-control form-control-sm" id="workerGroupSearch" placeholder="Search groups" aria-label="Search worker groups"></label>
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Worker groups shown"><button type="button" class="btn btn-outline-secondary" data-group-filter="all">All groups</button><button type="button" class="btn btn-outline-secondary" data-group-filter="occupied">Occupied</button></div><button type="button" class="btn btn-sm btn-link" data-group-clear hidden>Clear filters</button></div>
+                    <div class="worker-group-results small text-body-secondary"><span id="workerGroupSummary" role="status" aria-live="polite"></span><button type="button" class="btn btn-sm btn-link" data-group-outside hidden></button><button type="button" class="btn btn-sm btn-link" data-group-reveal hidden></button></div>
+                </div><div id="workerGroupLiveRows"></div><p id="workerGroupEmpty" class="text-body-secondary" hidden>No worker groups configured. Jobs wait until a compatible group is available.</p><div id="workerGroupLiveWarnings" class="small text-warning-emphasis mt-2"></div><div id="workerGroupLiveMessage" role="status" aria-live="polite"></div>`;
+            mount.querySelector('#workerGroupSearch').addEventListener('input', event => {
+                groupSearch = event.target.value.trim().toLocaleLowerCase(); showAllGroups = false; renderGroupVisibility();
+            });
+            mount.querySelector('#workerGroupFilters').addEventListener('click', event => {
+                const filter = event.target.closest('[data-group-filter]');
+                if (filter) { occupiedOnly = filter.dataset.groupFilter === 'occupied'; showAllGroups = false; }
+                if (event.target.closest('[data-group-clear]')) { groupSearch = ''; occupiedOnly = false; showAllGroups = false; }
+                if (event.target.closest('[data-group-reveal]')) showAllGroups = !showAllGroups;
+                if (event.target.closest('[data-group-outside]')) { groupSearch = ''; occupiedOnly = true; showAllGroups = true; }
+                if (!groupSearch) mount.querySelector('#workerGroupSearch').value = '';
+                renderGroupVisibility();
+            });
         }
         return document.getElementById('workerGroupLiveRows');
     }
@@ -176,19 +197,21 @@
             rows.append(section);
             dashboardGroups.set(key, { section, header, host, name });
             header.innerHTML = `<div class="worker-group-description"><strong>${escape(name || 'Workers without group details')}</strong><span class="small text-body-secondary">Group details unavailable</span></div>`;
+            renderGroupVisibility();
         }
         return dashboardGroups.get(key);
     }
 
     function setWorkerActivity(workers) {
         const next = {};
+        occupiedWorkerGroups = new Set((workers || []).filter(worker => worker.status !== 'idle').map(worker => String(worker.group_id || 'unassigned')));
         for (const worker of workers || []) {
             if (worker.group_id && worker.paused && !worker.retiring && worker.status !== 'idle') {
                 next[worker.group_id] = (next[worker.group_id] || 0) + 1;
             }
         }
         if (Object.keys(next).length === Object.keys(pausedByGroup).length
-            && Object.keys(next).every(id => next[id] === pausedByGroup[id])) return;
+            && Object.keys(next).every(id => next[id] === pausedByGroup[id])) { renderGroupVisibility(); return; }
         pausedByGroup = next;
         renderDashboard();
     }
@@ -201,6 +224,72 @@
 
     function warnings() {
         return (snapshot.warnings || []).map(warning => typeof warning === 'string' ? warning : warning.message || '').filter(Boolean);
+    }
+
+    function indicator(key, icon, value, label) {
+        return `<details class="worker-group-disclosure" data-group-indicator="${key}"><summary aria-label="${escape(label)}" data-bs-toggle="tooltip" data-bs-title="${escape(label)}"><i class="bi bi-${icon}" aria-hidden="true"></i>${value === null ? '' : `<span>${escape(value)}</span>`}</summary><div class="worker-group-disclosure-panel">${escape(label)}</div></details>`;
+    }
+
+    function replaceDashboardHeader(entry, markup) {
+        if (entry.header._markup === markup) return;
+        const open = [...entry.header.querySelectorAll('[data-group-indicator][open]')].map(node => node.dataset.groupIndicator);
+        const hardwareOpen = Boolean(entry.header.querySelector('.worker-group-hardware[open]'));
+        const editFocused = document.activeElement?.matches('.worker-group-edit') && entry.header.contains(document.activeElement);
+        const focused = entry.header.contains(document.activeElement) ? document.activeElement.closest('[data-group-indicator]')?.dataset.groupIndicator : null;
+        if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(entry.header);
+        entry.header.innerHTML = markup;
+        entry.header._markup = markup;
+        for (const node of entry.header.querySelectorAll('[data-group-indicator]')) {
+            node.open = open.includes(node.dataset.groupIndicator);
+            if (focused === node.dataset.groupIndicator) node.querySelector('summary').focus({ preventScroll: true });
+        }
+        if (hardwareOpen) entry.header.querySelector('.worker-group-hardware')?.setAttribute('open', '');
+        if (editFocused) entry.header.querySelector('.worker-group-edit')?.focus({ preventScroll: true });
+        window._initBootstrapTooltips?.(entry.header);
+    }
+
+    function renderGroupVisibility() {
+        const controls = document.getElementById('workerGroupFilters');
+        const rows = document.getElementById('workerGroupLiveRows');
+        if (!controls || !rows) return;
+        const configuredOrder = new Map((snapshot?.groups || []).map((group, index) => [String(group.id), index]));
+        const entries = [...dashboardGroups.entries()].sort(([a], [b]) =>
+            (configuredOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (configuredOrder.get(b) ?? Number.MAX_SAFE_INTEGER));
+        entries.forEach(([, entry], index) => {
+            if (rows.children[index] !== entry.section) rows.insertBefore(entry.section, rows.children[index] || null);
+        });
+        const occupied = ([id, entry]) => entry.occupied || occupiedWorkerGroups.has(id);
+        const matches = entries.filter(pair => (!occupiedOnly || occupied(pair)) &&
+            (!groupSearch || (pair[1].searchText || pair[1].name || '').toLocaleLowerCase().includes(groupSearch)));
+        const visible = showAllGroups ? matches : matches.slice(0, 6);
+        const visibleIds = new Set(visible.map(([id]) => id));
+        entries.forEach(([id, entry]) => {
+            entry.section.hidden = !visibleIds.has(id);
+            const index = visible.findIndex(([visibleId]) => id === visibleId);
+            entry.section.classList.toggle('worker-group-row-start-three', index >= 0 && index % 3 === 0);
+            entry.section.classList.toggle('worker-group-row-start-two', index >= 0 && index % 2 === 0);
+        });
+        rows.dataset.visibleCount = visible.length;
+        controls.hidden = entries.length <= 6 && !groupSearch && !occupiedOnly;
+        const occupiedTotal = entries.filter(occupied).length;
+        const outsideCount = entries.filter(pair => !visibleIds.has(pair[0]) && occupied(pair)).length;
+        const filtered = groupSearch || occupiedOnly;
+        const summary = `${entries.length} groups · ${occupiedTotal} occupied. ` + (matches.length ?
+            `Showing ${visible.length} of ${matches.length}${filtered ? ' matching groups' : ''}.` : 'No matching groups.');
+        const summaryNode = document.getElementById('workerGroupSummary');
+        if (summaryNode.textContent !== summary) summaryNode.textContent = summary;
+        const outside = controls.querySelector('[data-group-outside]');
+        outside.hidden = !outsideCount;
+        outside.textContent = `${outsideCount} occupied ${outsideCount === 1 ? 'group' : 'groups'} outside this view`;
+        const reveal = controls.querySelector('[data-group-reveal]');
+        reveal.hidden = matches.length <= 6;
+        reveal.textContent = showAllGroups ? 'Show first 6' : `Show all ${matches.length}`;
+        controls.querySelector('[data-group-clear]').hidden = !filtered;
+        controls.querySelectorAll('[data-group-filter]').forEach(button => {
+            const selected = (button.dataset.groupFilter === 'occupied') === occupiedOnly;
+            button.classList.toggle('active', selected);
+            button.setAttribute('aria-pressed', String(selected));
+        });
     }
 
     function renderDashboard() {
@@ -221,13 +310,27 @@
             delete entry.header.dataset.retiredGroup;
             const state = status(group);
             const counts = activity(state);
-            const markup = `<div class="worker-group-description"><strong>${escape(group.name)}</strong><div class="worker-group-meta small text-body-secondary">${resourceDescription(group)}<span>${group.job_types.map(kind => escape(JOBS[kind] || kind)).join(' · ')}</span><span>${group.count} configured · ${group.enabled ? 'Enabled' : 'Disabled'}</span></div><div class="worker-group-availability small text-body-secondary"><span>${escape(hours(group))}</span><span class="worker-group-state" ${['Within group hours', 'Available', 'Workers busy', 'Configured'].includes(state.label) ? 'hidden' : ''}>${escape(state.label)}${state.next_available_at ? ' · Next ' + escape(nextTime(state.next_available_at)) : ''}</span>${counts.length ? `<span class="worker-group-counts">${counts.map(count => `<span>${escape(count)}</span>`).join('')}</span>` : ''}</div></div><a class="worker-group-edit" href="/settings?worker_group=${encodeURIComponent(group.id)}#section-workers">Edit group<span class="visually-hidden"> ${escape(group.name)}</span><i class="bi bi-arrow-up-right ms-1" aria-hidden="true"></i></a>`;
-            if (entry.header._markup !== markup) {
-                const openHardware = entry.header.querySelector('details[open]');
-                entry.header.innerHTML = markup;
-                if (openHardware) entry.header.querySelector('details')?.setAttribute('open', '');
-                entry.header._markup = markup;
+            entry.occupied = state.busy > 0 || state.finishing > 0;
+            entry.searchText = [group.name, group.resource, resourceName(group), ...group.job_types.map(kind => JOBS[kind] || kind), hours(group)].join(' ');
+            const icons = { previews: 'film', intro_credits: 'skip-forward', loudness: 'soundwave' };
+            const labels = { previews: 'Previews', intro_credits: 'Intro & credits', loudness: 'Plex loudness' };
+            const jobTypes = group.job_types.map(kind => `<span class="worker-group-kind"><i class="bi bi-${icons[kind] || 'list-task'}" aria-hidden="true"></i>${escape(labels[kind] || kind)}</span>`).join('');
+            const controls = [indicator('configured', 'cpu', group.count, `${group.count} configured ${group.count === 1 ? 'worker' : 'workers'}. Worker counts set simultaneous tasks, not CPU cores.`)];
+            const exceptions = [];
+            for (const count of [...counts].sort((a, b) => Number(a.includes('available')) - Number(b.includes('available')))) {
+                const match = count.match(/^(\d+) (running|available)$/);
+                if (match) controls.push(indicator(match[2], match[2] === 'running' ? 'play-circle' : 'check-circle', match[1], `${count} ${match[1] === '1' ? 'worker' : 'workers'}`));
+                else exceptions.push(`<span>${escape(count)}</span>`);
             }
+            if (group.availability.mode === 'always') controls.push(indicator('hours', 'clock', null, 'Always available: this group has no restricted hours. Disabled groups and global processing pauses still prevent new work.'));
+            const schedule = group.availability.mode === 'always' ? '' : `<span><i class="bi bi-clock me-1" aria-hidden="true"></i>${escape(hours(group))}</span>`;
+            const stateLabel = ['Within group hours', 'Available', 'Workers busy', 'Configured'].includes(state.label) ? '' :
+                `<span class="worker-group-state">${escape(state.label)}${state.next_available_at ? ' · Next ' + escape(nextTime(state.next_available_at)) : ''}</span>`;
+            // Only expose hardware details when they add information beyond the group name.
+            const hardware = group.resource === 'gpu' && group.name !== resourceName(group) ? resourceDescription(group) :
+                group.resource === 'cpu' && !/cpu/i.test(group.name) ? '<span>CPU</span>' : '';
+            const markup = `<div class="worker-group-description"><div class="worker-group-title"><strong>${escape(group.name)}</strong><div class="worker-group-indicators">${controls.join('')}<a class="worker-group-edit" href="/settings?worker_group=${encodeURIComponent(group.id)}#section-workers" aria-label="Edit ${escape(group.name)}" data-bs-toggle="tooltip" data-bs-title="Edit ${escape(group.name)}"><i class="bi bi-pencil" aria-hidden="true"></i></a></div></div><div class="worker-group-meta small text-body-secondary">${jobTypes}${hardware}</div>${exceptions.length ? `<div class="worker-group-counts small">${exceptions.join('')}</div>` : ''}${schedule || stateLabel ? `<div class="worker-group-availability small text-body-secondary">${schedule}${stateLabel}</div>` : ''}</div>`;
+            replaceDashboardHeader(entry, markup);
         }
         for (const state of snapshot.capacity?.groups || []) {
             if (present.has(state.id) || !state.finishing) continue;
@@ -235,21 +338,24 @@
             const entry = dashboardGroup(state.id, state.name);
             delete entry.header.dataset.groupId;
             entry.header.dataset.retiredGroup = state.id;
-            entry.header._markup = null;
-            entry.header.innerHTML = `<div class="worker-group-description"><strong>${escape(state.name || 'Removed group')}</strong><span class="small text-body-secondary">Removed · ${state.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''} · ${escape(state.resource === 'cpu' ? 'CPU' : state.device || 'GPU')}</span></div>`;
+            entry.occupied = true;
+            entry.searchText = [state.name, state.resource, state.device].filter(Boolean).join(' ');
+            replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(state.name || 'Removed group')}</strong><span class="small text-body-secondary">Removed · ${state.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''} · ${escape(state.resource === 'cpu' ? 'CPU' : state.device || 'GPU')}</span></div>`);
         }
         for (const [id, entry] of dashboardGroups) {
             if (present.has(id)) continue;
             if (!entry.host.childElementCount) {
+                if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(entry.header);
                 entry.section.remove(); dashboardGroups.delete(id);
             } else {
-                entry.header._markup = null;
+                entry.occupied = occupiedWorkerGroups.has(id);
                 delete entry.header.dataset.groupId;
-                entry.header.innerHTML = `<div class="worker-group-description"><strong>${escape(entry.name || 'Workers without group details')}</strong><span class="small text-body-secondary">Live worker activity remains visible while group details refresh.</span></div>`;
+                replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(entry.name || 'Workers without group details')}</strong><span class="small text-body-secondary">Live worker activity remains visible while group details refresh.</span></div>`);
             }
         }
         document.getElementById('workerGroupEmpty').hidden = dashboardGroups.size > 0;
         document.getElementById('workerGroupLiveWarnings').textContent = warnings().join(' ');
+        renderGroupVisibility();
         window.dispatchEvent(new CustomEvent('worker-groups-updated', { detail: snapshot }));
     }
 
@@ -430,5 +536,19 @@
         if (!settings() && !dashboard()) return;
         load();
         setInterval(() => { if (!document.hidden && !saving) load(); }, dashboard() ? 5000 : 10000);
+    });
+    document.addEventListener('click', event => {
+        document.querySelectorAll('.worker-group-disclosure[open]').forEach(detail => {
+            if (!detail.contains(event.target)) detail.open = false;
+        });
+        const summary = event.target.closest('.worker-group-disclosure > summary');
+        if (summary) window.bootstrap?.Tooltip.getInstance(summary)?.hide();
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+        document.querySelectorAll('.worker-group-disclosure[open]').forEach(detail => {
+            detail.open = false;
+            if (detail.contains(document.activeElement)) detail.querySelector('summary').focus();
+        });
     });
 })();

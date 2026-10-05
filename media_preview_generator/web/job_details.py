@@ -7,6 +7,7 @@ the disk.
 from __future__ import annotations
 
 import os
+import unicodedata
 from collections.abc import Iterable, Sequence
 
 from ..servers.base import ServerConfig
@@ -63,6 +64,107 @@ def job_library_names(job: Job, configs: Sequence[ServerConfig]) -> list[str]:
         if pin is None or match.server_id == pin
     ]
     return _distinct(held)
+
+
+def job_library_scope(
+    job: Job,
+    configs: Sequence[ServerConfig],
+    path_cache: dict[str, list[OwnershipMatch]] | None = None,
+) -> list[dict[str, str]]:
+    """Resolve saved job selections or requested paths to exact server/library pairs.
+
+    This describes configured library association, not publication success. Source
+    attribution on ``job.server_id`` is not a publication pin. Unknown or ambiguous
+    legacy selections stay unknown. Only saved config and string paths are consulted.
+    """
+    cfg = job.config or {}
+    pin = str(cfg.get("server_id") or "")
+    servers = {server.id: server for server in configs}
+    pairs: dict[tuple[str, str], dict[str, str]] = {}
+
+    def add(server_id: str, library_id: str, library_name: str = "") -> None:
+        if not server_id or not library_id or (pin and server_id != pin):
+            return
+        server = servers.get(server_id)
+        library = next((lib for lib in server.libraries if str(lib.id) == library_id), None) if server else None
+        pairs[(server_id, library_id)] = {
+            "server_id": server_id,
+            "server_name": server.name
+            if server
+            else (job.server_name if job.server_id == server_id else server_id) or server_id,
+            "server_type": server.type.value
+            if server
+            else (job.server_type if job.server_id == server_id else "") or "",
+            "library_id": library_id,
+            "library_name": library.name if library else library_name or library_id,
+        }
+
+    selections = cfg.get("libraries") or []
+    for pair in selections:
+        if isinstance(pair, dict):
+            add(str(pair.get("server_id") or ""), str(pair.get("library_id") or ""))
+    if selections:
+        return list(pairs.values())
+
+    ids = [str(value) for value in cfg.get("selected_library_ids") or [] if value]
+    if not ids and job.library_id:
+        ids = [str(job.library_id)]
+    selected_names = cfg.get("selected_libraries") or []
+    selection_server = pin or str(job.server_id or "")
+    for library_id in ids:
+        if selection_server:
+            add(selection_server, library_id)
+        else:
+            matches = [server for server in configs if any(str(lib.id) == library_id for lib in server.libraries)]
+            if len(matches) == 1:
+                add(matches[0].id, library_id)
+    if ids:
+        return list(pairs.values())
+    if selected_names:
+        for name in selected_names:
+            matches = [
+                (server, lib)
+                for server in configs
+                if not selection_server or server.id == selection_server
+                for lib in server.libraries
+                if lib.name == name
+            ]
+            if selection_server or len(matches) == 1:
+                for server, library in matches:
+                    add(server.id, str(library.id))
+        return list(pairs.values())
+
+    cache = path_cache if path_cache is not None else {}
+    mapping_boundaries = {
+        unicodedata.normalize("NFC", str(prefix)).replace("\\", "/").rstrip("/")
+        for server in configs
+        for mapping in server.path_mappings
+        for prefix in [
+            mapping.get("remote_prefix"),
+            mapping.get("plex_prefix"),
+            mapping.get("local_prefix"),
+            *(mapping.get("webhook_prefixes") or []),
+        ]
+        if prefix
+    }
+    paths = [*(cfg.get("file_paths") or []), *(cfg.get("webhook_paths") or [])]
+    paths.extend(
+        (cfg.get("version_rerun_files") or {}).keys() if isinstance(cfg.get("version_rerun_files"), dict) else []
+    )
+    for path in dict.fromkeys(path for path in paths if isinstance(path, str) and path):
+        # Sibling files share prefix matches. A requested folder that is itself a
+        # mapping boundary may translate differently, so keep its exact key.
+        normalized = unicodedata.normalize("NFC", path).replace("\\", "/")
+        key = (
+            "path:" + normalized
+            if normalized.rstrip("/") in mapping_boundaries
+            else "directory:" + os.path.dirname(normalized)
+        )
+        if key not in cache:
+            cache[key] = _library_matches(path, list(configs))
+        for match in cache[key]:
+            add(match.server_id, match.library_id, match.library_name)
+    return list(pairs.values())
 
 
 def _library_matches(path: str, configs: list[ServerConfig]) -> list[OwnershipMatch]:
