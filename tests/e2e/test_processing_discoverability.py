@@ -115,7 +115,11 @@ def test_expanded_results_keep_counts_issues_and_current_activity(
     page.set_viewport_size({"width": width, "height": 1000 if width > 600 else 844})
     button = page.locator(f"#job-files-toggle-{job['id']}")
     expect(button).to_have_text("Job details")
-    assert button.bounding_box()["height"] >= 44
+    # Queue updates replace the row, so resolve and measure the current button in one browser task.
+    page.wait_for_function(
+        "id => (document.getElementById(id)?.getBoundingClientRect().height ?? 0) >= 44",
+        arg=f"job-files-toggle-{job['id']}",
+    )
     button.click()
     expect(button).to_have_attribute("aria-expanded", "true")
     details = page.locator(f"#job-detail-{job['id']}")
