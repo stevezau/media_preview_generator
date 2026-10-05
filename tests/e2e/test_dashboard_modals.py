@@ -478,23 +478,21 @@ class TestJobModalFilesTabStickiness:
 
         page.route("**/api/jobs/*/files**", _files_handler)
 
-    def _seed_two_jobs(self, page: Page) -> None:
+    def _open_modal(self, page: Page, job_id: str) -> None:
+        # Seed the app's lexical queue binding and open in one browser turn so
+        # the empty dashboard poll cannot replace the fixture between calls.
         page.evaluate(
-            """() => {
-                window.jobs = [
+            """jobId => {
+                jobs = [
                     {id: 'job-A', library_name: 'Movies A', status: 'completed', config: {}, publishers: []},
                     {id: 'job-B', library_name: 'Movies B', status: 'completed', config: {}, publishers: []},
                 ];
-            }"""
+                showLogsModal(jobId);
+            }""",
+            job_id,
         )
-
-    def _open_modal(self, page: Page, job_id: str) -> None:
-        # Re-seed window.jobs immediately before opening so the dashboard's
-        # background jobs poll (which the default mock returns empty) can't
-        # have wiped them out between steps.
-        self._seed_two_jobs(page)
-        page.evaluate(f"() => showLogsModal('{job_id}')")
         expect(page.locator("#logsModal")).to_be_visible(timeout=2000)
+        expect(page.locator("#logsModalHeader")).to_contain_text("Movies A" if job_id == "job-A" else "Movies B")
 
     def _close_modal(self, page: Page) -> None:
         page.evaluate("() => hideModalSafely(document.getElementById('logsModal'))")
@@ -545,12 +543,13 @@ class TestJobLogsPanelShowsIntroCreditsBlocks:
         )
         page.evaluate(
             """() => {
-                window.jobs = [{id: 'job-ic', library_name: 'Intro & Credits · Accused', status: 'completed',
+                jobs = [{id: 'job-ic', library_name: 'Intro & Credits · Accused', status: 'completed',
                                 kind: 'intro_credits', config: {}, publishers: []}];
+                showLogsModal('job-ic');
             }"""
         )
-        page.evaluate("() => showLogsModal('job-ic')")
         expect(page.locator("#logsModal")).to_be_visible(timeout=2000)
+        expect(page.locator("#logsModalHeader")).to_contain_text("Intro & Credits · Accused")
         lines = page.locator("#logsContent .log-line")
         expect(lines).to_have_count(len(self._LINES), timeout=2000)
 

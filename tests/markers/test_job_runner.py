@@ -842,6 +842,8 @@ class TestRun:
         preview.is_busy = marker.is_busy = True
         preview.current_job_id = "preview-job"
         marker.current_job_id = "j1"
+        preview.current_task = "/media/movie-a.mkv"
+        marker.current_task = "/media/episode.mkv"
         marker.media_title = "Episode"
         marker.current_phase = "Fingerprinting audio…"
 
@@ -854,6 +856,7 @@ class TestRun:
                 ("Movie B", 1, 3, "extracting"),
             ):
                 preview.media_title = title
+                preview.current_task = f"/media/{title.lower().replace(' ', '-')}.mkv"
                 preview.current_phase = "Chapter thumbnails for Plex…"
                 snapshot = {"stage": stage, "processed": processed, "total": total, "ready": processed, "failed": 0}
                 preview.chapter_progress = snapshot
