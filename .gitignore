@@ -83,7 +83,6 @@ docs/design/intro-credits/evidence/lab/results/
 docs/design/intro-credits/evidence/lab/plugins-old/
 docs/design/intro-credits/evidence/lab/scale_mounts.sh
 docs/design/intro-credits/evidence/online/skipdb-dump.json
-docs/design/intro-credits/evidence/plugins/emby-4.10/embylibs/
 docs/design/intro-credits/evidence/detect/fpcache*/
 docs/design/intro-credits/evidence/credits/bench/
 # Truth sets / results list real library file paths (public repo): local only

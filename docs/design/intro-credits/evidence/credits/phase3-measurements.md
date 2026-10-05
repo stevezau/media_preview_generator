@@ -1,6 +1,6 @@
 # Phase 3 pre-build measurements (credits text)
 
-Task 1 of `docs/design/intro-credits/plan-phase3.md`. Host: storage (Quadro P5000 at `0000:02:00.0`, NVIDIA driver
+Phase-3 detector measurements (the completed implementation plan is in Git history). Host: storage (Quadro P5000 at `0000:02:00.0`, NVIDIA driver
 580.178.04, 20 CPUs, host ffmpeg 8.0.1; `bench/host.txt`) unless a row says otherwise. Date: 2026-09-16. Counts and
 timings only; the truth sets (`credits/{movies40,tv40,movie_credit_truth,adjudicated}.json`, `credits/f3.jsonl`) are
 local-only.

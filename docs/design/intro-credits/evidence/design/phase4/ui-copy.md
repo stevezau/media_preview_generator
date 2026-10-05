@@ -1,14 +1,10 @@
 # Phase 4 — UI copy
 
-Every string phase 4 puts on screen, in the order of the plan's **"UI copy and mockups"** section
-(`plan-phase4.md`). Tasks 5, 6, 9 and 10 lift these verbatim — if a string here and a string in the code
-disagree, this file is wrong and gets fixed, not paraphrased.
+Approved wording from the shipped phase-4 work. The publisher outcomes and Setup Health implementation
+reference §4 and §7. Keep those sections aligned with the implementation.
 
-Rendered, in the app's own theme: [`index.html`](index.html) · screenshots in [`shots/`](shots/).
-
-**Status:** Tasks 5, 6, 9, 10 and §9 are built, and so is adding a marker by hand. What is written here is what
-the app says today; the rendered pack in `index.html` is the earlier mockup and has not been redrawn. Notes
-marked *changed while building* record where the shipped UI differs from the drawing, and why.
+The remaining sections record the original interface wording and design decisions. Later interface changes
+are reflected in the app and public user guide. The completed plan, mockups and screenshots are in Git history.
 
 Wording rules applied: plain English, present tense, no internal setting names in the first sentence,
 tooltips ≤ 120 characters.
@@ -181,7 +177,7 @@ If the owner picks option b instead, the badge stays `Keeps Plex's` and the line
 
 **Answered (Task 6, 2026-09-20): dropped.** `Published` was only printed when every enabled server's dot was
 already green, so it repeated the dots while saying less than they do — and in an action column a status word
-moves the buttons around. The reason is recorded in `plan-phase4.md` Task 6's notes.
+moves the buttons around.
 
 ## 6. Settings → Intro & Credits
 

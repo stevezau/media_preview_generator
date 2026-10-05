@@ -1,8 +1,8 @@
 # Intro & Credits (skip markers) — Design Spec
 
-**Revision 3 (consolidated) · 2026-09-13 · Status: approved, build in progress on PR #241 (`feat/markers-detection`)**
-Supersedes PR #241's spec (`feat/markers-detection`, `docs/design/2026-05-17-intro-credits-detection-design.md`).
-Revision 2 is archived at `evidence/history/spec-rev2-2026-09-13.md`.
+**Revision 3 (consolidated) · 2026-09-13 · Status: implemented; maintained design and detector evidence**
+Earlier spec revisions, completed phase plans and pre-build mockups are available in Git history.
+Dated status entries below record the implementation history; current rules and later rulings remain in this spec.
 
 ---
 
@@ -16,10 +16,10 @@ are language-aware (chapter names, season folder names) and what the rest of det
 
 **Read in this order.**
 1. This file, top to bottom. It is the source of truth. If code and spec disagree, stop and ask the owner.
-2. The implementation plans next to this file (`plan-*.md`) — which task is next is the first unchecked box.
-3. `evidence/README.md` — map of every script, truth set, prototype plugin, and the lab.
-4. Design report with UX mockups (owner-approved look): artifact
-   https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d (source: `evidence/design/index.html`).
+2. `plan-no-review.md` — the later decision-policy work and remaining accuracy follow-ups.
+3. `evidence/README.md` — map of detector scripts, truth sets, vendor proofs, and the lab.
+4. `../../skip-intro-credits.md` — the shipped interface and setup; approved publisher and Setup Health wording
+   remains in `evidence/design/phase4/ui-copy.md`.
 5. Memory notes: `intro-credits-markers-design`, `lab-servers-on-storage`, `design-doc-survives-clear`.
 
 **Status (2026-09-20).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
@@ -27,7 +27,7 @@ publishers, per-server Edit tab, Settings section, Inspector tab, config migrati
 lab-proven: lab matrix 18/19 (row 11 unit-tested), `pr-241` image checked on the lab, and a scale run on 715 real files
 with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an
 online source's daily budget runs out (§14, 2026-09-14/15), or moved into phase 2 (the season chapter-intro check).
-**Phase 2 is built, audited and lab-proven** (`plan-phase2.md`; ledger `.superpowers/sdd/plan-phase2/progress.md`):
+**Phase 2 is built, audited and lab-proven** (phase-2 implementation history):
 season audio intros (fingerprint store, v3 matcher, season step with the silence guard and the season chapter-intro
 check, Season follow-up jobs), the Emby Bridge plugin and Emby publisher, Plex version drift, the Check servers job
 (§6.2 step 6), the Season view and its API, the Settings / Edit tab / Inspector UI, and the accuracy harness
@@ -37,8 +37,7 @@ testable), owner checks done (Plex Web skip buttons, Emby Premiere), and the `pr
 (`sha256:3afed8e7124b6a2c465bcdf6c70f261c044b78ee18c29cbf642444d628908341`, from `8a8b92e`) re-ran rows 1, 2 and 8
 on the lab (`evidence/lab/phase2-results.md` "PR image check"). Rulings R1–R5 and G3 are in §14. Still open with the
 owner: the Emby catalog submission (roadmap checkpoint 4).
-**Phase 3 (credits text) is built, audited and lab-proven** (`plan-phase3.md`; ledger
-`.superpowers/sdd/plan-phase3/progress.md`):
+**Phase 3 (credits text) is built, audited and lab-proven** (phase-3 implementation history):
 keyframe-tail sampling, rule J's start and end, the ONNX Runtime WebGPU/CPU text detector with a per-device
 self-test, the Settings row, the Inspector "Credit text" lane, and the accuracy harness
 (`evidence/eval/phase3-harness.md`). Milestone audit found and fixed two real bugs (the end anchor, a stale
@@ -64,10 +63,9 @@ and phase 2's row 24 on the lab, and an earlier build ran the detector on one re
 (§14, 2026-09-19): 10 of 11 starts within 10 s (E04 no answer), every answered episode's after-credits scene kept.
 Tests: 11,429 unit/integration (88.84 %), 363 e2e, the CI integration selection; CI green on `003a8d1` including the
 new arm64 image check. Next: owner review, then phase 4. Build runs on PR #241, branch
-`feat/markers-detection`; spec, slimmed evidence and plans live in `docs/design/intro-credits/`. Local-only, gitignored
+`feat/markers-detection`; the maintained spec and evaluation evidence live in `docs/design/intro-credits/`. Local-only, gitignored
 files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and
-`evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`,
-`evidence/plugins/emby-4.10/embylibs/`.
+`evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`.
 
 **Open after the 2026-09-25 integration** (five lanes: gone-from-disk previews, "Keep Plex's" and Plex's marker
 settings, the credits scaler and 640×360 re-reads, two playback speeds, season audio's guards; then the intro-end rule,
@@ -196,7 +194,7 @@ real library mounted read-only.
 | Question | Answer | How it was proven |
 |---|---|---|
 | HTTP API to write intro/credits? | **No.** `POST /library/metadata/{id}/marker` → 400 for `type` 1–6 and every name; `attributes` override → 400; `PUT/DELETE …/marker/{id}` on intro/credits → 404; PUT converting a bookmark → 200 but ignored. Only bookmarks work. | (lab, claimed Pass server) + official spec + Plex Web 4.160 bundles + PMS binary route strings (`/marker`, `/marker/:markerID` only) |
-| Other routes | Custom Metadata Providers (Dec 2025) spec has no marker/media/part fields. Plex's cloud credits lookup (`tv.plex.provider.metadata` `/markers?hash=<media_parts.hash>&type=credits`) can be pointed elsewhere with hidden pref `MetadataProviderUrl`, but **zero requests reached the lab proxy** even on forced credits detection → not honoured. Chapter names are never converted to markers. Plex has no plugin system. | (lab) `evidence/plex-provider-redirect/` + developer.plex.tv + staff posts |
+| Other routes | Custom Metadata Providers (Dec 2025) spec has no marker/media/part fields. Plex's cloud credits lookup (`tv.plex.provider.metadata` `/markers?hash=<media_parts.hash>&type=credits`) can be pointed elsewhere with hidden pref `MetadataProviderUrl`, but **zero requests reached the lab proxy** even on forced credits detection → not honoured. Chapter names are never converted to markers. Plex has no plugin system. | Lab redirect experiment (archived in Git history), developer.plex.tv and staff posts |
 | Where markers live | `taggings` rows (`text` = `intro`/`credits`/`commercial`, `time_offset`/`end_time_offset` ms, `extra_data` e.g. intro `{"pv:version":"5"}`, final credits `{"pv:final":"1","pv:version":"4"}`) pointing at the single `tags` row with `tag_type=12` and **`tag=''`**; plus a per-part copy in `media_parts.extra_data` (`pv:intros`, `pv:credits`: MediaPartMarkersArray JSON, sorted keys, `url` URL-encoded; or, on parts Plex's one-time credits `final` migration rewrote, that `url` form alone, §14 2026-09-19). `metadata_item_setting_markers` is per-user bookmarks. | prod DB (read-only) + (lab) |
 | Direct DB write served? | **Yes, immediately, no restart**, XML identical to native markers. Stock Python `sqlite3` works (ICU triggers exist only on `tags` and `metadata_items` — PMS 1.43.4 — and we never write either; none on `taggings` or `media_parts`). | (lab) `evidence/lab/py_write.py` |
 | `taggings` alone enough? | Served, but **wiped** by the next forced Plex detection of any type (Plex rebuilds from `media_parts.extra_data`). Writing **both** survives. `extra_data` alone is not served. | (lab) |
@@ -213,7 +211,7 @@ real library mounted read-only.
 | Question | Answer | How |
 |---|---|---|
 | Core write API? | **No.** `POST /MediaSegments/{id}` → 405; controller GET-only in 10.10, 10.11, 12.0. | (lab) + source |
-| Plugin path | Plugin registers an `IMediaSegmentProvider` and a push endpoint that stores markers in the plugin data folder, then calls `IMediaSegmentManager.RunSegmentPluginProviders(item, libraryManager.GetLibraryOptions(item), forceOverwrite:false, ct)`. Segments appear instantly and **survive** Media Segment Scan, FullRefresh + replace-all, restart. | (lab, both versions) `evidence/plugins/jellyfin-*` |
+| Plugin path | Plugin registers an `IMediaSegmentProvider` and a push endpoint that stores markers in the plugin data folder, then calls `IMediaSegmentManager.RunSegmentPluginProviders(item, libraryManager.GetLibraryOptions(item), forceOverwrite:false, ct)`. Segments appear instantly and **survive** Media Segment Scan, FullRefresh + replace-all, restart. | Lab proof on both versions; shipped implementation: `jellyfin-plugin/Api/MarkersController.cs`, `jellyfin-plugin/Markers/BridgeSegmentProvider.cs` |
 | Why a provider | GET filters out rows whose provider id isn't a registered provider; a provider returning 0 segments deletes its rows. | source |
 | Client | jellyfin-web shows **Skip Intro** for our segment. | (lab, Playwright, synthetic VP9 episode) |
 | Versions | 12.0 adds required `IMediaSegmentProvider.CleanupExtractedData` and net10 → **two builds** (10.11/net9, 12.0/net10). Bridge 10.11.0.3 still loads on 12.0. 12.0 rejects `X-Emby-Token`/`api_key` (app already sends `Authorization`, #282). | (lab) |
@@ -226,7 +224,7 @@ real library mounted read-only.
 |---|---|---|
 | Core write API? | **No.** `POST /Items/{id}` with Chapters → 204 but ignored; no marker write route in OpenAPI, server DLL strings or web client. Staff (Jan 2026): not planned. | (lab) + research |
 | Storage | `Chapters3` rows; `MarkerType` = Chapter, IntroStart, IntroEnd, **CreditsStart** (no credits end, no recap). | OpenAPI + (lab) |
-| Plugin path | `IItemRepository.SaveChapters(internalId, list)` keeping existing `Chapter` rows. | (lab) `evidence/plugins/emby-4.10` |
+| Plugin path | `IItemRepository.SaveChapters(internalId, list)` keeping existing `Chapter` rows. | Lab proof; shipped implementation: `emby-plugin/Api/BridgeService.cs`, `emby-plugin/Markers/MarkerChapters.cs` |
 | What wipes | `MetadataRefreshMode=FullRefresh` ("Search for missing metadata" / "Replace all") wipes all markers. Default/ValidationOnly/image refresh, recursive series refresh, library scan, restart do not. | (lab) |
 | Self-heal | Plugin stores markers and re-applies on `ILibraryManager.ItemUpdated` (registered from an `IServerEntryPoint`) when they vanished — re-applied within the same refresh. | (lab) |
 | Client | Emby web shows **Skip Intro** for our markers, but **skipping an intro needs an Emby Premiere key on the server**. The player checks the Premiere feature `dvr` against Emby's licence server by server id (same code in 4.9.1.90 and 4.10.0.40; Emby's Premiere Feature Matrix lists Intro Skipping under "Server / All Apps"). Without a key the button shows only while a per-browser counter is under 5 (each episode adds 2: 2 at the first, 4 at the second, so the first 2 episodes), a click opens "Unlock Feature" and doesn't seek, and then the button stops showing. `CreditsStart` drives the "Up Next" overlay with no check; Emby web has no Skip Credits button. `GET /Registrations/dvr` answers `IsRegistered`. Native apps not tested. | (lab, Playwright + the web client's `videoosd.js`) + emby.media Intro Skip and Premiere Feature Matrix + `evidence/lab/phase2-results.md` "Phase 2 close-out" |
@@ -1505,7 +1503,8 @@ at the last write), `atomic_writes`.
 - Extend **Media Preview Bridge** (`jellyfin-plugin/`, route prefix `MediaPreviewBridge`, today `Ping`,
   `ResolvePath`, `POST Trickplay/{itemId}`): add `POST /MediaPreviewBridge/Markers/{itemId}` (store JSON in plugin
   data folder, run providers with `forceOverwrite:false`) and `DELETE` same path; provider named
-  "Media Preview Bridge". Prototype: `evidence/plugins/jellyfin-10.11/` and `-12.0/`.
+  "Media Preview Bridge". Implementation: `jellyfin-plugin/Api/MarkersController.cs` and
+  `jellyfin-plugin/Markers/BridgeSegmentProvider.cs`.
 - Two builds per release: 10.11 (net9, `Jellyfin.Controller` 10.11.0) and 12.0 (net10, `CleanupExtractedData`).
   Manifest carries both `targetAbi`s. App installs/updates via the existing `install_plugin()` flow
   (`PLUGIN_REPO_URL` manifest).
@@ -1544,7 +1543,7 @@ at the last write), `atomic_writes`.
 - Install: `POST /api/servers/{id}/install-plugin` installs from Emby's catalog (`POST /Packages/Installed/{name}` +
   restart) when `GET /Packages` lists the plugin; `manual: true` when `GET /Packages` doesn't list it (`false` with an
   error when the catalog can't be read), and the Edit tab links the guide's manual DLL install. Catalog status: §13
-  item 5. Prototype: `evidence/plugins/emby-4.10/`.
+  item 5. Implementation: `emby-plugin/Api/BridgeService.cs` and `emby-plugin/Markers/MarkerChapters.cs`.
 
 ### 6.4 Workers, priority and pause — plugging into the existing engine
 Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly like previews.
@@ -2061,7 +2060,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Intel tested on the plex host (iGPU slower than CPU there → CPU); AMD untested, no hardware.
 - 2026-09-13 · Build approved. Reuse PR #241 (branch `feat/markers-detection`) instead of a new `feat/intro-credits`
   PR; dev merged in; commits/pushes on that branch without per-commit asks; spec + evidence tracked on the branch.
-- 2026-09-13 · Implementation plan written (`plan-roadmap.md`, `plan-phase1.md`). Decisions taken while planning:
+- 2026-09-13 · Implementation roadmap and phase-1 plan written (now in Git history). Decisions taken while planning:
   SkipDB via its read API instead of the daily dump (no 29 MB daily download, fresher data, duration matching; the
   ODbL reciprocity term exempts read-only API use) — only `exact`/`shifted` matches count. Markers already on servers
   are read from **every** enabled server that owns the file (even with Intro & Credits off there, so Plex's markers can
@@ -2358,8 +2357,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Season job reads it, and that Season job can't queue the earlier episode again, so the episode is one run late, as
   before.
 - 2026-09-16 · Phase 3 owner answers: Q1 credits text alone at Medium (yes; measured on 80: alone 65 useful / 3 wrong,
-  Medium with Plex 56 / 1 vs Plex 47 / 13; cited from `plan-phase3.md` "Measured while planning" until Task 1 copies
-  them into `evidence/credits/phase3-measurements.md`) · Q2 credits text and a server's own marker are independent
+  Medium with Plex 56 / 1 vs Plex 47 / 13; recorded in `evidence/credits/phase3-measurements.md`) · Q2 credits text and a server's own marker are independent
   (yes) · Q3 credits text ends at the last credit frame when the roll ends more than 30 s before the end of the file
   (4 of 76 runs), else no end; Emby unchanged (R1)
 - 2026-09-16 · Phase 3 owner answers: Q4 gate — per set, Medium wrong ≤ 2 % and ≤ Plex, High wrong ≤ 1 % and ≤ Plex
@@ -2376,7 +2374,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   AniSkip copies count as IntroDB + TheIntroDB until phase 4 measures them (Task 9 fix round 2). Unknown or more than
   one database: as before. Known limit: on a server with importers of two databases the copy's database can't be
   told, so SkipDB plus its copy still decide there (pinned by test_pipeline's `two-databases` row).
-- 2026-09-16 · Phase 3 plan rulings, taken while planning (T-R1–T-R9; `plan-phase3.md`), each with its cost if
+- 2026-09-16 · Phase 3 plan rulings, taken while planning (T-R1–T-R9; historical phase-3 plan), each with its cost if
   wrong: T-R1 the helper module is `markers.credits.textdet_helper`, not §6.4's `markers.textdet` (cost: a rename)
   · T-R2 post-processing keeps pyclipper for the unclip step; `shapely` stays a test-only dependency instead of the
   roadmap's "unclip computed analytically" (cost: 1–10 MB of image if a fuzz test ever finds a differing box) · T-R3
@@ -2392,7 +2390,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   minutes and one within 5 s of that exit is replaced before the next request instead of racing its timer (cost: a
   1–2 s helper start after an idle gap) · T-R9 the detector ignores `pause_check` like season audio (cost: a paused
   job finishes the file already in progress, ≈10–30 s).
-- 2026-09-16 · Contradictions resolved while planning phase 3 (C1–C7; `plan-phase3.md`): C1 §5.5 rule 6's
+- 2026-09-16 · Contradictions resolved while planning phase 3 (C1–C7; historical phase-3 plan): C1 §5.5 rule 6's
   lone-decider list vs §5.4's "needs a second source under the default publish rule" — resolved by Q1 (credits text
   may decide alone at Medium) · C2 §5.4's "AMD: self-test decides" vs the evidence README's "default to CPU until
   proven" — resolved by Q6 (self-test decides) · C3 §12's "larger hand-checked set, tuning" vs the roadmap's

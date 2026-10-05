@@ -1,7 +1,8 @@
 # Site, README and brand redesign — design spec
 
-Status: **spec approved 2026-09-23**; plan in `docs/design/site-redesign-plan.md`. Branch `stevezau/site-redesign`. Excluded from the site
-build (`docs/design/`). Follows `docs/design/discoverability.md` (shipped #291–#294).
+Status: **implemented**. Retained design constraints for the Jekyll site, branding and benchmark evidence.
+The completed implementation plan is in Git history. Excluded from the site build (`docs/design/`).
+Follows `docs/design/discoverability.md` (shipped #291–#294).
 
 ## 0. Start here (for a fresh session)
 

@@ -351,7 +351,7 @@ Raw evidence is in `lab/results/row-NN.json` (git-ignored; run 1's copies are in
 
 - `pr-241` pulled; `import media_preview_generator.markers.pipeline` works; `mlab-app` recreated on it (volume kept).
 - Capability: Lab Plex `ready` (written into the database), both Jellyfins `ready` (plugin), Emby `needs_plugin`.
-- Screenshots for the PR are in `../screenshots/phase1/` (synth files only).
+- Plex-player skip-button proofs are in `../screenshots/phase1/` (synth files only); old app-UI captures are in Git history.
 
 ### Lab reset used before run 2
 
