@@ -189,7 +189,7 @@ class TestWorkerCardPhaseRendering:
                 const speed = card.querySelector('[data-speed]');
                 return {
                     percentText: percent ? percent.textContent : null,
-                    speedDisplay: speed ? speed.style.display : null,
+                    speedDisplay: speed ? speed.parentElement.style.display : null,
                 };
             }
             """
@@ -235,7 +235,7 @@ class TestWorkerCardPhaseRendering:
                 return {
                     percentText: percent ? percent.textContent : null,
                     speedText: speed ? speed.textContent : null,
-                    speedDisplay: speed ? speed.style.display : null,
+                    speedDisplay: speed ? speed.parentElement.style.display : null,
                 };
             }
             """
@@ -360,7 +360,7 @@ class TestChapterWorkerProgress:
                     stage: card.querySelector('[data-chapter-stage]').textContent,
                     width: card.querySelector('[data-progress]').style.width,
                     accessibleValue: card.querySelector('[data-progress-wrap]').getAttribute('aria-valuenow'),
-                    speedHidden: card.querySelector('[data-speed]').style.display === 'none',
+                    speedHidden: card.querySelector('[data-speed]').parentElement.style.display === 'none',
                     etaHidden: card.querySelector('[data-eta]').parentElement.style.display === 'none',
                     cpuIcon: card.querySelector('[data-icon]').classList.contains('bi-cpu'),
                     fits: metrics.scrollWidth <= metrics.clientWidth,
@@ -371,7 +371,7 @@ class TestChapterWorkerProgress:
                 worker.status = 'idle';
                 window.updateWorkerStatuses([worker]);
                 return {...first, registering,
-                    idleHidden: card.querySelector('[data-metrics]').style.visibility === 'hidden',
+                    idleHidden: card.querySelector('[data-metrics]').hidden,
                     idleChapterHidden: card.querySelector('[data-chapter-stage]').classList.contains('d-none'),
                     idleWidth: card.querySelector('[data-progress]').style.width,
                 };
@@ -414,14 +414,14 @@ class TestChapterWorkerProgress:
                     value: card.querySelector('[data-progress-wrap]').getAttribute('aria-valuenow'),
                     percent: card.querySelector('[data-percent]').textContent,
                     stage: card.querySelector('[data-chapter-stage]').textContent,
-                    speedHidden: card.querySelector('[data-speed]').style.display === 'none',
+                    speedHidden: card.querySelector('[data-speed]').parentElement.style.display === 'none',
                 };
                 Object.assign(worker, {chapter_progress: null, current_phase: '', progress_percent: 12.5});
                 window.updateWorkerStatuses([worker]);
                 return {...first,
                     videoPercent: card.querySelector('[data-percent]').textContent,
                     videoAnimated: card.querySelector('[data-progress]').classList.contains('progress-bar-animated'),
-                    videoSpeedVisible: card.querySelector('[data-speed]').style.display !== 'none',
+                    videoSpeedVisible: card.querySelector('[data-speed]').parentElement.style.display !== 'none',
                 };
             }""",
             stage,

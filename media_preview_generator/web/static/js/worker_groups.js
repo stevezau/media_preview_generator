@@ -1,4 +1,4 @@
-/* Shared capacity editor and dashboard controls. Runtime counts come from the server. */
+/* Worker group settings and read-only dashboard activity. Runtime counts come from the server. */
 (function () {
     'use strict';
     const JOBS = { previews: 'Video previews', intro_credits: 'Intro & Credits', loudness: 'Plex loudness' };
@@ -16,7 +16,8 @@
     let saving = false;
     let loading = null;
     let requestedEditor = new URLSearchParams(window.location.search).get('worker_group');
-    const pending = new Set();
+    const dashboardGroups = new Map();
+    let pausedByGroup = {};
     const settings = () => document.getElementById('workerGroupSettings');
     const dashboard = () => document.getElementById('workerGroupDashboard');
 
@@ -99,7 +100,9 @@
     function activity(state) {
         const parts = [];
         if (!snapshot.processing_paused && state.available) parts.push(`${state.available} available`);
-        if (state.busy) parts.push(`${state.busy} ${snapshot.processing_paused ? 'paused' : 'running'}`);
+        const paused = snapshot.processing_paused ? state.busy : Math.min(state.busy, pausedByGroup[state.id] || 0);
+        if (state.busy > paused) parts.push(`${state.busy - paused} running`);
+        if (paused) parts.push(`${paused} paused`);
         if (state.finishing) parts.push(`${state.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''}`);
         return parts;
     }
@@ -111,37 +114,89 @@
         return `<details class="worker-group-hardware"><summary>GPU hardware</summary><span>${escape(hardware)}</span></details>`;
     }
 
-    function renderRows(container, live) {
-        const groups = live ? snapshot.groups : (draft || snapshot.groups);
-        const rows = groups.map(group => {
-            const state = status(group);
-            const busy = pending.has(group.id);
-            const controls = live ? `
-                <div class="worker-group-capacity"><span class="worker-group-control-label">Workers</span><div class="worker-group-scale" role="group" aria-label="Scale ${escape(group.name)}">
-                    <button type="button" class="btn btn-sm btn-outline-secondary" data-scale="-1" data-id="${escape(group.id)}" aria-label="Remove worker from ${escape(group.name)}" ${!group.enabled || busy ? 'disabled' : ''}><i class="bi bi-dash-lg" aria-hidden="true"></i></button>
-                    <output aria-label="Desired workers" class="worker-group-count">${group.enabled ? group.count : 0}</output>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" data-scale="1" data-id="${escape(group.id)}" aria-label="Add worker to ${escape(group.name)}" ${busy || group.enabled && group.count >= (snapshot.limits?.[group.resource] || 32) ? 'disabled' : ''}><i class="bi bi-plus-lg" aria-hidden="true"></i></button>
-                </div></div><a class="btn btn-sm btn-outline-secondary worker-group-edit" href="/settings?worker_group=${encodeURIComponent(group.id)}#section-workers">Edit<span class="visually-hidden"> ${escape(group.name)}</span></a>` : `<div class="worker-group-capacity"><span class="worker-group-control-label">Workers</span><span class="worker-group-count" aria-label="Configured workers">${group.count}</span></div><button type="button" class="btn btn-sm btn-outline-secondary worker-group-edit" data-edit="${escape(group.id)}" ${saving ? 'disabled' : ''}>Edit<span class="visually-hidden"> ${escape(group.name)}</span></button>`;
-            const showState = live && !['Within group hours', 'Available', 'Workers busy', 'Configured'].includes(state.label);
-            const counts = live ? activity(state) : [];
-            const availability = !group.enabled && live ? `${group.count} saved worker${group.count === 1 ? '' : 's'}` : hours(group);
-            return `<div class="worker-group-row" data-group-id="${escape(group.id)}">
-                <div class="worker-group-description"><strong>${escape(group.name)}</strong><div class="worker-group-meta small text-body-secondary">${resourceDescription(group)}<span>${group.job_types.map(kind => escape(JOBS[kind] || kind)).join(' · ')}</span></div>
-                <div class="worker-group-availability small text-body-secondary"><span>${escape(availability)}</span>${live ? `<span class="worker-group-state" ${showState ? '' : 'hidden'}>${escape(state.label)}${state.next_available_at ? ' · Next ' + escape(nextTime(state.next_available_at)) : ''}</span>${counts.length ? `<span class="worker-group-counts">${counts.map(count => `<span>${escape(count)}</span>`).join('')}</span>` : ''}` : ''}</div></div>
-                <div class="worker-group-actions">${controls}<label class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" role="switch" data-enable="${escape(group.id)}" aria-label="Enable ${escape(group.name)}" ${group.enabled ? 'checked' : ''} ${busy || saving ? 'disabled' : ''}><span class="small">Enabled</span></label></div>
-            </div>`;
-        }).join('');
-        const removed = live ? (snapshot.capacity?.groups || []).filter(row => !groups.some(group => group.id === row.id) && row.finishing > 0).map(row => `<div class="worker-group-row" data-retired-group="${escape(row.id)}"><div><strong>${escape(row.name || 'Removed group')}</strong><div class="small text-body-secondary">Removed · ${row.finishing} finishing${snapshot.processing_paused ? ' (paused)' : ''} · ${escape(row.resource === 'cpu' ? 'CPU' : row.device || 'GPU')}</div></div></div>`).join('') : '';
-        const markup = rows + removed || '<p class="text-body-secondary mb-2">No worker groups configured. Jobs wait until a compatible group is available.</p>';
+    function renderRows(container) {
+        const groups = draft || snapshot.groups;
+        const markup = groups.map(group => `<div class="worker-group-row" data-group-id="${escape(group.id)}">
+            <div class="worker-group-description"><strong>${escape(group.name)}</strong><div class="worker-group-meta small text-body-secondary">${resourceDescription(group)}<span>${group.job_types.map(kind => escape(JOBS[kind] || kind)).join(' · ')}</span></div><div class="worker-group-availability small text-body-secondary">${escape(hours(group))}</div></div>
+            <div class="worker-group-actions"><div class="worker-group-capacity"><span class="worker-group-control-label">Workers</span><span class="worker-group-count" aria-label="Configured workers">${group.count}</span></div><button type="button" class="btn btn-sm btn-outline-secondary worker-group-edit" data-edit="${escape(group.id)}" ${saving ? 'disabled' : ''}>Edit<span class="visually-hidden"> ${escape(group.name)}</span></button><label class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" role="switch" data-enable="${escape(group.id)}" aria-label="Enable ${escape(group.name)}" ${group.enabled ? 'checked' : ''} ${saving ? 'disabled' : ''}><span class="small">Enabled</span></label></div>
+        </div>`).join('') || '<p class="text-body-secondary mb-2">No worker groups configured. Jobs wait until a compatible group is available.</p>';
         if (container._groupMarkup === markup) return;
         container._groupMarkup = markup;
+        const editor = document.getElementById('workerGroupEditor');
+        const focused = editor?.contains(document.activeElement) ? document.activeElement : null;
+        const selection = focused && focused.type === 'text' ? [focused.selectionStart, focused.selectionEnd] : null;
+        // Row labels update while typing; retain the editor node, focus and text selection.
+        if (editor && container.contains(editor)) container.after(editor);
         container.innerHTML = markup;
-        container.querySelectorAll('[data-scale]').forEach(button => button.addEventListener('click', () => scale(button.dataset.id, { delta: Number(button.dataset.scale) })));
         container.querySelectorAll('[data-edit]').forEach(button => button.addEventListener('click', () => edit(button.dataset.edit)));
         container.querySelectorAll('[data-enable]').forEach(input => input.addEventListener('change', () => {
-            if (live) scale(input.dataset.enable, { enabled: input.checked });
-            else { ensureDraft(); dirty = true; draft.find(group => group.id === input.dataset.enable).enabled = input.checked; renderSettings(); }
+            ensureDraft(); dirty = true; draft.find(group => group.id === input.dataset.enable).enabled = input.checked; renderSettings();
         }));
+        positionEditor();
+        if (focused?.isConnected) {
+            focused.focus({ preventScroll: true });
+            if (selection) focused.setSelectionRange(...selection);
+        }
+    }
+
+    function positionEditor() {
+        const editor = document.getElementById('workerGroupEditor');
+        const rows = document.getElementById('workerGroupRows');
+        if (!editor || !rows) return;
+        const selected = [...rows.querySelectorAll('[data-group-id]')].find(row => row.dataset.groupId === editing);
+        if (selected) {
+            if (selected.nextElementSibling !== editor) selected.after(editor);
+        } else if (editor.parentElement === rows) rows.after(editor);
+    }
+
+    function ensureDashboard() {
+        const mount = dashboard();
+        if (!mount) return null;
+        if (!document.getElementById('workerGroupLiveRows')) {
+            dashboardGroups.clear();
+            mount.innerHTML = '<p id="workerGroupHold" class="worker-group-hold small text-warning-emphasis mb-2" role="status" hidden></p><div id="workerGroupLiveRows"></div><p id="workerGroupEmpty" class="text-body-secondary" hidden>No worker groups configured. Jobs wait until a compatible group is available.</p><div id="workerGroupLiveWarnings" class="small text-warning-emphasis mt-2"></div><div id="workerGroupLiveMessage" role="status" aria-live="polite"></div><details class="worker-group-help small text-body-secondary"><summary>How worker groups behave</summary><p>Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.</p><a href="/settings#section-workers">Manage groups and availability</a></details>';
+        }
+        return document.getElementById('workerGroupLiveRows');
+    }
+
+    function dashboardGroup(id, name) {
+        const rows = ensureDashboard();
+        if (!rows) return null;
+        const key = String(id || 'unassigned');
+        if (!dashboardGroups.has(key)) {
+            const section = document.createElement('section');
+            section.className = 'worker-group-section';
+            section.dataset.workerGroupShell = key;
+            const header = document.createElement('div');
+            header.className = 'worker-group-row worker-group-dashboard-header';
+            const host = document.createElement('div');
+            host.className = 'worker-group-workers';
+            host.dataset.groupWorkers = key;
+            section.append(header, host);
+            rows.append(section);
+            dashboardGroups.set(key, { section, header, host, name });
+            header.innerHTML = `<div class="worker-group-description"><strong>${escape(name || 'Workers without group details')}</strong><span class="small text-body-secondary">Group details unavailable</span></div>`;
+        }
+        return dashboardGroups.get(key);
+    }
+
+    function setWorkerActivity(workers) {
+        const next = {};
+        for (const worker of workers || []) {
+            if (worker.group_id && worker.paused && !worker.retiring && worker.status !== 'idle') {
+                next[worker.group_id] = (next[worker.group_id] || 0) + 1;
+            }
+        }
+        if (Object.keys(next).length === Object.keys(pausedByGroup).length
+            && Object.keys(next).every(id => next[id] === pausedByGroup[id])) return;
+        pausedByGroup = next;
+        renderDashboard();
+    }
+
+    function getDashboardWorkerHost(id, name) {
+        const entry = dashboardGroup(id, name);
+        if (entry) document.getElementById('workerGroupEmpty').hidden = true;
+        return entry?.host || null;
     }
 
     function warnings() {
@@ -149,9 +204,8 @@
     }
 
     function renderDashboard() {
-        const mount = dashboard();
-        if (!mount || !snapshot) return;
-        if (!document.getElementById('workerGroupLiveRows')) mount.innerHTML = '<p id="workerGroupHold" class="worker-group-hold small text-warning-emphasis mb-2" role="status" hidden></p><div id="workerGroupLiveRows"></div><div id="workerGroupLiveWarnings" class="small text-warning-emphasis mt-2"></div><div id="workerGroupLiveMessage" role="status" aria-live="polite"></div><p class="small text-body-secondary mt-2 mb-0">Worker counts set simultaneous tasks, not CPU cores. Current files finish when a group is reduced.</p><a href="/settings#section-workers" class="small d-inline-block mt-2">Manage groups and availability</a>';
+        if (!dashboard() || !snapshot) return;
+        ensureDashboard();
         const hold = document.getElementById('workerGroupHold');
         hold.hidden = !snapshot.processing_paused;
         const owners = (snapshot.pause_reasons || []).map(reason => reason === 'quiet_hours' ? 'global pause schedule' : 'manual pause');
@@ -159,8 +213,44 @@
             ? owners.includes('manual pause') ? 'Resume processing and wait for the pause schedule to end.' : 'Processing resumes when the pause schedule ends.'
             : 'Resume processing to use available groups.';
         hold.textContent = 'Processing paused' + (owners.length ? ': ' + owners.join(' and ') : '') + '. ' + resumeHint;
-        renderRows(document.getElementById('workerGroupLiveRows'), true);
+        const present = new Set();
+        for (const group of snapshot.groups) {
+            present.add(group.id);
+            const entry = dashboardGroup(group.id, group.name);
+            entry.header.dataset.groupId = group.id;
+            delete entry.header.dataset.retiredGroup;
+            const state = status(group);
+            const counts = activity(state);
+            const markup = `<div class="worker-group-description"><strong>${escape(group.name)}</strong><div class="worker-group-meta small text-body-secondary">${resourceDescription(group)}<span>${group.job_types.map(kind => escape(JOBS[kind] || kind)).join(' · ')}</span><span>${group.count} configured · ${group.enabled ? 'Enabled' : 'Disabled'}</span></div><div class="worker-group-availability small text-body-secondary"><span>${escape(hours(group))}</span><span class="worker-group-state" ${['Within group hours', 'Available', 'Workers busy', 'Configured'].includes(state.label) ? 'hidden' : ''}>${escape(state.label)}${state.next_available_at ? ' · Next ' + escape(nextTime(state.next_available_at)) : ''}</span>${counts.length ? `<span class="worker-group-counts">${counts.map(count => `<span>${escape(count)}</span>`).join('')}</span>` : ''}</div></div><a class="worker-group-edit" href="/settings?worker_group=${encodeURIComponent(group.id)}#section-workers">Edit group<span class="visually-hidden"> ${escape(group.name)}</span><i class="bi bi-arrow-up-right ms-1" aria-hidden="true"></i></a>`;
+            if (entry.header._markup !== markup) {
+                const openHardware = entry.header.querySelector('details[open]');
+                entry.header.innerHTML = markup;
+                if (openHardware) entry.header.querySelector('details')?.setAttribute('open', '');
+                entry.header._markup = markup;
+            }
+        }
+        for (const state of snapshot.capacity?.groups || []) {
+            if (present.has(state.id) || !state.finishing) continue;
+            present.add(state.id);
+            const entry = dashboardGroup(state.id, state.name);
+            delete entry.header.dataset.groupId;
+            entry.header.dataset.retiredGroup = state.id;
+            entry.header._markup = null;
+            entry.header.innerHTML = `<div class="worker-group-description"><strong>${escape(state.name || 'Removed group')}</strong><span class="small text-body-secondary">Removed · ${state.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''} · ${escape(state.resource === 'cpu' ? 'CPU' : state.device || 'GPU')}</span></div>`;
+        }
+        for (const [id, entry] of dashboardGroups) {
+            if (present.has(id)) continue;
+            if (!entry.host.childElementCount) {
+                entry.section.remove(); dashboardGroups.delete(id);
+            } else {
+                entry.header._markup = null;
+                delete entry.header.dataset.groupId;
+                entry.header.innerHTML = `<div class="worker-group-description"><strong>${escape(entry.name || 'Workers without group details')}</strong><span class="small text-body-secondary">Live worker activity remains visible while group details refresh.</span></div>`;
+            }
+        }
+        document.getElementById('workerGroupEmpty').hidden = dashboardGroups.size > 0;
         document.getElementById('workerGroupLiveWarnings').textContent = warnings().join(' ');
+        window.dispatchEvent(new CustomEvent('worker-groups-updated', { detail: snapshot }));
     }
 
     function renderSettings() {
@@ -177,7 +267,8 @@
             <p class="form-text mt-3 mb-0">Current files finish when a group closes or is reduced. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.</p>`;
         const capacity = snapshot.capacity || {};
         document.getElementById('workerGroupCapacity').textContent = capacity.current && capacity.peak ? `${dirty ? 'Saved schedule' : 'Scheduled'} now: CPU ${capacity.current.cpu} · GPU ${capacity.current.gpu}. Weekly peak: CPU ${capacity.peak.cpu} · GPU ${capacity.peak.gpu}. ${timezoneLabel()}.` : '';
-        renderRows(document.getElementById('workerGroupRows'), false);
+        renderRows(document.getElementById('workerGroupRows'));
+        positionEditor();
         const warning = document.getElementById('workerGroupWarnings');
         warning.textContent = warnings().join(' ');
         warning.hidden = !warning.textContent;
@@ -196,7 +287,17 @@
     }
 
     function ensureDraft() { if (!draft) draft = clone(snapshot.groups); }
-    function edit(id) { ensureDraft(); editing = id; renderSettings(); renderEditor(); document.getElementById('workerGroupName').focus(); }
+    function focusEditor(id) {
+        if (editing !== id) return;
+        const name = document.getElementById('workerGroupName');
+        const editor = document.getElementById('workerGroupEditor');
+        if (!name || !editor || editor.hidden) return;
+        name.focus({ preventScroll: true });
+        editor.previousElementSibling?.scrollIntoView({ block: 'start' });
+    }
+    function edit(id) {
+        ensureDraft(); editing = id; renderSettings(); renderEditor(); focusEditor(id);
+    }
     function add(loudness) {
         ensureDraft();
         dirty = true;
@@ -292,25 +393,6 @@
         } finally { saving = false; renderSettings(); renderEditor(); }
     }
 
-    async function scale(id, body) {
-        if (pending.has(id)) return;
-        const focused = document.activeElement;
-        const restoreFocus = focused?.dataset.id === id || focused?.dataset.enable === id;
-        pending.add(id); renderDashboard();
-        try {
-            const updated = await request('POST', '/' + encodeURIComponent(id) + '/scale', body);
-            if (!snapshot || updated.revision >= snapshot.revision) snapshot = updated;
-            renderDashboard(); message(snapshot.warning || 'Worker group updated. Current files finish before reduced slots stop.', !!snapshot.warning);
-        } catch (error) { message(error.message, true); }
-        finally {
-            pending.delete(id); renderDashboard();
-            if (restoreFocus && document.activeElement === document.body) {
-                const selector = 'delta' in body ? `[data-id="${CSS.escape(id)}"][data-scale="${body.delta}"]` : `[data-enable="${CSS.escape(id)}"]`;
-                dashboard()?.querySelector(selector)?.focus();
-            }
-        }
-    }
-
     async function load(force = false) {
         if (loading) return loading;
         loading = (async () => {
@@ -326,21 +408,27 @@
                     const id = requestedEditor; requestedEditor = null;
                     if (snapshot.groups.some(group => group.id === id)) {
                         edit(id);
-                        document.getElementById('workerGroupEditor').scrollIntoView({ block: 'nearest' });
+                        // Let initial fragment navigation finish before positioning a directly linked editor.
+                        const focusLinked = () => requestAnimationFrame(() => requestAnimationFrame(() => focusEditor(id)));
+                        if (document.readyState === 'complete') focusLinked();
+                        else window.addEventListener('load', focusLinked, { once: true });
                     } else message('That worker group no longer exists. Choose a group below or add one.', true);
                 }
             } catch (error) {
-                for (const mount of [settings(), dashboard()]) if (mount && !snapshot) mount.innerHTML = '<p class="text-danger small">Could not load worker groups. Reload the page to try again.</p>';
+                if (!snapshot) {
+                    if (settings()) settings().innerHTML = '<p class="text-danger small">Could not load worker groups. Reload the page to try again.</p>';
+                    if (dashboard()) ensureDashboard();
+                }
                 message(error.message, true);
             } finally { loading = null; }
         })();
         return loading;
     }
-    window.WorkerGroups = { load, save, hasDraft: () => dirty, refreshHardware: () => load(true) };
+    window.WorkerGroups = { load, save, hasDraft: () => dirty, refreshHardware: () => load(true), getSnapshot: () => snapshot, getDashboardWorkerHost, setWorkerActivity };
     window.addEventListener('beforeunload', event => { if (dirty && !saving) { event.preventDefault(); event.returnValue = ''; } });
     document.addEventListener('DOMContentLoaded', () => {
         if (!settings() && !dashboard()) return;
         load();
-        setInterval(() => { if (!document.hidden && !pending.size && !saving) load(); }, dashboard() ? 5000 : 10000);
+        setInterval(() => { if (!document.hidden && !saving) load(); }, dashboard() ? 5000 : 10000);
     });
 })();

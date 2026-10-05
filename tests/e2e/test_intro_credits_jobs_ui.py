@@ -642,7 +642,7 @@ class TestQueueRows:
 
         assert _row_ids(page) == [other["id"], preview["id"], follower["id"]]
         row = page.locator(f"#job-row-{follower['id']}")
-        expect(row.locator(".job-follow-arrow")).to_have_text("↳")
+        expect(row.locator(".job-follow-arrow")).to_be_visible()
         assert _tooltip(row.locator(".job-follow-arrow")) == "Runs after preview job e64567e1 finishes its first try"
         expect(row).not_to_contain_text("follows")
         expect(row.locator(".job-kind-badge")).to_have_text("Intro & Credits")
@@ -672,7 +672,9 @@ class TestQueueRows:
         row = page.locator(f"#job-row-{job['id']}")
         expect(row).to_be_visible(timeout=5000)
 
-        assert row.locator("td").nth(1).get_attribute("title") == ", ".join(names)
+        page.locator(f"#job-files-toggle-{job['id']}").click()
+        detail = page.locator(f"#job-detail-{job['id']}")
+        expect(detail.locator(".queue-file-text > span")).to_have_text(names)
         assert page.locator("#jobQueue [onmouseover]").count() == 0
 
     def test_the_shared_escape_helpers_escape_quotes_for_attributes(self, dashboard) -> None:
@@ -842,7 +844,7 @@ class TestQueueRows:
         expect(row).to_be_visible(timeout=5000)
 
         assert _row_ids(page) == [preview["id"], chain["id"]]
-        expect(row).to_contain_text("↳")
+        expect(row.locator(".job-follow-arrow")).to_be_visible()
         expect(row.locator(".status-dot")).to_have_text("Pending")
         expect(row.locator(".markers-chain-retry-chip")).to_have_text("Retry 1/3")
         expect(row.locator(".markers-retry-chip")).to_have_count(0)
@@ -937,22 +939,19 @@ class TestQueueRows:
             progress=dict(waiting),
         )
         page = dashboard([verify, retry])
-        card = page.locator(f"#active-job-{verify['id']}")
-        expect(card).to_be_visible(timeout=5000)
-        expect(card.locator(".job-kind-badge")).to_have_text("Intro & Credits")
-        expect(card.locator(".retry-countdown-label")).to_have_text("Checking again in 10 min")
-        expect(card).to_contain_text("Waiting to check again")
-        expect(card).not_to_contain_text("Backing off after a failure")
-        expect(card).not_to_contain_text("Waiting to retry")
-        expect(card.locator(".markers-retry-chip")).to_have_count(0)
-        ticked = page.evaluate(_TICK_AND_READ, f"#active-job-{verify['id']} .retry-countdown-label")
+        row = page.locator(f"#job-row-{verify['id']}")
+        expect(row).to_be_visible(timeout=5000)
+        expect(row.locator(".job-kind-badge")).to_have_text("Intro & Credits")
+        expect(row.locator("[data-scheduled-at]")).to_have_text("Checking again in 10 min")
+        expect(row).not_to_contain_text("Retry starting")
+        expect(row.locator(".markers-retry-chip")).to_have_count(0)
+        ticked = page.evaluate(_TICK_AND_READ, f"#job-row-{verify['id']} [data-scheduled-at]")
         assert ticked == "Checking again in 10 min", ticked
-        retry_card = page.locator(f"#active-job-{retry['id']}")
-        expect(retry_card.locator(".retry-countdown-label")).to_have_text("Next attempt in 10 min")
-        ticked = page.evaluate(_TICK_AND_READ, f"#active-job-{retry['id']} .retry-countdown-label")
-        assert ticked == "Next attempt in 10 min", ticked
-        expect(retry_card).to_contain_text("Backing off after a failure — will try again automatically.")
-        expect(retry_card).to_contain_text("Waiting to retry")
+        retry_row = page.locator(f"#job-row-{retry['id']}")
+        expect(retry_row.locator("[data-scheduled-at]")).to_have_text("Retry starting in 10 min")
+        ticked = page.evaluate(_TICK_AND_READ, f"#job-row-{retry['id']} [data-scheduled-at]")
+        assert ticked == "Retry starting in 10 min", ticked
+        expect(retry_row).not_to_contain_text("Checking again")
 
 
 _EPISODES = [f"/data/tv/Rick and Morty (2013)/Season 01/Rick.and.Morty.S01E{i:02d}.1080p.mkv" for i in range(1, 13)]
@@ -1006,13 +1005,16 @@ class TestRowFilesAndLibraries:
         assert toggle.get_attribute("title") == "Job details"
         toggle.click()
         files = page.locator(f"#job-file-list-{job['id']}")
-        expect(files.locator(".job-file")).to_have_text(
-            [f"Rick and Morty (2013) S01E{i:02d} Rick.and.Morty.S01E{i:02d}.1080p.mkv" for i in range(1, 11)]
+        expect(files.locator(".queue-file-row")).to_have_count(5)
+        expect(files.locator(".queue-file-title")).to_have_text(
+            [f"Rick and Morty (2013) S01E{i:02d}" for i in range(1, 6)]
         )
-        expect(files.locator(".job-file-title").first).to_have_text("Rick and Morty (2013) S01E01")
-        expect(files.locator(".job-file-name").first).to_have_text("Rick.and.Morty.S01E01.1080p.mkv")
-        expect(files.locator(".job-file-more")).to_have_text("and 2 more")
-        assert files.locator(".job-file").first.get_attribute("title") == _EPISODES[0]
+        expect(files.locator("summary")).to_have_text([f"Rick.and.Morty.S01E{i:02d}.1080p.mkv" for i in range(1, 6)])
+        expect(files.locator(".job-detail-heading")).to_contain_text("12")
+        expect(files.locator(".queue-files-all")).to_be_visible()
+        files.locator("summary").first.click()
+        expect(files.locator(".queue-full-path").first).to_have_text(_EPISODES[0])
+        expect(files.locator(".queue-inspector").first).to_have_attribute("target", "_blank")
 
     def test_a_one_file_follow_up_with_no_publishers_yet_still_opens_to_its_file(self, dashboard) -> None:
         follower = _markers_job(publishers=[], status="pending", completed_at=None, progress={"outcome": None})
@@ -1021,8 +1023,11 @@ class TestRowFilesAndLibraries:
         page.locator(f"#job-files-toggle-{follower['id']}").click()
 
         files = page.locator(f"#job-file-list-{follower['id']}")
-        expect(files.locator(".job-file")).to_have_text(["Rick and Morty (2013) S01E01 e01.mkv"])
-        expect(files.locator(".job-file-more")).to_have_count(0)
+        expect(files.locator(".queue-file-row")).to_have_count(1)
+        expect(files.locator(".queue-file-title")).to_have_text("Rick and Morty (2013) S01E01")
+        expect(files.locator("summary")).to_have_text("e01.mkv")
+        files.locator("summary").click()
+        expect(files.locator(".queue-full-path")).to_have_text(paths[0])
         assert dashboard.file_lists_asked == [follower["id"]]
 
     def test_a_job_that_lists_its_files_when_it_runs_says_so(self, dashboard) -> None:
@@ -1030,7 +1035,7 @@ class TestRowFilesAndLibraries:
         page = dashboard([job])
         page.locator(f"#job-files-toggle-{job['id']}").click()
 
-        expect(page.locator(f"#job-file-list-{job['id']}")).to_have_text("Files: listed when the job runs")
+        expect(page.locator(f"#job-file-list-{job['id']}")).to_have_text("Files will be listed when the job runs.")
 
     def test_a_row_shows_the_library_it_covers_left_of_its_title(self, dashboard) -> None:
         follower = _markers_job(library_names=["TV Shows"])
@@ -1044,14 +1049,11 @@ class TestRowFilesAndLibraries:
         tag = page.locator(f"#job-row-{follower['id']} .job-library-tag")
         expect(tag).to_have_text("TV Shows")
         assert _tooltip(tag) == "Library: TV Shows"
-        # First in the row, before the kind badge and the title.
-        classes = (
-            page.locator(f"#job-row-{follower['id']} td")
-            .nth(1)
-            .locator("div > *")
-            .evaluate_all("els => els.map(e => e.classList[e.classList.length - 1])")
-        )
-        assert classes[:3] == ["job-library-tag", "job-kind-badge", "fw-medium"]
+        # The compact row keeps the library beside kind/source metadata, below its title.
+        metadata = page.locator(f"#job-row-{follower['id']} .queue-metadata")
+        expect(metadata.locator(".job-kind-badge")).to_have_text("Intro & Credits")
+        expect(metadata.locator(".job-library-tag")).to_have_text("TV Shows")
+        expect(page.locator(f"#job-row-{follower['id']} .queue-job-title")).to_be_visible()
         many = page.locator(f"#job-row-{preview['id']} .job-library-tag")
         expect(many).to_have_text("3 libraries")
         assert _tooltip(many) == "Libraries: TV Shows, Anime, Kids"
@@ -1089,7 +1091,7 @@ class TestRowFilesAndLibraries:
         job = _version_rerun_job()
         page = dashboard([job])
         row = page.locator(f"#job-row-{job['id']}")
-        expect(row.locator("td").nth(1).locator(".fw-medium")).to_have_text(
+        expect(row.locator(".queue-job-title")).to_have_text(
             "Re-checking 1,568 files after the app update · batch 3 of 16", timeout=5000
         )
         # Its source stays "version_rerun" for machines; the row says it in words.
@@ -1204,7 +1206,7 @@ class TestDecidedByCounts:
     def test_a_running_job_updates_the_counts_live(self, dashboard) -> None:
         job = _markers_job(status="running", completed_at=None, progress={"percent": 40.0, "marker_sources": None})
         page = dashboard([job])
-        card = page.locator(f"#active-job-{job['id']}")
+        card = self._open_detail(page, job)
         expect(card).to_be_visible(timeout=5000)
         expect(card.locator(".marker-sources")).to_have_count(0)
 
@@ -1700,7 +1702,7 @@ class TestPerJobPause:
         pause = row.locator('button[aria-label="Pause job"]')
         expect(pause).to_be_visible(timeout=5000)
         assert pause.get_attribute("title") == "Pause this job"
-        expect(page.locator("#activeJobsCount")).to_have_text("1 running")
+        expect(row.locator(".status-dot")).to_have_text("Running")
 
         paused_job = _running(job, paused=True)
 
@@ -1717,9 +1719,9 @@ class TestPerJobPause:
         expect(row.locator('button[aria-label="Resume job"]')).to_have_attribute("title", "Resume this job")
         expect(page.locator("#globalPauseResumeQueue")).to_contain_text("Pause Processing")
         expect(page.locator("#globalPauseResumeQueue")).not_to_contain_text("Resume Processing")
-        # Paused on its own, the job has handed its slot back: it isn't an active job any more.
-        expect(page.locator("#activeJobsCount")).to_have_text("Idle")
-        expect(page.locator(f"#active-job-{job['id']}")).to_have_count(0)
+        # The unified queue retains this job while its own pause is active.
+        expect(row).to_be_visible()
+        expect(page.locator(f"#job-row-{job['id']}")).to_have_count(1)
         tooltip = row.locator(".status-dot").get_attribute("data-bs-original-title") or row.locator(
             ".status-dot"
         ).get_attribute("title")
@@ -1749,7 +1751,7 @@ class TestPerJobPause:
         expect(page.locator(f"#job-row-{job['id']}")).to_be_visible(timeout=5000)
 
         expect(page.locator(f'#job-row-{job["id"]} button[aria-label="Pause job"]')).to_be_visible()
-        expect(page.locator(f"#active-job-{job['id']}")).to_be_visible()
+        expect(page.locator(f"#job-row-{job['id']}")).to_be_visible()
 
     def test_pause_all_shows_a_running_markers_job_as_held(self, dashboard) -> None:
         job = _running(_markers_job(config={"kind": "intro_credits", "source": "manual", "file_paths": []}))
@@ -1760,6 +1762,6 @@ class TestPerJobPause:
         dot = row.locator(".status-dot")
         tooltip = dot.get_attribute("data-bs-original-title") or dot.get_attribute("title") or ""
         assert "Pause all" in tooltip
-        # Held by Pause all it keeps its slot, so it stays an active job; its own Pause button still works.
-        expect(page.locator(f"#active-job-{job['id']}")).to_be_visible()
+        # A global hold keeps the unified row and its independent per-job Pause button.
+        expect(page.locator(f"#job-row-{job['id']}")).to_be_visible()
         expect(row.locator('button[aria-label="Pause job"]')).to_be_visible()

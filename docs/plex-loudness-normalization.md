@@ -47,7 +47,7 @@ webhooks, manual library runs and scheduled preview scans. Recently Added proces
 Chapter thumbnails remain part of the Previews job; Intro & Credits and loudness are separate jobs. Follow-ups can
 appear in the queue together while waiting for the preceding jobs' first passes; they do not wait through every
 retry of those jobs. For a loudness-only backfill,
-start a **Plex loudness** job from the dashboard (**New job**), for chosen libraries or all of them. A file Plex
+start a **Plex loudness** job from the dashboard (**New job**), for chosen libraries or all of them. To process specific files or folders, choose **Process a file or folder**, select **Plex loudness**, and select or paste the targets. A file Plex
 hasn't added to its library yet, or met while Plex was restarting or its database busy, is checked again according to
 your retry settings. The same job row shows the countdown and attempt count; **Retry now** skips the wait.
 After retries end, unresolved files leave a failure or a completion warning when other files succeeded. The Files

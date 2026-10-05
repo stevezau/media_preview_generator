@@ -26,12 +26,6 @@
 #workerGroupSettings .btn-outline-secondary,
 #workerGroupDashboard .btn-outline-secondary { color:var(--bs-body-color); }
 .worker-group-editor legend.form-label { font-size:1rem; font-weight:500; }
-@media(min-width:992px) {
- .dashboard-system-card .system-card-body > :nth-child(1) { grid-column:1; grid-row:1; }
- .dashboard-system-card .system-card-body > :nth-child(2) { grid-column:2; grid-row:1; }
- .dashboard-system-card .system-card-body > :nth-child(3) { grid-column:1 / -1; grid-row:2; }
- .dashboard-system-card .system-card-body > :nth-child(4) { grid-column:1 / -1; grid-row:3; }
-}
 @media(max-width:575px) {
  .worker-group-row { grid-template-columns:minmax(0,1fr); gap:.625rem; }
  .worker-group-actions { grid-template-columns:auto auto 1fr; align-items:center; justify-items:start; gap:.5rem; }
@@ -42,4 +36,26 @@
  #workerGroupApplyRow { flex-wrap:wrap; }
  #workerGroupSettings .btn, #workerGroupDashboard .btn { min-height:40px; }
  .worker-group-actions .form-switch { min-height:40px; display:flex; align-items:center; gap:.4rem; }
+}
+
+/* Group headers and worker mounts share the full-width Workers section. */
+.worker-group-section + .worker-group-section { margin-top:1rem; }
+.worker-group-dashboard-header { padding:.625rem 0; border-bottom:0; align-items:center; }
+.worker-group-dashboard-header .worker-group-description strong { margin-bottom:.125rem; }
+.worker-group-dashboard-header .worker-group-edit { white-space:nowrap; font-size:.875rem; text-underline-offset:.2em; padding:.5rem 0; }
+.worker-group-workers { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; align-items:start; }
+.worker-group-workers:empty { display:none; }
+.worker-group-help { margin-top:1rem; }
+.worker-group-help summary { cursor:pointer; width:fit-content; }
+.worker-group-help p { margin:.5rem 0; max-width:80ch; }
+.worker-group-editor { margin:0 0 1rem; padding:1rem; background:var(--bs-tertiary-bg); border:1px solid var(--bs-border-color); border-radius:var(--bs-border-radius); }
+#workerGroupRows > .worker-group-row { scroll-margin-top:6rem; }
+#workerGroupRows > .worker-group-row:has(+ .worker-group-editor:not([hidden])) { border-bottom:0; }
+.worker-group-help summary:focus-visible, .worker-group-edit:focus-visible { outline:2px solid var(--bs-primary); outline-offset:3px; }
+@media(max-width:767px) { .worker-group-workers { grid-template-columns:minmax(0,1fr); } }
+@media(max-width:575px) {
+ .worker-group-dashboard-header { grid-template-columns:minmax(0,1fr) auto; gap:.5rem; }
+ .worker-group-dashboard-header .worker-group-edit { min-height:44px; display:flex; align-items:center; }
+ #workerGroupSettings .btn, .worker-group-day { min-height:44px; }
+ .worker-group-editor { padding:.875rem; }
 }

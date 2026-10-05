@@ -1,0 +1,32 @@
+/* Both creation flows use the same Bootstrap fields and modal geometry. */
+#newJobModal .modal-dialog,#manualTriggerModal .modal-dialog { max-width:570px; }
+#newJobModal .modal-header,#manualTriggerModal .modal-header { padding:16px 20px; gap:16px; }
+#newJobModal .modal-title,#manualTriggerModal .modal-title { font-size:20px; font-weight:500; line-height:1.5; }
+#newJobModal .modal-body,#manualTriggerModal .modal-body { padding:16px 20px; }
+#newJobModal .modal-footer,#manualTriggerModal .modal-footer { padding:12px 20px; gap:8px; }
+#newJobModal .form-label,#manualTriggerModal .form-label,#newJobModal .form-check-label,#manualTriggerModal .form-check-label { font-size:14px; }
+#newJobModal .form-text,#manualTriggerModal .form-text { font-size:12px; line-height:1.5; }
+#newJobModal .form-control,#newJobModal .form-select,#manualTriggerModal .form-control,#manualTriggerModal .form-select { min-height:40px; }
+#newJobModal .modal-footer .btn,#manualTriggerModal .modal-footer .btn { min-height:40px; }
+#newJobModal .form-check-input:checked,#manualTriggerModal .form-check-input:checked { background-color:#e5a00d; border-color:#e5a00d; }
+#manualTriggerModal .manual-kind-help { margin:8px 0 16px; }
+#manualTriggerModal .manual-chip { min-width:0; max-width:100%; }
+#manualTriggerModal .manual-chip-label { overflow-wrap:anywhere; white-space:normal; text-align:left; }
+#manualTriggerModal .manual-chip-paths { font-size:12px; font-weight:400; white-space:normal; }
+#manualTriggerModal .manual-chip-paths code { display:block; color:var(--bs-body-color); overflow-wrap:anywhere; }
+#manualTriggerModal .manual-row-add { text-align:left; border:0; background:transparent; color:inherit; min-width:0; padding:0; }
+#manualTriggerModal #manualSelectBar[hidden] { display:none!important; }
+#manualTriggerModal legend { float:none; width:auto; }
+#manualTriggerModal [hidden] { display:none!important; }
+#manualTriggerModal #manualSubmissionError:empty,#manualTriggerModal #manualPathValidation:empty { display:none; }
+#newJobModal :focus-visible,#manualTriggerModal :focus-visible { outline:2px solid #e5a00d; outline-offset:3px; box-shadow:none; }
+@media(max-width:575.98px) {
+    #newJobModal .modal-header,#newJobModal .modal-body,#manualTriggerModal .modal-header,#manualTriggerModal .modal-body { padding:15px; }
+    #newJobModal .form-control,#newJobModal .form-select,#manualTriggerModal .form-control,#manualTriggerModal .form-select,#newJobModal .modal-footer .btn,#manualTriggerModal .modal-footer .btn { min-height:44px; }
+    #manualTriggerModal .manual-row-add { white-space:normal; }
+    #manualTriggerModal #manualSearchResults .list-group-item[data-idx] { flex-wrap:wrap; }
+}
+
+#newJobModal .btn-primary,#manualTriggerModal .btn-primary {
+    --bs-btn-disabled-bg:#e5a00d; --bs-btn-disabled-border-color:#e5a00d; --bs-btn-disabled-color:#161616;
+}

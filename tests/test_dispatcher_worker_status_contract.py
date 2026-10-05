@@ -54,6 +54,9 @@ class TestBuildWorkerStatusesContract:
         try:
             worker = pool._snapshot_workers()[0]
             worker.is_busy = True
+            worker.current_job_id = "preview-job"
+            worker.media_file = "/media/Test Movie.mkv"
+            worker.current_task = worker.media_file
             worker.media_title = "Test Movie"
             worker.library_name = "Movies"
             worker.progress_percent = 42.5
@@ -103,6 +106,8 @@ class TestBuildWorkerStatusesContract:
                 f"current_phase must reflect worker.current_phase; got {payload['current_phase']!r}"
             )
             assert payload["chapter_progress"] == worker.chapter_progress
+            assert payload["job_id"] == "preview-job"
+            assert payload["current_file"] == "/media/Test Movie.mkv"
         finally:
             dispatcher.shutdown()
 
@@ -118,6 +123,8 @@ class TestBuildWorkerStatusesContract:
             # Simulate the residue of a finished task: the fields are
             # still set on the Worker object but is_busy is False.
             worker.is_busy = False
+            worker.current_job_id = "finished-job"
+            worker.media_file = "/media/previous.mkv"
             worker.ffmpeg_started = True  # leftover from prior task
             worker.current_phase = "Encoding frames"  # leftover
             worker.chapter_progress = {"stage": "complete", "processed": 5, "total": 5, "ready": 5, "failed": 0}
@@ -135,6 +142,8 @@ class TestBuildWorkerStatusesContract:
                 f"Idle workers must clear current_phase; got {payload['current_phase']!r}"
             )
             assert payload["chapter_progress"] is None
+            assert payload["job_id"] is None
+            assert payload["current_file"] == ""
         finally:
             dispatcher.shutdown()
 
@@ -151,6 +160,7 @@ class TestBuildWorkerStatusesContract:
             worker = pool._snapshot_workers()[0]
             worker.is_busy = is_busy
             worker.media_title = "AV1 Clip 3 (2019)"
+            worker.current_task = "/media/AV1 Clip 3.mkv" if is_busy else None
             worker.fallback_active = True
             worker.fallback_reason = "GPU processing failed (exit code 255)"
 
@@ -176,4 +186,28 @@ class TestBuildWorkerStatusesContract:
             assert payload["fallback_active"] is False
             assert payload["fallback_title"] == ""
         finally:
+            dispatcher.shutdown()
+
+    def test_reserved_slot_never_reports_the_previous_task_as_running(self):
+        pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+        dispatcher = JobDispatcher(pool)
+        try:
+            worker = pool._snapshot_workers()[0]
+            worker.is_busy = True
+            worker.current_task = None
+            worker.current_job_id = "previous-job"
+            worker.media_file = "/media/previous.mkv"
+            worker.media_title = "Previous movie"
+            worker.library_name = "Previous library"
+            worker.progress_percent = 99
+            worker.ffmpeg_started = True
+            worker.current_phase = "Publishing"
+            payload = dispatcher._build_worker_statuses()[0]
+            assert payload["status"] == "processing"
+            assert payload["job_id"] is None and payload["current_file"] == ""
+            assert payload["current_title"] == "" and payload["library_name"] == ""
+            assert payload["progress_percent"] == 0
+            assert payload["current_phase"] == "" and not payload["ffmpeg_started"]
+        finally:
+            worker.is_busy = False
             dispatcher.shutdown()

@@ -105,8 +105,13 @@ def test_loudness_callback_preserves_shared_preview_chapter_progress(run, tmp_pa
             delivered.set()
 
     manager = JobManager(str(tmp_path), socketio=SimpleNamespace(emit=capture))
-    pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+    pool = WorkerPool(cpu_workers=2, gpu_workers=0, selected_gpus=[])
     dispatcher = JobDispatcher(pool)
+    preview_job = manager.create_job(kind="previews")
+    audio_job = manager.create_job(kind="loudness")
+    manager.start_job(preview_job.id)
+    manager.start_job(audio_job.id)
+    manager.request_pause(audio_job.id)
     for method in ("update_worker_status", "prune_worker_statuses", "emit_worker_statuses"):
         monkeypatch.setattr(run["jm"], method, getattr(manager, method))
     try:
@@ -114,7 +119,16 @@ def test_loudness_callback_preserves_shared_preview_chapter_progress(run, tmp_pa
         callback = run["dispatcher"].submit_items.call_args.kwargs["callbacks"]["worker_callback"]
         worker = pool._snapshot_workers()[0]
         worker.is_busy = True
-        worker.current_job_id = "preview-job"
+        worker.current_job_id = preview_job.id
+        worker.media_file = "/media/preview.mkv"
+        worker.current_task = worker.media_file
+        audio_worker = pool._snapshot_workers()[1]
+        audio_worker.is_busy = True
+        audio_worker.current_job_id = audio_job.id
+        audio_worker.media_file = "/media/audio.mkv"
+        audio_worker.current_task = audio_worker.media_file
+        audio_worker.media_title = "Audio movie"
+        audio_worker.current_phase = "Loudness 1/1"
         worker.current_phase = "Chapter thumbnails for Plex…"
         for title, processed in (("Movie A", 2), ("Movie A", 3), ("Movie B", 0)):
             worker.media_title = title
@@ -125,14 +139,23 @@ def test_loudness_callback_preserves_shared_preview_chapter_progress(run, tmp_pa
             assert delivered.wait(2)
             assert emitted[-1]["workers"][0]["current_title"] == title
             assert emitted[-1]["workers"][0]["chapter_progress"] == snapshot
+            preview_row, audio_row = emitted[-1]["workers"]
+            assert preview_row["job_id"] == preview_job.id and preview_row["job_kind"] == "previews"
+            assert preview_row["current_file"] == "/media/preview.mkv" and not preview_row["paused"]
+            assert audio_row["job_id"] == audio_job.id and audio_row["job_kind"] == "loudness"
+            assert audio_row["current_file"] == "/media/audio.mkv" and audio_row["paused"]
         worker.is_busy = False
         delivered.clear()
         callback(dispatcher._build_worker_statuses())
         assert delivered.wait(2)
         assert emitted[-1]["workers"][0]["chapter_progress"] is None
         assert emitted[-1]["workers"][0]["current_title"] == ""
+        assert emitted[-1]["workers"][0]["job_id"] is None
+        assert emitted[-1]["workers"][0]["job_kind"] is None
+        assert emitted[-1]["workers"][0]["current_file"] == ""
     finally:
-        pool._snapshot_workers()[0].is_busy = False
+        for worker in pool._snapshot_workers():
+            worker.is_busy = False
         pool.shutdown()
         manager.close()
 

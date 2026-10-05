@@ -2425,6 +2425,8 @@ class TestJobConfigPathMappings:
         """
         from media_preview_generator.web.jobs import get_job_manager
 
+        other_job = get_job_manager().create_job(kind="loudness")
+        get_job_manager().request_pause(other_job.id)
         seen: list[dict] = []
         done = threading.Event()
 
@@ -2436,6 +2438,8 @@ class TestJobConfigPathMappings:
                         "worker_type": "GPU",
                         "worker_name": "GPU Worker 1 (Quadro P5000)",
                         "status": "processing",
+                        "job_id": other_job.id,
+                        "current_file": "/media/AV1 Clip 3.mkv",
                         "current_title": "AV1 Clip 3 (2019)",
                         "fallback_active": True,
                         "fallback_reason": "GPU processing failed (exit code 255)",
@@ -2477,6 +2481,10 @@ class TestJobConfigPathMappings:
         assert seen[0]["fallback_active"] is True
         assert seen[0]["fallback_reason"] == "GPU processing failed (exit code 255)"
         assert seen[0]["fallback_title"] == "AV1 Clip 3 (2019)"
+        assert seen[0]["job_id"] == other_job.id
+        assert seen[0]["job_kind"] == "loudness"
+        assert seen[0]["current_file"] == "/media/AV1 Clip 3.mkv"
+        assert seen[0]["paused"] is True
 
     def test_start_job_does_NOT_accept_path_mappings_override(self, client, tmp_path):
         """``path_mappings`` is a Settings-level concept, not a per-job override.
@@ -6974,3 +6982,106 @@ class TestFullScanFilterAPI:
         )
         assert response.status_code == 201, response.get_json()
         assert response.get_json()["config"] == {"job_type": job_type, "lookback_hours": 1}
+
+
+class TestQueueDiscoveryContracts:
+    """Queue filters apply to the full visible set, before a page is selected."""
+
+    def test_query_finds_off_page_jobs_with_filtered_totals_and_keeps_retry_children_hidden(self, client):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        manager = get_job_manager()
+        for index in range(5):
+            manager.create_job(library_name=f"Other library {index}")
+        first = manager.create_job(library_name="Needle movies")
+        second = manager.create_job(library_name="Needle episodes")
+        child = manager.create_job(library_name="Needle hidden attempt", config={"is_retry_attempt": True})
+        default = client.get("/api/jobs?per_page=2", headers=_api_headers()).get_json()
+        assert first.id not in {job["id"] for job in default["jobs"]}
+
+        matched = client.get("/api/jobs?q=NEEDLE&per_page=1", headers=_api_headers()).get_json()
+        assert matched["total"] == 2 and matched["pages"] == 2
+        assert [job["id"] for job in matched["jobs"]] == [first.id]
+        page_two = client.get("/api/jobs?q=needle&per_page=1&page=2", headers=_api_headers()).get_json()
+        assert [job["id"] for job in page_two["jobs"]] == [second.id]
+        all_attempts = client.get("/api/jobs?q=needle&include_retry_attempts=1", headers=_api_headers()).get_json()
+        assert {job["id"] for job in all_attempts["jobs"]} == {first.id, second.id, child.id}
+        assert client.get("/api/jobs/stats", headers=_api_headers()).get_json()["total"] == 7
+
+    @pytest.mark.parametrize(
+        ("kind", "source", "query"),
+        [
+            ("previews", "plex", "Plex Direct"),
+            ("previews", "recently_added", "Recently Added"),
+            ("previews", "scheduled_recently_added", "Scheduled scan"),
+            ("previews", "version_rerun", "App update"),
+            ("previews", "manual", "Video previews"),
+            ("intro_credits", "manual", "Intro & Credits"),
+            ("loudness", "manual", "Plex loudness"),
+        ],
+    )
+    def test_query_matches_visible_source_and_kind_labels(self, client, kind, source, query):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        manager = get_job_manager()
+        wanted = manager.create_job(kind=kind, config={"source": source})
+        other_kind = "loudness" if kind == "previews" else "previews"
+        manager.create_job(kind=other_kind, config={"source": "sonarr"})
+        response = client.get("/api/jobs", query_string={"q": query}, headers=_api_headers())
+        assert response.status_code == 200
+        assert [job["id"] for job in response.get_json()["jobs"]] == [wanted.id]
+        assert response.get_json()["total"] == 1
+
+    def test_status_and_query_combine_without_changing_statistics(self, client):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        manager = get_job_manager()
+        paused = manager.create_job(library_name="Movies")
+        running = manager.create_job(library_name="Movies")
+        complete = manager.create_job(library_name="Movies")
+        manager.start_job(paused.id)
+        manager.request_pause(paused.id)
+        manager.start_job(running.id)
+        manager.start_job(complete.id)
+        manager.complete_job(complete.id)
+        paused_rows = client.get("/api/jobs?q=movies&status=paused", headers=_api_headers()).get_json()
+        assert [job["id"] for job in paused_rows["jobs"]] == [paused.id]
+        running_rows = client.get("/api/jobs?q=movies&status=running", headers=_api_headers()).get_json()
+        assert {job["id"] for job in running_rows["jobs"]} == {paused.id, running.id}
+        assert running_rows["total"] == 2
+        assert client.get("/api/jobs?status=nonsense", headers=_api_headers()).status_code == 400
+        stats = client.get("/api/jobs/stats", headers=_api_headers()).get_json()
+        assert stats["running"] == 2 and stats["completed"] == 1
+
+    def test_worker_api_uses_actual_job_identity_and_live_pause_without_another_callback(self, client):
+        from media_preview_generator.web.jobs import WorkerStatus, get_job_manager
+
+        manager = get_job_manager()
+        preview = manager.create_job(library_name="Movies", kind="previews")
+        audio = manager.create_job(library_name="Audio", kind="loudness")
+        manager.start_job(preview.id)
+        manager.start_job(audio.id)
+        for worker_id, job, path in [(1, preview, "/media/video.mkv"), (2, audio, "/media/audio.mkv")]:
+            manager.update_worker_status(
+                f"CPU_{worker_id}",
+                WorkerStatus(worker_id=worker_id, status="processing", job_id=job.id, current_file=path),
+            )
+        manager.request_pause(audio.id)
+        rows = client.get("/api/jobs/workers", headers=_api_headers()).get_json()["workers"]
+        by_id = {row["job_id"]: row for row in rows}
+        assert by_id[preview.id]["job_kind"] == "previews" and not by_id[preview.id]["paused"]
+        assert by_id[audio.id]["job_kind"] == "loudness" and by_id[audio.id]["paused"]
+        assert by_id[audio.id]["current_file"] == "/media/audio.mkv"
+        manager.request_pause(audio.id, by_schedule=True)
+        manager.request_resume(audio.id)
+        held = client.get("/api/jobs/workers", headers=_api_headers()).get_json()["workers"]
+        assert next(row for row in held if row["job_id"] == audio.id)["paused"]
+        manager.request_resume(audio.id, only_paused_by_schedule=True)
+        resumed = client.get("/api/jobs/workers", headers=_api_headers()).get_json()["workers"]
+        assert not next(row for row in resumed if row["job_id"] == audio.id)["paused"]
+        # Updating an idle snapshot clears the former association without deleting the slot.
+        manager.update_worker_status("CPU_2", WorkerStatus(worker_id=2, status="idle"))
+        idle = client.get("/api/jobs/workers", headers=_api_headers()).get_json()["workers"]
+        row = next(row for row in idle if row["worker_id"] == 2)
+        assert row["job_id"] is None and row["job_kind"] is None and not row["paused"]
+        assert row["current_file"] == ""

@@ -18,7 +18,7 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
@@ -332,6 +332,9 @@ class WorkerStatus:
     group_resource: str | None = None
     retiring: bool = False
     status: str = "idle"  # "idle", "processing"
+    job_id: str | None = None
+    job_kind: str | None = None
+    paused: bool = False
     current_file: str = ""
     current_title: str = ""
     library_name: str = ""
@@ -3010,7 +3013,18 @@ class JobManager:
     def get_worker_statuses(self) -> list[WorkerStatus]:
         """Get all worker statuses."""
         with self._lock:
-            return list(self._worker_statuses.values())
+            statuses = []
+            for status in self._worker_statuses.values():
+                job = self._jobs.get(status.job_id) if status.job_id else None
+                # Resolve live pause ownership here, including between progress callbacks.
+                statuses.append(
+                    replace(
+                        status,
+                        job_kind=job.kind if job else None,
+                        paused=bool(job_pause_reasons(job)) if job else False,
+                    )
+                )
+            return statuses
 
     def clear_worker_statuses(self) -> None:
         """Clear all worker statuses."""

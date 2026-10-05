@@ -1519,7 +1519,7 @@ webhooks, manual library runs and scheduled preview scans. Recently Added proces
 Chapter thumbnails remain part of the Previews job; Intro & Credits and loudness are separate jobs. Follow-ups can
 appear in the queue together while waiting for the preceding jobs' first passes; they do not wait through every
 retry of those jobs. For a loudness-only backfill,
-start a **Plex loudness** job from the dashboard (**New job**), for chosen libraries or all of them. A file Plex
+start a **Plex loudness** job from the dashboard (**New job**), for chosen libraries or all of them. To process specific files or folders, choose **Process a file or folder**, select **Plex loudness**, and select or paste the targets. A file Plex
 hasn't added to its library yet, or met while Plex was restarting or its database busy, is checked again according to
 your retry settings. The same job row shows the countdown and attempt count; **Retry now** skips the wait.
 After retries end, unresolved files leave a failure or a completion warning when other files succeeded. The Files
@@ -1778,13 +1778,13 @@ you pin to High by hand can still overtake a running scan.
 
 **Manual Generation:**
 
-The **Process a file or folder** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
+The **Process a file or folder** button runs **Previews**, **Intro & Credits**, or **Plex loudness** for specific media on demand. Choose a job type, then select at least one file or folder. There are three ways to pick what to process, and they can be mixed:
 
-- **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to generate previews for every episode in it; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
+- **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to process its episodes; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
 - **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.
 - **Or paste paths manually** — the collapsible box still accepts one absolute container path per line, for power users or scripts.
 
-Each pick becomes a removable chip; **Start Job** processes them all. The **Publish to which server?** dropdown scopes both the search and where previews are published — leave it on *All servers* to publish to whoever owns each file, or pick one server to limit both.
+Each pick becomes a removable chip; **Start Job** processes the selected targets and any pasted paths. Empty selections cannot start a job. For previews, **Publish to which server?** scopes both search and publishing. For Intro & Credits and loudness, **Search on** only limits search results: processing uses the enabled owning servers. Loudness requires an eligible Plex server and CPU worker group. Regeneration applies to previews; Intro & Credits can re-check completed work. Loudness has no force-regeneration option.
 
 **Job details:**
 
@@ -1793,7 +1793,8 @@ Each pick becomes a removable chip; **Start Job** processes them all. The **Publ
 information when available. A pending or retried job may already have saved results; these counts are not a
 claim that the current queue entry has finished. **Current activity** shows the current item when the job
 provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
-The full worker grid remains above the list, including idle workers.
+An expanded queue row shows up to five requested paths. **View all** opens the Files tab, where **Requested paths** lists the complete selection with search and pagination, separately from **Recorded outcomes**. Requested paths do not imply completed processing. File Inspector links open the Inspector tool in a new tab.
+The full worker grid remains above the list, grouped by worker group and including idle workers. Queue search and status filters apply across the full history; job statistics remain totals for all visible jobs.
 
 **Pause / Resume (global):**
 
@@ -1854,7 +1855,7 @@ Most Settings controls and the Automation page's **Triggers** tab **save automat
 Open **Settings → Workers** to choose which jobs can use your hardware. A group has a name, a CPU or detected GPU,
 its number of workers, allowed job types, and either **Always** or weekly availability. Start with one group per
 resource; add groups when different jobs need different counts or hours. Use **Edit** for the details, then
-**Apply changes** to save the whole group configuration. An edit in another browser or a dashboard count change
+**Apply changes** to save the whole group configuration. The editor opens directly below the selected group. An edit in another Settings session
 causes a conflict instead of silently overwriting the newer settings; discard and reload before applying again.
 
 CPU groups can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU groups can run previews and
@@ -1867,11 +1868,9 @@ audio analysis at a time without assigning video jobs to that CPU group. The nor
 applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU group.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
-The dashboard changes saved capacity immediately:
+The dashboard shows group activity. Use its **Edit group** link to open that group's controls in Settings:
 
-- **+ / −** change one named group. A decrease retires workers from that group after their current files finish;
-  an increase can restore compatible workers that were about to retire. At one worker, **−** disables the group
-  and remembers its count. The Enabled switch restores that saved count.
+- Change the group's worker count or Enabled setting, then **Apply changes**. A decrease retires workers from that group after their current files finish; an increase can restore compatible workers that were about to retire. Disabling a group remembers its saved count for when you enable it again.
 - **Desired** is the enabled group's saved count. **Available**, **Busy** and **Finishing** show its current
   activity; they can differ while hours close or capacity shrinks. Disabled and outside-hours groups are distinct.
   No workers means waiting for capacity, not a global pause: current files can still finish.
@@ -4479,7 +4478,7 @@ writes should use `media_servers[]` via `/api/servers`.
 ### Worker groups (`worker_groups`)
 
 Named groups are the authoritative worker allocation, edited in **Settings → Workers** and the setup wizard.
-The dashboard's group controls change the same saved configuration. See the [worker guide](https://mediapreviewgenerator.dev/guides/#worker-groups-and-availability)
+The dashboard shows group activity; its **Edit group** link opens that group's settings. See the [worker guide](https://mediapreviewgenerator.dev/guides/#worker-groups-and-availability)
 for scheduling, scaling and migration behavior.
 
 Each group contains `id` (unique stable identifier), `name` (1–80 characters), `enabled`, `resource` (`cpu` or `gpu`),
@@ -5691,6 +5690,10 @@ Worker availability never clears these holds.
 
 #### GET /api/jobs
 
+Optional query parameters: `page` (default 1; 0 returns all), `per_page` (default 50, maximum 200), `q` (case-insensitive job, library, source or server label search), and `status` (`running`, `pending`, `completed`, `failed`, `cancelled`, or `paused`). Omit `status` or use `all` for every status. `paused` selects pending or running jobs with their own pause hold, independently of global pause. An invalid status returns `400`.
+
+Search and status filters apply before pagination. The response includes `total`, `page`, `per_page` and `pages` for the filtered list; dashboard statistics remain unfiltered. Retry attempts are hidden by default; `include_retry_attempts=1` includes them.
+
 ```json
 {
   "jobs": [
@@ -6287,7 +6290,7 @@ unless noted.
 | GET | `/api/jobs/{id}/files` | Per-file outcomes — paginated `?page=&per_page=` (per_page capped at 500), plus optional `?outcome=` and `?search=` filters. The underlying per-job JSONL is itself soft-capped at 5000 rows; past that, a `truncated` marker row appears and aggregate counts remain in `progress.outcome`. |
 | POST | `/api/jobs/clear` | Delete completed/failed jobs from the queue |
 | GET | `/api/jobs/stats` | Totals grouped by status |
-| GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`) |
+| GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`). Busy workers include their actual `job_id` and `current_file`; `job_kind` and `paused` reflect that job's current state. Idle workers have no current job or file. Global processing pause is separate. |
 | POST | `/api/workers/add` · `/api/workers/remove` | Compatibility scaling: `{"worker_type":"CPU"\|"GPU","count":N,"group_id":"..."}`. Changes a saved group; omit `group_id` only when exactly one group matches the resource. Ambiguous selection returns `409`. Busy removed workers finish their current file. |
 | POST | `/api/jobs/{id}/workers/add` · `/api/jobs/{id}/workers/remove` | Compatibility aliases for a running job; select the group as above. Changes the shared saved group, not a temporary allocation exclusive to that job. |
 

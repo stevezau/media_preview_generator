@@ -296,6 +296,48 @@ def _job_rows(jobs: list) -> list[dict]:
     return rows
 
 
+def _filter_jobs_by_query(jobs: list, query: str) -> list:
+    """Match queue labels across all pages without consulting media servers."""
+    from ..job_details import job_library_names, saved_server_configs
+    from ..settings_manager import get_settings_manager
+
+    try:
+        configs = saved_server_configs(get_settings_manager().get("media_servers"))
+    except Exception as exc:
+        logger.debug("Couldn't load server labels for job search: {}", type(exc).__name__)
+        configs = []
+    server_names = {cfg.id: cfg.name for cfg in configs}
+    source_labels = {
+        "plex": "Plex Direct",
+        "emby": "Emby Webhook",
+        "jellyfin": "Jellyfin Webhook",
+        "custom": "Custom Webhook",
+        "scheduled": "Scheduled",
+        "recently_added": "Recently Added",
+        "scheduled_recently_added": "Scheduled scan",
+        "theintrodb_recheck": "TheIntroDB recheck",
+        "version_rerun": "App update",
+    }
+    kind_labels = {"previews": "Video previews", "intro_credits": "Intro & Credits", "loudness": "Plex loudness"}
+    matched = []
+    for job in jobs:
+        cfg = job.config or {}
+        labels = [job.id, job.library_name, job.server_name, job.server_type, job.kind]
+        labels.extend((kind_labels.get(job.kind, ""), source_labels.get(cfg.get("source"), "")))
+        labels.extend(job_library_names(job, configs))
+        labels.append(server_names.get(job.server_id, ""))
+        labels.extend(cfg.get(key, "") for key in ("source", "webhook_source", "title"))
+        for pair in cfg.get("libraries") or []:
+            if isinstance(pair, dict):
+                labels.append(server_names.get(str(pair.get("server_id") or ""), ""))
+        for publisher in job.publishers or []:
+            if isinstance(publisher, dict):
+                labels.extend(publisher.get(key, "") for key in ("server_name", "server_type"))
+        if any(query in str(label or "").casefold() for label in labels):
+            matched.append(job)
+    return matched
+
+
 @api.route("/jobs")
 @api_token_required
 def get_jobs():
@@ -304,6 +346,8 @@ def get_jobs():
     Query params:
         page: Page number (default 1). Use 0 to return all jobs unpaginated.
         per_page: Items per page (default 50, max 200).
+        status: Optional running, pending, completed, failed, cancelled, or paused filter.
+        q: Optional case-insensitive search of job, library, source and server labels.
         include_retry_attempts: Set to ``1`` to include per-attempt retry
             Jobs (``config.is_retry_attempt``) in the response. Default
             is to hide them so the dashboard shows ONE row per file
@@ -328,6 +372,18 @@ def get_jobs():
             # otherwise discussion #239 repeats — the queue collapses
             # children but the KPI keeps counting them.
             all_jobs = [j for j in all_jobs if is_user_visible_job(j)]
+
+        status_filter = (request.args.get("status") or "").strip().lower()
+        if status_filter and status_filter != "all":
+            if status_filter == "paused":
+                all_jobs = [j for j in all_jobs if j.status in (JobStatus.PENDING, JobStatus.RUNNING) and j.paused]
+            elif status_filter in {status.value for status in JobStatus}:
+                all_jobs = [j for j in all_jobs if j.status.value == status_filter]
+            else:
+                return jsonify({"error": "Invalid job status filter"}), 400
+        query = (request.args.get("q") or "").strip().casefold()
+        if query:
+            all_jobs = _filter_jobs_by_query(all_jobs, query)
 
         running = [j for j in all_jobs if j.status == JobStatus.RUNNING]
         pending = sorted(
@@ -1781,6 +1837,8 @@ def _build_idle_workers_from_config():
     # the UI between rendering modes when the dispatcher takes over.
     idle_entry = {
         "status": "idle",
+        "job_id": None,
+        "current_file": "",
         "current_title": "",
         "library_name": "",
         "progress_percent": 0,

@@ -1,0 +1,31 @@
+<!-- ⓘ details: each opens in #globalInfoModal from the ⓘ whose data-explain-template names it. -->
+<template id="infoJobKindMarkersTpl">
+    <p>Finds Skip Intro / Skip Credits markers for the chosen libraries and sends them to every server with Intro &amp; Credits turned on.</p>
+    <p>Runs at low priority by default (change it under Priority below) on worker groups that allow Intro &amp; Credits.</p>
+</template>
+<template id="infoJobCheckServersTpl">
+    <p>Checks that every server with Intro &amp; Credits on still shows the markers this app sent, and sends them again where they're missing or changed (unless that server is set to keep its own).</p>
+    <p>Covers all servers and libraries.</p>
+</template>
+<template id="infoJobLibrariesTpl">
+    <p>Per-run scope — picks which libraries this specific job will process.</p>
+    <p>Independent of the server-level 'Libraries to monitor' setting (Servers → Edit → Libraries), which gates everything an installed server is allowed to touch.</p>
+</template>
+<template id="infoJobPriorityTpl">
+    <p>Order in the queue when more than one job is waiting: High runs before Normal, Normal before Low.</p>
+    <p>It also applies file-by-file — a running job is never cancelled or paused, but each worker that frees up goes to the highest-priority job first, so a High job overtakes a long scan mid-run.</p>
+</template>
+<template id="infoManualFindMediaTpl">
+    <p>Pick a show to process its episodes, or a movie/episode for just that file. Choose the processing task under Job type.</p>
+    <p>To target one episode, add its number — e.g. <code>The Office S01E01</code> (or <code>1x01</code>).</p>
+    <p>Paths come straight from your servers, so you don't need to know the container path.</p>
+</template>
+
+<template id="infoManualMarkersTpl">
+    <p>Find Skip Intro and Skip Credits markers for the selected files or folders. Runs on enabled servers that own those files, with Intro &amp; Credits enabled for the server and library.</p>
+    <p>Requires the server’s publisher setup and a worker group that allows Intro &amp; Credits. This selection does not enable server or library settings. Search on only limits search results.</p>
+</template>
+<template id="infoManualLoudnessTpl">
+    <p>Analyze movie and TV audio tracks for owning Plex servers and libraries with Loudness enabled. Existing complete measurements are preserved.</p>
+    <p>Requires Plex 1.43.4.x on the same machine, its database mounted locally, and a CPU worker group that allows Plex loudness. The helper and network-mounted databases are unsupported. Source media is not rewritten.</p>
+</template>

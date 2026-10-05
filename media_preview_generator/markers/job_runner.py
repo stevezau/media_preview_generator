@@ -1691,6 +1691,8 @@ def worker_cards(jm) -> Callable[[list], None]:
                     group_resource=w.get("group_resource"),
                     retiring=bool(w.get("retiring", False)),
                     status=w["status"],
+                    job_id=w.get("job_id"),
+                    current_file=w.get("current_file", ""),
                     current_title=w.get("current_title", ""),
                     library_name=w.get("library_name", ""),
                     progress_percent=w.get("progress_percent", 0),

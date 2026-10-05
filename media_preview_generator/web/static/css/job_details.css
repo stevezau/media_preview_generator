@@ -1,0 +1,56 @@
+/* Job Details keeps the log and file controls together at practical table density. */
+#logsModal .modal-header { align-items:flex-start; gap:12px; }
+#logsModalHeader { min-width:0; }
+#logsModal .job-details-title-row { gap:8px 12px!important; }
+#logsModal .job-details-title { min-width:0; flex:1 1 280px; overflow-wrap:anywhere; font-size:20px; line-height:1.4; }
+#logsModal .job-details-meta .badge { font-size:12px; font-weight:400; white-space:normal; line-height:1.5; }
+#logsModal #logsJobId { max-width:100%; overflow-wrap:anywhere; font-size:12px; }
+#logsModal .modal-header>.btn-close { flex-shrink:0; margin-top:4px; }
+#logsModal .job-file-heading { display:flex; align-items:center; min-width:0; }
+#logsModal .job-file-heading>small { min-width:0; font-size:13px; }
+#logsModal .job-file-inspector { display:inline-flex; align-items:center; justify-content:center; width:32px; height:30px; padding:0; }
+#logsModal .job-file-path { margin-top:3px; font-size:12px; color:var(--bs-secondary-color); }
+#logsModal .job-file-path summary { cursor:pointer; width:fit-content; text-decoration:underline; text-underline-offset:3px; }
+#logsModal .job-file-path code { display:block; padding:6px 0; color:var(--bs-body-color); overflow-wrap:anywhere; white-space:normal; user-select:all; }
+#logsModal #fileResultsTable { table-layout:fixed; width:100%; }
+#logsModal #fileResultsTable th { font-size:12px; font-weight:600; }
+#logsModal #fileResultsTable td { padding:8px 6px; font-size:13px; vertical-align:top; overflow-wrap:anywhere; }
+#logsModal #fileResultsTable .badge { white-space:normal; text-align:left; line-height:1.4; }
+#logsModal #fileResultsTable .badge[style] { opacity:1!important; }
+#logsModal #logsContent { padding-right:52px!important; }
+#logsModal #filePaginationFooter { gap:8px; flex-wrap:wrap; }
+#logsModal #filePaginationControls { flex-wrap:wrap; gap:2px; }
+#logsModal :focus-visible { outline:2px solid var(--plex-orange,#e5a00d); outline-offset:3px; }
+@media(max-width:767.98px) {
+    #logsModal .modal-dialog { margin:8px; }
+    #logsModal .modal-header,#logsModal .modal-body { padding:12px; }
+    #logsModal .job-details-title { font-size:18px; flex-basis:100%; }
+    #logsModal #logsJobId { margin-left:0!important; }
+    #logsModal #fileResultsTable { min-width:0; }
+    #logsModal #fileResultsTable thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+    #logsModal #fileResultsTable tbody,#logsModal #fileResultsTable tr,#logsModal #fileResultsTable td { display:block; width:100%; }
+    #logsModal #fileResultsTable tr { border-bottom:1px solid var(--bs-border-color); padding:8px 0; }
+    #logsModal #fileResultsTable td { border:0; padding:3px 0; box-shadow:none; }
+    #logsModal #fileResultsTable td[data-label] { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+    #logsModal #fileResultsTable td[data-label]::before { content:attr(data-label); flex:0 0 52px; font-size:12px; color:var(--bs-secondary-color); }
+    #logsModal #fileResultsTable td[data-label="Details"]>div { flex:1 0 calc(100% - 60px); }
+    #logsModal .job-file-heading>small { white-space:normal; overflow-wrap:anywhere; }
+    #logsModal .job-file-inspector { width:40px; height:40px; margin-left:auto!important; }
+    #logsModal .job-file-path summary { min-height:32px; padding:5px 0; }
+    #logsModal .modal-footer { padding:10px 12px; }
+}
+
+#logsModal .job-details-context { font-size:13px; color:var(--bs-secondary-color); }
+#logsModal .job-details-context>summary { cursor:pointer; width:fit-content; padding:4px 0; }
+#logsModal .job-details-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px 16px; margin:0 0 12px; }
+#logsModal .job-details-facts dt { font-weight:400; font-size:12px; }
+#logsModal .job-details-facts dd { color:var(--bs-body-color); margin:2px 0 0; overflow-wrap:anywhere; }
+@media(max-width:575.98px) { #logsModal .job-details-facts { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+#logsModal [hidden] { display:none!important; }
+#logsModal #fileResultsTable[data-view="requested"] th:first-child { width:100%!important; }
+
+@media(max-width:767.98px) {
+    #logsModal .modal-footer[data-tab="files"]>[data-files-footer],
+    #logsModal .modal-footer[data-tab="files"]>.btn-secondary[data-bs-dismiss="modal"] { flex:0 1 auto; min-height:44px; }
+}

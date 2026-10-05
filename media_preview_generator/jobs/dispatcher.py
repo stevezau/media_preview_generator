@@ -1411,9 +1411,19 @@ class JobDispatcher:
 
         statuses = []
         for worker in all_workers:
-            with self.worker_pool._progress_lock:
+            with self.worker_pool._workers_lock, self.worker_pool._progress_lock:
                 progress_data = worker.get_progress_data()
                 is_busy = worker.is_busy
+                # A reserved worker has no task yet and may retain its previous task's fields.
+                has_task = is_busy and worker.current_task is not None
+                job_id = worker.current_job_id if has_task else None
+                current_file = worker.current_task if has_task else ""
+                current_title = worker.media_title if has_task else ""
+                library_name = worker.library_name if has_task else ""
+                ffmpeg_started = bool(getattr(worker, "ffmpeg_started", False)) if has_task else False
+                current_phase = (getattr(worker, "current_phase", "") or "") if has_task else ""
+                group_id, group_name, group_resource = worker.group_id, worker.group_name, worker.group_resource
+                retiring = worker._pending_removal
 
             idx = worker_type_index[worker.worker_id]
             # Shared label helper — keeps this dispatcher's rows visually
@@ -1437,17 +1447,19 @@ class JobDispatcher:
                 {
                     "worker_id": worker.worker_id,
                     "worker_type": worker.worker_type,
-                    "group_id": worker.group_id,
-                    "group_name": worker.group_name,
-                    "group_resource": worker.group_resource,
-                    "retiring": worker._pending_removal,
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "group_resource": group_resource,
+                    "retiring": retiring,
                     "worker_name": display_name,
                     "status": "processing" if is_busy else "idle",
-                    "current_title": worker.media_title if is_busy else "",
-                    "library_name": worker.library_name if is_busy else "",
-                    "progress_percent": (progress_data["progress_percent"] if is_busy else 0),
-                    "speed": progress_data["speed"] if is_busy else "0.0x",
-                    "remaining_time": (progress_data["remaining_time"] if is_busy else 0.0),
+                    "job_id": job_id,
+                    "current_file": current_file,
+                    "current_title": current_title,
+                    "library_name": library_name,
+                    "progress_percent": (progress_data["progress_percent"] if has_task else 0),
+                    "speed": progress_data["speed"] if has_task else "0.0x",
+                    "remaining_time": (progress_data["remaining_time"] if has_task else 0.0),
                     "fallback_active": fallback_active,
                     "fallback_reason": getattr(worker, "fallback_reason", None),
                     # The fallback file's title outlives is_busy: a quick CPU rerun ends before the next poll.
@@ -1458,9 +1470,9 @@ class JobDispatcher:
                     # not) every dispatcher-driven job got stuck rendering
                     # "Working…" and hid the speed/ETA chips for the entire
                     # run — user-reported "I never see ffmpeg %/speed".
-                    "ffmpeg_started": bool(getattr(worker, "ffmpeg_started", False)) if is_busy else False,
-                    "current_phase": (getattr(worker, "current_phase", "") or "") if is_busy else "",
-                    "chapter_progress": progress_data.get("chapter_progress") if is_busy else None,
+                    "ffmpeg_started": ffmpeg_started,
+                    "current_phase": current_phase,
+                    "chapter_progress": progress_data.get("chapter_progress") if has_task else None,
                 }
             )
         return statuses

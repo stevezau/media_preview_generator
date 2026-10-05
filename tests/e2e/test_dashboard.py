@@ -3,8 +3,8 @@
 Coverage:
 
 * Empty state when no media servers configured.
-* Per-GPU worker config card renders with detected GPUs.
-* CPU + GPU stepper buttons increment / decrement and POST settings.
+* Group hardware, configured capacity, and Settings links remain visible.
+* Dashboard group headers are read-only; configuration lives in Settings.
 * Update-available badge appears when /api/system/version reports newer.
 """
 
@@ -90,39 +90,29 @@ class TestDashboardWorkerGroups:
         expect(dashboard_page.locator("#workerGroupDashboard")).to_contain_text("GPU 0")
         expect(dashboard_page.locator("#gpuWorkerConfig, #cpuWorkers")).to_have_count(0)
 
-    def test_scaling_uses_one_atomic_request_per_click(self, authed_page: Page, app_url: str) -> None:
+    def test_group_controls_are_read_only_with_direct_edit_link(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)
         groups = mock_worker_groups(authed_page)
         legacy = capture_settings_save(authed_page)
         authed_page.goto(app_url + "/")
         row = authed_page.locator('[data-group-id="cpu"]')
-        row.locator('[data-scale="1"]').click()
-        expect(row.locator("output")).to_have_text("2")
-        row.locator('[data-scale="-1"]').click()
-        expect(row.locator("output")).to_have_text("1")
-        assert [write["body"] for write in groups["writes"]] == [{"delta": 1}, {"delta": -1}]
+        expect(row).to_contain_text("1 configured")
+        expect(row).to_contain_text("Enabled")
+        expect(row.locator('[data-scale], input[type="checkbox"]')).to_have_count(0)
+        expect(row.get_by_role("link", name="Edit group", exact=False)).to_have_attribute(
+            "href", "/settings?worker_group=cpu#section-workers"
+        )
+        assert not groups["writes"]
         assert not legacy
 
-    def test_group_stepper_stops_at_resource_limit(self, authed_page: Page, app_url: str) -> None:
+    def test_configured_capacity_does_not_require_dashboard_stepper(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)
-        groups = mock_worker_groups(authed_page, cpu_count=31)
+        groups = mock_worker_groups(authed_page, cpu_count=32)
         authed_page.goto(app_url + "/")
         row = authed_page.locator('[data-group-id="cpu"]')
-        row.locator('[data-scale="1"]').click()
-        expect(row.locator("output")).to_have_text("32")
-        expect(row.locator('[data-scale="1"]')).to_be_disabled()
-        assert len(groups["writes"]) == 1
-
-    def test_failed_scale_preserves_saved_count(self, authed_page: Page, app_url: str) -> None:
-        mock_dashboard_defaults(authed_page)
-        groups = mock_worker_groups(authed_page)
-        groups["error"] = "Combined CPU capacity exceeds the limit. Reduce another group first."
-        authed_page.goto(app_url + "/")
-        row = authed_page.locator('[data-group-id="cpu"]')
-        row.locator('[data-scale="1"]').click()
-        expect(authed_page.locator("#workerGroupLiveMessage")).to_contain_text("Reduce another group")
-        expect(row.locator("output")).to_have_text("1")
-        expect(row.locator('[data-scale="1"]')).to_be_enabled()
+        expect(row).to_contain_text("32 configured")
+        expect(row.locator("[data-scale]")).to_have_count(0)
+        assert not groups["writes"]
 
 
 @pytest.mark.e2e
@@ -180,15 +170,13 @@ class TestActiveJobWaitingToRetry:
         authed_page.goto(f"{app_url}/")
         authed_page.wait_for_load_state("domcontentloaded")
 
-        card = authed_page.locator(f"#active-job-{job['id']}")
-        expect(card).to_be_visible(timeout=5000)
-        expect(card).to_contain_text("Waiting to retry")
-        expect(card).to_contain_text("Next attempt in 5 min")
-        expect(card).to_contain_text("Attempt 2 of 5")
-        expect(card.locator(".job-kind-badge")).to_have_text("Previews")
-        expect(authed_page.locator(f"#job-row-{job['id']}")).to_contain_text("Retry starting in 5 min")
-
-        # The queue's first text column covers scans, webhooks, and retry
-        # chains alike — "Job" describes it, not "Library".
+        row = authed_page.locator(f"#job-row-{job['id']}")
+        expect(row).to_be_visible(timeout=5000)
+        expect(row).to_contain_text("Retry starting in 5 min")
+        expect(row.locator(".job-kind-badge")).to_have_text("Previews")
+        expect(authed_page.locator("#activeJobsContainer")).to_have_count(0)
         expect(authed_page.locator(".jobs-table thead th:nth-child(2)")).to_have_text("Job")
-        expect(card).to_contain_text("Job:")
+        row.get_by_role("button", name="Job details", exact=True).click()
+        detail = authed_page.locator(f"#job-detail-{job['id']}")
+        expect(detail).to_be_visible()
+        expect(detail).to_contain_text("Started")

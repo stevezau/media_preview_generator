@@ -196,7 +196,7 @@ def test_revision_conflict_preserves_draft_and_discard_reloads(
     expect(page.locator("#workerGroupName")).to_have_value("Overnight loudness")
 
 
-def test_dashboard_scale_is_group_specific_and_finishing_is_separate(
+def test_dashboard_group_configuration_is_read_only_and_links_to_its_editor(
     authed_page: Page, app_url: str, group_api: dict
 ) -> None:
     page = authed_page
@@ -204,21 +204,113 @@ def test_dashboard_scale_is_group_specific_and_finishing_is_separate(
     page.goto(app_url + "/")
     row = page.locator('#workerGroupDashboard [data-group-id="cpu-night"]')
     expect(row).to_contain_text("2 running")
-    row.locator('[data-scale="-1"]').click()
-    expect(row).to_contain_text("1 finishing")
-    expect(row.locator("output")).to_have_text("1")
-    assert group_api["writes"][0][1].endswith("/cpu-night/scale")
-    assert group_api["writes"][0][2] == {"delta": -1}
-    row.locator('[data-scale="-1"]').click()
-    expect(row).to_contain_text("Disabled")
+    expect(row).to_contain_text("2 configured · Enabled")
+    expect(page.locator("#workerGroupDashboard [data-scale], #workerGroupDashboard [data-enable]")).to_have_count(0)
+    expect(row.get_by_role("link", name="Edit group Overnight loudness")).to_have_attribute(
+        "href", "/settings?worker_group=cpu-night#section-workers"
+    )
+    group_api["state"]["groups"][0]["enabled"] = False
+    group_api["state"]["capacity"]["groups"][0].update(busy=0, finishing=2, state="disabled")
+    page.evaluate("WorkerGroups.load()")
+    expect(row).to_contain_text("2 configured · Disabled")
     expect(row).to_contain_text("2 finishing")
-    expect(row.locator("output")).to_have_text("0")
-    assert group_api["state"]["groups"][0]["count"] == 1
-    assert group_api["state"]["groups"][1]["count"] == 2
-    row.locator("[data-enable]").check()
-    expect(row.locator("output")).to_have_text("1")
-    assert group_api["writes"][-1][2] == {"enabled": True}
-    assert not any("/api/settings" in path for _, path, _ in group_api["writes"])
+    assert group_api["writes"] == []
+
+
+def test_group_editor_stays_beside_selection_with_focus_and_unsaved_drafts(
+    authed_page: Page, app_url: str, group_api: dict
+) -> None:
+    page = authed_page
+    settings_page(page, app_url)
+    page.locator('[data-edit="cpu-night"]').click()
+    name = page.locator("#workerGroupName")
+    name.fill("Audio")
+    name.press("End")
+    name.press_sequentially(" evenings")
+    expect(name).to_be_focused()
+    expect(name).to_have_value("Audio evenings")
+    assert (
+        page.evaluate("document.querySelector('[data-group-id=\"cpu-night\"]').nextElementSibling.id")
+        == "workerGroupEditor"
+    )
+    assert page.evaluate("document.querySelector('#workerGroupName').selectionStart") == len("Audio evenings")
+    page.locator('[data-edit="gpu-video"]').click()
+    assert (
+        page.evaluate("document.querySelector('[data-group-id=\"gpu-video\"]').nextElementSibling.id")
+        == "workerGroupEditor"
+    )
+    page.locator('[data-edit="cpu-night"]').click()
+    expect(name).to_have_value("Audio evenings")
+    page.locator("#workerGroupClose").click()
+    expect(page.locator("#workerGroupEditor")).to_be_hidden()
+    expect(page.locator("#workerGroupApply")).to_be_visible()
+    page.locator('[data-edit="cpu-night"]').click()
+    expect(name).to_have_value("Audio evenings")
+    page.locator("#workerGroupCancel").click()
+    page.locator('[data-edit="cpu-night"]').click()
+    expect(name).to_have_value("Overnight loudness")
+    assert group_api["writes"] == []
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_direct_group_link_opens_inline_editor_with_keyboard_focus(
+    authed_page: Page, app_url: str, group_api: dict, width: int
+) -> None:
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 900})
+    settings_page(page, app_url)
+    page.goto(app_url + "/settings?worker_group=gpu-video#section-workers")
+    expect(page.locator("#workerGroupName")).to_be_focused()
+    expect(page.locator("#workerGroupName")).to_have_value(group_api["state"]["groups"][1]["name"])
+    assert (
+        page.evaluate("document.querySelector('[data-group-id=\"gpu-video\"]').nextElementSibling.id")
+        == "workerGroupEditor"
+    )
+    expect(page.locator("#workerGroupEditor")).to_have_count(1)
+
+
+def test_group_refresh_preserves_worker_nodes_and_per_job_pause_occupancy(
+    authed_page: Page, app_url: str, group_api: dict
+) -> None:
+    page = authed_page
+    mock_dashboard_defaults(page)
+    # Keep the API worker snapshot consistent with the occupancy and per-job pause.
+    worker = {
+        "worker_id": "CPU-1",
+        "worker_type": "CPU",
+        "worker_name": "CPU Worker 1",
+        "group_id": "cpu-night",
+        "group_name": "Overnight loudness",
+        "status": "processing",
+        "job_id": "paused-job",
+        "job_kind": "loudness",
+        "paused": True,
+        "retiring": False,
+        "current_title": "Movie",
+        "current_phase": "Loudness 1/1",
+        "progress_percent": 0,
+    }
+    page.route("**/api/jobs/workers", lambda route: route.fulfill(json={"workers": [worker]}))
+    page.goto(app_url + "/")
+    row = page.locator('#workerGroupDashboard [data-group-id="cpu-night"]')
+    expect(row).to_contain_text("1 running")
+    expect(row).to_contain_text("1 paused")
+    host = page.locator('[data-group-workers="cpu-night"]')
+    expect(host.locator("[data-worker-key]")).to_have_count(1)
+    page.evaluate(
+        "window.savedWorkerNode = document.querySelector('[data-group-workers=\"cpu-night\"] [data-worker-key]')"
+    )
+    group_api["state"]["processing_paused"] = True
+    page.evaluate("WorkerGroups.load()")
+    expect(row).to_contain_text("2 paused")
+    group_api["state"]["processing_paused"] = False
+    page.evaluate("WorkerGroups.load()")
+    expect(row).to_contain_text("1 paused")
+    expect(row).to_contain_text("1 running")
+    assert page.evaluate(
+        "window.savedWorkerNode === document.querySelector('[data-group-workers=\"cpu-night\"] [data-worker-key]')"
+    )
+    assert group_api["state"]["capacity"]["groups"][0]["available"] == 0
 
 
 def test_quiet_hours_has_one_editor_and_schedules_links_to_it(authed_page: Page, app_url: str, group_api: dict) -> None:
@@ -258,7 +350,7 @@ def test_worker_wait_states_remain_distinct(
     if state in ("off_hours", "draining"):
         expect(row).to_contain_text("Next")
         expect(row).to_contain_text("Australia/Sydney")
-        expect(row.locator("output")).to_have_text("2")
+        expect(row).to_contain_text("2 configured")
     else:
         expect(row.locator(".worker-group-state")).not_to_contain_text("Next")
 
@@ -329,7 +421,7 @@ def test_global_pause_and_removed_draining_group_remain_visible(
         "Resume processing and wait for the pause schedule to end."
     )
     expect(authed_page.locator('[data-group-id="cpu-night"]')).to_contain_text("2 paused")
-    expect(authed_page.locator('[data-retired-group="removed"]')).to_contain_text("1 finishing (paused)")
+    expect(authed_page.locator('[data-retired-group="removed"]')).to_contain_text("1 finishing after resume")
     expect(authed_page.locator('[data-retired-group="removed"] button')).to_have_count(0)
 
 
@@ -371,7 +463,8 @@ def test_worker_card_names_group_and_retiring_phase(authed_page: Page, app_url: 
         "worker_id": "CPU-1",
         "worker_type": "CPU",
         "worker_name": "CPU Worker 1",
-        "group_name": "Night audio",
+        "group_name": "Overnight loudness",
+        "group_id": "cpu-night",
         "retiring": True,
         "status": "processing",
         "current_title": "Movie",
@@ -381,7 +474,7 @@ def test_worker_card_names_group_and_retiring_phase(authed_page: Page, app_url: 
     }
     authed_page.route("**/api/jobs/workers", lambda route: route.fulfill(json={"workers": [worker]}))
     authed_page.goto(app_url + "/")
-    expect(authed_page.locator("[data-worker-group]")).to_have_text("Night audio")
+    expect(authed_page.locator('[data-group-id="cpu-night"] strong')).to_have_text("Overnight loudness")
     expect(authed_page.locator("[data-status-badge]")).to_have_text("Finishing current file")
     expect(authed_page.locator("[data-title]")).to_contain_text("Movie")
 
@@ -529,8 +622,8 @@ def test_paused_idle_groups_show_one_hold_and_no_redundant_zero_activity(
     expect(authed_page.locator("#workerGroupDashboard")).not_to_contain_text("Globally paused")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
     assert gpu.locator(".worker-group-description").inner_text().count("NVIDIA card") == 1
-    expect(gpu.locator(".worker-group-control-label")).to_have_text("Workers")
-    expect(gpu.get_by_role("link", name="Edit NVIDIA card", exact=True)).to_have_attribute(
+    expect(gpu).to_contain_text("2 configured · Enabled")
+    expect(gpu.get_by_role("link", name="Edit group NVIDIA card", exact=True)).to_have_attribute(
         "href", "/settings?worker_group=gpu-video#section-workers"
     )
 

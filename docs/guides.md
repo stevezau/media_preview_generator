@@ -166,13 +166,13 @@ you pin to High by hand can still overtake a running scan.
 
 **Manual Generation:**
 
-The **Process a file or folder** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
+The **Process a file or folder** button runs **Previews**, **Intro & Credits**, or **Plex loudness** for specific media on demand. Choose a job type, then select at least one file or folder. There are three ways to pick what to process, and they can be mixed:
 
-- **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to generate previews for every episode in it; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
+- **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to process its episodes; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
 - **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.
 - **Or paste paths manually** — the collapsible box still accepts one absolute container path per line, for power users or scripts.
 
-Each pick becomes a removable chip; **Start Job** processes them all. The **Publish to which server?** dropdown scopes both the search and where previews are published — leave it on *All servers* to publish to whoever owns each file, or pick one server to limit both.
+Each pick becomes a removable chip; **Start Job** processes the selected targets and any pasted paths. Empty selections cannot start a job. For previews, **Publish to which server?** scopes both search and publishing. For Intro & Credits and loudness, **Search on** only limits search results: processing uses the enabled owning servers. Loudness requires an eligible Plex server and CPU worker group. Regeneration applies to previews; Intro & Credits can re-check completed work. Loudness has no force-regeneration option.
 
 **Job details:**
 
@@ -181,7 +181,8 @@ Each pick becomes a removable chip; **Start Job** processes them all. The **Publ
 information when available. A pending or retried job may already have saved results; these counts are not a
 claim that the current queue entry has finished. **Current activity** shows the current item when the job
 provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
-The full worker grid remains above the list, including idle workers.
+An expanded queue row shows up to five requested paths. **View all** opens the Files tab, where **Requested paths** lists the complete selection with search and pagination, separately from **Recorded outcomes**. Requested paths do not imply completed processing. File Inspector links open the Inspector tool in a new tab.
+The full worker grid remains above the list, grouped by worker group and including idle workers. Queue search and status filters apply across the full history; job statistics remain totals for all visible jobs.
 
 **Pause / Resume (global):**
 
@@ -242,7 +243,7 @@ Most Settings controls and the Automation page's **Triggers** tab **save automat
 Open **Settings → Workers** to choose which jobs can use your hardware. A group has a name, a CPU or detected GPU,
 its number of workers, allowed job types, and either **Always** or weekly availability. Start with one group per
 resource; add groups when different jobs need different counts or hours. Use **Edit** for the details, then
-**Apply changes** to save the whole group configuration. An edit in another browser or a dashboard count change
+**Apply changes** to save the whole group configuration. The editor opens directly below the selected group. An edit in another Settings session
 causes a conflict instead of silently overwriting the newer settings; discard and reload before applying again.
 
 CPU groups can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU groups can run previews and
@@ -255,11 +256,9 @@ audio analysis at a time without assigning video jobs to that CPU group. The nor
 applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU group.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
-The dashboard changes saved capacity immediately:
+The dashboard shows group activity. Use its **Edit group** link to open that group's controls in Settings:
 
-- **+ / −** change one named group. A decrease retires workers from that group after their current files finish;
-  an increase can restore compatible workers that were about to retire. At one worker, **−** disables the group
-  and remembers its count. The Enabled switch restores that saved count.
+- Change the group's worker count or Enabled setting, then **Apply changes**. A decrease retires workers from that group after their current files finish; an increase can restore compatible workers that were about to retire. Disabling a group remembers its saved count for when you enable it again.
 - **Desired** is the enabled group's saved count. **Available**, **Busy** and **Finishing** show its current
   activity; they can differ while hours close or capacity shrinks. Disabled and outside-hours groups are distinct.
   No workers means waiting for capacity, not a global pause: current files can still finish.

@@ -114,7 +114,7 @@ writes should use `media_servers[]` via `/api/servers`.
 ### Worker groups (`worker_groups`)
 
 Named groups are the authoritative worker allocation, edited in **Settings → Workers** and the setup wizard.
-The dashboard's group controls change the same saved configuration. See the [worker guide](guides.md#worker-groups-and-availability)
+The dashboard shows group activity; its **Edit group** link opens that group's settings. See the [worker guide](guides.md#worker-groups-and-availability)
 for scheduling, scaling and migration behavior.
 
 Each group contains `id` (unique stable identifier), `name` (1–80 characters), `enabled`, `resource` (`cpu` or `gpu`),
@@ -1326,6 +1326,10 @@ Worker availability never clears these holds.
 
 #### GET /api/jobs
 
+Optional query parameters: `page` (default 1; 0 returns all), `per_page` (default 50, maximum 200), `q` (case-insensitive job, library, source or server label search), and `status` (`running`, `pending`, `completed`, `failed`, `cancelled`, or `paused`). Omit `status` or use `all` for every status. `paused` selects pending or running jobs with their own pause hold, independently of global pause. An invalid status returns `400`.
+
+Search and status filters apply before pagination. The response includes `total`, `page`, `per_page` and `pages` for the filtered list; dashboard statistics remain unfiltered. Retry attempts are hidden by default; `include_retry_attempts=1` includes them.
+
 ```json
 {
   "jobs": [
@@ -1922,7 +1926,7 @@ unless noted.
 | GET | `/api/jobs/{id}/files` | Per-file outcomes — paginated `?page=&per_page=` (per_page capped at 500), plus optional `?outcome=` and `?search=` filters. The underlying per-job JSONL is itself soft-capped at 5000 rows; past that, a `truncated` marker row appears and aggregate counts remain in `progress.outcome`. |
 | POST | `/api/jobs/clear` | Delete completed/failed jobs from the queue |
 | GET | `/api/jobs/stats` | Totals grouped by status |
-| GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`) |
+| GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`). Busy workers include their actual `job_id` and `current_file`; `job_kind` and `paused` reflect that job's current state. Idle workers have no current job or file. Global processing pause is separate. |
 | POST | `/api/workers/add` · `/api/workers/remove` | Compatibility scaling: `{"worker_type":"CPU"\|"GPU","count":N,"group_id":"..."}`. Changes a saved group; omit `group_id` only when exactly one group matches the resource. Ambiguous selection returns `409`. Busy removed workers finish their current file. |
 | POST | `/api/jobs/{id}/workers/add` · `/api/jobs/{id}/workers/remove` | Compatibility aliases for a running job; select the group as above. Changes the shared saved group, not a temporary allocation exclusive to that job. |
 

@@ -28,6 +28,18 @@ let logsRefreshInterval = null;
 // Logs Functions
 let _rawLogs = [];
 let _logsModalJobId = null;
+let _modalJobSnapshot = null;
+let _modalOpenSequence = 0;
+
+// Queue filters and pagination must not limit an already-open job record.
+function _modalJob(jobId = _logsModalJobId) {
+    const queued = jobs.find(job => job.id === jobId);
+    if (queued) {
+        if (jobId === _logsModalJobId) _modalJobSnapshot = queued;
+        return queued;
+    }
+    return _modalJobSnapshot?.id === jobId ? _modalJobSnapshot : null;
+}
 // When the modal's target Job is a retry-chain row, ``_logsModalAttemptId``
 // holds the UUID of the per-attempt child Job currently selected in the
 // Attempts dropdown. The three log-fetch functions (``refreshLogs``,
@@ -110,7 +122,7 @@ function _jobDurationLabel(job) {
 // Falls back to the generic "Job Details" string when ``job`` is missing
 // (``undefined`` or ``null``). Real-world trigger: the modal was re-opened
 // after the job was cleaned from history mid-poll, so
-// ``jobs.find(j => j.id === targetId)`` returned ``undefined``. The
+// ``_modalJob(targetId)`` returned ``undefined``. The
 // ``if (!job)`` guard handles both shapes.
 function _renderModalHeader(job) {
     const headerEl = document.getElementById('logsModalHeader');
@@ -177,16 +189,42 @@ function _renderModalHeader(job) {
         + '</div>';
 
     headerEl.innerHTML =
-        '<div class="d-flex align-items-baseline flex-wrap gap-2">'
-        +   '<h5 class="modal-title mb-0">'
+        '<div class="job-details-title-row d-flex align-items-baseline flex-wrap gap-2">'
+        +   '<h5 class="modal-title job-details-title mb-0">'
         +     '<i class="bi bi-file-text me-2"></i>' + escapeHtmlText(title)
         +   '</h5>'
         +   statusBadge
         +   jidBlock
         + '</div>'
         + (chips.length
-            ? '<div class="d-flex flex-wrap gap-2 small mt-1">' + chips.join('') + '</div>'
+            ? '<div class="job-details-meta d-flex flex-wrap gap-2 small mt-1">' + chips.join('') + '</div>'
             : '');
+}
+
+function _renderModalContext(job) {
+    const context = document.getElementById('jobDetailsContext');
+    const body = document.getElementById('jobDetailsContextBody');
+    if (!context || !body) return;
+    context.hidden = !job;
+    if (!job) { body.replaceChildren(); return; }
+    const cfg = job.config || {};
+    const progress = job.progress || {};
+    const rows = [];
+    const add = (label, value) => rows.push('<div><dt>' + label + '</dt><dd>' + escapeHtmlText(String(value)) + '</dd></div>');
+    const processed = Number(progress.processed_items) || 0;
+    const total = Number(progress.total_items) || 0;
+    add('Files', total ? processed.toLocaleString() + ' of ' + total.toLocaleString() + ' processed' : processed.toLocaleString() + ' processed · total not reported');
+    add('Priority', ({1: 'High', 2: 'Normal', 3: 'Low'})[job.priority] || 'Not recorded');
+    const requested = cfg.webhook_paths || cfg.file_paths;
+    if (Array.isArray(requested) && requested.length) add('Requested paths', requested.length.toLocaleString());
+    for (const [field, label] of [['created_at', 'Created'], ['started_at', 'Started'], ['completed_at', 'Finished']]) {
+        if (job[field]) add(label, typeof formatDate === 'function' ? formatDate(job[field]) : job[field]);
+    }
+    const current = cfg.resource_wait?.reason || progress.current_item;
+    body.innerHTML = '<dl class="job-details-facts">' + rows.join('') + '</dl>'
+        + (current ? '<p class="small mb-1">' + escapeHtmlText(current) + '</p>' : '')
+        + (progress.current_file ? '<details class="job-file-path"><summary>Current file path</summary><code>' + escapeHtmlText(progress.current_file) + '</code></details>' : '')
+        + (job.error ? '<p class="small text-danger-emphasis mt-2 mb-0">' + escapeHtmlText(job.error) + '</p>' : '');
 }
 
 // Attempt-scope subtitle above the Logs viewer — orients the reader
@@ -198,7 +236,7 @@ function _renderModalHeader(job) {
 function _renderLogsSubtitle() {
     const el = document.getElementById('logsSubtitle');
     if (!el) return;
-    const job = jobs.find(j => j.id === _logsModalJobId);
+    const job = _modalJob();
     const isChain = !!(job && job.config && job.config.is_retry_chain);
     if (!isChain || !_logsModalAttemptId || _logsModalAttemptId === _logsModalJobId) {
         el.classList.add('d-none');
@@ -320,7 +358,7 @@ async function onOperatorRetryNow() {
         // Update operator-action visibility — once fired, the chain is
         // briefly running and ``retry_eta`` clears, so "Retry now"
         // should hide. Re-read the job from the global list.
-        const refreshed = jobs.find(j => j.id === _logsModalJobId);
+        const refreshed = _modalJob();
         _updateOperatorActions(refreshed);
     } catch (err) {
         console.error('retry-now failed:', err);
@@ -358,7 +396,7 @@ async function onOperatorCancelChain() {
         // refresh the attempts dropdown immediately so the modal
         // reflects the cancellation without waiting.
         _refreshAttemptsDropdown(_logsModalJobId);
-        const refreshed = jobs.find(j => j.id === _logsModalJobId);
+        const refreshed = _modalJob();
         _updateOperatorActions(refreshed);
     } catch (err) {
         console.error('cancel-chain failed:', err);
@@ -426,10 +464,29 @@ function _autoOpenModalFromUrl() {
 }
 let _initialDeepLinkAttempt = null;
 let _initialDeepLinkTab = null;
+let _initialFileView = null;
 
-function showLogsModal(jobId) {
+function openJobDetails(jobId, tab = 'logs', fileView = 'results') {
+    _initialFileView = fileView === 'requested' ? 'requested' : 'results';
+    _initialDeepLinkTab = tab === 'files' ? 'files' : 'logs';
+    showLogsModal(jobId);
+}
+
+async function showLogsModal(jobId) {
     const targetId = jobId || _lastNotifiedJobId;
     if (!targetId) return;
+    const opening = ++_modalOpenSequence;
+    let targetJob = jobs.find(job => job.id === targetId);
+    if (!targetJob) {
+        try {
+            targetJob = await apiGet('/api/jobs/' + encodeURIComponent(targetId));
+        } catch (error) {
+            if (opening === _modalOpenSequence) showToast('Job unavailable', error.message || 'Could not load this job. Try again.', 'danger');
+            return;
+        }
+        if (opening !== _modalOpenSequence) return;
+    }
+    _modalJobSnapshot = targetJob;
     _logsModalJobId = targetId;
     _logsModalAttemptId = null;
     // Deep-link override: a ?attempt= param takes precedence over the
@@ -445,12 +502,13 @@ function showLogsModal(jobId) {
     document.getElementById('logsSearchInput').value = '';
 
     // Phase H8: render the per-publisher header for this job.
-    const _job = jobs.find(j => j.id === targetId);
+    const _job = _modalJob(targetId);
     // Operator header — title (library / retry basename), status badge,
     // chips for source / server / duration / run count. Replaces the
     // generic "Job Details" string with the entity name so an operator
     // can identify the job at a glance.
     _renderModalHeader(_job);
+    _renderModalContext(_job);
     const _hdr = document.getElementById('logsModalPublishers');
     if (_hdr) {
         _disposeBootstrapTooltips(_hdr);
@@ -501,12 +559,15 @@ function showLogsModal(jobId) {
 
     // Reset Files tab state
     _fileResultsActiveFilter = '';
+    _fileView = _initialFileView === 'requested' ? 'requested' : 'results';
+    _initialFileView = null;
     _fileResultsLoaded = false;
+    _fileRequestSequence++;
     _filePage = 1;
     _fileProcessedTotal = 0;
     _fileListTruncated = false;
     document.getElementById('fileResultsBody').innerHTML =
-        '<tr><td colspan="4" class="text-muted text-center">Click to load file results</td></tr>';
+        '<tr><td colspan="5" class="text-muted text-center">Click to load file results</td></tr>';
     document.getElementById('fileResultsCount').textContent = '';
     document.getElementById('fileResultsSearch').value = '';
     var _ofSel = document.getElementById('fileOutcomeFilter');
@@ -516,6 +577,7 @@ function showLogsModal(jobId) {
     }
     var pFooter = document.getElementById('filePaginationFooter');
     if (pFooter) pFooter.classList.add('d-none');
+    _configureFileView();
 
     // Tab selection — deep-link param wins. Otherwise we land on the
     // SSR default (Logs). Tier 2 had localStorage tab-restore via
@@ -525,10 +587,11 @@ function showLogsModal(jobId) {
         const btn = document.getElementById(btnId);
         if (btn) new bootstrap.Tab(btn).show();
     }
+    _syncJobDetailsFooter();
     // Push the deep-link URL state so reload / back navigation works.
     _pushModalState(targetId, _deepLinkAttempt, _deepLinkTab);
 
-    const job = jobs.find(j => j.id === targetId);
+    const job = _modalJob(targetId);
     const isRunning = job && job.status === 'running';
     const isChainRow = !!(job && job.config && job.config.is_retry_chain);
     const autoScrollEl = document.getElementById('logsAutoScroll');
@@ -562,7 +625,15 @@ function showLogsModal(jobId) {
     // meaning a modal opened during a PENDING window never saw later
     // attempts spawn.
     if (isRunning || isChainRow) {
-        logsRefreshInterval = setInterval(function() {
+        logsRefreshInterval = setInterval(async function() {
+            if (!jobs.some(job => job.id === targetId)) {
+                try {
+                    const refreshed = await apiGet('/api/jobs/' + encodeURIComponent(targetId));
+                    if (_logsModalJobId !== targetId || opening !== _modalOpenSequence) return;
+                    _modalJobSnapshot = refreshed;
+                } catch (_) { /* Keep the last known job facts; logs retain their own retry state. */ }
+            }
+            if (_logsModalJobId !== targetId || opening !== _modalOpenSequence) return;
             pollNewLogs();
             // D27 — always refresh files (not just when the Files tab is
             // active) so switching to the tab mid-run shows current
@@ -577,8 +648,9 @@ function showLogsModal(jobId) {
             // a chain that transitioned ``pending`` → ``completed``
             // mid-modal would still show "Retry now" / "Cancel chain"
             // until the user closed and reopened.
-            const _polled = jobs.find(j => j.id === targetId);
+            const _polled = _modalJob(targetId);
             _updateOperatorActions(_polled);
+            _renderModalContext(_polled);
         }, 5000);
     }
 
@@ -593,6 +665,8 @@ function showLogsModal(jobId) {
         }
         _popModalState();
         _logsModalJobId = null;
+        _modalJobSnapshot = null;
+        _modalOpenSequence++;
         _logsModalAttemptId = null;
     }, { once: true });
 }
@@ -1044,7 +1118,7 @@ function _renderChainStateChip(chainId) {
     if (!chip) return;
     if (_chainStateTickInterval) { clearInterval(_chainStateTickInterval); _chainStateTickInterval = null; }
     const job = (typeof jobs !== 'undefined' && Array.isArray(jobs))
-        ? jobs.find(j => j.id === chainId) : null;
+        ? _modalJob(chainId) : null;
     if (!job) { chip.className = 'badge attempts-state-chip d-none'; chip.textContent = ''; return; }
     const status = job.status || '';
     const attempt = (job.config && job.config.retry_attempt) || 0;
@@ -1368,7 +1442,7 @@ function onAttemptSelected(button) {
     _filePage = 1;
     _fileResultsLoaded = false;
     document.getElementById('fileResultsBody').innerHTML =
-        '<tr><td colspan="4" class="text-muted text-center">Loading…</td></tr>';
+        '<tr><td colspan="5" class="text-muted text-center">Loading…</td></tr>';
     var filesTabBtn = document.getElementById('filesTab');
     if (filesTabBtn && filesTabBtn.classList.contains('active')) {
         refreshFileResults();
@@ -1466,7 +1540,10 @@ async function downloadLogs() {
 var _fileResultsActiveFilter = '';
 var _fileResultsLoaded = false;
 var _filePage = 1;
-var _filePerPage = parseInt(localStorage.getItem('filePerPage'), 10) || 100;
+var _savedFilePerPage = Number(localStorage.getItem('filePerPage'));
+var _filePerPage = [50, 100, 250, 500].includes(_savedFilePerPage) ? _savedFilePerPage : 100;
+var _fileRequestSequence = 0;
+var _fileView = 'results';
 var _fileTotalPages = 1;
 var _fileFilteredCount = 0;
 var _fileTotal = 0;
@@ -1501,7 +1578,81 @@ function _showFileOutcomesForKind(select, kind) {
     });
 }
 
+function _requestedJobPaths() {
+    const cfg = _modalJob()?.config || {};
+    const paths = Array.isArray(cfg.webhook_paths) && cfg.webhook_paths.length ? cfg.webhook_paths : cfg.file_paths;
+    return Array.isArray(paths) ? paths.filter(path => typeof path === 'string') : [];
+}
+
+function _configureFileView() {
+    const paths = _requestedJobPaths();
+    const select = document.getElementById('fileResultsView');
+    if (!select) return;
+    if (!paths.length) _fileView = 'results';
+    select.hidden = !paths.length;
+    select.value = _fileView;
+    select.options[1].textContent = 'Requested paths (' + paths.length.toLocaleString() + ')';
+    const requested = _fileView === 'requested';
+    document.getElementById('fileOutcomeFilter').hidden = requested;
+    document.getElementById('requestedPathsNote').hidden = !requested;
+    const table = document.getElementById('fileResultsTable');
+    table.dataset.view = _fileView;
+    table.querySelectorAll('thead th').forEach((cell, index) => {
+        cell.hidden = requested && index > 0;
+        if (index === 0) { cell.textContent = requested ? 'Requested path' : 'File'; cell.colSpan = requested ? 5 : 1; }
+    });
+    const search = document.getElementById('fileResultsSearch');
+    search.placeholder = requested ? 'Search requested paths...' : 'Search files...';
+    search.setAttribute('aria-label', requested ? 'Search requested paths' : 'Search files');
+}
+
+function onFileViewChanged(select) {
+    _fileView = select.value === 'requested' ? 'requested' : 'results';
+    _filePage = 1;
+    _fileResultsLoaded = false;
+    _configureFileView();
+    refreshFileResults();
+}
+
+function _renderRequestedPaths() {
+    const paths = _requestedJobPaths();
+    const query = document.getElementById('fileResultsSearch').value.trim().toLowerCase();
+    const matches = query ? paths.filter(path => path.toLowerCase().includes(query)) : paths;
+    _fileTotal = paths.length;
+    _fileFilteredCount = matches.length;
+    _fileTotalPages = Math.max(1, Math.ceil(matches.length / _filePerPage));
+    _filePage = Math.min(_filePage, _fileTotalPages);
+    _fileListTruncated = false;
+    _fileProcessedTotal = 0;
+    _fileResultsLoaded = true;
+    const offset = (_filePage - 1) * _filePerPage;
+    const page = matches.slice(offset, offset + _filePerPage);
+    document.getElementById('fileResultsBody').innerHTML = page.length ? page.map(path => {
+        const name = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
+        return '<tr><td colspan="5" class="job-file-name"><div class="job-file-heading"><small class="text-truncate" title="'
+            + escapeHtmlAttr(path) + '">' + escapeHtmlText(name) + '</small></div><details class="job-file-path"><summary>Full path</summary><code>'
+            + escapeHtmlText(path) + '</code></details></td></tr>';
+    }).join('') : '<tr><td colspan="5" class="text-body-secondary text-center">No matching requested paths</td></tr>';
+    document.getElementById('fileResultsCount').textContent = page.length
+        ? 'Showing ' + (offset + 1).toLocaleString() + '–' + (offset + page.length).toLocaleString() + ' of ' + matches.length.toLocaleString() + ' requested paths'
+        : '0 of ' + paths.length.toLocaleString() + ' requested paths match';
+    renderFilePagination();
+}
+
+function _syncJobDetailsFooter(filesActive = document.getElementById('filesTab')?.classList.contains('active')) {
+    const footer = document.querySelector('#logsModal .modal-footer');
+    if (!footer) return;
+    footer.dataset.tab = filesActive ? 'files' : 'logs';
+    footer.querySelectorAll('[data-logs-footer]').forEach(node => { node.hidden = filesActive; });
+    footer.querySelectorAll('[data-files-footer]').forEach(node => { node.hidden = !filesActive; });
+}
+
+// Bootstrap keyboard and programmatic tab selection follow the same footer state.
+document.getElementById('filesTab')?.addEventListener('shown.bs.tab', () => _syncJobDetailsFooter(true));
+document.getElementById('logsTab')?.addEventListener('shown.bs.tab', () => _syncJobDetailsFooter(false));
+
 function onLogsTabActivated() {
+    _syncJobDetailsFooter(false);
     // Mirror onFilesTabActivated so the URL reflects whichever tab is
     // visible. Without this, the deep-link contract is asymmetric:
     // clicking Files updates the URL; clicking Logs leaves the URL
@@ -1511,6 +1662,7 @@ function onLogsTabActivated() {
 }
 
 function onFilesTabActivated() {
+    _syncJobDetailsFooter(true);
     if (!_fileResultsLoaded) {
         refreshFileResults();
     }
@@ -1531,6 +1683,8 @@ async function refreshFileResults() {
     // diverges: logs are per-run, files are per-lifecycle.
     var targetId = _logsModalJobId;
     if (!targetId) return;
+    var requestSequence = ++_fileRequestSequence;
+    if (_fileView === 'requested') { _renderRequestedPaths(); return; }
     try {
         var params = 'page=' + _filePage + '&per_page=' + _filePerPage;
         if (_fileResultsActiveFilter) params += '&outcome=' + encodeURIComponent(_fileResultsActiveFilter);
@@ -1538,6 +1692,7 @@ async function refreshFileResults() {
         if (search) params += '&search=' + encodeURIComponent(search);
 
         var data = await apiGet('/api/jobs/' + targetId + '/files?' + params);
+        if (requestSequence !== _fileRequestSequence || targetId !== _logsModalJobId) return;
         _fileResultsLoaded = true;
         _filePage = data.page || 1;
         _fileTotalPages = data.total_pages || 1;
@@ -1549,8 +1704,12 @@ async function refreshFileResults() {
         renderFileResultsTable(data.files || []);
         renderFilePagination();
     } catch (e) {
+        if (requestSequence !== _fileRequestSequence || targetId !== _logsModalJobId) return;
+        document.getElementById('fileResultsCount').textContent = '';
+        document.getElementById('filePaginationFooter').classList.add('d-none');
         document.getElementById('fileResultsBody').innerHTML =
-            '<tr><td colspan="4" class="text-muted text-center">Could not load file results</td></tr>';
+            '<tr><td colspan="5" class="text-body-secondary text-center">Could not load file results. '
+            + '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="refreshFileResults()">Try again</button></td></tr>';
     }
 }
 
@@ -1575,7 +1734,7 @@ function renderFileResultsTable(files) {
 
     // Intro & Credits pills name each server's status: several servers can end differently for one file.
     var showServerStatus = typeof _hasOwnRunner === 'function'
-        && _hasOwnRunner(jobs.find(function (j) { return j.id === _logsModalJobId; }));
+        && _hasOwnRunner(_modalJob());
     var html = '';
     for (var i = 0; i < files.length; i++) {
         var f = files[i];
@@ -1604,24 +1763,24 @@ function renderFileResultsTable(files) {
         }
         if (inspectorHref) {
             inspectorBtn = '<a href="' + inspectorHref
-                + '" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-2 flex-shrink-0"'
+                + '" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary job-file-inspector ms-2 flex-shrink-0"'
                 + ' title="Open in the Inspector" aria-label="Open in the Inspector"><i class="bi bi-eye"></i></a>';
         }
 
         var serverNotes = _renderFileServerNotes(f.servers || [], showServerStatus);
 
         html += '<tr>'
-            + '<td style="max-width: 400px;">'
-            +   '<div class="d-flex align-items-center">'
-            // Attribute values need escapeHtmlAttr: escapeHtml leaves '"' as is, and a file name can contain one.
+            + '<td class="job-file-name">'
+            +   '<div class="job-file-heading">'
             +     '<small class="text-truncate" title="' + escapeHtmlAttr(fileName) + '">' + escapeHtml(shortName) + '</small>'
             +     inspectorBtn
             +   '</div>'
+            +   (fileName ? '<details class="job-file-path"><summary>Full path</summary><code>' + escapeHtml(fileName) + '</code></details>' : '')
             + '</td>'
-            + '<td><span class="badge ' + meta.badge + '">' + meta.label + '</span></td>'
-            + '<td>' + serversHtml + '</td>'
-            + '<td>' + serverNotes + '<small class="text-muted" title="' + escapeHtmlAttr(f.reason || '') + '">' + reason + '</small></td>'
-            + '<td>' + workerBadge + '</td>'
+            + '<td data-label="Outcome"><span class="badge ' + meta.badge + '">' + meta.label + '</span></td>'
+            + '<td data-label="Servers">' + serversHtml + '</td>'
+            + '<td data-label="Details">' + serverNotes + '<small class="text-body-secondary" title="' + escapeHtmlAttr(f.reason || '') + '">' + reason + '</small></td>'
+            + '<td data-label="Worker">' + (workerBadge || '<small class="text-body-secondary" aria-label="Worker not recorded">—</small>') + '</td>'
             + '</tr>';
     }
     tbody.innerHTML = html;
@@ -1688,7 +1847,7 @@ function _compactWorkerBadge(worker) {
     var prefix = match[1].toUpperCase() === 'GPU' ? 'G' : 'C';
     var idx = match[2];
     return '<span class="badge bg-light text-dark border font-monospace"'
-        + ' title="' + escapeHtmlAttr(worker) + '" style="font-size: 0.7rem;">'
+        + ' title="' + escapeHtmlAttr(worker) + '" aria-label="' + escapeHtmlAttr(worker) + '" style="font-size: 0.7rem;">'
         + prefix + idx + '</span>';
 }
 
@@ -1747,7 +1906,8 @@ function renderFilePagination() {
 
     var start = (_filePage - 1) * _filePerPage + 1;
     var end = Math.min(_filePage * _filePerPage, _fileFilteredCount);
-    var base = 'Showing ' + start + '\u2013' + end + ' of ' + _fileFilteredCount.toLocaleString();
+    var base = _fileFilteredCount ? 'Showing ' + start + '\u2013' + end + ' of ' + _fileFilteredCount.toLocaleString() : '0 matches';
+    if (_fileView === 'requested') base += ' requested paths';
     if (_fileListTruncated) {
         base += ' files in list (' + _fileProcessedTotal.toLocaleString()
              +  ' items processed \u2014 list truncated for performance)';
@@ -1794,7 +1954,8 @@ function goToFilePage(page) {
 }
 
 function changeFilePerPage(value) {
-    _filePerPage = parseInt(value, 10) || 100;
+    var selected = Number(value);
+    _filePerPage = [50, 100, 250, 500].includes(selected) ? selected : 100;
     _filePage = 1;
     localStorage.setItem('filePerPage', String(_filePerPage));
     refreshFileResults();

@@ -1,0 +1,127 @@
+<!-- New Job Modal -->
+<div class="modal fade" id="newJobModal" tabindex="-1" aria-labelledby="newJobTitle">
+    <div class="modal-dialog modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="newJobTitle"><i class="bi bi-play-fill me-2" aria-hidden="true"></i>Start New Job</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="newJobForm">
+                    <div class="mb-3">
+                        <label class="form-label">Job type</label>
+                        <div class="d-flex flex-wrap gap-3">
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="radio" name="jobKind" id="jobKindPreviews" value="previews" checked onchange="onJobKindChange()">
+                                <label class="form-check-label" for="jobKindPreviews">Previews</label>
+                            </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobKind" id="jobKindMarkers" value="intro_credits" onchange="onJobKindChange()">
+                                <label class="form-check-label ms-1" for="jobKindMarkers">Intro &amp; Credits</label>
+                                <button type="button" class="info-icon ms-1" id="jobKindMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds Skip Intro and Skip Credits markers for the chosen libraries and sends them to your servers." data-explain-title="Intro &amp; Credits job" data-explain-template="infoJobKindMarkersTpl" aria-label="Finds Skip Intro and Skip Credits markers for the chosen libraries and sends them to your servers."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobKind" id="jobKindLoudness" value="loudness" onchange="onJobKindChange()">
+                                <label class="form-check-label ms-1" for="jobKindLoudness">Plex loudness</label>
+                                <button type="button" class="info-icon ms-1" id="jobKindLoudnessInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Runs Plex's loudness analysis of each audio track in the chosen libraries and stores it in Plex, for Normalize Loudness. Libraries need Loudness on (server settings)." aria-label="Runs Plex's loudness analysis of each audio track in the chosen libraries and stores it in Plex, for Normalize Loudness. Libraries need Loudness on (server settings)."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </div>
+                        </div>
+                        <div class="mt-2 ms-4" id="jobMarkersModeGroup" hidden><div class="d-flex flex-wrap gap-3">
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="radio" name="jobMarkersMode" id="jobMarkersModeFind" value="find" checked onchange="_showJobKindControls()">
+                                <label class="form-check-label" for="jobMarkersModeFind">Find markers</label>
+                            </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobMarkersMode" id="jobMarkersModeCheckServers" value="check_servers" onchange="_showJobKindControls()">
+                                <label class="form-check-label ms-1" for="jobMarkersModeCheckServers">Check servers</label>
+                                <button type="button" class="info-icon ms-1" id="jobMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks your servers still show the markers this app sent, and resends any missing or changed." data-explain-title="Check servers" data-explain-template="infoJobCheckServersTpl" aria-label="Checks your servers still show the markers this app sent, and resends any missing or changed."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </div>
+                        </div></div>
+                    </div>
+                    <div class="mb-3" id="jobLibrariesGroup">
+                        <label class="form-label">Run against these libraries
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Which libraries this job processes, for this run only." data-explain-title="Run against these libraries" data-explain-template="infoJobLibrariesTpl" aria-label="Which libraries this job processes, for this run only."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                        </label>
+                        <div class="mb-2 d-flex justify-content-between align-items-center">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="jobLibraryAll" checked onchange="toggleAllLibraries(this)">
+                                <label class="form-check-label fw-bold" for="jobLibraryAll">
+                                    All Libraries
+                                </label>
+                            </div>
+                            <div class="btn-group btn-group-sm">
+                                <button type="button" class="btn btn-link p-0 small me-2" onclick="setAllLibrariesChecked(true)">Select all</button>
+                                <button type="button" class="btn btn-link p-0 small" onclick="setAllLibrariesChecked(false)">None</button>
+                            </div>
+                        </div>
+                        <div id="jobLibraryListCaption" class="small text-muted mb-1 ms-3"></div>
+                        <div id="jobLibraryList" class="ms-3 border-start ps-3" style="max-height: 240px; overflow-y: auto;">
+                            <div class="text-muted small">Loading libraries...</div>
+                        </div>
+                        <!-- Live scope summary: computed from the current tick state.
+                             When every ticked library lives on one server, this shows
+                             "Scanning → {ServerName} only" so the user can confirm the
+                             implicit pin before submit. Mixed server selection shows
+                             a multi-server fan-out message instead. -->
+                        <div id="jobScopeBadge" class="mt-2 small"></div>
+                    </div>
+                    <div id="jobScanFiltersGroup">{% with filter_prefix='job' %}{% include '_scan_filters.html' %}{% endwith %}</div>
+                    <p class="form-text mb-3" id="jobOwnRunnerFiltersNote" hidden>Checks every eligible file in the chosen libraries. Preview date, episode and ordering filters do not apply.</p>
+                    <div class="mb-3" id="jobMarkersForceGroup" hidden>
+                        <div class="form-check d-flex align-items-center">
+                            <input class="form-check-input" type="checkbox" id="jobMarkersForce">
+                            <label class="form-check-label ms-1" for="jobMarkersForce">Re-check files already done</label>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Looks every file up and detects it again, even files already checked. Leave it off to skip files that are already done." aria-label="Looks every file up and detects it again, even files already checked. Leave it off to skip files that are already done."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                        </div>
+                    </div>
+                    <div class="mb-3" id="jobProcessingModeGroup">
+                        <label class="form-label">Processing Mode
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Missing only skips files that already have a preview. Regenerate all redoes every file, e.g. after changing thumbnail quality." aria-label="Missing only skips files that already have a preview. Regenerate all redoes every file, e.g. after changing thumbnail quality."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                        </label>
+                        <div class="form-check mb-1">
+                            <input class="form-check-input" type="radio" name="jobProcessingMode" id="jobMissingOnly" value="missing" checked>
+                            <label class="form-check-label" for="jobMissingOnly">
+                                <i class="bi bi-funnel me-1" aria-hidden="true"></i>Process only items missing previews
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="jobProcessingMode" id="jobRegenerateAll" value="regenerate">
+                            <label class="form-check-label" for="jobRegenerateAll">
+                                <i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>Regenerate all previews
+                            </label>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="jobPriority" class="form-label">Priority
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Which waiting job runs first: High, then Normal, then Low." data-explain-title="Priority" data-explain-template="infoJobPriorityTpl" aria-label="Which waiting job runs first: High, then Normal, then Low."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                        </label>
+                        <select class="form-select" id="jobPriority">
+                            <option value="1">High</option>
+                            <option value="2" selected>Normal</option>
+                            <option value="3">Low</option>
+                        </select>
+                    </div>
+                    <div class="mb-3" id="jobSortByGroup">
+                        <label for="jobSortBy" class="form-label">Processing Order
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Orders items within each library by date added. Default uses server order. Parallel workers may finish out of order." aria-label="Orders items within each library by date added. Default uses server order. Parallel workers may finish out of order."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                        </label>
+                        <select class="form-select" id="jobSortBy">
+                            <option value="default" selected>Default (server order)</option>
+                            <option value="newest">Newest added first</option>
+                            <option value="oldest">Oldest added first</option>
+                            <option value="random">Random</option>
+                        </select>
+                        <div class="form-text">Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</div>
+                        <div class="form-text">Pick <strong>Random</strong> if your media is split across multiple disks, so workers don't all hit one disk at the same time.</div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="startNewJob()">
+                    <i class="bi bi-play-fill me-1" aria-hidden="true"></i>Start Job
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
