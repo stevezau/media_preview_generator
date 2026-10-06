@@ -54,7 +54,6 @@
 .job-file-issues,
 .job-detail-files { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--bs-border-color); }
 .job-detail-files { max-height: 22rem; overflow: auto; }
-.job-detail-actions { margin-top: 1rem; }
 .job-detail-actions .btn { min-height: 44px; --bs-btn-color: var(--bs-body-color); --bs-btn-border-color: var(--bs-secondary-color); }
 .job-current-activity { overflow-wrap: anywhere; }
 .job-current-activity .d-flex { gap: .5rem 1rem; flex-wrap: wrap; }

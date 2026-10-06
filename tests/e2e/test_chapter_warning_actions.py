@@ -73,12 +73,18 @@ def test_warning_notice_survives_unfinished_filter_and_review_clears_other_filte
     expect(page.locator("#job-row-chapter-warning")).to_have_count(0)
     expect(page.locator("#chapterWarningsNotice")).to_be_visible()
     expect(page.locator("#chapterWarningsText")).to_contain_text("1 job ended with chapter issues")
+    if width <= 900:
+        page.locator("#queueFiltersToggle").click()
     page.locator("#jobKindFilter").select_option("loudness")
     page.locator("#jobSearch").fill("nonmatching search")
     expect(page.locator("#jobQueue [id^='job-row-']")).to_have_count(0)
     page.get_by_role("button", name="Review chapter warnings", exact=True).click()
     expect(page.locator("#job-row-chapter-warning")).to_be_visible()
     expect(page.locator("#jobStatusFilter")).to_have_value("chapter_warnings")
+    expect(page.locator("#chapterWarningsReview")).to_be_hidden()
+    expect(page.locator("#chapterWarningsText")).to_have_text(
+        "These jobs ended with chapter issues. Review the saved results before running them again."
+    )
     expect(page.locator("#jobKindFilter")).to_have_value("")
     expect(page.locator("#jobSearch")).to_have_value("")
     assert queries[-1].get("status") == ["chapter_warnings"]

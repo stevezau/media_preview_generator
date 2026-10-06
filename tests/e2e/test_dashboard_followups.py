@@ -157,6 +157,197 @@ class TestLongHardwareNames:
             assert subtitle.evaluate("e => e.getBoundingClientRect().height") <= line_height + 1
             assert subtitle.evaluate("e => getComputedStyle(e).textOverflow") == "ellipsis"
 
+    def test_long_device_name_does_not_widen_the_page_when_viewport_is_phone_sized(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        mock_dashboard_defaults(authed_page)
+        groups = mock_worker_groups(authed_page)
+        groups["state"]["groups"][1]["name"] = "UHD Graphics 770"
+        groups["state"]["hardware"][0]["name"] = LONG_DEVICE
+        authed_page.set_viewport_size({"width": 390, "height": 844})
+        authed_page.goto(app_url + "/")
+        expect(authed_page.locator('[data-group-id="gpu"] .hw > span')).to_have_text(LONG_DEVICE)
+        assert authed_page.evaluate("document.documentElement.scrollWidth") <= 390
+
+
+@pytest.mark.e2e
+class TestWorkerGroupHeaderStaysInItsColumn:
+    @pytest.mark.parametrize("width", [1600, 1440, 1280, 1100, 390])
+    def test_long_hardware_name_keeps_tools_inside_their_own_group_when_three_groups_show(
+        self, authed_page: Page, app_url: str, width: int
+    ) -> None:
+        mock_dashboard_defaults(authed_page)
+        groups = mock_worker_groups(authed_page)
+        groups["state"]["groups"][1]["name"] = "GPU video"
+        groups["state"]["hardware"][0]["name"] = LONG_DEVICE
+        groups["state"]["groups"].append(
+            {
+                "id": "cpu-loud",
+                "name": "CPU loudness",
+                "resource": "cpu",
+                "device": None,
+                "count": 2,
+                "enabled": True,
+                "job_types": ["loudness"],
+                "availability": {"mode": "always", "windows": []},
+            }
+        )
+        authed_page.set_viewport_size({"width": width, "height": 900})
+        authed_page.goto(app_url + "/")
+        expect(authed_page.locator('[data-group-id="gpu"] .hw > span')).to_have_text(LONG_DEVICE)
+        boxes = authed_page.evaluate(
+            """() => [...document.querySelectorAll('#workerGroupLiveRows > .worker-group-section')].map(section => {
+                const rect = e => { const r = e.getBoundingClientRect(); return {l: r.left, r: r.right, t: r.top, b: r.bottom}; };
+                return {
+                    section: rect(section),
+                    header: rect(section.querySelector('.worker-group-dashboard-header')),
+                    tools: rect(section.querySelector('.g-tools')),
+                    chip: rect(section.querySelector('.occ-chip')),
+                };
+            })"""
+        )
+        assert len(boxes) == 3
+        for box in boxes:
+            assert box["tools"]["r"] <= box["section"]["r"] + 0.5
+            assert box["chip"]["r"] <= box["section"]["r"] + 0.5
+            assert box["header"]["l"] >= box["section"]["l"] - 0.5
+            assert box["header"]["r"] <= box["section"]["r"] + 0.5
+        for left, right in zip(boxes, boxes[1:], strict=False):
+            same_row = left["section"]["t"] < right["section"]["b"] and right["section"]["t"] < left["section"]["b"]
+            if same_row:
+                assert left["header"]["r"] <= right["header"]["l"] + 0.5
+
+    def test_hardware_name_truncates_with_ellipsis_and_keeps_full_text_in_title_when_column_is_narrow(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        mock_dashboard_defaults(authed_page)
+        groups = mock_worker_groups(authed_page)
+        groups["state"]["hardware"][0]["name"] = LONG_DEVICE
+        groups["state"]["groups"].append({**groups["state"]["groups"][0], "id": "cpu-loud", "name": "CPU loudness"})
+        authed_page.set_viewport_size({"width": 1280, "height": 900})
+        authed_page.goto(app_url + "/")
+        hardware = authed_page.locator('[data-group-id="gpu"] .hw > span')
+        expect(hardware).to_have_attribute("title", LONG_DEVICE)
+        assert hardware.evaluate("e => getComputedStyle(e).textOverflow") == "ellipsis"
+        assert hardware.evaluate("e => e.scrollWidth > e.clientWidth")
+
+
+@pytest.mark.e2e
+class TestQueuedProgressText:
+    WAIT_PREVIEW = "Queued — waiting for the preview job for these files to finish"
+    WAIT_SLOT = "Queued — waiting for active slot (4 of 5 busy, 1 reserved for high priority)"
+
+    def _open(self, page: Page, app_url: str, message: str, *, wait_reason: str | None = None) -> None:
+        mock_dashboard_defaults(page)
+        mock_worker_groups(page)
+        job = {
+            "id": "12345678-aaaa-4bbb-8ccc-1234567890ab",
+            "status": "pending",
+            "library_name": "Movies",
+            "created_at": datetime.now(UTC).isoformat(),
+            "progress": {"percent": 0, "processed_items": 0, "total_items": 3, "current_item": message},
+            "config": {"resource_wait": {"reason": wait_reason}} if wait_reason else {},
+        }
+        page.route("**/api/jobs?**", lambda r: _fulfill_json(r, {"jobs": [job], "total": 1, "page": 1}))
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(app_url + "/")
+
+    @pytest.mark.parametrize(
+        ("message", "short"),
+        [
+            (WAIT_PREVIEW, "Waiting for previews to finish"),
+            (WAIT_SLOT, "Waiting for a free worker"),
+            ("Queued - waiting for the preview job for these files to finish", "Waiting for previews to finish"),
+            ("Queued — waiting for GPU memory", "waiting for GPU memory"),
+            ("Waiting for the Plex scan", "Waiting for the Plex scan"),
+        ],
+    )
+    def test_queued_reason_is_shortened_to_one_line_with_the_full_text_in_title(
+        self, authed_page: Page, app_url: str, message: str, short: str
+    ) -> None:
+        self._open(authed_page, app_url, message)
+        cell = authed_page.locator(".job-row .queue-progress-cell")
+        line = cell.locator(".queue-phase-line")
+        expect(line).to_have_text(short)
+        expect(line).to_have_attribute("title", message)
+        expect(line).to_have_attribute("aria-label", message)
+        assert "Queued" not in cell.inner_text().replace(message, "") or short.startswith("Queued")
+        style = line.evaluate(
+            "e => { const s = getComputedStyle(e); return [s.whiteSpace, s.textOverflow, s.overflow]; }"
+        )
+        assert style == ["nowrap", "ellipsis", "hidden"]
+        line_height = line.evaluate("e => parseFloat(getComputedStyle(e).lineHeight)")
+        assert line.evaluate("e => e.getBoundingClientRect().height") <= line_height + 1
+
+    def test_queued_heading_is_dropped_when_a_reason_exists(self, authed_page: Page, app_url: str) -> None:
+        self._open(authed_page, app_url, self.WAIT_SLOT)
+        expect(authed_page.locator(".job-row .queue-progress-cell > .small")).to_have_count(0)
+
+    def test_plain_queued_label_stays_when_no_reason_exists(self, authed_page: Page, app_url: str) -> None:
+        self._open(authed_page, app_url, "")
+        cell = authed_page.locator(".job-row .queue-progress-cell")
+        expect(cell).to_contain_text("Queued")
+        expect(cell.locator(".queue-phase-line")).to_have_count(0)
+
+    def test_resource_wait_reason_takes_priority_over_current_item(self, authed_page: Page, app_url: str) -> None:
+        self._open(authed_page, app_url, "something else", wait_reason=self.WAIT_SLOT)
+        line = authed_page.locator(".job-row .queue-phase-line")
+        expect(line).to_have_text("Waiting for a free worker")
+        expect(line).to_have_attribute("title", self.WAIT_SLOT)
+
+
+@pytest.mark.e2e
+class TestExpandedJobRowLayout:
+    def _open(self, page: Page, app_url: str, width: int = 1440) -> None:
+        mock_dashboard_defaults(page)
+        mock_worker_groups(page)
+        paths = [f"/data/Movies/Film {n}/Film {n}.mkv" for n in range(8)]
+        job = {
+            "id": "12345678-aaaa-4bbb-8ccc-1234567890ab",
+            "status": "running",
+            "library_name": "Movies",
+            "created_at": datetime.now(UTC).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
+            "progress": {"percent": 5, "processed_items": 1, "total_items": 8, "current_item": ""},
+            "config": {"file_paths": paths, "file_paths_count": 8},
+        }
+        page.route("**/api/jobs?**", lambda r: _fulfill_json(r, {"jobs": [job], "total": 1, "page": 1}))
+        page.set_viewport_size({"width": width, "height": 900})
+        page.goto(app_url + "/")
+        page.locator(".job-row .exp, .job-row .job-details-toggle").first.click()
+        expect(page.locator(".job-files-detail:not(.d-none) .queue-file-row").first).to_be_visible()
+
+    @pytest.mark.parametrize("width", [1600, 1440, 1280])
+    def test_path_list_uses_the_full_row_width_when_only_a_short_activity_line_exists(
+        self, authed_page: Page, app_url: str, width: int
+    ) -> None:
+        self._open(authed_page, app_url, width)
+        detail = authed_page.locator(".job-files-detail .job-expanded-content")
+        files = authed_page.locator(".job-files-detail .job-detail-files")
+        content_width = detail.evaluate(
+            "e => e.clientWidth - parseFloat(getComputedStyle(e).paddingLeft) - parseFloat(getComputedStyle(e).paddingRight)"
+        )
+        assert files.evaluate("e => e.getBoundingClientRect().width") >= content_width * 0.8
+
+    def test_every_field_is_present_and_activity_sits_above_the_paths(self, authed_page: Page, app_url: str) -> None:
+        self._open(authed_page, app_url)
+        detail = authed_page.locator(".job-files-detail")
+        expect(detail.locator(".job-current-activity")).to_contain_text("Started")
+        expect(detail.locator(".job-detail-files")).to_contain_text("Requested paths")
+        expect(detail.locator(".queue-files-all")).to_be_visible()
+        expect(detail.locator(".job-detail-actions")).to_contain_text("Open logs and files")
+        activity_bottom = detail.locator(".job-current-activity").evaluate("e => e.getBoundingClientRect().bottom")
+        files_top = detail.locator(".job-detail-files").evaluate("e => e.getBoundingClientRect().top")
+        assert activity_bottom <= files_top
+
+    def test_everything_stacks_in_one_column_when_viewport_is_phone_sized(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        self._open(authed_page, app_url, 390)
+        assert authed_page.evaluate("document.documentElement.scrollWidth") <= 390
+        files = authed_page.locator(".job-files-detail .job-detail-files")
+        assert files.evaluate("e => e.getBoundingClientRect().right") <= 390
+
 
 @pytest.mark.e2e
 class TestQueueColumns:

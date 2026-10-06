@@ -83,9 +83,9 @@ def test_queue_filters_keep_exact_library_pair_and_reset_pagination(authed_page:
         "page": ["1"],
     }
     assert {key: captured[-1].get(key) for key in expected} == expected
-    expect(queue.get_by_text("1 job matches these filters", exact=True)).to_be_visible()
+    expect(queue.locator("#jobFilterCount")).to_have_attribute("title", "1 job matches these filters")
     queue.get_by_label("Search jobs", exact=True).fill("absent")
-    expect(queue.get_by_text("0 jobs match these filters", exact=True)).to_be_visible()
+    expect(queue.locator("#jobFilterCount")).to_have_attribute("title", "0 jobs match these filters")
     with page.expect_response(
         lambda req: (
             "/api/jobs?" in req.url
@@ -253,7 +253,6 @@ def test_phone_files_and_server_results_remain_keyboard_accessible(dashboard: Ca
     expect(modal).to_be_visible()
     modal.get_by_role("tab", name="Files", exact=True).click()
     expect(modal.locator("#fileResultsBody")).to_contain_text("film.mkv")
-    expect(modal.locator("#logsJobId")).to_be_hidden()
     expect(modal.locator("#logsModalPublishers")).to_be_hidden()
     expect(modal.get_by_role("tab", name="Files", exact=True)).to_be_in_viewport()
     first_file = modal.locator("#fileResultsBody tr").first
@@ -266,9 +265,6 @@ def test_phone_files_and_server_results_remain_keyboard_accessible(dashboard: Ca
     expect(modal.locator("#logsModalPublishers")).to_be_visible()
     for server_name in ("Home Plex", "Home Jellyfin"):
         expect(modal.locator("#logsModalPublishers").get_by_text(server_name, exact=True)).to_be_visible()
-    identity = modal.locator(".job-identity-disclosure summary")
-    identity.focus()
-    page.keyboard.press("Enter")
     expect(modal.locator("#logsJobId")).to_contain_text(job["id"])
     expect(modal.get_by_role("button", name="Copy Job ID", exact=True)).to_be_visible()
     modal.get_by_role("tab", name="Logs", exact=True).click()
