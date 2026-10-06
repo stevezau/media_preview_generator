@@ -44,13 +44,12 @@
 .dash-workers-head { display:flex; align-items:center; flex-wrap:wrap; gap:.75rem; min-height:52px; }
 .dash-workers-head .flex-fill { flex:1 1 0; }
 .workers-heading { display:inline-flex; align-items:center; min-width:0; }
-.dash-occupancy { display:inline-flex; align-items:center; gap:.625rem; font-size:.8125rem; color:var(--muted); font-weight:600; letter-spacing:normal; text-transform:none; }
-.dash-occupancy { flex-wrap:wrap; min-width:0; max-width:100%; }
-.dash-occupancy .occ { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px; min-width:0; }
-.dash-occupancy .occ i { width:14px; height:6px; border-radius:99px; background:var(--line-strong); }
+.dash-occupancy { display:inline-flex; align-items:center; min-width:0; max-width:100%; gap:.625rem; font-size:.8125rem; color:var(--muted); font-weight:600; letter-spacing:normal; text-transform:none; }
+.dash-occupancy .occ { display:inline-flex; flex-wrap:wrap; align-items:center; min-width:0; gap:4px; }
+.dash-occupancy .occ i { flex:0 0 14px; width:14px; height:6px; border-radius:99px; background:var(--line-strong); }
 .dash-occupancy .occ i.on { background:var(--run); }
 .dash-occupancy .occ i.paused { background:var(--warn); }
-.dash-occupancy #workersHeaderCount { color:var(--bs-body-color); }
+.dash-occupancy #workersHeaderCount { flex-shrink:0; color:var(--bs-body-color); }
 .dash-workers-head .dash-resume { color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
 .dash-workers-head .dash-resume:hover { color:var(--accent-ink); background:var(--accent); filter:brightness(1.08); }
 .worker-group-hold { margin:0; padding:.5rem 1rem; background:var(--warn-soft); color:var(--warn); border-bottom:1px solid var(--line); font-size:.8125rem; }

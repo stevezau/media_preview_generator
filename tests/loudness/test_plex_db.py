@@ -82,6 +82,34 @@ def test_write_is_byte_identical_to_plexs_own(db):
     assert _extra(db, 11) == PLEX_ANALYSED
 
 
+@pytest.mark.parametrize("abort", [False, True], ids=["commit", "rollback"])
+def test_native_title_control_is_preserved_by_atomic_loudness_write(db, tmp_path, monkeypatch, abort):
+    original = {"ma:title": "Commentary with Person A \x16and Person B", "ma:profile": "he-aac"}
+    canonical = encode_extra_data(original)
+    raw = canonical.replace("\\u0016", "\x16")
+    with sqlite3.connect(db._path()) as conn:
+        conn.execute("UPDATE media_streams SET extra_data=? WHERE id=11", (raw,))
+    if abort:
+
+        def fail_receipt(*args, **kwargs):
+            raise OSError("Receipt disk unavailable")
+
+        monkeypatch.setattr(plex_db, "_log_write", fail_receipt)
+        with pytest.raises(OSError, match="Receipt disk unavailable"):
+            plex_db.write_stream(db, 11, FIELDS, deadline=1e12)
+        assert _extra(db, 11) == raw
+        return
+
+    assert plex_db.write_stream(db, 11, FIELDS, deadline=1e12) is True
+    after = _extra(db, 11)
+    expected = json.loads(encode_extra_data({**original, **FIELDS}))
+    assert json.loads(after) == expected
+    assert "\x16" not in after and "\\u0016" in after
+    record, receipt = [json.loads(line) for line in (tmp_path / "loudness-writes.jsonl").read_text().splitlines()]
+    assert record["before"] == raw and record["after"] == after
+    assert receipt["transaction_id"] == record["transaction_id"]
+
+
 def test_write_over_null_extra_data(db):
     assert plex_db.write_stream(db, 12, FIELDS, deadline=1e12) is True
     assert json.loads(_extra(db, 12))["ln:loudness"] == "-23.23"
