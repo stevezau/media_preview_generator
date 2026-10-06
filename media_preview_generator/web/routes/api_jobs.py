@@ -285,14 +285,17 @@ def _job_rows(
     (``job_details.job_library_names``; empty where its config names none)."""
     rows = [j.to_dict() for j in jobs]
     try:
-        from ..job_details import job_library_names, job_library_scope, saved_server_configs
+        from ..job_details import job_file_paths, job_library_names, job_library_scope, saved_server_configs
         from ..settings_manager import get_settings_manager
 
         if configs is None:
             configs = saved_server_configs(get_settings_manager().get("media_servers"))
-        names = [job_library_names(j, configs) for j in jobs]
+        selections = {j.id: job_file_paths(j) for j in jobs if j.config.get("file_paths_ref")}
+        names = [job_library_names(j, configs, selections.get(j.id)) for j in jobs]
         associations = [
-            scopes[j.id] if scopes is not None and j.id in scopes else job_library_scope(j, configs, path_cache)
+            scopes[j.id]
+            if scopes is not None and j.id in scopes
+            else job_library_scope(j, configs, path_cache, selections.get(j.id))
             for j in jobs
         ]
     except Exception as exc:
@@ -368,7 +371,7 @@ def get_jobs():
     Query params:
         page: Page number (default 1). Use 0 to return all jobs unpaginated.
         per_page: Items per page (default 50, max 200).
-        status: Optional running, pending, completed, failed, cancelled, or paused filter.
+        status: Optional active, running, pending, completed, failed, cancelled, paused, or chapter_warnings filter.
         q: Optional case-insensitive search of job, library, source and server labels.
         kind: Optional previews, intro_credits, or loudness filter.
         server_id: Originating or selected/path-associated server, not publication success.
@@ -387,7 +390,7 @@ def get_jobs():
     try:
         job_manager = get_job_manager()
         all_jobs = job_manager.get_all_jobs()
-        from ..job_details import job_library_scope, saved_server_configs
+        from ..job_details import job_has_chapter_warning, job_library_scope, saved_server_configs
         from ..settings_manager import get_settings_manager
 
         try:
@@ -430,9 +433,15 @@ def get_jobs():
             # children but the KPI keeps counting them.
             all_jobs = [j for j in all_jobs if is_user_visible_job(j)]
 
+        # This is a history notice, independent of the current page or queue filters.
+        chapter_warning_count = sum(job_has_chapter_warning(job) for job in all_jobs)
         status_filter = (request.args.get("status") or "").strip().lower()
         if status_filter and status_filter != "all":
-            if status_filter == "paused":
+            if status_filter == "active":
+                all_jobs = [j for j in all_jobs if j.status in (JobStatus.PENDING, JobStatus.RUNNING)]
+            elif status_filter == "chapter_warnings":
+                all_jobs = [j for j in all_jobs if job_has_chapter_warning(j)]
+            elif status_filter == "paused":
                 all_jobs = [j for j in all_jobs if j.status in (JobStatus.PENDING, JobStatus.RUNNING) and j.paused]
             elif status_filter in {status.value for status in JobStatus}:
                 all_jobs = [j for j in all_jobs if j.status.value == status_filter]
@@ -492,6 +501,7 @@ def get_jobs():
                 {
                     "jobs": _job_rows(sorted_jobs, configs, scopes, path_cache),
                     "filter_options": filter_options,
+                    "chapter_warning_count": chapter_warning_count,
                     "total": total,
                     "page": 0,
                     "per_page": total,
@@ -508,6 +518,7 @@ def get_jobs():
             {
                 "jobs": _job_rows(page_jobs, configs, scopes, path_cache),
                 "filter_options": filter_options,
+                "chapter_warning_count": chapter_warning_count,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -1714,6 +1725,7 @@ def get_job_file_results(job_id):
         search: Case-insensitive filename substring search.
         page: 1-based page number (default 1).
         per_page: Results per page (default 100, max 500).
+        view: "requested" lists the exact selected paths instead of processing results.
     """
     job_manager = get_job_manager()
     job = job_manager.get_job(job_id)
@@ -1724,6 +1736,29 @@ def get_job_file_results(job_id):
     search = request.args.get("search", "").strip()
     page = max(1, request.args.get("page", 1, type=int))
     per_page = min(500, max(1, request.args.get("per_page", 100, type=int)))
+
+    if request.args.get("view") == "requested":
+        from ...loudness.inputs import read_file_paths
+
+        try:
+            paths = (job.config or {}).get("webhook_paths") or read_file_paths(job_manager.config_dir, job.config or {})
+        except (OSError, ValueError):
+            return jsonify({"error": "Could not read this job's requested paths. Try again or check its logs."}), 503
+        matches = [path for path in paths if search.lower() in path.lower()] if search else paths
+        total_pages = max(1, math.ceil(len(matches) / per_page))
+        page = min(page, total_pages)
+        start = (page - 1) * per_page
+        return jsonify(
+            {
+                "job_id": job_id,
+                "files": [{"file": path} for path in matches[start : start + per_page]],
+                "total": len(paths),
+                "filtered_count": len(matches),
+                "page": page,
+                "per_page": per_page,
+                "total_pages": total_pages,
+            }
+        )
 
     all_results = job_manager.get_file_results(job_id)
 

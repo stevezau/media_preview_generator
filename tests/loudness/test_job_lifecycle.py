@@ -408,21 +408,50 @@ def test_retry_keeps_sender_path_for_mapping_on_next_attempt(lifecycle: Lifecycl
     assert lifecycle.rows(parent)[path]["outcome"] == job.UP_TO_DATE
 
 
-def test_bounded_retry_keeps_omitted_waiting_files_in_parent_summary(
+def test_large_remapped_retry_survives_restart_without_omitting_waiting_files(
     lifecycle: Lifecycle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(job, "MAX_RETRY_FILES", 1)
-    paths = [lifecycle.add_file("first.mkv"), lifecycle.add_file("second.mkv")]
-    parent = lifecycle.start(paths)
+    from media_preview_generator.loudness.inputs import load_file_input
+
+    paths = [lifecycle.add_file(f"waiting-{index:03}.mkv") for index in range(501)]
+    senders = [f"/sender/{Path(path).name}" for path in paths]
+    cfg = job._build_multi_server_registry(None).get_config("plex")
+    cfg.path_mappings = [{"remote_prefix": "/sender", "local_prefix": str(lifecycle.media)}]
+    cfg.libraries = [Library(id="1", name="Movies", remote_paths=("/sender",), kind="movie", enabled=True)]
+    with sqlite3.connect(lifecycle.database) as conn:
+        conn.executemany("UPDATE media_parts SET file=? WHERE file=?", zip(senders, paths, strict=True))
+    parent = lifecycle.start(senders)
     (child,) = lifecycle.children(parent)
-    assert child.config["file_paths"] == [paths[0]]
+    assert parent.progress.outcome[job.WAITING] == len(paths)
+    expanded = load_file_input(lifecycle.manager.config_dir, child.config)
+    assert expanded["file_paths"] == senders
+    assert len(expanded["retry_baseline"]["files"]) == len(paths)
+    assert len(json.dumps(child.config)) < 4096
+
+    # Resume from disk with a changed local mount, preserving original file identities.
+    relocated = lifecycle.media.with_name("relocated")
+    lifecycle.media.rename(relocated)
+    cfg.path_mappings = [{"remote_prefix": "/sender", "local_prefix": str(relocated)}]
+    lifecycle.manager.close()
+    restored = JobManager(config_dir=lifecycle.manager.config_dir)
+    lifecycle.manager = restored
+    for module in (job, shared_runner, jobs):
+        monkeypatch.setattr(module, "get_job_manager", lambda: restored)
     lifecycle.api_ready = True
+    child = restored.get_job(child.id)
     lifecycle.retry(child)
-    assert parent.status is JobStatus.COMPLETED
-    assert parent.error
-    assert parent.progress.outcome[job.UP_TO_DATE] == 1
-    assert parent.progress.outcome[job.WAITING] == 1
-    assert lifecycle.rows(parent)[paths[1]]["outcome"] == job.WAITING
+    finished = restored.get_job(parent.id)
+    assert finished.status is JobStatus.COMPLETED
+    assert finished.error is None
+    assert finished.progress.outcome == {job.UP_TO_DATE: len(paths)}
+    assert finished.publishers[0]["counts"] == {job.UP_TO_DATE: len(paths)}
+    assert len(lifecycle.analyses) == len(paths)
+    assert set(lifecycle.rows(child)) == set(paths)
+    assert "retry_sender_paths" not in child.config
+    assert len(json.dumps(child.config)) < 4096
+    expanded = load_file_input(restored.config_dir, child.config)
+    for _ in range(2):
+        assert job._recount_chain(restored, parent.id, expanded, child.id) == {job.UP_TO_DATE: len(paths)}
 
 
 @pytest.mark.parametrize("restart", [False, True], ids=["same-process", "restart"])

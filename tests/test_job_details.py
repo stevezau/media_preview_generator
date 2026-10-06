@@ -397,7 +397,7 @@ class TestJobsApi:
         from media_preview_generator.web.jobs import get_job_manager
 
         job = get_job_manager().create_job(library_name="Show", config={"webhook_paths": ["/data/tv/x.mkv"]})
-        with patch("media_preview_generator.web.job_details.find_library_matches", side_effect=RuntimeError("bad")):
+        with patch("media_preview_generator.web.job_details._library_matches", side_effect=RuntimeError("bad")):
             body = app.test_client().get("/api/jobs", headers=_HEADERS).get_json()
 
         assert [(r["id"], r["library_names"]) for r in body["jobs"]] == [(job.id, [])]
@@ -433,3 +433,114 @@ class TestJobsApi:
         job = get_job_manager().create_job(library_name="x", config={})
         response = app.test_client().get(f"/api/jobs/{job.id}/file-list")
         assert response.status_code == 401
+
+
+class TestCompiledLibraryScope:
+    def test_large_selection_translates_library_roots_once(self):
+        from media_preview_generator.web import job_details
+
+        server = _server("plex", "plex", [{"id": "1", "name": "TV", "remote_paths": ["/plex/tv"]}])
+        server["path_mappings"] = [
+            {"remote_prefix": "/plex", "local_prefix": "/media", "webhook_prefixes": ["/sender"]}
+        ]
+        configs = saved_server_configs([server])
+        paths = [f"/media/tv/show{i}/episode.mkv" for i in range(10000)]
+        with (
+            patch.object(job_details, "apply_path_mappings", wraps=job_details.apply_path_mappings) as mapping,
+            patch.object(job_details, "webhook_path_candidates", wraps=job_details.webhook_path_candidates) as aliases,
+        ):
+            scope = job_library_scope(_job({"file_paths": paths}), configs)
+        assert [(row["server_id"], row["library_id"]) for row in scope] == [("plex", "1")]
+        mapping.assert_called_once_with("/plex/tv", configs[0].path_mappings)
+        aliases.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/media/tv/Show/a.mkv",
+            "/media/tv/4k/Show/a.mkv",
+            "/sender/tv/Show/a.mkv",
+            "/plex/tv/Show/a.mkv",
+            "/media/tv-archive/a.mkv",
+            "/media/tv",
+            "/sender/tv",
+            "/unknown/a.mkv",
+            "/media/cafe\u0301/a.mkv",
+            "D:\\TV\\Show\\a.mkv",
+            "",
+            "/",
+        ],
+    )
+    def test_compiled_matching_preserves_alias_overlap_unicode_and_server_semantics(self, path):
+        from media_preview_generator.web import job_details
+
+        server = _server(
+            "plex",
+            "plex",
+            [
+                {"id": "1", "name": "TV", "remote_paths": ["/plex/tv", "D:\\TV"]},
+                {"id": "2", "name": "4K", "remote_paths": ["/plex/tv/4k"], "enabled": False},
+                {"id": "3", "name": "Unicode", "remote_paths": ["/media/café"]},
+                {"id": "4", "name": "Empty", "remote_paths": ["", " "]},
+            ],
+        )
+        server["path_mappings"] = [
+            {"remote_prefix": "/plex", "local_prefix": "/media", "webhook_prefixes": ["/sender"]},
+            {"remote_prefix": "/plex", "local_prefix": "/other", "webhook_prefixes": ["/sender"]},
+        ]
+        configs = saved_server_configs(
+            [server, {**server, "id": "peer", "type": "jellyfin"}, {**server, "id": "off", "enabled": False}]
+        )
+        assert job_details._library_matches(path, configs, job_details._library_index(configs)) == (
+            job_details._library_matches(path, configs)
+        )
+
+
+class TestActiveJobsFilter:
+    def test_active_preserves_running_paused_and_retry_heads_with_history_accessible(self, app):
+        from media_preview_generator.web.jobs import JobStatus, get_job_manager
+
+        manager = get_job_manager()
+        active = []
+        for status, paused in [(JobStatus.RUNNING, False), (JobStatus.RUNNING, True), (JobStatus.PENDING, True)]:
+            entry = manager.create_job(library_name=f"{status.value}-{paused}", config={})
+            entry.status = status
+            entry.paused = paused
+            active.append(entry)
+        head = manager.create_job(config={"is_retry": True, "is_retry_chain": True})
+        active.append(head)
+        child = manager.create_job(config={"is_retry": True, "parent_job_id": head.id})
+        terminal = {}
+        for status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            entry = manager.create_job(library_name=status.value, config={})
+            entry.status = status
+            terminal[status.value] = entry
+        client = app.test_client()
+        response = client.get("/api/jobs?status=active", headers=_HEADERS)
+        assert response.status_code == 200
+        assert response.json["total"] == len(active)
+        assert {row["id"] for row in response.json["jobs"]} == {entry.id for entry in active}
+        assert sum(row["paused"] for row in response.json["jobs"]) == 2
+        for query in ("", "?status=all"):
+            body = client.get("/api/jobs" + query, headers=_HEADERS).json
+            assert body["total"] == len(active) + len(terminal)
+            assert {row["id"] for row in body["jobs"]} == {entry.id for entry in [*active, *terminal.values()]}
+        for status, entry in terminal.items():
+            body = client.get(f"/api/jobs?status={status}", headers=_HEADERS).json
+            assert [row["id"] for row in body["jobs"]] == [entry.id]
+        body = client.get("/api/jobs?status=active&include_retry_attempts=1", headers=_HEADERS).json
+        assert {row["id"] for row in body["jobs"]} == {entry.id for entry in [*active, child]}
+
+    def test_active_filter_precedes_pagination_and_combines_with_kind(self, app):
+        from media_preview_generator.web.jobs import JobStatus, get_job_manager
+
+        manager = get_job_manager()
+        for _ in range(4):
+            manager.create_job(kind="loudness", config={}).status = JobStatus.CANCELLED
+        selected = [manager.create_job(kind="loudness", config={}) for _ in range(3)]
+        manager.create_job(kind="intro_credits", config={})
+        response = app.test_client().get("/api/jobs?status=active&kind=loudness&page=2&per_page=2", headers=_HEADERS)
+        assert response.status_code == 200
+        assert response.json["total"] == 3
+        assert response.json["pages"] == 2
+        assert [row["id"] for row in response.json["jobs"]] == [selected[-1].id]

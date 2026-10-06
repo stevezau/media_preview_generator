@@ -5,6 +5,7 @@ Separated from route handlers for clarity -- this is the bridge between
 the web layer and the CLI processing pipeline.
 """
 
+import math
 import os
 import re
 import threading
@@ -504,6 +505,26 @@ def _is_force_fire_now_set(job_manager, job_id: str) -> bool:
     return bool((job.config or {}).get("force_fire_now"))
 
 
+def _preview_retry_deadline(config: dict, now: datetime) -> datetime:
+    """Return the saved retry deadline so a restart does not renew the backoff.
+
+    Args:
+        config: Persisted retry configuration, including its scheduled time.
+        now: Current UTC time, used for legacy retries without a valid deadline.
+
+    Returns:
+        The retry deadline as an aware UTC datetime.
+    """
+    raw = config.get("scheduled_at")
+    try:
+        due = datetime.fromisoformat(raw) if raw else None
+    except (TypeError, ValueError):
+        due = None
+    if due is not None:
+        return due.replace(tzinfo=UTC) if due.tzinfo is None else due.astimezone(UTC)
+    return now + timedelta(seconds=max(1, int(config.get("retry_delay", 30))))
+
+
 def resume_running_and_drain_pending() -> None:
     """Wake eligible pending jobs without clearing any job's own pause causes."""
     from ..jobs import get_job_manager
@@ -951,8 +972,12 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             if run_job_config and run_job_config.config.get("is_retry") and not parked_reference:
                 import time as _time
 
-                delay_sec = max(1, int(run_job_config.config.get("retry_delay", 30)))
-                retry_eta = (datetime.now(UTC) + timedelta(seconds=delay_sec)).isoformat()
+                retry_now = datetime.now(UTC)
+                retry_due = _preview_retry_deadline(run_job_config.config, retry_now)
+                delay_sec = max(0, math.ceil((retry_due - retry_now).total_seconds()))
+                retry_eta = retry_due.isoformat()
+                # Seal legacy deadlines too: restarting during their first wait must not reset it.
+                job_manager.merge_job_config(job_id, {"scheduled_at": retry_eta})
                 _parent_job_id = (run_job_config.config or {}).get("parent_job_id")
                 _parent_job = job_manager.get_job(_parent_job_id) if _parent_job_id else None
                 _server_label = _format_retry_wait_server_label(_parent_job, run_job_config)
@@ -1047,7 +1072,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # A restart ages a job waiting here by the downtime only (JobManager.requeue_interrupted_jobs).
                         job_manager.note_slot_wait(job_id)
 
-                    from ...jobs.group_runtime import runtime_capacity, wait_for_capacity
+                    from ...jobs.group_runtime import admission_options, runtime_capacity, wait_for_capacity
 
                     def held_by_pause():
                         return job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused
@@ -1067,13 +1092,14 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             priority=_slot_priority,
                             cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                             on_wait=_on_wait,
+                            **admission_options(job_manager, job_id, JOB_KIND_PREVIEWS),
                         )
                         if not admitted:
                             break
                         _slot_held = True
                         if runtime_capacity(JOB_KIND_PREVIEWS)["open"] and not held_by_pause():
                             break
-                        get_job_gate().release(_slot_priority)
+                        get_job_gate().release(_slot_priority, kind=JOB_KIND_PREVIEWS)
                         _slot_held = False
                     if not admitted:
                         # User cancelled while the job was waiting for a
@@ -2072,7 +2098,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                 try:
                     from ..job_gate import get_job_gate
 
-                    get_job_gate().release(_slot_priority)
+                    get_job_gate().release(_slot_priority, kind=JOB_KIND_PREVIEWS)
                 except Exception as gate_err:
                     logger.debug("Could not release job gate for {}: {}", job_id, gate_err)
                 finally:

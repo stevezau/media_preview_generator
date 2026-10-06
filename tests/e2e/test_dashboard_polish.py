@@ -35,18 +35,22 @@ def test_queue_filters_keep_exact_library_pair_and_reset_pagination(authed_page:
             {"id": "1", "name": "Movies", "server_id": "jellyfin-1", "server_name": "Studio Jellyfin"},
         ],
     }
-    job = _job("shared-preview", library_name="Shared archive")
+    job = _job("shared-preview", library_name="Shared archive", status="pending")
     captured: list[dict[str, list[str]]] = []
 
     def jobs(route: Route) -> None:
         query = parse_qs(urlparse(route.request.url).query)
         captured.append(query)
-        filtered = any(key in query for key in ("server_id", "library_id", "kind", "status", "q"))
+        filtered = any(key in query for key in ("server_id", "library_id", "kind", "q")) or query.get(
+            "status", ["active"]
+        )[0] not in ("", "active")
         empty = query.get("q") == ["absent"]
         _fulfill_json(
             route,
             {
-                "jobs": [] if empty else [job],
+                "jobs": []
+                if empty
+                else [{**job, "status": "completed" if query.get("status") == ["completed"] else "pending"}],
                 "total": 0 if empty else 1 if filtered else 61,
                 "page": int(query.get("page", ["1"])[0]),
                 "pages": 1 if filtered else 2,
@@ -85,12 +89,14 @@ def test_queue_filters_keep_exact_library_pair_and_reset_pagination(authed_page:
     with page.expect_response(
         lambda req: (
             "/api/jobs?" in req.url
-            and not any(key in parse_qs(urlparse(req.url).query) for key in expected if key != "page")
+            and parse_qs(urlparse(req.url).query).get("status") == ["active"]
+            and not any(key in parse_qs(urlparse(req.url).query) for key in expected if key not in ("page", "status"))
         )
     ):
         queue.get_by_role("button", name="Clear filters", exact=True).click()
-    for label in ("Server", "Library", "Job type", "Status", "Search jobs"):
+    for label in ("Server", "Library", "Job type", "Search jobs"):
         expect(queue.get_by_label(label, exact=True)).to_have_value("")
+    expect(queue.get_by_label("Status", exact=True)).to_have_value("active")
     expect(queue.get_by_role("button", name="Clear filters", exact=True)).to_be_hidden()
 
 

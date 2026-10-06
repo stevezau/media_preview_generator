@@ -45,10 +45,12 @@ pytestmark = pytest.mark.journey
 def _reset_singletons():
     """Each test starts with a fresh settings + job + scheduler singleton."""
     reset_settings_manager()
+    import media_preview_generator.web.job_gate as gate_mod
     import media_preview_generator.web.jobs as jobs_mod
     import media_preview_generator.web.scheduler as sched_mod
     import media_preview_generator.web.webhooks as wh_mod
 
+    gate_mod.reset_job_gate()
     with jobs_mod._job_lock:
         jobs_mod._job_manager = None
     with sched_mod._schedule_lock:
@@ -62,6 +64,7 @@ def _reset_singletons():
             pass
     wh_mod._pending_timers.clear()
     yield
+    gate_mod.reset_job_gate()
     reset_settings_manager()
     with jobs_mod._job_lock:
         jobs_mod._job_manager = None
@@ -84,6 +87,9 @@ def _reset_singletons():
 
 @pytest.fixture()
 def app(tmp_path, monkeypatch):
+    # The synchronous thread shim nests retries before their parent releases its slot.
+    # These tests cover retry results; real worker admission has separate threaded coverage.
+    monkeypatch.setattr("media_preview_generator.jobs.group_runtime.admission_capacity", lambda kind: None)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
@@ -2874,3 +2880,46 @@ class TestDefaultRetryCount:
                 0,
             )
         ]
+
+
+def test_proven_chapter_corruption_settles_with_warning_without_spawning_retry(app, no_retry_wait):
+    from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+    from media_preview_generator.processing.chapters import ChapterSourceCorruptionError, _failure
+    from media_preview_generator.processing.generator import ProcessingResult, _notify_file_result
+    from media_preview_generator.web.jobs import JobStatus, get_job_manager
+    from media_preview_generator.web.routes.job_runner import _start_job_async
+
+    path = "/data/movies/Invalid seek index.mkv"
+    chapter = _failure(ChapterSourceCorruptionError("Matroska seek index points to invalid Cues data"), 8, 36)
+    row = {
+        "server_id": "plex-1",
+        "server_name": "Plex Main",
+        "server_type": "plex",
+        "status": "published_chapters_failed",
+        "artifacts": {"bif": {"status": "skipped_output_exists"}, "chapters": chapter.to_dict()},
+    }
+
+    def processing(config, selected_gpus, **kwargs):
+        _notify_file_result(path, ProcessingResult.SKIPPED_BIF_EXISTS, chapter.message, "Checking", servers=[row])
+        aggregate = {}
+        fold_publisher_rows_into_aggregate(aggregate, [row])
+        get_job_manager().set_publishers(kwargs["job_id"], list(aggregate.values()))
+        return {"outcome": {"skipped_bif_exists": 1}, "webhook_resolution": _all_resolved(1, {path: path})}
+
+    with (
+        app.app_context(),
+        patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=processing) as run,
+    ):
+        manager = get_job_manager()
+        job = manager.create_job(library_name="Chapter corruption", config={"source": "manual"})
+        _start_job_async(
+            job.id, config_overrides={"webhook_paths": [path], "server_id": "plex-1", "webhook_retry_count": 5}
+        )
+        assert _retries_of(manager, job.id) == []
+        assert job.status is JobStatus.COMPLETED
+        assert "chapter thumbnails failed for 1" in job.error
+        assert job.progress.outcome == {"skipped_bif_exists": 1}
+        assert manager.get_file_results(job.id)[0]["servers"][0]["artifacts"]["chapters"] == chapter.to_dict()
+    run.assert_called_once()
+    assert run.call_args.args[0].webhook_paths == [path]
+    assert run.call_args.kwargs["job_id"] == job.id

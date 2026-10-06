@@ -346,3 +346,74 @@ def test_files_footer_refreshes_files_and_logs_actions_return_on_logs(
     page.locator("#filesTab").click()
     expect(footer.locator("[data-logs-footer]:visible")).to_have_count(0)
     assert writes == []
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_manifest_requested_paths_page_search_error_and_stale_response(creation_page, width):
+    page, writes = creation_page
+    page.set_viewport_size({"width": width, "height": 900})
+    paths = [f"/data/item-{index:04}.mkv" for index in range(1001)]
+    damaged = [False]
+    page.route("**/api/jobs/*/logs**", lambda route: _fulfill_json(route, {"logs": [], "total_lines": 0}))
+
+    def files(route):
+        args = parse_qs(urlparse(route.request.url).query)
+        if args.get("view") != ["requested"]:
+            _fulfill_json(route, {"files": [], "total": 0})
+            return
+        if damaged[0]:
+            route.fulfill(
+                status=503, content_type="application/json", body='{"error":"Could not read requested paths"}'
+            )
+            return
+        search = args.get("search", [""])[0].lower()
+        matches = [path for path in paths if search in path.lower()]
+        per_page = int(args.get("per_page", [100])[0])
+        total_pages = max(1, (len(matches) + per_page - 1) // per_page)
+        number = min(int(args.get("page", [1])[0]), total_pages)
+        offset = (number - 1) * per_page
+        _fulfill_json(
+            route,
+            {
+                "files": [{"file": path} for path in matches[offset : offset + per_page]],
+                "page": number,
+                "total_pages": total_pages,
+                "total": len(paths),
+                "filtered_count": len(matches),
+            },
+        )
+
+    page.route("**/api/jobs/*/files?**", files)
+    page.evaluate("""() => {
+        jobs = [{id:'manifest-paths',library_name:'Loudness library',kind:'loudness',status:'pending',
+            config:{file_paths:[],file_paths_ref:'input.json',file_paths_count:1001},publishers:[],progress:{}}];
+        openJobDetails('manifest-paths', 'files', 'requested');
+    }""")
+    rows = page.locator("#fileResultsBody tr")
+    expect(rows).to_have_count(100)
+    expect(page.locator("#fileResultsCount")).to_contain_text("1,001 requested paths")
+    expect(page.locator("#fileResultsView")).to_be_visible()
+    page.locator("#filePaginationControls").get_by_role("link", name="11", exact=True).click()
+    expect(rows).to_have_count(1)
+    expect(rows.first.locator("code")).to_have_text(paths[-1])
+    page.locator("#fileResultsSearch").fill("item-1000")
+    expect(page.locator("#fileResultsCount")).to_contain_text("1 requested paths")
+    expect(rows.first.locator("code")).to_have_text(paths[-1])
+    damaged[0] = True
+    page.evaluate("refreshFileResults()")
+    expect(page.locator("#fileResultsBody")).to_contain_text("Could not load requested paths")
+    damaged[0] = False
+    page.get_by_role("button", name="Try again", exact=True).click()
+    expect(rows.first.locator("code")).to_have_text(paths[-1])
+    page.evaluate("""() => {
+        const original = apiGet;
+        apiGet = url => url.includes('view=requested') ? new Promise(resolve => window.lateRequested = resolve) : original(url);
+        refreshFileResults();
+    }""")
+    page.locator("#fileResultsView").select_option("results")
+    expect(page.locator("#fileResultsBody")).to_contain_text("No matching files")
+    page.evaluate(
+        """() => window.lateRequested({files:[{file:'/data/stale.mkv'}],page:1,total_pages:1,total:1,filtered_count:1})"""
+    )
+    expect(page.locator("#fileResultsBody")).to_contain_text("No matching files")
+    assert writes == []

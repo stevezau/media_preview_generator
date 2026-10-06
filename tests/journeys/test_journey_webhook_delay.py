@@ -68,6 +68,7 @@ def delay_flow(app) -> Iterator[SimpleNamespace]:
     with (
         app.app_context(),
         patch.object(wh, "datetime", Clock),
+        patch.object(job_runner, "datetime", Clock),
         patch.object(wh, "threading", SimpleNamespace(Timer=make_timer)),
         patch.object(wh, "_kick_early_scan") as scans,
         patch("media_preview_generator.web.routes._start_job_async", side_effect=job_runner._start_job_async) as start,
@@ -491,9 +492,10 @@ def test_manual_reprocess_starts_immediately_without_initial_delay_state(delay_f
     assert "webhook_fire_at" not in replay.config
 
 
-def test_automatic_retry_uses_its_own_backoff_not_global_webhook_delay(delay_flow) -> None:
+@pytest.mark.parametrize("remaining,expected_sleeps", [(-60, []), (7, [2, 2, 2, 1])])
+def test_automatic_retry_uses_its_own_backoff_not_global_webhook_delay(delay_flow, remaining, expected_sleeps) -> None:
     flow = delay_flow
-    scheduled_at = (flow.clock.now - timedelta(seconds=60)).isoformat()
+    scheduled_at = (flow.clock.now + timedelta(seconds=remaining)).isoformat()
     job = jobs.get_job_manager().create_job(
         library_name="Retry",
         config={
@@ -512,7 +514,7 @@ def test_automatic_retry_uses_its_own_backoff_not_global_webhook_delay(delay_flo
     assert config.webhook_paths == ["/data/show/one.mkv"]
     assert config.webhook_source == "sonarr"
     assert config.server_id_filter == "plex-1"
-    assert [call.args[0] for call in sleep.call_args_list if call.args[0] >= 1] == [2, 2, 2, 1]
+    assert [call.args[0] for call in sleep.call_args_list if call.args[0] >= 1] == expected_sleeps
     assert not any(call.args[0] == "webhook_delay" for call in get.call_args_list)
     assert job.config["scheduled_at"] == scheduled_at
     assert job.config["retry_delay"] == 7

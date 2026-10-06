@@ -211,6 +211,11 @@
                         aria-label="Retry the chain now">
                     <i class="bi bi-lightning-charge-fill me-1" aria-hidden="true"></i>Retry now
                 </button>
+                <button type="button" class="btn btn-outline-warning d-none"
+                        id="opActionReprocess" onclick="onOperatorReprocess()"
+                        title="Start a new job with this job's full selection and settings">
+                    <i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>Re-run job
+                </button>
                 <button type="button" class="btn btn-outline-danger d-none"
                         id="opActionCancelChain" onclick="onOperatorCancelChain()"
                         title="Cancel this retry chain — pending retry timer is dropped and any in-flight attempts get a cancellation signal"

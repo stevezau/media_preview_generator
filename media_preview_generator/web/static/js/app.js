@@ -24,7 +24,7 @@ let jobPerPage = parseInt(localStorage.getItem('jobPerPage') || '50', 10);
 let jobTotalPages = 1;
 let jobTotal = 0;
 let jobSearch = '';
-let jobStatusFilter = '';
+let jobStatusFilter = 'active';
 let jobServerFilter = '';
 let jobLibraryFilter = '';
 let jobKindFilter = '';
@@ -32,6 +32,7 @@ let jobFilterOptions = {servers: [], libraries: []};
 let _jobFilterOptionsSignature = '';
 let _jobSearchTimer = null;
 let _jobsLoadSequence = 0;
+let _jobsLoadRequest = null;
 
 function changeJobSearch(value) {
     jobSearch = value.trim();
@@ -51,6 +52,8 @@ function changeJobStatus(value) {
 
 // Latest /api/jobs/stats, kept so the status tabs and the Clear jobs menu can show counts.
 let _jobStats = null;
+// Latest chapter_warning_count from /api/jobs; drives the Chapter warnings tab.
+let _chapterWarningCount = 0;
 
 // The tabs and the hidden Status select describe the same filter; this keeps both in step with jobStatusFilter.
 function renderStatusTabs() {
@@ -61,9 +64,16 @@ function renderStatusTabs() {
         tab.classList.toggle('on', on);
         tab.setAttribute('aria-pressed', String(on));
     });
+    const warningTab = document.getElementById('chapterWarningsTab');
+    if (warningTab) warningTab.hidden = !(_chapterWarningCount > 0 || jobStatusFilter === 'chapter_warnings');
+    const warningCount = document.querySelector('[data-status-count="chapter_warnings"]');
+    if (warningCount) warningCount.textContent = _chapterWarningCount > 0 ? _chapterWarningCount.toLocaleString() : '';
     if (!_jobStats) return;
     document.querySelectorAll('[data-status-count]').forEach(el => {
-        el.textContent = Number(_jobStats[el.dataset.statusCount] || 0).toLocaleString();
+        const key = el.dataset.statusCount;
+        if (key === 'chapter_warnings') return;
+        const n = key === 'active' ? Number(_jobStats.pending || 0) + Number(_jobStats.running || 0) : Number(_jobStats[key] || 0);
+        el.textContent = n.toLocaleString();
     });
     document.querySelectorAll('[data-clear-count]').forEach(el => {
         el.textContent = Number(_jobStats[el.dataset.clearCount] || 0).toLocaleString();
@@ -86,12 +96,18 @@ document.addEventListener('change', event => {
 });
 
 function jobFiltersActive() {
-    return !!(jobSearch || jobStatusFilter || jobServerFilter || jobLibraryFilter || jobKindFilter);
+    return !!(jobSearch || jobStatusFilter !== 'active' || jobServerFilter || jobLibraryFilter || jobKindFilter);
 }
 
 function updateJobFilterSummary() {
     const clear = document.getElementById('clearJobFilters');
     const count = document.getElementById('jobFilterCount');
+    const scope = document.getElementById('jobListScope');
+    if (scope) {
+        scope.textContent = jobStatusFilter === 'active' ? 'Unfinished work'
+            : !jobStatusFilter ? 'Queue and history'
+            : document.getElementById('jobStatusFilter')?.selectedOptions[0]?.textContent || 'Filtered jobs';
+    }
     if (clear) clear.hidden = !jobFiltersActive();
     if (count) {
         count.hidden = !jobFiltersActive();
@@ -148,11 +164,12 @@ function changeJobLibrary(value) {
 
 function changeJobKind(value) { jobKindFilter = value; _reloadFilteredJobs(); }
 
-function clearJobFilters() {
-    jobSearch = jobStatusFilter = jobServerFilter = jobLibraryFilter = jobKindFilter = '';
+function clearJobFilters(status = 'active') {
+    jobSearch = jobServerFilter = jobLibraryFilter = jobKindFilter = '';
+    jobStatusFilter = status;
     for (const id of ['jobSearch', 'jobStatusFilter', 'jobServerFilter', 'jobKindFilter']) {
         const control = document.getElementById(id);
-        if (control) control.value = '';
+        if (control) control.value = id === 'jobStatusFilter' ? status : '';
     }
     renderStatusTabs();
     updateJobLibraryChoices();
@@ -855,23 +872,46 @@ window._dedupeActivityCount = _dedupeActivityCount;
 // landed, the hover guard would otherwise keep the row stale until the pointer moves away.
 async function loadJobs(options) {
     const force = !!(options && options.force === true);
-    const sequence = ++_jobsLoadSequence;
+    const params = new URLSearchParams({page: jobPage, per_page: jobPerPage});
+    if (jobSearch) params.set('q', jobSearch);
+    if (jobStatusFilter) params.set('status', jobStatusFilter);
+    if (jobServerFilter) params.set('server_id', jobServerFilter);
+    if (jobKindFilter) params.set('kind', jobKindFilter);
+    if (jobLibraryFilter) {
+        const [serverId, libraryId] = JSON.parse(jobLibraryFilter);
+        params.set('library_server_id', serverId);
+        params.set('library_id', libraryId);
+    }
+    const query = params.toString();
+    // Polls and socket events must not supersede a slower response for the same page.
+    // Explicit user actions still fetch fresh state after their mutation completes.
+    if (!force && _jobsLoadRequest?.query === query && _jobsLoadRequest.sequence === _jobsLoadSequence) {
+        return _jobsLoadRequest.promise;
+    }
+    const request = {query, force, sequence: ++_jobsLoadSequence, promise: null};
+    _jobsLoadRequest = request;
+    request.promise = _loadJobsPage(request);
+    return request.promise;
+}
+
+async function _loadJobsPage(request) {
+    const {force, sequence} = request;
     try {
-        const params = new URLSearchParams({page: jobPage, per_page: jobPerPage});
-        if (jobSearch) params.set('q', jobSearch);
-        if (jobStatusFilter) params.set('status', jobStatusFilter);
-        if (jobServerFilter) params.set('server_id', jobServerFilter);
-        if (jobKindFilter) params.set('kind', jobKindFilter);
-        if (jobLibraryFilter) {
-            const [serverId, libraryId] = JSON.parse(jobLibraryFilter);
-            params.set('library_server_id', serverId);
-            params.set('library_id', libraryId);
-        }
-        const data = await apiGet('/api/jobs?' + params.toString());
+        const data = await apiGet('/api/jobs?' + request.query);
         if (sequence !== _jobsLoadSequence) return;
         jobs = data.jobs || [];
         jobTotal = data.total || 0;
         jobTotalPages = data.pages || 1;
+        const chapterNotice = document.getElementById('chapterWarningsNotice');
+        const chapterNoticeText = document.getElementById('chapterWarningsText');
+        const chapterWarnings = Number(data.chapter_warning_count);
+        const hasChapterWarnings = Number.isInteger(chapterWarnings) && chapterWarnings > 0;
+        _chapterWarningCount = hasChapterWarnings ? chapterWarnings : 0;
+        renderStatusTabs();
+        if (chapterNotice) chapterNotice.classList.toggle('d-none', !hasChapterWarnings);
+        if (chapterNoticeText && hasChapterWarnings) {
+            chapterNoticeText.textContent = `${chapterWarnings.toLocaleString()} ${chapterWarnings === 1 ? 'job ended' : 'jobs ended'} with chapter issues. Review the saved results before running those jobs again.`;
+        }
         updateJobFilterOptions(data.filter_options);
         updateJobFilterSummary();
         if (jobPage > jobTotalPages) {
@@ -920,6 +960,8 @@ async function loadJobs(options) {
                 </tr>
             `;
         }
+    } finally {
+        if (_jobsLoadRequest === request) _jobsLoadRequest = null;
     }
 }
 
@@ -1743,7 +1785,7 @@ const STATUS_META = {
 
     // Legacy / pipeline-specific outcomes.
     skipped_file_not_found: { label: 'Not Found',     cls: 'bg-warning text-dark', tip: 'File not found on disk' },
-    skipped_source_gone:    { label: 'Gone from disk', cls: 'bg-secondary', tip: 'Replaced by a newer file before this job reached it; the newer file is run on its own.' },
+    skipped_source_gone:    { label: 'Gone from disk', cls: 'bg-secondary', tip: 'Confirmed deleted or replaced before this job reached it. Any replacement is processed by its own job.' },
     skipped_excluded:       { label: 'Excluded',      cls: 'bg-secondary', tip: 'Path matched an exclusion rule' },
     skipped_invalid_hash:   { label: 'Invalid Hash',  cls: 'bg-warning text-dark', tip: 'Could not compute the path hash' },
     unresolved_plex:        { label: 'Not In Plex',   cls: 'bg-danger', tip: 'Could not find this item in Plex after lookup' },
@@ -1892,12 +1934,13 @@ function _markersFilesBlock(job) {
 function _markersFilesBody(job) {
     const cached = _jobFileLists.get(String(job.id));
     const cfg = job.config || {};
-    const paths = Array.isArray(cfg.webhook_paths) && cfg.webhook_paths.length ? cfg.webhook_paths : Array.isArray(cfg.file_paths) ? cfg.file_paths : [];
+    const paths = cfg.file_paths_ref ? (cached?.data?.files || []).map(file => file.path)
+        : Array.isArray(cfg.webhook_paths) && cfg.webhook_paths.length ? cfg.webhook_paths : Array.isArray(cfg.file_paths) ? cfg.file_paths : [];
     const names = Array.isArray(cfg.webhook_basenames) ? cfg.webhook_basenames : [];
     if (paths.length || names.length) {
         // Match API-resolved media titles by actual path, preserving input order and duplicates.
         const titles = new Map((cached?.data?.files || []).map(file => [file.path, file.title]));
-        const total = paths.length || names.length;
+        const total = Number(cfg.file_paths_count) || paths.length || names.length;
         const requested = paths.length ? paths.slice(0, 5).map((path, index) => ({path, name: names[index] || '', title: titles.get(path) || ''})) : names.slice(0, 5).map(name => ({name}));
         return `<h3 class="job-detail-heading">Requested paths <span class="text-body-secondary">${total.toLocaleString()}</span></h3>`
             + _queueFileRows(requested)
@@ -2370,8 +2413,8 @@ function updateJobQueue(force) {
                 <tr>
                     <td colspan="7" class="queue-empty">
                         <i class="bi bi-inbox" aria-hidden="true"></i>
-                        <div class="queue-empty-title">${jobFiltersActive() ? 'No jobs match these filters.' : 'No jobs yet'}</div>
-                        <div class="queue-empty-sub">${jobFiltersActive() ? 'Change a filter or use Clear filters to see other jobs.' : 'New jobs will show up here once you start one.'}</div>
+                        <div class="queue-empty-title">${jobFiltersActive() ? 'No jobs match these filters.' : 'Nothing queued'}</div>
+                        <div class="queue-empty-sub">${jobFiltersActive() ? 'Change a filter or use Clear filters to see other jobs.' : 'Start a job, or choose All jobs and history (the All tab) to review past work.'}</div>
                         ${jobFiltersActive() ? '' : '<button type="button" class="btn btn-primary dash-btn-primary queue-empty-action" onclick="showNewJobModal()"><i class="bi bi-play-fill me-2" aria-hidden="true"></i>Start new job</button>'}
                     </td>
                 </tr>
@@ -2420,6 +2463,7 @@ function updateJobQueue(force) {
         const _isRetryRowPre = !!(job.config && (job.config.is_retry || job.config.is_retry_chain));
         const isWaitingRetryRow =
             (job.status === 'pending' && _isRetryRowPre && _scheduledAtPre) || _inWorkerRetryWaitPre;
+        const isActiveRetryChain = !!job.config?.is_retry_chain && ['pending', 'running'].includes(job.status);
         const webhookFireAt = job.config && job.config.webhook_fire_at;
         const isWaitingWebhookRow =
             job.status === 'pending'
@@ -2522,8 +2566,16 @@ function updateJobQueue(force) {
         } else if (isWaitingRetryRow) {
             const remaining = Math.max(0, Math.ceil((new Date(countdownTarget).getTime() - Date.now()) / 1000));
             const waitWord = _countdownWord(job, 'Retry starting');
-            const label = remaining > 0 ? `${waitWord} ${_formatCountdown(remaining)}` : 'Starting...';
+            const label = remaining > 0 ? `${waitWord} ${_formatCountdown(remaining)}` : 'Queued for retry';
             progressCell = `<span class="text-warning small" data-scheduled-at="${escapeHtml(countdownTarget)}" data-countdown-label="${escapeHtmlAttr(waitWord)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
+        } else if (isActiveRetryChain) {
+            const processed = Number(job.progress.processed_items) || 0;
+            const total = Number(job.progress.total_items) || 0;
+            const checked = total ? `<span class="queue-phase text-body-secondary" data-queue-checked>${processed.toLocaleString()} / ${total.toLocaleString()} checked</span>` : '';
+            const chapterRetry = (job.publishers || []).some(publisher => Number(publisher.retryable_counts?.published_chapters_failed) > 0);
+            const retryLabel = job.paused || markersPause ? 'Retry paused'
+                : job.status === 'running' ? 'Retry in progress' : 'Queued for retry';
+            progressCell = `<span class="small text-warning">${retryLabel}${chapterRetry ? ' · Chapter thumbnails' : ''}</span>${checked}`;
         } else {
             // Bar colour per status comes from queue.css via [data-status]; only a running bar animates, and a
             // paused Intro & Credits job does no work.
@@ -2539,11 +2591,11 @@ function updateJobQueue(force) {
                 : `<span class="small text-body-secondary">${job.status === 'pending' ? 'Queued' : job.status === 'running' ? 'Starting…' : 'No progress recorded'}</span>`;
 
         }
-        const followsId = isMarkers && job.config && job.config.follows_job_id
+        const followsId = ownRunner && job.config && job.config.follows_job_id
             && jobs.some(function (j) { return String(j.id) === String(job.config.follows_job_id); })
             ? String(job.config.follows_job_id)
             : '';
-        const followTip = `Runs after preview job ${followsId.substring(0, 8)} finishes its first try`;
+        const followTip = `Companion of job ${followsId.substring(0, 8)}`;
         const rowTitle = isMarkers ? _markersDisplayName(job.library_name) : job.kind === JOB_KIND_LOUDNESS
             ? (job.library_name || '').replace(/^((?:Retry|Verify): )?Plex loudness(?::| ·) (.+)$/, '$1$2') : (job.library_name || '');
         const nameHtml = (followsId
@@ -2922,7 +2974,9 @@ function updateJobProgress(jobId, progress, publishers) {
         if (label) label.textContent = pct.toFixed(1) + '%';
         const count = row.querySelector('[data-queue-items]');
         if (count) count.textContent = `${Number(job.progress.processed_items || 0).toLocaleString()} / ${job.progress.total_items ? Number(job.progress.total_items).toLocaleString() : '?'}`;
-        const phase = row.querySelector('.queue-phase');
+        const checked = row.querySelector('[data-queue-checked]');
+        if (checked) checked.textContent = `${Number(job.progress.processed_items || 0).toLocaleString()} / ${Number(job.progress.total_items || 0).toLocaleString()} checked`;
+        const phase = row.querySelector('.queue-phase:not([data-queue-checked])');
         if (phase) phase.textContent = job.config?.resource_wait?.reason || job.progress.current_item || '';
     }
     const detail = document.getElementById('job-detail-' + jobId);
@@ -4114,7 +4168,7 @@ function _updateElapsedTimers() {
             var word = el.getAttribute('data-countdown-label') || 'Retry starting';
             el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>' + escapeHtml(word) + ' ' + _formatCountdown(remaining);
         } else {
-            el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Starting...';
+            el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Queued for retry';
         }
     });
     // Webhook debounce countdown — same shape as the retry countdown

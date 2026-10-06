@@ -61,12 +61,19 @@ def _reset_singletons():
     import media_preview_generator.web.jobs as jobs_mod
     import media_preview_generator.web.routes.job_runner as jr_mod
     import media_preview_generator.web.scheduler as sched_mod
+    from media_preview_generator.web.settings_manager import get_settings_manager
 
     with jobs_mod._job_lock:
         jobs_mod._job_manager = None
     with sched_mod._schedule_lock:
         sched_mod._schedule_manager = None
     gate_mod.reset_job_gate()
+    # Isolate the global cap/priority reservation contract in these journeys.
+    # Kind-aware admission has separate real-runner and contention coverage.
+    gate_mod._gate = gate_mod.JobGate(
+        lambda: get_settings_manager().get("max_concurrent_jobs", 3),
+        kind_capacity_provider=None,
+    )
     threads_before = {t.ident for t in _threading.enumerate()}
     yield
 

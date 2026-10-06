@@ -18,6 +18,9 @@
 
 /* Tools row: segmented status tabs, search and compact filters */
 .dashboard-layout .queue-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.dashboard-layout .queue-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 18px; background: var(--warn-soft, rgba(245, 158, 11, .12)); color: var(--bs-body-color); border-bottom: 1px solid var(--line); font-size: 13px; }
+.dashboard-layout .queue-notice.d-none { display: none; }
+.dashboard-layout .queue-notice > .bi { color: var(--warn, #f59e0b); }
 .dashboard-layout .seg { display: inline-flex; max-width: 100%; padding: 3px; gap: 2px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); overflow-x: auto; }
 .dashboard-layout .seg button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; transition: background-color .16s ease-out, color .16s ease-out; }
 .dashboard-layout .seg button:hover { color: var(--bs-body-color); }

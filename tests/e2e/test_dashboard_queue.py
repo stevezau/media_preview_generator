@@ -89,11 +89,12 @@ class TestStatusTabs:
         authed_page.goto(app_url + "/")
         tabs = authed_page.locator("#jobStatusTabs")
         expect(tabs.get_by_role("button", name="Failed 20")).to_be_visible()
-        expect(tabs.get_by_role("button", name="All 1,127")).to_have_attribute("aria-pressed", "true")
+        expect(tabs.get_by_role("button", name="Unfinished 19")).to_have_attribute("aria-pressed", "true")
+        expect(authed_page.locator("#jobStatusFilter")).to_have_value("active")
         with authed_page.expect_response(lambda r: parse_qs(urlparse(r.url).query).get("status") == ["failed"]):
             tabs.get_by_role("button", name="Failed 20").click()
         expect(tabs.get_by_role("button", name="Failed 20")).to_have_attribute("aria-pressed", "true")
-        expect(tabs.get_by_role("button", name="All 1,127")).to_have_attribute("aria-pressed", "false")
+        expect(tabs.get_by_role("button", name="Unfinished 19")).to_have_attribute("aria-pressed", "false")
         expect(authed_page.locator("#jobStatusFilter")).to_have_value("failed")
         assert queries[-1]["page"] == ["1"]
 

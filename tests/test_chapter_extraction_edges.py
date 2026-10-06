@@ -47,7 +47,7 @@ def test_declared_hdr_input_colors_reach_zscale(extraction, transfer, expected):
     options = factory.call_args.kwargs
     assert options["path_kind"] == "hdr10_zscale"
     assert options["hdr10_zscale_chain"].startswith(f"zscale=tin={expected}:pin=bt2020:min=bt2020nc:t=linear")
-    assert options["base_scale"] == "scale=w=1280:h=-2"
+    assert options["base_scale"] == "scale=w=1280:h=-2:in_range=tv:out_range=pc,format=yuvj420p"
 
 
 @pytest.mark.parametrize("transfer,hdr", [(None, None), (None, "SMPTE ST 2086"), ("BT.709", None)])
@@ -128,9 +128,11 @@ def test_no_endpoint_retry_without_safe_video_duration(extraction, duration):
     track, factory, extract, _, _ = extraction
     track.duration = duration
     factory.return_value = lambda **kwargs: (234, 0, "", ["No filtered frames"])
-    with pytest.raises(RuntimeError):
+    expected_error = ValueError if duration == 999 else RuntimeError
+    expected_message = "outside the current video's duration" if duration == 999 else "FFmpeg exit 234"
+    with pytest.raises(expected_error, match=expected_message):
         extract()
-    assert factory.call_count == 1
+    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == [10000]
 
 
 @pytest.mark.parametrize(
@@ -145,9 +147,11 @@ def test_no_endpoint_retry_without_safe_video_duration(extraction, duration):
 def test_no_retry_for_truncation_early_seek_or_other_filter_failure(extraction, start, stderr):
     _, factory, extract, _, _ = extraction
     factory.return_value = lambda **kwargs: (234, 0, "", stderr)
-    with pytest.raises(RuntimeError) as error:
+    expected_error = ValueError if start == 12000 else RuntimeError
+    expected_message = "outside the current video's duration" if start == 12000 else "FFmpeg exit 234"
+    with pytest.raises(expected_error, match=expected_message) as error:
         extract(start)
-    assert factory.call_count == 1
+    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == [start]
     if "File ended prematurely" in stderr:
         assert "source ended prematurely" in str(error.value)
 

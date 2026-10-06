@@ -1326,9 +1326,14 @@ Worker availability never clears these holds.
 
 #### GET /api/jobs
 
-Optional query parameters: `page` (default 1; 0 returns all), `per_page` (default 50, maximum 200), `q` (case-insensitive job, library, source or server label search), and `status` (`running`, `pending`, `completed`, `failed`, `cancelled`, or `paused`). Omit `status` or use `all` for every status. `paused` selects pending or running jobs with their own pause hold, independently of global pause. An invalid status returns `400`.
+Optional query parameters: `page` (default 1; 0 returns all), `per_page` (default 50, maximum 200), `q` (case-insensitive job, library, source or server label search), and `status` (`active`, `running`, `pending`, `completed`, `failed`, `cancelled`, `paused`, or `chapter_warnings`). Omit `status` or use `all` for every status. `active` selects unfinished pending or running jobs, including paused jobs and retry heads. The dashboard initially requests this filter; the API default remains all statuses. `paused` selects pending or running jobs with their own pause hold, independently of global pause. `chapter_warnings` selects visible terminal preview jobs whose saved publisher summaries report failed, waiting or incomplete chapters. An invalid status returns `400`.
 
 Search and status filters apply before pagination. The response includes `total`, `page`, `per_page` and `pages` for the filtered list; dashboard statistics remain unfiltered. Retry attempts are hidden by default; `include_retry_attempts=1` includes them.
+
+`chapter_warning_count` is the number of visible terminal preview jobs with saved chapter issues, independent of
+the current page, search, status, server, library and kind filters. It excludes hidden retry attempts even when
+they are requested. Typed chapter counts take precedence over legacy publication counts. This describes job
+history rather than the current state of every media file; a later successful run does not rewrite an older job.
 
 ```json
 {
@@ -1923,7 +1928,7 @@ unless noted.
 | POST | `/api/jobs/{id}/retry-now` | Skip the retry back-off on a chain-head job whose next attempt is currently in the back-off countdown. Returns 200 + `{"fired": true, ...}` on success, 409 when no retry is pending, 400 if the job isn't a chain head. |
 | POST | `/api/jobs/{id}/fire-webhook-now` | Skip the initial wait on a pending webhook job, including source-specific batches and universal/per-server jobs. Returns 202 when dispatched, or 404 when no pending webhook timer exists for the job. Automatic restart recovery restores pending timers from saved job deadlines. |
 | GET | `/api/jobs/{id}/logs` | Paginated log stream — `?offset=&limit=` (limit capped at 5000); or legacy `?last=N` for the tail |
-| GET | `/api/jobs/{id}/files` | Per-file outcomes — paginated `?page=&per_page=` (per_page capped at 500), plus optional `?outcome=` and `?search=` filters. The underlying per-job JSONL is itself soft-capped at 5000 rows; past that, a `truncated` marker row appears and aggregate counts remain in `progress.outcome`. |
+| GET | `/api/jobs/{id}/files` | Per-file outcomes — paginated `?page=&per_page=` (per_page capped at 500), plus optional `?outcome=` and `?search=` filters. Use `?view=requested` to list the complete selected paths, with search and pagination, instead of recorded outcomes; requested paths do not imply completed processing. The underlying outcome JSONL is soft-capped at 5000 rows; past that, a `truncated` marker row appears and aggregate counts remain in `progress.outcome`. |
 | POST | `/api/jobs/clear` | Delete completed/failed jobs from the queue |
 | GET | `/api/jobs/stats` | Totals grouped by status |
 | GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`). Busy workers include their actual `job_id` and `current_file`; `job_kind` and `paused` reflect that job's current state. Idle workers have no current job or file. Global processing pause is separate. |

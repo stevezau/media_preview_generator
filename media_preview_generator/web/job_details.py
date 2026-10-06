@@ -1,7 +1,7 @@
 """What the Jobs page shows about a job beyond its own fields: the libraries it covers and the files it lists.
 
-Both come from the saved server configs, the job's config and its file results; nothing here asks a server or touches
-the disk.
+Both come from saved settings, job selections and file results. Large loudness
+selections are read from their private input manifests; media files are not opened.
 """
 
 from __future__ import annotations
@@ -10,13 +10,55 @@ import os
 import unicodedata
 from collections.abc import Iterable, Sequence
 
+from loguru import logger
+
 from ..servers.base import ServerConfig
-from ..servers.ownership import OwnershipMatch, find_library_matches, webhook_path_candidates
+from ..servers.ownership import OwnershipMatch, apply_path_mappings, find_library_matches, webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-from .jobs import Job
+from .jobs import Job, JobStatus, is_user_visible_job
 
 # A job's files looked up for its libraries: a webhook batch is one show or film, so its first files name them all.
 _PATHS_FOR_LIBRARIES = 20
+LibraryIndex = list[list[tuple[str, OwnershipMatch]]]
+
+
+def job_has_chapter_warning(job: Job) -> bool:
+    """Identify finished preview heads that reported incomplete chapter outputs."""
+    if (
+        job.kind != "previews"
+        or job.status not in (JobStatus.COMPLETED, JobStatus.FAILED)
+        or not is_user_visible_job(job)
+    ):
+        return False
+    for publisher in job.publishers or []:
+        if not isinstance(publisher, dict):
+            continue
+        chapters = publisher.get("chapter_counts")
+        if isinstance(chapters, dict) and chapters:
+            counts = (chapters.get(key) for key in ("failed", "waiting", "incomplete"))
+        else:
+            legacy = publisher.get("counts")
+            if not isinstance(legacy, dict):
+                continue
+            counts = (legacy.get(key) for key in ("published_chapters_failed", "published_pending_chapters"))
+        if any(type(count) is int and count > 0 for count in counts):
+            return True
+    return False
+
+
+def job_file_paths(job: Job) -> list[str]:
+    """Read inline or durable selected paths for job details and Inspector matching."""
+    cfg = job.config or {}
+    if not cfg.get("file_paths_ref"):
+        return list(cfg.get("file_paths") or [])
+    from ..loudness.inputs import read_file_paths
+    from .jobs import get_job_manager
+
+    try:
+        return read_file_paths(get_job_manager().config_dir, cfg)
+    except (OSError, ValueError):
+        logger.warning("Could not read the selected files for loudness job {}", job.id)
+        return []
 
 
 def saved_server_configs(entries: object) -> list[ServerConfig]:
@@ -39,7 +81,9 @@ def saved_server_configs(entries: object) -> list[ServerConfig]:
     return configs
 
 
-def job_library_names(job: Job, configs: Sequence[ServerConfig]) -> list[str]:
+def job_library_names(
+    job: Job, configs: Sequence[ServerConfig], requested_paths: Sequence[str] | None = None
+) -> list[str]:
     """The names of the libraries a job covers, where its config says: the libraries it was started on, else the
     libraries holding the files it lists.
 
@@ -56,11 +100,13 @@ def job_library_names(job: Job, configs: Sequence[ServerConfig]) -> list[str]:
     named = _started_on(cfg, job, configs, pin)
     if named:
         return _distinct(named)
-    paths = [str(p) for p in [*(cfg.get("file_paths") or []), *(cfg.get("webhook_paths") or [])] if p]
+    given = job_file_paths(job) if requested_paths is None else requested_paths
+    paths = [str(p) for p in [*given, *(cfg.get("webhook_paths") or [])] if p]
+    index = _library_index(configs)
     held = [
         match.library_name
         for path in paths[:_PATHS_FOR_LIBRARIES]
-        for match in _library_matches(path, list(configs))
+        for match in _library_matches(path, list(configs), index)
         if pin is None or match.server_id == pin
     ]
     return _distinct(held)
@@ -70,6 +116,7 @@ def job_library_scope(
     job: Job,
     configs: Sequence[ServerConfig],
     path_cache: dict[str, list[OwnershipMatch]] | None = None,
+    requested_paths: Sequence[str] | None = None,
 ) -> list[dict[str, str]]:
     """Resolve saved job selections or requested paths to exact server/library pairs.
 
@@ -84,6 +131,8 @@ def job_library_scope(
 
     def add(server_id: str, library_id: str, library_name: str = "") -> None:
         if not server_id or not library_id or (pin and server_id != pin):
+            return
+        if (server_id, library_id) in pairs:
             return
         server = servers.get(server_id)
         library = next((lib for lib in server.libraries if str(lib.id) == library_id), None) if server else None
@@ -147,10 +196,12 @@ def job_library_scope(
         ]
         if prefix
     }
-    paths = [*(cfg.get("file_paths") or []), *(cfg.get("webhook_paths") or [])]
+    given = job_file_paths(job) if requested_paths is None else requested_paths
+    paths = [*given, *(cfg.get("webhook_paths") or [])]
     paths.extend(
         (cfg.get("version_rerun_files") or {}).keys() if isinstance(cfg.get("version_rerun_files"), dict) else []
     )
+    index = _library_index(configs)
     for path in dict.fromkeys(path for path in paths if isinstance(path, str) and path):
         # Sibling files share prefix matches. A requested folder that is itself a
         # mapping boundary may translate differently, so keep its exact key.
@@ -161,20 +212,57 @@ def job_library_scope(
             else "directory:" + os.path.dirname(normalized)
         )
         if key not in cache:
-            cache[key] = _library_matches(path, list(configs))
+            cache[key] = _library_matches(path, list(configs), index)
         for match in cache[key]:
             add(match.server_id, match.library_id, match.library_name)
     return list(pairs.values())
 
 
-def _library_matches(path: str, configs: list[ServerConfig]) -> list[OwnershipMatch]:
+def _library_index(configs: Sequence[ServerConfig]) -> LibraryIndex:
+    """Translate library roots once instead of repeating that work for every file."""
+    index: LibraryIndex = []
+    for server in configs:
+        if not server.enabled:
+            continue
+        for library in server.libraries:
+            prefixes = []
+            for remote in library.remote_paths:
+                if not (remote or "").strip():
+                    continue
+                for local in apply_path_mappings(remote, server.path_mappings):
+                    if (local or "").strip():
+                        prefix = unicodedata.normalize("NFC", local.replace("\\", "/").rstrip("/")) + "/"
+                        prefixes.append((prefix, OwnershipMatch(server.id, library.id, library.name, local)))
+            index.append(prefixes)
+    return index
+
+
+def _library_matches(path: str, configs: list[ServerConfig], index: LibraryIndex | None = None) -> list[OwnershipMatch]:
     """The libraries holding a file, whether the path is this app's or the sender's (Sonarr's ``/data/...``): the
     first of its local forms (``webhook_path_candidates``) that any library holds."""
-    for candidate in webhook_path_candidates(path, configs):
-        matches = find_library_matches(candidate, configs)
+    if index is not None:
+        matches = _indexed_matches(path, index)
+        if matches:
+            return matches
+    candidates = webhook_path_candidates(path, configs)
+    for candidate in candidates if index is None else candidates[1:]:
+        matches = find_library_matches(candidate, configs) if index is None else _indexed_matches(candidate, index)
         if matches:
             return matches
     return []
+
+
+def _indexed_matches(path: str, index: LibraryIndex) -> list[OwnershipMatch]:
+    """Match canonical paths before constructing unnecessary sender aliases."""
+    path = unicodedata.normalize("NFC", path).replace("\\", "/")
+    normalized = os.path.dirname(path).rstrip("/") + "/" + os.path.basename(path)
+    matches = []
+    for prefixes in index:
+        for prefix, match in prefixes:
+            if normalized.startswith(prefix):
+                matches.append(match)
+                break
+    return matches
 
 
 def _started_on(cfg: dict, job: Job, configs: Sequence[ServerConfig], pin: str | None) -> list[str]:
@@ -240,11 +328,12 @@ def job_file_list(job: Job, results: Iterable[dict], limit: int) -> tuple[list[d
 
     cfg = job.config or {}
     held = cfg.get("version_rerun_files")
-    given = [str(p) for p in cfg.get("file_paths") or [] if p]
+    given = [str(p) for p in job_file_paths(job) if p]
     given += [str(p) for p in (held if isinstance(held, dict) else {})]
     ran = [str(r.get("file") or "") for r in results]
     ordered = [p for p in dict.fromkeys([*given, *ran]) if p]
-    total = max(len(ordered), int(job.progress.total_items or 0))
+    stored_count = cfg.get("file_paths_count")
+    total = max(len(ordered), int(job.progress.total_items or 0), stored_count if type(stored_count) is int else 0)
     files = []
     for path in ordered[: max(0, limit)]:
         server_title, year = TITLE_CACHE.get(path) or (None, None)

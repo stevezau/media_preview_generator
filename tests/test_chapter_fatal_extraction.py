@@ -127,7 +127,80 @@ def test_watchdog_during_endpoint_fallback_still_aborts(extraction, monkeypatch)
     assert runner.call_count == 2
 
 
-def test_successful_frame_is_accepted_despite_demux_warning(extraction, monkeypatch):
+@pytest.mark.parametrize("returncode", [0, 234])
+def test_confirmed_empty_seek_beyond_duration_has_nonretryable_timestamp_error(extraction, monkeypatch, returncode):
+    plan, config, media, _register = extraction
+    runner = MagicMock(return_value=lambda **_kwargs: (returncode, 0, "", ["No filtered frames"]))
+    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
+
+    with pytest.raises(ValueError, match="Chapter timestamp 75000ms is outside.*duration \\(10000ms\\)") as caught:
+        chapters.extract_chapter_frame(plan.canonical_path, 75000, plan.folder / "frame.jpg", config, media_info=media)
+
+    assert not chapters._failure(caught.value).retryable
+    assert runner.call_count == 1
+    assert runner.call_args.kwargs["chapter_start_ms"] == 75000
+    assert runner.call_args.kwargs["chapter_output"] == str(plan.folder / "frame.jpg")
+
+
+@pytest.mark.parametrize("duration", [None, 0, -1, float("nan"), float("inf"), "unknown"])
+def test_unknown_duration_does_not_claim_invalid_timestamp(extraction, monkeypatch, duration):
+    plan, config, media, _register = extraction
+    media.video_tracks[0].duration = duration
+    runner = MagicMock(return_value=lambda **_kwargs: (234, 0, "", ["No filtered frames"]))
+    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
+
+    with pytest.raises(RuntimeError, match="FFmpeg exit 234"):
+        chapters.extract_chapter_frame(plan.canonical_path, 75000, plan.folder / "frame.jpg", config, media_info=media)
+
+
+@pytest.mark.parametrize("duration", [5679279, "5679279"])
+def test_container_duration_diagnoses_missing_video_duration_without_guessing_frames(extraction, monkeypatch, duration):
+    plan, config, media, _register = extraction
+    media.video_tracks[0].duration = None
+    media.general_tracks = [SimpleNamespace(duration=duration)]
+    runner = MagicMock(return_value=lambda **_kwargs: (0, 0, "", ["No filtered frames"]))
+    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
+
+    with pytest.raises(ValueError, match="Chapter timestamp 5753160ms is outside.*duration \\(5679279ms\\)") as caught:
+        chapters.extract_chapter_frame(
+            plan.canonical_path, 5753160, plan.folder / "frame.jpg", config, media_info=media
+        )
+
+    assert not chapters._failure(caught.value).retryable
+    assert [call.kwargs["chapter_start_ms"] for call in runner.call_args_list] == [5753160]
+
+
+@pytest.mark.parametrize("duration", [None, "malformed", float("nan"), float("inf"), 0, -1])
+def test_unknown_container_duration_reports_missing_frame_without_temporary_path(extraction, monkeypatch, duration):
+    plan, config, media, _register = extraction
+    media.video_tracks[0].duration = None
+    media.general_tracks = [SimpleNamespace(duration=duration)]
+    runner = MagicMock(return_value=lambda **_kwargs: (0, 0, "", ["No filtered frames"]))
+    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
+
+    with pytest.raises(ValueError, match="No video frame was available for chapter timestamp 75000ms") as caught:
+        chapters.extract_chapter_frame(plan.canonical_path, 75000, plan.folder / "frame.jpg", config, media_info=media)
+
+    assert "outside" not in str(caught.value)
+    assert str(plan.folder) not in str(caught.value)
+    assert not chapters._failure(caught.value).retryable
+    assert [call.kwargs["chapter_start_ms"] for call in runner.call_args_list] == [75000]
+
+
+def test_container_duration_does_not_enable_video_endpoint_fallback(extraction, monkeypatch):
+    plan, config, media, _register = extraction
+    media.video_tracks[0].duration = None
+    media.general_tracks = [SimpleNamespace(duration=10000)]
+    runner = MagicMock(return_value=lambda **_kwargs: (0, 0, "", ["No filtered frames"]))
+    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
+
+    with pytest.raises(ValueError, match="No video frame was available"):
+        chapters.extract_chapter_frame(plan.canonical_path, 10000, plan.folder / "frame.jpg", config, media_info=media)
+
+    assert [call.kwargs["chapter_start_ms"] for call in runner.call_args_list] == [10000]
+
+
+def test_successful_frame_is_rejected_when_demuxer_proves_corruption(extraction, monkeypatch):
     plan, config, media, _register = extraction
     output = plan.folder.parent / "frame.jpg"
 
@@ -136,5 +209,33 @@ def test_successful_frame_is_accepted_despite_demux_warning(extraction, monkeypa
         return 0, 0, "", [CORRUPTION]
 
     monkeypatch.setattr(chapters, "create_ffmpeg_runner", lambda **_kwargs: run)
-    chapters.extract_chapter_frame(plan.canonical_path, 0, output, config, media_info=media)
-    assert output.exists()
+    with pytest.raises(chapters.ChapterSourceCorruptionError):
+        chapters.extract_chapter_frame(plan.canonical_path, 0, output, config, media_info=media)
+
+
+@pytest.mark.parametrize("prefix", ["matroska", "matroska,webm", "in#0/matroska,webm", "in#12/matroska"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "0x00 at pos 3843235529 invalid as first byte of an EBML number",
+        "0x00 at pos 254 (0xfe) invalid as first byte of an EBML number",
+        "Length 5 indicated by an EBML number's first byte 0x0b at pos 197030 (0x301a6) exceeds max length 4.",
+    ],
+)
+def test_structural_demux_errors_are_fatal_even_after_ffmpeg_reports_success(prefix, message):
+    with pytest.raises(chapters.ChapterSourceCorruptionError):
+        chapters._check_fatal_extraction(0, [f"[{prefix} @ 0x1234] {message}"], 4000)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[in#0/matroska,webm @ 0x1234] Unknown entry 0x6DB8 at pos. 19413194771",
+        "[ffv1 @ 0x1234] Length 5 indicated by an EBML number's first byte 0x0b exceeds max length 4.",
+        "[matroska,webm @ 0x1234] title: Length 5 indicated by an EBML number's first byte 0x0b exceeds max length 4.",
+        "Metadata title: [matroska @ 0x1234] 0x00 at pos 1 invalid as first byte of an EBML number",
+        "[in#0/matroska,webm @ 0x1234] Invalid data found when processing input",
+    ],
+)
+def test_optional_unknown_elements_metadata_and_generic_codec_errors_are_not_proven_corruption(line):
+    chapters._check_fatal_extraction(0, [line], 4000)

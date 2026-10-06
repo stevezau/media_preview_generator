@@ -52,9 +52,13 @@ def test_paused_loudness_job_is_queued_and_cancellable_without_review(
 
     response = requests.post(f"{url}/api/jobs/{job_id}/cancel", headers=_HEADERS, timeout=15)
     assert response.ok, response.text
+    expect(row).to_have_count(0, timeout=10000)
+    page.get_by_label("Status", exact=True).select_option(label="All jobs and history")
     expect(row.locator(".status-dot")).to_have_text("Cancelled", timeout=10000)
     expect(row.locator('[aria-label="Re-run job"]')).to_be_enabled()
     page.reload()
+    expect(row).to_have_count(0)
+    page.get_by_label("Status", exact=True).select_option(label="All jobs and history")
     expect(row.locator(".status-dot")).to_have_text("Cancelled")
     with sqlite3.connect(Path(config_dir) / "jobs.db") as db:
         assert db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone() == ("cancelled",)

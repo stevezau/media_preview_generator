@@ -1,4 +1,4 @@
-"""Bounded retry accounting independent of the Files panel's truncated history."""
+"""Retry accounting independent of the Files panel's truncated history."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def previous_result(path: str, outcome: str, servers: list[dict] | None) -> dict
 
 
 def snapshot(head, previous: dict[str, dict]) -> dict:
-    """Capture immutable totals and only the bounded set of files this attempt will replace."""
+    """Capture immutable totals and the files this attempt will replace."""
     return {
         "outcome": dict(head.progress.outcome or {}),
         "publishers": deepcopy(head.publishers or []),
@@ -41,10 +41,13 @@ def replace_results(baseline: dict, rows: list[dict], sender_paths: dict[str, st
     outcome = Counter(baseline["outcome"])
     publishers = {row["server_id"]: deepcopy(row) for row in baseline["publishers"]}
     previous = baseline["files"]
+    # Current attempts persist the original file identity even when a mount moves.
+    # The explicit mapping remains for retry rows written by earlier versions.
+    original_paths = {result["file"]: sender for sender, result in previous.items()}
     latest = {}
     for row in rows:
         path = row.get("file")
-        key = sender_paths.get(path, path)
+        key = sender_paths.get(path, original_paths.get(path, path))
         if path and key in previous:
             latest[key] = row
     for key, current in latest.items():

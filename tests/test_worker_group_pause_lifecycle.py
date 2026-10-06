@@ -121,8 +121,25 @@ def test_weekend_resource_wait_is_not_expired_as_stale(tmp_path):
         reopened.close()
 
 
-@pytest.mark.parametrize("change", [None, "server", "libraries", "force", "priority", "started"])
-def test_full_library_ticks_only_coalesce_same_never_started_scope(manager, monkeypatch, change):
+@pytest.mark.parametrize(
+    "change",
+    [
+        None,
+        "server",
+        "libraries",
+        "force",
+        "priority",
+        "parked",
+        "running",
+        "revived",
+        "paused",
+        "retry",
+        "completed",
+        "failed",
+        "cancelled",
+    ],
+)
+def test_full_library_ticks_coalesce_same_unfinished_scope(manager, monkeypatch, change):
     from types import SimpleNamespace
 
     schedule = SimpleNamespace(_update_last_run=MagicMock())
@@ -140,9 +157,23 @@ def test_full_library_ticks_only_coalesce_same_never_started_scope(manager, monk
     scheduler.execute_scheduled_job("night", ["1", "2"], "Movies", {"force": True}, 2, "plex")
     first = manager.get_all_jobs()[0]
     assert first.parent_schedule_id == "night" and first.server_id == "plex"
-    if change == "started":
+    if change in {"parked", "running", "revived", "paused", "retry", "completed", "failed", "cancelled"}:
         manager.start_job(first.id)
-        manager.park_job(first.id, "saved.json", "off_hours")
+        if change == "parked":
+            manager.park_job(first.id, "saved.json", "off_hours")
+        elif change == "revived":
+            manager._revive_interrupted(first)
+        elif change == "paused":
+            manager.request_pause(first.id)
+        elif change == "retry":
+            manager.merge_job_config(first.id, {"is_retry_chain": True})
+            first.status = JobStatus.PENDING
+        elif change == "completed":
+            manager.complete_job(first.id)
+        elif change == "failed":
+            manager.complete_job(first.id, error="failed")
+        elif change == "cancelled":
+            manager.cancel_job(first.id)
     scheduler.execute_scheduled_job(
         "night",
         ["3"] if change == "libraries" else ["2", "1"],
@@ -151,7 +182,11 @@ def test_full_library_ticks_only_coalesce_same_never_started_scope(manager, monk
         1 if change == "priority" else 2,
         "other" if change == "server" else "plex",
     )
-    assert len(manager.get_all_jobs()) == (1 if change is None else 2)
+    assert len(manager.get_all_jobs()) == (
+        1 if change in {None, "parked", "running", "revived", "paused", "retry"} else 2
+    )
+    if change == "paused":
+        assert first.paused and manager.is_pause_requested(first.id)
     assert first.config["force"] is True
 
 

@@ -66,5 +66,6 @@
 
 @media(max-width:767.98px) {
     #logsModal .modal-footer[data-tab="files"]>[data-files-footer],
+    #logsModal .modal-footer[data-tab="files"]>#opActionReprocess,
     #logsModal .modal-footer[data-tab="files"]>.btn-secondary[data-bs-dismiss="modal"] { flex:0 1 auto; min-height:44px; }
 }

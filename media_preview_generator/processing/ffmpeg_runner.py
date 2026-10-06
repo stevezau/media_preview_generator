@@ -31,6 +31,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 from loguru import logger
@@ -45,6 +46,24 @@ from .hwaccel import hwaccel_decode_args
 # Added to the stderr lines a run returns when the stall watchdog stopped it: the exit code (-9) alone reads like an OOM
 # kill, and the retry cascade words its CPU hand-off by the real cause (``generator._gpu_hand_off``).
 STALL_WATCHDOG_LINE = "[media_preview_generator] FFmpeg stopped making progress and was stopped by the stall watchdog"
+ACTIVE_TIMEOUT_LINE = "[media_preview_generator] FFmpeg exceeded its active attempt time limit"
+PROCESS_EXIT_PENDING_LINE = "[media_preview_generator] FFmpeg did not exit after termination; cleanup is pending"
+DIAGNOSTIC_LIMIT_LINE = "[media_preview_generator] FFmpeg exceeded the chapter diagnostic output limit"
+_CHAPTER_STDERR_LIMIT = 4 * 1024 * 1024
+_CHAPTER_READ_LIMIT = 64 * 1024
+_MATROSKA_CONTEXT = re.compile(r"^\[(?:in#\d+/)?matroska(?:,webm)?(?:\s+@[^\]]*)?\]\s*(.*)$", re.IGNORECASE)
+_EBML_CORRUPTION = re.compile(
+    r"^(?:0x[0-9a-f]+ at pos \d+(?: \(0x[0-9a-f]+\))? invalid as first byte of an EBML number"
+    r"|Length \d+ indicated by an EBML number's first byte .* exceeds max length \d+)",
+    re.IGNORECASE,
+)
+
+
+def is_matroska_corruption_line(line: str) -> bool:
+    """Identify explicit structural errors, not optional unknown EBML elements."""
+    context = _MATROSKA_CONTEXT.match(line.strip())
+    return bool(context and _EBML_CORRUPTION.match(context.group(1)))
+
 
 # Added to the stderr lines of a GPU run stopped at the decoder's own verdict that it can't decode the file on this
 # GPU; the retry cascade hands the file to the CPU as an unsupported codec (``generator._gpu_hand_off``).
@@ -94,6 +113,7 @@ def create_ffmpeg_runner(
     hdr10_zscale_chain: str,
     chapter_start_ms: int | None = None,
     chapter_output: str | None = None,
+    active_timeout_s: float | None = None,
 ) -> Callable[..., tuple[int, float, float, list[str]]]:
     """Factory: return a configured ffmpeg-runner closure for one media item.
 
@@ -452,13 +472,38 @@ def create_ffmpeg_runner(
             # Track progress
             total_duration = None
             speed_local = "0.0x"
-            ffmpeg_output_lines = []
+            ffmpeg_output_lines = deque(maxlen=256) if active_timeout_s is not None else []
+            sticky_diagnostics = []
             last_progress_time = time.time()
             stalled = False
             gpu_cant_decode = False
             wrote_frame = False
             stderr_reader = None
             unfinished_line = ""
+
+            def remember(line: str) -> None:
+                ffmpeg_output_lines.append(line)
+                if active_timeout_s is not None and (
+                    is_matroska_corruption_line(line)
+                    or line
+                    in {STALL_WATCHDOG_LINE, ACTIVE_TIMEOUT_LINE, PROCESS_EXIT_PENDING_LINE, DIAGNOSTIC_LIMIT_LINE}
+                ):
+                    if line not in sticky_diagnostics and (
+                        len(sticky_diagnostics) < 12 or line.startswith("[media_preview_generator]")
+                    ):
+                        sticky_diagnostics.append(line)
+
+            def reap_killed_process() -> None:
+                """A blocked mount must not hold a chapter worker after SIGKILL."""
+                if active_timeout_s is None:
+                    proc.wait()
+                    return
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.warning("FFmpeg did not exit after termination for {}; cleanup is pending", video_file)
+                    remember(PROCESS_EXIT_PENDING_LINE)
+                    threading.Thread(target=proc.wait, name=f"ffmpeg-reap-{proc.pid}", daemon=True).start()
 
             def read_new_stderr(*, process_exited: bool = False) -> list[str]:
                 """The lines FFmpeg has added to its stderr file since the last call, stripped, blank ones dropped.
@@ -474,12 +519,25 @@ def create_ffmpeg_runner(
                     # paths or stream metadata in Latin-1). Strict decode crashed the runner
                     # mid-loop, surfaced as a misleading "corrupt video file" error to users.
                     stderr_reader = open(output_file, encoding="utf-8", errors="replace")
-                raw_lines = stderr_reader.readlines()
+                if active_timeout_s is not None:
+                    if process_exited:
+                        size = os.path.getsize(output_file)
+                        if size - stderr_reader.tell() > _CHAPTER_READ_LIMIT:
+                            remember(DIAGNOSTIC_LIMIT_LINE)
+                            stderr_reader.seek(size - _CHAPTER_READ_LIMIT)
+                            unfinished_line = ""
+                    raw_lines = stderr_reader.read(_CHAPTER_READ_LIMIT).splitlines(keepends=True)
+                else:
+                    raw_lines = stderr_reader.readlines()
                 if unfinished_line:
                     raw_lines = [unfinished_line + (raw_lines[0] if raw_lines else ""), *raw_lines[1:]]
                     unfinished_line = ""
                 if raw_lines and not process_exited and not raw_lines[-1].endswith("\n"):
                     *raw_lines, unfinished_line = raw_lines
+                    if active_timeout_s is not None:
+                        unfinished_line = unfinished_line[:8192]
+                if active_timeout_s is not None:
+                    raw_lines = [line[:8192] for line in raw_lines]
                 return [line for line in (raw.strip() for raw in raw_lines) if line]
 
             def speed_capture_callback(
@@ -516,7 +574,14 @@ def create_ffmpeg_runner(
 
             time.sleep(0.02)
             paused_locally = False
+            active_elapsed = 0.0
+            active_tick = time.monotonic() if active_timeout_s is not None else 0.0
             while proc.poll() is None:
+                if active_timeout_s is not None:
+                    now_tick = time.monotonic()
+                    if not paused_locally:
+                        active_elapsed += max(0.0, now_tick - active_tick)
+                    active_tick = now_tick
                 if cancel_check and cancel_check():
                     logger.info("Cancellation requested, terminating FFmpeg for {}", video_file)
                     # If we were paused, resume first so SIGTERM can be delivered.
@@ -531,7 +596,7 @@ def create_ffmpeg_runner(
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                        proc.wait()
+                        reap_killed_process()
                     raise CancellationError(f"Processing cancelled for {video_file}")
 
                 # Hard-pause via SIGSTOP/SIGCONT — freezes the FFmpeg process
@@ -566,12 +631,19 @@ def create_ffmpeg_runner(
                         logger.info("FFmpeg resumed for {} (PID {})", video_file, proc.pid)
                     except (ProcessLookupError, OSError):
                         pass
+                if active_timeout_s is not None and active_elapsed >= active_timeout_s:
+                    logger.warning("FFmpeg exceeded its {}s active attempt limit for {}", active_timeout_s, video_file)
+                    stalled = True
+                    proc.kill()
+                    reap_killed_process()
+                    remember(ACTIVE_TIMEOUT_LINE)
+                    break
                 try:
                     new_lines = read_new_stderr()
                 except OSError:
                     new_lines = []
                 for line in new_lines:
-                    ffmpeg_output_lines.append(line)
+                    remember(line)
                     total_duration = parse_ffmpeg_progress_line(line, total_duration, speed_capture_callback)
                     progress = _PROGRESS_FRAME_RE.match(line)
                     if progress and int(progress.group(1)) > 0:
@@ -580,6 +652,13 @@ def create_ffmpeg_runner(
                         gpu_cant_decode = True
                 if new_lines:
                     last_progress_time = time.time()
+                if active_timeout_s is not None and os.path.getsize(output_file) > _CHAPTER_STDERR_LIMIT:
+                    logger.warning("FFmpeg exceeded its chapter diagnostic output limit for {}", video_file)
+                    stalled = True
+                    proc.kill()
+                    reap_killed_process()
+                    remember(DIAGNOSTIC_LIMIT_LINE)
+                    break
                 if gpu_cant_decode:
                     # One verdict before any frame is enough: all 68 failed production runs that printed it wrote no
                     # frame, and FFmpeg itself ends a run at the first such failure for a decoder with a software path.
@@ -608,15 +687,15 @@ def create_ffmpeg_runner(
                     )
                     stalled = True
                     proc.kill()
-                    proc.wait()
-                    ffmpeg_output_lines.append(STALL_WATCHDOG_LINE)
+                    reap_killed_process()
+                    remember(STALL_WATCHDOG_LINE)
                     break
                 time.sleep(0.005)
 
             # Process any remaining data
             try:
                 for line in read_new_stderr(process_exited=True):
-                    ffmpeg_output_lines.append(line)
+                    remember(line)
                     total_duration = parse_ffmpeg_progress_line(line, total_duration, speed_capture_callback)
             except OSError:
                 pass
@@ -630,6 +709,10 @@ def create_ffmpeg_runner(
             except OSError:
                 pass
 
+        if active_timeout_s is not None:
+            ffmpeg_output_lines = sticky_diagnostics + [
+                line for line in ffmpeg_output_lines if line not in sticky_diagnostics
+            ]
         # Error logging (skip generic failure log when we stopped FFmpeg ourselves; already logged above)
         if proc.returncode != 0 and not stalled and not gpu_cant_decode:
             exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode, ffmpeg_output_lines)
@@ -765,6 +848,11 @@ def create_ffmpeg_runner(
             calculated_speed = total_duration / seconds_local
             speed_local = f"{calculated_speed:.0f}x"
 
-        return proc.returncode, seconds_local, speed_local, ffmpeg_output_lines
+        returncode = (
+            -signal.SIGKILL
+            if proc.returncode is None and PROCESS_EXIT_PENDING_LINE in ffmpeg_output_lines
+            else proc.returncode
+        )
+        return returncode, seconds_local, speed_local, ffmpeg_output_lines
 
     return _run_ffmpeg

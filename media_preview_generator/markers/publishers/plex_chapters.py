@@ -11,7 +11,8 @@ import io
 import re
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, fields
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,27 @@ class ChapterTarget:
     source_updated_at: int | None
     chapters: tuple[Chapter, ...]
     machine_identifier: str
+
+
+def _target_changes(before: ChapterTarget, after: ChapterTarget) -> tuple[str, ...]:
+    """Describe optimistic-concurrency changes without exposing source values."""
+    changed = [
+        field.name
+        for field in fields(ChapterTarget)
+        if field.name != "chapters" and getattr(before, field.name) != getattr(after, field.name)
+    ]
+    if len(before.chapters) != len(after.chapters):
+        changed.append("chapters.count")
+    else:
+        changed.extend(
+            f"chapters.{field.name}"
+            for field in fields(Chapter)
+            if any(
+                getattr(left, field.name) != getattr(right, field.name)
+                for left, right in zip(before.chapters, after.chapters, strict=True)
+            )
+        )
+    return tuple(changed)
 
 
 def target_to_json(target: ChapterTarget) -> dict:
@@ -353,7 +375,9 @@ class LocalChapters:
                     current = self._read(conn, target.source_path, target.machine_identifier, target.rating_key)
                     if current != target:
                         raise ChapterError(
-                            "Plex source or chapters changed while images were generated", code="source_changed"
+                            "Plex source or chapters changed while images were generated "
+                            f"(changed fields: {', '.join(_target_changes(target, current))})",
+                            code="source_changed",
                         )
                     self._images(target, revisions, deadline=deadline)
                     for chapter in target.chapters:
@@ -451,23 +475,61 @@ def resolve_chapter_target(server: Any, canonical_path: str, *, item_id_hint: in
     return backend.read(canonical_path, machine, version, item_id_hint=item_id_hint, deadline=time.monotonic() + 10)
 
 
-def register_chapters(server: Any, target: ChapterTarget, revisions: dict[int, str]) -> None:
-    """Register all images, then require Plex's live API to expose the exact references."""
-    backend, machine, version, plex = _context(server)
+def register_chapters(
+    server: Any,
+    target: ChapterTarget,
+    revisions: dict[int, str],
+    *,
+    verify_source: Callable[[], None] | None = None,
+) -> None:
+    """Register and verify images, allowing one guarded timestamp-only refresh.
+
+    A source-fingerprint verifier is required to refresh an otherwise identical
+    snapshot. Changed chapter references remain a conflict, even if another
+    publisher generated them while this job was extracting its images.
+    """
+    backend, machine, version, _ = _context(server)
     if machine != target.machine_identifier:
         raise ChapterError("Connected Plex server changed during chapter generation", code="source_changed")
-    if isinstance(backend, AgentClient):
-        _remote(
-            backend,
-            "register",
-            machine,
-            version,
-            target=target_to_json(target),
-            revisions=[{"index": index, "sha256": sha} for index, sha in revisions.items()],
-        )
-    else:
-        backend.register(target, revisions, version, deadline=time.monotonic() + 10)
+
+    def register(snapshot: ChapterTarget) -> None:
+        if isinstance(backend, AgentClient):
+            _remote(
+                backend,
+                "register",
+                machine,
+                version,
+                target=target_to_json(snapshot),
+                revisions=[{"index": index, "sha256": sha} for index, sha in revisions.items()],
+            )
+        else:
+            backend.register(snapshot, revisions, version, deadline=time.monotonic() + 10)
+
+    if verify_source is not None:
+        verify_source()
+    try:
+        register(target)
+    except ChapterError as exc:
+        if exc.code != "source_changed" or verify_source is None:
+            raise
+        fresh = resolve_chapter_target(server, target.source_path, item_id_hint=target.rating_key)
+        verify_source()
+        changed = _target_changes(target, fresh)
+        if changed != ("source_updated_at",):
+            raise ChapterError(
+                "Plex source or chapters changed while images were generated "
+                f"(changed fields: {', '.join(changed) or 'unconfirmed concurrent change'})",
+                code="source_changed",
+            ) from exc
+        # The second write still compares its complete snapshot inside the
+        # transaction. A further change fails normally; there is no retry loop.
+        register(fresh)
+        target = fresh
+    if verify_source is not None:
+        verify_source()
     verify_chapters(server, target, revisions)
+    if verify_source is not None:
+        verify_source()
 
 
 def verify_chapters(server: Any, target: ChapterTarget, revisions: dict[int, str]) -> None:
