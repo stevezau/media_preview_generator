@@ -73,21 +73,18 @@ def test_mobile_settings_selection_and_hash_navigation_agree(settings_page: Page
 
 
 def test_settings_extra_guidance_can_be_opened_and_closed_with_keyboard(settings_page: Page) -> None:
-    toggle = settings_page.locator(".settings-help-toggle").first
-    expect(toggle).to_have_attribute("aria-expanded", "false")
-    detail_id = toggle.get_attribute("aria-controls")
-    assert detail_id
-    detail = settings_page.locator(f"#{detail_id}")
-    expect(detail).to_be_hidden()
-    toggle.focus()
+    info = settings_page.get_by_role("button", name="Explain auto-requeue interrupted jobs")
+    hint = settings_page.locator("label[for='autoRequeueOnRestart'] + .sr-hint")
+    assert len(hint.inner_text()) <= 90, "the row keeps one short line; the rest lives in the (i)"
+    modal = settings_page.locator("#globalInfoModal")
+    expect(modal).to_be_hidden()
+    watch_modal_shown(settings_page, "globalInfoModal")
+    info.focus()
     settings_page.keyboard.press("Enter")
-    expect(toggle).to_have_attribute("aria-expanded", "true")
-    expect(detail).to_be_visible()
-    assert detail.inner_text().strip()
-    settings_page.keyboard.press("Space")
-    expect(toggle).to_have_attribute("aria-expanded", "false")
-    expect(detail).to_be_hidden()
-    expect(toggle).to_be_focused()
+    expect_modal_shown(settings_page, "globalInfoModal")
+    expect(settings_page.locator("#globalInfoBody")).to_contain_text("Use Reprocess to run a failed job again")
+    settings_page.keyboard.press("Escape")
+    expect(modal).to_be_hidden()
 
 
 def test_compact_settings_help_keeps_full_guidance_in_its_dialog(settings_page: Page) -> None:
@@ -143,10 +140,10 @@ def test_setup_progress_name_updates_after_forward_and_back(wizard_page: Page, a
     expect(progress).to_have_accessible_name("Setup progress: step 3 of 5, Paths")
     expect(progress).to_have_attribute("aria-valuenow", "3")
     page.locator("#step3Back").click()
-    expect(progress).to_have_accessible_name("Setup progress: step 2 of 5, Server & libraries")
+    expect(progress).to_have_accessible_name("Setup progress: step 2 of 5, Connect")
     expect(progress).to_have_attribute("aria-valuenow", "2")
-    expect(progress.locator('[data-step="2"] span')).to_have_text("Server & libraries")
-    expect(page.locator("#setupProgressCurrent")).to_have_text("Step 2 of 5 · Server & libraries")
+    expect(progress.locator('[data-step="2"] span')).to_have_text("Connect")
+    expect(page.locator("#setupProgressCurrent")).to_have_text("Step 2 of 5 · Connect")
     page.set_viewport_size({"width": 768, "height": 900})
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
 

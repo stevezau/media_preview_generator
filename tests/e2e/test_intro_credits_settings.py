@@ -430,6 +430,9 @@ class TestIntroCreditsSettings:
         _open_settings(authed_page, app_url, _default_markers())
         section = authed_page.locator("#section-markers #markersHowItDecides")
         expect(section).to_be_visible()
+        expect(section).not_to_have_attribute("open", "")
+        section.locator("summary").click()
+        expect(section.locator(".markers-step").first).to_be_visible()
         expect(section.get_by_role("heading", level=3)).to_have_text("How it decides")
         expect(section.locator(".markers-step-num")).to_have_text(["1", "2", "3", "4"])
         expect(section.locator(".markers-step-title")).to_have_text(
@@ -443,6 +446,7 @@ class TestIntroCreditsSettings:
 
     def test_see_how_decisions_are_made_opens_the_three_blocks(self, authed_page: Page, app_url: str) -> None:
         _open_settings(authed_page, app_url, _default_markers())
+        authed_page.locator("#markersHowItDecides summary").click()
         link = authed_page.locator("#markersHowItDecides #markersHowItDecidesMore")
         expect(link).to_have_text("See how decisions are made")
         link.click()
