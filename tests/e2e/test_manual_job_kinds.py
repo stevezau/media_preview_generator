@@ -326,25 +326,28 @@ def test_files_footer_refreshes_files_and_logs_actions_return_on_logs(
                  config:{},publishers:[],progress:{}}];
         openJobDetails('footer-job','files');
     }""")
-    footer = page.locator("#logsModal .modal-footer")
+    modal = page.locator("#logsModal")
+    footer = modal.locator(".modal-footer")
     expect(footer).to_have_attribute("data-tab", "files")
-    expect(footer.locator("[data-logs-footer]:visible")).to_have_count(0)
-    expect(footer.get_by_role("button", name="Refresh files", exact=True)).to_be_visible()
+    files_refresh = modal.get_by_role("button", name="Refresh files", exact=True)
+    expect(files_refresh).to_be_visible()
     expect(footer.get_by_role("button", name="Close", exact=True)).to_be_visible()
+    for label in ("Copy", "Download", "Refresh"):
+        expect(footer.get_by_role("button", name=label, exact=True)).to_have_count(0)
     expect(page.locator("#fileResultsBody")).to_contain_text("No matching files")
     initial_reads = len(file_reads)
     with page.expect_response(lambda response: "/api/jobs/footer-job/files?" in response.url):
-        footer.get_by_role("button", name="Refresh files", exact=True).click()
+        files_refresh.click()
     assert len(file_reads) == initial_reads + 1
     assert all(read.get("page") == ["1"] and read.get("per_page") == ["100"] for read in file_reads)
     assert footer.bounding_box()["height"] < 100
     page.locator("#logsTab").click()
     expect(footer).to_have_attribute("data-tab", "logs")
     for label in ("Copy", "Download", "Refresh"):
-        expect(footer.get_by_role("button", name=label, exact=True)).to_be_visible()
-    expect(footer.locator("[data-files-footer]")).to_be_hidden()
+        expect(modal.locator("#logsTabPane").get_by_role("button", name=label, exact=True)).to_be_visible()
+    expect(files_refresh).to_be_hidden()
     page.locator("#filesTab").click()
-    expect(footer.locator("[data-logs-footer]:visible")).to_have_count(0)
+    expect(modal.locator("#logsTabPane")).to_be_hidden()
     assert writes == []
 
 

@@ -15,11 +15,13 @@ let _manualChecked = new Set();
 
 let _manualOpeningSequence = 0;
 let _manualSubmitting = false;
+// help is the one visible line under the type cards; the long version lives in each type's (i) dialog.
 const _MANUAL_KINDS = {
-    previews: { label: 'Previews', endpoint: '/api/jobs/manual', help: 'Creates previews for Plex, Emby and Jellyfin servers that own these files. Chapter thumbnails follow each Plex server’s preview setting.' },
-    intro_credits: { label: 'Intro & Credits', endpoint: '/api/markers/jobs', help: 'Runs on enabled owning servers and libraries with Intro & Credits on. Requires the server’s publisher setup and a compatible worker group. Search scope does not restrict publishing.' },
-    loudness: { label: 'Plex loudness', endpoint: '/api/loudness/jobs', help: 'Runs on owning Plex movie and TV libraries with Loudness on. Requires a local Plex 1.43.4.x database and a CPU group allowing loudness. Existing complete measurements are kept; the helper is unsupported.' },
+    previews: { label: 'Previews', icon: 'bi-film', start: 'Start previews job', endpoint: '/api/jobs/manual', help: 'Creates previews on every server that owns these files.' },
+    intro_credits: { label: 'Intro & Credits', icon: 'bi-skip-forward', start: 'Start intro & credits job', endpoint: '/api/markers/jobs', help: 'Finds skip markers on enabled servers that own these files.' },
+    loudness: { label: 'Plex loudness', icon: 'bi-soundwave', start: 'Start loudness job', endpoint: '/api/loudness/jobs', help: 'Analyzes audio loudness on owning Plex servers.' },
 };
+const _MANUAL_PRIORITY_NAMES = { 1: 'High', 2: 'Normal', 3: 'Low' };
 
 function _manualJobKind() {
     return document.querySelector('input[name="manualJobKind"]:checked')?.value || 'previews';
@@ -46,6 +48,26 @@ function _manualUpdateStartState() {
     document.getElementById('manualPathValidation').textContent = paths.length ? pathError : '';
     const clearAll = document.getElementById('manualClearAll');
     if (clearAll) clearAll.classList.toggle('d-none', !paths.length);
+    _manualSyncSummary(paths);
+}
+
+// The footer line: how much is picked, and the type's colour chip.
+function _manualSyncSummary(paths = _manualPaths()) {
+    const summary = document.getElementById('manualSummary');
+    if (!summary) return;
+    const spec = _MANUAL_KINDS[_manualJobKind()];
+    const priority = _MANUAL_PRIORITY_NAMES[Number(document.getElementById('manualPriority').value)] || 'Normal';
+    const picked = _manualSelections.length || paths.length;
+    summary.textContent = '';
+    const chip = document.createElement('span');
+    chip.className = 'ov-task';
+    chip.innerHTML = `<i class="bi ${spec.icon}" aria-hidden="true"></i>`;
+    chip.append(spec.label);
+    const count = document.createElement('span');
+    const bold = document.createElement('b');
+    bold.textContent = priority;
+    count.append(picked ? `${picked} selected · ` : 'Nothing selected · ', bold);
+    summary.append(chip, count);
 }
 
 function _showManualKindControls(resetDefaults = false) {
@@ -56,14 +78,27 @@ function _showManualKindControls(resetDefaults = false) {
     document.getElementById('manualProcessingModeGroup').hidden = !previews;
     document.getElementById('manualMarkersForceGroup').hidden = kind !== 'intro_credits';
     document.getElementById('manualKindHelp').textContent = _MANUAL_KINDS[kind]?.help || '';
+    document.getElementById('manualTriggerModal').dataset.kind = kind;
+    document.getElementById('manualStartLabel').textContent = _MANUAL_KINDS[kind]?.start || 'Start job';
+    const priority = document.getElementById('manualPriority');
+    priority.dataset.segDefault = previews ? '2' : '3';
     if (resetDefaults) {
         document.getElementById('manualPriority').value = previews ? '2' : '3';
         document.getElementById('manualMissingOnly').checked = true;
         document.getElementById('manualMarkersForce').checked = false;
         document.getElementById('manualSubmissionError').textContent = '';
     }
+    if (window.OverlaySegments) window.OverlaySegments.sync(priority);
+    _manualSyncRegenerateHint();
     _manualHideSearch();
     _manualUpdateStartState();
+}
+
+function _manualSyncRegenerateHint() {
+    const regenerate = document.getElementById('manualForceRegenerate').checked;
+    const hint = document.getElementById('manualProcessingModeHint');
+    hint.textContent = regenerate ? 'Rebuilds every preview, including ones that already exist.' : 'Skips files that already have a preview.';
+    hint.classList.toggle('ov-warn', regenerate);
 }
 
 
@@ -98,9 +133,9 @@ function _manualKindIcon(kind) {
 // server(s) a hit came from. A merged row (same item on several servers) shows
 // one pill per server. Colour-coded by vendor for at-a-glance scanning.
 function _manualServerBadges(servers) {
-    const cls = { plex: 'text-warning border-warning', emby: 'text-success border-success', jellyfin: 'text-info border-info' };
+    const known = ['plex', 'emby', 'jellyfin'];
     return (servers || []).map(s =>
-        `<span class="badge bg-transparent border ${cls[s.type] || 'text-secondary border-secondary'} ms-1" style="font-weight:500;" title="${escapeHtmlAttr((s.type || '').toUpperCase())}">${escapeHtmlText(s.name)}</span>`
+        `<span class="ov-vtag ov-vtag-${known.includes(s.type) ? s.type : 'other'}" title="${escapeHtmlAttr((s.type || '').toUpperCase())}">${escapeHtmlText(s.name)}</span>`
     ).join('');
 }
 
@@ -131,10 +166,10 @@ function manualRenderChips() {
     empty.classList.toggle('d-none', !!_manualSelections.length);
     wrap.innerHTML = _manualSelections.map(selection => {
         const tip = (selection.sublabel ? selection.sublabel + '\n' : '') + selection.paths.join('\n');
-        return `<div class="manual-chip badge bg-secondary-subtle text-body border d-flex align-items-start gap-2 py-2 px-2" title="${escapeHtmlAttr(tip)}">
-            <i class="bi ${_manualKindIcon(selection.kind)}" aria-hidden="true"></i>
-            <div class="manual-chip-label"><span>${escapeHtmlText(selection.label)}</span><details class="manual-chip-paths mt-1"><summary>Paths</summary>${selection.paths.map(path => `<code>${escapeHtmlText(path)}</code>`).join('')}</details></div>
-            <button type="button" class="btn btn-link text-reset p-0 ms-auto manual-chip-rm" data-key="${escapeHtmlAttr(selection.key)}" aria-label="Remove ${escapeHtmlAttr(selection.label)}"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+        return `<div class="manual-chip" title="${escapeHtmlAttr(tip)}">
+            <span class="ov-chip-ic" aria-hidden="true"><i class="bi ${_manualKindIcon(selection.kind)}"></i></span>
+            <div class="manual-chip-label"><b>${escapeHtmlText(selection.label)}</b><details class="manual-chip-paths"><summary>Paths</summary>${selection.paths.map(path => `<code>${escapeHtmlText(path)}</code>`).join('')}</details></div>
+            <button type="button" class="ov-ibtn manual-chip-rm" data-key="${escapeHtmlAttr(selection.key)}" aria-label="Remove ${escapeHtmlAttr(selection.label)}"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
         </div>`;
     }).join('');
     wrap.querySelectorAll('.manual-chip-rm').forEach(button => button.addEventListener('click', () => manualRemoveSelection(button.dataset.key)));
@@ -155,7 +190,7 @@ function manualRenderSearchResults(results) {
     const box = document.getElementById('manualSearchResults');
     if (!box) return;
     if (!results || !results.length) {
-        box.innerHTML = '<div class="list-group-item text-muted small">No matches.</div>';
+        box.innerHTML = '<div class="ov-r-state">No matches.</div>';
         box.classList.remove('d-none');
         return;
     }
@@ -167,22 +202,22 @@ function manualRenderSearchResults(results) {
     results.forEach((r, idx) => {
         if (r.kind !== lastKind) {
             lastKind = r.kind;
-            rows.push(`<div class="list-group-item bg-body-tertiary py-1 small fw-semibold text-muted">${kindLabel[r.kind] || 'Results'}</div>`);
+            rows.push(`<div class="ov-gh">${kindLabel[r.kind] || 'Results'}</div>`);
         }
-        const year = r.year ? ` <span class="text-muted">(${r.year})</span>` : '';
+        const year = r.year ? ` <small>(${r.year})</small>` : '';
         const bits = [];
         if (r.kind === 'show') {
             if (r.child_count) bits.push(`${r.child_count} eps`);
             if ((r.paths || []).length > 1) bits.push(`${r.paths.length} folders`);
         }
-        const meta = bits.length ? `<span class="small text-muted me-2">${escapeHtmlText(bits.join(' · '))}</span>` : '';
+        const meta = bits.length ? `<span class="ov-meta">${escapeHtmlText(bits.join(' · '))}</span>` : '';
         // A row is a checkbox (batch-pick) + a clickable title (add-one-now) +
         // metadata/badges. The checkbox toggles selection without closing the
         // dropdown; clicking the title adds just that item immediately.
-        rows.push(`<div class="list-group-item d-flex align-items-center gap-2" data-idx="${idx}">
-            <input type="checkbox" class="form-check-input mt-0 flex-shrink-0 manual-row-check" data-idx="${idx}" aria-label="Select ${escapeHtmlAttr(r.title)}">
-            <button type="button" class="flex-grow-1 text-truncate manual-row-add" data-idx="${idx}"><i class="bi ${_manualKindIcon(r.kind)} me-2" aria-hidden="true"></i>${escapeHtmlText(r.title)}${year}</button>
-            <span class="ms-1 flex-shrink-0 d-flex align-items-center">${meta}${_manualServerBadges(r.servers)}</span>
+        rows.push(`<div class="ov-ri" data-idx="${idx}">
+            <input type="checkbox" class="form-check-input manual-row-check" data-idx="${idx}" aria-label="Select ${escapeHtmlAttr(r.title)}">
+            <button type="button" class="manual-row-add" data-idx="${idx}"><i class="bi ${_manualKindIcon(r.kind)}" aria-hidden="true"></i>${escapeHtmlText(r.title)}${year}</button>
+            ${meta}${_manualServerBadges(r.servers)}
         </div>`);
     });
     // Discoverability: when a show is in the results and the user hasn't typed
@@ -191,11 +226,11 @@ function manualRenderSearchResults(results) {
     const q = (document.getElementById('manualSearchInput') || {}).value || '';
     const typedEpisode = /\bS\d{1,2}E\d{1,3}\b|\b\d{1,2}x\d{1,3}\b/i.test(q);
     if (results.some(r => r.kind === 'show') && !typedEpisode) {
-        rows.unshift('<div class="list-group-item small text-body-secondary bg-body-tertiary py-1 border-bottom"><i class="bi bi-lightbulb me-1 text-warning" aria-hidden="true"></i>Tip: add an episode like <code>S01E01</code> to pick just one episode.</div>');
+        rows.unshift('<div class="ov-tip"><i class="bi bi-lightbulb" aria-hidden="true"></i>Tip: add an episode like <code>S01E01</code> to pick just one episode.</div>');
     }
     // Sticky batch-add bar — only shown once something is ticked.
-    rows.push(`<div class="list-group-item d-flex justify-content-between align-items-center position-sticky bottom-0 bg-body border-top" id="manualSelectBar" hidden>
-        <span class="small text-muted"><span id="manualSelectCount">0</span> selected</span>
+    rows.push(`<div class="ov-selbar" id="manualSelectBar" hidden>
+        <span class="ov-hint"><span id="manualSelectCount">0</span> selected</span>
         <button type="button" class="btn btn-sm btn-primary" id="manualAddSelectedBtn"><i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Add selected</button>
     </div>`);
     box.innerHTML = rows.join('');
@@ -252,7 +287,7 @@ async function manualRunSearch() {
     const scope = document.getElementById(scopeId).value;
     const box = document.getElementById('manualSearchResults');
     if (box) {
-        box.innerHTML = '<div class="list-group-item text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Searching…</div>';
+        box.innerHTML = '<div class="ov-r-state"><span class="spinner-border spinner-border-sm me-1"></span>Searching…</div>';
         box.classList.remove('d-none');
     }
     const seq = ++_manualSearchSeq;
@@ -264,7 +299,7 @@ async function manualRunSearch() {
         manualRenderSearchResults(data.results || []);
     } catch (e) {
         if (seq !== _manualSearchSeq) return;
-        if (box) box.innerHTML = `<div class="list-group-item text-danger small">${escapeHtmlText((e && e.message) || 'Search failed')}</div>`;
+        if (box) box.innerHTML = `<div class="ov-r-state ov-r-error">${escapeHtmlText((e && e.message) || 'Search failed')}</div>`;
     }
 }
 
@@ -314,6 +349,8 @@ function _wireManualModal() {
         _showManualKindControls(true);
         if ((input.value || '').trim().length >= 2) manualRunSearch();
     }));
+    document.querySelectorAll('input[name="manualProcessingMode"]').forEach(radio => radio.addEventListener('change', _manualSyncRegenerateHint));
+    document.getElementById('manualPriority').addEventListener('change', () => _manualSyncSummary());
     document.getElementById('manualFilePaths').addEventListener('input', () => {
         document.getElementById('manualSubmissionError').textContent = '';
         _manualUpdateStartState();
@@ -403,7 +440,8 @@ async function startManualJob() {
         showToast('Error', 'Failed to start manual job: ' + error.message, 'danger');
     } finally {
         _manualSubmitting = false;
-        startButton.innerHTML = '<i class="bi bi-play-fill me-1" aria-hidden="true"></i>Start Job';
+        startButton.innerHTML = '<i class="bi bi-play-fill me-1" aria-hidden="true"></i><span id="manualStartLabel"></span>';
+        document.getElementById('manualStartLabel').textContent = spec.start;
         _manualUpdateStartState();
     }
 }

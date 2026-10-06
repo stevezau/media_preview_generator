@@ -40,9 +40,20 @@ window.MediaScanFilters = (() => {
             || !!config.latest_seasons || !!config.movie_year_from || !!config.movie_year_to;
     }
 
+    // Inline copy of each failed check, beside its field; the native validation popup alone is easy to miss.
+    function showErrors(el) {
+        el.querySelectorAll('[data-filter-error]').forEach(box => {
+            const input = field(el, box.dataset.filterError);
+            const message = input && !input.disabled ? input.validationMessage : '';
+            box.hidden = !message;
+            box.querySelector('span').textContent = message;
+        });
+    }
+
     function refresh(prefix) {
         const el = root(prefix);
         if (!el) return;
+        el.querySelectorAll('[data-filter-error]').forEach(box => { box.hidden = true; });
         const enabled = prefix === 'schedule'
             ? document.getElementById('scanModeFull')?.checked
             : !document.getElementById('jobKindMarkers')?.checked;
@@ -155,6 +166,7 @@ window.MediaScanFilters = (() => {
         const invalid = Array.from(el.querySelectorAll('input, select')).find(input => !input.checkValidity());
         if (invalid) {
             el.open = true;
+            showErrors(el);
             invalid.reportValidity();
             return null;
         }
@@ -169,4 +181,66 @@ window.MediaScanFilters = (() => {
     }
 
     return { reset, refresh, read, setLoading };
+})();
+
+// Segmented control drawn over a <select>. The select stays the source of truth (ids, tests and the JS that sets
+// .value keep working); its value setter is wrapped so a programmatic change moves the highlight too.
+window.OverlaySegments = (() => {
+    function sync(select) {
+        const group = select._ovSeg;
+        if (!group) return;
+        group.querySelectorAll('[role="radio"]').forEach(button => {
+            const on = button.dataset.value === select.value;
+            button.classList.toggle('on', on);
+            button.setAttribute('aria-checked', String(on));
+            button.tabIndex = on ? 0 : -1;
+            button.querySelector('.ov-def')?.toggleAttribute('hidden', button.dataset.value !== select.dataset.segDefault);
+        });
+    }
+
+    function choose(select, value) {
+        select.value = value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function build(select) {
+        if (select._ovSeg) return;
+        const group = document.createElement('div');
+        group.className = 'ov-seg';
+        group.setAttribute('role', 'radiogroup');
+        const label = select.id && document.querySelector(`label[for="${select.id}"]`);
+        group.setAttribute('aria-label', (label?.firstChild?.textContent || 'Choice').trim());
+        for (const option of select.options) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'radio');
+            button.dataset.value = option.value;
+            button.innerHTML = `${option.textContent.replace(/ \(from Settings\)$/, '')}<span class="ov-def" hidden>default</span>`;
+            button.addEventListener('click', () => choose(select, option.value));
+            group.appendChild(button);
+        }
+        group.addEventListener('keydown', event => {
+            const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+            if (!step) return;
+            const buttons = Array.from(group.querySelectorAll('button'));
+            const next = buttons[(buttons.indexOf(document.activeElement) + step + buttons.length) % buttons.length];
+            event.preventDefault();
+            next.focus();
+            choose(select, next.dataset.value);
+        });
+        const nativeValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+        Object.defineProperty(select, 'value', {
+            get() { return nativeValue.get.call(this); },
+            set(value) { nativeValue.set.call(this, value); sync(this); },
+        });
+        select._ovSeg = group;
+        select.after(group);
+        sync(select);
+    }
+
+    function init(scope = document) {
+        scope.querySelectorAll('select.ov-seg-select').forEach(build);
+    }
+    init();
+    return { init, sync, build };
 })();
