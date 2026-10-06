@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup redesign mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+<link rel="stylesheet" href="../shared.css">
+<style>
+.wiz { max-width: 720px; margin: 0 auto; padding: 32px 16px 120px; display: grid; gap: 22px; }
+.wiz-h { text-align: center; }
+.wiz-h h1 { margin: 0; font-size: 24px; font-weight: 700; }
+.wiz-h p { margin: 4px 0 0; color: var(--muted); }
+.steps { display: flex; align-items: center; justify-content: center; gap: 0; }
+.progress-step { display: flex; align-items: center; gap: 8px; color: var(--faint); font-weight: 600; font-size: 13px; background: none; border: 0; padding: 4px; }
+.step-number { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid var(--line-strong); font-size: 13px; font-weight: 700; }
+.progress-step.active { color: var(--accent); } .progress-step.active .step-number { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 0 0 4px var(--accent-soft); }
+.progress-step.completed { color: var(--text); } .progress-step.completed .step-number { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+.step-connector { width: 28px; height: 2px; background: var(--line-strong); margin: 0 6px; border-radius: 2px; }
+.step-connector.done { background: var(--ok); }
+.step-now { display: none; text-align: center; color: var(--muted); font-size: 13px; margin-top: -10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+.card-b { padding: 24px; display: grid; gap: 18px; }
+.card-b h2 { margin: 0; font-size: 18px; font-weight: 700; }
+.card-b .lead { margin: -10px 0 0; color: var(--muted); }
+.card-f { display: flex; align-items: center; gap: 10px; padding: 14px 24px; border-top: 1px solid var(--line); }
+.card-f .sp { flex: 1; }
+.helper { color: var(--faint); font-size: 12px; }
+.setup-step { display: none; } .setup-step.on { display: block; }
+.vendors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.wizard-vendor-btn { display: grid; gap: 10px; justify-items: center; text-align: center; padding: 20px 12px 18px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--inset); color: var(--text); transition: border-color .16s, background .16s; }
+.wizard-vendor-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
+.wizard-vendor-btn b { font-size: 15px; }
+.wizard-vendor-btn small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.vlogo { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--panel-2); border: 1px solid var(--line); font-size: 20px; flex: none; }
+.vlogo.plex { color: #e5a00d; } .vlogo.emby { color: #52b54b; } .vlogo.jf { color: #5aa0e8; }
+fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 12px; min-width: 0; }
+legend { padding: 0; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 2px; }
+.fld { display: grid; gap: 6px; min-width: 0; }
+.fld label { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.fld .help { color: var(--faint); font-size: 12px; }
+.inp { display: flex; gap: 8px; min-width: 0; }
+.inp input, .inp select, .fld input.t { flex: 1; min-width: 0; height: 40px; border-radius: 9px; border: 1px solid var(--line-strong); background: transparent; color: var(--text); padding: 0 12px; font: inherit; }
+.inp input:focus, .fld input.t:focus, .inp select:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.inp select option { background: var(--panel); }
+.mono { font-family: var(--mono); font-size: 13px; }
+.info { color: var(--faint); font-size: 14px; cursor: help; }
+.res { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.liblist { display: grid; gap: 4px; }
+.lib { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--inset); font-weight: 600; }
+.lib input { accent-color: var(--accent); width: 16px; height: 16px; }
+.lib span.n { margin-left: auto; color: var(--faint); font-weight: 500; font-size: 12px; }
+details.adv { border: 1px solid var(--line); border-radius: var(--radius-sm); }
+details.adv summary { cursor: pointer; padding: 10px 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; color: var(--muted); list-style: none; }
+details.adv summary::-webkit-details-marker { display: none; }
+details.adv summary .chev { margin-left: auto; transition: transform .2s; }
+details.adv[open] summary .chev { transform: rotate(180deg); }
+details.adv summary small { color: var(--faint); font-weight: 500; }
+details.adv .adv-b { padding: 4px 14px 14px; display: grid; gap: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
+.row-map { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 8px; }
+.row-map input { min-width: 0; height: 36px; border-radius: 8px; border: 1px solid var(--line-strong); background: transparent; color: var(--text); padding: 0 10px; font: 13px var(--mono); }
+.opts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.sw-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--inset); }
+.sw-row .tx { flex: 1; } .sw-row b { display: block; } .sw-row small { color: var(--faint); }
+.sw-row input { accent-color: var(--accent); width: 18px; height: 18px; }
+.tokenbox { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--inset); border: 1px solid var(--line); font: 13px var(--mono); }
+.tokenbox span { flex: 1; overflow-wrap: anywhere; }
+.note { color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; text-align: center; }
+.nav .brand { margin-right: 0; }
+@media (max-width: 700px) {
+  .vendors { grid-template-columns: 1fr; gap: 8px; }
+  .wizard-vendor-btn { grid-template-columns: 40px 1fr; justify-items: start; text-align: left; align-items: center; column-gap: 12px; row-gap: 0; height: 64px; padding: 0 12px; }
+  .wizard-vendor-btn .vtx { display: grid; }
+  .steps .progress-step .lbl, .steps .step-connector { display: none; }
+  .steps { gap: 10px; }
+  .step-now { display: block; }
+  .wiz-h h1 { font-size: 22px; }
+  .card-b { padding: 18px 16px; }
+  .opts { grid-template-columns: 1fr; }
+  .row-map { grid-template-columns: 1fr 1fr; }
+  .row-map:not([style]) input { grid-column: 1/-1; }
+  .row-map .path-mapping-remove { justify-self: end; }
+  .theme { display: none; }
+  .nav .btn span { display: none; }
+  .nav { gap: 10px; padding: 0 12px; }
+  .nav .brand small { display: none; }
+  .card-f { padding: 12px 16px; }
+  .card-f.sticky { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; background: var(--panel); border-radius: 0; gap: 10px; }
+  .card-f.sticky .btn { flex: 1; height: 44px; }
+  .card-f.sticky .helper { display: none; }
+  #skipSetupBtn { width: 100%; }
+  .card-f.one { flex-direction: column; align-items: stretch; }
+  .theme { bottom: 76px; }
+}
+.vtx { display: contents; }
+@media (min-width: 701px) { .vtx { display: contents; } }
+</style>
+</head>
+<body>
+<header class="nav">
+  <a class="brand" href="#"><span class="mark"><i class="bi bi-play-btn-fill"></i></span><span><b>Media Preview Generator</b><small>local build</small></span></a>
+  <span class="sp"></span>
+  <button class="ibtn" aria-label="Toggle theme" title="Toggle theme" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'"><i class="bi bi-moon-stars"></i></button>
+  <button class="btn sm" aria-label="Logout"><i class="bi bi-box-arrow-right"></i><span> Logout</span></button>
+</header>
+
+<main class="wiz">
+  <div class="wiz-h"><h1>Set up your server</h1><p>Five quick steps. You can change everything later in Settings.</p></div>
+
+  <nav class="steps" id="steps" aria-label="Setup progress"></nav>
+  <div class="step-now" id="stepNow"></div>
+
+  <section class="card">
+    <!-- STEP 1 -->
+    <div class="setup-step on" data-step="1">
+      <div class="card-b">
+        <h2>Choose your media server</h2>
+        <p class="lead">Pick your first server. You can add more from the Servers page later.</p>
+        <div class="vendors">
+          <button class="wizard-vendor-btn" data-vendor="plex"><span class="vlogo plex"><i class="bi bi-chevron-right"></i></span><span class="vtx"><b>Plex</b><small>auto-discovery via plex.tv</small></span></button>
+          <button class="wizard-vendor-btn" data-vendor="emby"><span class="vlogo emby"><i class="bi bi-play-btn-fill"></i></span><span class="vtx"><b>Emby</b><small>URL + API key or password</small></span></button>
+          <button class="wizard-vendor-btn" data-vendor="jellyfin"><span class="vlogo jf"><i class="bi bi-triangle-fill"></i></span><span class="vtx"><b>Jellyfin</b><small>Quick Connect or URL+key</small></span></button>
+        </div>
+      </div>
+      <div class="card-f one"><span class="sp"></span><button class="btn sm" id="skipSetupBtn"><i class="bi bi-skip-forward"></i> Skip for now</button></div>
+    </div>
+
+    <!-- STEP 2 -->
+    <div class="setup-step" data-step="2">
+      <div class="card-b">
+        <h2>Connect to Plex</h2>
+        <p class="lead">We found your server through plex.tv. Pick the libraries to process.</p>
+        <fieldset>
+          <legend>Server</legend>
+          <div class="fld"><label for="serverUrl">Server URL</label>
+            <div class="inp"><input id="serverUrl" class="mono" value="http://mlab-plex:32400"><button class="btn" id="serverUrlApply"><i class="bi bi-check2"></i> Apply</button></div>
+            <span class="help">Signed in as steve via plex.tv. <a href="#" style="color:var(--accent)">Enter a URL and token manually</a></span></div>
+          <button class="btn sm" id="manualPlexTestBtn" style="justify-self:start"><i class="bi bi-plug"></i> Test connection</button>
+          <div class="res" style="color:var(--ok)"><span class="dot ok"></span> Connected to Lab Plex (v1.41)</div>
+        </fieldset>
+        <fieldset>
+          <legend>Libraries</legend>
+          <div class="liblist">
+            <label class="lib"><input type="checkbox" checked> Movies <span class="n">1,204 items</span></label>
+            <label class="lib"><input type="checkbox" checked> TV Shows <span class="n">312 shows</span></label>
+            <label class="lib"><input type="checkbox"> Home Videos <span class="n">86 items</span></label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="card-f sticky"><button class="btn" id="step2Back" data-go="1"><i class="bi bi-arrow-left"></i> Back</button><span class="sp"></span><button class="btn primary" id="step2Next" data-go="3">Next <i class="bi bi-arrow-right"></i></button></div>
+    </div>
+
+    <!-- STEP 3 -->
+    <div class="setup-step" data-step="3">
+      <div class="card-b">
+        <h2>Where are your files?</h2>
+        <p class="lead">Preview files are written next to Plex's own data. Check that this app can see them.</p>
+        <fieldset>
+          <legend>Plex data</legend>
+          <div class="fld"><label for="wizardPlexConfigFolder">Plex config folder <i class="bi bi-info-circle info" title="The folder that contains Plex's Media/localhost directory. Previews are written here."></i></label>
+            <div class="inp"><input id="wizardPlexConfigFolder" class="mono" value="/plex-config"><button class="btn"><i class="bi bi-folder2-open"></i> Browse</button></div>
+            <span class="help res" style="color:var(--ok)"><i class="bi bi-check-circle-fill"></i> Found Media/localhost</span></div>
+        </fieldset>
+        <fieldset>
+          <legend>Check a file</legend>
+          <div class="fld"><label for="setupCheckFile">Sample media file <i class="bi bi-info-circle info" title="Paste a path as Plex sees it; we confirm this app can read it."></i></label>
+            <div class="inp"><input id="setupCheckFile" class="mono" placeholder="/data/movies/Example (2020)/Example.mkv"><button class="btn" id="step3Check"><i class="bi bi-search"></i> Check file</button></div>
+            <span class="help">Optional. Pick any video from your library to confirm paths line up.</span></div>
+        </fieldset>
+        <details class="adv">
+          <summary><i class="bi bi-sliders"></i> Advanced <small>path mappings, excluded paths</small><i class="bi bi-chevron-down chev"></i></summary>
+          <div class="adv-b">
+            <fieldset>
+              <legend>Path mappings <i class="bi bi-info-circle info" title="Use when Plex and this app see the same folder under different paths."></i></legend>
+              <span class="helper">Only needed if Plex and this app mount media at different paths.</span>
+              <div class="row-map"><input value="/data/movies" aria-label="Plex path"><input value="/media/movies" aria-label="Local path"><button class="ibtn path-mapping-browse" aria-label="Browse" title="Browse"><i class="bi bi-folder2-open"></i></button><button class="ibtn danger path-mapping-remove" aria-label="Remove" title="Remove"><i class="bi bi-trash"></i></button></div>
+              <button class="btn sm" id="setupAddPathMappingBtn" style="justify-self:start"><i class="bi bi-plus-lg"></i> Add mapping</button>
+            </fieldset>
+            <fieldset>
+              <legend>Exclude paths <i class="bi bi-info-circle info" title="Files under these folders are skipped."></i></legend>
+              <div class="row-map" style="grid-template-columns:1fr auto"><input value="/data/movies/Trailers" aria-label="Excluded path"><button class="ibtn danger exclude-path-remove" aria-label="Remove" title="Remove"><i class="bi bi-trash"></i></button></div>
+              <button class="btn sm" id="setupAddExcludePathBtn" style="justify-self:start"><i class="bi bi-plus-lg"></i> Add excluded path</button>
+            </fieldset>
+          </div>
+        </details>
+      </div>
+      <div class="card-f sticky"><button class="btn" id="step3Back" data-go="2"><i class="bi bi-arrow-left"></i> Back</button><span class="sp"></span><button class="btn primary" id="step3Next" data-go="4">Next <i class="bi bi-arrow-right"></i></button></div>
+    </div>
+
+    <!-- STEP 4 -->
+    <div class="setup-step" data-step="4">
+      <div class="card-b">
+        <h2>Processing options</h2>
+        <p class="lead">Sensible defaults are already filled in.</p>
+        <fieldset>
+          <legend>Previews</legend>
+          <div class="opts">
+            <div class="fld"><label for="interval">Frame interval <i class="bi bi-info-circle info" title="Seconds between preview thumbnails."></i></label><div class="inp"><input id="interval" type="number" value="5"></div><span class="help">seconds</span></div>
+            <div class="fld"><label for="quality">Thumbnail quality <i class="bi bi-info-circle info" title="Lower = smaller files."></i></label><div class="inp"><select id="quality"><option>Balanced</option><option>Small files</option><option>Best</option></select></div></div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Workers</legend>
+          <div class="sw-row"><span class="vlogo" style="width:32px;height:32px;font-size:16px"><i class="bi bi-gpu-card"></i></span><span class="tx"><b>NVIDIA RTX 3060</b><small>GPU worker</small></span><div class="stepper"><button aria-label="Fewer">&minus;</button><output>1</output><button aria-label="More">+</button></div></div>
+          <div class="sw-row"><span class="vlogo" style="width:32px;height:32px;font-size:16px"><i class="bi bi-cpu"></i></span><span class="tx"><b>CPU</b><small>CPU worker</small></span><div class="stepper"><button aria-label="Fewer">&minus;</button><output>1</output><button aria-label="More">+</button></div></div>
+        </fieldset>
+        <fieldset>
+          <legend>Extras</legend>
+          <label class="sw-row"><span class="tx"><b>Skip existing previews</b><small>Don't regenerate files that already exist</small></span><input type="checkbox" checked></label>
+        </fieldset>
+      </div>
+      <div class="card-f sticky"><button class="btn" id="step4Back" data-go="3"><i class="bi bi-arrow-left"></i> Back</button><span class="sp"></span><button class="btn primary" id="step4Next" data-go="5">Next <i class="bi bi-arrow-right"></i></button></div>
+    </div>
+
+    <!-- STEP 5 -->
+    <div class="setup-step" data-step="5">
+      <div class="card-b">
+        <h2>Secure the web interface</h2>
+        <p class="lead">This token is required to sign in. Save it somewhere safe.</p>
+        <fieldset>
+          <legend>Authentication token</legend>
+          <div class="tokenbox"><i class="bi bi-key" style="color:var(--faint)"></i><span id="tok">k7Qm-2xRvB9tYp4LwZ0cNa8EdH3sUf6J</span><button class="ibtn" aria-label="Copy token" title="Copy token"><i class="bi bi-clipboard"></i></button></div>
+          <span class="helper">Also saved to <code class="mono">/config/auth.json</code>.</span>
+        </fieldset>
+      </div>
+      <div class="card-f sticky"><button class="btn" id="step5Back" data-go="4"><i class="bi bi-arrow-left"></i> Back</button><span class="sp"></span><button class="btn primary" id="finishSetup"><i class="bi bi-check-lg"></i> Finish setup</button></div>
+    </div>
+  </section>
+  <div class="note" id="stateNote">Preview: step switcher above is for the mockup only</div>
+</main>
+<button class="btn sm theme" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'"><i class="bi bi-circle-half"></i> Theme</button>
+<script>
+var labels = ['Server type', 'Connect', 'Paths', 'Options', 'Security'];
+function go(n) {
+  document.querySelectorAll('.setup-step').forEach(function (s) { s.classList.toggle('on', +s.dataset.step === n); });
+  var h = '';
+  labels.forEach(function (l, i) {
+    var k = i + 1, c = k < n ? 'completed' : k === n ? 'active' : '';
+    h += (i ? '<span class="step-connector' + (k <= n ? ' done' : '') + '"></span>' : '') +
+      '<button class="progress-step ' + c + '" data-step="' + k + '"' + (k === n ? ' aria-current="step"' : '') + '><span class="step-number">' +
+      (k < n ? '<i class="bi bi-check-lg"></i>' : k) + '</span><span class="lbl">' + l + '</span></button>';
+  });
+  document.getElementById('steps').innerHTML = h;
+  document.getElementById('stepNow').textContent = 'Step ' + n + ' of 5 – ' + labels[n - 1];
+  window.scrollTo(0, 0);
+}
+document.addEventListener('click', function (e) {
+  var g = e.target.closest('[data-go]'); if (g) return go(+g.dataset.go);
+  if (e.target.closest('.wizard-vendor-btn')) return go(2);
+  var s = e.target.closest('.progress-step'); if (s) go(+s.dataset.step);
+});
+go(1);
+</script>
+</body>
+</html>

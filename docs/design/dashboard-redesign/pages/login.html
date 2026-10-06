@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login redesign mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+<link rel="stylesheet" href="../shared.css">
+<style>
+body { min-height: 100dvh; display: flex; align-items: flex-start; justify-content: center; padding: 16px;
+  background: radial-gradient(900px 500px at 50% 0%, rgba(255,255,255,.04), transparent 70%), var(--bg); }
+:root[data-theme="light"] body { background: var(--bg); }
+.login-card { width: 100%; max-width: 420px; margin: clamp(16px, 12vh, 120px) auto 0; padding: 28px 24px 24px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); display: grid; gap: 18px; }
+.logo-container { text-align: center; display: grid; gap: 4px; justify-items: center; }
+.logo-container .mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 11px; background: var(--accent-soft); color: var(--accent); font-size: 25px; margin-bottom: 8px; }
+.logo-container h1 { margin: 0; font-size: 20px; font-weight: 700; }
+.logo-container p { margin: 0; color: var(--muted); }
+.alert { display: none; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 13px; line-height: 1.4; }
+.alert i { margin-top: 2px; }
+.alert b { display: block; }
+.alert.alert-danger { background: var(--bad-soft); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent); }
+.alert.alert-warn { background: var(--warn-soft); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+body[data-state="error"] .alert-danger, body[data-state="rate"] .alert-warn { display: flex; }
+label.fl { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.igrp { display: flex; align-items: center; height: 44px; border: 1px solid var(--line-strong); border-radius: 9px; background: transparent; }
+.igrp:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.igrp > i { padding: 0 4px 0 12px; color: var(--faint); }
+.igrp input { flex: 1; min-width: 0; height: 100%; border: 0; background: transparent; color: var(--text); font: inherit; padding: 0 10px; outline: 0; }
+.igrp .ibtn { width: 40px; height: 40px; }
+body[data-state="error"] .igrp { border-color: var(--bad); box-shadow: 0 0 0 2px var(--bad-soft); }
+.btn.signin { width: 100%; height: 48px; margin-top: 14px; }
+details.help { border-top: 1px solid var(--line); padding-top: 14px; }
+details.help summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; list-style: none; }
+details.help summary::-webkit-details-marker { display: none; }
+details.help summary .chev { margin-left: auto; transition: transform .2s; }
+details.help[open] summary .chev { transform: rotate(180deg); }
+details.help summary:hover { color: var(--text); }
+.help-body { margin-top: 12px; display: grid; gap: 10px; color: var(--muted); font-size: 13px; }
+.help-body ol { margin: 0; padding-left: 18px; display: grid; gap: 8px; }
+.help-body code { font: 12px var(--mono); background: var(--inset); border: 1px solid var(--line); padding: 1px 6px; border-radius: 5px; color: var(--text); overflow-wrap: anywhere; }
+.help-body pre { margin: 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--inset); border: 1px solid var(--line); font: 12px/1.5 var(--mono); color: var(--text); overflow-x: auto; }
+.help-body .sub { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.states { position: fixed; left: 16px; bottom: 16px; display: flex; align-items: center; gap: 8px; z-index: 5; }
+@media (max-width: 480px) { .states { position: static; } .login-card { margin-top: 24px; } body { flex-wrap: wrap; align-content: flex-start; } }
+</style>
+</head>
+<body data-state="default">
+<main class="login-card form-signin">
+  <div class="logo-container">
+    <span class="mark"><i class="bi bi-play-btn-fill"></i></span>
+    <h1>Media Preview Generator</h1>
+    <p>Enter your token to continue</p>
+  </div>
+
+  <div class="alert alert-danger" role="alert"><i class="bi bi-exclamation-triangle-fill"></i><span><b>That token didn't work.</b>Check it and try again.</span></div>
+  <div class="alert alert-warn" role="alert"><i class="bi bi-hourglass-split"></i><span><b>Too many attempts.</b>Wait a minute, then try again.</span></div>
+
+  <form method="post" action="/login" onsubmit="return false">
+    <label class="fl" for="token">Authentication token</label>
+    <div class="igrp">
+      <i class="bi bi-key"></i>
+      <input id="token" name="token" type="password" required autofocus autocomplete="current-password" aria-describedby="loginTokenHelp" value="">
+      <button type="button" class="ibtn" id="reveal" aria-label="Show token" aria-pressed="false" title="Show token"><i class="bi bi-eye"></i></button>
+    </div>
+    <button type="submit" class="btn primary signin"><i class="bi bi-box-arrow-in-right"></i> Sign In</button>
+  </form>
+
+  <details class="help" id="loginTokenHelp">
+    <summary><i class="bi bi-question-circle"></i> How do I find my token? <i class="bi bi-chevron-down chev"></i></summary>
+    <div class="help-body">
+      <ol>
+        <li>Check <code>/config/auth.json</code> in your config volume.</li>
+        <li>Or run <code>docker logs &lt;container&gt;</code> for the file path.</li>
+        <li>Or set <code>WEB_AUTH_TOKEN</code> in your environment / docker-compose.</li>
+      </ol>
+      <div class="sub">First time? docker-compose</div>
+      <pre>environment:
+  - WEB_AUTH_TOKEN=your-secret-token</pre>
+    </div>
+  </details>
+</main>
+
+<div class="states">
+  <span class="seg" role="group" aria-label="Preview state">
+    <button class="on" data-s="default">Default</button><button data-s="error">Wrong token</button><button data-s="rate">Rate limited</button>
+  </span>
+  <button class="btn sm" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'"><i class="bi bi-circle-half"></i> Theme</button>
+</div>
+<script>
+var t = document.getElementById('token'), rv = document.getElementById('reveal');
+rv.addEventListener('click', function () {
+  var show = t.type === 'password';
+  t.type = show ? 'text' : 'password';
+  rv.setAttribute('aria-pressed', show); rv.setAttribute('aria-label', show ? 'Hide token' : 'Show token'); rv.title = rv.getAttribute('aria-label');
+  rv.firstElementChild.className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
+});
+document.querySelectorAll('.states .seg button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.states .seg button').forEach(function (x) { x.classList.toggle('on', x === b); });
+    document.body.dataset.state = b.dataset.s;
+    var err = b.dataset.s !== 'default';
+    document.getElementById('loginTokenHelp').open = err;
+    t.toggleAttribute('aria-invalid', b.dataset.s === 'error');
+  });
+});
+</script>
+</body>
+</html>

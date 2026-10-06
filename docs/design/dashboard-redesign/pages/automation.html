@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automation page mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+<link rel="stylesheet" href="../shared.css">
+<style>
+.shell{max-width:1240px;margin:0 auto;padding:24px 20px 64px;display:grid;grid-template-columns:220px minmax(0,1fr);gap:28px;align-items:start}
+.side{position:sticky;top:20px;display:grid;gap:2px}
+.side .grp{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding:10px 12px 6px}
+.side .grp:not(:first-child){margin-top:10px;border-top:1px solid var(--line);padding-top:16px}
+.side a{display:flex;align-items:center;gap:10px;padding:7px 12px;border-radius:8px;color:var(--muted);font-size:13px}
+.side a:hover{background:var(--inset);color:var(--text)}
+.side a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mnav{display:none;position:sticky;top:0;z-index:10;background:var(--bg);padding:8px 0}
+.main{display:grid;gap:20px;min-width:0}
+.ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.ph h1{margin:0;font-size:24px}
+.ph p{margin:0;color:var(--muted);flex-basis:100%}
+.panel-h h2.t{font-size:15px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--text)}
+.panel-h h2.t i{color:var(--muted);font-size:16px}
+.lead{color:var(--muted);margin:0}
+.tile{width:36px;height:36px;flex:none;border-radius:10px;display:grid;place-items:center;background:var(--panel-2);border:1px solid var(--line);font-size:17px;color:var(--muted)}
+.orow{display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:var(--radius-sm);background:var(--inset);border:1px solid var(--line)}
+.omain{flex:1;min-width:0}.ot{font-weight:600}.od{color:var(--muted);font-size:13px}
+.orow .btn{flex:none;align-self:center}
+.list{display:grid;gap:8px}
+code{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--inset);border:1px solid var(--line);padding:1px 6px;border-radius:5px;overflow-wrap:anywhere}
+details.mini-d{margin-top:6px;font-size:13px;color:var(--muted)}
+details.mini-d>summary,details.g>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;font-weight:600;color:var(--muted)}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"\F285";font-family:bootstrap-icons;font-size:11px;transition:transform .2s}
+details[open]>summary::before{transform:rotate(90deg)}
+details.mini-d>div{margin-top:6px;padding:8px 10px;border-radius:8px;background:var(--panel-2);border:1px solid var(--line)}
+details.g{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 14px;background:var(--inset)}
+details.g>summary{color:var(--text)}
+details.g>div{margin-top:10px;display:grid;gap:6px;color:var(--muted);font-size:13px}
+details.g ol{margin:0;padding-left:20px;display:grid;gap:4px}
+.note{display:flex;gap:12px;padding:12px 14px;border-radius:var(--radius-sm);background:var(--inset);border:1px solid var(--line)}
+.note .tile{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.note b{display:block}.note p{margin:0;color:var(--muted);font-size:13px}
+.field{display:flex;align-items:center;gap:0;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--inset);overflow:hidden}
+.field input,.field .v{flex:1;min-width:0;height:40px;border:0;background:transparent;color:var(--text);padding:0 12px;font:13px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center}
+.field button{width:40px;height:40px;border:0;border-left:1px solid var(--line);background:transparent;color:var(--muted)}
+.field button:hover{background:var(--inset);color:var(--text)}
+.field button.copied{color:var(--accent);background:var(--accent-soft)}
+.lbl{font-weight:600;font-size:13px}
+.help{font-size:12px;color:var(--faint);margin:0}
+.hint{font-size:12px;color:var(--faint)}
+pre{margin:0;padding:10px 12px;border-radius:8px;background:var(--inset);border:1px solid var(--line);font:12px/1.5 var(--mono);color:var(--muted);overflow-x:auto}
+.seg button i{font-size:14px}
+select.sel{height:38px;border-radius:var(--radius-sm);border:1px solid var(--line-strong);background:var(--inset);color:var(--text);padding:0 10px;font:inherit;max-width:100%}
+.info{display:flex;gap:10px;align-items:center;padding:10px 12px;border-radius:var(--radius-sm);background:var(--run-soft);color:var(--run);font-size:13px}
+.info a{text-decoration:underline}
+.srow2,.set{display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--line)}
+.set:last-child{border-bottom:0}.set .l{flex:1;min-width:0}.set .r{display:flex;align-items:center;gap:10px}
+.set input[type=range]{accent-color:var(--accent);width:200px;max-width:100%}
+.set .val{font-weight:700;min-width:36px;text-align:right}
+.set.col{flex-wrap:wrap}.set.col .r{flex:1 1 280px}.set.col .field{flex:1}
+.sw{position:relative;display:inline-block;width:38px;height:22px;flex:none}
+.sw input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer;z-index:1}
+.sw i{position:absolute;inset:0;border-radius:99px;background:var(--line-strong);transition:background .16s}
+.sw i::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .16s}
+.sw input:checked+i{background:var(--accent)}.sw input:checked+i::after{transform:translateX(16px)}
+.sw input:focus-visible+i{outline:2px solid var(--accent);outline-offset:2px}
+.srow{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:var(--radius-sm);background:var(--inset);border:1px solid var(--line)}
+.smain{flex:1;min-width:0}.snm{font-weight:600}
+.ssub{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:12px}
+.next{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font-size:12px;font-weight:600;white-space:nowrap}
+.next.off{color:var(--faint)}
+.racts{display:flex;gap:2px}
+.chip-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fl{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.fl .sp{flex:1}
+@media(max-width:900px){.shell{grid-template-columns:1fr;gap:12px;padding:16px}.side{display:none}.mnav{display:block}}
+@media(max-width:700px){
+ .orow{flex-direction:column;align-items:stretch}.orow>.tile{display:none}.orow .btn{width:100%;align-self:stretch}
+ .srow{flex-wrap:wrap}
+ .set{flex-wrap:wrap}.set .l{flex:1 1 100%}.set .r{flex:1 1 100%}.set input[type=range]{flex:1;width:auto}.set.col .r{flex-wrap:wrap}.set.col .field{flex:1 1 100%}.set:first-child .l{flex:1 1 60%}.set:first-child .r{flex:none}
+ .srow .smain{flex:1 1 calc(100% - 100px)}.srow .next{order:5;flex:1}.srow .racts{order:6}.srow .sw{order:2;margin-left:auto}
+ .nav{gap:12px}
+}
+</style>
+</head>
+<body>
+<header class="nav">
+  <a class="brand" href="#"><span class="mark"><i class="bi bi-play-btn-fill"></i></span><span><b>Media Preview Generator</b><small>local build</small></span></a>
+  <a class="tab" href="#"><i class="bi bi-speedometer2"></i> Dashboard</a>
+  <a class="tab" href="#"><i class="bi bi-hdd-network"></i> Servers</a>
+  <a class="tab on" href="#"><i class="bi bi-magic"></i> Automation <i class="bi bi-chevron-down caret"></i></a>
+  <a class="tab" href="#"><i class="bi bi-gear"></i> Settings <i class="bi bi-chevron-down caret"></i></a>
+  <a class="tab" href="#"><i class="bi bi-wrench"></i> Tools <i class="bi bi-chevron-down caret"></i></a>
+  <span class="sp"></span>
+  <button class="ibtn" aria-label="Notifications" title="Notifications"><i class="bi bi-bell"></i><span class="badge-dot">1</span></button>
+  <button class="ibtn" aria-label="Help" title="Help"><i class="bi bi-question-circle"></i></button>
+  <a class="ibtn coffee" href="#" aria-label="Buy me a coffee" title="Buy me a coffee"><i class="bi bi-cup-hot-fill"></i></a>
+  <a class="btn sm" href="#"><i class="bi bi-star-fill" style="color:var(--accent)"></i> Star</a>
+  <button class="ibtn" aria-label="Toggle theme" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
+  <button class="btn sm"><i class="bi bi-box-arrow-right"></i> Logout</button>
+</header>
+<div class="shell">
+<aside class="side" id="automation-sidebar" aria-label="Automation sections">
+ <div class="grp" id="sidebar-group-triggers"><i class="bi bi-broadcast"></i> Triggers</div>
+ <div id="sidebar-triggers-links">
+ <a class="on" href="#section-webhooks-overview"><i class="bi bi-info-circle"></i> Overview</a>
+ <a href="#section-webhooks-arr"><i class="bi bi-download"></i> *arr apps</a>
+ <a href="#section-webhooks-custom"><i class="bi bi-plug"></i> Custom (Tdarr / scripts)</a>
+ <a href="#section-webhooks-settings"><i class="bi bi-sliders"></i> Settings</a>
+ <a href="#section-webhooks-activity"><i class="bi bi-clock-history"></i> Webhook activity</a></div>
+ <div class="grp" id="sidebar-group-schedules"><i class="bi bi-calendar3"></i> Schedules</div>
+ <div id="sidebar-schedules-links"><a href="#section-schedules-list"><i class="bi bi-list-ul"></i> All schedules</a></div>
+</aside>
+<main class="main">
+<div class="mnav" id="automationMobileNav"><div class="seg" role="tablist"><button class="on" data-go="#section-webhooks-overview"><i class="bi bi-broadcast"></i> Triggers</button><button data-go="#section-schedules-list"><i class="bi bi-calendar3"></i> Schedules</button></div></div>
+<div class="ph"><h1 id="automationHeading">Triggers &amp; Schedules</h1><span class="pill ok"><i class="bi bi-check-circle-fill"></i> Webhooks on</span><span class="pill"><i class="bi bi-calendar-check"></i> 3 schedules enabled</span><span class="hint" id="saveStatusIndicator"><i class="bi bi-check2"></i> All changes saved</span><p id="automationSubtitle">Instant updates when new media appears, plus recurring scans.</p></div>
+
+<section class="panel" id="section-webhooks-overview"><div class="panel-h"><h2 class="t" role="heading" aria-level="2"><i class="bi bi-info-circle"></i> Overview</h2></div><div class="panel-b">
+<p class="lead">Webhooks generate previews automatically when new media lands in Plex, Emby, or Jellyfin. Pick the source that matches how your media gets in.</p>
+<div class="lbl">How do you add media?</div>
+<div class="list">
+<div class="orow"><span class="tile"><i class="bi bi-download"></i></span><div class="omain"><div class="ot">Sonarr / Radarr / Sportarr grab your media</div><div class="od">Sportarr is the Sonarr fork for sports. Works for any server.</div></div><a class="btn sm" href="#">Use the *arr webhook <i class="bi bi-arrow-right"></i></a></div>
+<div class="orow"><span class="tile"><i class="bi bi-plug"></i></span><div class="omain"><div class="ot">Tdarr, FileFlows, or a script transcodes files</div><div class="od">Works for any server.</div></div><a class="btn sm" href="#">Use the Custom webhook <i class="bi bi-arrow-right"></i></a></div>
+<div class="orow"><span class="tile"><i class="bi bi-play-circle-fill" style="color:#e5a00d"></i></span><div class="omain"><div class="ot">You add media manually to <b>Plex</b></div><div class="od">Plex only: it is the only vendor with a server-side webhook we can subscribe to.</div></div><a class="btn sm" href="#">Servers → Plex → Webhook <i class="bi bi-arrow-right"></i></a></div>
+<div class="orow"><span class="tile"><i class="bi bi-hdd-network-fill" style="color:#52b54b"></i></span><div class="omain"><div class="ot">You add media manually to <b>Emby</b></div><div class="od">Emby has built-in webhooks that post to the same <code>/incoming</code> URL.</div><details class="mini-d"><summary>Setup steps</summary><div>Dashboard → Webhooks → Add Webhook, URL <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code>, tick <b>Library → New Media Added</b>.</div></details></div><a class="btn sm" href="#">Open Emby setup <i class="bi bi-arrow-right"></i></a></div>
+<div class="orow"><span class="tile"><i class="bi bi-collection-play-fill" style="color:#aa5cc3"></i></span><div class="omain"><div class="ot">You add media manually to <b>Jellyfin</b></div><div class="od">Install the official Webhook plugin; same <code>/incoming</code> URL as Plex and Emby.</div><details class="mini-d"><summary>Setup steps</summary><div>Dashboard → Plugins → Catalog → Webhook. Add a <i>Generic</i> destination with URL <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code>, subscribe to <b>Item Added</b>.</div></details></div><a class="btn sm" href="#">Open Jellyfin setup <i class="bi bi-arrow-right"></i></a></div>
+</div>
+<div class="note"><span class="tile"><i class="bi bi-exclamation-triangle"></i></span><div><b>Server webhooks miss file upgrades</b><p>Plex, Emby and Jellyfin only fire for brand-new library items. For replaced files use the Sonarr/Radarr "On Upgrade" event.</p>
+<details class="mini-d"><summary>Why this happens</summary><div>When Sonarr or Radarr upgrades an existing file in place, the media server keeps the same library item, so the new file is never seen as "added" and the server-side webhooks do not fire. The "On Upgrade" event works regardless of which media server you use.</div></details></div></div>
+</div></section>
+
+<section class="panel" id="section-webhooks-arr"><div class="panel-h"><h2 class="t" role="heading" aria-level="2"><i class="bi bi-download"></i> *arr apps</h2><span class="pill">Per-import trigger</span></div><div class="panel-b">
+<p class="lead">Sonarr, Radarr, and Sportarr POST here as soon as they finish importing or upgrading a file. Copy the URL, add your auth token, done.</p>
+<div class="fl"><label class="lbl" for="pubsrv">Publish to which server?</label><select class="sel" id="pubsrv"><option>All servers (publish to whoever owns the file)</option><option>Plex (Main)</option><option>Emby</option></select></div>
+<p class="help">Adds <code>?server_id=&lt;id&gt;</code>. Use when the same library exists on more than one server and you want one specific target.</p>
+<div class="seg" role="tablist" style="align-self:flex-start"><button class="on" id="tab-sonarr-tab" data-bs-target="#tab-sonarr" role="tab"><i class="bi bi-tv"></i> Sonarr</button><button id="tab-radarr-tab" data-bs-target="#tab-radarr" role="tab"><i class="bi bi-film"></i> Radarr</button><button id="tab-sportarr-tab" data-bs-target="#tab-sportarr" role="tab"><i class="bi bi-trophy"></i> Sportarr</button></div>
+<div class="tp" id="tab-sonarr"  style="display:grid;gap:10px"><div class="lbl">Sonarr webhook URL</div><div class="field"><div class="v">http://127.0.0.1:18080/api/webhooks/sonarr</div><button data-copy aria-label="Copy URL" title="Copy"><i class="bi bi-clipboard"></i></button></div><span class="hint">Replace 127.0.0.1:18080 with your server's address.</span>
+<details class="g" open><summary>Setup in Sonarr</summary><div><ol><li>Go to <b>Settings → Connect → + → Webhook</b></li><li>Set <b>Name</b>: <code>Plex Previews</code></li><li>Set <b>URL</b>: copy the URL above</li><li>Under <b>Events</b>, enable <i>On File Import</i> and <i>On File Upgrade</i></li><li><b>Authentication</b>: put your webhook secret in Password (leave Username blank), or add header <code>X-Auth-Token</code> = your secret</li><li>Click <b>Test</b>, then <b>Save</b></li></ol></div></details></div><div class="tp" id="tab-radarr" hidden style="display:none;gap:10px"><div class="lbl">Radarr webhook URL</div><div class="field"><div class="v">http://127.0.0.1:18080/api/webhooks/radarr</div><button data-copy aria-label="Copy URL" title="Copy"><i class="bi bi-clipboard"></i></button></div><span class="hint">Replace 127.0.0.1:18080 with your server's address.</span>
+<details class="g" ><summary>Setup in Radarr</summary><div><ol><li>Go to <b>Settings → Connect → + → Webhook</b></li><li>Set <b>Name</b>: <code>Plex Previews</code></li><li>Set <b>URL</b>: copy the URL above</li><li>Under <b>Events</b>, enable <i>On File Import</i> and <i>On File Upgrade</i></li><li><b>Authentication</b>: put your webhook secret in Password (leave Username blank), or add header <code>X-Auth-Token</code> = your secret</li><li>Click <b>Test</b>, then <b>Save</b></li></ol></div></details></div><div class="tp" id="tab-sportarr" hidden style="display:none;gap:10px"><div class="lbl">Sportarr webhook URL</div><div class="field"><div class="v">http://127.0.0.1:18080/api/webhooks/sportarr</div><button data-copy aria-label="Copy URL" title="Copy"><i class="bi bi-clipboard"></i></button></div><span class="hint">Replace 127.0.0.1:18080 with your server's address.</span>
+<details class="g" ><summary>Setup in Sportarr</summary><div><ol><li>Go to <b>Settings → Connect → + → Webhook</b></li><li>Set <b>Name</b>: <code>Plex Previews</code></li><li>Set <b>URL</b>: copy the URL above</li><li>Under <b>Events</b>, enable <i>On File Import</i> and <i>On File Upgrade</i></li><li><b>Authentication</b>: put your webhook secret in Password (leave Username blank), or add header <code>X-Auth-Token</code> = your secret</li><li>Click <b>Test</b>, then <b>Save</b></li></ol></div></details></div>
+<div class="info"><i class="bi bi-shield-check"></i><span>Authentication uses the webhook secret (or API token) set in <a href="#section-webhooks-settings">Settings</a> below.</span></div>
+</div></section>
+
+<section class="panel" id="section-webhooks-custom"><div class="panel-h"><h2 class="t" role="heading" aria-level="2"><i class="bi bi-plug"></i> Custom webhook</h2><span class="pill">Any HTTP client</span></div><div class="panel-b">
+<p class="lead">Trigger previews from any tool that can send an HTTP POST: Tdarr, FileFlows, shell scripts. Send a file path and it runs through the same pipeline as Sonarr/Radarr.</p>
+<div class="lbl">Custom webhook URL</div><div class="field"><div class="v">http://127.0.0.1:18080/api/webhooks/custom</div><button data-copy aria-label="Copy URL" title="Copy"><i class="bi bi-clipboard"></i></button></div>
+<p class="help">To pin to one server use the "Publish to which server?" picker in <a href="#section-webhooks-arr" style="text-decoration:underline">*arr apps</a>; it appends <code>?server_id=&lt;id&gt;</code>. Send <code>{"eventType": "Test"}</code> to verify connectivity.</p>
+<div class="list">
+<details class="g" open><summary>Payload: single file</summary><div><pre>{
+  "file_path": "/media/movies/Movie (2024)/Movie.mkv"
+}</pre></div></details>
+<details class="g"><summary>Payload: multiple files</summary><div><pre>{
+  "file_paths": ["/media/tv/Show/S01E01.mkv", "/media/tv/Show/S01E02.mkv"],
+  "title": "Optional display label"
+}</pre></div></details>
+<details class="g"><summary>Tdarr setup</summary><div>Add a flow plugin or post-process hook that POSTs the output file path to the URL above.</div></details>
+<details class="g"><summary>FileFlows setup</summary><div>Add a Web Request node: POST, JSON body with <code>file_path</code>.</div></details>
+<details class="g"><summary>curl example</summary><div><pre>curl -X POST -H "X-Auth-Token: &lt;secret&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"file_path": "/media/movies/Movie.mkv"}' \
+  http://127.0.0.1:18080/api/webhooks/custom</pre></div></details></div>
+</div></section>
+
+<section class="panel" id="section-webhooks-settings"><div class="panel-h"><h2 class="t" role="heading" aria-level="2"><i class="bi bi-sliders"></i> Webhook settings</h2></div><div class="panel-b" style="gap:0">
+<div class="set"><div class="l"><div class="lbl">Enable webhook processing <i class="bi bi-info-circle" title="Master switch for all incoming webhooks" style="color:var(--faint)"></i></div><p class="help">Turn off to pause without touching any individual settings.</p></div><div class="r"><span class="pill ok" id="onpill"><i class="bi bi-check-circle-fill"></i> On</span><label class="sw"><input type="checkbox" id="master" checked aria-label="Enable webhook processing"><i></i></label></div></div>
+<div class="set"><div class="l"><div class="lbl">Delay before processing <i class="bi bi-info-circle" title="Batch window" style="color:var(--faint)"></i></div><p class="help">Imports are queued and processed in batches once this much time passes without new imports.</p></div><div class="r"><input type="range" min="0" max="300" value="60" id="delay" aria-label="Delay"><span class="val num" id="dv">60s</span></div></div>
+<div class="set col"><div class="l"><div class="lbl">Webhook secret <i class="bi bi-info-circle" title="Used for webhook auth" style="color:var(--faint)"></i></div><p class="help">Optional; falls back to the API token. Also embedded in the Plex Direct webhook URL (Servers → Plex → Webhook &amp; Scanner); rotating it re-registers that webhook on next save.</p></div><div class="r"><div class="field"><input type="password" placeholder="Optional, falls back to API token" aria-label="Webhook secret"><button aria-label="Show secret" title="Show"><i class="bi bi-eye"></i></button></div><button class="btn sm"><i class="bi bi-magic"></i> Generate</button></div></div>
+<p class="help" style="padding-top:12px">Retry policy, restart recovery and queue concurrency moved to <a href="#" style="text-decoration:underline">Settings → Processing → Job Execution</a> and apply to every job type.</p>
+</div></section>
+
+<section class="panel" id="section-webhooks-activity"><div class="panel-b" style="flex-direction:row;align-items:center;gap:12px;flex-wrap:wrap"><i class="bi bi-clock-history" style="font-size:18px;color:var(--muted)"></i><span style="flex:1;min-width:200px">Inbound webhook events and their outcomes are tracked under Tools.</span><a class="btn sm" href="#">View webhook activity <i class="bi bi-arrow-right"></i></a></div></section>
+
+<section class="panel" id="section-schedules-list"><div class="panel-h"><h2 class="t" role="heading" aria-level="2"><i class="bi bi-calendar3"></i> Schedules</h2><span class="pill ok">3 enabled</span><span class="sp"></span><button class="btn sm"><i class="bi bi-plus-lg"></i> New schedule</button></div><div class="panel-b">
+<div class="sched" style="margin-top:0"><span class="ico"><i class="bi bi-alarm"></i></span><div><div class="lbl" style="font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--accent)">Next run</div><div class="nm">Movies Daily</div><div class="when"><b>in 16h</b><span>Wed 01:00</span></div></div><button class="btn sm"><i class="bi bi-play-fill"></i> Run now</button></div>
+<div class="list" id="scheduleList">
+<div class="srow"><span class="tile"><i class="bi bi-film"></i></span><div class="smain"><div class="snm">Movies Daily</div><div class="ssub"><span>Every day at 01:00</span><code>0 1 * * *</code><span class="tag">Movies</span></div></div><span class="next"><i class="bi bi-clock"></i> in 16h · Wed 01:00</span><label class="sw"><input type="checkbox" checked aria-label="Enabled"><i></i></label><div class="racts"><button class="ibtn" aria-label="Run now" title="Run now"><i class="bi bi-play-fill"></i></button><button class="ibtn" aria-label="Edit schedule" title="Edit"><i class="bi bi-pencil"></i></button><button class="ibtn danger" aria-label="Delete schedule" title="Delete"><i class="bi bi-trash3"></i></button></div></div>
+<div class="srow"><span class="tile"><i class="bi bi-tv"></i></span><div class="smain"><div class="snm">TV Weekly Sweep</div><div class="ssub"><span>Sundays at 03:30</span><code>30 3 * * 0</code><span class="tag">TV Shows</span></div></div><span class="next"><i class="bi bi-clock"></i> in 4d · Sun 03:30</span><label class="sw"><input type="checkbox" checked aria-label="Enabled"><i></i></label><div class="racts"><button class="ibtn" aria-label="Run now" title="Run now"><i class="bi bi-play-fill"></i></button><button class="ibtn" aria-label="Edit schedule" title="Edit"><i class="bi bi-pencil"></i></button><button class="ibtn danger" aria-label="Delete schedule" title="Delete"><i class="bi bi-trash3"></i></button></div></div>
+<div class="srow"><span class="tile"><i class="bi bi-arrow-repeat"></i></span><div class="smain"><div class="snm">Full Library Refresh</div><div class="ssub"><span>Every 6 hours</span><code>0 */6 * * *</code><span class="tag">All libraries</span></div></div><span class="next"><i class="bi bi-clock"></i> in 3h · Tue 22:00</span><label class="sw"><input type="checkbox" checked aria-label="Enabled"><i></i></label><div class="racts"><button class="ibtn" aria-label="Run now" title="Run now"><i class="bi bi-play-fill"></i></button><button class="ibtn" aria-label="Edit schedule" title="Edit"><i class="bi bi-pencil"></i></button><button class="ibtn danger" aria-label="Delete schedule" title="Delete"><i class="bi bi-trash3"></i></button></div></div>
+<div class="srow"><span class="tile"><i class="bi bi-collection"></i></span><div class="smain"><div class="snm">Anime Monthly</div><div class="ssub"><span>1st of month at 04:00</span><code>0 4 1 * *</code><span class="tag">Anime</span></div></div><span class="next off">Paused</span><label class="sw"><input type="checkbox"  aria-label="Enabled"><i></i></label><div class="racts"><button class="ibtn" aria-label="Run now" title="Run now"><i class="bi bi-play-fill"></i></button><button class="ibtn" aria-label="Edit schedule" title="Edit"><i class="bi bi-pencil"></i></button><button class="ibtn danger" aria-label="Delete schedule" title="Delete"><i class="bi bi-trash3"></i></button></div></div>
+</div></div></section>
+</main></div>
+<button class="btn sm theme" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'"><i class="bi bi-circle-half"></i> Theme</button>
+<script>
+document.querySelectorAll('.seg [id^=tab-]').forEach(b=>b.onclick=()=>{
+ b.parentNode.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
+ document.querySelectorAll('.tp').forEach(p=>p.style.display=('#'+p.id===b.dataset.bsTarget)?'grid':'none');});
+document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{b.classList.add('copied');b.innerHTML='<i class="bi bi-check2"></i>';setTimeout(()=>{b.classList.remove('copied');b.innerHTML='<i class="bi bi-clipboard"></i>'},1200)});
+document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{b.parentNode.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));document.querySelector(b.dataset.go).scrollIntoView({behavior:'smooth'})});
+var dl=document.getElementById('delay');dl.oninput=()=>document.getElementById('dv').textContent=dl.value+'s';
+var m=document.getElementById('master'),op=document.getElementById('onpill');
+m.onchange=()=>{op.className='pill '+(m.checked?'ok':'warn');op.innerHTML=m.checked?'<i class="bi bi-check-circle-fill"></i> On':'<i class="bi bi-pause-circle-fill"></i> Paused'};
+var links=[...document.querySelectorAll('.side a')];
+addEventListener('scroll',()=>{var cur=links[0];links.forEach(a=>{var s=document.querySelector(a.getAttribute('href'));if(s&&s.getBoundingClientRect().top<160)cur=a});links.forEach(a=>a.classList.toggle('on',a===cur))});
+</script>
+</body></html>
