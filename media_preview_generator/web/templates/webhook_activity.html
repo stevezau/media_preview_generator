@@ -3,76 +3,90 @@
 {% block title %}Webhook Activity - Media Preview Generator{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation_triggers.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/webhook_activity.css') }}">
 {% endblock %}
 
 {% block content %}
-<div class="container-xxl py-3">
+<div class="container-xxl py-3 wh-page">
     <header class="page-header">
         <div>
-            <h1 class="page-title"><i class="bi bi-clock-history me-2"></i>Webhook Activity</h1>
+            <div class="wh-crumb">Tools › Webhook Activity</div>
+            <h1 class="page-title">Webhook Activity</h1>
             <p class="page-subtitle mb-0">
                 Inbound webhook events and their outcomes. Configure trigger sources under
                 <a href="{{ url_for('main.automation_page') }}#section-webhooks-overview">Automation → Triggers</a>.
             </p>
         </div>
-        <button class="btn btn-outline-secondary" type="button" id="historyRefresh" onclick="loadHistory()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+        <div class="page-actions">
+            <button class="wh-ibtn" type="button" id="historyRefresh" onclick="loadHistory()" aria-label="Refresh" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+            <button class="btn btn-sm wh-danger" type="button" onclick="clearHistory()"><i class="bi bi-trash me-1"></i>Clear</button>
+        </div>
     </header>
 
     <div class="card section-card" id="section-webhooks-activity">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <span><i class="bi bi-clock-history me-2"></i>Activity Log</span>
-            <button class="btn btn-sm btn-outline-secondary" onclick="clearHistory()">
-                <i class="bi bi-trash me-1"></i>Clear
-            </button>
+        <form class="history-filters" id="historyFilters" role="search" aria-label="Filter webhook activity">
+            <div class="wh-seg" id="historyOutcomeTabs" role="group" aria-label="Outcome"></div>
+            <div class="wh-search">
+                <i class="bi bi-search" aria-hidden="true"></i>
+                <input type="search" id="historySearch" placeholder="Search title or file" aria-label="Title or file">
+            </div>
+            <div class="dropdown">
+                <button type="button" class="wh-fbtn" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Filter by source">Source: <b id="historySourceLabel">All</b> <i class="bi bi-chevron-down"></i></button>
+                <div class="dropdown-menu wh-menu" id="historySourceMenu"></div>
+            </div>
+            <div class="dropdown">
+                <button type="button" class="wh-fbtn" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Filter by server">Server: <b id="historyServerLabel">All</b> <i class="bi bi-chevron-down"></i></button>
+                <div class="dropdown-menu wh-menu" id="historyServerMenu"></div>
+            </div>
+            <button type="reset" class="wh-reset d-none" id="historyReset">Reset filters</button>
+            <span class="wh-count" id="historyFilterCount" role="status"></span>
+            <select id="historySource" hidden aria-label="Source"><option value="">All sources</option></select>
+            <select id="historyStatus" hidden aria-label="Outcome"><option value="">All outcomes</option></select>
+            <select id="historyServer" hidden aria-label="Server"><option value="">All destinations</option></select>
+        </form>
+        <div id="historyError" class="wh-state d-none" role="alert">
+            <span class="wh-tile bad"><i class="bi bi-exclamation-triangle"></i></span>
+            <b>Could not load webhook activity</b>
+            <p>Check the connection and try again.</p>
+            <button type="button" class="btn btn-sm wh-btn" onclick="loadHistory()"><i class="bi bi-arrow-repeat me-1"></i>Retry</button>
         </div>
-        <div class="card-body">
-            <form class="history-filters" id="historyFilters" role="search" aria-label="Filter webhook activity">
-                <div><label class="form-label" for="historySearch">Title or file</label><input type="search" class="form-control" id="historySearch" placeholder="Search received events"></div>
-                <div><label class="form-label" for="historySource">Source</label><select class="form-select" id="historySource"><option value="">All sources</option></select></div>
-                <div><label class="form-label" for="historyStatus">Outcome</label><select class="form-select" id="historyStatus"><option value="">All outcomes</option></select></div>
-                <div><label class="form-label" for="historyServer">Server</label><select class="form-select" id="historyServer"><option value="">All destinations</option></select></div>
-                <button type="reset" class="btn btn-outline-secondary">Reset filters</button>
-            </form>
-            <p class="small text-muted" id="historyFilterCount" role="status"></p>
-            <div id="historyError" class="alert alert-danger d-none" role="alert">Could not load webhook activity. Check the connection and try Refresh again.</div>
-            <div id="historyNoMatches" class="d-none text-center py-4" role="status">No events match these filters. Change a filter or reset them to see received events.</div>
-            <div id="historyLoading" class="text-center py-3">
-                <div class="spinner-border spinner-border-sm" role="status"></div>
-                <span class="ms-2">Loading...</span>
-            </div>
-            <div id="historyEmpty" class="d-none text-center text-muted py-3">
-                <div>No webhook events received yet.</div>
-                <div class="small">Set up a trigger source under Automation → Triggers to start receiving events.</div>
-            </div>
-            <div class="table-responsive">
-                <table class="table table-sm history-table d-none" id="historyTable">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Source</th>
-                            <th>Server</th>
-                            <th>Title</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody id="historyBody"></tbody>
-                </table>
-            </div>
+        <div id="historyNoMatches" class="wh-state d-none" role="status">
+            <span class="wh-tile"><i class="bi bi-funnel"></i></span>
+            <b>No events match these filters</b>
+            <p>Change a filter or reset them to see received events.</p>
+            <button type="button" class="btn btn-sm wh-btn" onclick="document.getElementById('historyFilters').reset()">Show all events</button>
         </div>
-        <div class="card-footer d-none py-2 px-3" id="historyPaginationFooter">
-            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                <div class="d-flex align-items-center gap-2">
-                    <label class="form-label mb-0 small text-muted" for="historyPerPageSelect">Show</label>
-                    <select class="form-select form-select-sm" id="historyPerPageSelect" style="width: auto;" onchange="changeHistoryPerPage(this.value)">
-                        <option value="10">10</option>
-                        <option value="25" selected>25</option>
-                        <option value="50">50</option>
-                    </select>
-                    <span class="small text-muted" id="historyPaginationInfo"></span>
-                </div>
-                <nav aria-label="Webhook history pagination">
+        <div id="historyLoading" class="wh-skel" role="status" aria-label="Loading webhook activity"><i></i><i></i><i></i><i></i><i></i></div>
+        <div id="historyEmpty" class="wh-state d-none">
+            <span class="wh-tile"><i class="bi bi-webhook"></i></span>
+            <b>No webhook events received yet</b>
+            <p>Set up a trigger source under Automation → Triggers to start receiving events.</p>
+            <a class="btn btn-sm wh-btn" href="{{ url_for('main.automation_page') }}#section-webhooks-overview">Open Automation → Triggers <i class="bi bi-arrow-right ms-1"></i></a>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm history-table d-none" id="historyTable">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Source</th>
+                        <th>Server</th>
+                        <th>Title</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="historyBody"></tbody>
+            </table>
+        </div>
+        <div class="card-footer d-none" id="historyPaginationFooter">
+            <div class="wh-foot">
+                <label class="wh-show" for="historyPerPageSelect">Show</label>
+                <select class="form-select form-select-sm wh-show" id="historyPerPageSelect" onchange="changeHistoryPerPage(this.value)">
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                </select>
+                <span class="wh-info" id="historyPaginationInfo"></span>
+                <nav aria-label="Webhook history pagination" class="ms-auto">
                     <ul class="pagination pagination-sm mb-0" id="historyPaginationControls"></ul>
                 </nav>
             </div>
@@ -98,6 +112,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const filters = document.getElementById('historyFilters');
     filters.addEventListener('submit', event => event.preventDefault());
     filters.addEventListener('input', () => { historyPage = 1; renderHistoryPage(); });
+    // The Source and Server dropdown items and the Outcome tabs drive the hidden selects, which stay the single
+    // source of filter state; they dispatch `input` so the listener above re-renders.
+    filters.addEventListener('click', event => {
+        const item = event.target.closest('[data-filter-select]');
+        if (!item) return;
+        const select = document.getElementById(item.dataset.filterSelect);
+        select.value = item.dataset.value;
+        select.dispatchEvent(new Event('input', { bubbles: true }));
+    });
     filters.addEventListener('reset', () => setTimeout(() => { historyPage = 1; renderHistoryPage(); }, 0));
     loadHistory();
 });
@@ -120,6 +143,60 @@ function populateHistoryFilters() {
         Array.from(choices).sort((a, b) => a[1].localeCompare(b[1])).forEach(([value, label]) => select.add(new Option(label, value)));
         if (choices.has(value)) select.value = value;
     });
+}
+
+const HISTORY_STATUS_LABELS = {
+    triggered: 'Triggered',
+    queued: 'Queued',
+    ignored: 'Ignored',
+    ignored_no_path: 'No file path',
+    ignored_no_paths: 'No file paths',
+    test: 'Test',
+    disabled: 'Disabled',
+    error: 'Error'
+};
+// Tone and icon carry the state; the word stays because there are seven of them.
+const HISTORY_STATUS_PILLS = {
+    triggered: ['ok', 'check-circle-fill'],
+    queued: ['warn', 'hourglass-split'],
+    ignored: ['', 'dash-circle'],
+    disabled: ['', 'dash-circle'],
+    ignored_no_path: ['bad', 'exclamation-triangle-fill'],
+    ignored_no_paths: ['bad', 'exclamation-triangle-fill'],
+    error: ['bad', 'exclamation-triangle-fill'],
+    test: ['run', 'beaker']
+};
+const HISTORY_ALWAYS_TABS = ['triggered', 'queued', 'ignored', 'error'];
+
+function renderHistoryOutcomeTabs() {
+    const current = document.getElementById('historyStatus').value;
+    const counts = {};
+    allHistoryEvents.forEach(evt => { counts[evt.status] = (counts[evt.status] || 0) + 1; });
+    const present = Object.keys(HISTORY_STATUS_LABELS).filter(status => counts[status] || HISTORY_ALWAYS_TABS.includes(status));
+    const tabs = [['', 'All', allHistoryEvents.length]].concat(
+        present.map(status => [status, HISTORY_STATUS_LABELS[status], counts[status] || 0]));
+    document.getElementById('historyOutcomeTabs').innerHTML = tabs.map(([value, label, count]) =>
+        '<button type="button" class="' + (value === current ? 'on' : '') + '" data-filter-select="historyStatus" data-value="' + escapeHtml(value) +
+        '" aria-pressed="' + (value === current) + '">' + escapeHtml(label) + ' <span class="c">' + count + '</span></button>').join('');
+}
+
+function renderHistoryDropdown(selectId, menuId, labelId) {
+    const select = document.getElementById(selectId);
+    const menu = document.getElementById(menuId);
+    menu.innerHTML = Array.from(select.options).map(option =>
+        '<button type="button" class="dropdown-item' + (option.value === select.value ? ' active' : '') + '" data-filter-select="' + selectId +
+        '" data-value="' + escapeHtml(option.value) + '">' + escapeHtml(option.value ? option.text : 'All') + '</button>').join('');
+    const selected = select.options[select.selectedIndex];
+    document.getElementById(labelId).textContent = select.value ? selected.text : 'All';
+}
+
+function renderHistoryFilterControls() {
+    renderHistoryOutcomeTabs();
+    renderHistoryDropdown('historySource', 'historySourceMenu', 'historySourceLabel');
+    renderHistoryDropdown('historyServer', 'historyServerMenu', 'historyServerLabel');
+    const active = ['historySearch', 'historySource', 'historyStatus', 'historyServer']
+        .some(id => document.getElementById(id).value.trim());
+    document.getElementById('historyReset').classList.toggle('d-none', !active);
 }
 
 function filterHistoryEvents() {
@@ -159,6 +236,7 @@ function renderHistoryPage() {
 
     loading.classList.add('d-none');
     filteredHistoryEvents = filterHistoryEvents();
+    renderHistoryFilterControls();
     document.getElementById('historyFilterCount').textContent = `${filteredHistoryEvents.length} of ${allHistoryEvents.length} received events`;
     document.getElementById('historyNoMatches').classList.toggle('d-none', !allHistoryEvents.length || !!filteredHistoryEvents.length);
 
@@ -186,32 +264,27 @@ function renderHistoryPage() {
         const time = new Date(evt.timestamp);
         const relative = timeAgo(time);
 
-        var sourceBadgeMap = {radarr: 'Radarr', sonarr: 'Sonarr', sportarr: 'Sportarr', custom: 'Custom', plex: 'Plex', emby: 'Emby', jellyfin: 'Jellyfin', recently_added: 'Recently Added'};
-        var sourceBadgeClass = sourceBadgeMap[evt.source] ? evt.source : 'custom';
-        var sourceBadgeLabel = sourceBadgeMap[evt.source] || evt.source;
-        const sourceBadge = '<span class="badge source-badge ' + sourceBadgeClass + '">' + escapeHtml(sourceBadgeLabel || 'Unknown') + '</span>';
+        const sourceBadgeMap = {radarr: 'Radarr', sonarr: 'Sonarr', sportarr: 'Sportarr', tdarr: 'Tdarr', custom: 'Custom', plex: 'Plex', emby: 'Emby', jellyfin: 'Jellyfin', recently_added: 'Recently Added'};
+        const sourceIcons = {radarr: 'film', sonarr: 'tv', sportarr: 'trophy', tdarr: 'arrow-repeat', plex: 'play-btn', emby: 'play-btn', jellyfin: 'play-btn', recently_added: 'clock-history'};
+        const sourceBadgeClass = sourceBadgeMap[evt.source] ? evt.source : 'custom';
+        const sourceBadgeLabel = sourceBadgeMap[evt.source] || evt.source;
+        const sourceBadge = '<span class="source-badge ' + sourceBadgeClass + '"><i class="bi bi-' + (sourceIcons[evt.source] || 'code-slash') + '"></i>' + escapeHtml(sourceBadgeLabel || 'Unknown') + '</span>';
 
-        const statusLabelMap = {
-            queued: 'Queued',
-            triggered: 'Triggered',
-            ignored: 'Ignored',
-            ignored_no_path: 'No file path',
-            ignored_no_paths: 'No file paths',
-            test: 'Test',
-            disabled: 'Disabled',
-            error: 'Error'
-        };
         const statusClass = evt.status || 'ignored';
-        const statusLabel = statusLabelMap[evt.status] || evt.status;
+        const statusLabel = HISTORY_STATUS_LABELS[evt.status] || evt.status;
+        const [statusTone, statusIcon] = HISTORY_STATUS_PILLS[statusClass] || ['', 'dash-circle'];
         const hasFiles = evt.status === 'triggered' && evt.files_preview && evt.files_preview.length > 0;
         const pathCount = typeof evt.path_count === 'number' ? evt.path_count : (evt.files_preview ? evt.files_preview.length : 0);
-        let titleCell = escapeHtml(evt.title || '-');
-        if (hasFiles) {
-            titleCell += ' <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline" id="history-files-toggle-' + idx + '" onclick="toggleHistoryFiles(' + idx + ')" aria-expanded="false" aria-controls="history-detail-' + idx + '" title="Show files"><i class="bi bi-chevron-down"></i></button>';
-        }
+        // The expander sits in a fixed-width slot (empty when there is nothing to expand) so every title starts at
+        // the same x.
+        const expander = hasFiles
+            ? '<button type="button" class="wh-ibtn wh-exp" id="history-files-toggle-' + idx + '" onclick="toggleHistoryFiles(' + idx + '); event.stopPropagation();" aria-expanded="false" aria-controls="history-detail-' + idx + '" aria-label="Show files" title="Show files"><i class="bi bi-chevron-down"></i></button>'
+            : '';
+        const titleCell = '<div class="wh-title' + (hasFiles ? ' has-files' : '') + '"' + (hasFiles ? ' onclick="toggleHistoryFiles(' + idx + ')"' : '') + '>' +
+            '<span class="wh-exp-slot">' + expander + '</span><span class="wh-name">' + escapeHtml(evt.title || '-') + '</span></div>';
 
-        // Per-server badge. Three states:
-        //   * server_name/server_type set → coloured per-vendor badge
+        // Per-server cell. Three states:
+        //   * server_name/server_type set → neutral pill with the name
         //   * pre-existing entry from before the column existed → "—"
         //     with a tooltip explaining
         //   * deliberately fan-out webhook (no server_id query param) →
@@ -219,40 +292,41 @@ function renderHistoryPage() {
         const hasServerData = !!(evt.server_name || evt.server_type);
         let serverCell;
         if (hasServerData) {
-            const palette = { plex: 'bg-warning text-dark', emby: 'bg-success', jellyfin: 'bg-info text-dark' };
             const stype = (evt.server_type || '').toLowerCase();
-            const cls = palette[stype] || 'bg-secondary';
             const label = evt.server_name || stype.toUpperCase() || 'Server';
-            serverCell = '<span class="badge ' + cls + '">' + escapeHtml(label) + '</span>';
+            serverCell = '<span class="pill">' + escapeHtml(label) + '</span>';
         } else if (evt.timestamp && new Date(evt.timestamp).getTime() < new Date('2026-04-29').getTime()) {
             // History entries from before this column existed have no
             // server attribution. Show an em-dash + tooltip rather than
             // the misleading "All".
-            serverCell = '<span class="text-muted small" title="This webhook fired before the per-server attribution column was added in this version. Future events will show the destination server.">—</span>';
+            serverCell = '<span class="wh-faint" title="This webhook fired before the per-server attribution column was added in this version. Future events will show the destination server.">—</span>';
         } else {
-            serverCell = '<span class="text-muted small" title="No ?server_id= on the inbound webhook URL — fanned out to every owning server.">All</span>';
+            serverCell = '<span class="wh-faint" title="No ?server_id= on the inbound webhook URL — fanned out to every owning server.">All</span>';
         }
 
+        // Each file logs a Queued row and then a Triggered row; fading the Queued one stops the pair reading as
+        // a duplicate.
+        tr.className = 'wh-row' + (evt.status === 'queued' ? ' faded' : '');
         tr.innerHTML =
-            '<td title="' + escapeHtml(time.toLocaleString()) + '">' + escapeHtml(relative) + '</td>' +
-            '<td>' + sourceBadge + '</td>' +
-            '<td>' + serverCell + '</td>' +
-            '<td>' + titleCell + '</td>' +
-            '<td><span class="badge status-badge ' + escapeHtml(statusClass) + '">' + escapeHtml(statusLabel) + '</span></td>';
+            '<td class="wh-time" title="' + escapeHtml(time.toLocaleString()) + '">' + escapeHtml(relative) + '</td>' +
+            '<td class="wh-src">' + sourceBadge + '</td>' +
+            '<td class="wh-srv">' + serverCell + '</td>' +
+            '<td class="wh-title-cell">' + titleCell + '</td>' +
+            '<td class="wh-status"><span class="pill status-badge ' + statusTone + ' ' + escapeHtml(statusClass) + '"><i class="bi bi-' + statusIcon + '"></i>' + escapeHtml(statusLabel) + '</span></td>';
         tbody.appendChild(tr);
 
         if (hasFiles) {
             const filesList = evt.files_preview
-                .map(function(f) { return '<div class="text-muted">' + escapeHtml(f) + '</div>'; })
+                .map(function(f) { return '<div class="wh-file">' + escapeHtml(f) + '</div>'; })
                 .join('');
             const overflow = pathCount > evt.files_preview.length
-                ? '<div class="text-muted mt-1">(+' + (pathCount - evt.files_preview.length) + ' more)</div>'
+                ? '<div class="wh-file mt-1">(+' + (pathCount - evt.files_preview.length) + ' more)</div>'
                 : '';
             const detailTr = document.createElement('tr');
             detailTr.id = 'history-detail-' + idx;
             detailTr.className = 'd-none history-files-detail';
             detailTr.setAttribute('aria-hidden', 'true');
-            detailTr.innerHTML = '<td colspan="5" class="bg-body-tertiary small py-2 ps-4"><strong>Files:</strong><div class="mt-1">' + filesList + overflow + '</div></td>';
+            detailTr.innerHTML = '<td colspan="5" class="wh-detail small"><strong>Files:</strong><div class="mt-1">' + filesList + overflow + '</div></td>';
             tbody.appendChild(detailTr);
         }
     });

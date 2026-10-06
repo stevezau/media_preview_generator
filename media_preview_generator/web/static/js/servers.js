@@ -69,15 +69,25 @@
     // ---------- list rendering -------------------------------------------------
     async function loadServers() {
         const list = $('#serverList');
-        list.innerHTML = '<div class="col-12 text-center text-muted py-3"><div class="spinner-border" role="status"></div></div>';
+        list.innerHTML = '<div class="srv-state text-muted"><div class="spinner-border" role="status"></div></div>';
         const r = await api('GET', '/api/servers');
         if (!r.ok) {
-            list.innerHTML = `<div class="col-12"><div class="alert alert-danger">Failed to load servers (HTTP ${r.status}).</div></div>`;
+            list.innerHTML = `<div class="srv-state"><div class="alert alert-danger mb-0">Failed to load servers (HTTP ${r.status}).</div></div>`;
             return;
         }
         const servers = (r.data && r.data.servers) || [];
         if (servers.length === 0) {
-            list.innerHTML = `<div class="col-12"><div class="alert alert-secondary">No media servers configured yet. Click <strong>Add Server</strong> to start.</div></div>`;
+            list.innerHTML = `
+                <div class="srv-state">
+                    <div class="srv-empty">
+                        <span class="srv-vlogo"><i class="bi bi-hdd-network"></i></span>
+                        <strong>No servers yet</strong>
+                        <span>Connect Plex, Emby or Jellyfin to start generating previews.</span>
+                        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addServerModal">
+                            <i class="bi bi-plus-lg me-1"></i>Add Server
+                        </button>
+                    </div>
+                </div>`;
             return;
         }
         list.innerHTML = servers.map(serverCard).join('');
@@ -105,13 +115,13 @@
                 const target = ev.currentTarget;
                 const id = target.dataset.id;
                 target.disabled = true;
-                target.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing…';
+                target.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
                 const r = await api('POST', `/api/servers/${encodeURIComponent(id)}/refresh-libraries`);
                 if (r.ok) loadServers();
                 else {
                     showToast('Refresh failed', `${(r.data && r.data.error) || r.status}`, 'danger');
                     target.disabled = false;
-                    target.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh libraries';
+                    target.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
                 }
             });
         });
@@ -142,11 +152,16 @@
                 if (r.ok) {
                     const label = target.parentElement.querySelector('label');
                     if (label) label.textContent = enabled ? 'Enabled' : 'Disabled';
+                    const card = target.closest('.srv-card');
+                    if (card) card.classList.toggle('off', !enabled);
                     showToast('Server updated', `${enabled ? 'Enabled' : 'Disabled'} successfully`, 'success');
                     // Re-probe connection status — disabled servers shouldn't
                     // probe (we'd hit a server the user just paused).
                     if (enabled) probeServerConnection(id);
-                    else updateServerStatusPill(id, { ok: null, message: 'Disabled' });
+                    else {
+                        updateServerStatusPill(id, { ok: null, message: 'Disabled' });
+                        updateServerReadinessGlyph(id, null);
+                    }
                 } else {
                     target.checked = !enabled;  // revert on error
                     showToast('Update failed', `${(r.data && r.data.error) || r.status}`, 'danger');
@@ -203,23 +218,35 @@
         }
     }
 
+    // The status element is a dot; its title/aria-label carry the words. A failure message also lands in the
+    // reserved issue row so it is readable without hovering.
     function updateServerStatusPill(serverId, { ok, message }) {
-        const pill = document.getElementById(`server-status-${serverId}`);
-        if (!pill) return;
+        const dot = document.getElementById(`server-status-${serverId}`);
+        if (!dot) return;
+        let tone = 'bad';
+        let label = message || 'Connection failed';
         if (ok === null) {
-            pill.className = 'badge bg-secondary';
-            pill.innerHTML = '<i class="bi bi-pause-circle me-1"></i>Disabled';
-            pill.title = message || 'Disabled';
-            return;
+            tone = '';
+            label = message || 'Disabled';
+        } else if (ok) {
+            tone = 'ok';
+            label = message || 'Connected';
         }
-        if (ok) {
-            pill.className = 'badge bg-success';
-            pill.innerHTML = '<i class="bi bi-check-circle me-1"></i>Connected';
-            pill.title = message || 'Connected';
-        } else {
-            pill.className = 'badge bg-warning text-dark';
-            pill.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>Auth failed';
-            pill.title = message || 'Connection failed';
+        dot.className = `srv-dot ${tone}`.trim();
+        dot.title = label;
+        dot.setAttribute('aria-label', label);
+
+        const error = document.getElementById(`server-error-${serverId}`);
+        if (error) {
+            error.classList.toggle('d-none', ok !== false);
+            error.title = label;
+            error.querySelector('span').textContent = ok === false ? label : '';
+        }
+        const hint = document.getElementById(`server-checked-${serverId}`);
+        if (hint) {
+            hint.textContent = ok === null
+                ? 'Not checked while disabled'
+                : `Last checked ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
         }
     }
 
@@ -294,40 +321,24 @@
     function updateServerReadinessGlyph(serverId, info) {
         const glyph = document.getElementById(`server-readiness-${serverId}`);
         if (!glyph) return;
-        // info === null → card is Disabled; hide the glyph entirely.
-        // Preserve the marker class so any post-render traversal that
-        // looks for .server-readiness-glyph still finds it (e.g. if a
-        // future enable-toggle path re-runs wireup on an existing card).
-        if (info === null) {
+        // Disabled cards and failed probes hide the pill: the dot and error row already say what is wrong. The
+        // marker class stays so a re-render that looks for .server-readiness-glyph still finds it.
+        if (info === null || info.unknown) {
             glyph.className = 'server-readiness-glyph d-none';
+            glyph.removeAttribute('data-state');
             return;
         }
-        if (info.unknown) {
-            // Connection failed / probe errored — stay neutral rather
-            // than flashing a red warning. The connection pill below
-            // already shows the underlying problem.
-            glyph.className = 'server-readiness-glyph d-none';
-            return;
-        }
-        const base = 'server-readiness-glyph ms-2';
-        // Visible count badge sits next to the icon for critical /
-        // recommended states so users can compare "1 thing" vs "5
-        // things" at a glance — pre-redesign the count was hidden in
-        // the hover tooltip only. ok state stays icon-only because
-        // count=0 + green tick is redundant noise.
+        // A healthy server shows no pill; the green dot already says so.
+        glyph.dataset.state = info.state;
         const count = typeof info.count === 'number' ? info.count : 0;
-        const countBadge = (info.state !== 'ok' && count > 0)
-            ? `<span class="badge readiness-count-badge ${info.state === 'critical' ? 'bg-danger' : 'bg-warning text-dark'}">${count}</span>`
-            : '';
         if (info.state === 'critical') {
-            glyph.className = `${base} text-danger`;
-            glyph.innerHTML = `<i class="bi bi-exclamation-triangle-fill"></i>${countBadge}`;
+            glyph.className = 'server-readiness-glyph pill bad';
+            glyph.innerHTML = `<i class="bi bi-exclamation-triangle-fill"></i>${count > 0 ? `${count} must fix` : 'Must fix'}`;
         } else if (info.state === 'recommended') {
-            glyph.className = `${base} text-warning`;
-            glyph.innerHTML = `<i class="bi bi-exclamation-circle-fill"></i>${countBadge}`;
+            glyph.className = 'server-readiness-glyph pill warn';
+            glyph.innerHTML = `<i class="bi bi-exclamation-circle-fill"></i>${count > 0 ? `${count} to fix` : 'To review'}`;
         } else {
-            glyph.className = `${base} text-success`;
-            glyph.innerHTML = '<i class="bi bi-check-circle-fill"></i>';
+            glyph.className = 'server-readiness-glyph d-none';
         }
         glyph.title = info.tooltip || '';
         glyph.setAttribute('aria-label', info.tooltip || '');
@@ -336,71 +347,61 @@
     function serverCard(server) {
         const libCount = (server.libraries || []).length;
         const enabledLibs = (server.libraries || []).filter((l) => l.enabled).length;
-        // Vendor SVG logo (24px) prepended to the server name — the logo IS
-        // the vendor signal, no need for a redundant text badge alongside.
-        const vendorLogo = ['plex', 'emby', 'jellyfin'].includes((server.type || '').toLowerCase())
-            ? `<img src="/static/images/vendors/${escapeHtml(server.type.toLowerCase())}.svg" alt="${escapeHtml(server.type)}" width="24" height="24" style="margin-right: 8px; vertical-align: -5px;">`
-            : '';
-        // Connection status pill — populated lazily after card render via
-        // _refreshServerCardStatus(). Starts as "Checking…" so users get
-        // immediate feedback that the probe is running. Same colour map
-        // as the System & Workers card for visual consistency.
-        const statusPillId = `server-status-${escapeHtml(server.id)}`;
-        const enabledToggleId = `server-enabled-${escapeHtml(server.id)}`;
-        const readinessGlyphId = `server-readiness-${escapeHtml(server.id)}`;
+        const vendor = (server.type || '').toLowerCase();
+        const vendorLogo = ['plex', 'emby', 'jellyfin'].includes(vendor)
+            ? `<img src="/static/images/vendors/${escapeHtml(vendor)}.svg" alt="${escapeHtml(server.type)}" width="22" height="22">`
+            : '<i class="bi bi-hdd-network"></i>';
+        const id = escapeHtml(server.id);
+        const name = escapeHtml(server.name);
+        const statusPillId = `server-status-${id}`;
+        const enabledToggleId = `server-enabled-${id}`;
+        const readinessGlyphId = `server-readiness-${id}`;
+        // Every card renders the same rows (header, host, issue slot, libraries, footer) so a row sits at the same
+        // height in every card; the issue slot is reserved even when empty.
         return `
-            <div class="col-md-6 col-lg-4">
-                <div class="card card-interactive h-100">
-                    <div class="card-body">
-                        <h2 class="h5 card-title mb-2 d-flex align-items-center" style="min-width:0;">
-                            <span style="white-space:nowrap;">${vendorLogo}</span>
-                            <span class="text-truncate">${escapeHtml(server.name)}</span>
-                            <!-- Inline Setup Health glyph next to the server name.
-                                 Populated by probeServerReadiness(). Stays hidden
-                                 (d-none) until the probe completes so it doesn't
-                                 flash-of-wrong-state on slow networks. -->
-                            <span class="server-readiness-glyph d-none"
-                                  id="${readinessGlyphId}"
-                                  data-id="${escapeHtml(server.id)}"
-                                  role="button"
-                                  tabindex="0"
-                                  style="cursor:pointer;"></span>
-                        </h2>
-                        <div class="text-muted small mb-2 text-truncate" title="${escapeHtml(server.url)}">${escapeHtml(server.url)}</div>
-                        <div class="d-flex align-items-center justify-content-between mb-2 gap-2 flex-wrap">
-                            <span class="badge bg-secondary" id="${statusPillId}" title="Connection status">
-                                <span class="spinner-border spinner-border-sm me-1" role="status" style="width:0.7em; height:0.7em;"></span>Checking&hellip;
-                            </span>
-                            <div class="form-check form-switch mb-0" title="Quick enable/disable — when off, this server is ignored by all jobs and webhooks">
-                                <input class="form-check-input server-enabled-toggle" type="checkbox"
-                                       id="${enabledToggleId}" data-id="${escapeHtml(server.id)}"
-                                       ${server.enabled ? 'checked' : ''}>
-                                <label class="form-check-label small" for="${enabledToggleId}">${server.enabled ? 'Enabled' : 'Disabled'}</label>
-                            </div>
-                        </div>
-                        <div class="text-muted small">
-                            Libraries: <strong>${enabledLibs}</strong> enabled / ${libCount} total
-                        </div>
+            <article class="card srv-card${server.enabled ? '' : ' off'}" data-id="${id}">
+                <div class="srv-top">
+                    <span class="srv-vlogo">${vendorLogo}</span>
+                    <div class="srv-title">
+                        <span class="srv-dot" id="${statusPillId}" role="img" aria-label="Checking connection" title="Checking connection"></span>
+                        <h2 class="srv-name" title="${name}">${name}</h2>
                     </div>
-                    <div class="card-footer bg-transparent d-flex flex-wrap gap-1 justify-content-between">
-                        <div class="d-flex flex-wrap gap-1">
-                            <button class="btn btn-sm btn-outline-primary edit-server-btn"
-                                    data-id="${escapeHtml(server.id)}">
-                                <i class="bi bi-pencil me-1"></i>Configure
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary refresh-libraries-btn"
-                                    data-id="${escapeHtml(server.id)}">
-                                <i class="bi bi-arrow-clockwise me-1"></i>Refresh libraries
-                            </button>
-                        </div>
-                        <button class="btn btn-sm btn-outline-danger delete-server-btn"
-                                data-id="${escapeHtml(server.id)}"
-                                data-name="${escapeHtml(server.name)}" aria-label="Delete ${escapeHtml(server.name)}">
-                            <i class="bi bi-trash"></i>
-                        </button>
+                    <div class="form-check form-switch mb-0" title="Quick enable/disable — when off, this server is ignored by all jobs and webhooks">
+                        <input class="form-check-input server-enabled-toggle" type="checkbox"
+                               id="${enabledToggleId}" data-id="${id}"
+                               ${server.enabled ? 'checked' : ''}>
+                        <label class="form-check-label visually-hidden" for="${enabledToggleId}">${server.enabled ? 'Enabled' : 'Disabled'}</label>
                     </div>
                 </div>
-            </div>
+                <div class="srv-host" title="${escapeHtml(server.url)}">${escapeHtml(server.url)}</div>
+                <div class="srv-issue">
+                    <span class="server-readiness-glyph d-none"
+                          id="${readinessGlyphId}"
+                          data-id="${id}"
+                          role="button"
+                          tabindex="0"></span>
+                    <span class="pill bad d-none" id="server-error-${id}"><i class="bi bi-x-circle-fill"></i><span></span></span>
+                </div>
+                <div class="srv-lib">
+                    <span class="srv-lib-num${enabledLibs < libCount ? ' warn' : ''}">${enabledLibs}</span>
+                    <span class="srv-lib-sub">of ${libCount} ${libCount === 1 ? 'library' : 'libraries'} enabled</span>
+                </div>
+                <div class="srv-foot">
+                    <span class="srv-hint" id="server-checked-${id}"></span>
+                    <button type="button" class="ibtn edit-server-btn" data-id="${id}"
+                            aria-label="Edit ${name}" title="Edit">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button type="button" class="ibtn refresh-libraries-btn" data-id="${id}"
+                            aria-label="Refresh libraries for ${name}" title="Refresh libraries">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                    <button type="button" class="ibtn danger delete-server-btn" data-id="${id}"
+                            data-name="${name}" aria-label="Delete ${name}" title="Delete">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </article>
         `;
     }
 
@@ -1470,7 +1471,7 @@
             <td>
                 <div class="input-group input-group-sm">
                     <input type="text" class="form-control form-control-sm pm-local" value="${escapeHtml(localVal)}" placeholder="/mnt/plex/movies">
-                    <button type="button" class="btn btn-outline-secondary pm-browse" title="Browse folders">
+                    <button type="button" class="btn btn-outline-secondary pm-browse" title="Browse folders" aria-label="Browse folders">
                         <i class="bi bi-folder2-open"></i>
                     </button>
                     <div class="invalid-feedback small"></div>
@@ -1478,7 +1479,7 @@
                 </div>
             </td>
             <td><input type="text" class="form-control form-control-sm pm-webhook" value="${escapeHtml(webhookAliases)}" placeholder="/data" title="Optional. Webhook source prefix that resolves to this disk. Add another row for additional sources."></td>
-            <td><button type="button" class="btn btn-sm btn-outline-danger pm-remove"><i class="bi bi-x-lg"></i></button></td>
+            <td><button type="button" class="btn btn-sm btn-outline-danger pm-remove" aria-label="Remove mapping" title="Remove mapping"><i class="bi bi-x-lg"></i></button></td>
         `;
         tr.querySelector('.pm-remove').addEventListener('click', () => tr.remove());
         const localInput = tr.querySelector('.pm-local');
@@ -1608,7 +1609,7 @@
                     <option value="regex" ${type === 'regex' ? 'selected' : ''}>regex</option>
                 </select>
             </td>
-            <td><button type="button" class="btn btn-sm btn-outline-danger ep-remove"><i class="bi bi-x-lg"></i></button></td>
+            <td><button type="button" class="btn btn-sm btn-outline-danger ep-remove" aria-label="Remove endpoint" title="Remove endpoint"><i class="bi bi-x-lg"></i></button></td>
         `;
         tr.querySelector('.ep-remove').addEventListener('click', () => tr.remove());
         tbody.appendChild(tr);

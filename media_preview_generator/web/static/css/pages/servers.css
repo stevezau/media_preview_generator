@@ -1,0 +1,68 @@
+/* Servers page. Tokens (--ok, --bad, --warn, --inset, --line, --accent ...) live in style.css; the pill and
+ * icon-button primitives are redefined here because the shared ones are scoped to the dashboard layout. */
+.servers-page .page-header h1,
+.servers-page .page-header .page-title { font-size: 24px; font-weight: 700; }
+.servers-page .page-header .page-subtitle { color: var(--muted); }
+.servers-page .page-header .btn-primary { font-weight: 600; }
+
+.srv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.srv-state { grid-column: 1 / -1; text-align: center; padding: 32px 0; }
+
+.srv-card { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-card); transition: opacity .16s ease-out, border-color .16s ease-out; }
+.srv-card:hover { border-color: var(--line-strong); }
+.srv-card.off { opacity: .7; }
+
+/* Fixed row heights so every card lines up row for row, whatever the server's state. */
+.srv-top { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 12px; align-items: center; height: 52px; padding: 16px 16px 0; box-sizing: content-box; }
+.srv-vlogo { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); font-size: 18px; }
+.srv-vlogo img { width: 22px; height: 22px; display: block; }
+.srv-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.srv-name { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.srv-host { height: 18px; margin-top: 8px; padding: 0 16px 0 64px; color: var(--faint); font: 12px/18px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srv-issue { height: 24px; margin-top: 10px; padding: 0 16px; display: flex; align-items: center; min-width: 0; }
+.srv-lib { display: flex; align-items: center; gap: 10px; margin: 12px 16px 0; padding: 10px 12px; border-radius: var(--radius-card); background: var(--inset); border: 1px solid var(--line); }
+.srv-lib-num { font-size: 22px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.srv-lib-num.warn { color: var(--warn); }
+.srv-lib-sub { font-size: 13px; color: var(--muted); }
+.srv-foot { display: flex; align-items: center; gap: 4px; margin-top: auto; padding: 10px 12px 12px; }
+.srv-hint { flex: 1; min-width: 0; padding-left: 4px; color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.srv-card .form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+.srv-card .form-check-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.srv-card .form-switch { padding-left: 0; display: flex; align-items: center; min-height: 0; }
+.srv-card .form-switch .form-check-input { margin: 0; float: none; }
+
+.srv-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; display: inline-block; }
+.srv-dot.ok { background: var(--ok); }
+.srv-dot.bad { background: var(--bad); }
+
+.servers-page .pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; max-width: 100%; padding: 0 10px; border: 0; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); white-space: nowrap; }
+.servers-page .pill > span { overflow: hidden; text-overflow: ellipsis; }
+/* The connection error carries the host the user needs, so it wraps instead of truncating. */
+.servers-page .pill.bad[id^="server-error-"] { height: auto; min-height: 24px; padding-top: 3px; padding-bottom: 3px; border-radius: 12px; white-space: normal; overflow-wrap: anywhere; align-items: flex-start; }
+.servers-page .pill.bad[id^="server-error-"] > span { overflow: visible; text-overflow: clip; }
+.servers-page .pill.ok { background: var(--ok-soft); color: var(--ok); }
+.servers-page .pill.bad { background: var(--bad-soft); color: var(--bad); }
+.servers-page .pill.warn { background: var(--warn-soft); color: var(--warn); }
+.server-readiness-glyph.pill { cursor: pointer; transition: filter .16s ease-out; }
+.server-readiness-glyph.pill:hover { filter: brightness(1.15); }
+
+.ibtn { width: 32px; height: 32px; display: inline-grid; place-items: center; flex: none; padding: 0; border: 1px solid transparent; border-radius: var(--radius-xs); background: transparent; color: var(--muted); transition: background-color .16s ease-out, color .16s ease-out; }
+.ibtn:hover:not(:disabled) { background: var(--inset); color: var(--bs-body-color); }
+.ibtn.danger:hover:not(:disabled) { background: var(--bad-soft); color: var(--bad); }
+.ibtn:disabled { opacity: .4; }
+.ibtn i { font-size: 15px; }
+.ibtn:focus-visible, .server-readiness-glyph:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.srv-empty { display: grid; gap: 10px; justify-items: center; padding: 36px 20px; border: 1px dashed var(--line-strong); border-radius: var(--radius-card); color: var(--muted); }
+.srv-empty strong { color: var(--bs-body-color); font-size: 16px; }
+.srv-empty .srv-vlogo { width: 48px; height: 48px; font-size: 22px; }
+
+@media (max-width: 700px) {
+    .srv-grid { grid-template-columns: 1fr; }
+    .srv-foot .ibtn { width: 40px; height: 40px; }
+    .srv-foot .ibtn i { font-size: 17px; }
+    .srv-hint { display: none; }
+    .srv-foot { justify-content: flex-end; }
+    .servers-page .page-header .page-actions, .servers-page .page-header .page-actions .btn { width: 100%; }
+}
