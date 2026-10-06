@@ -40,6 +40,7 @@ function renderNotifications(notifications) {
     var empty = document.getElementById('notificationEmpty');
     var badge = document.getElementById('notificationBellBadge');
     var mobileLabel = document.getElementById('notificationBellLabel');
+    var countPill = document.getElementById('notificationCount');
     if (!list) return;
 
     // Wipe previous entries but keep the 'empty' placeholder at the top.
@@ -57,10 +58,15 @@ function renderNotifications(notifications) {
         // keeps the icon-only treatment with tooltip — the dropdown's
         // own "you're all caught up" state is enough there.
         if (mobileLabel) mobileLabel.textContent = 'No new notifications';
+        if (countPill) countPill.classList.add('d-none');
         return;
     }
 
     if (empty) empty.classList.add('d-none');
+    if (countPill) {
+        countPill.textContent = String(notifications.length);
+        countPill.classList.remove('d-none');
+    }
     if (badge) {
         // The pill is 16px wide: past 9 it reads "9+" and the full count stays in the tooltip.
         badge.textContent = notifications.length > 9 ? '9+' : String(notifications.length);
@@ -77,10 +83,10 @@ function renderNotifications(notifications) {
 
     notifications.forEach(function (notif) {
         var entry = document.createElement('div');
-        entry.className = 'notification-entry border-bottom p-3';
+        var severity = notif.severity || 'info';
+        entry.className = 'notification-entry ov-nt ov-nt-' + (['warning', 'error'].indexOf(severity) >= 0 ? severity : 'info');
         entry.dataset.notificationId = notif.id;
 
-        var severity = notif.severity || 'info';
         var iconClass = severity === 'warning'
             ? 'bi-exclamation-triangle-fill text-warning'
             : severity === 'error'
@@ -117,7 +123,7 @@ function renderNotifications(notifications) {
         if (notif.dismissable !== false) {
             var dismiss = document.createElement('button');
             dismiss.type = 'button';
-            dismiss.className = 'btn btn-sm btn-outline-secondary';
+            dismiss.className = 'btn btn-sm btn-outline-secondary ov-nt-dismiss';
             dismiss.textContent = 'Dismiss';
             dismiss.title = 'Hide until next restart';
             dismiss.onclick = function () { dismissNotificationSession(notif.id); };
@@ -127,7 +133,7 @@ function renderNotifications(notifications) {
             if (notif.permanent_dismissable !== false) {
                 var dismissPerm = document.createElement('button');
                 dismissPerm.type = 'button';
-                dismissPerm.className = 'btn btn-sm btn-outline-danger';
+                dismissPerm.className = 'btn btn-sm btn-outline-danger ov-nt-perm';
                 dismissPerm.textContent = 'Dismiss permanently';
                 dismissPerm.title = 'Never show this notification again';
                 dismissPerm.onclick = function () { dismissNotificationPermanent(notif.id); };

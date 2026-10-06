@@ -44,16 +44,21 @@
     --inset: var(--surface-1);
     --line: var(--surface-border);
     --line-strong: rgba(255, 255, 255, 0.14);
-    --panel-2: #1e1e33;
-    /* Dark text tokens measured >= 4.5:1 on the lightest dark surfaces (table head, code, tinted pills). */
-    --muted: #aeaec4;
-    --faint: #a4a4bb;
+    /* One navy family for every raised surface (dropdown, offcanvas, modal, tooltip): lighter than the card, never grey. */
+    --panel-2: #242439;
+    /* Dark text tokens, contrast on page #1a1a2e / card #252538 / inset #2e2e40 (tests/test_design_tokens.py checks them):
+       body #d8dce6 12.4/10.9/9.7, muted 7.2/6.4/5.6, faint 6.1/5.3/4.7. Body stays below pure white on purpose: large
+       tables of #fff text halate on a dark page. */
+    --muted: #a3a8bd;
+    --faint: #9499b0;
     --accent: #e5a00d;
     --accent-text: #e5a00d;
     --accent-ink: #1a1203;
+    /* Button fill only: a touch deeper than the text/icon amber so a large button is not the brightest object on screen. */
+    --accent-fill: #d19610;
     --accent-soft: rgba(229, 160, 13, 0.14);
-    --ok: #3ecf8e;   --ok-soft: rgba(62, 207, 142, 0.14);
-    --bad: #f77d88;  --bad-soft: rgba(240, 97, 109, 0.14);
+    --ok: #4fbf8f;   --ok-soft: rgba(79, 191, 143, 0.14);
+    --bad: #f1858e;  --bad-soft: rgba(241, 133, 142, 0.14);
     --run: #74adff;  --run-soft: rgba(91, 157, 255, 0.15);
     --warn: #e5a00d; --warn-soft: rgba(229, 160, 13, 0.14);
     --t-previews: #5b9dff; --t-previews-soft: rgba(91, 157, 255, 0.15);
@@ -62,7 +67,27 @@
     --radius-card: 12px;
     --radius-ctl: 8px;
     --radius-xs: 6px;
+    /* One control height and one icon-button size for every page (44px where a finger is the pointer). */
+    --ctl-h: 36px;
+    --ctl-icon: 32px;
+    /* One page gutter and content width: .page-shell (base.html main + navbar) is the only horizontal inset a page gets. */
+    --page-gutter: 24px;
+    --page-max: 1440px;
     --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+}
+
+html[data-bs-theme="dark"] {
+    --bs-body-color: #d8dce6;
+    --bs-body-color-rgb: 216, 220, 230;
+    --bs-emphasis-color: #e8eaf2;
+    --bs-emphasis-color-rgb: 232, 234, 242;
+    --bs-secondary-bg: #2e2e40;
+    --bs-tertiary-bg: #242439;
+    --bs-border-color: rgba(255, 255, 255, 0.12);
+    --bs-link-color: #e5a00d;
+    --bs-link-color-rgb: 229, 160, 13;
+    --bs-link-hover-color: #f0b232;
+    --bs-link-hover-color-rgb: 240, 178, 50;
 }
 
 html[data-bs-theme="light"] {
@@ -97,13 +122,17 @@ html[data-bs-theme="light"] {
     /* Text scale — never pure black; slate-900 reads more refined and
        pairs with the slate surfaces. Three levels are enough. */
     --bs-body-color: #1e293b;       /* slate-800 — primary text */
-    --bs-secondary-color: #64748b;  /* slate-500 — meta / labels */
+    --bs-secondary-color: #526075;  /* 5.2:1 on the page grey, 6.2:1 on a card (slate-500 was 3.8:1) */
     --bs-tertiary-color: #94a3b8;   /* slate-400 — disabled / placeholders */
-    --bs-emphasis-color: #0f172a;   /* slate-900 — headings + emphasis */
+    --bs-emphasis-color: #1e293b;   /* same as body: #0f172a headings read harder than the text under them */
+    --bs-link-color: #7a4f00;
+    --bs-link-color-rgb: 122, 79, 0;
+    --bs-link-hover-color: #5c3b00;
+    --bs-link-hover-color-rgb: 92, 59, 0;
 
     /* Borders — visible enough to define card edges, quiet enough to
        not compete with content. Two weights. */
-    --bs-border-color: #e2e8f0;             /* slate-200 — default */
+    --bs-border-color: #cbd5e1;             /* slate-300: a card edge is 1.45:1 on the card, slate-200 was 1.2:1 */
     --bs-border-color-translucent: rgba(15, 23, 42, 0.08);
 
     /* Status palette — solid colours kept for the rare callsite that
@@ -140,10 +169,10 @@ html[data-bs-theme="light"] {
     --bs-danger-bg-subtle: #fee2e2;      /* red-100 */
     --bs-danger-text-emphasis: #991b1b;   /* red-800 */
 
-    /* Surface tokens — used by .kpi-tile, .library-item etc. */
+    /* Surface tokens. */
     --surface-1: rgba(15, 23, 42, 0.03);
     --surface-2: rgba(15, 23, 42, 0.05);
-    --surface-border: #e2e8f0;
+    --surface-border: #cbd5e1;
 
     /* Light-mode shadow tokens. Dark mode declares --shadow-1/-2 on :root
        with rgba(0,0,0,0.22) — appropriate for a near-black canvas but too
@@ -170,7 +199,8 @@ html[data-bs-theme="light"] {
     --warn: #805300; --warn-soft: rgba(229, 160, 13, 0.16);
     --t-previews: #2563d6; --t-previews-soft: rgba(37, 99, 214, 0.10);
     --t-intro: #6d4fd8;    --t-intro-soft: rgba(109, 79, 216, 0.10);
-    --t-loud: #0c8f84;     --t-loud-soft: rgba(12, 143, 132, 0.10);
+    --t-loud: #096f67;     --t-loud-soft: rgba(12, 143, 132, 0.10);
+    --accent-fill: #e5a00d;
 }
 
 .skip-link {
@@ -196,7 +226,6 @@ html[data-bs-theme="light"] .card-header > .bi {
     color: var(--plex-orange-text);
 }
 
-.dashboard-mobile-jump { display: none; }
 .dashboard-list-scope {
     margin-left: 0.4rem;
     color: var(--bs-secondary-color);
@@ -232,32 +261,6 @@ html[data-bs-theme="light"] .card-header > .bi {
     .dashboard-system-card .system-card-body > :nth-child(4) { grid-column: 2; grid-row: 3; }
 }
 @media (max-width: 991.98px) {
-    .dashboard-mobile-jump {
-        position: sticky;
-        top: 4.4rem;
-        z-index: 1010;
-        display: flex;
-        gap: 0.35rem;
-        overflow-x: auto;
-        margin: -0.5rem 0 1rem;
-        padding: 0.4rem;
-        border: 1px solid var(--bs-border-color);
-        border-radius: var(--radius);
-        background: color-mix(in srgb, var(--bs-body-bg) 94%, transparent);
-        backdrop-filter: blur(8px);
-    }
-    .dashboard-mobile-jump a {
-        flex: 1 0 auto;
-        min-height: 44px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0.45rem 0.75rem;
-        color: var(--bs-body-color);
-        text-decoration: none;
-        border-radius: var(--radius-sm);
-    }
-    #dashboard-active-work,
     #dashboard-workers,
     #dashboard-all-jobs { scroll-margin-top: 8rem; }
 }
@@ -386,13 +389,17 @@ a:focus-visible {
  * the content rail at ~1500px gives the app a designed feel without
  * shrinking on common laptop widths.
  * ────────────────────────────────────────────────────────────────────── */
-@media (min-width: 1600px) {
-    body > main.container-fluid,
-    .app-shell {
-        max-width: 1500px;
-        margin-left: auto;
-        margin-right: auto;
-    }
+/* .page-shell is the one horizontal frame: main, the navbar row and the config banner share the same gutter and
+ * max width, so every page's first content edge lines up (it was 12/20/72/118px per page). Pages add no inset of
+ * their own; a full-bleed page (logs) opts out explicitly. */
+.page-shell {
+    width: 100%;
+    max-width: var(--page-max);
+    margin-inline: auto;
+    padding-inline: var(--page-gutter);
+}
+@media (max-width: 575.98px) {
+    :root { --page-gutter: 16px; }
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -413,7 +420,7 @@ html[data-bs-theme="dark"] nav.navbar.sticky-top {
     background-color: rgba(15, 15, 26, 0.78) !important;
 }
 html[data-bs-theme="light"] nav.navbar.sticky-top {
-    background-color: rgba(255, 255, 255, 0.78);
+    background-color: rgba(244, 246, 248, 0.86);
 }
 nav.navbar.sticky-top::after {
     content: "";
@@ -438,7 +445,7 @@ html[data-bs-theme="dark"] nav.navbar.sticky-top::after {
  * via a flat hairline reads as proper "header / body" hierarchy. */
 html[data-bs-theme="light"] nav.navbar.sticky-top::after {
     height: 1px;
-    background: #e2e8f0;
+    background: #cbd5e1;
 }
 
 /* Nav link hover: subtle highlight band, no jarring fill change. */
@@ -493,7 +500,7 @@ html[data-bs-theme="dark"] .card {
     background: linear-gradient(180deg, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0.02) 100%);
     border: 1px solid var(--surface-border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-1);
+    box-shadow: none;
     transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 html[data-bs-theme="light"] .card {
@@ -512,32 +519,15 @@ html[data-bs-theme="light"] .card {
     transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
-/* Subtle hover lift on cards that opt-in via .card-interactive (e.g.
- * server cards, schedule cards). Avoid lifting every dashboard panel
- * — that would have the whole page jiggle on cursor move. */
-html[data-bs-theme="dark"] .card-interactive:hover {
-    border-color: rgba(229, 160, 13, 0.35);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-2);
-}
-/* Light-mode hover: NEUTRAL slate border lift — orange-on-white
- * fights the calm palette and reads as a warning state. Dark mode
- * keeps the brand orange because it pops against navy. */
-html[data-bs-theme="light"] .card-interactive:hover {
-    border-color: #94a3b8;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
-}
-
 html[data-bs-theme="dark"] .card-header,
 html[data-bs-theme="light"] .card-header {
     background: transparent;
     border-bottom: 1px solid var(--surface-border);
     padding: 0.85rem 1.1rem;
-    font-size: 0.78rem;
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    letter-spacing: 0;
+    text-transform: none;
     color: var(--bs-secondary-color);
 }
 
@@ -549,64 +539,7 @@ html[data-bs-theme="light"] .card-header {
 .card-body { padding: 1.1rem; }
 .card-body.p-0 { padding: 0; } /* keep for tables */
 
-/* ──────────────────────────────────────────────────────────────────────
- * KPI tiles — the dashboard's 6-cell stats grid (Pending / Running /
- * Completed / Failed / Cancelled / Total) gets a per-tile background
- * + small label-above-number layout that's easier to scan at a glance.
- * Each tile is its own touch target; on mobile they stack 2-up.
- * ────────────────────────────────────────────────────────────────────── */
-/* minmax(0, 1fr), not 1fr: a plain 1fr column can't shrink below its longest label, so with a
- * wide font (DejaVu Sans) "CANCELLED" pushed the dashboard ~20px past a 992px window. */
-.kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.5rem;
-}
-@media (max-width: 575.98px) { .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-
-.kpi-tile {
-    min-width: 0;
-    background: var(--surface-1);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
-    padding: 0.7rem 0.55rem;
-    transition: background 0.15s ease, border-color 0.15s ease;
-}
-.kpi-tile:hover { background: var(--surface-2); }
-
-.kpi-tile .kpi-label {
-    font-size: 0.64rem;
-    text-transform: uppercase;
-    letter-spacing: 0.035em;
-    color: var(--bs-secondary-color);
-    margin-bottom: 0.15rem;
-    font-weight: 600;
-    white-space: nowrap;
-}
-
-.kpi-tile .kpi-value {
-    font-size: 1.6rem;
-    font-weight: 700;
-    line-height: 1.05;
-    font-variant-numeric: tabular-nums;
-}
-
-/* Status colour accents on the value text only — keeps the tile
-   surface neutral so the colour reads as data, not chrome. */
-.kpi-tile.kpi-pending  .kpi-value { color: var(--bs-secondary-color); }
-.kpi-tile.kpi-running  .kpi-value { color: #4a9eff; }
-.kpi-tile.kpi-completed .kpi-value { color: #2ecc71; }
-.kpi-tile.kpi-failed   .kpi-value { color: #e74c3c; }
-.kpi-tile.kpi-cancelled .kpi-value { color: var(--plex-orange); }
-
-/* Light mode: the dark-theme palette above is tuned for white-on-navy.
-   Drop to the same muted Tailwind hues as --bs-success / --bs-danger
-   so the dashboard's data palette reads as one designed system, not
-   a mix of neon-bright leftovers. */
-html[data-bs-theme="light"] .kpi-tile.kpi-running  .kpi-value { color: #475569; }  /* slate-600 */
-html[data-bs-theme="light"] .kpi-tile.kpi-completed .kpi-value { color: #059669; }  /* emerald-600 */
-html[data-bs-theme="light"] .kpi-tile.kpi-failed   .kpi-value { color: #b91c1c; }  /* red-700 */
-html[data-bs-theme="light"] .kpi-tile.kpi-cancelled .kpi-value { color: #d97706; }  /* amber-600 */
+/* Light theme status-dot colours: muted Tailwind hues, matching --bs-success / --bs-danger. */
 html[data-bs-theme="light"] .status-dot.status-running   { color: #475569; }
 html[data-bs-theme="light"] .status-dot.status-completed { color: #059669; }
 html[data-bs-theme="light"] .status-dot.status-failed    { color: #b91c1c; }
@@ -652,23 +585,6 @@ html[data-bs-theme="light"] .status-dot.status-warning   { color: #d97706; }
     50% { box-shadow: 0 0 0 4px rgba(74, 158, 255, 0); }
 }
 
-/* ──────────────────────────────────────────────────────────────────────
- * Buttons — soft-fill ghost variant for secondary actions. Stops
- * three or four loud "btn-outline-*" buttons from competing for
- * attention with the actual primary CTA.
- * ────────────────────────────────────────────────────────────────────── */
-.btn-ghost {
-    background-color: var(--surface-1);
-    border: 1px solid var(--surface-border);
-    color: var(--bs-body-color);
-    transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-.btn-ghost:hover {
-    background-color: var(--surface-2);
-    border-color: var(--surface-border);
-    color: var(--bs-body-color);
-}
-
 /* Smooth out the default Bootstrap btn transition feel — primary
  * actions are the same, but icon-only secondary buttons get a more
  * tactile feel.
@@ -679,8 +595,8 @@ html[data-bs-theme="light"] .status-dot.status-warning   { color: #d97706; }
  * matches the orange logo + active nav tab. Without this, light mode
  * shows Bootstrap's stock blue which clashes with the orange brand. */
 .btn-primary {
-    background-color: var(--plex-orange);
-    border-color: var(--plex-orange);
+    background-color: var(--accent-fill);
+    border-color: var(--accent-fill);
     color: #161616;
     font-weight: 600;
 }
@@ -688,8 +604,8 @@ html[data-bs-theme="light"] .status-dot.status-warning   { color: #d97706; }
 .btn-primary:focus,
 .btn-primary:active,
 .btn-primary:focus-visible {
-    background-color: #d18f0a;
-    border-color: #d18f0a;
+    background-color: #c08909;
+    border-color: #c08909;
     color: #161616;
 }
 
@@ -868,7 +784,12 @@ html[data-bs-theme="light"] .navbar {
 
 .navbar-brand {
     color: var(--plex-orange) !important;
-    font-weight: bold;
+    font-weight: 600;
+    font-size: 18px;
+}
+/* Amber on the light navbar is 2.1:1; the brand takes the dark amber text token (6.6:1) there. */
+html[data-bs-theme="light"] .navbar-brand {
+    color: var(--plex-orange-text) !important;
 }
 
 /* The logo mark in the nav brand: optically centred on the wordmark's x-height. */
@@ -1174,9 +1095,7 @@ html[data-bs-theme="light"] .card-header {
     font-weight: 500;
 }
 
-/* Legacy .stat-value / .stat-label — kept for the few places that
- * still hand-roll a stat callout outside the .kpi-tile system. New
- * code should use .kpi-tile + .kpi-value + .kpi-label. */
+/* Stat callouts on the dashboard. */
 .stat-value {
     font-size: 1.6rem;
     font-weight: 700;
@@ -1210,7 +1129,7 @@ html[data-bs-theme="dark"] .progress {
 
 /* Tables */
 html[data-bs-theme="dark"] .table {
-    color: #e0e0e0;
+    color: var(--bs-body-color);
 }
 
 html[data-bs-theme="dark"] .table-hover tbody tr:hover {
@@ -1270,49 +1189,22 @@ html[data-bs-theme="light"] .gpu-card {
 }
 
 /* Library list */
-.library-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem;
-    border-radius: 0.25rem;
-    margin-bottom: 0.25rem;
-}
 
-html[data-bs-theme="dark"] .library-item {
-    background-color: rgba(255, 255, 255, 0.05);
-}
 
-html[data-bs-theme="dark"] .library-item:hover {
-    background-color: rgba(255, 255, 255, 0.1);
-}
 
-html[data-bs-theme="light"] .library-item {
-    background-color: rgba(0, 0, 0, 0.04);
-}
 
-html[data-bs-theme="light"] .library-item:hover {
-    background-color: rgba(0, 0, 0, 0.08);
-}
 
-.library-item .library-name {
-    font-weight: 500;
-}
 
-.library-item .library-count {
-    font-size: 0.75rem;
-    color: var(--bs-secondary-color, #adb5bd);
-}
 
 /* Toast notifications */
 html[data-bs-theme="dark"] .toast {
-    background-color: #1a1a2e;
+    background-color: var(--panel-2);
     border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 /* Modals */
 html[data-bs-theme="dark"] .modal-content {
-    background-color: #1a1a2e;
+    background-color: var(--panel-2);
     border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
@@ -1329,14 +1221,14 @@ html[data-bs-theme="dark"] .form-control,
 html[data-bs-theme="dark"] .form-select {
     background-color: rgba(0, 0, 0, 0.3);
     border-color: rgba(255, 255, 255, 0.2);
-    color: #e0e0e0;
+    color: var(--bs-body-color);
 }
 
 html[data-bs-theme="dark"] .form-control:focus,
 html[data-bs-theme="dark"] .form-select:focus {
     background-color: rgba(0, 0, 0, 0.4);
     border-color: var(--plex-orange);
-    color: #e0e0e0;
+    color: var(--bs-body-color);
     box-shadow: 0 0 0 0.25rem rgba(229, 160, 13, 0.25);
 }
 
@@ -1465,13 +1357,13 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
         background-color: rgb(15, 15, 26) !important;
     }
     html[data-bs-theme="light"] nav.navbar.sticky-top {
-        background-color: #fff;
+        background-color: #f4f6f8;
     }
 
     /* One row: only the brand and the hamburger are in flow here (the menu is the fixed drawer),
      * so the brand shrinks and ellipsizes rather than pushing the hamburger onto a second row
      * of a pinned bar. */
-    nav.navbar > .container-fluid {
+    nav.navbar > .page-shell {
         flex-wrap: nowrap;
     }
 
@@ -1539,7 +1431,8 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
      * tappable but reads as a footer / account-level action. */
     .navbar-nav-utility .nav-item:last-child .nav-link {
         font-size: 0.875rem;
-        opacity: 0.75;
+        opacity: 1;
+        color: var(--muted);
     }
     .navbar-nav-utility .nav-item:last-child .nav-link:hover,
     .navbar-nav-utility .nav-item:last-child .nav-link:focus-visible {
@@ -1601,7 +1494,6 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
 /* Responsive adjustments */
 @media (max-width: 768px) {
     .stat-value { font-size: 1.25rem; }
-    .kpi-tile .kpi-value { font-size: 1.4rem; }
     .table-responsive { font-size: 0.875rem; }
 
     /* Tighter card padding on phones so the cards don't waste a third
@@ -1747,7 +1639,7 @@ html[data-bs-theme="light"] .log-level-critical { color: #b02a37; }
 
 /* Dropdown menus (dark theme only — light mode uses Bootstrap defaults) */
 html[data-bs-theme="dark"] .dropdown-menu {
-    background-color: #1a1a2e;
+    background-color: var(--panel-2);
     border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
@@ -1769,7 +1661,7 @@ html[data-bs-theme="dark"] .dropdown-menu {
 }
 
 html[data-bs-theme="dark"] .dropdown-menu .form-check-label {
-    color: #e0e0e0;
+    color: var(--bs-body-color);
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -1927,7 +1819,6 @@ html[data-bs-theme="light"] .jobs-table tbody tr:hover { background-color: rgba(
         overflow-wrap: anywhere;
         word-break: normal;
     }
-    .jobs-table tbody tr > td:nth-child(2) > .job-title-link,
     .jobs-table tbody tr > td:nth-child(2) > a:first-child {
         display: -webkit-box;
         -webkit-line-clamp: 2;
@@ -1984,69 +1875,7 @@ html[data-bs-theme="light"] .jobs-table tbody tr:hover { background-color: rgba(
     .jobs-table tbody tr > td > .progress {
         width: 100%;
     }
-    /* Hide the table-responsive horizontal scroll affordance — there's
-       nothing left to scroll once rows stack. */
-    .jobs-table-card .table-responsive { overflow-x: visible; }
 
-    /* The flat-row layout above sits directly inside the parent card —
-     * tighten the parent .card-body's horizontal padding so the row's
-     * own padding doesn't double-pad the visible content area. */
-    .jobs-table-card .card-body {
-        padding-left: 0.6rem;
-        padding-right: 0.6rem;
-    }
-
-    /* Schedules table — same card-stack treatment as the jobs table.
-     * Cells in DOM order: Name(1), Library(2), Schedule(3), Priority(4),
-     * Next Run(5), Status(6), Actions(7).
-     *
-     *   ┌─────────────────────────────────────┐
-     *   │ NAME · Library  · [Status]          │  row 1  (.title row)
-     *   │ Schedule  ·  Next Run    [actions]  │  row 2  (.meta + .actions)
-     *   │ Priority pill                        │  row 3  (.priority — small)
-     *   └─────────────────────────────────────┘
-     */
-    .schedules-table thead { display: none; }
-    .schedules-table,
-    .schedules-table tbody { display: block; width: 100%; }
-    .schedules-table tbody tr {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        grid-template-areas:
-            "name     status"
-            "schedule actions"
-            "nextrun  priority";
-        gap: 0.4rem 0.6rem;
-        align-items: center;
-        margin-bottom: 0.6rem;
-        background: var(--surface-1);
-        border: 1px solid var(--surface-border);
-        border-radius: var(--radius);
-        padding: 0.7rem 0.85rem;
-    }
-    .schedules-table tbody tr > td {
-        display: block;
-        border: none !important;
-        padding: 0;
-    }
-    .schedules-table tbody tr > td:nth-child(1) { grid-area: name; font-weight: 500; }
-    .schedules-table tbody tr > td:nth-child(2) {
-        font-size: 0.78rem;
-        color: var(--bs-secondary-color);
-    }
-    .schedules-table tbody tr > td:nth-child(2)::before {
-        content: "Library: ";
-        opacity: 0.6;
-    }
-    .schedules-table tbody tr > td:nth-child(3) { grid-area: schedule; font-size: 0.85rem; }
-    .schedules-table tbody tr > td:nth-child(4) { grid-area: priority; justify-self: end; }
-    .schedules-table tbody tr > td:nth-child(5) {
-        grid-area: nextrun;
-        font-size: 0.78rem;
-        color: var(--bs-secondary-color);
-    }
-    .schedules-table tbody tr > td:nth-child(6) { grid-area: status; justify-self: end; }
-    .schedules-table tbody tr > td:nth-child(7) { grid-area: actions; justify-self: end; }
 
     /* Trigger Activity Log table on /automation. Use display:inline on
      * the meta cells (Time, Source, Server) so they flow as a single
@@ -2135,14 +1964,6 @@ html[data-bs-theme="dark"] .workers-panel-card[data-status="processing"] {
 .system-card-body .system-section { margin-bottom: 1.1rem; }
 .system-card-body .system-section:last-of-type { margin-bottom: 0.4rem; }
 
-.system-section-title {
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--bs-secondary-color);
-    margin-bottom: 0.55rem;
-}
 
 html[data-bs-theme="dark"] .system-version-row { border-color: rgba(255, 255, 255, 0.08); }
 html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.08); }
@@ -2181,17 +2002,6 @@ html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.
 }
 
 /* Color dot in priority dropdown items */
-.priority-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    margin-right: 6px;
-    vertical-align: middle;
-}
-.priority-dot-high   { background-color: #dc3545; }
-.priority-dot-normal { background-color: #0d6efd; }
-.priority-dot-low    { background-color: #6c757d; }
 
 /* ──────────────────────────────────────────────────────────────
  * Unified info-icon (ⓘ) affordance
@@ -2219,7 +2029,7 @@ html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.
 }
 .info-icon:hover,
 .info-icon:focus-visible {
-    color: var(--bs-primary);
+    color: var(--accent-text);
 }
 .info-icon:focus-visible {
     outline: none;
@@ -2231,13 +2041,7 @@ html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.
 .info-icon-more:not(:disabled) {
     cursor: pointer;
 }
-.info-icon-more::after {
-    content: '\F285'; /* bi-chevron-right */
-    font-family: 'bootstrap-icons';
-    font-size: 0.7em;
-    margin-left: 0.1em;
-    opacity: 0.6;
-}
+/* The ⓘ alone is the affordance; a trailing chevron made it two controls for one action. */
 
 .scan-filters > summary {
     list-style: none;
@@ -2303,57 +2107,6 @@ html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.
     font-weight: 600;
 }
 .readiness-arrow { font-weight: 700; }
-
-/* Inline server-name glyph (the indicator shown on /servers cards
- * next to each server's title). Count badge sits to the right of the
- * icon so users can tell "1 thing to check" from "5 things to check"
- * without hovering for the tooltip. */
-.server-readiness-glyph .readiness-count-badge {
-    font-size: 0.65rem;
-    padding: 0.15rem 0.35rem;
-    line-height: 1;
-    margin-left: 0.25rem;
-    vertical-align: middle;
-}
-
-/* ──────────────────────────────────────────────────────────────────────
- * Light-mode polish pass — 14 targeted overrides identified by the
- * 2026-05-14 visual audit. Goal: close the perceptual gap between the
- * polished dark theme and the light theme without rewriting the
- * palette. Each rule is scoped to ``html[data-bs-theme="light"]`` so
- * dark mode is untouched.
- *
- * Issues addressed (audit numbering preserved for cross-reference):
- *   #2  .kpi-tile near-invisible on light cards
- *   #3  .btn-ghost low-contrast surfaces
- *   #4  Modal Cancel button white-on-white hover
- *   #5  Top-right utility-icon hovers invisible
- *   #6  status-dot pulse keeps neon-blue halo
- *   #7  .attempts-pill hover shadow too heavy
- *   #8  .attempts-pill active ring is a faint grey halo
- *   #9  .attempts-bar inconsistent against cards vs modals
- *   #10 .gpu-card Bootstrap-blue accent clashes with palette
- *   #11 Legacy .badge-* family hardcoded saturated colors
- *   #12 .priority-dot-* over-saturated
- *   #13 .log-highlight too candy-bright
- *   #14 .info-icon focus ring wrong blue, not brand orange
- *   #15 .attempts-pill[data-is-originating] divider invisible
- * Plus tightened .form-control / .form-select borders for stronger
- * field edges on light cards.
- * ────────────────────────────────────────────────────────────────────── */
-
-html[data-bs-theme="light"] .kpi-tile {
-    background: #f1f5f9;
-    border-color: #e2e8f0;
-}
-
-html[data-bs-theme="light"] .btn-ghost {
-    background: #f1f5f9;
-}
-html[data-bs-theme="light"] .btn-ghost:hover,
-html[data-bs-theme="light"] .btn-ghost:focus {
-    background: #e2e8f0;
-}
 
 html[data-bs-theme="light"] .modal-footer .btn-secondary[data-bs-dismiss="modal"]:hover {
     background-color: #e2e8f0;
@@ -2429,9 +2182,6 @@ html[data-bs-theme="light"] .badge-cancelled {
 }
 
 /* Priority dots — drop saturation so they read as labels, not alarms. */
-html[data-bs-theme="light"] .priority-dot-high { background: #b91c1c; }
-html[data-bs-theme="light"] .priority-dot-normal { background: #475569; }
-html[data-bs-theme="light"] .priority-dot-low { background: #94a3b8; }
 
 /* Log search-result highlight. The 30%-opacity orange reads as candy
  * over near-white logs; amber-100 matches the rest of the
@@ -2458,34 +2208,7 @@ html[data-bs-theme="light"] .form-select:focus {
     border-color: #94a3b8;
 }
 
-/* ──────────────────────────────────────────────────────────────────────
- * Senior-design polish pass round 2 — items found in the 2026-05-14
- * full walk-through across all 8 pages × dark/light × desktop/mobile.
- *
- * Targets two cross-cutting palette inconsistencies that survived the
- * round-1 polish because they ship from Bootstrap defaults:
- *
- *   * .form-switch checked-state defaults to a hardcoded blue SVG in
- *     Bootstrap and ignored our --bs-primary slate override — the
- *     "Enabled" toggles on /servers + /settings rendered a clashing
- *     blue against the slate-on-orange light palette.
- *   * .form-range thumb + track use --bs-primary (slate-600 in light),
- *     leaving sliders looking grey rather than picking up the brand
- *     accent the rest of the active treatment uses.
- *
- * Both retuned to brand orange in light mode. Dark mode untouched —
- * the existing dark-mode treatment of these controls is fine against
- * the navy canvas.
- * ────────────────────────────────────────────────────────────────────── */
-
-html[data-bs-theme="light"] .form-check-input:checked {
-    background-color: var(--plex-orange);
-    border-color: var(--plex-orange);
-}
-html[data-bs-theme="light"] .form-check-input:checked:focus {
-    box-shadow: 0 0 0 0.25rem rgba(229, 160, 13, 0.25);
-}
-
+/* Light theme: the slider thumb takes the brand accent (Bootstrap's default is the slate primary). */
 html[data-bs-theme="light"] .form-range::-webkit-slider-thumb {
     background-color: var(--plex-orange);
 }
@@ -2505,26 +2228,6 @@ html[data-bs-theme="light"] .form-range::-moz-range-thumb:active {
  * either confirmed real via Playwright measurement or visible in the
  * captured screenshots. All scoped to avoid dark/light regressions.
  * ────────────────────────────────────────────────────────────────────── */
-
-/* Mobile body inset — Bootstrap's container-fluid uses 12px padding
- * on each side. Apple HIG / Material guidelines suggest 16-20px on
- * phones for comfortable touch targets near edges. Bump to 16px at
- * < 576px so content doesn't kiss the bezel. */
-@media (max-width: 575.98px) {
-    body > main.container-fluid {
-        padding-left: 16px;
-        padding-right: 16px;
-    }
-}
-
-/* KPI tile shadow in light mode. Round 1 polish bumped the bg to
- * slate-100 + slate-200 border so tiles render; adding a soft drop
- * shadow gives them genuine lift over the page bg (--bs-body-bg is
- * slate-200 — same tone as the tile border, which makes the edges
- * disappear without a shadow). */
-html[data-bs-theme="light"] .kpi-tile {
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-}
 
 /* Pagination disabled state. Default Bootstrap disabled pagination
  * shows the chevrons at near-full opacity in light mode — looks
@@ -2576,18 +2279,6 @@ html[data-bs-theme="light"] .kpi-tile {
 }
 .setup-progress .step-connector.completed {
     background-color: var(--plex-orange);
-}
-
-/* Preview Inspector inactive tab — give it explicit secondary color
- * and a visible affordance on hover so the dual-tab toggle reads as
- * an actual toggle, not a single chip with a label next to it. */
-#bif-viewer-page .nav-pills .nav-link:not(.active),
-.bif-viewer-tabs .nav-link:not(.active) {
-    color: var(--bs-secondary-color);
-}
-.preview-inspector-header ~ .row .nav-pills .nav-link:not(.active):hover {
-    background-color: var(--bs-tertiary-bg);
-    color: var(--bs-body-color);
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -2784,9 +2475,6 @@ html[data-bs-theme="light"] #logsContent {
 .job-file-list .job-file {
     max-width: 100%;
 }
-.job-file-list .job-file-title {
-    color: var(--bs-body-color);
-}
 
 /* Notification bell badge: a 16px count pill ringed in the navbar colour (set per theme below). */
 #notificationBellBadge {
@@ -2831,51 +2519,25 @@ main {
     padding-bottom: 2rem;
 }
 
-/* Phone menu utility block: five 44px tiles in two columns, Logout anchored full-width at the bottom. */
+/* Phone menu: the Account & help rows, notifications and the pinned Logout / version foot are in overlays.css. */
 @media (max-width: 1199.98px) {
     #navbarNav.offcanvas .offcanvas-body {
         display: flex;
         flex-direction: column;
     }
-    .navbar-nav-utility {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-        margin-top: auto;
-    }
-    .navbar-nav-utility > .nav-item:first-child,
-    .navbar-nav-utility > .nav-item:last-child,
-    .navbar-nav-utility > .nav-item.dropdown:has(.dropdown-menu.show) {
-        grid-column: 1 / -1;
-    }
-    .navbar-nav-utility > .nav-item:not(:first-child):not(:last-child) > .nav-link {
-        min-height: 44px;
-        padding: 0 0.75rem;
-        background: var(--inset);
-        border: 1px solid var(--line);
-        border-radius: var(--radius-ctl);
-    }
-    .navbar-nav-utility > .nav-item:last-child {
-        border-top: 1px solid var(--line);
-        padding-top: 0.25rem;
-    }
     #navbarNav.offcanvas .nav-hover-menu > .dropdown-toggle.show::after {
         transform: rotate(180deg);
-    }
-    #navbarNav.offcanvas .nav-hover-menu > .dropdown-menu {
-        padding-left: 1.75rem;
     }
 }
 
 /* 44px touch targets for icon buttons on every page; the visual size is unchanged on pointer devices. */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 575.98px) {
     .ibtn, .wh-ibtn, .log-ibtn, .pm-remove, .ep-remove, .stepper-minus, .stepper-plus, .btn-icon { min-width: 44px; min-height: 44px; }
     .dash-btn, .dash-btn-sm { min-height: 44px; min-width: 44px; }
     .btn, .nav-link, .log-level-btn, .log-fbtn, .log-nav-btn { min-height: 44px; }
     .log-nav-btn, .log-level-btn { min-width: 44px; }
     .form-control, .form-select { min-height: 44px; }
     summary { min-height: 44px; display: flex; align-items: center; }
-    .navbar-brand, .navbar-version { display: inline-flex; align-items: center; min-height: 44px; }
     /* Hit area only: the glyph keeps its size, a transparent 44px square centred on it takes the tap. */
     .info-icon { position: relative; }
     .info-icon::before { content: ''; position: absolute; top: 50%; left: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
@@ -2883,3 +2545,111 @@ main {
     .form-check-input[type="checkbox"]::before { content: ''; position: absolute; top: 50%; left: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
     .form-range { height: 44px; }
 }
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Polish layer: tokens and Bootstrap overrides that make the app one calm family. Kept last so it wins over the legacy rules above at equal specificity.
+ * ────────────────────────────────────────────────────────────────────── */
+
+/* The navbar row lost Bootstrap's .container-fluid flex rules when it took .page-shell. */
+nav.navbar > .page-shell {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+}
+.navbar .nav-link { font-size: 14px; }
+
+/* Typography scale 11 / 12 / 13 / 14 / 16 / 20 / 26: Bootstrap's fractional sizes (11.5, 12.5, 13.6 px) are retired. */
+small, .small, .form-text { font-size: 12px; }
+.badge { font-size: 11px; font-weight: 600; }
+.table { font-size: 13px; }
+.table { --bs-table-color: var(--bs-body-color); }
+.table thead th { font-weight: 600; }
+
+/* Secondary outline buttons: Bootstrap grey was 3.6:1 on the page and 2.8:1 on a card. */
+.btn-outline-secondary {
+    --bs-btn-color: var(--bs-body-color);
+    --bs-btn-border-color: var(--line-strong);
+    --bs-btn-hover-bg: var(--inset);
+    --bs-btn-hover-color: var(--bs-body-color);
+    --bs-btn-hover-border-color: var(--faint);
+    --bs-btn-active-bg: var(--inset);
+    --bs-btn-active-color: var(--bs-body-color);
+    --bs-btn-active-border-color: var(--line-strong);
+    --bs-btn-disabled-color: var(--muted);
+    --bs-btn-disabled-border-color: var(--line-strong);
+}
+/* Info and success outline buttons (vendor tiles): token text colour, neutral edge. */
+.btn-outline-info, .btn-outline-success {
+    --bs-btn-border-color: var(--line-strong);
+    --bs-btn-hover-bg: var(--inset);
+    --bs-btn-active-bg: var(--inset);
+    --bs-btn-hover-border-color: var(--line-strong);
+    --bs-btn-active-border-color: var(--line-strong);
+}
+.btn-outline-info { --bs-btn-color: var(--run); --bs-btn-hover-color: var(--run); --bs-btn-active-color: var(--run); }
+.btn-outline-success { --bs-btn-color: var(--ok); --bs-btn-hover-color: var(--ok); --bs-btn-active-color: var(--ok); }
+html[data-bs-theme="light"] .btn-outline-info { --bs-btn-color: var(--bs-info-text-emphasis); --bs-btn-hover-color: var(--bs-info-text-emphasis); --bs-btn-active-color: var(--bs-info-text-emphasis); }
+html[data-bs-theme="light"] .btn-outline-warning { --bs-btn-hover-color: var(--plex-orange-text); }
+
+/* Solid status badges become the tinted pill used everywhere else (white on cyan was 1.96:1, on green 3.8:1). */
+html[data-bs-theme="dark"] .badge.bg-info,
+html[data-bs-theme="dark"] .badge.bg-info.text-dark { background-color: var(--run-soft) !important; color: var(--run) !important; }
+html[data-bs-theme="dark"] .badge.bg-success { background-color: var(--ok-soft) !important; color: var(--ok) !important; }
+html[data-bs-theme="dark"] .badge.bg-warning,
+html[data-bs-theme="dark"] .badge.bg-warning.text-dark { background-color: var(--warn-soft) !important; color: var(--warn) !important; }
+html[data-bs-theme="dark"] .badge.bg-danger { background-color: var(--bad-soft) !important; color: var(--bad) !important; }
+html[data-bs-theme="dark"] .badge.bg-secondary { background-color: var(--inset) !important; color: var(--muted) !important; }
+
+/* Menus, offcanvas, modals and tooltips are one navy family one step above the card. */
+.dropdown-menu { --bs-dropdown-bg: var(--panel-2); --bs-dropdown-link-hover-bg: var(--inset); }
+.offcanvas { --bs-offcanvas-bg: var(--panel-2); }
+html[data-bs-theme="light"] .modal-content { background-color: var(--bs-secondary-bg); }
+html[data-bs-theme="dark"] .table > thead > tr > th,
+html[data-bs-theme="dark"] .table thead th { background-color: var(--inset); }
+.tooltip {
+    --bs-tooltip-bg: var(--panel-2);
+    --bs-tooltip-color: var(--bs-body-color);
+    --bs-tooltip-max-width: 280px;
+    --bs-tooltip-opacity: 1;
+}
+.tooltip-inner { border: 1px solid var(--line-strong); box-shadow: var(--shadow-2); }
+html[data-bs-theme="light"] .tooltip { --bs-tooltip-bg: #1e293b; --bs-tooltip-color: #f1f5f9; }
+html[data-bs-theme="light"] .tooltip-inner { border-color: transparent; }
+
+/* One accent for every switch, checkbox and radio. The mark inside is dark: white on amber is 2.3:1. */
+.form-check-input:checked { background-color: var(--accent-fill); border-color: var(--accent-fill); }
+.form-check-input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+.form-check-input:checked[type="checkbox"] {
+    --bs-form-check-bg-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%231a1203' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='m6 10 3 3 6-6'/%3e%3c/svg%3e");
+}
+.form-check-input:checked[type="radio"] {
+    --bs-form-check-bg-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='2' fill='%231a1203'/%3e%3c/svg%3e");
+}
+.form-switch .form-check-input:checked {
+    --bs-form-switch-bg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='3' fill='%231a1203'/%3e%3c/svg%3e");
+}
+
+/* Light theme glare and hairlines */
+html[data-bs-theme="light"] .table { --bs-table-border-color: var(--surface-border); }
+html[data-bs-theme="light"] .card-header { border-bottom-color: var(--surface-border); }
+
+/* Dashboard bars draw no stripes, so the stripe keyframe would only burn an infinite animation. The indeterminate
+ * worker bar keeps its own slide. */
+.dashboard-layout .progress-bar-animated:not(.worker-indeterminate) { animation: none; }
+
+/* Icon controls share one size: 32px with a pointer, 44px on a phone. */
+.ibtn, .btn-icon, .stepper-minus, .stepper-plus { min-width: var(--ctl-icon); min-height: var(--ctl-icon); }
+@media (max-width: 575.98px) {
+    :root { --ctl-icon: 44px; }
+    .info-icon { position: relative; }
+    .info-icon::before { content: ''; position: absolute; top: 50%; left: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
+}
+
+/* Numbers that change are tabular so a ticking count does not shimmer. */
+.stat, .stat-value, .queue-progress, .queue-created, .wh-time, .occ-chip, input[type="number"] { font-variant-numeric: tabular-nums; }
+@media (pointer: coarse) {
+    .navbar-brand, .navbar-version { display: inline-flex; align-items: center; min-height: 44px; }
+}
+/* The bar is a fixed 57px whatever the wordmark size: the logo mark, not the text, sets its line box. */
+nav.navbar { min-height: 57px; }

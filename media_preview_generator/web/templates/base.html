@@ -1,3 +1,9 @@
+{#- One navbar list entry: icon tile, title and a one-line purpose (the purpose also stays in aria-label). -#}
+{% macro menu_item(href, icon, title, purpose, anchor=None, label=None, active=False) -%}
+<a class="dropdown-item{% if active %} active{% endif %}" href="{{ href }}"{% if anchor %} data-anchor="{{ anchor }}"{% endif %}{% if label %} aria-label="{{ label }}"{% endif %}{% if active %} aria-current="page"{% endif %}>
+    <span class="nav-item-ic" aria-hidden="true"><i class="bi bi-{{ icon }}"></i></span><span class="nav-item-tx"><b>{{ title }}</b><small>{{ purpose }}</small></span>
+</a>
+{%- endmacro -%}
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
@@ -31,6 +37,7 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet" integrity="sha256-u2/YzYU5TLNn6KxY5HKS8taOsoj6Evq2jmVDCl3fzkg=" crossorigin="anonymous">
     <!-- Custom CSS -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/overlays.css') }}" rel="stylesheet">
 
     <!-- CSRF token: csrf_fetch.js adds it to every state-changing fetch to this app -->
     <meta name="csrf-token" content="{{ csrf_token() }}">
@@ -46,7 +53,7 @@
     {% if request.endpoint != 'main.login' %}
     <!-- Navigation -->
     <nav class="navbar navbar-expand-xl border-bottom sticky-top">
-        <div class="container-fluid">
+        <div class="page-shell">
             <div class="navbar-brand-group">
                 <a class="navbar-brand" href="{{ url_for('main.index') }}">
                     <img class="navbar-brand-mark me-2" src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="26" height="26">Media Preview Generator
@@ -113,20 +120,8 @@
                             <i class="bi bi-magic me-1"></i>Automation
                         </a>
                         <ul class="dropdown-menu" id="navAutomationMenu" aria-labelledby="navAutomationDropdown">
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-webhooks-overview"
-                                   href="{{ url_for('main.automation_page') }}#section-webhooks-overview"
-                                   aria-label="Triggers: webhooks that start jobs as new media arrives">
-                                    <i class="bi bi-lightning-charge me-2" aria-hidden="true"></i>Triggers
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-schedules-list"
-                                   href="{{ url_for('main.automation_page') }}#section-schedules-list"
-                                   aria-label="Schedules: recurring library scans">
-                                    <i class="bi bi-calendar-event me-2" aria-hidden="true"></i>Schedules
-                                </a>
-                            </li>
+                            <li>{{ menu_item(url_for('main.automation_page') ~ '#section-webhooks-overview', 'lightning-charge', 'Triggers', 'Webhooks that start jobs as media arrives', anchor='section-webhooks-overview', label='Triggers: webhooks that start jobs as new media arrives') }}</li>
+                            <li>{{ menu_item(url_for('main.automation_page') ~ '#section-schedules-list', 'calendar-event', 'Schedules', 'Recurring library scans', anchor='section-schedules-list', label='Schedules: recurring library scans') }}</li>
                         </ul>
                     </li>
                     <li class="nav-item dropdown nav-hover-menu">
@@ -137,50 +132,16 @@
                         </a>
                         {# The Settings page's sidebar sections, in its order (settings.html). #}
                         <ul class="dropdown-menu" id="navSettingsMenu" aria-labelledby="navSettingsDropdown">
-                            <li><a class="dropdown-item" data-anchor="section-workers" href="{{ url_for('main.settings') }}#section-workers" aria-label="Workers: groups, job permissions and availability"><i class="bi bi-cpu me-2" aria-hidden="true"></i>Workers</a></li>
-                            <li><a class="dropdown-item" data-anchor="section-worker-quiet-hours" href="{{ url_for('main.settings') }}#section-worker-quiet-hours" aria-label="Global pause schedule: times when all processing pauses"><i class="bi bi-moon-stars me-2" aria-hidden="true"></i>Global pause schedule</a></li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-processing"
-                                   href="{{ url_for('main.settings') }}#section-processing"
-                                   aria-label="Processing Options: job limits, device tuning and thumbnails">
-                                    <i class="bi bi-speedometer2 me-2" aria-hidden="true"></i>Processing Options
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-markers"
-                                   href="{{ url_for('main.settings') }}#section-markers"
-                                   aria-label="Intro &amp; Credits: skip-intro and credits markers">
-                                    <i class="bi bi-skip-forward me-2" aria-hidden="true"></i>Intro &amp; Credits
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-logging"
-                                   href="{{ url_for('main.settings') }}#section-logging"
-                                   aria-label="Logging: log level, log files and job history">
-                                    <i class="bi bi-journal-text me-2" aria-hidden="true"></i>Logging
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-auth"
-                                   href="{{ url_for('main.settings') }}#section-auth"
-                                   aria-label="Authentication: the token that signs in to this web app">
-                                    <i class="bi bi-key me-2" aria-hidden="true"></i>Authentication
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-backups"
-                                   href="{{ url_for('main.settings') }}#section-backups"
-                                   aria-label="Backups: earlier copies of the config files">
-                                    <i class="bi bi-clock-history me-2" aria-hidden="true"></i>Backups
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item" data-anchor="section-about"
-                                   href="{{ url_for('main.settings') }}#section-about"
-                                   aria-label="About: version and project links">
-                                    <i class="bi bi-info-circle me-2" aria-hidden="true"></i>About
-                                </a>
-                            </li>
+                            <li><h6 class="dropdown-header">Processing</h6></li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-workers', 'cpu', 'Workers', 'Groups, job permissions and availability', anchor='section-workers', label='Workers: groups, job permissions and availability') }}</li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-worker-quiet-hours', 'moon-stars', 'Global pause schedule', 'Times when all processing pauses', anchor='section-worker-quiet-hours', label='Global pause schedule: times when all processing pauses') }}</li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-processing', 'speedometer2', 'Processing Options', 'Job limits, device tuning, thumbnails', anchor='section-processing', label='Processing Options: job limits, device tuning and thumbnails') }}</li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-markers', 'skip-forward', 'Intro & Credits', 'Skip-intro and credits markers', anchor='section-markers', label='Intro & Credits: skip-intro and credits markers') }}</li>
+                            <li><h6 class="dropdown-header">System</h6></li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-logging', 'journal-text', 'Logging', 'Level, log files, job history', anchor='section-logging', label='Logging: log level, log files and job history') }}</li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-auth', 'key', 'Authentication', 'The token that signs in to this app', anchor='section-auth', label='Authentication: the token that signs in to this web app') }}</li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-backups', 'clock-history', 'Backups', 'Earlier copies of the config files', anchor='section-backups', label='Backups: earlier copies of the config files') }}</li>
+                            <li>{{ menu_item(url_for('main.settings') ~ '#section-about', 'info-circle', 'About', 'Version and project links', anchor='section-about', label='About: version and project links') }}</li>
                         </ul>
                     </li>
                     {# Tools groups the diagnostic pages, keeping the main bar to configuration. "Run setup again"
@@ -192,32 +153,14 @@
                             <i class="bi bi-wrench-adjustable me-1"></i>Tools
                         </a>
                         <ul class="dropdown-menu" id="navToolsMenu" aria-labelledby="navToolsDropdown">
-                            <li>
-                                {# One page for a file's preview frames and its intro & credits. #}
-                                <a class="dropdown-item {% if request.endpoint == 'main.inspector' %}active{% endif %}" href="{{ url_for('main.inspector') }}"{% if request.endpoint == 'main.inspector' %} aria-current="page"{% endif %}>
-                                    <i class="bi bi-film me-2"></i>Inspector
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.logs_page' %}active{% endif %}" href="{{ url_for('main.logs_page') }}"{% if request.endpoint == 'main.logs_page' %} aria-current="page"{% endif %}>
-                                    <i class="bi bi-terminal me-2"></i>Logs
-                                </a>
-                            </li>
-                            <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.webhook_activity_page' %}active{% endif %}" href="{{ url_for('main.webhook_activity_page') }}"{% if request.endpoint == 'main.webhook_activity_page' %} aria-current="page"{% endif %}>
-                                    <i class="bi bi-clock-history me-2"></i>Webhook Activity
-                                </a>
-                            </li>
+                            {# One page for a file's preview frames and its intro & credits. #}
+                            <li>{{ menu_item(url_for('main.inspector'), 'film', 'Inspector', "A file's preview frames and markers", active=request.endpoint == 'main.inspector') }}</li>
+                            <li>{{ menu_item(url_for('main.logs_page'), 'terminal', 'Logs', 'Live application log', active=request.endpoint == 'main.logs_page') }}</li>
+                            <li>{{ menu_item(url_for('main.webhook_activity_page'), 'clock-history', 'Webhook Activity', 'History of incoming webhooks', active=request.endpoint == 'main.webhook_activity_page') }}</li>
                             <li><hr class="dropdown-divider"></li>
-                            <li>
-                                {# ?rerun=1 — the setup_wizard route normally
-                                   redirects authenticated post-setup users
-                                   to the dashboard. The flag opts the user
-                                   into re-entering the wizard explicitly. #}
-                                <a class="dropdown-item" href="{{ url_for('main.setup_wizard', rerun=1) }}">
-                                    <i class="bi bi-magic me-2"></i>Run setup again
-                                </a>
-                            </li>
+                            {# ?rerun=1: the setup_wizard route normally redirects authenticated post-setup users to the
+                               dashboard; the flag opts the user into re-entering the wizard explicitly. #}
+                            <li>{{ menu_item(url_for('main.setup_wizard', rerun=1), 'magic', 'Run setup again', 'Re-open the setup wizard') }}</li>
                         </ul>
                     </li>
                 </ul>
@@ -230,6 +173,7 @@
                          right-aligned cluster naturally separates them. -->
                     <li class="nav-item d-xl-none">
                         <hr class="dropdown-divider my-2">
+                        <div class="offcanvas-group-label">Account &amp; help</div>
                     </li>
                     <li class="nav-item dropdown notification-bell-wrapper">
                         <button type="button"
@@ -256,13 +200,14 @@
                         </button>
                         <div class="dropdown-menu dropdown-menu-end notification-dropdown p-0"
                              aria-labelledby="notificationBellBtn">
-                            <div class="d-flex justify-content-between align-items-center px-3 py-2 border-bottom">
+                            <div class="d-flex align-items-center gap-2 px-3 py-2 border-bottom notification-head">
                                 <strong>Notifications</strong>
+                                <span class="notification-count d-none" id="notificationCount">0</span>
                                 <button type="button"
-                                        class="btn btn-sm btn-link p-0 text-decoration-none"
+                                        class="btn btn-sm btn-link p-0 text-decoration-none ms-auto"
                                         id="notificationResetBtn"
                                         title="Restore dismissed notifications">
-                                    Reset
+                                    Restore dismissed
                                 </button>
                             </div>
                             <div id="notificationList" class="notification-list">
@@ -359,7 +304,11 @@
                             <span class="d-xl-none ms-2" id="themeToggleLabel">Switch to light theme</span>
                         </button>
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item offcanvas-foot">
+                        <div class="offcanvas-version d-xl-none">
+                            <span>Version {{ navbar_version.label }}</span>
+                            {%- if navbar_version.update_available %}<span class="ov-pill run">Update available</span>{% endif %}
+                        </div>
                         {# A POST with the page's token: a plain link would let any page sign the user out. #}
                         <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -379,11 +328,11 @@
     <!-- Config-health banner (issue #278): rendered by checkConfigHealth()
          in app.js when /config isn't writable, mounted :ro, or a media
          mount is missing. Hidden until a problem is detected. -->
-    <div id="configHealthBanner" class="container-fluid pt-3 d-none"></div>
+    <div id="configHealthBanner" class="page-shell pt-3 d-none"></div>
     {% endif %}
 
     <!-- Main Content -->
-    <main id="main-content" tabindex="-1" class="{% if request.endpoint != 'main.login' %}container-fluid py-4{% endif %}">
+    <main id="main-content" tabindex="-1" class="{% if request.endpoint != 'main.login' %}container-fluid page-shell py-4{% endif %}">
         {% block content %}{% endblock %}
     </main>
 
@@ -393,17 +342,17 @@
          all share one consistent in-app dialog instead of an OS popup
          that varies per browser, ignores app theming, and can't surface
          icon/colour cues for severity. -->
-    <div class="modal fade" id="appConfirmModal" tabindex="-1" aria-labelledby="appConfirmModalTitle" aria-hidden="true">
+    <div class="modal fade" id="appConfirmModal" tabindex="-1" aria-labelledby="appConfirmModalTitle" aria-describedby="appConfirmModalBody" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title d-flex align-items-center gap-2" id="appConfirmModalTitle">
-                        <i class="bi bi-question-circle" id="appConfirmModalIcon"></i>
-                        <span id="appConfirmModalTitleText">Confirm</span>
-                    </h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                <div class="modal-body ov-confirm-body">
+                    <span class="ov-confirm-ic" id="appConfirmModalIconTile" data-variant="danger"><i class="bi bi-question-circle" id="appConfirmModalIcon" aria-hidden="true"></i></span>
+                    <div>
+                        <h5 class="modal-title" id="appConfirmModalTitle"><span id="appConfirmModalTitleText">Confirm</span></h5>
+                        <p id="appConfirmModalBody"></p>
+                    </div>
+                    <button type="button" class="btn-close ov-confirm-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
-                <div class="modal-body" id="appConfirmModalBody"></div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="appConfirmModalCancelBtn">Cancel</button>
                     <button type="button" class="btn btn-danger" id="appConfirmModalOkBtn">Confirm</button>
@@ -430,7 +379,7 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title d-flex align-items-center gap-2">
-                        <i class="bi bi-info-circle-fill text-primary"></i>
+                        <span class="ov-info-ic" aria-hidden="true"><i class="bi bi-info-circle-fill"></i></span>
                         <span id="globalInfoTitle">About this setting</span>
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
