@@ -16,6 +16,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import struct
 import threading
@@ -395,8 +396,61 @@ def encode_extra_data(d: dict[str, str], *, url_form: bool = False) -> str:
     return json.dumps(ordered, separators=(",", ":"), ensure_ascii=False)
 
 
+def _unique_extra_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError("Duplicate Plex extra_data key")
+        fields[key] = value
+    return fields
+
+
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\[\s\S])*"')
+_JSON_KEY_END = re.compile(r"[ \t\r\n]*:")
+
+
+def _escape_native_title_controls(extra: str) -> str:
+    """Escape only Plex's observed raw title characters; leave JSON validation strict."""
+    current_key = None
+    repaired = False
+
+    def escape(match: re.Match[str]) -> str:
+        nonlocal current_key, repaired
+        token = match.group()
+        if _JSON_KEY_END.match(extra, match.end()):
+            current_key = json.loads(token)
+            return token
+        if not any(ord(char) < 32 for char in token):
+            return token
+        if current_key != "ma:title":
+            raise ValueError("Raw control outside Plex title")
+        result = []
+        index = 0
+        while index < len(token):
+            char = token[index]
+            if char == "\\":
+                if index + 1 == len(token) or ord(token[index + 1]) < 32:
+                    raise ValueError("Invalid JSON escape in Plex title")
+                result.append(token[index : index + 2])
+                index += 2
+                continue
+            result.append(f"\\u{ord(char):04x}" if ord(char) < 32 else char)
+            index += 1
+        repaired = True
+        return "".join(result)
+
+    escaped = _JSON_STRING.sub(escape, extra)
+    if not repaired:
+        raise ValueError("No compatible raw Plex title character")
+    return escaped
+
+
 def decode_extra_data(extra: str | None) -> tuple[dict[str, str], bool]:
     """Read extra_data in either form Plex stores (see ``encode_extra_data``).
+
+    Plex sometimes leaves literal control characters in ``ma:title``. That one
+    compatibility case requires an agreeing URL mirror before preserving the
+    characters as canonical JSON escapes; other malformed JSON remains refused.
 
     Args:
         extra: The stored text; None or "" is no fields.
@@ -412,8 +466,13 @@ def decode_extra_data(extra: str | None) -> tuple[dict[str, str], bool]:
     if not extra:
         return {}, False
     if extra.startswith("{"):
+        repaired = False
         try:
-            parsed = json.loads(extra)
+            try:
+                parsed = json.loads(extra, object_pairs_hook=_unique_extra_fields)
+            except json.JSONDecodeError:
+                parsed = json.loads(_escape_native_title_controls(extra), object_pairs_hook=_unique_extra_fields)
+                repaired = True
         except ValueError as exc:
             raise PublishError("Plex extra_data is not valid JSON", state=Capability.UNSUPPORTED_SCHEMA) from exc
         if not isinstance(parsed, dict):
@@ -422,6 +481,19 @@ def decode_extra_data(extra: str | None) -> tuple[dict[str, str], bool]:
             raise PublishError(
                 "Plex extra_data holds a non-text value; not writing markers.", state=Capability.UNSUPPORTED_SCHEMA
             )
+        if repaired:
+            try:
+                if any(not key or any(ord(char) < 32 for char in key) for key in parsed):
+                    raise ValueError("Invalid Plex extra_data key")
+                # A second independently encoded copy must prove the compatibility
+                # read preserved every value, including the literal title character.
+                if parsed.get("url") != _url_form(parsed) or json.loads(encode_extra_data(parsed)) != parsed:
+                    raise ValueError("Plex extra_data URL mirror disagrees")
+            except ValueError as exc:
+                raise PublishError(
+                    "Plex extra_data title cannot be read losslessly; not writing metadata.",
+                    state=Capability.UNSUPPORTED_SCHEMA,
+                ) from exc
         return parsed, False
     fields: dict[str, str] | None = {}
     try:
