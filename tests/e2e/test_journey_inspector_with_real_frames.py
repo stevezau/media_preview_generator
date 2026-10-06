@@ -130,7 +130,7 @@ def backend_real_app_with_bif(tmp_path_factory, real_bif_setup):
         [
             sys.executable,
             "-c",
-            app_boot_payload(port, host="0.0.0.0"),
+            app_boot_payload(port),
         ],
         env=env,
         stdout=sp.PIPE,

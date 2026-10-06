@@ -1,91 +1,128 @@
-<!-- Manual Trigger Modal -->
-<div class="modal fade" id="manualTriggerModal" tabindex="-1" aria-labelledby="manualTriggerTitle">
+<!-- Manual Trigger Modal. The job type colours the header tile, the selected card, the chips and the footer chip. -->
+<div class="modal fade ov-modal" id="manualTriggerModal" tabindex="-1" aria-labelledby="manualTriggerTitle" data-kind="previews">
     <div class="modal-dialog modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title" id="manualTriggerTitle"><i class="bi bi-file-earmark-play me-2" aria-hidden="true"></i>Process a file or folder</h5>
+                <span class="ov-tile" aria-hidden="true"><i class="bi bi-file-earmark-play"></i></span>
+                <h5 class="modal-title" id="manualTriggerTitle">Process a file or folder</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
                 <form id="manualTriggerForm" autocomplete="off">
-                    <fieldset class="mb-3">
-                        <legend class="form-label">Job type</legend>
-                        <div class="d-flex flex-wrap gap-3">
-                            <div class="form-check mb-0"><input class="form-check-input" type="radio" name="manualJobKind" id="manualKindPreviews" value="previews" checked><label class="form-check-label" for="manualKindPreviews">Previews</label></div>
-                            <div class="form-check mb-0 d-flex align-items-center"><input class="form-check-input" type="radio" name="manualJobKind" id="manualKindMarkers" value="intro_credits"><label class="form-check-label ms-1" for="manualKindMarkers">Intro &amp; Credits</label><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" title="Find markers for the selected files on owning servers with Intro &amp; Credits enabled." data-explain-title="Intro &amp; Credits" data-explain-template="infoManualMarkersTpl" aria-label="About Intro and Credits"><i class="bi bi-info-circle" aria-hidden="true"></i></button></div>
-                            <div class="form-check mb-0 d-flex align-items-center"><input class="form-check-input" type="radio" name="manualJobKind" id="manualKindLoudness" value="loudness"><label class="form-check-label ms-1" for="manualKindLoudness">Plex loudness</label><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" title="Analyze audio with CPU workers for eligible local Plex libraries." data-explain-title="Plex loudness" data-explain-template="infoManualLoudnessTpl" aria-label="About Plex loudness"><i class="bi bi-info-circle" aria-hidden="true"></i></button></div>
+                    <section class="ov-sec">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Job type</div>
+                        <div class="ov-tcards ov-compact" role="radiogroup" aria-label="Job type">
+                            <div class="ov-tcard" data-type="previews">
+                                <input class="ov-tcard-input" type="radio" name="manualJobKind" id="manualKindPreviews" value="previews" checked>
+                                <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-film"></i></span><label for="manualKindPreviews">Previews</label>
+                                <button type="button" class="info-icon" data-bs-toggle="tooltip" title="Creates previews for Plex, Emby and Jellyfin servers that own the selected files." data-explain-title="Previews" data-explain-template="infoManualPreviewsTpl" aria-label="About Previews"><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+                                <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
+                            </div>
+                            <div class="ov-tcard" data-type="intro_credits">
+                                <input class="ov-tcard-input" type="radio" name="manualJobKind" id="manualKindMarkers" value="intro_credits">
+                                <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-skip-forward"></i></span><label for="manualKindMarkers">Intro &amp; Credits</label>
+                                <button type="button" class="info-icon" data-bs-toggle="tooltip" title="Find markers for the selected files on owning servers with Intro &amp; Credits enabled." data-explain-title="Intro &amp; Credits" data-explain-template="infoManualMarkersTpl" aria-label="About Intro and Credits"><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+                                <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
+                            </div>
+                            <div class="ov-tcard" data-type="loudness">
+                                <input class="ov-tcard-input" type="radio" name="manualJobKind" id="manualKindLoudness" value="loudness">
+                                <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-soundwave"></i></span><label for="manualKindLoudness">Plex loudness</label>
+                                <button type="button" class="info-icon" data-bs-toggle="tooltip" title="Analyze audio with CPU workers for eligible local Plex libraries." data-explain-title="Plex loudness" data-explain-template="infoManualLoudnessTpl" aria-label="About Plex loudness"><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+                                <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
+                            </div>
                         </div>
-                        <p class="form-text manual-kind-help" id="manualKindHelp"></p>
-                    </fieldset>
-                    <div class="mb-3" id="manualSearchServerGroup" hidden>
-                        <label class="form-label" for="manualSearchServer">Search on</label>
-                        <select class="form-select" id="manualSearchServer"><option value="">All enabled servers</option></select>
-                        <div class="form-text">Filters search results only. The job runs on enabled servers that own the selected files.</div>
-                    </div>
-                    <div class="mb-3 position-relative">
-                        <label class="form-label" for="manualSearchInput">
-                            Find media
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Search your servers for a show, movie or episode by name." data-explain-title="Find media" data-explain-template="infoManualFindMediaTpl" aria-label="Search your servers for a show, movie or episode by name."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
-                        </label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="bi bi-search" aria-hidden="true"></i></span>
-                            <input type="text" class="form-control" id="manualSearchInput"
-                                   placeholder="Search a show, movie, or episode (e.g. The Office S01E01)…" autocomplete="off" spellcheck="false">
-                            <button class="btn btn-outline-secondary" type="button" id="manualBrowseBtn"
-                                    title="Browse folders & files">
-                                <i class="bi bi-folder2-open me-1" aria-hidden="true"></i>Browse
-                            </button>
+                        <p class="ov-hint manual-kind-help" id="manualKindHelp"></p>
+                    </section>
+                    <section class="ov-sec">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Media</div>
+                        <div class="ov-fld" id="manualSearchServerGroup" hidden>
+                            <label class="ov-lbl" for="manualSearchServer">Search on</label>
+                            <select class="form-select" id="manualSearchServer"><option value="">All enabled servers</option></select>
+                            <div class="ov-hint">Filters search results only.<button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The job runs on enabled servers that own the selected files." data-explain-title="Search on" data-explain-template="infoManualSearchOnTpl" aria-label="The job runs on enabled servers that own the selected files."><i class="bi bi-info-circle" aria-hidden="true"></i></button></div>
                         </div>
-                        <div id="manualSearchResults" class="list-group shadow-sm mt-1 d-none"
-                             style="max-height: 320px; overflow-y: auto;"></div>
-                    </div>
-                    <div class="mb-3">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <label class="form-label mb-0">Selected</label>
-                            <a href="#" id="manualClearAll" class="small text-muted d-none">Clear all</a>
+                        <div class="ov-fld" id="manualPublishServerGroup">
+                            <label for="manualServerScope" class="ov-lbl">Publish to</label>
+                            <select class="form-select" id="manualServerScope">
+                                <option value="">All servers (publish to whoever owns the file)</option>
+                            </select>
+                            <div class="ov-hint">Also limits the search below.</div>
                         </div>
-                        <div id="manualChips" class="d-flex flex-wrap gap-2"></div>
-                        <div id="manualChipsEmpty" class="form-text">Nothing selected yet — search or browse above.</div>
-                    </div>
-                    <details class="mb-3" id="manualAdvanced">
-                        <summary class="small text-muted" style="cursor: pointer;">Or paste paths manually</summary>
-                        <label class="visually-hidden" for="manualFilePaths">Container paths</label>
-                        <textarea class="form-control font-monospace mt-2" id="manualFilePaths" rows="3"
-                            placeholder="/data/media/tv/Show Name (2024)&#10;/data/media/movies/Movie (2024)/Movie (2024).mkv"></textarea>
-                        <div class="form-text">One absolute container path per line.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Directories expand to the media inside." data-explain-title="Paste paths manually" data-explain-template="infoManualPathsTpl"><i class="bi bi-info-circle"></i></button></div>
+                        <div class="ov-fld position-relative">
+                            <label class="ov-lbl" for="manualSearchInput">
+                                Find media
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Search your servers for a show, movie or episode by name." data-explain-title="Find media" data-explain-template="infoManualFindMediaTpl" aria-label="Search your servers for a show, movie or episode by name."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </label>
+                            <div class="ov-searchbox">
+                                <i class="bi bi-search" aria-hidden="true"></i>
+                                <input type="text" class="form-control" id="manualSearchInput"
+                                       placeholder="Search a show, movie, or episode (e.g. The Office S01E01)…" autocomplete="off" spellcheck="false">
+                                <button class="btn btn-outline-secondary btn-sm" type="button" id="manualBrowseBtn"
+                                        title="Browse folders & files">
+                                    <i class="bi bi-folder2-open me-1" aria-hidden="true"></i>Browse
+                                </button>
+                            </div>
+                            <div id="manualSearchResults" class="ov-results d-none"></div>
+                        </div>
+                        <div class="ov-fld">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <label class="ov-lbl">Selected</label>
+                                <a href="#" id="manualClearAll" class="ov-link d-none">Clear all</a>
+                            </div>
+                            <div id="manualChips" class="ov-chips"></div>
+                            <div id="manualChipsEmpty" class="ov-empty">Nothing selected yet. Search or browse above.</div>
+                            <p class="ov-err" id="manualPathValidation" role="status"></p>
+                        </div>
+                        <details class="ov-adv" id="manualAdvanced">
+                            <summary><i class="bi bi-chevron-right" aria-hidden="true"></i>Or paste paths manually</summary>
+                            <div class="ov-fld">
+                                <label class="ov-lbl" for="manualFilePaths">Container paths
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Directories expand to the media inside." data-explain-title="Paste paths manually" data-explain-template="infoManualPathsTpl" aria-label="Directories expand to the media inside."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                                </label>
+                                <textarea class="form-control font-monospace" id="manualFilePaths" rows="3"
+                                    placeholder="/data/media/tv/Show Name (2024)&#10;/data/media/movies/Movie (2024)/Movie (2024).mkv"></textarea>
+                                <div class="ov-hint">One absolute container path per line.</div>
+                            </div>
 <template id="infoManualPathsTpl">
     <p>One absolute container path per line. Directories expand to the media inside. Select at least one path; an empty selection never means all libraries.</p>
 </template>
-                    </details>
-                    <p class="small text-danger-emphasis" id="manualPathValidation" role="status"></p>
-                    <div class="mb-3" id="manualPublishServerGroup">
-                        <label for="manualServerScope" class="form-label">Publish to which server?</label>
-                        <select class="form-select" id="manualServerScope">
-                            <option value="">All servers (publish to whoever owns the file)</option>
-                        </select>
-                        <div class="form-text">Limits both the search above and where previews are published.</div>
-                    </div>
-                    <fieldset class="mb-3" id="manualProcessingModeGroup">
-                        <legend class="form-label">Processing Mode <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" title="Missing only keeps existing previews. Regenerate all rebuilds previews using current quality settings." aria-label="About processing mode"><i class="bi bi-info-circle" aria-hidden="true"></i></button></legend>
-                        <div class="form-check mb-1"><input class="form-check-input" type="radio" name="manualProcessingMode" id="manualMissingOnly" value="missing" checked><label class="form-check-label" for="manualMissingOnly"><i class="bi bi-funnel me-1" aria-hidden="true"></i>Process only items missing previews</label></div>
-                        <div class="form-check"><input class="form-check-input" type="radio" name="manualProcessingMode" id="manualForceRegenerate" value="regenerate"><label class="form-check-label" for="manualForceRegenerate"><i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>Regenerate all previews</label></div>
-                    </fieldset>
-                    <div class="mb-3" id="manualMarkersForceGroup" hidden><div class="form-check d-flex align-items-center"><input class="form-check-input" type="checkbox" id="manualMarkersForce"><label class="form-check-label ms-1" for="manualMarkersForce">Re-check files already done</label><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" title="Detects the selected files again. Leave off to skip files that are already done." aria-label="About re-checking files"><i class="bi bi-info-circle" aria-hidden="true"></i></button></div></div>
-                    <div class="mb-3">
-                        <label for="manualPriority" class="form-label">Priority <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" title="Which waiting job runs first: High, then Normal, then Low." data-explain-title="Priority" data-explain-template="infoJobPriorityTpl" aria-label="About priority"><i class="bi bi-info-circle" aria-hidden="true"></i></button></label>
-                        <select class="form-select" id="manualPriority">
-                            <option value="1">High</option>
-                            <option value="2" selected>Normal</option>
-                            <option value="3">Low</option>
-                        </select>
-                    </div>
-                    <p class="small text-danger-emphasis" id="manualSubmissionError" role="alert"></p>
+                        </details>
+                    </section>
+                    <section class="ov-sec">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Options</div>
+                        <div class="ov-fld" id="manualProcessingModeGroup">
+                            <div class="ov-lbl" id="manualProcessingModeLabel">Processing Mode
+                                <button type="button" class="info-icon" data-bs-toggle="tooltip" title="Missing only keeps existing previews. Regenerate all rebuilds previews using current quality settings." data-explain-title="Processing Mode" data-explain-template="infoJobProcessingModeTpl" aria-label="About processing mode"><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </div>
+                            <div class="ov-seg" role="radiogroup" aria-labelledby="manualProcessingModeLabel">
+                                <span class="ov-seg-opt"><input type="radio" name="manualProcessingMode" id="manualMissingOnly" value="missing" checked><label for="manualMissingOnly"><i class="bi bi-funnel" aria-hidden="true"></i>Missing only</label></span>
+                                <span class="ov-seg-opt" data-warn><input type="radio" name="manualProcessingMode" id="manualForceRegenerate" value="regenerate"><label for="manualForceRegenerate"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>Regenerate all</label></span>
+                            </div>
+                            <div class="ov-hint" id="manualProcessingModeHint">Skips files that already have a preview.</div>
+                        </div>
+                        <div class="ov-fld" id="manualMarkersForceGroup" hidden>
+                            <label class="ov-switch" for="manualMarkersForce">
+                                <input type="checkbox" id="manualMarkersForce"><span class="ov-track" aria-hidden="true"></span>Re-check files already done
+                                <button type="button" class="info-icon" data-bs-toggle="tooltip" title="Detects the selected files again. Leave off to skip files that are already done." aria-label="About re-checking files"><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </label>
+                            <div class="ov-hint">Off skips files that were already checked.</div>
+                        </div>
+                        <div class="ov-fld">
+                            <label for="manualPriority" class="ov-lbl">Priority <button type="button" class="info-icon" data-bs-toggle="tooltip" title="Which waiting job runs first: High, then Normal, then Low." data-explain-title="Priority" data-explain-template="infoJobPriorityTpl" aria-label="About priority"><i class="bi bi-info-circle" aria-hidden="true"></i></button></label>
+                            <select class="form-select ov-seg-select" id="manualPriority">
+                                <option value="1">High</option>
+                                <option value="2" selected>Normal</option>
+                                <option value="3">Low</option>
+                            </select>
+                        </div>
+                        <p class="ov-err ov-err-box" id="manualSubmissionError" role="alert"></p>
+                    </section>
                 </form>
             </div>
             <div class="modal-footer">
+                <span class="ov-sum" id="manualSummary" aria-live="polite">Nothing selected</span>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" id="manualStartButton" onclick="startManualJob()" disabled>
-                    <i class="bi bi-play-fill me-1" aria-hidden="true"></i>Start Job
+                    <i class="bi bi-play-fill me-1" aria-hidden="true"></i><span id="manualStartLabel">Start previews job</span>
                 </button>
             </div>
         </div>

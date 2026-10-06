@@ -1,87 +1,100 @@
-<details class="scan-filters mb-3 border rounded" id="{{ filter_prefix }}ScanFilters">
-    <summary class="fw-semibold d-flex align-items-start justify-content-between gap-2 p-3 rounded">
-        <span><i class="bi bi-funnel me-1" aria-hidden="true"></i>Filter media
-            <span class="d-block small fw-normal text-muted mt-1" data-filter-summary aria-live="polite">All selected media</span>
+<details class="scan-filters ov-flt" id="{{ filter_prefix }}ScanFilters">
+    <summary>
+        <span class="ov-flt-t">
+            <span class="ov-flt-name"><i class="bi bi-funnel" aria-hidden="true"></i>Filter media</span>
+            <span class="ov-flt-sum" data-filter-summary aria-live="polite">All selected media</span>
         </span>
-        <span class="small text-primary d-inline-flex align-items-center gap-2 text-nowrap">
+        <span class="ov-flt-edit">
             <span class="scan-filters-edit">Edit filters</span>
             <span class="scan-filters-hide">Hide filters</span>
             <i class="bi bi-chevron-down scan-filters-chevron" aria-hidden="true"></i>
         </span>
     </summary>
-    <div class="px-3 pb-3">
-        <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
-            <p class="small text-muted mb-0">Filters combine. Only matching media is included in this run.</p>
+    <div class="ov-flt-body">
+        <div class="ov-flt-head">
+            <p class="ov-hint mb-0">Filters combine. Only matching media is included in this run.</p>
             <button type="button" class="btn btn-sm btn-outline-secondary text-nowrap" data-filter-clear aria-label="Clear media filters">Clear</button>
         </div>
-        <p class="small text-muted" data-filter-scope-note hidden></p>
-        <fieldset data-filter-fields>
-            <div class="mb-3">
-                <label for="{{ filter_prefix }}AddedFilter" class="form-label">Added to library</label>
+        <p class="ov-hint" data-filter-scope-note hidden></p>
+        <fieldset data-filter-fields class="ov-flt-fields">
+            <div class="ov-fld">
+                <label for="{{ filter_prefix }}AddedFilter" class="ov-lbl">Added to library
+                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Uses the date added to your media server, not the release date." data-explain-title="Date added filter" data-explain-template="{{ filter_prefix }}InfoAddedTpl" aria-label="Uses the date added to your media server, not the release date."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                </label>
                 <select id="{{ filter_prefix }}AddedFilter" class="form-select" data-filter="added_filter">
                     <option value="all">Any time</option>
                     <option value="last_days">Within the last…</option>
                     <option value="date_range">Date range</option>
                 </select>
-                <div class="mt-2" data-filter-section="days" hidden>
-                    <label for="{{ filter_prefix }}AddedLastDays" class="form-label">Number of days</label>
+                <div class="ov-fld" data-filter-section="days" hidden>
+                    <label for="{{ filter_prefix }}AddedLastDays" class="ov-lbl">Number of days</label>
                     <input id="{{ filter_prefix }}AddedLastDays" class="form-control" type="number" min="1" step="1" value="30" data-filter="added_last_days">
+                    <div class="ov-err" data-filter-error="added_last_days" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
                 </div>
-                <div class="row g-2 mt-1" data-filter-section="dates" hidden>
-                    <div class="col-sm-6">
-                        <label for="{{ filter_prefix }}AddedFrom" class="form-label">From</label>
+                <div class="ov-row2" data-filter-section="dates" hidden>
+                    <div class="ov-fld">
+                        <label for="{{ filter_prefix }}AddedFrom" class="ov-lbl">From</label>
                         <input id="{{ filter_prefix }}AddedFrom" class="form-control" type="date" data-filter="added_from">
                     </div>
-                    <div class="col-sm-6">
-                        <label for="{{ filter_prefix }}AddedTo" class="form-label">Through</label>
+                    <div class="ov-fld">
+                        <label for="{{ filter_prefix }}AddedTo" class="ov-lbl">Through</label>
                         <input id="{{ filter_prefix }}AddedTo" class="form-control" type="date" data-filter="added_to">
                     </div>
+                    <div class="ov-err ov-span2" data-filter-error="added_to" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
                 </div>
-                <div class="form-text">Filters by the date added to your media server.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Uses the date added to your media server, not the release date." data-explain-title="Date added filter" data-explain-template="{{ filter_prefix }}InfoAddedTpl"><i class="bi bi-info-circle"></i></button></div>
 <template id="{{ filter_prefix }}InfoAddedTpl">
-    <p>Uses the date recorded by your media server, not the release date. Date ranges include both days in the app timezone.</p>
+    <p>Filters by the date added to your media server. Uses the date recorded by your media server, not the release date. Date ranges include both days in the app timezone.</p>
 </template>
             </div>
-            <fieldset class="mb-3" data-filter-type="tv">
-                <legend class="fs-6 fw-semibold">TV shows</legend>
-                <label for="{{ filter_prefix }}SeasonMode" class="form-label">Seasons to include</label>
-                <select id="{{ filter_prefix }}SeasonMode" class="form-select" data-filter="season_mode">
-                    <option value="all">All seasons</option>
-                    <option value="latest">Most recent available seasons</option>
-                </select>
-                <div class="mt-2" data-filter-section="seasons" hidden>
-                    <label for="{{ filter_prefix }}LatestSeasons" class="form-label">Number of seasons per show</label>
+            <fieldset class="ov-flt-grp" data-filter-type="tv">
+                <legend><i class="bi bi-tv" aria-hidden="true"></i>TV shows</legend>
+                <div class="ov-fld">
+                    <label for="{{ filter_prefix }}SeasonMode" class="ov-lbl">Seasons to include</label>
+                    <select id="{{ filter_prefix }}SeasonMode" class="form-select" data-filter="season_mode">
+                        <option value="all">All seasons</option>
+                        <option value="latest">Most recent available seasons</option>
+                    </select>
+                </div>
+                <div class="ov-fld" data-filter-section="seasons" hidden>
+                    <label for="{{ filter_prefix }}LatestSeasons" class="ov-lbl">Number of seasons per show
+                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Excludes specials; applies only to TV shows." data-explain-title="Seasons per show" data-explain-template="{{ filter_prefix }}InfoSeasonsTpl" aria-label="Excludes specials; applies only to TV shows."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                    </label>
                     <input id="{{ filter_prefix }}LatestSeasons" class="form-control" type="number" min="1" step="1" value="1" data-filter="latest_seasons">
-                    <div class="form-text">Highest-numbered seasons per show.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Excludes specials; applies only to TV shows." data-explain-title="Seasons per show" data-explain-template="{{ filter_prefix }}InfoSeasonsTpl"><i class="bi bi-info-circle"></i></button></div>
+                    <div class="ov-hint">Highest-numbered seasons per show.</div>
+                    <div class="ov-err" data-filter-error="latest_seasons" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
 <template id="{{ filter_prefix }}InfoSeasonsTpl">
     <p>Highest numbered seasons in the library; excludes specials. Applies only to TV shows, including ended shows.</p>
 </template>
                 </div>
             </fieldset>
-            <fieldset class="mb-0" data-filter-type="movie">
-                <legend class="fs-6 fw-semibold">Movies</legend>
-                <label for="{{ filter_prefix }}MovieYearMode" class="form-label">Release year</label>
-                <select id="{{ filter_prefix }}MovieYearMode" class="form-select" data-filter="movie_year_mode">
-                    <option value="all">All release years</option>
-                    <option value="range">Year range</option>
-                </select>
-                <div class="row g-2 mt-1" data-filter-section="years" hidden>
-                    <div class="col-sm-6">
-                        <label for="{{ filter_prefix }}MovieYearFrom" class="form-label">From year</label>
+            <fieldset class="ov-flt-grp" data-filter-type="movie">
+                <legend><i class="bi bi-film" aria-hidden="true"></i>Movies</legend>
+                <div class="ov-fld">
+                    <label for="{{ filter_prefix }}MovieYearMode" class="ov-lbl">Release year</label>
+                    <select id="{{ filter_prefix }}MovieYearMode" class="form-select" data-filter="movie_year_mode">
+                        <option value="all">All release years</option>
+                        <option value="range">Year range</option>
+                    </select>
+                </div>
+                <div class="ov-row2" data-filter-section="years" hidden>
+                    <div class="ov-fld">
+                        <label for="{{ filter_prefix }}MovieYearFrom" class="ov-lbl">From year</label>
                         <input id="{{ filter_prefix }}MovieYearFrom" class="form-control" type="number" min="1" max="9999" step="1" placeholder="Any" data-filter="movie_year_from">
                     </div>
-                    <div class="col-sm-6">
-                        <label for="{{ filter_prefix }}MovieYearTo" class="form-label">Through year</label>
+                    <div class="ov-fld">
+                        <label for="{{ filter_prefix }}MovieYearTo" class="ov-lbl">Through year</label>
                         <input id="{{ filter_prefix }}MovieYearTo" class="form-control" type="number" min="1" max="9999" step="1" placeholder="Any" data-filter="movie_year_to">
                     </div>
-                    <div class="col-12 form-text">Inclusive release years, for movies only.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Release year range." data-explain-title="Release year range" data-explain-template="{{ filter_prefix }}InfoYearsTpl"><i class="bi bi-info-circle"></i></button></div>
+                    <div class="ov-hint ov-span2">Inclusive release years, for movies only.<button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Release year range." data-explain-title="Release year range" data-explain-template="{{ filter_prefix }}InfoYearsTpl" aria-label="Release year range."><i class="bi bi-info-circle" aria-hidden="true"></i></button></div>
+                    <div class="ov-err ov-span2" data-filter-error="movie_year_from" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                    <div class="ov-err ov-span2" data-filter-error="movie_year_to" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
 <template id="{{ filter_prefix }}InfoYearsTpl">
     <p>Inclusive release years, for movies only. Enter at least one year; leave the other blank for no limit.</p>
 </template>
                 </div>
             </fieldset>
         </fieldset>
-        <p class="small text-muted mt-3 mb-0">Media missing a value an active filter needs is excluded.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Filters and existing previews." data-explain-title="Filter matching" data-explain-template="{{ filter_prefix }}InfoExcludedTpl"><i class="bi bi-info-circle"></i></button></p>
+        <p class="ov-hint mb-0">Media missing a value an active filter needs is excluded.<button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Filters and existing previews." data-explain-title="Filter matching" data-explain-template="{{ filter_prefix }}InfoExcludedTpl" aria-label="Filters and existing previews."><i class="bi bi-info-circle" aria-hidden="true"></i></button></p>
 <template id="{{ filter_prefix }}InfoExcludedTpl">
     <p>Media missing a date, season or year needed by an active filter is excluded. Existing previews are checked after selection.</p>
 </template>

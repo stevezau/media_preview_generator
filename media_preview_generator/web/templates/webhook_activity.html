@@ -7,13 +7,13 @@
 {% endblock %}
 
 {% block content %}
-<div class="container-xxl py-3 wh-page">
+<div class="wh-page">
     <header class="page-header">
         <div>
             <div class="wh-crumb">Tools › Webhook Activity</div>
             <h1 class="page-title">Webhook Activity</h1>
             <p class="page-subtitle mb-0">
-                Inbound webhook events and their outcomes. Configure trigger sources under
+                Inbound webhook events. Set sources in
                 <a href="{{ url_for('main.automation_page') }}#section-webhooks-overview">Automation → Triggers</a>.
             </p>
         </div>
@@ -294,14 +294,14 @@ function renderHistoryPage() {
         if (hasServerData) {
             const stype = (evt.server_type || '').toLowerCase();
             const label = evt.server_name || stype.toUpperCase() || 'Server';
-            serverCell = '<span class="pill">' + escapeHtml(label) + '</span>';
+            // A server named after its own source ("Plex" on a Plex event) repeats the source chip.
+            serverCell = label.toLowerCase() === String(sourceBadgeLabel).toLowerCase() ? '' : '<span class="pill">' + escapeHtml(label) + '</span>';
         } else if (evt.timestamp && new Date(evt.timestamp).getTime() < new Date('2026-04-29').getTime()) {
-            // History entries from before this column existed have no
-            // server attribution. Show an em-dash + tooltip rather than
-            // the misleading "All".
+            // Entries from before per-server attribution existed: em-dash rather than the misleading "All".
             serverCell = '<span class="wh-faint" title="This webhook fired before the per-server attribution column was added in this version. Future events will show the destination server.">—</span>';
         } else {
-            serverCell = '<span class="wh-faint" title="No ?server_id= on the inbound webhook URL — fanned out to every owning server.">All</span>';
+            // Fan-out webhook (no ?server_id=): "All" is the default, so the cell stays empty.
+            serverCell = '';
         }
 
         // Each file logs a Queued row and then a Triggered row; fading the Queued one stops the pair reading as

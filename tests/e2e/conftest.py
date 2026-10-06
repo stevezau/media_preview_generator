@@ -63,7 +63,7 @@ def get_free_port() -> int:
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
 
-def app_boot_payload(port: int, host: str = "0.0.0.0") -> str:
+def app_boot_payload(port: int, host: str = "127.0.0.1") -> str:
     """``python -c`` source that boots the app with dotenv disabled.
 
     ``tests/conftest.py::_isolate_dotenv_from_tests`` neuters ``load_dotenv``
@@ -85,6 +85,9 @@ def app_boot_payload(port: int, host: str = "0.0.0.0") -> str:
     """
     return (
         "import dotenv; dotenv.load_dotenv = lambda *a, **k: None; "
+        # PR_SET_PDEATHSIG=SIGKILL: a force-killed pytest (timeout, OOM, Ctrl-C twice) never runs fixture teardown,
+        # which left hundreds of orphaned servers holding gigabytes of RAM.
+        "import ctypes, signal; ctypes.CDLL('libc.so.6').prctl(1, signal.SIGKILL); "
         "from media_preview_generator.web.app import run_server; "
         f"run_server(host='{host}', port={port})"
     )
@@ -368,6 +371,17 @@ def watch_modal_shown(page: Page, modal_id: str) -> None:
 def expect_modal_shown(page: Page, modal_id: str, timeout: int = 5000) -> None:
     """Wait until the modal :func:`watch_modal_shown` armed has finished opening."""
     expect(page.locator(f'#{modal_id}[data-e2e-shown="1"]')).to_be_attached(timeout=timeout)
+
+
+def touch_edit_form(page: Page) -> None:
+    """Mark the open Edit Server dialog as edited without changing a value.
+
+    Save stays disabled until the form is edited, so a test that saves exactly what was loaded first re-enters one
+    field the way a user retyping it would (an ``input`` event on the display name). Works from any tab.
+    """
+    page.evaluate(
+        "() => document.getElementById('editServerDisplayName').dispatchEvent(new Event('input', { bubbles: true }))"
+    )
 
 
 # ---------------------------------------------------------------------------

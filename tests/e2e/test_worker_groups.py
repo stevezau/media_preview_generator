@@ -317,7 +317,11 @@ def test_quiet_hours_has_one_editor_and_schedules_links_to_it(authed_page: Page,
     settings_page(authed_page, app_url)
     page = authed_page
     expect(page.locator("#quietHoursSaveBtn")).to_have_count(1)
-    expect(page.locator("#section-worker-quiet-hours")).to_contain_text("scheduled runs are not caught up")
+    # The rule sits behind the section's info icon (a template for its dialog), not as a visible line.
+    assert (
+        "scheduled runs are not caught up"
+        in page.evaluate("document.getElementById('infoPauseRulesTpl').content.textContent").lower()
+    )
     page.goto(app_url + "/automation?tab=schedules")
     expect(page.locator("#quietHoursSaveBtn")).to_have_count(0)
     expect(page.locator('#section-schedules-quiet-hours a[href="/settings#section-worker-quiet-hours"]')).to_have_count(

@@ -1,0 +1,411 @@
+/* Servers → Add and Edit modals. Tokens (--ok, --bad, --warn, --run, --inset, --line, --accent, --panel-2 ...) live in
+ * style.css. The .pill and icon-button primitives are scoped to the dashboard layout there, so the pill is
+ * redefined here, scoped to these modals. The Add form partial is also inlined in the Setup wizard, so everything
+ * the form uses is keyed on .sm-* classes rather than on the modal id. */
+
+.sm-modal,
+.sm-step {
+    --sm-text: var(--bs-body-color);
+    --sm-bg: var(--bs-body-bg);
+}
+
+/* ---------- shared bits ------------------------------------------------------------------------------------ */
+.sm-modal .pill,
+.sm-step .pill {
+    display: inline-flex; align-items: center; gap: 6px; height: 24px; max-width: 100%; padding: 0 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; line-height: 1; white-space: nowrap; background: var(--inset); color: var(--muted);
+}
+.sm-modal .pill.ok, .sm-step .pill.ok { background: var(--ok-soft); color: var(--ok); }
+.sm-modal .pill.bad, .sm-step .pill.bad { background: var(--bad-soft); color: var(--bad); }
+.sm-modal .pill.warn, .sm-step .pill.warn { background: var(--warn-soft); color: var(--warn); }
+.sm-modal .pill.run, .sm-step .pill.run { background: var(--run-soft); color: var(--run); }
+.sm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; display: inline-block; }
+.pill.ok > .sm-dot { background: var(--ok); }
+.pill.bad > .sm-dot { background: var(--bad); }
+.pill.warn > .sm-dot { background: var(--warn); }
+.sm-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: sm-spin .7s linear infinite; display: inline-block; flex: none; }
+@keyframes sm-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .sm-spin { animation-duration: 2s; } }
+
+.sm-logo { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); font-size: 18px; }
+.sm-logo img { width: 22px; height: 22px; display: block; }
+.sm-logo-lg { width: 48px; height: 48px; border-radius: 12px; font-size: 24px; }
+.sm-logo-lg img { width: 26px; height: 26px; }
+
+.sm-sec { display: grid; gap: 14px; min-width: 0; }
+.sm-sec-h { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.sm-sec-h::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.sm-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.sm-fld { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.sm-lab { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 13px; font-weight: 600; color: var(--sm-text); }
+.sm-strong { color: var(--sm-text); }
+.sm-hint { font-size: 12.5px; line-height: 1.4; color: var(--muted); min-width: 0; }
+.sm-hint code, .sm-lead code { padding: 1px 5px; border-radius: 4px; background: var(--inset); color: var(--sm-text); font-size: 12px; }
+.sm-hint a, .sm-lead a, .sm-ex a { text-decoration: underline; text-underline-offset: 2px; }
+.sm-lead { color: var(--muted); font-size: 13.5px; margin: 0; }
+.sm-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.sm-line > :first-child { min-width: 0; }
+.sm-sp { flex: 1; }
+.sm-testrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sm-card { border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--inset); min-width: 0; }
+.sm-card-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.sm-card-h h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 700; }
+.sm-card-b { display: grid; gap: 12px; padding: 14px 16px; min-width: 0; }
+.sm-warnline { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-ctl); background: var(--warn-soft); color: var(--warn); font-size: 12.5px; min-width: 0; }
+.sm-warnline > span { min-width: 0; flex: 1; }
+.sm-warnline > i { flex: none; }
+.sm-warnline.bad { background: var(--bad-soft); color: var(--bad); }
+.sm-warnline code { color: inherit; }
+.sm-warnline .info-icon { color: inherit; }
+.sm-vmsg { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.sm-vmsg.bad { color: var(--bad); }
+.sm-vmsg.ok { color: var(--ok); }
+.sm-status { padding: 8px 12px; border-radius: var(--radius-ctl); background: var(--run-soft); color: var(--run); font-size: 13px; }
+.sm-status.ok { background: var(--ok-soft); color: var(--ok); }
+.sm-status.bad { background: var(--bad-soft); color: var(--bad); }
+.sm-status a { color: inherit; text-decoration: underline; }
+
+/* Fields: one look for every input in both modals. Validation is a red or green border with a check at the right
+ * edge (Bootstrap's own .is-valid / .is-invalid state classes, which servers.js already toggles). */
+.sm-modal .form-control, .sm-modal .form-select, .sm-step .form-control, .sm-step .form-select {
+    min-height: 38px; border-radius: var(--radius-ctl); border-color: var(--line-strong); background-color: var(--sm-bg); color: var(--sm-text); font-size: 14px;
+}
+.sm-modal .form-control:focus, .sm-modal .form-select:focus, .sm-step .form-control:focus, .sm-step .form-select:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sm-modal .form-control[readonly], .sm-step .form-control[readonly] { color: var(--muted); }
+.sm-modal .form-control::placeholder, .sm-step .form-control::placeholder { color: var(--faint); }
+.sm-modal .input-group > .btn, .sm-step .input-group > .btn { min-width: 38px; border-color: var(--line-strong); color: var(--muted); }
+.sm-modal .input-group > .btn:hover, .sm-step .input-group > .btn:hover { background: var(--inset); color: var(--sm-text); }
+.sm-modal .form-control.is-valid, .sm-step .form-control.is-valid { border-color: var(--ok); }
+.sm-modal .form-control.is-invalid, .sm-step .form-control.is-invalid { border-color: var(--bad); }
+.sm-modal .valid-feedback, .sm-step .valid-feedback { color: var(--ok); font-size: 12.5px; }
+.sm-modal .invalid-feedback, .sm-step .invalid-feedback { color: var(--bad); font-size: 12.5px; }
+.sm-modal .form-control:focus.is-invalid, .sm-step .form-control:focus.is-invalid { box-shadow: 0 0 0 3px var(--bad-soft); }
+.sm-modal .form-control:focus.is-valid, .sm-step .form-control:focus.is-valid { box-shadow: 0 0 0 3px var(--ok-soft); }
+
+/* Switches: amber when on, the same control everywhere in the modal. */
+.sm-modal .form-switch .form-check-input, .sm-step .form-switch .form-check-input { margin: 0; float: none; cursor: pointer; }
+.sm-modal .form-switch, .sm-step .form-switch { padding-left: 0; display: flex; align-items: center; min-height: 0; margin: 0; }
+
+/* Segmented method / choice control. */
+.sm-mseg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); }
+.sm-mseg > .btn { flex: 1 1 auto; height: 32px; padding: 0 14px; border: 0 !important; border-radius: 7px !important; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.sm-mseg > .btn:hover { color: var(--sm-text); }
+.sm-mseg > .btn-check:checked + .btn { background: var(--panel-2); color: var(--sm-text); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); }
+.sm-mseg > .btn-check:focus-visible + .btn { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sm-authseg { display: flex; }
+.sm-authseg > .btn { height: 38px; }
+.sm-authseg > .btn-check:checked + .btn { box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--accent-text); }
+.sm-authseg > label.d-none { display: none !important; }
+
+/* Disclosure used for worked examples, prerequisites and setup steps. */
+.sm-ex > summary { cursor: pointer; color: var(--run); font-size: 13px; width: fit-content; }
+.sm-ex-box { margin: 8px 0 0; padding: 10px 12px; background: var(--inset); border-radius: var(--radius-ctl); font-size: 13px; color: var(--muted); }
+.sm-ex-box.sm-steps { padding-left: 30px; }
+.sm-ex-box code { color: var(--sm-text); }
+
+.sm-tfoot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.sm-tbl { margin: 0; font-size: 13.5px; --bs-table-bg: transparent; }
+.sm-tbl th { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); font-weight: 700; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.sm-tbl td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.sm-cell-lab { display: none; }
+.sm-col-x { width: 44px; }
+.sm-col-type { width: 220px; }
+.sm-tbl .btn-outline-danger { border-color: transparent; color: var(--muted); width: 32px; height: 32px; padding: 0; display: inline-grid; place-items: center; }
+.sm-tbl .btn-outline-danger:hover { background: var(--bad-soft); color: var(--bad); }
+.sm-tbl .input-group > .btn { height: 31px; }
+.sm-libs .badge { background: var(--inset) !important; border: 1px solid var(--line); color: var(--muted) !important; font-size: 11px; font-weight: 500; }
+
+/* ---------- Edit modal frame ------------------------------------------------------------------------------- */
+#editServerModal .modal-content, #addServerModal .modal-content { border-radius: 16px; border: 1px solid var(--line-strong); overflow: hidden; }
+.sm-header { align-items: center; gap: 14px; padding: 16px 20px; min-height: 76px; border-bottom: 1px solid var(--line); }
+.sm-title { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.sm-name { margin: 0; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; font-size: 18px; font-weight: 700; line-height: 1.2; min-width: 0; }
+.sm-name .text-truncate { min-width: 0; }
+.sm-name .pill { flex: none; }
+.sm-host { font: 12px/1.3 var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sm-sub { font-size: 14px; color: var(--muted); }
+.sm-enabled { display: inline-flex; align-items: center; gap: 10px; flex: none; color: var(--muted); font-size: 13px; font-weight: 600; }
+.sm-enabled-label { margin: 0; cursor: pointer; }
+.sm-paused { display: none; font-size: 12px; font-weight: 500; color: var(--warn); }
+#editServerModal.sm-paused .sm-paused { display: inline; }
+#editServerModal.sm-paused .sm-rail, #editServerModal.sm-paused .sm-panes { opacity: .75; }
+
+#editServerModal .sm-body { padding: 0; display: grid; grid-template-columns: 244px minmax(0, 1fr); height: min(70vh, 660px); min-height: 0; overflow: hidden; }
+.sm-panes { min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.sm-panes > .tab-pane { padding: 22px 26px; min-width: 0; }
+.sm-panes > .tab-pane.active { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-content: start; min-height: 100%; }
+#edit-tab-health.active { display: flex; flex-direction: column; }
+#edit-tab-health .sm-health { flex: 1; display: flex; flex-direction: column; }
+#edit-tab-health .sm-stickybar { margin-top: auto; }
+.sm-panes > .tab-pane > * { min-width: 0; }
+#editServerModal .processing-feature.sm-sec { padding: 0; border: 0; }
+#editServerModal .processing-feature p { max-width: none; }
+
+#editServerModal .sm-rail.nav-tabs { display: flex; flex-direction: column; flex-wrap: nowrap; gap: 2px; margin: 0; padding: 12px 10px; border: 0; border-right: 1px solid var(--line); background: var(--inset); overflow-y: auto; }
+#editServerModal .sm-rail .nav-item { margin: 0; }
+#editServerModal .sm-rail .nav-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 600; text-align: left; white-space: nowrap; }
+#editServerModal .sm-rail .nav-link > i { width: 18px; text-align: center; font-size: 16px; flex: none; }
+#editServerModal .sm-rail .nav-link:hover { color: var(--sm-text); background: var(--inset); }
+#editServerModal .sm-rail .nav-link.active { background: var(--accent-soft); color: var(--accent-text); border: 0; }
+#editServerModal .sm-rail .nav-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sm-rail-lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.sm-nb { min-width: 22px; height: 20px; padding: 0 6px; border-radius: 99px; display: inline-grid; place-items: center; background: var(--inset); color: var(--muted); border: 1px solid var(--line); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sm-nb.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.sm-nb.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.sm-nb.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.sm-nb.sm-nb-dot { min-width: 10px; width: 10px; height: 10px; padding: 0; }
+
+.sm-footer { align-items: center; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--line); flex-wrap: nowrap; }
+#editServerModal .sm-footer .btn { min-height: 38px; margin: 0; }
+.sm-foot-msg { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.sm-foot-msg > div { margin: 0; }
+.sm-dirty { display: inline-flex; align-items: center; gap: 6px; color: var(--warn); font-weight: 600; }
+.sm-dirty i { font-size: 7px; }
+#editServerResult { padding: 0; border: 0; background: none; font-size: 13px; }
+#editServerResult.bad { color: var(--bad); }
+#editServerResult.ok { color: var(--ok); }
+#editServerResult.warn { color: var(--warn); }
+.sm-discard { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--sm-text); font-weight: 600; }
+#editServerSave:disabled { opacity: .45; background-color: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+#editServerModal #editTestConnectionBtn { min-height: 32px; }
+
+/* ---------- Connection ------------------------------------------------------------------------------------- */
+.sm-tres { display: inline-flex; align-items: center; gap: 8px; min-height: 24px; font-size: 13px; color: var(--muted); min-width: 0; }
+.sm-tres.ok { color: var(--ok); }
+.sm-tres.warn { color: var(--warn); }
+.sm-tres.bad { color: var(--bad); }
+.sm-dz { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent); border-radius: var(--radius-card); }
+.sm-dz-text { flex: 1; min-width: 200px; }
+.sm-dz-text b { display: block; }
+.sm-cred-forms { display: grid; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+.sm-cred-forms.d-none { display: none; }
+.sm-cred-forms > div { min-width: 0; }
+.sm-cred-forms > [id^="editReauth"][class*="sm-fld"] { gap: 10px; }
+
+/* ---------- Setup Health ----------------------------------------------------------------------------------- */
+.sm-health { display: grid; gap: 14px; }
+.sm-health.d-none { display: none; }
+.sm-hsum { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sm-hsum-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; font-weight: 700; }
+.sm-health-body { display: grid; gap: 12px; }
+.readiness-bucket { border: 1px solid var(--line); border-radius: var(--radius-card); overflow: hidden; margin: 0 !important; }
+.readiness-bucket > summary { display: flex; align-items: center; gap: 10px !important; padding: 12px 16px !important; border: 0; border-radius: 0 !important; background: var(--inset); font-weight: 700; list-style: none; cursor: pointer; }
+.readiness-bucket > summary:hover { background: var(--panel-2); }
+.readiness-bucket > summary::after { content: "\F285"; font-family: "bootstrap-icons"; margin-left: auto; color: var(--faint); font-size: 12px; transition: transform .16s; }
+.readiness-bucket[open] > summary::after { transform: rotate(90deg); }
+.readiness-bucket[data-tier="critical"] > summary { color: var(--bad); }
+.readiness-bucket[data-tier="recommended"] > summary { color: var(--warn); }
+.readiness-bucket[data-tier="ok"] > summary { color: var(--ok); }
+.readiness-bucket > summary .badge { background: var(--inset) !important; color: inherit !important; border: 1px solid var(--line); font-size: 11px; font-weight: 700; }
+.readiness-bucket[data-tier="critical"] > summary .badge { background: var(--bad-soft) !important; border-color: transparent; }
+.readiness-bucket[data-tier="recommended"] > summary .badge { background: var(--warn-soft) !important; border-color: transparent; }
+.readiness-bucket[data-tier="ok"] > summary .badge { background: var(--ok-soft) !important; border-color: transparent; }
+.readiness-bucket-body { border: 0 !important; padding: 0 0 4px !important; }
+.rd-cat { padding: 10px 16px 4px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+
+.rd-row { display: grid; grid-template-columns: 4px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.rd-sev { align-self: stretch; border-radius: 2px; background: var(--line-strong); }
+.rd-row.bad .rd-sev { background: var(--bad); }
+.rd-row.warn .rd-sev { background: var(--warn); }
+.rd-row.ok .rd-sev { background: var(--ok); }
+.rd-main { min-width: 0; }
+.rd-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; font-size: 14px; }
+.rd-title .badge { height: 20px; display: inline-flex; align-items: center; margin: 0 !important; padding: 0 8px; border-radius: 99px; border: 0 !important; font-size: 11px; font-weight: 700; }
+.rd-title .badge.bg-danger-subtle { background: var(--bad-soft) !important; color: var(--bad) !important; }
+.rd-title .badge.bg-warning-subtle { background: var(--warn-soft) !important; color: var(--warn) !important; }
+.rd-title .badge.bg-success-subtle { background: var(--ok-soft) !important; color: var(--ok) !important; }
+.rd-title .badge.bg-secondary-subtle { background: var(--inset) !important; color: var(--muted) !important; border: 1px solid var(--line) !important; }
+.rd-reason { margin-top: 2px; font-size: 12.5px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.rd-acts { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.rd-acts .btn { margin: 0 !important; height: 30px; padding: 0 12px; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+.rd-acts .btn-warning { background: var(--panel-2); border-color: var(--line-strong); color: var(--sm-text); }
+.rd-acts .btn-warning:hover { border-color: var(--accent); }
+.rd-acts .btn-warning.rd-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.rd-dismiss { color: var(--muted) !important; border: 0 !important; background: transparent !important; }
+.rd-dismiss:hover { color: var(--sm-text) !important; background: var(--inset) !important; }
+.readiness-values { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--faint); }
+.readiness-values .readiness-current, .readiness-values .readiness-recommended { padding: 3px 8px !important; border-radius: 6px; border: 0 !important; }
+.readiness-values .readiness-current { background: var(--bad-soft) !important; color: var(--bad) !important; }
+.readiness-values .readiness-recommended { background: var(--ok-soft) !important; color: var(--ok) !important; }
+.readiness-values code { font: 700 12px var(--mono); }
+.readiness-currently { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.readiness-currently code { font: 700 12px var(--mono); color: var(--sm-text); }
+.readiness-note { margin-top: 8px !important; border: 0 !important; background: var(--inset) !important; border-radius: var(--radius-ctl) !important; }
+.rd-main .readiness-note .btn { height: 28px; }
+
+.sm-stickybar { position: sticky; bottom: 0; z-index: 3; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 -26px -22px; padding: 12px 26px; background: var(--sm-bg); border-top: 1px solid var(--line); }
+.sm-stickybar.d-none { display: none; }
+.sm-stickybar .btn { height: 32px; }
+.sm-stickybar .btn-warning { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+
+/* ---------- Processing ------------------------------------------------------------------------------------- */
+.sm-jump { position: sticky; top: 0; z-index: 3; display: flex; gap: 6px; flex-wrap: wrap; margin: -22px -26px 0 !important; padding: 10px 26px; background: var(--sm-bg); }
+.sm-jump a { display: inline-flex; align-items: center; min-height: 28px !important; height: 28px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 99px; font-size: 12.5px !important; font-weight: 600; color: var(--muted); text-decoration: none; }
+.sm-jump a:hover { color: var(--sm-text); background: var(--inset); }
+.sm-jump.d-none { display: none; }
+.sm-ph { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 15px; font-weight: 700; scroll-margin-top: 56px; }
+.sm-ph small { color: var(--faint); font-size: 12px; font-weight: 600; }
+.sm-dl-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 10px 16px; font-size: 13.5px; align-items: baseline; }
+.sm-dl-k { color: var(--muted); }
+.sm-dl-v { min-width: 0; }
+.markers-kv { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 10px 16px; align-items: center; font-size: 13.5px; }
+.markers-kv > .markers-kv-label { color: var(--muted); }
+.markers-kv > div:not(.markers-kv-label) { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.markers-kv .badge { height: 22px; display: inline-flex; align-items: center; margin: 0; padding: 0 10px; border-radius: 99px; border: 0 !important; font-size: 12px; font-weight: 600; text-wrap: nowrap; }
+.markers-kv .badge.text-wrap { height: auto; min-height: 22px; padding: 3px 10px; text-wrap: wrap; }
+.markers-kv .badge.bg-success-subtle { background: var(--ok-soft) !important; color: var(--ok) !important; }
+.markers-kv .badge.bg-warning-subtle { background: var(--warn-soft) !important; color: var(--warn) !important; }
+.markers-kv .badge.bg-danger-subtle { background: var(--bad-soft) !important; color: var(--bad) !important; }
+.markers-kv .badge.bg-secondary-subtle { background: var(--inset) !important; color: var(--muted) !important; }
+#markersStatusBlock .alert { border: 0; border-radius: var(--radius-ctl); }
+
+/* Pills that replace Bootstrap's .badge in the card headers and status lines. The webhook panel and the scanner
+ * summary still emit .badge.badge-status (they are shared with other callers), so it is restyled here. */
+#editServerModal .badge.badge-status { height: 24px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: 99px; font-size: 12px; font-weight: 600; background: var(--inset) !important; color: var(--muted) !important; }
+#editServerModal .badge.badge-status.bg-success { background: var(--ok-soft) !important; color: var(--ok) !important; }
+#editServerModal .badge.badge-status.bg-warning { background: var(--warn-soft) !important; color: var(--warn) !important; }
+#editServerModal .badge.badge-status.bg-danger { background: var(--bad-soft) !important; color: var(--bad) !important; }
+#editServerModal .badge.badge-status.bg-info { background: var(--run-soft) !important; color: var(--run) !important; }
+#editServerModal #markersAgentState .badge { margin-right: 4px; }
+
+/* ---------- Add flow --------------------------------------------------------------------------------------- */
+#addServerModal .sm-header { padding: 20px 24px; gap: 16px; }
+#addServerModal .sm-name { font-size: 20px; font-weight: 600; }
+.sm-add .sm-logo-lg { width: 52px; height: 52px; border-radius: 14px; font-size: 26px; border-color: transparent; }
+.sm-add #addServerLogoTile { background: var(--accent-soft); color: var(--accent); }
+.sm-add #addServerLogoTile[data-vendor="plex"] { background: color-mix(in srgb, #e5a00d 18%, var(--sm-bg)); }
+.sm-add #addServerLogoTile[data-vendor="emby"] { background: color-mix(in srgb, #52b54b 18%, var(--sm-bg)); }
+.sm-add #addServerLogoTile[data-vendor="jellyfin"] { background: color-mix(in srgb, #7c8cff 18%, var(--sm-bg)); }
+.sm-add #addServerLogoTile img { width: 28px; height: 28px; }
+
+.sm-prog { list-style: none; margin: 0; padding: 22px 32px 20px; display: grid; grid-template-columns: repeat(3, 1fr); position: relative; border-bottom: 1px solid var(--line); }
+.sm-prog-trk { position: absolute; top: 40px; left: calc(32px + (100% - 64px) / 6); right: calc(32px + (100% - 64px) / 6); height: 3px; border-radius: 2px; background: var(--line-strong); }
+.sm-prog-fill { display: block; height: 100%; width: 100%; background: var(--ok); border-radius: 2px; transform: scaleX(var(--p, 0)); transform-origin: left center; transition: transform .3s; }
+.sm-prog-st { display: grid; justify-items: center; gap: 3px; text-align: center; position: relative; z-index: 1; color: var(--faint); }
+.sm-prog-st b { font-size: 14px; font-weight: 600; }
+.sm-prog-st small { font-size: 12px; color: var(--faint); }
+.sm-prog-circ { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 4px; background: var(--sm-bg); border: 2px solid var(--line-strong); font-weight: 700; font-size: 14px; }
+.sm-prog-circ i { display: none; font-size: 18px; line-height: 1; }
+.sm-prog-st.done .sm-prog-circ { background: linear-gradient(var(--ok-soft), var(--ok-soft)), var(--sm-bg); border-color: var(--ok); color: var(--ok); }
+.sm-prog-st.done .sm-prog-n { display: none; }
+.sm-prog-st.done .sm-prog-circ i { display: block; }
+.sm-prog-st.done b { color: var(--sm-text); }
+.sm-prog-st.on .sm-prog-circ { border-color: var(--accent); color: var(--accent-text); box-shadow: 0 0 0 4px var(--accent-soft); }
+.sm-prog-st.on b { color: var(--sm-text); font-weight: 800; }
+
+.sm-add-body { padding: 28px 32px 0 92px; display: flex; flex-direction: column; }
+.sm-add-body > .server-step { flex: 1; display: flex; flex-direction: column; gap: 18px; }
+.sm-add-body > .sm-step > .sm-actions { margin-top: auto; }
+.sm-add-body > .server-step.d-none { display: none; }
+.sm-step-title { margin: 0; color: var(--muted); font-size: 13px; font-weight: 600; }
+#addServerModal .sm-step-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+.sm-types { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding-bottom: 28px; min-height: 280px; align-content: start; margin-left: -60px; }
+.sm-tcard { text-align: left; display: grid; gap: 10px; align-content: start; min-height: 170px; padding: 18px; border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--inset); color: var(--sm-text); transition: border-color .16s, background .16s; }
+.sm-tcard:hover { border-color: var(--accent); background: var(--accent-soft); }
+.sm-tcard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sm-tcard b { font-size: 16px; }
+.sm-tcard .pill { width: fit-content; }
+.sm-tcard-d { color: var(--muted); font-size: 13px; }
+.sm-tcard .sm-logo-lg { background: var(--panel-2); }
+
+.sm-signin { height: 44px; font-weight: 600; }
+.sm-pick .list-group-item { background: var(--inset); border-color: var(--line); color: var(--sm-text); }
+.sm-pick .list-group-item:first-child { border-top-left-radius: var(--radius-ctl); border-top-right-radius: var(--radius-ctl); }
+.sm-pick .list-group-item:last-child { border-bottom-left-radius: var(--radius-ctl); border-bottom-right-radius: var(--radius-ctl); }
+
+.sm-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sm-actions .btn { white-space: nowrap; }
+#addServerModal .sm-actions { position: sticky; bottom: 0; z-index: 3; margin-left: -92px; margin-right: -32px; padding: 14px 32px 14px 92px; background: var(--sm-bg); border-top: 1px solid var(--line); }
+#addServerModal .sm-actions .btn { min-height: 38px; }
+
+/* Quick Connect: code, copy and the state pill. */
+.sm-qc { display: grid; gap: 12px; }
+.sm-qc.d-none { display: none; }
+.sm-qc-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.sm-qc-code { font: 700 36px/1 var(--mono); letter-spacing: .12em; padding: 14px 20px; border-radius: 12px; background: var(--sm-bg); border: 1px dashed var(--line-strong); }
+.sm-qc[data-qc="expired"] .sm-qc-code { opacity: .4; text-decoration: line-through; }
+.sm-qc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.sm-qc-foot .btn { margin-left: 6px; }
+.sm-qc-start { display: inline-flex; align-items: center; gap: 6px; }
+.sm-qc-start .btn { white-space: nowrap; }
+.sm-qc-edit { padding: 12px; border-radius: var(--radius-ctl); background: var(--bs-body-bg); border: 1px solid var(--line); }
+
+/* Result step. */
+.sm-res { display: grid; gap: 14px; padding: 0; border: 0; background: none; }
+.sm-res-banner { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: var(--radius-card); background: var(--run-soft); }
+.sm-res-banner > i { font-size: 20px; margin-top: 1px; }
+.sm-res-banner.ok { background: var(--ok-soft); }
+.sm-res-banner.ok > i { color: var(--ok); }
+.sm-res-banner.bad { background: var(--bad-soft); }
+.sm-res-banner.bad > i { color: var(--bad); }
+.sm-res-msg { min-width: 0; overflow-wrap: anywhere; }
+.sm-res-dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: 13.5px; }
+.sm-res-dl dt { color: var(--muted); font-weight: 400; }
+.sm-res-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.sm-res-dl code { color: var(--sm-text); }
+.sm-res-tips { display: grid; gap: 6px; }
+
+/* ---------- Setup wizard (inline form) --------------------------------------------------------------------- */
+#ejConnectPanel .sm-step { display: grid; gap: 18px; }
+#ejConnectPanel .sm-step.d-none { display: none; }
+#ejConnectPanel .sm-types { margin-left: 0; }
+
+/* style.css gives these two tables a 480px minimum and a sideways-scrolling pane on phones; here they stack instead. */
+#editServerModal #editPathMappingsTable, #editServerModal #editExcludePathsTable { min-width: 0; }
+#editServerModal #edit-tab-paths, #editServerModal #edit-tab-excludes { overflow-x: visible; }
+
+/* ---------- Tablet and phone ------------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+    #editServerModal .sm-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+    #editServerModal .sm-rail.nav-tabs { flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 10px; scroll-snap-type: x proximity; }
+    #editServerModal .sm-rail .nav-link { width: auto; min-height: 44px; padding: 0 14px; scroll-snap-align: start; flex: none; }
+    #editServerModal .sm-rail .nav-link.active { box-shadow: inset 0 -2px 0 var(--accent); border-radius: 8px 8px 0 0; }
+    #editServerModal .sm-rail .sm-rail-lbl { flex: none; }
+}
+@media (max-width: 700px) {
+    .sm-row2 { grid-template-columns: 1fr; }
+    #editServerModal .modal-dialog, #addServerModal .modal-dialog { margin: 0; max-width: none; width: 100%; height: 100dvh; min-height: 0; }
+    #editServerModal .modal-content, #addServerModal .modal-content { height: 100dvh; border-radius: 0; border: 0; }
+    #editServerModal .sm-body { flex: 1; height: auto; }
+    .sm-header { padding: 12px 16px; min-height: 64px; }
+    #addServerModal .sm-header { padding: 14px 16px; }
+    .sm-enabled-label, .sm-paused { display: none !important; }
+    .sm-panes > .tab-pane { padding: 18px 16px; }
+    .sm-stickybar { margin: 0 -16px -18px; padding: 12px 16px; }
+    .sm-jump { margin: -18px -16px 0 !important; padding: 10px 16px; }
+    .sm-footer { flex-wrap: wrap; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+    .sm-foot-msg { flex: 1 0 100%; order: -1; }
+    .sm-footer .btn { flex: 1; height: 44px; }
+    .sm-dl-row, .markers-kv, .sm-res-dl { grid-template-columns: 1fr; gap: 2px 0; }
+    .markers-kv > div:not(.markers-kv-label) { margin-bottom: 8px; }
+    .rd-row { grid-template-columns: 4px minmax(0, 1fr); }
+    .rd-acts { grid-column: 2; justify-content: flex-start; }
+    /* Path mappings and exclude rules stack, each cell labelled (with its ⓘ); the libraries table keeps its header
+     * so the column ⓘs stay reachable, and just tightens up. */
+    .sm-tbl-stack, .sm-tbl-stack tbody, .sm-tbl-stack tr, .sm-tbl-stack td { display: block; width: 100%; }
+    .sm-tbl-stack thead { display: none; }
+    .sm-tbl-stack tr { padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .sm-tbl-stack td { border: 0; padding: 4px 0; }
+    .sm-tbl-stack td.sm-cell-x { display: flex; justify-content: flex-end; }
+    .sm-cell-lab { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+    .sm-libs th, .sm-libs td { padding: 8px 4px; white-space: normal; }
+    .sm-libs th { font-size: 11px; }
+    #editServerModal #editTestConnectionBtn { min-height: 40px; }
+    .sm-add-body { padding: 22px 16px 0; }
+    #addServerModal .modal-body { flex: 1; }
+    .sm-types { grid-template-columns: 1fr; margin-left: 0; min-height: 0; }
+    .sm-tcard { min-height: 0; grid-template-columns: 48px 1fr; align-items: center; }
+    .sm-tcard .sm-logo-lg { grid-row: span 3; }
+    #addServerModal .sm-actions { margin-left: -16px; margin-right: -16px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+    #auth-fields-quick-connect .sm-line { flex-wrap: wrap; }
+    .sm-qc-start { white-space: nowrap; }
+    #addServerModal .sm-actions .btn { flex: 1; height: 44px; }
+    .sm-prog { padding: 16px 16px 14px; }
+    .sm-prog-trk { top: 34px; left: calc(16px + (100% - 32px) / 6); right: calc(16px + (100% - 32px) / 6); }
+    .sm-prog-st small, .sm-prog-st:not(.on) b { display: none; }
+    .sm-qc-code { font-size: 28px; padding: 12px 14px; }
+    .sm-authseg { flex-wrap: nowrap; }
+    .sm-authseg > .btn { padding: 0 6px; font-size: 12.5px; }
+}

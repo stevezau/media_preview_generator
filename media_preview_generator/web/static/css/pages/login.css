@@ -40,7 +40,7 @@ html[data-bs-theme="light"] body { background: #e4e7eb; }
 .logo-container h1 {
     margin: 0;
     font-size: 1.25rem;
-    font-weight: 700;
+    font-weight: 600;
     text-wrap: balance;
 }
 
@@ -54,7 +54,7 @@ html[data-bs-theme="light"] body { background: #e4e7eb; }
 .login-token-group {
     display: flex;
     align-items: center;
-    height: 44px;
+    height: 48px;
     border: 1px solid var(--line-strong);
     border-radius: 9px;
 }
@@ -75,8 +75,8 @@ html[data-bs-theme="light"] body { background: #e4e7eb; }
     outline: 0;
 }
 .login-reveal {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     display: grid;
     place-items: center;
     border: 0;
@@ -129,11 +129,9 @@ html[data-bs-theme="light"] body { background: #e4e7eb; }
 .login-help-body ul { margin: 0; }
 .login-help-body ul { padding-left: 1.1rem; display: grid; gap: 0.4rem; }
 .login-help-sub {
-    font-size: 0.6875rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--faint);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
 }
 .login-help code {
     padding: 1px 6px;

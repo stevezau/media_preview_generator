@@ -194,7 +194,7 @@ class TestDesktopHover:
 
         _expect_open(nav_page, name)
         items = _items(nav_page, name)
-        expect(items).to_have_text(_texts(name))
+        expect(items.locator("b")).to_have_text(_texts(name))
         assert [items.nth(i).get_attribute("href") for i in range(items.count())] == _hrefs(name)
         assert [items.nth(i).get_attribute("aria-label") for i in range(items.count())] == [
             label for _, _, label in menu["items"]
@@ -508,7 +508,7 @@ class TestPhoneMenu:
                 _expect_closed(nav_page, other)
             assert nav_page.url == f"{app_url}/"
             items = _items(nav_page, name)
-            expect(items).to_have_text(_texts(name))
+            expect(items.locator("b")).to_have_text(_texts(name))
             for i in range(items.count()):
                 row = items.nth(i).bounding_box()
                 assert drawer["x"] <= row["x"] and row["x"] + row["width"] <= drawer["x"] + drawer["width"]

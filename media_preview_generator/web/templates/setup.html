@@ -3,6 +3,7 @@
 {% block title %}Setup - Media Preview Generator{% endblock %}
 
 {% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/settings.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/setup.css') }}">
 {% endblock %}
 
@@ -20,7 +21,7 @@
         </button>
         <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-outline-secondary btn-sm" id="setupLogoutBtn">
+            <button type="submit" class="btn btn-outline-secondary btn-sm" id="setupLogoutBtn" aria-label="Log out">
                 <i class="bi bi-box-arrow-right me-1"></i><span class="d-none d-sm-inline">Logout</span>
             </button>
         </form>
@@ -434,7 +435,7 @@
                 </button>
                 </fieldset>
 
-                <div class="setup-group" id="workerGroupSettings"><p class="text-body-secondary">Loading worker groups…</p></div>
+                <div class="setup-group settings-page" id="workerGroupSettings"><p class="text-body-secondary">Loading worker groups…</p></div>
 
                 <fieldset class="setup-group">
                 <legend>Thumbnails</legend>
@@ -548,6 +549,7 @@
 <script src="{{ url_for('static', filename='js/plex-auth.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plex_webhook_panel.js') }}"></script>
 <script src="{{ url_for('static', filename='js/folder_picker.js') }}"></script>
+<script src="{{ url_for('static', filename='js/week_graph.js') }}"></script>
 <script src="{{ url_for('static', filename='js/gpu_config_panel.js') }}"></script>
 <script src="{{ url_for('static', filename='js/servers.js') }}"></script>
 <script>

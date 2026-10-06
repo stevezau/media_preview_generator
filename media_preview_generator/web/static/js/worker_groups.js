@@ -121,7 +121,10 @@
     function settingsGroupMeta(group) {
         const state = status(group);
         const notes = [...activity(state), state.next_available_at ? `Next ${nextTime(state.next_available_at)}` : ''].filter(Boolean);
-        return `${capabilityIcons(group)}<span class="wg-state ${STATE_TONES[state.label] || ''}">${escape(state.label)}</span>${notes.map(note => `<span>${escape(note)}</span>`).join('')}<span class="wg-hours"><i class="bi bi-clock" aria-hidden="true"></i> ${escape(hours(group))}</span>`;
+        // "Within group hours" on an always-on group says nothing the hours line below does not.
+        const redundant = group.availability.mode === 'always' && ['Within group hours', 'Available'].includes(state.label);
+        const chip = redundant ? '' : `<span class="wg-state ${STATE_TONES[state.label] || ''}">${escape(state.label)}</span>`;
+        return `${capabilityIcons(group)}${chip}${notes.map(note => `<span>${escape(note)}</span>`).join('')}<span class="wg-hours"><i class="bi bi-clock" aria-hidden="true"></i> ${escape(hours(group))}</span>`;
     }
 
     // The group's own week bar, only for groups with weekly hours; a global pause is overlaid when one is set.

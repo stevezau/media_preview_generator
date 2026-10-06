@@ -47,7 +47,7 @@ html {
 }
 .automation-sidebar .sidebar-group {
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--faint);
@@ -104,7 +104,7 @@ html {
 .automation-page details[open] > summary::before { transform: rotate(90deg); }
 .automation-page details.mini-d { margin-top: 6px; font-size: 13px; color: var(--muted); }
 .automation-page details.mini-d > div { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); }
-.automation-page details.g { border: 1px solid var(--line); border-radius: var(--radius-ctl); padding: 10px 14px; background: var(--inset); }
+.automation-page details.g { border: 0; border-radius: var(--radius-ctl); padding: 10px 14px; background: var(--inset); }
 .automation-page details.g > summary { color: var(--bs-body-color); font-size: 14px; }
 .automation-page details.g > div { margin-top: 10px; color: var(--muted); font-size: 13px; }
 .automation-page details.g ol { padding-left: 20px; }
@@ -149,7 +149,7 @@ html {
 .automation-page .next-hero[hidden] { display: none; }
 .automation-page .next-hero .tile { background: transparent; border-color: transparent; color: var(--accent-text); }
 .automation-page .next-hero-text { flex: 1; min-width: 0; }
-.automation-page .next-hero-label { font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--accent-text); }
+.automation-page .next-hero-label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--accent-text); }
 .automation-page .next-hero-name { font-weight: 600; }
 .automation-page .next-hero-when { display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
 .automation-page .next-hero-when b { color: var(--bs-body-color); }
@@ -159,7 +159,7 @@ html {
 .automation-page .sched-table tbody { display: grid; gap: 8px; }
 .automation-page .sched-table thead { margin-bottom: 8px; }
 .automation-page .sched-table tr { display: grid; grid-template-columns: var(--sched-cols); gap: 12px; align-items: center; }
-.automation-page .sched-table thead th { padding: 0 14px; border: 0; background: transparent; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); }
+.automation-page .sched-table thead th { padding: 0 14px; border: 0; background: transparent; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); }
 .automation-page .sched-table tbody tr { padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-ctl); background: var(--inset); }
 .automation-page .sched-table tbody td { display: block; min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; font-size: 13px; color: var(--muted); }
 .automation-page .sched-table tbody td[colspan] { grid-column: 1 / -1; }
@@ -169,7 +169,7 @@ html {
 .automation-page .sched-table .next { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-text); font-size: 12px; font-weight: 600; }
 .automation-page .sched-table .next.off { color: var(--faint); }
 .automation-page .racts { display: flex; gap: 2px; justify-content: flex-end; }
-.automation-page .sched-group-label { margin: 4px 0 10px; padding-top: 4px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.automation-page .sched-group-label { margin: 4px 0 10px; padding-top: 4px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
 .automation-page .sched-group-label:not(:first-child) { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
 
 @media (max-width: 991.98px) {
@@ -233,8 +233,20 @@ html {
 .automation-page .tab-content,
 .automation-page details { min-width: 0; max-width: 100%; }
 .automation-page .d-grid { grid-template-columns: minmax(0, 1fr); }
-.automation-page .btn-outline-secondary { color: var(--bs-body-color); border-color: var(--line-strong); }
-.automation-page .btn-outline-secondary:hover { background: var(--inset); border-color: var(--faint); color: var(--bs-body-color); }
 .automation-page .input-group > .btn-outline-secondary { color: var(--muted); }
 .automation-page .form-range::-webkit-slider-runnable-track { background: var(--line-strong); height: 4px; border-radius: 99px; }
 .automation-page .form-range::-moz-range-track { background: var(--line-strong); height: 4px; border-radius: 99px; }
+
+/* The switch is the state; the pill beside it only repeated it. Kept in the DOM because the sync script writes to it. */
+.automation-page #webhookStatePill { display: none; }
+.automation-page .priority-badge { font-size: 11px; font-weight: 600; }
+/* Payload and URL samples wrap instead of running past the card on narrow screens. */
+.automation-page #section-webhooks-custom code, .automation-page .webhook-url { overflow-wrap: anywhere; }
+.automation-page #section-webhooks-custom pre { max-width: 100%; }
+@media (pointer: coarse) {
+    .automation-page .decision-row > .btn { min-height: 44px; }
+}
+/* col-xl-8 leaves a dead 2-column gutter on the right; let the content take the rest, capped for line length. */
+@media (min-width: 1200px) {
+    .automation-page .automation-content { flex: 1 1 0; width: auto; max-width: 1100px; min-width: 0; }
+}

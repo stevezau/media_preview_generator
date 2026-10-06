@@ -1,9 +1,8 @@
 /* Webhook activity page. Tokens live in style.css; the pill, segmented tab and icon-button primitives are redefined
  * here because the shared ones are scoped to the dashboard layout. */
-.wh-crumb { margin-bottom: 4px; color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.wh-page .page-header .page-title { font-weight: 700; }
+.wh-crumb { margin-bottom: 4px; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.wh-page .page-header .page-title { font-weight: 600; }
 .wh-page .page-header .page-subtitle { color: var(--muted); font-size: 14px; max-width: 70ch; }
-.wh-page .page-header .page-subtitle a { color: var(--accent-text); }
 
 .wh-page .section-card { border-radius: var(--radius-card); overflow: hidden; }
 
@@ -24,7 +23,7 @@
 .wh-seg button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; flex: none; transition: background-color .16s ease-out, color .16s ease-out; }
 .wh-seg button:hover { color: var(--bs-body-color); }
 .wh-seg button.on { background: var(--panel-2); color: var(--bs-body-color); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); }
-.wh-seg .c { padding: 1px 6px; border-radius: 99px; background: var(--inset); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.wh-seg .c { padding: 1px 6px; border-radius: 99px; background: var(--inset); color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .wh-seg button.on .c { background: var(--accent-soft); color: var(--accent-text); }
 .wh-search { position: relative; flex: 1; min-width: 200px; max-width: 320px; }
 .wh-search i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
@@ -43,7 +42,7 @@
 
 /* Table */
 .history-table { margin: 0; font-size: 14px; --bs-table-bg: transparent; }
-.history-table thead th { padding: 10px 14px; color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
+.history-table thead th { padding: 10px 14px; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
 .history-table td { padding: 10px 14px; vertical-align: middle; border-color: var(--line); }
 .history-table tbody tr.wh-row:hover > td { background: var(--inset); }
 .history-table tr.faded > td:not(.wh-title-cell) { opacity: .7; }
@@ -64,14 +63,13 @@
 .wh-page .pill.warn { background: var(--warn-soft); color: var(--warn); }
 .wh-page .pill i { font-size: 12px; }
 .source-badge { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); }
-.source-badge.sonarr { background: var(--ok-soft); color: var(--ok); }
-.source-badge.radarr { background: rgba(255, 159, 67, .15); color: #ff9f43; }
-.source-badge.tdarr, .source-badge.recently_added { background: var(--run-soft); color: var(--run); }
-.source-badge.plex { background: var(--accent-soft); color: var(--accent-text); }
-.source-badge.emby { background: var(--ok-soft); color: var(--ok); }
-.source-badge.jellyfin, .source-badge.custom { background: var(--t-intro-soft); color: var(--t-intro); }
-.source-badge.sportarr { background: var(--t-loud-soft); color: var(--t-loud); }
-html[data-bs-theme="light"] .source-badge.radarr { background: rgba(217, 119, 6, .12); color: #b45309; }
+/* Source chips stay neutral; the icon carries the hue so Status is the only tinted chip in a row. */
+.source-badge i { color: var(--accent-text); }
+.source-badge.sonarr i, .source-badge.emby i { color: var(--ok); }
+.source-badge.radarr i { color: var(--warn); }
+.source-badge.tdarr i, .source-badge.recently_added i { color: var(--run); }
+.source-badge.jellyfin i, .source-badge.custom i { color: var(--t-intro); }
+.source-badge.sportarr i { color: var(--t-loud); }
 
 /* States */
 .wh-state { display: grid; justify-items: center; gap: 6px; padding: 48px 20px; text-align: center; }
@@ -95,6 +93,10 @@ html[data-bs-theme="light"] .source-badge.radarr { background: rgba(217, 119, 6,
     --bs-pagination-active-bg: var(--accent); --bs-pagination-active-border-color: var(--accent); --bs-pagination-active-color: var(--accent-ink);
     --bs-pagination-disabled-bg: transparent; --bs-pagination-disabled-border-color: var(--line); --bs-pagination-focus-box-shadow: var(--focus-ring); font-variant-numeric: tabular-nums; }
 
+@media (pointer: coarse) {
+    .wh-ibtn, .wh-fbtn, .wh-btn, .wh-danger, .wh-search input { min-height: 44px; min-width: 44px; }
+    .wh-seg button { height: 40px; }
+}
 @media (max-width: 700px) {
     .history-filters { padding: 12px 14px; }
     .wh-seg { width: 100%; order: -1; }

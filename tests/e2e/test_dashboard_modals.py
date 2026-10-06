@@ -138,7 +138,7 @@ class TestManualTriggerModal:
 
         dashboard_page.locator("#manualAddSelectedBtn").click()
         # Both picks land as chips.
-        expect(dashboard_page.locator("#manualChips .badge")).to_have_count(2)
+        expect(dashboard_page.locator("#manualChips .manual-chip")).to_have_count(2)
 
 
 @pytest.fixture

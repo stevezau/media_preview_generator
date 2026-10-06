@@ -68,6 +68,7 @@ function renderStatusTabs() {
     if (warningTab) warningTab.hidden = !(_chapterWarningCount > 0 || jobStatusFilter === 'chapter_warnings');
     const warningCount = document.querySelector('[data-status-count="chapter_warnings"]');
     if (warningCount) warningCount.textContent = _chapterWarningCount > 0 ? _chapterWarningCount.toLocaleString() : '';
+    renderChapterNotice();
     if (!_jobStats) return;
     document.querySelectorAll('[data-status-count]').forEach(el => {
         const key = el.dataset.statusCount;
@@ -79,6 +80,20 @@ function renderStatusTabs() {
         el.textContent = Number(_jobStats[el.dataset.clearCount] || 0).toLocaleString();
     });
     updateClearJobsButton();
+}
+
+// Inside the Chapter warnings view the banner only says what to do; elsewhere it carries the count and the way in.
+function renderChapterNotice() {
+    const notice = document.getElementById('chapterWarningsNotice');
+    const text = document.getElementById('chapterWarningsText');
+    const review = document.getElementById('chapterWarningsReview');
+    if (!notice || !text) return;
+    const inView = jobStatusFilter === 'chapter_warnings';
+    notice.classList.toggle('d-none', _chapterWarningCount <= 0);
+    if (review) review.hidden = inView;
+    text.textContent = inView
+        ? 'These jobs ended with chapter issues. Review the saved results before running them again.'
+        : `${_chapterWarningCount.toLocaleString()} ${_chapterWarningCount === 1 ? 'job ended' : 'jobs ended'} with chapter issues. Review the saved results before running those jobs again.`;
 }
 
 // "Clear N jobs": N follows the ticked statuses.
@@ -104,15 +119,32 @@ function updateJobFilterSummary() {
     const count = document.getElementById('jobFilterCount');
     const scope = document.getElementById('jobListScope');
     if (scope) {
+        // A specific status is already named by its tab, so only the broad views and Chapter warnings add text.
         scope.textContent = jobStatusFilter === 'active' ? 'Unfinished work'
-            : !jobStatusFilter ? 'Queue and history'
-            : document.getElementById('jobStatusFilter')?.selectedOptions[0]?.textContent || 'Filtered jobs';
+            : !jobStatusFilter ? 'All jobs and history'
+            : jobStatusFilter === 'chapter_warnings' ? 'Chapter warnings'
+            : '';
     }
     if (clear) clear.hidden = !jobFiltersActive();
     if (count) {
-        count.hidden = !jobFiltersActive();
-        count.textContent = `${jobTotal.toLocaleString()} ${jobTotal === 1 ? 'job matches' : 'jobs match'} these filters`;
+        // The status tab already says which status is listed, so a status-only filter needs no count.
+        count.hidden = !(jobSearch || jobServerFilter || jobLibraryFilter || jobKindFilter);
+        const everything = Number(_jobStats?.total);
+        count.textContent = Number.isFinite(everything) && everything >= jobTotal
+            ? `${jobTotal.toLocaleString()} of ${everything.toLocaleString()}`
+            : `${jobTotal.toLocaleString()} ${jobTotal === 1 ? 'job' : 'jobs'}`;
+        count.title = `${jobTotal.toLocaleString()} ${jobTotal === 1 ? 'job matches' : 'jobs match'} these filters`;
     }
+    const dropdownFilters = [jobServerFilter, jobLibraryFilter, jobKindFilter].filter(Boolean).length;
+    const toggleCount = document.getElementById('queueFiltersToggleCount');
+    if (toggleCount) toggleCount.textContent = dropdownFilters ? ` (${dropdownFilters})` : '';
+}
+
+function toggleQueueFilters() {
+    const row = document.querySelector('.queue-filter-row');
+    const toggle = document.getElementById('queueFiltersToggle');
+    if (!row || !toggle) return;
+    toggle.setAttribute('aria-expanded', String(row.classList.toggle('filters-open')));
 }
 
 function updateJobLibraryChoices(resetSelection = false) {
@@ -868,6 +900,20 @@ function _dedupeActivityCount(text, processed, total) {
 }
 window._dedupeActivityCount = _dedupeActivityCount;
 
+// Pending rows already say "Pending" in the Status column, so the Progress cell shows only a short reason; the
+// backend text stays untouched and is carried in the title. Unknown reasons lose just the "Queued — " prefix.
+const _QUEUE_REASON_SHORT = [
+    [/^waiting for the preview job for these files to finish\b/i, 'Waiting for previews to finish'],
+    [/^waiting for active slot\b/i, 'Waiting for a free worker'],
+];
+function _queueReasonShort(text) {
+    const stripped = String(text || '').replace(/^\s*Queued\s*[—–-]\s*/i, '').trim();
+    const known = _QUEUE_REASON_SHORT.find(([pattern]) => pattern.test(stripped));
+    return known ? known[1] : stripped;
+}
+window._queueReasonShort = _queueReasonShort;
+
+
 // ``{force: true}`` re-renders even while the pointer is over the queue: after the user's own Pause/Resume click has
 // landed, the hover guard would otherwise keep the row stale until the pointer moves away.
 async function loadJobs(options) {
@@ -902,16 +948,10 @@ async function _loadJobsPage(request) {
         jobs = data.jobs || [];
         jobTotal = data.total || 0;
         jobTotalPages = data.pages || 1;
-        const chapterNotice = document.getElementById('chapterWarningsNotice');
-        const chapterNoticeText = document.getElementById('chapterWarningsText');
         const chapterWarnings = Number(data.chapter_warning_count);
         const hasChapterWarnings = Number.isInteger(chapterWarnings) && chapterWarnings > 0;
         _chapterWarningCount = hasChapterWarnings ? chapterWarnings : 0;
         renderStatusTabs();
-        if (chapterNotice) chapterNotice.classList.toggle('d-none', !hasChapterWarnings);
-        if (chapterNoticeText && hasChapterWarnings) {
-            chapterNoticeText.textContent = `${chapterWarnings.toLocaleString()} ${chapterWarnings === 1 ? 'job ended' : 'jobs ended'} with chapter issues. Review the saved results before running those jobs again.`;
-        }
         updateJobFilterOptions(data.filter_options);
         updateJobFilterSummary();
         if (jobPage > jobTotalPages) {
@@ -1519,13 +1559,13 @@ function _renderScheduleLibraryList(libs, filterServerId) {
     }
     const allDisabled = document.getElementById('scheduleLibraryAll').checked;
     const renderRow = (lib, indent) => `
-        <div class="form-check ${indent ? 'ms-2' : ''}">
+        <div class="form-check ov-lib">
             <input class="form-check-input schedule-library-checkbox" type="checkbox"
                    value="${lib.id}" id="schedLib_${lib.id}" ${allDisabled ? 'disabled' : ''}
                    data-library-kind="${escapeHtml(lib.type || lib.kind || '')}"
                    onchange="MediaScanFilters.refresh('schedule')">
             <label class="form-check-label" for="schedLib_${lib.id}">
-                ${escapeHtml(lib.name)} <span class="text-muted small">(${libraryTypeLabel(lib)})</span>
+                ${escapeHtml(lib.name)} <span class="ov-lib-tag">${libraryTypeLabel(lib)}</span>
             </label>
         </div>
     `;
@@ -1546,8 +1586,8 @@ function _renderScheduleLibraryList(libs, filterServerId) {
     for (const [_, grp] of groups) {
         const stype = (grp.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 14) || '';
-        const head = `<div class="text-muted small mt-2 mb-1">${logo}<strong>${escapeHtml(grp.server_name || stype.toUpperCase() || 'Server')}</strong></div>`;
-        sections.push(head + grp.libs.map(l => renderRow(l, true)).join(''));
+        const head = `<div class="ov-lg-h">${logo}<strong>${escapeHtml(grp.server_name || stype.toUpperCase() || 'Server')}</strong><span class="ov-lg-count">${grp.libs.length}</span></div>`;
+        sections.push(`<div class="ov-lg">${head}${grp.libs.map(l => renderRow(l, true)).join('')}</div>`);
     }
     listEl.innerHTML = sections.join('');
     MediaScanFilters.refresh('schedule');
@@ -1860,11 +1900,13 @@ function _queueMetadataHtml(job, title) {
         seen.add(id); return true;
     });
     const hasOrigin = !!(job.server_name || job.server_type || job.server);
-    const primary = hasOrigin ? `<span title="Originating server">${_serverBadge(job)}</span>` : '';
+    // A single-server job's server is in the type tile's tooltip; a tag per row only earns its place when servers differ.
+    const spansServers = associated.length > 0 || (job.publishers || []).length > 1;
+    const primary = hasOrigin && spansServers ? `<span title="Originating server">${_serverBadge(job)}</span>` : '';
     const ownerBadge = pair => _serverBadge({server_name: pair.server_name || pair.server_id, server_type: pair.server_type});
     let owners = '';
-    if (associated.length === 1) owners = `<span class="queue-additional-owner" title="Associated library server">${hasOrigin ? '+ ' : ''}${ownerBadge(associated[0])}</span>`;
-    else if (associated.length > 1) owners = `<details class="queue-owner-details"><summary aria-label="Show associated library servers">${hasOrigin ? '+' : ''}${associated.length} servers</summary><div class="queue-owner-list">${associated.map(pair => `<div>${ownerBadge(pair)}</div>`).join('')}</div></details>`;
+    if (associated.length === 1) owners = `<span class="queue-additional-owner" title="Associated library server">${primary ? '+ ' : ''}${ownerBadge(associated[0])}</span>`;
+    else if (associated.length > 1) owners = `<details class="queue-owner-details"><summary aria-label="Show associated library servers">${primary ? '+' : ''}${associated.length} servers</summary><div class="queue-owner-list">${associated.map(pair => `<div>${ownerBadge(pair)}</div>`).join('')}</div></details>`;
     const servers = primary || owners ? `<span class="queue-server-group">${primary}${owners}</span>` : '';
     const source = job.config?.source ? `<span class="queue-trigger-context">${_serverBadge({config: job.config})}</span>` : '';
     const failedFiles = job.status === 'failed' ? Number(job.progress?.outcome?.failed) || 0 : 0;
@@ -1879,7 +1921,9 @@ function _jobTypeTileHtml(job) {
     const tone = ({intro_credits: 'intro', loudness: 'loud'})[job.kind] || 'previews';
     const icon = failed ? 'bi-exclamation-triangle-fill'
         : ({intro_credits: 'bi-skip-forward', loudness: 'bi-soundwave'})[job.kind] || 'bi-film';
-    return `<span class="tico ${failed ? 'bad' : tone}" aria-hidden="true"><i class="bi ${icon}"></i></span>`;
+    const kind = JOB_KIND_LABELS[job.kind] || JOB_KIND_LABELS[JOB_KIND_PREVIEWS];
+    const server = job.server_name ? ` · ${job.server_name}` : '';
+    return `<span class="tico ${failed ? 'bad' : tone}" title="${escapeHtmlAttr(kind + server)}" aria-hidden="true"><i class="bi ${icon}"></i></span>`;
 }
 
 // 'own' = paused on its own (it has handed its job slot back), 'all' = held by Pause all (keeps its slot), '' = neither.
@@ -2577,9 +2621,9 @@ function updateJobQueue(force) {
                 : job.status === 'running' ? 'Retry in progress' : 'Queued for retry';
             progressCell = `<span class="small text-warning">${retryLabel}${chapterRetry ? ' · Chapter thumbnails' : ''}</span>${checked}`;
         } else {
-            // Bar colour per status comes from queue.css via [data-status]; only a running bar animates, and a
+            // Bar colour per status comes from queue.css via [data-status]; a
             // paused Intro & Credits job does no work.
-            const barClass = !markersPause && job.status === 'running' ? 'progress-bar-striped progress-bar-animated' : '';
+            const barClass = '';
             const processed = Number(job.progress.processed_items) || 0;
             const total = Number(job.progress.total_items) || 0;
             const hasProgress = total > 0 || Number(progress) > 0;
@@ -2612,7 +2656,12 @@ function updateJobQueue(force) {
             progressCell = `<span class="small text-body-secondary" tabindex="0" title="${escapeHtmlAttr(activityText)}">${total ? `${total.toLocaleString()} ${total === 1 ? 'item' : 'items'} · ` : ''}Awaiting worker</span>`;
         }
         const phaseText = _dedupeActivityCount(activityText, job.progress.processed_items, job.progress.total_items);
-        const phase = phaseText && !genericWait ? `<span class="queue-phase text-body-secondary">${escapeHtml(phaseText)}</span>` : '';
+        const queuedLine = job.status === 'pending' && !Number(job.progress.processed_items) && !Number(progress);
+        if (queuedLine && phaseText && !genericWait && !isWaitingRetryRow && !isWaitingWebhookRow && !isActiveRetryChain) progressCell = '';
+        const phase = !phaseText || genericWait ? ''
+            : queuedLine
+                ? `<span class="queue-phase queue-phase-line text-body-secondary" tabindex="0" title="${escapeHtmlAttr(phaseText)}" aria-label="${escapeHtmlAttr(phaseText)}">${escapeHtml(_queueReasonShort(phaseText))}</span>`
+                : `<span class="queue-phase text-body-secondary">${escapeHtml(phaseText)}</span>`;
         html += `
             <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}${isFilesExpanded ? ' open' : ''}">
                 <td class="queue-id" data-label="ID"><code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
@@ -2626,7 +2675,8 @@ function updateJobQueue(force) {
                 <td class="queue-created text-body-secondary" data-label="Created"><time datetime="${escapeHtmlAttr(job.created_at)}" title="${escapeHtmlAttr(formatDate(job.created_at))}">${created}</time></td>
                 <td class="queue-actions" data-label="Actions">${actionButtons}</td>
             </tr>`;
-        const filesBlock = `<section class="job-detail-files">${_markersFilesBlock(job)}</section>`;
+        const detailActions = `<div class="job-detail-actions"><button class="btn dash-btn-sm" onclick="openJobDetails('${escapeHtml(job.id)}')"><i class="bi bi-file-text" aria-hidden="true"></i>Open logs and files</button></div>`;
+        const filesBlock = `<section class="job-detail-files">${detailActions}${_markersFilesBlock(job)}</section>`;
         const publishersBlock = _renderPublishersBlock(job);
         const currentItem = job.progress?.current_item;
         const started = job.started_at ? `<span>Started <b>${escapeHtml(formatDate(job.started_at))}</b>${job.status === 'running' ? ` · Job elapsed <b data-elapsed-since="${escapeHtmlAttr(job.started_at)}">${formatElapsed(job.started_at)}</b>` : ''}${job.completed_at ? ` · Finished <b>${escapeHtml(formatDate(job.completed_at))}</b>` : ''}</span>` : '';
@@ -2640,7 +2690,6 @@ function updateJobQueue(force) {
                     <div class="queue-detail-summary">${error}${activity}<div class="queue-results" id="queue-publishers-${escapeHtml(job.id)}">${publishersBlock}</div></div>
                     ${filesBlock}
                 </div>
-                <div class="job-detail-actions"><button class="btn dash-btn-sm" onclick="openJobDetails('${escapeHtml(job.id)}')"><i class="bi bi-file-text" aria-hidden="true"></i>Open logs and files</button></div>
             </div></td></tr>`;
 
     }
@@ -3428,6 +3477,7 @@ function showNewJobModal() {
     // because Plex assigns library ids per-server starting at "1".
     _renderJobLibraryList(libraries);
     _updateJobScopeBadge();
+    document.getElementById('jobLibrariesError')?.setAttribute('hidden', '');
 
     const modal = new bootstrap.Modal(document.getElementById('newJobModal'));
     modal.show();
@@ -3482,20 +3532,22 @@ function _renderJobLibraryList(libs) {
     for (const [_, grp] of groups) {
         const stype = (grp.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 14) || '';
-        const head = `<div class="text-muted small mt-2 mb-1">${logo}<strong>${escapeHtml(grp.server_name || stype.toUpperCase() || 'Server')}</strong></div>`;
+        const head = `<div class="ov-lg-h">${logo}<strong>${escapeHtml(grp.server_name || stype.toUpperCase() || 'Server')}</strong>`
+            + `<span class="ov-lg-count">${grp.libs.length}</span>`
+            + '<button type="button" class="ov-link job-select-server">Select server</button></div>';
         const rows = grp.libs.map(lib => `
-            <div class="form-check ms-2">
+            <div class="form-check ov-lib">
                 <input class="form-check-input job-library-checkbox" type="checkbox"
                        value="${lib.id}" id="jobLib_${lib.id}"
                        data-server-id="${escapeHtml(lib.server_id || '')}"
                        data-server-name="${escapeHtml(lib.server_name || '')}"
                        data-library-kind="${escapeHtml(lib.type || lib.kind || '')}" disabled>
                 <label class="form-check-label" for="jobLib_${lib.id}">
-                    ${escapeHtml(lib.name)} <span class="text-muted small">(${libraryTypeLabel(lib)})</span>
+                    ${escapeHtml(lib.name)} <span class="ov-lib-tag">${libraryTypeLabel(lib)}</span>
                 </label>
             </div>
         `).join('');
-        sections.push(head + rows);
+        sections.push(`<div class="ov-lg" data-server-group="${escapeHtml(grp.server_id)}">${head}${rows}</div>`);
     }
     listEl.innerHTML = sections.join('');
 
@@ -3503,6 +3555,21 @@ function _renderJobLibraryList(libs) {
     // user always knows which server(s) the submit will target.
     document.querySelectorAll('.job-library-checkbox').forEach(cb => {
         cb.addEventListener('change', _updateJobScopeBadge);
+    });
+    // "Select server" ticks that server's rows only, leaving the rest as they are.
+    listEl.querySelectorAll('.job-select-server').forEach(link => {
+        link.addEventListener('click', () => {
+            const allCb = document.getElementById('jobLibraryAll');
+            if (allCb && allCb.checked) {
+                allCb.checked = false;
+                toggleAllLibraries(allCb);
+            }
+            link.closest('.ov-lg').querySelectorAll('.job-library-checkbox').forEach(cb => {
+                cb.disabled = false;
+                cb.checked = true;
+            });
+            _updateJobScopeBadge();
+        });
     });
 }
 
@@ -3514,25 +3581,31 @@ function _renderJobLibraryList(libs) {
 // that don't send server_id (see issue #244).
 function _updateJobScopeBadge() {
     MediaScanFilters.refresh('job');
+    _syncJobDialog();
     const badge = document.getElementById('jobScopeBadge');
     if (!badge) return;
+    const show = (scope, icon, html) => {
+        badge.dataset.scope = scope;
+        badge.innerHTML = `<i class="bi ${icon}" aria-hidden="true"></i><span>${html}</span>`;
+    };
+    const hide = () => {
+        badge.dataset.scope = 'none';
+        badge.innerHTML = '';
+    };
 
     const allCb = document.getElementById('jobLibraryAll');
     if (allCb && allCb.checked) {
-        badge.innerHTML =
-            '<span class="badge bg-secondary-subtle text-secondary-emphasis border">'
-            + (_jobKindIsMarkers()
-                ? '<i class="bi bi-globe2 me-1"></i>Checking every library with Intro &amp; Credits turned on'
-                : _jobKindIsLoudness()
-                    ? '<i class="bi bi-globe2 me-1"></i>Checking every library with Loudness turned on'
-                    : '<i class="bi bi-globe2 me-1"></i>Scanning every enabled library across all servers')
-            + '</span>';
+        show('all', 'bi-globe2', _jobKindIsMarkers()
+            ? 'Checking every library with Intro &amp; Credits on'
+            : _jobKindIsLoudness()
+                ? 'Checking every library with Loudness on'
+                : 'Scanning every enabled library on all servers');
         return;
     }
 
     const ticked = Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
     if (ticked.length === 0) {
-        badge.innerHTML = '';
+        hide();
         return;
     }
     const serverNames = new Set();
@@ -3545,19 +3618,70 @@ function _updateJobScopeBadge() {
     }
     const verb = _jobKindIsMarkers() || _jobKindIsLoudness() ? 'Checking' : 'Scanning';
     if (serverNames.size === 1) {
-        badge.innerHTML =
-            '<span class="badge bg-success-subtle text-success-emphasis border">'
-            + `<i class="bi bi-bullseye me-1"></i>${verb} → <strong>${escapeHtml(singleServerName)}</strong> only`
-            + '</span>';
+        show('one', 'bi-bullseye', `${verb} → <strong>${escapeHtml(singleServerName)}</strong> only`);
     } else if (serverNames.size > 1) {
-        badge.innerHTML =
-            '<span class="badge bg-info-subtle text-info-emphasis border">'
-            + `<i class="bi bi-diagram-3 me-1"></i>${verb} → <strong>${serverNames.size} servers</strong> (cross-server fan-out)`
-            + '</span>';
+        show('many', 'bi-diagram-3', `${verb} → <strong>${serverNames.size} servers</strong> (cross-server fan-out)`);
     } else {
-        badge.innerHTML = '';
+        hide();
     }
 }
+
+// The dialog's type-driven chrome: header tile and card colour (data-kind), the Start button's label, the footer
+// summary, the Regenerate warning and which priority carries the "default" tag.
+const _JOB_DIALOG_TYPES = {
+    previews: { icon: 'bi-film', name: 'Previews', start: 'Start previews job', defaultPriority: '2' },
+    intro_credits: { icon: 'bi-skip-forward', name: 'Intro & Credits', start: 'Start intro & credits job', defaultPriority: '3' },
+    loudness: { icon: 'bi-soundwave', name: 'Plex loudness', start: 'Start loudness job', defaultPriority: '3' },
+};
+const _JOB_PRIORITY_NAMES = { 1: 'High', 2: 'Normal', 3: 'Low' };
+
+function _syncJobDialog() {
+    const modal = document.getElementById('newJobModal');
+    if (!modal) return;
+    const kind = _jobKindIsMarkers() ? 'intro_credits' : _jobKindIsLoudness() ? 'loudness' : 'previews';
+    const type = _JOB_DIALOG_TYPES[kind];
+    const checksServers = _jobChecksServers();
+    modal.dataset.kind = checksServers ? 'check' : kind;
+
+    const priority = document.getElementById('jobPriority');
+    if (priority) {
+        priority.dataset.segDefault = type.defaultPriority;
+        if (window.OverlaySegments) window.OverlaySegments.sync(priority);
+    }
+    const startLabel = document.getElementById('jobStartLabel');
+    if (startLabel) startLabel.textContent = checksServers ? 'Check servers' : type.start;
+
+    const regenerate = document.getElementById('jobRegenerateAll')?.checked;
+    const modeHint = document.getElementById('jobProcessingModeHint');
+    if (modeHint) {
+        modeHint.textContent = regenerate
+            ? 'Rebuilds every preview, including ones that already exist.'
+            : 'Skips files that already have a preview.';
+        modeHint.classList.toggle('ov-warn', !!regenerate);
+    }
+
+    const summary = document.getElementById('jobSummary');
+    if (summary) {
+        const all = document.getElementById('jobLibraryAll')?.checked;
+        const picked = document.querySelectorAll('.job-library-checkbox:checked').length;
+        const scope = checksServers ? 'Every server' : all ? 'All libraries' : `${picked} ${picked === 1 ? 'library' : 'libraries'}`;
+        const priorityName = _JOB_PRIORITY_NAMES[parseInt(priority?.value, 10)] || 'Normal';
+        summary.innerHTML = `<span class="ov-task"><i class="bi ${type.icon}" aria-hidden="true"></i>${escapeHtml(type.name)}</span>`
+            + `<span>${scope} · <b>${priorityName}</b></span>`;
+    }
+}
+
+// Nothing ticked: the toast stays (existing flows read it) and the same sentence appears under the list.
+function _jobLibrariesMissing() {
+    showToast('Error', 'Please select at least one library', 'warning');
+    document.getElementById('jobLibrariesError')?.removeAttribute('hidden');
+    document.getElementById('jobLibraryList')?.scrollIntoView({ block: 'nearest' });
+}
+
+document.getElementById('newJobForm')?.addEventListener('change', () => {
+    document.getElementById('jobLibrariesError')?.setAttribute('hidden', '');
+    _syncJobDialog();
+});
 
 function _jobKindIsMarkers() {
     const radio = document.getElementById('jobKindMarkers');
@@ -3593,6 +3717,7 @@ function _showJobKindControls() {
     toggle('jobMarkersForceGroup', !markers || checksServers);
     toggle('jobScanFiltersGroup', ownRunner);
     toggle('jobOwnRunnerFiltersNote', !ownRunner || checksServers);
+    toggle('jobCheckServersNote', !checksServers);
     _updateJobScopeBadge();
 }
 
@@ -3601,6 +3726,7 @@ function onJobKindChange() {
     _showJobKindControls();
     const priority = document.getElementById('jobPriority');
     if (priority) priority.value = _jobKindIsMarkers() || _jobKindIsLoudness() ? '3' : '2';
+    _syncJobDialog();
 }
 
 function toggleAllLibraries(checkbox) {
@@ -3669,7 +3795,7 @@ async function _startMarkersJob() {
     const allTicked = document.getElementById('jobLibraryAll').checked;
     const ticked = allTicked ? [] : Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
     if (!allTicked && ticked.length === 0) {
-        showToast('Error', 'Please select at least one library', 'warning');
+        _jobLibrariesMissing();
         return;
     }
     const picked = ticked.map(cb => ({ server_id: cb.dataset.serverId || '', library_id: cb.value }));
@@ -3692,7 +3818,7 @@ async function _startLoudnessJob() {
     const allTicked = document.getElementById('jobLibraryAll').checked;
     const ticked = allTicked ? [] : Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
     if (!allTicked && ticked.length === 0) {
-        showToast('Error', 'Please select at least one library', 'warning');
+        _jobLibrariesMissing();
         return;
     }
     const picked = ticked.map(cb => ({ server_id: cb.dataset.serverId || '', library_id: cb.value }));
@@ -3773,7 +3899,7 @@ async function startNewJob() {
         var selectedIdsLocal = Array.from(selectedCheckboxes).map(cb => cb.value);
 
         if (selectedIdsLocal.length === 0) {
-            showToast('Error', 'Please select at least one library', 'warning');
+            _jobLibrariesMissing();
             return;
         }
 
@@ -4079,7 +4205,7 @@ function getStatusBadge(status, paused, error, outcome, pauseNote, asPill) {
         var lead = asPill
             ? (icon === 'live' ? '<span class="dot run live" aria-hidden="true"></span>' : '<i class="bi ' + icon + '" aria-hidden="true"></i>')
             : '';
-        return '<span class="status-dot ' + cls + (asPill ? ' pill ' + tone : '') + '"' + tooltipAttrs + '>' + lead + label + '</span>';
+        return '<span class="status-dot ' + cls + (asPill ? ' pill ' + tone : '') + '"' + (tooltipAttrs || ' title="' + label + '"') + ' aria-label="' + label + '">' + lead + '<span class="status-label">' + label + '</span></span>';
     }
 
     if ((status === 'running' || status === 'pending') && paused) return dot('status-warning', 'Paused', 'warn', 'bi-pause-circle');
@@ -4219,6 +4345,19 @@ function _stopElapsedTimer() {
     _elapsedTimerInterval = null;
 }
 
+// A dialog opened over another one (an ⓘ or a confirmation inside Start job) must own the keyboard: Bootstrap's focus
+// trap on the dialog underneath pulls focus back into it, so Escape would close the wrong one. The underlying traps
+// are paused until the top dialog is gone (same private-API step as markers_server_tab.js confirmPlexMarkers()).
+function _pauseUnderlyingFocusTraps(topEl) {
+    const paused = [];
+    document.querySelectorAll('.modal.show').forEach((el) => {
+        if (el === topEl) return;
+        const trap = window.bootstrap.Modal.getInstance(el)?._focustrap;
+        if (trap && typeof trap.deactivate === 'function') { trap.deactivate(); paused.push(trap); }
+    });
+    topEl.addEventListener('hidden.bs.modal', () => paused.forEach(trap => trap.activate()), { once: true });
+}
+
 /**
  * Bootstrap-modal replacement for the native browser ``confirm()``.
  *
@@ -4263,8 +4402,10 @@ function appConfirm(message, opts = {}) {
 
     const variant = opts.variant || 'danger';
     okBtn.className = `btn btn-${variant}`;
-    const iconMap = { danger: 'bi-exclamation-triangle text-danger', warning: 'bi-exclamation-triangle text-warning', primary: 'bi-question-circle text-primary' };
+    const iconMap = { danger: 'bi-exclamation-triangle', warning: 'bi-exclamation-triangle', primary: 'bi-question-circle' };
     iconEl.className = `bi ${iconMap[variant] || iconMap.danger}`;
+    const iconTile = document.getElementById('appConfirmModalIconTile');
+    if (iconTile) iconTile.dataset.variant = iconMap[variant] ? variant : 'danger';
 
     const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
 
@@ -4284,6 +4425,9 @@ function appConfirm(message, opts = {}) {
         };
         okBtn.addEventListener('click', onOk);
         modalEl.addEventListener('hidden.bs.modal', onHidden);
+        // A destructive answer takes a deliberate move: Cancel holds focus until the user picks the other button.
+        modalEl.addEventListener('shown.bs.modal', () => (variant === 'danger' ? cancelBtn : okBtn).focus(), { once: true });
+        _pauseUnderlyingFocusTraps(modalEl);
         modal.show();
     });
 }
@@ -4345,26 +4489,46 @@ function hideModalSafely(modalEl, opening) {
     }
 }
 
+// Up to three toasts stack. The newest keeps the original element (and its ids); one still on screen is cloned
+// into the stack above it first. Errors stay until closed, the rest hide after five seconds.
+const _TOAST_STACK_MAX = 3;
+const _TOAST_ICONS = {
+    'success': 'bi-check-circle',
+    'danger': 'bi-exclamation-circle',
+    'warning': 'bi-exclamation-triangle',
+    'info': 'bi-info-circle'
+};
+
+function _archiveVisibleToast(toast) {
+    const clone = toast.cloneNode(true);
+    clone.removeAttribute('id');
+    clone.classList.add('toast-stacked');
+    clone.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+    toast.before(clone);
+    const stacked = toast.parentElement.querySelectorAll('.toast-stacked');
+    for (let i = 0; i < stacked.length - (_TOAST_STACK_MAX - 1); i++) stacked[i].remove();
+    clone.querySelector('.btn-close')?.addEventListener('click', () => clone.remove());
+    if (clone.dataset.type !== 'danger') setTimeout(() => clone.remove(), 5000);
+}
+
 function showToast(title, message, type = 'info') {
     const toast = document.getElementById('toastNotification');
     const toastTitle = document.getElementById('toastTitle');
     const toastBody = document.getElementById('toastBody');
     const toastIcon = document.getElementById('toastIcon');
 
+    if (toast.classList.contains('show')) _archiveVisibleToast(toast);
     toastTitle.textContent = title;
     toastBody.textContent = message;
 
-    // Update icon based on type
-    const icons = {
-        'success': 'bi-check-circle text-success',
-        'danger': 'bi-exclamation-circle text-danger',
-        'warning': 'bi-exclamation-triangle text-warning',
-        'info': 'bi-info-circle text-info'
-    };
-    toastIcon.className = `bi ${icons[type] || icons.info} me-2`;
+    toast.dataset.type = _TOAST_ICONS[type] ? type : 'info';
+    toast.setAttribute('role', type === 'danger' ? 'alert' : 'status');
+    toast.setAttribute('aria-live', type === 'danger' ? 'assertive' : 'polite');
+    toastIcon.className = `bi ${_TOAST_ICONS[type] || _TOAST_ICONS.info} me-2`;
 
-    const bsToast = new bootstrap.Toast(toast);
-    bsToast.show();
+    const previous = bootstrap.Toast.getInstance(toast);
+    if (previous) previous.dispose();
+    new bootstrap.Toast(toast, { autohide: type !== 'danger', delay: 5000 }).show();
 }
 
 // "What's New" changelog popup (runs on every page via base.html)
@@ -4477,22 +4641,20 @@ async function refreshBackupsPanel() {
             panel.innerHTML = '<div class="text-muted small">No backup-tracked config files found.</div>';
             return;
         }
-        // D17 — one row per managed file: header + dropdown + Restore button.
-        // Replaces the old vertical-list-of-rows that grew with retention,
-        // making the panel feel cluttered for users on installs that save
-        // settings often (every webhook → webhook_history.json → +1 row).
+        // One row per managed file (a dropdown, not one row per snapshot), so frequent saves don't grow the panel.
         const blocks = files.map((f, idx) => {
             const liveAge = _formatBackupTime(f.live_mtime);
             const headerBadge = f.bak_newer
-                ? '<span class="badge bg-warning text-dark ms-2" title="Most recent backup is newer than the live file">backup is newer</span>'
-                : (f.has_bak ? '' : '<span class="badge bg-secondary ms-2">no backups yet</span>');
+                ? '<span class="badge backup-badge ms-2" title="Most recent backup is newer than the live file">backup is newer</span>'
+                : (f.has_bak ? '' : '<span class="badge backup-badge ms-2">no backups yet</span>');
 
             const backups = f.backups || [];
             const selectId = 'backupSelect-' + idx;
             const selectHtml = backups.length
                 ? `
-                    <div class="d-flex align-items-center gap-2 mt-2">
-                        <select id="${selectId}" class="form-select form-select-sm" style="max-width: 320px;"
+                    <div class="backup-controls">
+                        <span class="backup-count">${backups.length} snapshot${backups.length === 1 ? '' : 's'}</span>
+                        <select id="${selectId}" class="form-select form-select-sm"
                                 aria-label="Backup snapshot for ${escapeHtmlAttr(f.name)}">
                             ${backups.map((b) => {
                                 const label = escapeHtmlText(_formatBackupLabel(b))
@@ -4500,21 +4662,20 @@ async function refreshBackupsPanel() {
                                 return `<option value="${escapeHtmlAttr(b.filename)}">${label}</option>`;
                             }).join('')}
                         </select>
-                        <button type="button" class="btn btn-sm btn-outline-warning flex-shrink-0"
+                        <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0"
                                 data-restore-file="${escapeHtmlAttr(f.name)}"
                                 data-restore-select="${selectId}">
                             <i class="bi bi-arrow-counterclockwise me-1"></i>Restore selected
                         </button>
-                        <span class="text-muted small flex-shrink-0">${backups.length} snapshot${backups.length === 1 ? '' : 's'}</span>
                     </div>
                 `
-                : '<div class="small text-muted mt-2">No backups yet — they appear after the next save.</div>';
+                : '<div class="backup-empty">No backups yet — they appear after the next save.</div>';
 
             return `
-                <div class="border-bottom py-2">
-                    <div>
+                <div class="backup-row">
+                    <div class="backup-file">
                         <code>${escapeHtmlText(f.name)}</code>${headerBadge}
-                        <div class="small text-muted">Live saved: ${escapeHtmlText(liveAge)}</div>
+                        <div class="backup-live">Live saved: ${escapeHtmlText(liveAge)}</div>
                     </div>
                     ${selectHtml}
                 </div>
@@ -4817,6 +4978,13 @@ function _openGlobalInfoModal({ title, html, docsHref }) {
             docsLink.classList.add('d-none');
         }
     }
+    // Paused traps wake first (and refocus their dialog), then focus goes back to the ⓘ. Bootstrap restores focus only
+    // for its own data-api triggers, not for dialogs opened from script.
+    _pauseUnderlyingFocusTraps(modalEl);
+    const opener = document.activeElement;
+    modalEl.addEventListener('hidden.bs.modal', () => {
+        if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+    }, { once: true });
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
 }
 

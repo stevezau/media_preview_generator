@@ -480,8 +480,8 @@
         <div class="card section-card section-violet" id="section-markers">
             <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-skip-forward sec-ico" aria-hidden="true"></i>
-                <div class="sec-title"><span class="sec-name">Intro &amp; Credits</span><span class="sec-desc">Shared by every server. Turn markers on for each server in
-                    <a class="btn btn-sm btn-link-chip" href="/servers">Servers</a> → Edit → Intro &amp; Credits.</span></div>
+                <div class="sec-title"><span class="sec-name">Intro &amp; Credits</span><span class="sec-desc">Shared by every server. Turn on per server in
+                    <a class="btn btn-sm btn-link-chip" href="/servers">Servers</a> → Edit.</span></div>
             </div>
             <div class="card-body">
                 <h3 class="settings-subheading"><i class="bi bi-bullseye" aria-hidden="true"></i>What to detect</h3>
@@ -613,9 +613,12 @@
                         <span class="markers-source-num" aria-hidden="true"></span>
                         <div class="markers-source-body">
                             <span class="markers-source-name">Matching audio across a season</span>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season&#39;s episodes share, so shows no database has still get intros. Used on its own unless another source disagrees."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season&#39;s episodes share, so shows no database has still get intros. Used on its own unless another source disagrees." data-explain-title="Matching audio across a season" data-explain-template="infoSeasonAudioTpl"><i class="bi bi-info-circle"></i></button>
                             <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
-                            <div class="markers-source-note">Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode</div>
+                            <div class="markers-source-note">Matches a season's shared theme · CPU</div>
+<template id="infoSeasonAudioTpl">
+    <p>Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode</p>
+</template>
                             <div class="small text-warning-emphasis markers-source-reason" hidden></div>
                         </div>
                         <div class="markers-source-controls">
@@ -633,9 +636,12 @@
                         <span class="markers-source-num" aria-hidden="true"></span>
                         <div class="markers-source-body">
                             <span class="markers-source-name">On-screen credit text</span>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Reads the credit roll on screen near the end of the file. Used on its own for credits, and to correct a credits chapter&#39;s start."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Reads the credit roll on screen near the end of the file. Used on its own for credits, and to correct a credits chapter&#39;s start." data-explain-title="On-screen credit text" data-explain-template="infoCreditTextTpl"><i class="bi bi-info-circle"></i></button>
                             <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
-                            <div class="markers-source-note">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
+                            <div class="markers-source-note">Reads the end of the file · GPU or CPU</div>
+<template id="infoCreditTextTpl">
+    <p>Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</p>
+</template>
                             <div class="small text-warning-emphasis markers-source-reason" hidden></div>
                         </div>
                         <div class="markers-source-controls">
@@ -956,9 +962,9 @@
                 <button type="button" class="btn btn-sm btn-icon ms-auto" id="refreshBackupsBtn" aria-label="Refresh backups" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
             </div>
             <div class="card-body">
-                <div class="danger-zone">
-                    <div class="dz-head"><i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>Restore overwrites live config</div>
-                    <div class="dz-body">
+                <div class="restore-zone">
+                    <div class="restore-note"><i class="bi bi-info-circle" aria-hidden="true"></i>Restoring overwrites the live config file.</div>
+                    <div class="restore-body">
                         <div id="backupRestorePanel">
                             <div class="text-muted small">
                                 <span class="spinner-border spinner-border-sm me-1"></span>Checking for backups&hellip;
@@ -1007,7 +1013,7 @@
         <div class="card section-card" id="section-about">
             <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-info-circle sec-ico" aria-hidden="true"></i>
-                <div class="sec-title"><span class="sec-name">About</span><span class="sec-desc">Media Preview Generator: video preview thumbnails for your media servers, with GPU acceleration.</span></div>
+                <div class="sec-title"><span class="sec-name">About</span><span class="sec-desc">Video preview thumbnails for your media servers, with GPU acceleration.</span></div>
             </div>
             <div class="card-body">
                 <div class="version-row">

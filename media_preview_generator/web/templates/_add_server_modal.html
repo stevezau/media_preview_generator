@@ -2,37 +2,50 @@
    Included from /servers (the dashboard view) and /setup (wizard step 1
    when the user picks Emby or Jellyfin). The modal's JS lives in
    static/js/servers.js — that file's DOMContentLoaded handler guards
-   loadServers() so it no-ops on /setup where there's no server list. #}
-<div class="modal fade" id="addServerModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+   loadServers() so it no-ops on /setup where there's no server list.
+
+   The header tile, title, subtitle and the three-step progress rail follow the wizard step (servers.js
+   updateAddHeader); they are chrome around the same step panes and ids as before. #}
+<div class="modal fade sm-modal sm-add" id="addServerModal" tabindex="-1" aria-hidden="true" aria-labelledby="serverModalTitle">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable sm-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="serverModalTitle">Add Server</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <div class="modal-header sm-header">
+                <span class="sm-logo sm-logo-lg" id="addServerLogoTile" data-vendor=""><i class="bi bi-plus-lg"></i></span>
+                <div class="sm-title">
+                    <h5 class="modal-title sm-name" id="serverModalTitle">Add Server</h5>
+                    <div class="sm-sub" id="serverModalSubtitle">Choose which media server to connect</div>
+                </div>
+                <button type="button" class="btn-close flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
+            <ol class="sm-prog" id="addServerProgress" aria-label="Add server progress" style="--p:0">
+                <li class="sm-prog-trk" aria-hidden="true"><i class="sm-prog-fill"></i></li>
+                <li class="sm-prog-st on" data-step="type" aria-current="step"><span class="sm-prog-circ"><span class="sm-prog-n">1</span><i class="bi bi-check-lg"></i></span><b>Type</b><small>Pick a server type</small></li>
+                <li class="sm-prog-st" data-step="connect"><span class="sm-prog-circ"><span class="sm-prog-n">2</span><i class="bi bi-check-lg"></i></span><b>Connect</b><small>Credentials &amp; paths</small></li>
+                <li class="sm-prog-st" data-step="result"><span class="sm-prog-circ"><span class="sm-prog-n">3</span><i class="bi bi-check-lg"></i></span><b>Verify</b><small>Check &amp; import libraries</small></li>
+            </ol>
+            <div class="modal-body sm-add-body">
                 <!-- Step 1: pick a type -->
                 <div id="step-type" class="server-step">
-                    <h6 class="text-muted mb-3">1. Choose server type</h6>
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <button class="btn btn-outline-primary w-100 py-3 server-type-btn" data-type="plex">
-                                <img src="{{ url_for('static', filename='images/vendors/plex.svg') }}" alt="Plex" width="36" height="36" class="d-block mx-auto mb-1">
-                                Plex
-                            </button>
-                        </div>
-                        <div class="col-md-4">
-                            <button class="btn btn-outline-success w-100 py-3 server-type-btn" data-type="emby">
-                                <img src="{{ url_for('static', filename='images/vendors/emby.svg') }}" alt="Emby" width="36" height="36" class="d-block mx-auto mb-1">
-                                Emby
-                            </button>
-                        </div>
-                        <div class="col-md-4">
-                            <button class="btn btn-outline-info w-100 py-3 server-type-btn" data-type="jellyfin">
-                                <img src="{{ url_for('static', filename='images/vendors/jellyfin.svg') }}" alt="Jellyfin" width="36" height="36" class="d-block mx-auto mb-1">
-                                Jellyfin
-                            </button>
-                        </div>
+                    <h6 class="visually-hidden">1. Choose server type</h6>
+                    <div class="sm-types">
+                        <button type="button" class="sm-tcard server-type-btn" data-type="plex">
+                            <span class="sm-logo sm-logo-lg" data-vendor="plex"><img src="{{ url_for('static', filename='images/vendors/plex.svg') }}" alt="" width="26" height="26"></span>
+                            <b>Plex</b>
+                            <span class="sm-tcard-d">Sign in with Plex and pick from the servers on your account.</span>
+                            <span class="pill">Sign-in or token</span>
+                        </button>
+                        <button type="button" class="sm-tcard server-type-btn" data-type="emby">
+                            <span class="sm-logo sm-logo-lg" data-vendor="emby"><img src="{{ url_for('static', filename='images/vendors/emby.svg') }}" alt="" width="26" height="26"></span>
+                            <b>Emby</b>
+                            <span class="sm-tcard-d">Connect with a URL and a login or API key.</span>
+                            <span class="pill">Login or API key</span>
+                        </button>
+                        <button type="button" class="sm-tcard server-type-btn" data-type="jellyfin">
+                            <span class="sm-logo sm-logo-lg" data-vendor="jellyfin"><img src="{{ url_for('static', filename='images/vendors/jellyfin.svg') }}" alt="" width="26" height="26"></span>
+                            <b>Jellyfin</b>
+                            <span class="sm-tcard-d">Connect with a URL and Quick Connect, a login or an API key.</span>
+                            <span class="pill">Quick Connect, login or API key</span>
+                        </button>
                     </div>
                 </div>
 

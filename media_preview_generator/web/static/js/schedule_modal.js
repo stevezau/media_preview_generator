@@ -19,6 +19,67 @@
 //   resolve.
 // =========================================================================
 
+const _SCHEDULE_DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// "Mon to Fri", "Sat, Sun", "every day": consecutive days collapse into a range, in Monday-first order.
+function _scheduleDaysLabel(days) {
+    const order = [1, 2, 3, 4, 5, 6, 0].filter(day => days.includes(day));
+    if (order.length === 7) return 'every day';
+    const runs = [];
+    for (const day of order) {
+        const last = runs[runs.length - 1];
+        if (last && (last[last.length - 1] + 1) % 7 === day && day !== 1) last.push(day);
+        else runs.push([day]);
+    }
+    return runs.map(run => run.length > 2
+        ? `${_SCHEDULE_DAY_NAMES[run[0]]} to ${_SCHEDULE_DAY_NAMES[run[run.length - 1]]}`
+        : run.map(day => _SCHEDULE_DAY_NAMES[day]).join(', ')).join(', ');
+}
+
+// One plain-language line for the trigger, so the user can read back what they set. Client-side text only.
+function _updateScheduleSummary() {
+    const box = document.getElementById('scheduleWhenSummary');
+    const type = document.querySelector('input[name="scheduleType"]:checked')?.value;
+    if (!box || !type) return;
+    let text = '';
+    if (type === 'specific-time') {
+        const time = document.getElementById('scheduleTime').value;
+        const days = Array.from(document.querySelectorAll('.schedule-day:checked')).map(cb => parseInt(cb.value, 10));
+        text = time && days.length ? `${_scheduleDaysLabel(days)} at ${time}, container time` : '';
+    } else if (type === 'interval') {
+        const amount = parseInt(document.getElementById('scheduleIntervalValue').value, 10);
+        const unit = document.getElementById('scheduleIntervalUnit').value;
+        text = amount >= 1 ? `Every ${amount === 1 ? unit.replace(/s$/, '') : `${amount} ${unit}`}` : '';
+    } else {
+        const cron = document.getElementById('scheduleCronInput').value.trim();
+        text = cron ? `Cron ${cron}, container time` : '';
+    }
+    box.hidden = !text;
+    const label = box.querySelector('span');
+    if (label) label.textContent = text;
+}
+
+// Inline copy of a failed check beside its field; the toast stays for the flows that read it.
+const _SCHEDULE_ERROR_IDS = ['scheduleNameError', 'scheduleLibrariesError', 'scheduleTimeError', 'scheduleDaysError', 'scheduleIntervalError', 'scheduleCronError'];
+
+function _setScheduleFieldError(id, message) {
+    const box = document.getElementById(id);
+    if (!box) return;
+    box.hidden = !message;
+    const label = box.querySelector('span');
+    if (label) label.textContent = message;
+}
+
+function _clearScheduleFieldErrors() {
+    _SCHEDULE_ERROR_IDS.forEach(id => _setScheduleFieldError(id, ''));
+}
+
+document.getElementById('newScheduleForm')?.addEventListener('input', () => {
+    _clearScheduleFieldErrors();
+    _updateScheduleSummary();
+});
+document.getElementById('newScheduleForm')?.addEventListener('change', _updateScheduleSummary);
+
 function onScheduleTypeChange() {
     const selected = document.querySelector('input[name="scheduleType"]:checked').value;
     document.getElementById('scheduleFieldsTime').classList.toggle('d-none', selected !== 'specific-time');
@@ -31,6 +92,7 @@ function onScheduleTypeChange() {
     if (stopGroup) {
         stopGroup.classList.toggle('d-none', selected === 'interval');
     }
+    _updateScheduleSummary();
 }
 
 // Intro & Credits · Check servers reads back every server, so the server and library pickers don't apply.
@@ -45,10 +107,14 @@ function onScanModeChange() {
     const markersMode = document.getElementById('scheduleMarkersModeGroup');
     if (markersMode) markersMode.hidden = selected !== 'intro_credits';
     const checksServers = _scheduleChecksServers();
-    ['scheduleServerGroup', 'scheduleLibrariesGroup'].forEach(id => {
+    ['scheduleServerGroup', 'scheduleLibrariesGroup', 'scheduleScopeSection'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.hidden = checksServers;
     });
+    const checkNote = document.getElementById('scheduleCheckServersNote');
+    if (checkNote) checkNote.hidden = !checksServers;
+    const dialog = document.getElementById('newScheduleModal');
+    if (dialog) dialog.dataset.kind = selected === 'intro_credits' ? (checksServers ? 'check' : 'intro_credits') : 'previews';
     const lookbackGroup = document.getElementById('scheduleLookbackGroup');
     if (lookbackGroup) {
         lookbackGroup.style.display = selected === 'recently_added' ? '' : 'none';
@@ -89,6 +155,7 @@ function _getSelectedScheduleType() {
 }
 
 function _resetScheduleForm() {
+    _clearScheduleFieldErrors();
     MediaScanFilters.reset('schedule');
     MediaScanFilters.setLoading('schedule', false);
     document.getElementById('scheduleLibraryAll').checked = true;
@@ -139,8 +206,9 @@ function _resetScheduleForm() {
 
 function showNewScheduleModal() {
     _resetScheduleForm();
-    document.getElementById('scheduleModalTitle').innerHTML =
-        '<i class="bi bi-calendar-plus me-2"></i>Add Schedule';
+    document.getElementById('scheduleModalTitle').textContent = 'Add Schedule';
+    const addIcon = document.getElementById('scheduleModalIcon');
+    if (addIcon) addIcon.className = 'bi bi-calendar-plus';
     document.getElementById('scheduleSubmitBtn').innerHTML =
         '<i class="bi bi-check me-1"></i>Create Schedule';
 
@@ -275,8 +343,9 @@ function showEditScheduleModal(scheduleId) {
     }
     onScheduleTypeChange();
 
-    document.getElementById('scheduleModalTitle').innerHTML =
-        '<i class="bi bi-pencil me-2"></i>Edit Schedule';
+    document.getElementById('scheduleModalTitle').textContent = 'Edit Schedule';
+    const editIcon = document.getElementById('scheduleModalIcon');
+    if (editIcon) editIcon.className = 'bi bi-pencil';
     document.getElementById('scheduleSubmitBtn').innerHTML =
         '<i class="bi bi-check me-1"></i>Save Changes';
 
@@ -288,7 +357,9 @@ async function saveSchedule() {
     const opening = modalOpening(document.getElementById('newScheduleModal'));
     const editId = document.getElementById('scheduleEditId').value;
     const name = document.getElementById('scheduleName').value.trim();
+    _clearScheduleFieldErrors();
     if (!name) {
+        _setScheduleFieldError('scheduleNameError', 'Name is required.');
         showToast('Error', 'Name is required', 'danger');
         return;
     }
@@ -303,6 +374,7 @@ async function saveSchedule() {
         selectedLibraryIds = Array.from(document.querySelectorAll('.schedule-library-checkbox:checked'))
             .map(cb => cb.value);
         if (selectedLibraryIds.length === 0) {
+            _setScheduleFieldError('scheduleLibrariesError', 'Select at least one library or check All Libraries.');
             showToast('Error', 'Select at least one library or check "All Libraries"', 'warning');
             return;
         }
@@ -363,11 +435,13 @@ async function saveSchedule() {
     if (scheduleType === 'specific-time') {
         const timeValue = document.getElementById('scheduleTime').value;
         if (!timeValue) {
+            _setScheduleFieldError('scheduleTimeError', 'Time is required.');
             showToast('Error', 'Time is required', 'danger');
             return;
         }
         const selectedDays = Array.from(document.querySelectorAll('.schedule-day:checked')).map(cb => cb.value);
         if (selectedDays.length === 0) {
+            _setScheduleFieldError('scheduleDaysError', 'Select at least one day.');
             showToast('Error', 'Select at least one day', 'danger');
             return;
         }
@@ -378,6 +452,7 @@ async function saveSchedule() {
     } else if (scheduleType === 'interval') {
         const intervalValue = parseInt(document.getElementById('scheduleIntervalValue').value, 10);
         if (!intervalValue || intervalValue < 1) {
+            _setScheduleFieldError('scheduleIntervalError', 'Interval must be at least 1.');
             showToast('Error', 'Interval must be at least 1', 'danger');
             return;
         }
@@ -386,11 +461,13 @@ async function saveSchedule() {
     } else if (scheduleType === 'cron') {
         const cronInput = document.getElementById('scheduleCronInput').value.trim();
         if (!cronInput) {
+            _setScheduleFieldError('scheduleCronError', 'Cron expression is required.');
             showToast('Error', 'Cron expression is required', 'danger');
             return;
         }
         const parts = cronInput.split(/\s+/);
         if (parts.length !== 5) {
+            _setScheduleFieldError('scheduleCronError', 'Cron expression must have 5 fields.');
             showToast('Error', 'Cron expression must have 5 fields (minute hour day-of-month month day-of-week)', 'danger');
             return;
         }

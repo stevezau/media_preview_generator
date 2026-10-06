@@ -127,8 +127,10 @@ function _jobDurationLabel(job) {
 function _renderModalHeader(job) {
     const headerEl = document.getElementById('logsModalHeader');
     if (!headerEl) return;
+    const dialog = document.getElementById('logsModal');
+    if (dialog) dialog.dataset.kind = job && ['intro_credits', 'loudness'].includes(job.kind) ? job.kind : 'previews';
     if (!job) {
-        headerEl.innerHTML = '<h5 class="modal-title mb-0"><i class="bi bi-file-text me-2"></i>Job Details</h5>';
+        headerEl.innerHTML = '<h5 class="modal-title mb-0">Job Details</h5>';
         return;
     }
     const cfg = job.config || {};
@@ -137,7 +139,8 @@ function _renderModalHeader(job) {
     const meta = (typeof _statusMeta === 'function')
         ? _statusMeta(job.status)
         : { label: job.status || '?', cls: 'bg-secondary', tip: '' };
-    const statusBadge = `<span class="badge ${meta.cls} ms-2 align-self-center"`
+    const tone = ({ 'bg-success': 'ok', 'bg-danger': 'bad', 'bg-warning': 'warn', 'bg-primary': 'run', 'bg-info': 'run' })[meta.cls.split(' ')[0]] || '';
+    const statusBadge = `<span class="ov-pill ${tone}"`
         + (meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '')
         + `>${escapeHtmlText(meta.label)}</span>`;
 
@@ -146,18 +149,18 @@ function _renderModalHeader(job) {
         chips.push(_jobKindBadgeHtml(job));
     }
     if (cfg.source) {
-        chips.push('<span class="badge bg-light text-dark border">'
-            + '<i class="bi bi-' + _sourceIcon(cfg.source) + ' me-1"></i>'
+        chips.push('<span class="ov-tag">'
+            + '<i class="bi bi-' + _sourceIcon(cfg.source) + '" aria-hidden="true"></i>'
             + escapeHtmlText(cfg.source) + '</span>');
     }
     if (job.server_name) {
-        chips.push('<span class="badge bg-light text-dark border">'
+        chips.push('<span class="ov-tag">'
             + escapeHtmlText(job.server_name) + '</span>');
     }
     const dur = _jobDurationLabel(job);
     if (dur) {
-        chips.push('<span class="badge bg-light text-dark border">'
-            + '<i class="bi bi-clock me-1"></i>' + escapeHtmlText(dur) + '</span>');
+        chips.push('<span class="ov-tag">'
+            + '<i class="bi bi-clock" aria-hidden="true"></i>' + escapeHtmlText(dur) + '</span>');
     }
     if (isChain) {
         // ``retry_attempt`` counts retries — 0 means "originating dispatch
@@ -169,43 +172,45 @@ function _renderModalHeader(job) {
             ? totalRuns + ' run' + (totalRuns === 1 ? '' : 's')
                 + ' · 1 original + ' + ra + ' retr' + (ra === 1 ? 'y' : 'ies')
             : '1 run · original only';
-        chips.push('<span class="badge bg-light text-dark border">'
-            + '<i class="bi bi-arrow-clockwise me-1"></i>' + escapeHtmlText(runsLabel)
-            + ' <span class="text-muted">/ ' + (rmax + 1) + ' max</span></span>');
+        chips.push('<span class="ov-tag">'
+            + '<i class="bi bi-arrow-clockwise" aria-hidden="true"></i>' + escapeHtmlText(runsLabel)
+            + ' <span class="ov-faint">/ ' + (rmax + 1) + ' max</span></span>');
     }
 
-    // Job-ID block on the right of the title row — small monospace,
-    // copy-on-click. Keeps the ID accessible (deep-link sharing,
-    // operator copy/paste, ``aria-describedby`` reference) without
-    // dedicating a whole sub-row to muted text. The id stays
-    // ``logsJobId`` so the modal's ``aria-describedby`` keeps working.
+    // Job ID, copy-on-click: shared and pasted often, so it sits in the header (its own line on a phone). The id
+    // stays ``logsJobId`` so the modal's ``aria-describedby`` keeps working.
     const jid = escapeHtmlText(job.id || '');
-    const jidBlock = '<div class="ms-auto d-flex align-items-center gap-1 text-muted small font-monospace" id="logsJobId">'
+    const jidBlock = '<div class="ov-jobid" id="logsJobId">'
         + '<span title="Job ID">' + jid + '</span>'
-        + '<button type="button" class="btn btn-link btn-sm p-0 ms-1" title="Copy Job ID" aria-label="Copy Job ID"'
+        + '<button type="button" class="ov-ibtn" title="Copy Job ID" aria-label="Copy Job ID"'
         + ' onclick="onCopyJobId(\'' + escapeHtmlAttr(job.id || '') + '\', this)">'
-        + '<i class="bi bi-clipboard"></i>'
+        + '<i class="bi bi-clipboard" aria-hidden="true"></i>'
         + '</button>'
         + '</div>';
 
     headerEl.innerHTML =
-        '<div class="job-details-title-row d-flex align-items-baseline flex-wrap gap-2">'
-        +   '<h5 class="modal-title job-details-title mb-0">'
-        +     '<i class="bi bi-file-text me-2"></i>' + escapeHtmlText(title)
-        +   '</h5>'
+        '<div class="job-details-title-row">'
+        +   '<h5 class="modal-title job-details-title mb-0">' + escapeHtmlText(title) + '</h5>'
         +   statusBadge
+        +   jidBlock
         + '</div>'
         + (chips.length
-            ? '<div class="job-details-meta d-flex flex-wrap gap-2 small mt-1">' + chips.join('') + '</div>'
-            : '')
-        + '<details class="job-identity-disclosure"><summary>Job ID</summary>' + jidBlock + '</details>';
+            ? '<div class="job-details-meta">' + chips.join('') + '</div>'
+            : '');
 }
 
 function _renderModalContext(job) {
     const context = document.getElementById('jobDetailsContext');
     const body = document.getElementById('jobDetailsContextBody');
+    const errorBox = document.getElementById('jobDetailsError');
+    const liveHint = document.getElementById('logsLiveHint');
     if (!context || !body) return;
     context.hidden = !job;
+    if (liveHint) liveHint.hidden = !(job && job.status === 'running');
+    if (errorBox) {
+        errorBox.hidden = !(job && job.error);
+        errorBox.innerHTML = job && job.error ? '<b>Job error</b>' + escapeHtmlText(job.error) : '';
+    }
     if (!job) { body.replaceChildren(); return; }
     const cfg = job.config || {};
     const progress = job.progress || {};
@@ -221,11 +226,17 @@ function _renderModalContext(job) {
     for (const [field, label] of [['created_at', 'Created'], ['started_at', 'Started'], ['completed_at', 'Finished']]) {
         if (job[field]) add(label, typeof formatDate === 'function' ? formatDate(job[field]) : job[field]);
     }
-    const current = cfg.resource_wait?.reason || progress.current_item;
-    body.innerHTML = '<dl class="job-details-facts">' + rows.join('') + '</dl>'
-        + (current ? '<p class="small mb-1">' + escapeHtmlText(current) + '</p>' : '')
-        + (progress.current_file ? '<details class="job-file-path"><summary>Current file path</summary><code>' + escapeHtmlText(progress.current_file) + '</code></details>' : '')
-        + (job.error ? '<p class="small text-danger-emphasis mt-2 mb-0">' + escapeHtmlText(job.error) + '</p>' : '');
+    const waitReason = cfg.resource_wait?.reason;
+    const current = waitReason || progress.current_item;
+    const active = job.status === 'running' || job.status === 'pending';
+    const activityLabel = waitReason ? 'Waiting' : active ? 'Current activity' : 'Last activity';
+    const activity = current || progress.current_file
+        ? '<div class="ov-cur"><span class="ov-k">' + activityLabel + '</span>'
+            + (current ? '<span>' + escapeHtmlText(current) + '</span>' : '')
+            + (progress.current_file ? '<details class="job-file-path"><summary>Current file path</summary><code>' + escapeHtmlText(progress.current_file) + '</code></details>' : '')
+            + '</div>'
+        : '';
+    body.innerHTML = '<dl class="job-details-facts">' + rows.join('') + '</dl>' + activity;
 }
 
 // Attempt-scope subtitle above the Logs viewer — orients the reader
@@ -591,6 +602,7 @@ async function showLogsModal(jobId) {
     _filePage = 1;
     _fileProcessedTotal = 0;
     _fileListTruncated = false;
+    _syncFilesTabCount();
     document.getElementById('fileResultsBody').innerHTML =
         '<tr><td colspan="5" class="text-muted text-center">Click to load file results</td></tr>';
     document.getElementById('fileResultsCount').textContent = '';
@@ -1596,7 +1608,7 @@ function _fileOutcomeMeta(key) {
 // Each job kind has its own outcomes; options tagged with another kind are hidden (untagged ones are shared).
 function _showFileOutcomesForKind(select, kind) {
     var current = kind === 'intro_credits' || kind === 'loudness' ? kind : 'previews';
-    Array.prototype.forEach.call(select.options, function (opt) {
+    Array.prototype.forEach.call(select.querySelectorAll('option, optgroup'), function (opt) {
         var other = !!opt.dataset.kind && opt.dataset.kind !== current;
         opt.hidden = other;
         opt.disabled = other;
@@ -1652,6 +1664,7 @@ function _renderRequestedPaths(data) {
     _fileListTruncated = false;
     _fileProcessedTotal = 0;
     _fileResultsLoaded = true;
+    _syncFilesTabCount();
     const offset = (_filePage - 1) * _filePerPage;
     const page = data ? data.files.map(file => file.file) : matches.slice(offset, offset + _filePerPage);
     document.getElementById('fileResultsBody').innerHTML = page.length ? page.map(path => {
@@ -1670,8 +1683,14 @@ function _syncJobDetailsFooter(filesActive = document.getElementById('filesTab')
     const footer = document.querySelector('#logsModal .modal-footer');
     if (!footer) return;
     footer.dataset.tab = filesActive ? 'files' : 'logs';
-    footer.querySelectorAll('[data-logs-footer]').forEach(node => { node.hidden = filesActive; });
-    footer.querySelectorAll('[data-files-footer]').forEach(node => { node.hidden = !filesActive; });
+}
+
+// The Files tab carries the number of files so the count is visible before the tab is opened.
+function _syncFilesTabCount() {
+    const badge = document.getElementById('filesTabCount');
+    if (!badge) return;
+    badge.hidden = !_fileResultsLoaded || !_fileTotal;
+    badge.textContent = _fileTotal ? _fileTotal.toLocaleString() : '';
 }
 
 // Bootstrap keyboard and programmatic tab selection follow the same footer state.
@@ -1730,6 +1749,7 @@ async function refreshFileResults() {
         _fileTotal = data.total || 0;
         _fileProcessedTotal = data.processed_total || 0;
         _fileListTruncated = !!data.list_truncated;
+        _syncFilesTabCount();
 
         renderFileResultsTable(data.files || []);
         renderFilePagination();

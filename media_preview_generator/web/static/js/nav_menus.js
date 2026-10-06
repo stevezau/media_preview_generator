@@ -2,7 +2,7 @@
  *
  * At the navbar's expanded width (xl, 1200px and up) the word is a plain link to its page (Tools: to its first
  * item), and its list (the page's sections; Tools: its pages) opens on hover, or from the keyboard with ArrowDown /
- * ArrowUp / Space. Escape closes it.
+ * ArrowUp / Space, or a click on the caret. Escape closes it.
  * Below xl the same lists sit in the offcanvas phone menu, where a tap on the word expands them like the other
  * groups there.
  *
@@ -19,6 +19,7 @@
     // Time for the pointer to cross the gap between the word and its list, or clip the next item on a diagonal.
     var CLOSE_DELAY_MS = 250;
     var LANDING_HOLD_MS = 10000;
+    var CARET_WIDTH_PX = 18;
     var expandedNavbar = window.matchMedia('(min-width: 1200px)');
     var menus = [];
 
@@ -81,8 +82,16 @@
             else clearTimeout(timer);
         });
 
+        // The caret sits in the link's right padding. A click on it opens the list for touch and laptops, where
+        // hover never fires; a click on the word still follows the link.
+        function onCaret(event) {
+            var rect = toggle.getBoundingClientRect();
+            var pad = parseFloat(window.getComputedStyle(toggle).paddingRight) || 0;
+            return event.clientX >= rect.right - pad - CARET_WIDTH_PX;
+        }
+
         toggle.addEventListener('click', function (event) {
-            if (expandedNavbar.matches) return;
+            if (expandedNavbar.matches && !onCaret(event)) return;
             event.preventDefault();
             if (isOpen()) close();
             else open();

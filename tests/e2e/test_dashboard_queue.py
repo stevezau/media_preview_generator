@@ -129,3 +129,87 @@ class TestClearJobsMenu:
         authed_page.locator("#appConfirmModalOkBtn").click()
         expect(authed_page.locator("#toastBody")).to_contain_text("Cleared 20 failed jobs")
         assert cleared == [{"statuses": ["failed"]}]
+
+
+_STATUS_ROWS = [
+    ("Completed with warnings", {"status": "completed", "error": "chapter thumbnails failed"}),
+    ("Completed", {"status": "completed"}),
+    ("Cancelled", {"status": "cancelled"}),
+    ("Failed", {"status": "failed", "error": "boom"}),
+    ("Paused", {"status": "running", "paused": True}),
+    ("Running", {"status": "running"}),
+    ("Pending", {"status": "pending"}),
+]
+
+
+@pytest.mark.e2e
+class TestStatusPillFit:
+    @pytest.mark.parametrize("width", [1920, 1440, 1280, 1100])
+    def test_status_pill_stays_inside_its_cell_and_clear_of_priority_when_width_is_narrow(
+        self, dashboard: Callable[..., Page], width: int
+    ) -> None:
+        jobs = [_job(f"row-{i}", **overrides) for i, (_label, overrides) in enumerate(_STATUS_ROWS)]
+        page = dashboard(jobs)
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.locator("#jobStatusFilter").select_option(label="All jobs and history")
+        for i, (label, _overrides) in enumerate(_STATUS_ROWS):
+            row = page.locator(f"#job-row-row-{i}")
+            expect(row).to_be_visible()
+            pill = row.locator(".queue-status .status-dot")
+            expect(pill).to_have_attribute("aria-label", label)
+            pill_box = pill.bounding_box()
+            cell_box = row.locator("td.queue-status").bounding_box()
+            priority_box = row.locator("td.queue-priority").bounding_box()
+            assert pill_box["x"] + pill_box["width"] <= cell_box["x"] + cell_box["width"] + 0.5, label
+            assert pill_box["x"] + pill_box["width"] <= priority_box["x"] + 0.5, label
+            assert pill.evaluate(
+                "el => el.querySelector('.status-label').scrollWidth <= el.querySelector('.status-label').clientWidth"
+            ), f"{label} label is truncated at {width}px"
+
+
+@pytest.mark.e2e
+class TestQueueToolbar:
+    def test_toolbar_is_two_rows_with_count_inline_when_filters_are_active(
+        self, dashboard: Callable[..., Page]
+    ) -> None:
+        page = dashboard([_job("a", status="running")])
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.locator("#jobSearch").fill("zzz")
+        expect(page.locator("#jobFilterCount")).to_be_visible()
+        expect(page.locator("#clearJobFilters")).to_be_visible()
+        box = lambda selector: page.locator(selector).bounding_box()  # noqa: E731
+        tabs, search, count, clear = (
+            box("#jobStatusTabs"),
+            box("#jobSearch"),
+            box("#jobFilterCount"),
+            box("#clearJobFilters"),
+        )
+        assert tabs["y"] + tabs["height"] <= search["y"]
+        for selector in ("#jobServerFilter", "#jobLibraryFilter", "#jobKindFilter"):
+            select = box(selector)
+            assert abs(select["y"] - search["y"]) < 6, selector
+            assert 150 <= select["width"] <= 170, selector
+        assert abs(count["y"] - search["y"]) < 12 and abs(clear["y"] - search["y"]) < 12
+        assert count["x"] > clear["x"]
+        queue_tools = box(".queue-tools")
+        assert queue_tools["height"] < 130
+
+    def test_selects_fold_into_filters_button_with_active_count_when_viewport_is_narrow(
+        self, dashboard: Callable[..., Page]
+    ) -> None:
+        page = dashboard([_job("a", status="running")])
+        page.set_viewport_size({"width": 800, "height": 900})
+        toggle = page.locator("#queueFiltersToggle")
+        expect(toggle).to_be_visible()
+        expect(page.locator("#jobServerFilter")).to_be_hidden()
+        toggle.click()
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        page.locator("#jobKindFilter").select_option("previews")
+        expect(toggle).to_contain_text("Filters (1)")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+    def test_filters_button_is_hidden_when_viewport_is_wide(self, dashboard: Callable[..., Page]) -> None:
+        page = dashboard([_job("a", status="running")])
+        page.set_viewport_size({"width": 1440, "height": 900})
+        expect(page.locator("#queueFiltersToggle")).to_be_hidden()
+        expect(page.locator("#jobServerFilter")).to_be_visible()

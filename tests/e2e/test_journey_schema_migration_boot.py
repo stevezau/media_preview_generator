@@ -94,7 +94,7 @@ def _start_app_for_migration(config_dir: Path, port: int) -> subprocess.Popen:
         [
             sys.executable,
             "-c",
-            app_boot_payload(port, host="0.0.0.0"),
+            app_boot_payload(port),
         ],
         env=env,
         stdout=subprocess.PIPE,

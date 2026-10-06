@@ -69,6 +69,7 @@
     // ---------- list rendering -------------------------------------------------
     async function loadServers() {
         const list = $('#serverList');
+        list.className = 'srv-grid';
         list.innerHTML = '<div class="srv-state text-muted"><div class="spinner-border" role="status"></div></div>';
         const r = await api('GET', '/api/servers');
         if (!r.ok) {
@@ -77,6 +78,8 @@
         }
         const servers = (r.data && r.data.servers) || [];
         if (servers.length === 0) {
+            list.className = 'srv-grid';
+            renderServerSummary([]);
             list.innerHTML = `
                 <div class="srv-state">
                     <div class="srv-empty">
@@ -90,15 +93,15 @@
                 </div>`;
             return;
         }
-        list.innerHTML = servers.map(serverCard).join('');
+        // One or two servers get roomy full-width rows; from three the cards form a grid. Both carry the same ids,
+        // classes and data attributes, so every handler below (and the probes) work on either.
+        const asRows = servers.length <= ROW_LAYOUT_MAX;
+        list.className = asRows ? 'srv-rows' : 'srv-grid';
+        list.innerHTML = servers.map(asRows ? serverRow : serverCard).join('') + (asRows ? addServerRow() : addServerTile());
+        renderServerSummary(servers);
         $$('.delete-server-btn').forEach((btn) => {
-            btn.addEventListener('click', async (ev) => {
-                const id = ev.currentTarget.dataset.id;
-                const name = ev.currentTarget.dataset.name;
-                if (!await appConfirm(`Delete media server "${name}"? Previews already published to this server stay on disk; this only removes the configuration entry.`, { title: 'Delete media server', confirmText: 'Delete' })) return;
-                const r = await api('DELETE', `/api/servers/${encodeURIComponent(id)}`);
-                if (r.ok) loadServers();
-                else showToast('Delete failed', `${(r.data && r.data.error) || r.status}`, 'danger');
+            btn.addEventListener('click', (ev) => {
+                deleteServerWithConfirm(ev.currentTarget.dataset.id, ev.currentTarget.dataset.name);
             });
         });
         $$('.edit-server-btn').forEach((btn) => {
@@ -153,7 +156,10 @@
                     const label = target.parentElement.querySelector('label');
                     if (label) label.textContent = enabled ? 'Enabled' : 'Disabled';
                     const card = target.closest('.srv-card');
-                    if (card) card.classList.toggle('off', !enabled);
+                    if (card) {
+                        card.classList.toggle('off', !enabled);
+                        delete card.dataset.conn;
+                    }
                     showToast('Server updated', `${enabled ? 'Enabled' : 'Disabled'} successfully`, 'success');
                     // Re-probe connection status — disabled servers shouldn't
                     // probe (we'd hit a server the user just paused).
@@ -235,6 +241,14 @@
         dot.className = `srv-dot ${tone}`.trim();
         dot.title = label;
         dot.setAttribute('aria-label', label);
+        const statusText = document.getElementById(`server-status-text-${serverId}`);
+        if (statusText) {
+            statusText.textContent = ok === false ? 'Unreachable' : ok === null ? 'Disabled' : 'Connected';
+            statusText.classList.toggle('bad', ok === false);
+        }
+        const card = dot.closest('.srv-card');
+        if (card) card.dataset.conn = ok === false ? 'bad' : ok === null ? 'off' : 'ok';
+        refreshServerSummary();
 
         const error = document.getElementById(`server-error-${serverId}`);
         if (error) {
@@ -323,9 +337,17 @@
         if (!glyph) return;
         // Disabled cards and failed probes hide the pill: the dot and error row already say what is wrong. The
         // marker class stays so a re-render that looks for .server-readiness-glyph still finds it.
+        const note = document.getElementById(`server-health-note-${serverId}`);
+        const setNote = (text, tone) => {
+            if (!note) return;
+            note.textContent = text;
+            note.className = `srv-health-note${tone ? ` ${tone}` : ''}`;
+        };
         if (info === null || info.unknown) {
             glyph.className = 'server-readiness-glyph d-none';
             glyph.removeAttribute('data-state');
+            setNote(info === null ? 'Not checked while disabled' : '', '');
+            refreshServerSummary();
             return;
         }
         // A healthy server shows no pill; the green dot already says so.
@@ -340,17 +362,17 @@
         } else {
             glyph.className = 'server-readiness-glyph d-none';
         }
+        if (info.state === 'ok') setNote('Setup is healthy', 'ok');
+        else setNote('Open to review and fix', '');
         glyph.title = info.tooltip || '';
         glyph.setAttribute('aria-label', info.tooltip || '');
+        refreshServerSummary();
     }
 
     function serverCard(server) {
         const libCount = (server.libraries || []).length;
         const enabledLibs = (server.libraries || []).filter((l) => l.enabled).length;
-        const vendor = (server.type || '').toLowerCase();
-        const vendorLogo = ['plex', 'emby', 'jellyfin'].includes(vendor)
-            ? `<img src="/static/images/vendors/${escapeHtml(vendor)}.svg" alt="${escapeHtml(server.type)}" width="22" height="22">`
-            : '<i class="bi bi-hdd-network"></i>';
+        const vendorLogo = vendorLogoHtml(server);
         const id = escapeHtml(server.id);
         const name = escapeHtml(server.name);
         const statusPillId = `server-status-${id}`;
@@ -405,6 +427,178 @@
         `;
     }
 
+    // Below this many servers the list shows roomy rows; from here up it is a grid of cards.
+    const ROW_LAYOUT_MAX = 2;
+    const VENDOR_NAMES = { plex: 'Plex', emby: 'Emby', jellyfin: 'Jellyfin' };
+
+    function vendorLogoHtml(server) {
+        const vendor = (server.type || '').toLowerCase();
+        return VENDOR_NAMES[vendor]
+            ? `<img src="/static/images/vendors/${escapeHtml(vendor)}.svg" alt="${escapeHtml(server.type)}" width="22" height="22">`
+            : '<i class="bi bi-hdd-network"></i>';
+    }
+
+    // What this server receives, from the settings the list already carries (no counts: those are not in the data).
+    function sendsChipsHtml(server) {
+        const vendor = (server.type || '').toLowerCase();
+        const enabledLibs = (server.libraries || []).filter((l) => l.enabled).length;
+        const chip = (cls, icon, label, on) => `<span class="srv-fchip ${cls}${on ? '' : ' off'}"><i class="bi ${icon}"></i>${label} <span class="srv-fchip-st">${on ? 'on' : 'off'}</span></span>`;
+        let html = chip('pv', 'bi-images', 'Previews', enabledLibs > 0)
+            + chip('mk', 'bi-skip-forward-fill', 'Intro &amp; Credits', !!(server.markers && server.markers.enabled));
+        if (vendor === 'plex') {
+            html += chip('ld', 'bi-volume-up', 'Loudness', !!(server.loudness && server.loudness.enabled))
+                + chip('ch', 'bi-card-image', 'Chapter thumbnails', !!(server.output && server.output.chapter_thumbnails));
+        }
+        return `<span class="srv-k">Sends</span>${html}`;
+    }
+
+    function libraryChipsHtml(libraries) {
+        const shown = libraries.slice(0, 6).map((l) => `<span class="srv-chip${l.enabled ? '' : ' x'}" title="${escapeHtml(l.name || l.id || '')}">${escapeHtml(l.name || l.id || 'unnamed')}</span>`).join('');
+        return libraries.length > 6 ? `${shown}<span class="srv-chip more">+${libraries.length - 6} more</span>` : shown;
+    }
+
+    function libraryBarHtml(libraries, enabledLibs) {
+        const segs = libraries.map((l) => `<i class="${l.enabled ? '' : 'x'}"></i>`).join('');
+        return `<div class="srv-segbar${enabledLibs < libraries.length ? ' bad' : ''}" aria-hidden="true">${segs}</div>`;
+    }
+
+    // Roomy layout for one or two servers. Same ids, classes and data attributes as serverCard (it is still a
+    // .srv-card), plus a column of library chips, a health column and the "Sends" strip.
+    function serverRow(server) {
+        const libraries = server.libraries || [];
+        const libCount = libraries.length;
+        const enabledLibs = libraries.filter((l) => l.enabled).length;
+        const vendor = (server.type || '').toLowerCase();
+        const id = escapeHtml(server.id);
+        const name = escapeHtml(server.name);
+        return `
+            <article class="card srv-card${server.enabled ? '' : ' off'}" data-id="${id}" data-layout="row">
+                <div class="srv-r-id">
+                    <span class="srv-vlogo srv-vlogo-lg">${vendorLogoHtml(server)}</span>
+                    <div class="srv-r-meta">
+                        <h2 class="srv-name" title="${name}">${name}</h2>
+                        <div class="srv-r-status">
+                            <span class="srv-dot" id="server-status-${id}" role="img" aria-label="Checking connection" title="Checking connection"></span>
+                            <span id="server-status-text-${id}">Checking…</span>
+                            <span class="srv-faint">· ${escapeHtml(VENDOR_NAMES[vendor] || server.type || '')} · <span id="server-checked-${id}"></span></span>
+                        </div>
+                        <div class="srv-host" title="${escapeHtml(server.url)}">${escapeHtml(server.url)}</div>
+                    </div>
+                </div>
+                <div class="srv-r-libs">
+                    <span class="srv-k">Libraries</span>
+                    <div class="srv-r-libhead">
+                        <span class="srv-lib-num${enabledLibs < libCount ? ' warn' : ''}">${enabledLibs}</span>
+                        <span class="srv-lib-sub">of ${libCount} ${libCount === 1 ? 'library' : 'libraries'} enabled</span>
+                    </div>
+                    ${libraryBarHtml(libraries, enabledLibs)}
+                    <div class="srv-chips">${libraryChipsHtml(libraries)}</div>
+                </div>
+                <div class="srv-r-health">
+                    <span class="srv-k">Setup health</span>
+                    <div class="srv-issue">
+                        <span class="server-readiness-glyph d-none"
+                              id="server-readiness-${id}"
+                              data-id="${id}"
+                              role="button"
+                              tabindex="0"></span>
+                        <span class="pill bad d-none" id="server-error-${id}"><i class="bi bi-x-circle-fill"></i><span></span></span>
+                    </div>
+                    <span class="srv-health-note" id="server-health-note-${id}"></span>
+                </div>
+                <div class="srv-r-acts">
+                    <div class="form-check form-switch mb-0" title="Quick enable/disable — when off, this server is ignored by all jobs and webhooks">
+                        <input class="form-check-input server-enabled-toggle" type="checkbox"
+                               id="server-enabled-${id}" data-id="${id}"
+                               ${server.enabled ? 'checked' : ''}>
+                        <label class="form-check-label visually-hidden" for="server-enabled-${id}">${server.enabled ? 'Enabled' : 'Disabled'}</label>
+                    </div>
+                    <div class="srv-r-btns">
+                        <button type="button" class="ibtn edit-server-btn" data-id="${id}"
+                                aria-label="Edit ${name}" title="Edit">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        <button type="button" class="ibtn refresh-libraries-btn" data-id="${id}"
+                                aria-label="Refresh libraries for ${name}" title="Refresh libraries">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                        <button type="button" class="ibtn danger delete-server-btn" data-id="${id}"
+                                data-name="${name}" aria-label="Delete ${name}" title="Delete">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="srv-r-sends">${sendsChipsHtml(server)}</div>
+            </article>
+        `;
+    }
+
+    function addServerVendorLogos() {
+        return ['plex', 'emby', 'jellyfin'].map((v) => `<span class="srv-vlogo srv-vlogo-sm"><img src="/static/images/vendors/${v}.svg" alt="" width="16" height="16"></span>`).join('');
+    }
+
+    function addServerTile() {
+        return `
+            <button type="button" class="srv-addtile" data-bs-toggle="modal" data-bs-target="#addServerModal">
+                <span class="srv-plus"><i class="bi bi-plus-lg"></i></span>
+                <strong>Add server</strong>
+                <span>Connect another Plex, Emby or Jellyfin.</span>
+                <span class="srv-vs">${addServerVendorLogos()}</span>
+            </button>`;
+    }
+
+    function addServerRow() {
+        return `
+            <button type="button" class="srv-addrow" data-bs-toggle="modal" data-bs-target="#addServerModal">
+                <span class="srv-plus"><i class="bi bi-plus-lg"></i></span>
+                <span class="srv-addrow-text"><strong>Add another server</strong>Plex, Emby or Jellyfin. Frames are extracted once and reused across servers.</span>
+                <span class="srv-vs">${addServerVendorLogos()}</span>
+            </button>`;
+    }
+
+    // Summary strip above the list: counts come from the server list; the attention count follows the probes.
+    function renderServerSummary(servers) {
+        const el = document.getElementById('serverSummary');
+        if (!el) return;
+        if (!servers.length) {
+            el.innerHTML = '';
+            return;
+        }
+        const libs = servers.reduce((n, sv) => n + (sv.libraries || []).filter((l) => l.enabled).length, 0);
+        el.innerHTML = `<span><b>${servers.length}</b> ${servers.length === 1 ? 'server' : 'servers'}</span>`
+            + '<span class="srv-sep"></span>'
+            + `<span><b>${libs}</b> ${libs === 1 ? 'library' : 'libraries'} enabled</span>`
+            + '<span class="srv-sep"></span>'
+            + '<span id="serverSummaryStatus" role="status">Checking servers…</span>';
+    }
+
+    function refreshServerSummary() {
+        const el = document.getElementById('serverSummaryStatus');
+        if (!el) return;
+        const cards = $$('#serverList .srv-card').filter((c) => !c.classList.contains('off'));
+        const pending = cards.filter((c) => !c.dataset.conn).length;
+        const attention = cards.filter((c) => {
+            if (c.dataset.conn === 'bad') return true;
+            const g = c.querySelector('.server-readiness-glyph');
+            return !!g && (g.dataset.state === 'critical' || g.dataset.state === 'recommended');
+        }).length;
+        if (attention > 0) el.innerHTML = `<b class="srv-warn">${attention}</b> need${attention === 1 ? 's' : ''} attention`;
+        else if (pending > 0) el.textContent = 'Checking servers…';
+        else el.innerHTML = '<b class="srv-ok">All</b> healthy';
+    }
+
+    // Shared by the card's trash button and the Delete button in the Edit modal. Resolves true when deleted.
+    async function deleteServerWithConfirm(id, name) {
+        if (!await appConfirm(`Delete media server "${name}"? Previews already published to this server stay on disk; this only removes the configuration entry.`, { title: 'Delete media server', confirmText: 'Delete' })) return false;
+        const r = await api('DELETE', `/api/servers/${encodeURIComponent(id)}`);
+        if (r.ok) {
+            if (document.getElementById('serverList')) loadServers();
+            return true;
+        }
+        showToast('Delete failed', `${(r.data && r.data.error) || r.status}`, 'danger');
+        return false;
+    }
+
     function escapeHtml(s) {
         return String(s == null ? '' : s)
             .replace(/&/g, '&amp;')
@@ -432,6 +626,66 @@
     function showStep(stepId) {
         $$('.server-step').forEach((s) => s.classList.add('d-none'));
         $('#' + stepId).classList.remove('d-none');
+        updateAddHeader(stepId);
+    }
+
+    // The modal's header tile, title, subtitle and three-step rail follow the step. Absent on /setup, which inlines
+    // only the form.
+    const ADD_STEP_INDEX = { 'step-type': 0, 'step-connect': 1, 'step-result': 2 };
+    const ADD_CONNECT_SUBTITLES = {
+        plex: 'Sign in with Plex, or enter the URL and token',
+        emby: 'Enter the URL and a login or API key',
+        jellyfin: 'Enter the URL, then use Quick Connect, a login or an API key',
+    };
+
+    function updateAddHeader(stepId, { failed = false } = {}) {
+        const tile = document.getElementById('addServerLogoTile');
+        if (!tile) return;
+        const index = ADD_STEP_INDEX[stepId] || 0;
+        const vendor = index === 0 ? '' : (wizard.type || '');
+        tile.dataset.vendor = vendor;
+        tile.innerHTML = vendor
+            ? `<img src="/static/images/vendors/${escapeHtml(vendor)}.svg" alt="" width="28" height="28">`
+            : '<i class="bi bi-plus-lg"></i>';
+        const vendorName = VENDOR_NAMES[vendor] || '';
+        const title = document.getElementById('serverModalTitle');
+        if (title) title.textContent = vendorName ? `Add ${vendorName} server` : 'Add Server';
+        const sub = document.getElementById('serverModalSubtitle');
+        if (sub) {
+            sub.textContent = index === 0
+                ? 'Choose which media server to connect'
+                : index === 1
+                    ? (ADD_CONNECT_SUBTITLES[vendor] || '')
+                    : (failed ? 'Fix the connection and try again' : 'Review the details, then save');
+        }
+        const rail = document.getElementById('addServerProgress');
+        if (rail) {
+            rail.style.setProperty('--p', String(index / 2));
+            $$('.sm-prog-st', rail).forEach((li, i) => {
+                li.classList.toggle('done', i < index);
+                li.classList.toggle('on', i === index);
+                if (i === index) li.setAttribute('aria-current', 'step');
+                else li.removeAttribute('aria-current');
+            });
+        }
+    }
+
+    function resetQuickConnectCard() {
+        if (wizard.quickConnectPoll) {
+            clearInterval(wizard.quickConnectPoll);
+            wizard.quickConnectPoll = null;
+        }
+        wizard.quickConnectSecret = null;
+        wizard.accessToken = null;
+        wizard.userId = null;
+        const code = document.getElementById('quickConnectCode');
+        if (code) {
+            code.className = 'sm-qc d-none';
+            code.innerHTML = '';
+            delete code.dataset.qc;
+        }
+        const idle = document.getElementById('quickConnectIdle');
+        if (idle) idle.classList.remove('d-none');
     }
 
     function resetWizard() {
@@ -453,12 +707,9 @@
         $('#authApiKey').value = '';
         $('#plexToken').value = '';
         $('#plexConfigFolder').value = '';
-        $('#quickConnectCode').classList.add('d-none');
-        $('#quickConnectCode').textContent = '';
-        if (wizard.quickConnectPoll) {
-            clearInterval(wizard.quickConnectPoll);
-            wizard.quickConnectPoll = null;
-        }
+        resetQuickConnectCard();
+        clearFormError();
+        $('#authApiKey').type = 'password';
     }
 
     // Switch the connection form into "connect to <vendor>" mode and reveal
@@ -485,19 +736,18 @@
         document.querySelectorAll('.processing-section-link').forEach((link) => {
             link.addEventListener('click', (event) => {
                 event.preventDefault();
-                const trigger = document.querySelector(`#editServerModal [data-bs-target="#edit-tab-${link.dataset.section}"]`);
-                if (trigger && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+                activateSection(`edit-tab-${link.dataset.section}`);
             });
         });
         const editSectionSelect = document.getElementById('editServerSectionSelect');
         if (editSectionSelect) {
-            editSectionSelect.addEventListener('change', () => {
-                const tab = document.querySelector(`#editServerModal [data-bs-target="#${editSectionSelect.value}"]`);
-                if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
-            });
+            editSectionSelect.addEventListener('change', () => activateSection(editSectionSelect.value));
             document.querySelectorAll('#editServerModal [data-bs-toggle="tab"]').forEach((tab) => {
                 tab.addEventListener('shown.bs.tab', (event) => {
                     editSectionSelect.value = (event.target.dataset.bsTarget || '').replace(/^#/, '');
+                    // A section opens at its top, whatever the one before it was scrolled to.
+                    const panes = document.querySelector('#editServerModal .sm-panes');
+                    if (panes) panes.scrollTop = 0;
                 });
             });
         }
@@ -519,6 +769,30 @@
             modalEl.addEventListener('show.bs.modal', resetWizard);
             modalEl.addEventListener('hidden.bs.modal', resetWizard);
         }
+
+        // Quick Connect card buttons (Add flow and Edit → Re-authenticate render the same card).
+        document.addEventListener('click', (ev) => {
+            const copy = ev.target.closest('.sm-qc-copy');
+            if (copy) {
+                const value = copy.dataset.code || '';
+                if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).catch(() => {});
+                copy.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
+                return;
+            }
+            const cancel = ev.target.closest('.sm-qc-cancel');
+            const retry = ev.target.closest('.sm-qc-retry');
+            const btn = cancel || retry;
+            if (!btn) return;
+            if (btn.dataset.qcTarget === 'edit') {
+                if (_editReauthQcPoll) { clearInterval(_editReauthQcPoll); _editReauthQcPoll = null; }
+                const status = document.getElementById('editReauthJfQcStatus');
+                if (cancel && status) { status.className = 'sm-status d-none'; status.innerHTML = ''; }
+                if (retry) _editReauthStartQuickConnect();
+            } else {
+                resetQuickConnectCard();
+                if (retry) startQuickConnect();
+            }
+        });
 
         $$('.server-type-btn').forEach((btn) => {
             btn.addEventListener('click', () => pickVendorAndAdvance(btn.dataset.type));
@@ -552,6 +826,14 @@
             });
         });
 
+        const apiKeyShow = document.getElementById('authApiKeyShow');
+        if (apiKeyShow) {
+            apiKeyShow.addEventListener('click', () => {
+                const input = $('#authApiKey');
+                input.type = input.type === 'password' ? 'text' : 'password';
+                apiKeyShow.innerHTML = `<i class="bi ${input.type === 'password' ? 'bi-eye' : 'bi-eye-slash'}"></i>`;
+            });
+        }
         $('#step-connect-test').addEventListener('click', testConnection);
         $('#step-result-back').addEventListener('click', () => showStep('step-connect'));
         $('#step-result-save').addEventListener('click', saveServer);
@@ -670,9 +952,9 @@
         // the linear flow: pick → Test connection → Save → (sign in
         // again to add another).
         list.innerHTML = servers.map((s, idx) => {
-            const ownedBadge = s.owned ? '<span class="badge bg-success">owned</span>' : '<span class="badge bg-secondary">shared</span>';
-            const localBadge = s.local ? '<span class="badge bg-info ms-1">local</span>' : '';
-            const sslBadge = s.ssl ? '<span class="badge bg-secondary ms-1">https</span>' : '';
+            const ownedBadge = s.owned ? '<span class="pill ok">owned</span>' : '<span class="pill">shared</span>';
+            const localBadge = s.local ? '<span class="pill run ms-1">local</span>' : '';
+            const sslBadge = s.ssl ? '<span class="pill ms-1">https</span>' : '';
             return `
                 <label class="list-group-item d-flex align-items-start gap-2">
                     <input type="radio" name="plexDiscoveredPick" class="form-check-input mt-1 plex-server-pick"
@@ -712,17 +994,26 @@
         });
     }
 
+    const PORT_HINTS = { plex: ':32400', emby: ':8096', jellyfin: ':8096' };
+
     function configureAuthForType(type) {
         const methodSection = $('#auth-method-section');
+        const plexConfig = document.getElementById('auth-fields-plex-config');
+        const trickplayNote = document.getElementById('auth-jellyfin-trickplay-note');
+        const portHint = document.getElementById('serverUrlPortHint');
+        if (portHint && PORT_HINTS[type]) portHint.innerHTML = `Default port: <code>${PORT_HINTS[type]}</code>`;
+        if (trickplayNote) trickplayNote.classList.toggle('d-none', type !== 'jellyfin');
         if (type === 'plex') {
             methodSection.classList.add('d-none');
             wizard.authMethod = 'token';
             $('#auth-fields-token-plex').classList.remove('d-none');
+            if (plexConfig) plexConfig.classList.remove('d-none');
             $('#auth-fields-password').classList.add('d-none');
             $('#auth-fields-api-key').classList.add('d-none');
             $('#auth-fields-quick-connect').classList.add('d-none');
         } else {
             methodSection.classList.remove('d-none');
+            if (plexConfig) plexConfig.classList.add('d-none');
             // Pick a sensible default per vendor.
             const defaultMethod = type === 'jellyfin' ? 'quick_connect' : 'password';
             wizard.authMethod = defaultMethod;
@@ -747,16 +1038,18 @@
         $('#auth-fields-api-key').classList.toggle('d-none', wizard.authMethod !== 'api_key');
         $('#auth-fields-quick-connect').classList.toggle('d-none', wizard.authMethod !== 'quick_connect');
         $('#auth-fields-token-plex').classList.toggle('d-none', wizard.authMethod !== 'token');
+        const plexConfig = document.getElementById('auth-fields-plex-config');
+        if (plexConfig) plexConfig.classList.toggle('d-none', wizard.authMethod !== 'token');
     }
 
     async function startQuickConnect() {
         const url = $('#serverUrl').value.trim();
         if (!url) { markFieldInvalid($('#serverUrl'), 'Enter the Jellyfin URL first.'); return; }
+        const card = $('#quickConnectCode');
         const r = await api('POST', '/api/servers/auth/jellyfin/quick-connect/initiate', { url });
         if (!r.ok || !r.data || !r.data.ok) {
-            $('#quickConnectCode').classList.remove('d-none');
-            $('#quickConnectCode').className = 'alert alert-danger';
-            $('#quickConnectCode').textContent = (r.data && r.data.message) || 'Quick Connect failed';
+            card.className = 'sm-status bad';
+            card.textContent = (r.data && r.data.message) || 'Quick Connect failed';
             return;
         }
         wizard.quickConnectSecret = r.data.secret;
@@ -769,19 +1062,14 @@
         const baseUrl = url.replace(/\/+$/, '');
         const qcUrl = baseUrl + '/web/#/quickconnect';
         try { window.open(qcUrl, '_blank', 'noopener,noreferrer'); } catch (_) { /* blocked */ }
-        $('#quickConnectCode').classList.remove('d-none');
-        $('#quickConnectCode').className = 'alert alert-info';
-        $('#quickConnectCode').innerHTML =
-            `Opened <a href="${escapeHtml(qcUrl)}" target="_blank" rel="noopener" class="alert-link">Jellyfin Quick Connect</a> in a new tab — log in if needed,
-             then paste this code: <strong class="fs-3">${escapeHtml(r.data.code)}</strong>.
-             Waiting for approval…
-             <div class="small text-muted mt-2">
-               <i class="bi bi-info-circle me-1"></i>After you log in: Jellyfin needs <em>Trickplay image extraction</em> enabled per library —
-               the Servers page has a one-click <strong>Fix trickplay</strong> button on each Jellyfin server card.
-             </div>`;
+        const idle = document.getElementById('quickConnectIdle');
+        if (idle) idle.classList.add('d-none');
+        card.className = 'sm-qc';
+        renderQuickConnect(card, 'waiting', { code: r.data.code, url: qcUrl, target: 'add' });
 
         // Poll every 2 seconds.
         if (wizard.quickConnectPoll) clearInterval(wizard.quickConnectPoll);
+        const startedAt = Date.now();
         wizard.quickConnectPoll = setInterval(async () => {
             const p = await api('POST', '/api/servers/auth/jellyfin/quick-connect/poll',
                 { url, secret: wizard.quickConnectSecret });
@@ -793,12 +1081,18 @@
                 if (e.ok && e.data && e.data.ok) {
                     wizard.accessToken = e.data.access_token;
                     wizard.userId = e.data.user_id;
-                    $('#quickConnectCode').className = 'alert alert-success';
-                    $('#quickConnectCode').innerHTML = `<i class="bi bi-check2-circle me-1"></i>Approved as ${escapeHtml(e.data.server_name || 'Jellyfin user')}.`;
+                    renderQuickConnect(card, 'approved', {
+                        code: r.data.code, url: qcUrl, target: 'add',
+                        who: e.data.server_name || 'Jellyfin user', after: 'Continue with Test connection.',
+                    });
                 } else {
-                    $('#quickConnectCode').className = 'alert alert-danger';
-                    $('#quickConnectCode').textContent = (e.data && e.data.message) || 'Token exchange failed';
+                    card.className = 'sm-status bad';
+                    card.textContent = (e.data && e.data.message) || 'Token exchange failed';
                 }
+            } else if (quickConnectExpired(p, startedAt)) {
+                clearInterval(wizard.quickConnectPoll);
+                wizard.quickConnectPoll = null;
+                renderQuickConnect(card, 'expired', { code: r.data.code, url: qcUrl, target: 'add' });
             }
         }, 2000);
     }
@@ -836,9 +1130,10 @@
 
         const r = await api('POST', '/api/servers/test-connection', payload);
         const result = $('#connectResult');
-        if (r.ok && r.data && r.data.ok) {
-            result.className = 'alert alert-success';
-            result.innerHTML = `<i class="bi bi-check2-circle me-1"></i>Connected to <strong>${escapeHtml(r.data.server_name || wizard.name)}</strong>${r.data.version ? ' (v' + escapeHtml(r.data.version) + ')' : ''}.`;
+        const connected = !!(r.ok && r.data && r.data.ok);
+        if (connected) {
+            result.className = 'sm-res';
+            result.innerHTML = connectResultSuccessHtml(payload, r.data);
             // The wizard used to render an inline "Jellyfin trickplay
             // disabled" warning + "Fix it for me" button here. The
             // button's only side-effect was setting a `_pendingTrickplayFix`
@@ -848,11 +1143,45 @@
             // modal (post-save) covers this case for every vendor and
             // every flag — so we drop the misleading wizard surfacing.
         } else {
-            result.className = 'alert alert-warning';
-            result.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml((r.data && r.data.message) || 'Connection failed')}`;
+            result.className = 'sm-res';
+            result.innerHTML = connectResultFailureHtml(payload, (r.data && r.data.message) || 'Connection failed');
         }
         wizard._lastTestPayload = payload;
         showStep('step-result');
+        updateAddHeader('step-result', { failed: !connected });
+    }
+
+    function connectResultSuccessHtml(payload, data) {
+        const signIn = {
+            token: 'Plex sign-in (token stored)',
+            api_key: 'API key (stored)',
+            password: 'Login (access token stored)',
+            quick_connect: 'Quick Connect (access token stored)',
+        }[(payload.auth || {}).method] || 'Credentials stored';
+        const folder = (payload.output || {}).plex_config_folder;
+        return `
+            <div class="sm-res-banner ok" id="connectResultMsg"><i class="bi bi-check-circle-fill"></i>
+                <div class="sm-res-msg"><b>Connected to <strong>${escapeHtml(data.server_name || wizard.name)}</strong>${data.version ? ' (v' + escapeHtml(data.version) + ')' : ''}.</b>
+                    <div class="sm-hint">Saving enables the server and opens its Setup Health check.</div></div></div>
+            <dl class="sm-res-dl">
+                <dt>Display name</dt><dd>${escapeHtml(payload.name)}</dd>
+                <dt>Server URL</dt><dd><code>${escapeHtml(payload.url)}</code></dd>
+                <dt>Sign-in</dt><dd>${escapeHtml(signIn)}</dd>
+                ${folder ? `<dt>Config folder</dt><dd><code>${escapeHtml(folder)}</code></dd>` : ''}
+            </dl>`;
+    }
+
+    function connectResultFailureHtml(payload, message) {
+        const port = PORT_HINTS[payload.type] || '';
+        return `
+            <div class="sm-res-banner bad" id="connectResultMsg"><i class="bi bi-x-octagon-fill"></i>
+                <div class="sm-res-msg"><b>Could not connect</b><div class="sm-hint">${escapeHtml(message)}</div></div></div>
+            <div class="sm-card"><div class="sm-card-b sm-res-tips">
+                <b>Check these first</b>
+                <span class="sm-hint">Is the URL reachable from inside this container? <code>localhost</code> is the container itself.</span>
+                <span class="sm-hint">Is the port right (${escapeHtml(port)} by default)?</span>
+                <span class="sm-hint">Self-signed HTTPS? Turn off certificate verification after saving.</span>
+            </div></div>`;
     }
 
     async function buildAuth() {
@@ -983,8 +1312,7 @@
         } catch (err) {
             if (urlInput) urlInput.value = '';
             if (hintEl) {
-                hintEl.classList.remove('alert-info');
-                hintEl.classList.add('alert-danger');
+                hintEl.className = 'sm-warnline bad';
                 hintEl.textContent = 'Could not load webhook info: ' + (err && err.message || err);
             }
             return;
@@ -997,8 +1325,7 @@
         // Settings → Authentication and pastes it into their plugin.
         if (headerNameEl) headerNameEl.textContent = info.auth_header_name || 'X-Auth-Token';
         if (hintEl) {
-            hintEl.classList.remove('alert-danger');
-            hintEl.classList.add('alert-info');
+            hintEl.className = 'sm-hint';
             const plugin = info.plugin || {};
             const installLink = plugin.install_url
                 ? ` <a href="${plugin.install_url}" target="_blank" rel="noopener">${escapeHtml(plugin.plugin_name || 'plugin')} install instructions ↗</a>`
@@ -1011,6 +1338,8 @@
         if (stepsEl) {
             const steps = (info.plugin || {}).config_steps || [];
             stepsEl.innerHTML = steps.map(s => '<li>' + escapeHtml(s) + '</li>').join('');
+            const stepsSummary = document.getElementById('editVendorWebhookStepsSummary');
+            if (stepsSummary) stepsSummary.textContent = steps.length ? `Setup steps (${steps.length})` : 'Setup steps';
         }
 
         if (copyBtn && urlInput) {
@@ -1052,9 +1381,8 @@
         ['editReauthJfQcStatus', 'editReauthJfPwStatus', 'editReauthEmbyPwStatus'].forEach((id) => {
             const el = document.getElementById(id);
             if (el) {
-                el.classList.add('d-none');
                 el.innerHTML = '';
-                el.className = 'alert alert-info d-none mt-2';
+                el.className = 'sm-status d-none mt-2';
             }
         });
         if (_editReauthQcPoll) {
@@ -1133,14 +1461,13 @@
             ? '/api/servers/auth/jellyfin/password'
             : '/api/servers/auth/emby/password';
         if (status) {
-            status.classList.remove('d-none');
-            status.className = 'alert alert-info mt-2';
+            status.className = 'sm-status mt-2';
             status.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Verifying…';
         }
         const r = await api('POST', endpoint, { url, username: u, password: p });
         if (!r.ok || !r.data || !r.data.ok) {
             if (status) {
-                status.className = 'alert alert-danger mt-2';
+                status.className = 'sm-status bad mt-2';
                 status.textContent = (r.data && r.data.message) || `Auth failed (HTTP ${r.status})`;
             }
             return;
@@ -1151,8 +1478,9 @@
             user_id: r.data.user_id,
         };
         document.getElementById('editReauthPending').value = JSON.stringify(payload);
+        setEditDirty(true);
         if (status) {
-            status.className = 'alert alert-success mt-2';
+            status.className = 'sm-status ok mt-2';
             status.innerHTML = '<i class="bi bi-check2-circle me-1"></i>Verified — click <strong>Save changes</strong> to apply.';
         }
     }
@@ -1163,8 +1491,7 @@
         const status = document.getElementById('editReauthJfQcStatus');
         const r = await api('POST', '/api/servers/auth/jellyfin/quick-connect/initiate', { url });
         if (!r.ok || !r.data || !r.data.ok) {
-            status.classList.remove('d-none');
-            status.className = 'alert alert-danger';
+            status.className = 'sm-status bad';
             status.textContent = (r.data && r.data.message) || 'Quick Connect failed';
             return;
         }
@@ -1172,12 +1499,11 @@
         const baseUrl = url.replace(/\/+$/, '');
         const qcUrl = baseUrl + '/web/#/quickconnect';
         try { window.open(qcUrl, '_blank', 'noopener,noreferrer'); } catch (_) { /* blocked */ }
-        status.classList.remove('d-none');
-        status.className = 'alert alert-info';
-        status.innerHTML =
-            `Opened <a href="${escapeHtml(qcUrl)}" target="_blank" rel="noopener" class="alert-link">Jellyfin Quick Connect</a> in a new tab — paste this code: <strong class="fs-3">${escapeHtml(r.data.code)}</strong>. Waiting for approval…`;
+        status.className = 'sm-qc sm-qc-edit';
+        renderQuickConnect(status, 'waiting', { code: r.data.code, url: qcUrl, target: 'edit' });
 
         if (_editReauthQcPoll) clearInterval(_editReauthQcPoll);
+        const startedAt = Date.now();
         _editReauthQcPoll = setInterval(async () => {
             const p = await api('POST', '/api/servers/auth/jellyfin/quick-connect/poll',
                 { url, secret: _editReauthQcSecret });
@@ -1192,14 +1518,197 @@
                         access_token: e.data.access_token,
                         user_id: e.data.user_id,
                     });
-                    status.className = 'alert alert-success';
-                    status.innerHTML = `<i class="bi bi-check2-circle me-1"></i>Approved as ${escapeHtml(e.data.server_name || 'Jellyfin user')} — click <strong>Save changes</strong> to apply.`;
+                    setEditDirty(true);
+                    renderQuickConnect(status, 'approved', {
+                        code: r.data.code, url: qcUrl, target: 'edit',
+                        who: e.data.server_name || 'Jellyfin user', after: 'Click Save changes to apply.',
+                    });
                 } else {
-                    status.className = 'alert alert-danger';
+                    status.className = 'sm-status bad';
                     status.textContent = (e.data && e.data.message) || 'Token exchange failed';
                 }
+            } else if (quickConnectExpired(p, startedAt)) {
+                clearInterval(_editReauthQcPoll);
+                _editReauthQcPoll = null;
+                renderQuickConnect(status, 'expired', { code: r.data.code, url: qcUrl, target: 'edit' });
             }
         }, 2000);
+    }
+
+    // ---------- Quick Connect card (Add flow and Edit → Re-authenticate share it) ------------------------------
+    const QC_LIFETIME_MS = 5 * 60 * 1000;
+
+    function quickConnectExpired(pollResponse, startedAt) {
+        const msg = String((pollResponse && pollResponse.data && pollResponse.data.message) || '');
+        return /expired|not found/i.test(msg) || Date.now() - startedAt > QC_LIFETIME_MS;
+    }
+
+    // Fills `el` (which already carries .sm-qc) for one of the three live states: waiting, approved, expired.
+    function renderQuickConnect(el, state, { code = '', url = '', target = 'add', who = '', after = '' } = {}) {
+        el.classList.remove('d-none');
+        el.dataset.qc = state;
+        const link = url
+            ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Jellyfin Quick Connect</a>`
+            : 'Jellyfin Quick Connect';
+        const pills = {
+            waiting: '<span class="pill run"><span class="sm-spin"></span> Waiting for approval</span>',
+            approved: '<span class="pill ok"><i class="bi bi-check-circle-fill"></i> Approved</span>',
+            expired: '<span class="pill bad"><i class="bi bi-clock-history"></i> Code expired</span>',
+        };
+        const messages = {
+            waiting: `Opened ${link} in a new tab — log in if needed, then enter this code in your Jellyfin profile menu.`,
+            approved: `<i class="bi bi-check2-circle me-1"></i>Approved as ${escapeHtml(who || 'Jellyfin user')}. ${escapeHtml(after)}`,
+            expired: 'The code timed out after 5 minutes. Get a new one.',
+        };
+        const copy = state === 'expired' ? '' : `<button type="button" class="btn btn-sm btn-outline-secondary sm-qc-copy" data-code="${escapeHtml(code)}"><i class="bi bi-clipboard me-1"></i>Copy</button>`;
+        const actions = state === 'waiting'
+            ? `<button type="button" class="btn btn-sm btn-outline-secondary sm-qc-cancel" data-qc-target="${target}">Cancel</button>`
+            : state === 'expired'
+                ? `<button type="button" class="btn btn-sm btn-primary sm-qc-retry" data-qc-target="${target}"><i class="bi bi-arrow-repeat me-1"></i>Get a new code</button>`
+                  + `<button type="button" class="btn btn-sm btn-outline-secondary sm-qc-cancel" data-qc-target="${target}">Cancel</button>`
+                : '';
+        el.innerHTML = `
+            <div class="sm-qc-row"><div class="sm-qc-code" aria-label="Quick Connect code">${escapeHtml(code)}</div>${copy}</div>
+            <div class="sm-hint">${messages[state]}</div>
+            <div class="sm-qc-foot">${pills[state]}<span>${actions}</span></div>`;
+    }
+
+    // ---------- Edit modal: dirty state, results, header, badges ----------------------------------------------
+    // Everything the Save button sends is edited in this one dialog, so one flag covers all seven sections.
+    let _editDirty = false;
+    let _editDiscardOk = false;
+
+    function setEditDirty(dirty) {
+        _editDirty = !!dirty;
+        const save = document.getElementById('editServerSave');
+        if (save && !save.dataset.busy) save.disabled = !_editDirty;
+        const flag = document.getElementById('editServerDirty');
+        if (flag) flag.classList.toggle('d-none', !_editDirty);
+        if (!_editDirty) {
+            const bar = document.getElementById('editServerDiscardBar');
+            if (bar) bar.classList.add('d-none');
+        }
+    }
+
+    // `kind` is bad | ok | warn; empty text hides the line.
+    function showEditResult(kind, html) {
+        const el = document.getElementById('editServerResult');
+        if (!el) return;
+        el.className = html ? kind : 'd-none';
+        el.innerHTML = html || '';
+    }
+
+    // The same call backs the rail, the phone strip and the (hidden) section select.
+    function activateSection(paneId) {
+        const trigger = document.querySelector(`#editServerModal [data-bs-target="#${paneId}"]`);
+        if (trigger && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+    }
+
+    function setEditStatusPill(tone, text) {
+        const pill = document.getElementById('editServerStatusPill');
+        if (!pill) return;
+        if (!text) {
+            pill.classList.add('d-none');
+            return;
+        }
+        pill.className = `pill ${tone}`.trim();
+        pill.querySelector('.sm-pill-text').textContent = text;
+    }
+
+    function setNavBadge(id, text, tone) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (text === '' || text == null) {
+            el.classList.add('d-none');
+            el.textContent = '';
+            return;
+        }
+        el.className = `sm-nb ${tone || ''}`.trim();
+        el.textContent = text;
+    }
+
+    function updateEditBadges() {
+        const toggles = $$('#editLibraryList .edit-lib-toggle');
+        if (toggles.length) {
+            const on = toggles.filter((t) => t.checked).length;
+            setNavBadge('editLibrariesTabBadge', `${on}/${toggles.length}`, on < toggles.length ? 'warn' : '');
+        } else {
+            setNavBadge('editLibrariesTabBadge', '');
+        }
+        const maps = readPathMappingsFromForm().length;
+        setNavBadge('editPathsTabBadge', maps > 0 ? String(maps) : '');
+        const rules = readExcludePathsFromForm().length;
+        setNavBadge('editExcludesTabBadge', rules > 0 ? String(rules) : '');
+    }
+
+    // Grey until something is set up, green when a Plex webhook is registered or a scanner exists.
+    function updateAutomationDot() {
+        const dot = document.getElementById('editAutomationTabDot');
+        if (!dot) return;
+        const registered = ((document.getElementById('plexWebhookStatusBadge') || {}).textContent || '').trim() === 'Registered';
+        const scanner = /active/i.test(((document.getElementById('recentlyAddedStatusBadge') || {}).textContent || ''));
+        dot.className = `sm-nb sm-nb-dot${registered || scanner ? ' ok' : ''}`;
+        dot.title = registered ? 'Webhook registered' : scanner ? 'Scanner active' : 'Nothing set up yet';
+    }
+
+    function renderEditCredentials(server) {
+        const method = String((server.auth || {}).method || '').toLowerCase();
+        const who = {
+            token: 'Signed in with a Plex token',
+            api_key: 'Using an API key',
+            password: 'Signed in with a login',
+            quick_connect: 'Signed in with Quick Connect',
+        }[method] || 'Credentials stored';
+        const hint = method === 'password' || method === 'quick_connect'
+            ? 'Access token stored; the password is never saved.'
+            : 'Stored; never shown in full.';
+        $('#editCredWho').textContent = who;
+        $('#editCredHint').textContent = hint;
+        setCredFormsOpen(false);
+    }
+
+    function setCredFormsOpen(open) {
+        const forms = document.getElementById('editReauthSection');
+        const btn = document.getElementById('editCredToggle');
+        if (forms) forms.classList.toggle('d-none', !open);
+        if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    // The URL is only checked here for a missing scheme; Test Connection does the real check.
+    function validateEditUrl() {
+        const input = document.getElementById('editServerUrl');
+        const msg = document.getElementById('editServerUrlMsg');
+        if (!input || !msg) return;
+        const value = input.value.trim();
+        const bad = value !== '' && !/^https?:\/\//i.test(value);
+        input.classList.toggle('is-invalid', bad);
+        msg.textContent = bad ? 'Start the address with http:// or https://' : '';
+        msg.classList.toggle('d-none', !bad);
+    }
+
+    function renderEditHeader(server) {
+        $('#editServerName').textContent = server.name || '';
+        // Long server names used to wrap the title onto two lines; the CSS truncates, and the full name stays on hover.
+        const nameWrap = $('#editServerNameWrap');
+        if (nameWrap) nameWrap.title = `Edit ${server.name || ''}`.trim();
+        const host = $('#editServerHostLine');
+        if (host) {
+            host.textContent = server.url || '';
+            host.title = server.url || '';
+        }
+        const vendorLogo = $('#editServerVendorLogo');
+        if (vendorLogo) {
+            const t = (server.type || '').toLowerCase();
+            if (VENDOR_NAMES[t]) {
+                vendorLogo.src = `/static/images/vendors/${t}.svg`;
+                vendorLogo.alt = t;
+                vendorLogo.classList.remove('d-none');
+            } else {
+                vendorLogo.classList.add('d-none');
+            }
+        }
+        setEditStatusPill('', server.enabled === false ? 'Disabled' : '');
+        $('#editServerModal').classList.toggle('sm-paused', server.enabled === false);
     }
 
     async function openEditModal(serverId, { openTab = 'general' } = {}) {
@@ -1221,29 +1730,7 @@
         const allServers = (listR.ok && listR.data && listR.data.servers) || [];
         _editState = { server, allServers };
 
-        $('#editServerName').textContent = server.name || '';
-        // Long server names (e.g. "My Plex Server In The Living Room With Lots Of Movies")
-        // used to wrap the modal title onto two lines because the inner span had no
-        // text-truncate. The CSS truncates with ellipsis; surface the full name on
-        // hover so the truncation isn't lossy.
-        const nameWrap = $('#editServerNameWrap');
-        if (nameWrap) {
-            nameWrap.title = `Edit ${server.name || ''}`.trim();
-        }
-        // Show the vendor logo next to the title — replaces the old text
-        // type-badge ("plex" / "emby" / "jellyfin") which was redundant
-        // because the icon already conveys the vendor.
-        const vendorLogo = $('#editServerVendorLogo');
-        if (vendorLogo) {
-            const t = (server.type || '').toLowerCase();
-            if (['plex', 'emby', 'jellyfin'].includes(t)) {
-                vendorLogo.src = `/static/images/vendors/${t}.svg`;
-                vendorLogo.alt = t;
-                vendorLogo.classList.remove('d-none');
-            } else {
-                vendorLogo.classList.add('d-none');
-            }
-        }
+        renderEditHeader(server);
         $('#editServerId').value = server.id || '';
         $('#editServerType').value = server.type || '';
         $('#editServerDisplayName').value = server.name || '';
@@ -1254,9 +1741,13 @@
         // the previous Edit doesn't carry over.
         const tcResult = document.getElementById('editTestConnectionResult');
         if (tcResult) {
-            tcResult.className = 'small text-muted';
+            tcResult.className = 'sm-tres';
             tcResult.textContent = '';
         }
+        validateEditUrl();
+        renderEditCredentials(server);
+        setEditDirty(false);
+        _editDiscardOk = false;
         // Unified "Previews readiness" card — one probe per modal open.
         // Fire-and-forget so the modal opens instantly; the card renders
         // itself when the probe returns. Disabled servers MUST NOT be
@@ -1279,13 +1770,18 @@
         $('#editPlexConfigGroup').classList.toggle('d-none', !isPlex);
         $('#processingChapters').classList.toggle('d-none', !isPlex);
         document.querySelectorAll('.processing-plex-link').forEach((link) => link.classList.toggle('d-none', !isPlex));
+        const featureNav = document.querySelector('#edit-tab-processing .processing-feature-nav');
+        if (featureNav) featureNav.classList.toggle('d-none', !isPlex);
         const previewOutput = $('#processingPreviewOutput');
         const previewDescriptions = {
-            plex: 'Plex BIF preview bundles are written to the Plex config folder in Connection.',
-            emby: 'Emby BIF previews are written beside each video. The media mount must be writable.',
-            jellyfin: 'Jellyfin trickplay tiles are written beside each video, or to the config folder selected in Connection. Setup Health checks the plugin and storage requirements.',
+            plex: ['Plex config folder (set in Connection)', 'Plex BIF preview bundles are written to the Plex config folder in Connection.'],
+            emby: ['Beside each video (the media mount must be writable)', 'Emby BIF previews are written beside each video. The media mount must be writable.'],
+            jellyfin: ['Beside each video, or Jellyfin\'s config folder', 'Jellyfin trickplay tiles are written beside each video, or to the config folder selected in Connection. Setup Health checks the plugin and storage requirements.'],
         };
-        previewOutput.textContent = previewDescriptions[(server.type || '').toLowerCase()] || 'Preview output follows this server’s configuration.';
+        const previewText = previewDescriptions[(server.type || '').toLowerCase()]
+            || ['Follows this server’s configuration', 'Preview output follows this server’s configuration.'];
+        previewOutput.textContent = previewText[0];
+        previewOutput.title = previewText[1];
 
         // Jellyfin-only: "store trickplay off the media drive" toggle + the
         // config-folder field it reveals. Mirrors the Plex config-folder block.
@@ -1371,8 +1867,7 @@
             $('#editPlexChapterThumbnails').checked = out.chapter_thumbnails === true;
             $('#editPlexChapterHealthLink').onclick = (event) => {
                 event.preventDefault();
-                const tab = document.querySelector('#editServerModal [data-bs-target="#edit-tab-health"]');
-                if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
+                activateSection('edit-tab-health');
             };
             const cfgInput = $('#editPlexConfigFolder');
             cfgInput.value = out.plex_config_folder || '';
@@ -1408,12 +1903,13 @@
         renderEditExcludePaths(server.exclude_paths || []);
         if (window.loadMarkersTab) window.loadMarkersTab(server);
         if (window.loadLoudnessTab) window.loadLoudnessTab(server);
-        $('#editServerResult').className = 'd-none';
-        $('#editServerResult').innerHTML = '';
+        showEditResult('', '');
 
         const modalEl = document.getElementById('editServerModal');
         const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
         modal.show();
+        updateEditBadges();
+        updateAutomationDot();
     }
 
     // Each row's Intro & Credits cell is left empty and hidden: markers_server_tab.js fills it
@@ -1422,6 +1918,7 @@
         const list = $('#editLibraryList');
         if (!libraries.length) {
             list.innerHTML = '<tr><td colspan="4" class="text-muted">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</td></tr>';
+            updateEditBadges();
             return;
         }
         list.innerHTML = libraries.map((lib, idx) => {
@@ -1430,11 +1927,11 @@
             <tr data-lib-id="${escapeHtml(lib.id || '')}"
                 data-lib-name="${escapeHtml(lib.name || '')}"
                 data-lib-kind="${escapeHtml(lib.kind || '')}">
-                <td class="text-break">
+                <td class="text-break" data-l="Library">
                     ${escapeHtml(label)}
                     <span class="badge bg-secondary ms-1">${escapeHtml(lib.kind || 'unknown')}</span>
                 </td>
-                <td class="text-center">
+                <td class="text-center sm-lib-sw" data-l="Previews">
                     <div class="form-check form-switch edit-lib-switch">
                         <input type="checkbox" role="switch" class="form-check-input edit-lib-toggle"
                                data-idx="${idx}"
@@ -1444,10 +1941,20 @@
                                ${lib.enabled ? 'checked' : ''}>
                     </div>
                 </td>
-                <td class="text-center markers-lib-col markers-lib-cell d-none"></td>
-                <td class="text-center loudness-lib-col loudness-lib-cell d-none"></td>
+                <td class="text-center markers-lib-col markers-lib-cell d-none" data-l="Intro &amp; Credits"></td>
+                <td class="text-center loudness-lib-col loudness-lib-cell d-none" data-l="Loudness"></td>
             </tr>`;
         }).join('');
+        updateEditBadges();
+    }
+
+    // The stacked (phone) layout hides the table header, so each cell carries its own label with the same ⓘ the
+    // header has. Hidden on desktop, where the header shows.
+    function cellLabel(text, tip, explain) {
+        const more = explain
+            ? ` data-explain-title="${escapeHtml(explain.title)}" data-explain-template="${escapeHtml(explain.template)}" aria-label="Explain ${escapeHtml(explain.title)}"`
+            : '';
+        return `<span class="sm-cell-lab">${escapeHtml(text)}<button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(tip)}"${more}><i class="bi bi-info-circle"></i></button></span>`;
     }
 
     function renderEditPathMappings(mappings) {
@@ -1467,9 +1974,10 @@
             ? row.webhook_prefixes.join('; ')
             : (row.webhook_prefixes || '');
         tr.innerHTML = `
-            <td><input type="text" class="form-control form-control-sm pm-remote" value="${escapeHtml(remoteVal)}" placeholder="/data_16tb/movies"></td>
-            <td>
-                <div class="input-group input-group-sm">
+            <td data-l="Path on Media Server">${cellLabel('Path on Media Server', 'The path your media server reports (what\'s stored in its database / shown in its admin UI).')}<input type="text" class="form-control form-control-sm pm-remote" value="${escapeHtml(remoteVal)}" placeholder="/data_16tb/movies"></td>
+            <td data-l="Local path on this app">
+                ${cellLabel('Local path on this app', 'The path the same file appears at INSIDE this app\'s container — i.e. the volume mount target.')}
+                <div class="input-group input-group-sm has-validation sm-vf">
                     <input type="text" class="form-control form-control-sm pm-local" value="${escapeHtml(localVal)}" placeholder="/mnt/plex/movies">
                     <button type="button" class="btn btn-outline-secondary pm-browse" title="Browse folders" aria-label="Browse folders">
                         <i class="bi bi-folder2-open"></i>
@@ -1478,10 +1986,10 @@
                     <div class="valid-feedback small">Path exists</div>
                 </div>
             </td>
-            <td><input type="text" class="form-control form-control-sm pm-webhook" value="${escapeHtml(webhookAliases)}" placeholder="/data" title="Optional. Webhook source prefix that resolves to this disk. Add another row for additional sources."></td>
-            <td><button type="button" class="btn btn-sm btn-outline-danger pm-remove" aria-label="Remove mapping" title="Remove mapping"><i class="bi bi-x-lg"></i></button></td>
+            <td data-l="Path on Apps (Sonarr, Radarr, Webhooks)">${cellLabel('Path on Apps (Sonarr, Radarr, Webhooks)', 'For Sonarr/Radarr/Tdarr webhooks that send a different path than your server reports.', { title: 'Webhook path mapping', template: 'infoWebhookPathTpl' })}<input type="text" class="form-control form-control-sm pm-webhook" value="${escapeHtml(webhookAliases)}" placeholder="/data" title="Optional. Webhook source prefix that resolves to this disk. Add another row for additional sources."></td>
+            <td class="sm-cell-x"><button type="button" class="btn btn-sm btn-outline-danger pm-remove" aria-label="Remove mapping" title="Remove mapping"><i class="bi bi-x-lg"></i></button></td>
         `;
-        tr.querySelector('.pm-remove').addEventListener('click', () => tr.remove());
+        tr.querySelector('.pm-remove').addEventListener('click', () => { tr.remove(); setEditDirty(true); updateEditBadges(); });
         const localInput = tr.querySelector('.pm-local');
         localInput.addEventListener('input', _debouncedValidatePath(localInput));
         if (localVal) _validateLocalPathInput(localInput);
@@ -1493,6 +2001,7 @@
             });
         });
         tbody.appendChild(tr);
+        if (typeof _initBootstrapTooltips === 'function') _initBootstrapTooltips(tr);
     }
 
     // Debounced inline validation of local-path inputs (path mappings + Plex
@@ -1602,16 +2111,17 @@
         const value = row.value || '';
         const type = row.type || 'path';
         tr.innerHTML = `
-            <td><input type="text" class="form-control form-control-sm ep-value" value="${escapeHtml(value)}" placeholder="/data/Trailers/"></td>
-            <td>
+            <td data-l="Value"><input type="text" class="form-control form-control-sm ep-value" value="${escapeHtml(value)}" placeholder="/data/Trailers/"></td>
+            <td data-l="Type">
+                ${cellLabel('Type', 'Path prefix skips everything under a folder; Regex matches the full file path.', { title: 'Exclude paths', template: 'infoExcludeTypeTpl' })}
                 <select class="form-select form-select-sm ep-type">
                     <option value="path" ${type === 'path' ? 'selected' : ''}>path (prefix)</option>
                     <option value="regex" ${type === 'regex' ? 'selected' : ''}>regex</option>
                 </select>
             </td>
-            <td><button type="button" class="btn btn-sm btn-outline-danger ep-remove" aria-label="Remove endpoint" title="Remove endpoint"><i class="bi bi-x-lg"></i></button></td>
+            <td class="sm-cell-x"><button type="button" class="btn btn-sm btn-outline-danger ep-remove" aria-label="Remove endpoint" title="Remove endpoint"><i class="bi bi-x-lg"></i></button></td>
         `;
-        tr.querySelector('.ep-remove').addEventListener('click', () => tr.remove());
+        tr.querySelector('.ep-remove').addEventListener('click', () => { tr.remove(); setEditDirty(true); updateEditBadges(); });
         tbody.appendChild(tr);
     }
 
@@ -1636,9 +2146,10 @@
         if (!_editState) return;
         const { server } = _editState;
         const opening = modalOpening(document.getElementById('editServerModal'));
-        const result = $('#editServerResult');
         const saveBtn = $('#editServerSave');
+        saveBtn.dataset.busy = '1';
         saveBtn.disabled = true;
+        showEditResult('', '');
         const orig = saveBtn.innerHTML;
         saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving…';
 
@@ -1709,6 +2220,7 @@
         if (window.markersNeedsPlexConfirmation && window.markersNeedsPlexConfirmation(server)) {
             const confirmed = await window.confirmPlexMarkers(server);
             if (!confirmed) {
+                delete saveBtn.dataset.busy;
                 saveBtn.disabled = false;
                 saveBtn.innerHTML = orig;
                 return;
@@ -1718,14 +2230,23 @@
         if (window.readLoudnessFromForm) payload.loudness = window.readLoudnessFromForm(server);
 
         const r = await api('PUT', `/api/servers/${encodeURIComponent(server.id)}`, payload);
-        saveBtn.disabled = false;
+        delete saveBtn.dataset.busy;
         saveBtn.innerHTML = orig;
+        // An answer that arrives after the user closed this dialog (and maybe opened another) must not touch the
+        // new one's state: only the opening the request started in gets the result.
+        const nowOpen = modalOpening(document.getElementById('editServerModal'));
+        const sameOpening = !!opening && !!nowOpen && nowOpen.count === opening.count;
+        saveBtn.disabled = sameOpening ? false : !_editDirty;
         if (r.ok) {
+            if (sameOpening) {
+                // Saved: nothing is left to discard, so the unsaved-changes guard must not stop the close.
+                _editDiscardOk = true;
+                setEditDirty(false);
+            }
             hideModalSafely(document.getElementById('editServerModal'), opening);
             loadServers();
-        } else {
-            result.className = 'alert alert-danger mt-2';
-            result.textContent = (r.data && r.data.error) || `Save failed (HTTP ${r.status})`;
+        } else if (sameOpening) {
+            showEditResult('bad', `<i class="bi bi-x-circle-fill me-1"></i>${escapeHtml((r.data && r.data.error) || `Save failed (HTTP ${r.status})`)}`);
         }
     }
 
@@ -1755,13 +2276,10 @@
         }
         btn.disabled = false;
         btn.innerHTML = orig;
-        const result = $('#editServerResult');
         if (failedList.length === 0) {
-            result.className = 'alert alert-success mt-2';
-            result.innerHTML = `<i class="bi bi-check2-circle me-1"></i>Copied ${field} to ${okList.length} other server${okList.length === 1 ? '' : 's'}.`;
+            showEditResult('ok', `<i class="bi bi-check2-circle me-1"></i>Copied ${escapeHtml(field)} to ${okList.length} other server${okList.length === 1 ? '' : 's'}.`);
         } else {
-            result.className = 'alert alert-warning mt-2';
-            result.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>Copied to ${okList.length}/${others.length} server${others.length === 1 ? '' : 's'}; failures:<br>${failedList.map(escapeHtml).join('<br>')}`;
+            showEditResult('warn', `<i class="bi bi-exclamation-triangle me-1"></i>Copied to ${okList.length}/${others.length} server${others.length === 1 ? '' : 's'}; failures: ${failedList.map(escapeHtml).join('; ')}`);
         }
     }
 
@@ -1866,24 +2384,30 @@
         const original = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Testing…';
-        result.className = 'small text-muted';
+        result.className = 'sm-tres';
         result.textContent = '';
         try {
             const r = await api('POST', `/api/servers/${encodeURIComponent(id)}/test-connection`);
             const data = r.data || {};
             if (data.ok) {
-                result.className = 'small text-success';
-                result.innerHTML = `<i class="bi bi-check-circle me-1"></i>Connected${data.version ? ` &mdash; ${escapeHtml(data.version)}` : ''}`;
+                result.className = 'sm-tres ok';
+                result.innerHTML = `<i class="bi bi-check-circle-fill"></i>Connected${data.version ? ` &mdash; ${escapeHtml(data.version)}` : ''}`;
+                setEditStatusPill('ok', 'Connected');
             } else {
-                result.className = 'small text-warning';
-                result.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml(data.message || 'Connection failed')}`;
+                result.className = 'sm-tres warn';
+                result.innerHTML = `<i class="bi bi-exclamation-triangle-fill"></i>${escapeHtml(data.message || 'Connection failed')}`;
+                setEditStatusPill('bad', 'Unreachable');
+                // A refused credential is the one case the credentials card is for: open it.
+                if (/\b401\b|unauthori[sz]ed|forbidden|invalid (token|api key|credential)|credentials?\b/i.test(String(data.message || ''))) {
+                    setCredFormsOpen(true);
+                }
             }
             // Plugin badge — only present in the response for Jellyfin
             // servers that connected successfully. updateJellyfinPluginPanel
             // hides the panel for non-Jellyfin and missing-plugin cases.
             updateJellyfinPluginPanel(data.plugin);
         } catch (e) {
-            result.className = 'small text-danger';
+            result.className = 'sm-tres bad';
             result.textContent = String(e);
         } finally {
             btn.disabled = false;
@@ -1931,10 +2455,11 @@
         group.classList.remove('d-none');
         fixCtl.classList.add('d-none');
         if (pluginCtl) pluginCtl.classList.add('d-none');
-        if (fixResult) { fixResult.className = 'small text-muted'; fixResult.textContent = ''; }
-        badge.className = 'badge ms-1 bg-secondary';
+        if (fixResult) { fixResult.className = 'sm-hint'; fixResult.textContent = ''; }
+        badge.className = 'pill';
         badge.textContent = 'disabled';
-        body.innerHTML = '<div class="small text-muted"><i class="bi bi-pause-circle me-1"></i>This server is disabled — checks are paused. Re-enable it on the Servers page to run readiness checks.</div>';
+        setNavBadge('editHealthTabMarker', '');
+        body.innerHTML = '<div class="sm-hint"><i class="bi bi-pause-circle me-1"></i>This server is disabled — checks are paused. Re-enable it with the switch above to run readiness checks.</div>';
         _readinessDataByServer.delete(serverId);
     }
 
@@ -1952,15 +2477,16 @@
         body.innerHTML = '';
         fixCtl.classList.add('d-none');
         if (pluginCtl) pluginCtl.classList.add('d-none');
-        if (fixResult) { fixResult.className = 'small text-muted'; fixResult.textContent = ''; }
-        badge.className = 'badge ms-1 bg-secondary';
+        if (fixResult) { fixResult.className = 'sm-hint'; fixResult.textContent = ''; }
+        badge.className = 'pill';
         badge.textContent = 'checking…';
 
         const r = await api('GET', `/api/servers/${encodeURIComponent(serverId)}/previews-readiness`);
         if (!r.ok || !r.data) {
-            badge.className = 'badge ms-1 bg-warning text-dark';
+            badge.className = 'pill warn';
             badge.textContent = 'unavailable';
-            body.innerHTML = '<div class="small text-muted">Could not reach the server. Check connection and try again.</div>';
+            body.innerHTML = '<div class="sm-hint">Could not reach the server. Check connection and try again.</div>';
+            setNavBadge('editHealthTabMarker', '');
             _readinessDataByServer.delete(serverId);
             return;
         }
@@ -2042,11 +2568,11 @@
         // `tier` is the stable string consumers key off (badge, tab marker, glyph) —
         // using it avoids substring-matching the Bootstrap class list, which
         // would break silently if someone ever added `bg-warning-subtle` etc.
-        if (anyCritical) return { tier: 'critical', cls: 'bg-danger', text: 'action needed' };
-        if (anyRecommended) return { tier: 'recommended', cls: 'bg-warning text-dark', text: 'recommendations' };
-        if (pluginInstalled === true) return { tier: 'ok', cls: 'bg-success', text: 'ready (instant)' };
-        if (pluginInstalled === false) return { tier: 'ok', cls: 'bg-success', text: 'ready (next scan)' };
-        return { tier: 'ok', cls: 'bg-success', text: 'ready' };
+        if (anyCritical) return { tier: 'critical', cls: 'bad', text: 'action needed' };
+        if (anyRecommended) return { tier: 'recommended', cls: 'warn', text: 'recommendations' };
+        if (pluginInstalled === true) return { tier: 'ok', cls: 'ok', text: 'ready (instant)' };
+        if (pluginInstalled === false) return { tier: 'ok', cls: 'ok', text: 'ready (next scan)' };
+        return { tier: 'ok', cls: 'ok', text: 'ready' };
     }
 
     // Renders the unified previews-readiness card. Walks data.sections[]
@@ -2070,28 +2596,9 @@
 
         // Badge.
         const badgeState = _deriveBadgeState(data);
-        badge.className = `badge ms-1 ${badgeState.cls}`;
+        badge.className = `pill ${badgeState.cls}`;
         badge.textContent = badgeState.text;
-
-        // Tab-label marker — stamp ❗ / ⚠ / ✓ next to "Setup Health"
-        // in the nav bar so the user sees there's something to
-        // address even when they're on a different tab.
-        const tabMarker = document.getElementById('editHealthTabMarker');
-        if (tabMarker) {
-            if (badgeState.tier === 'critical') {
-                tabMarker.className = 'ms-1 text-danger';
-                tabMarker.innerHTML = '<i class="bi bi-exclamation-triangle-fill"></i>';
-                tabMarker.title = 'Action needed';
-            } else if (badgeState.tier === 'recommended') {
-                tabMarker.className = 'ms-1 text-warning';
-                tabMarker.innerHTML = '<i class="bi bi-exclamation-circle-fill"></i>';
-                tabMarker.title = 'Recommendations';
-            } else {
-                tabMarker.className = 'ms-1 d-none';
-                tabMarker.innerHTML = '';
-                tabMarker.title = '';
-            }
-        }
+        setEditStatusPill('ok', 'Connected');
 
         // Bucket the checks once so each bucket can render its own
         // collapsible group with the right icon/colour/expanded state.
@@ -2100,6 +2607,13 @@
         //   Recommended   = !ok (anything not critical, including info)
         //   All good      = ok (everything passing or info-pass)
         const partition = _partitionChecks(sections);
+
+        // Count badge on the rail: red while anything must be fixed, amber for recommendations only, none when healthy.
+        if (partition.mustFix.length > 0) setNavBadge('editHealthTabMarker', String(partition.mustFix.length), 'bad');
+        else if (partition.recommended.length > 0) setNavBadge('editHealthTabMarker', String(partition.recommended.length), 'warn');
+        else setNavBadge('editHealthTabMarker', '');
+        const tabMarker = document.getElementById('editHealthTabMarker');
+        if (tabMarker) tabMarker.title = partition.mustFix.length ? 'Action needed' : partition.recommended.length ? 'Recommendations' : '';
 
         body.innerHTML = '';
         if (partition.mustFix.length > 0) {
@@ -2144,6 +2658,12 @@
                 emptyHint: '',
             }));
         }
+
+        // One amber "Apply recommended" per bucket (the first); the rest read as secondary.
+        body.querySelectorAll('.readiness-bucket').forEach((bucket) => {
+            const first = bucket.querySelector('.rd-acts .btn-warning');
+            if (first) first.classList.add('rd-primary');
+        });
 
         // Show the fix controls when there are fixable rows (any check
         // with an enable/disable action whose recommended-state flip is
@@ -2256,19 +2776,18 @@
     // without confusing them with passing-row checkmarks.
     function _renderBucket({ serverId, serverType, tier, title, items, expanded, badgeCls, iconHtml }) {
         const det = document.createElement('details');
-        det.className = 'readiness-bucket mb-2';
+        det.className = 'readiness-bucket';
         det.dataset.tier = tier;
         if (expanded) det.open = true;
 
         const sum = document.createElement('summary');
-        sum.className = 'd-flex align-items-center gap-2 py-1 px-2 rounded user-select-none';
-        sum.style.cursor = 'pointer';
+        sum.className = 'd-flex align-items-center gap-2 user-select-none';
         sum.innerHTML = `${iconHtml}<span class="fw-semibold">${escapeHtml(title)}</span>`
             + `<span class="badge ${badgeCls} ms-1">${items.length}</span>`;
         det.appendChild(sum);
 
         const inner = document.createElement('div');
-        inner.className = 'readiness-bucket-body ps-2 pt-2';
+        inner.className = 'readiness-bucket-body';
 
         // Split dismissed items out so they render under a separate
         // "Dismissed" subhead at the bottom of the bucket. Done only
@@ -2308,21 +2827,11 @@
     }
 
     function _renderSectionSubhead(title) {
-        // Section subhead is a plain label — pre-fix this rendered a
-        // small ⓘ next to the title that opened
-        // https://github.com/…/previews-readiness.md#anchor in a new
-        // tab. Users hit 404s on environments where that path doesn't
-        // resolve (private fork, unpublished branch, renamed file).
-        // Every row already carries its OWN ⓘ that opens the inline
-        // explanation modal — section-level docs links were redundant
-        // even when they worked. Drop entirely.
+        // A plain label. Every row already carries its OWN ⓘ that opens the inline explanation modal; section-level
+        // docs links 404'd on private forks / unpublished branches, so they stay dropped.
         const wrap = document.createElement('div');
-        wrap.className = 'text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1';
-        wrap.style.letterSpacing = '0.5px';
-        wrap.style.fontWeight = '600';
-        const lbl = document.createElement('span');
-        lbl.textContent = title;
-        wrap.appendChild(lbl);
+        wrap.className = 'rd-cat';
+        wrap.textContent = title;
         return wrap;
     }
 
@@ -2332,24 +2841,12 @@
     // inline [Enable] / [Disable] toggles built from check.actions.
     function _renderCheckRow(serverId, serverType, check) {
         const row = document.createElement('div');
-        row.className = 'd-flex align-items-start gap-2 mb-1 small';
 
         const ok = check.ok !== false;
         const sev = check.severity || 'info';
         const informational = sev === 'info' && check.informational === true;
-        // Passing health checks get a
-        // green filled check; pre-fix passing recommended rows got a
-        // grey outlined check and users complained that a row "off
-        // when recommended off" didn't show as passing.
-        //
-        // ONE badge per row — pre-fix a failing row with no auto-fix
-        // got BOTH "Recommended — server still works" AND a separate
-        // "Manual" chip and the dual-badge was confusing. When there's
-        // no action button the badge becomes "Change in <vendor> UI"
-        // — pre-fix this said "Manual fix needed" but the user noted
-        // calling it a "fix" reads as "the app needs to apply a fix"
-        // when the app actually CAN'T act on this row at all. The new
-        // wording names the actual place the user has to go.
+        // ONE badge per row. When there's no action button the badge says where the user has to go instead
+        // ("Change in <vendor> UI"): this app can't act on that row at all, so calling it a "fix" would mislead.
         const actionsObj = check.actions || {};
         const hasFixAction = !!(actionsObj.enable || actionsObj.disable);
         const vendorLabel = _vendorDisplayName(serverType);
@@ -2360,32 +2857,30 @@
         const manualBadgeTitle = check.fix_where === 'agent'
             ? "This app can't toggle this for you — fix it on the machine running the Plex marker agent."
             : `This app can't toggle this for you — open ${vendorLabel}'s admin UI and follow the instructions below.`;
-        let icon;
+        let tone = '';
         let tierBadge;
         if (informational) {
-            icon = '<i class="bi bi-info-circle text-muted mt-1"></i>';
             tierBadge = '';
         } else if (ok && sev === 'critical') {
-            icon = '<i class="bi bi-check-circle-fill text-success mt-1"></i>';
-            tierBadge = '<span class="badge bg-success-subtle text-success-emphasis border border-success-subtle ms-1" title="Required check — currently passing.">Required</span>';
+            tone = 'ok';
+            tierBadge = '<span class="badge bg-success-subtle text-success-emphasis border border-success-subtle" title="Required check — currently passing.">Required</span>';
         } else if (ok) {
-            icon = '<i class="bi bi-check-circle-fill text-success mt-1"></i>';
-            tierBadge = '<span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle ms-1" title="Recommended optimisation — currently applied.">Recommended</span>';
+            tone = 'ok';
+            tierBadge = '<span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle" title="Recommended optimisation — currently applied.">Recommended</span>';
         } else if (sev === 'critical' && !hasFixAction) {
-            icon = '<i class="bi bi-x-circle-fill text-danger mt-1"></i>';
-            tierBadge = `<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1" title="${escapeAttr(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
+            tone = 'bad';
+            tierBadge = `<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" title="${escapeAttr(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
         } else if (sev === 'critical') {
-            icon = '<i class="bi bi-x-circle-fill text-danger mt-1"></i>';
-            tierBadge = '<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1" title="Required for the server to work — apply the fix.">Required — fix to enable</span>';
+            tone = 'bad';
+            tierBadge = '<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" title="Required for the server to work — apply the fix.">Required — fix to enable</span>';
         } else if (!hasFixAction) {
-            icon = '<i class="bi bi-exclamation-triangle-fill text-warning mt-1"></i>';
-            tierBadge = `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1" title="${escapeAttr(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
+            tone = 'warn';
+            tierBadge = `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" title="${escapeAttr(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
         } else {
-            icon = '<i class="bi bi-exclamation-triangle-fill text-warning mt-1"></i>';
-            tierBadge = '<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1" title="Recommended improvement — server still works without it.">Recommended</span>';
+            tone = 'warn';
+            tierBadge = '<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" title="Recommended improvement — server still works without it.">Recommended</span>';
         }
-        // No separate Manual chip — the badge above already says it.
-        const manualChip = '';
+        row.className = `rd-row${tone ? ` ${tone}` : ''}`;
 
         // No data-explain-docs — the row's rich explanation is shown
         // inline via the global explain modal (set up by app.js's
@@ -2393,12 +2888,13 @@
         // out to an external docs page. Pre-fix every row carried a
         // GitHub URL that 404'd on private forks / unpushed branches.
         const tooltip = check.tooltip || '';
-        const explanationHtml = check.explanation || '';
-        // "Click for more." and .info-icon-more come from _applyInfoIconAffordance once _explanationHtml is set below.
+        const reason = check.reason || '';
+        // The description is one line in the row; its full text also sits in the ⓘ so nothing is lost to the clamp.
+        const explanationHtml = (reason ? `<p>${escapeHtml(reason)}</p>` : '') + (check.explanation || '');
         const infoIcon = (tooltip || explanationHtml)
-            ? `<button type="button" class="info-icon ms-1" `
+            ? `<button type="button" class="info-icon" `
                 + `data-bs-toggle="tooltip" data-bs-placement="top" `
-                + `title="${escapeAttr(tooltip)}" `
+                + `title="${escapeAttr(tooltip || reason)}" `
                 + `data-explain-title="${escapeAttr(check.label || tooltip || 'About this check')}" `
                 + `aria-label="Explain ${escapeAttr(check.label || '')}">`
                 + `<i class="bi bi-info-circle"></i></button>`
@@ -2406,20 +2902,23 @@
 
         const valuesHtml = _renderValueDiff(check.current, check.recommended, ok, check.label || '');
 
-        const reasonStr = check.reason
-            ? `<div class="text-muted mt-1">${escapeHtml(check.reason)}</div>`
+        const reasonStr = reason
+            ? `<div class="rd-reason" title="${escapeAttr(reason)}">${escapeHtml(reason)}</div>`
             : '';
 
         const labelHtml = escapeHtml(check.label || check.id || '');
-        row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${reasonStr}${valuesHtml}</div>`;
+        row.innerHTML = `<span class="rd-sev" aria-hidden="true"></span>`
+            + `<div class="rd-main"><div class="rd-title"><span>${labelHtml}</span>${tierBadge}${infoIcon}</div>${reasonStr}${valuesHtml}</div>`
+            + `<div class="rd-acts"></div>`;
+        const main = row.querySelector('.rd-main');
+        const acts = row.querySelector('.rd-acts');
         if (check.help_url === '/settings#section-workers') {
             const help = document.createElement('a');
             help.href = check.help_url;
             help.className = 'd-inline-block mt-1';
             help.textContent = check.help_label || 'Configure CPU workers';
-            row.querySelector('.flex-grow-1').appendChild(help);
+            main.appendChild(help);
         }
-
 
         // Attach the rich explanation HTML to the info-icon button as
         // a DOM property — can't round-trip multi-paragraph HTML through
@@ -2438,15 +2937,8 @@
         // Per-check toggle buttons. Two semantic roles:
         //   FIX direction   — matches check.recommended (the "right" answer).
         //   OPPOSITE direction — moves AWAY from recommended (destructive/opt-out).
-        //
-        // Pre-redesign both rendered as primary-coloured buttons in the
-        // same row. That meant on a row where current=on, recommended=off,
-        // the user saw an "Enable" (green) button next to a "Disable"
-        // (red) button — the FIX (Disable) had the danger colour while
-        // the BREAK (Enable) had the encouraging colour. Click-confusion
-        // bait. Now: failing-row fix is amber-filled (matches the bucket),
-        // opposite is low-emphasis grey-outline; passing rows hide the
-        // fix (no-op) and keep only the opt-out as a quiet outline.
+        // The fix is the filled button; the opposite is a low-emphasis outline; passing rows hide the fix (no-op)
+        // and keep only the opt-out as a quiet outline.
         const actions = check.actions || {};
         // ``check.fix_action`` is an explicit hint from the backend
         // (string: "enable" or "disable") that names which action key
@@ -2462,18 +2954,13 @@
         const breakDir = fixDir === 'enable' ? 'disable' : 'enable';
         const fixAction = actions[fixDir];
         const breakAction = actions[breakDir];
-        const btnWrap = document.createElement('div');
-        btnWrap.className = 'd-flex gap-1 flex-wrap';
 
         // Button labels are decoupled from the on/off DIRECTION the
-        // action runs in — pre-fix the same word "Enable" meant "apply
+        // action runs in — the same word "Enable" meant "apply
         // the recommendation" on one row (recommended=On) and "override
-        // the recommendation" on another (recommended=Off). Users had
-        // to figure out which button was the fix on each row before
-        // clicking. Now:
+        // the recommendation" on another (recommended=Off). Now:
         //   * Fix button   — always reads "Apply recommended" (intent-
-        //                    labelled). The amber colour reinforces it
-        //                    as the primary CTA.
+        //                    labelled), unless the backend names the fix.
         //   * Break button — reads "Enable (override)" or "Disable
         //                    (override)" — outcome verb + a "(override)"
         //                    tag so the user reads it as "do the
@@ -2492,7 +2979,7 @@
                 ? `${fixLabel} — ${check.label || check.id || 'this'}`
                 : `Apply the recommendation — set ${check.label || check.id || 'this'} to ${targetOn ? 'On' : 'Off'}`;
             btn.addEventListener('click', () => _runCheckAction(serverId, serverType, check, fixDir, btn));
-            btnWrap.appendChild(btn);
+            acts.appendChild(btn);
         }
         if (!informational && breakAction) {
             const targetOn = breakDir === 'enable';
@@ -2507,7 +2994,7 @@
             );
             btn.title = `Override the recommendation — set ${check.label || check.id || 'this'} to ${targetOn ? 'On' : 'Off'}`;
             btn.addEventListener('click', () => _runCheckAction(serverId, serverType, check, breakDir, btn));
-            btnWrap.appendChild(btn);
+            acts.appendChild(btn);
         }
         const optionalDir = check.optional_action;
         if (informational && (optionalDir === 'enable' || optionalDir === 'disable')
@@ -2519,13 +3006,10 @@
             btn.querySelector('i').setAttribute('aria-hidden', 'true');
             btn.title = check.optional_label;
             btn.addEventListener('click', () => _runCheckAction(serverId, serverType, check, optionalDir, btn));
-            btnWrap.appendChild(btn);
-        }
-        if (btnWrap.children.length > 0) {
-            row.querySelector('.flex-grow-1').appendChild(btnWrap);
+            acts.appendChild(btn);
         }
         if (check.note && typeof check.note === 'object' && check.note.text) {
-            row.querySelector('.flex-grow-1').appendChild(_renderCheckNote(serverId, serverType, check));
+            main.appendChild(_renderCheckNote(serverId, serverType, check));
         }
 
         // Issue #237: per-check dismiss control. Only on recommended-
@@ -2537,23 +3021,22 @@
             if (check.dismissed === true) {
                 const undismissBtn = document.createElement('button');
                 undismissBtn.type = 'button';
-                undismissBtn.className = 'btn btn-sm btn-link p-0 text-decoration-none ms-1';
-                undismissBtn.style.fontSize = '0.85em';
-                undismissBtn.innerHTML = '<i class="bi bi-arrow-counterclockwise me-1"></i>Undismiss';
+                undismissBtn.className = 'btn btn-sm rd-dismiss';
+                undismissBtn.innerHTML = '<i class="bi bi-arrow-counterclockwise"></i>Undismiss';
                 undismissBtn.title = `Restore this check to the Recommended bucket — ${check.label || check.id || 'this row'}.`;
                 undismissBtn.addEventListener('click', () => _toggleCheckDismissal(serverId, serverType, check, false, undismissBtn));
-                row.querySelector('.flex-grow-1').appendChild(undismissBtn);
+                acts.appendChild(undismissBtn);
             } else {
                 const dismissBtn = document.createElement('button');
                 dismissBtn.type = 'button';
-                dismissBtn.className = 'btn btn-sm btn-link p-0 text-decoration-none ms-2 text-muted';
-                dismissBtn.style.fontSize = '0.85em';
-                dismissBtn.innerHTML = '<i class="bi bi-x-circle me-1"></i>Dismiss';
+                dismissBtn.className = 'btn btn-sm rd-dismiss';
+                dismissBtn.innerHTML = '<i class="bi bi-x-circle"></i>Dismiss';
                 dismissBtn.title = `Hide this recommendation — ${check.label || check.id || 'this row'} — from the Recommended bucket. Reversible from the All good section.`;
                 dismissBtn.addEventListener('click', () => _toggleCheckDismissal(serverId, serverType, check, true, dismissBtn));
-                row.querySelector('.flex-grow-1').appendChild(dismissBtn);
+                acts.appendChild(dismissBtn);
             }
         }
+        if (!acts.children.length) acts.remove();
 
         return row;
     }
@@ -2590,9 +3073,8 @@
 
     function _showPlexHelperConfiguration(event) {
         if (event) event.preventDefault();
-        const tab = document.querySelector('#editServerModal [data-bs-target="#edit-tab-general"]');
         const group = document.getElementById('markersPlexAgentGroup');
-        if (tab && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(tab).show();
+        activateSection('edit-tab-general');
         if (group) requestAnimationFrame(() => group.scrollIntoView({ block: 'center' }));
     }
 
@@ -2603,7 +3085,7 @@
     function _renderCheckNote(serverId, serverType, check) {
         const note = check.note;
         const wrap = document.createElement('div');
-        wrap.className = 'readiness-note d-flex align-items-start gap-2 mt-2 p-2 rounded border bg-body-tertiary';
+        wrap.className = 'readiness-note d-flex align-items-start gap-2 mt-2 p-2 rounded';
         const icon = document.createElement('i');
         icon.className = 'bi bi-info-circle text-info mt-1';
         icon.setAttribute('aria-hidden', 'true');
@@ -3524,6 +4006,90 @@
         }
     }
 
+    // Dirty tracking, the discard guard, the footer, Ctrl/Cmd+Enter, the header switch and the credentials toggle.
+    function wireEditModalChrome() {
+        const modalEl = document.getElementById('editServerModal');
+        if (!modalEl) return;
+        // Controls whose changes are never part of the PUT: the section select, the readiness card (it acts on the
+        // vendor directly), the webhook URL (used only by Register) and the re-auth method pickers.
+        const NOT_SAVED = '#editServerSectionSelect, #editReadinessGroup, #plexWebhookPublicUrl, '
+            + 'input[name="editReauthJfMethod"], input[name="editReauthEmbyMethod"]';
+        const onEdit = (event) => {
+            const t = event.target;
+            if (!t || !t.matches || !t.matches('input, select, textarea') || t.closest(NOT_SAVED)) return;
+            setEditDirty(true);
+            if (t.closest('#edit-tab-paths, #edit-tab-excludes, #edit-tab-libraries')) updateEditBadges();
+            if (t.id === 'editServerUrl') validateEditUrl();
+            if (t.id === 'editServerEnabled') modalEl.classList.toggle('sm-paused', !t.checked);
+        };
+        modalEl.addEventListener('input', onEdit);
+        modalEl.addEventListener('change', onEdit);
+
+        // Close, Esc, backdrop and Cancel all end up in hide(); while there are edits, ask first (inline, in the footer).
+        modalEl.addEventListener('hide.bs.modal', (event) => {
+            // A save in flight has already taken the edits, so closing then has nothing to discard.
+            const saving = !!(document.getElementById('editServerSave') || {}).dataset.busy;
+            if (event.target !== modalEl || !_editDirty || _editDiscardOk || saving) return;
+            event.preventDefault();
+            const bar = document.getElementById('editServerDiscardBar');
+            if (bar) {
+                bar.classList.remove('d-none');
+                const keep = document.getElementById('editServerKeepEditing');
+                if (keep) keep.focus();
+            }
+        });
+        modalEl.addEventListener('hidden.bs.modal', (event) => {
+            if (event.target !== modalEl) return;
+            _editDirty = false;
+            _editDiscardOk = false;
+            if (_editReauthQcPoll) { clearInterval(_editReauthQcPoll); _editReauthQcPoll = null; }
+        });
+        const keepBtn = document.getElementById('editServerKeepEditing');
+        if (keepBtn) keepBtn.addEventListener('click', () => document.getElementById('editServerDiscardBar').classList.add('d-none'));
+        const discardBtn = document.getElementById('editServerDiscardConfirm');
+        if (discardBtn) {
+            discardBtn.addEventListener('click', () => {
+                _editDiscardOk = true;
+                window.bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+            });
+        }
+
+        modalEl.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+            const save = document.getElementById('editServerSave');
+            if (_editDirty && save && !save.disabled) {
+                event.preventDefault();
+                save.click();
+            }
+        });
+
+        const credToggle = document.getElementById('editCredToggle');
+        if (credToggle) {
+            credToggle.addEventListener('click', () => setCredFormsOpen(credToggle.getAttribute('aria-expanded') !== 'true'));
+        }
+        const deleteBtn = document.getElementById('editDeleteServerBtn');
+        if (deleteBtn) {
+            deleteBtn.addEventListener('click', async () => {
+                if (!_editState) return;
+                const { server } = _editState;
+                if (await deleteServerWithConfirm(server.id, server.name || server.id)) {
+                    _editDiscardOk = true;
+                    setEditDirty(false);
+                    window.bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+                }
+            });
+        }
+
+        // The rail's webhook dot follows the two status badges the Plex webhook panel keeps up to date.
+        if (window.MutationObserver) {
+            const observer = new MutationObserver(updateAutomationDot);
+            ['plexWebhookStatusBadge', 'recentlyAddedStatusBadge'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) observer.observe(el, { childList: true, characterData: true, subtree: true });
+            });
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         // The Edit Server modal lives only on /servers. servers.js is also
         // loaded on /setup (for MPGShared exports the wizard depends on),
@@ -3632,6 +4198,8 @@
                 });
             });
         }
+
+        wireEditModalChrome();
     });
 
     // Public surface for /setup wizard (and any other page) that needs the
@@ -3648,4 +4216,5 @@
     // (which only exists in the modal).
     window.MPGShared.pickVendor = pickVendorAndAdvance;
     window.MPGShared.resetServerWizard = resetWizard;
+    window.MPGShared.activateSection = activateSection;
 })();

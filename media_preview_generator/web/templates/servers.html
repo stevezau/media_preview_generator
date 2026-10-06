@@ -5,14 +5,15 @@
 {% block head %}
 <link href="{{ url_for('static', filename='css/processing_jobs.css') }}" rel="stylesheet">
 <link href="{{ url_for('static', filename='css/pages/servers.css') }}" rel="stylesheet">
+<link href="{{ url_for('static', filename='css/pages/server_modal.css') }}" rel="stylesheet">
 {% endblock %}
 
 {% block content %}
-<div class="container py-4 servers-page">
+<div class="servers-page">
     <header class="page-header">
         <div>
             <h1 class="page-title"><i class="bi bi-hdd-stack me-2"></i>Media Servers</h1>
-            <p class="page-subtitle mb-0">Plex, Emby, and Jellyfin servers this app prepares previews and media analysis for.</p>
+            <p class="page-subtitle mb-0">Plex, Emby and Jellyfin servers that get previews and analysis.</p>
         </div>
         <div class="page-actions">
             <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addServerModal">
@@ -20,6 +21,8 @@
             </button>
         </div>
     </header>
+
+    <div class="srv-summary" id="serverSummary" aria-live="polite"></div>
 
     <div id="serverList" class="srv-grid">
         <div class="srv-state text-muted">
@@ -37,29 +40,37 @@
 
 <!-- Edit Server Modal — per-server config editor for an already-saved server.
      Submits via PUT /api/servers/<id>; the Add wizard above stays focused on
-     first-time onboarding. -->
-<div class="modal fade" id="editServerModal" tabindex="-1" aria-hidden="true">
-    <!-- modal-xl + a generous custom max-width because "Webhook & Scanner"
-         used to wrap onto two lines at modal-lg. Wider also gives the
-         readiness card more horizontal room for the Current → Recommended
-         pill pair. -->
-    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+     first-time onboarding. Fixed-height body (the pane scrolls, the footer stays put), a left rail for the
+     seven sections (a scroll strip on phones) and a footer that carries the save result and the unsaved-changes
+     state. Styling lives in css/pages/server_modal.css. -->
+<div class="modal fade sm-modal" id="editServerModal" tabindex="-1" aria-hidden="true" aria-labelledby="editServerNameWrap">
+    <div class="modal-dialog modal-xl modal-dialog-centered sm-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title d-flex align-items-center gap-2 flex-grow-1" style="min-width: 0;">
-                    <i class="bi bi-pencil flex-shrink-0"></i>
-                    <img id="editServerVendorLogo" src="" alt="" width="20" height="20" class="d-none flex-shrink-0">
-                    <span class="text-truncate" style="min-width: 0;" id="editServerNameWrap">Edit <span id="editServerName"></span></span>
-                </h5>
+            <div class="modal-header sm-header">
+                <span class="sm-logo" id="editServerLogoTile"><img id="editServerVendorLogo" src="" alt="" width="22" height="22" class="d-none"></span>
+                <div class="sm-title">
+                    <h5 class="modal-title sm-name" id="editServerNameWrap"><span class="visually-hidden">Edit </span><span class="text-truncate" id="editServerName"></span>
+                        <span class="pill d-none" id="editServerStatusPill" role="status"><span class="sm-dot"></span><span class="sm-pill-text"></span></span>
+                    </h5>
+                    <div class="sm-host" id="editServerHostLine"></div>
+                </div>
+                <div class="sm-enabled form-check form-switch mb-0">
+                    <span class="sm-paused" id="editServerPausedNote">Paused: no webhooks, scans or publishes</span>
+                    <label class="form-check-label sm-enabled-label" for="editServerEnabled">Enabled</label>
+                    <input type="checkbox" role="switch" id="editServerEnabled" class="form-check-input">
+                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Off = this server is ignored entirely (no webhooks, no scans, no publishes). Use to pause one server without deleting it from your config." aria-label="About Server enabled"><i class="bi bi-info-circle"></i></button>
+                </div>
                 <button type="button" class="btn-close flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body sm-body">
                 <input type="hidden" id="editServerId">
                 <input type="hidden" id="editServerType">
 
-                <div class="server-edit-mobile-nav">
+                <!-- The select is no longer shown (the rail is a scroll strip on phones). It stays in step with the
+                     tabs so anything driving it keeps working; activateSection() backs both. -->
+                <div class="server-edit-mobile-nav visually-hidden" aria-hidden="true">
                     <label class="form-label" for="editServerSectionSelect">Edit section</label>
-                    <select class="form-select" id="editServerSectionSelect">
+                    <select class="form-select" id="editServerSectionSelect" tabindex="-1">
                         <option value="edit-tab-general">Connection</option>
                         <option value="edit-tab-health">Setup Health</option>
                         <option value="edit-tab-processing">Processing</option>
@@ -70,306 +81,343 @@
                     </select>
                 </div>
 
-                <ul class="nav nav-tabs mb-3" role="tablist">
+                <ul class="nav nav-tabs sm-rail" role="tablist" aria-label="Edit section">
                     <li class="nav-item">
                         <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#edit-tab-general" type="button">
-                            <i class="bi bi-plug me-1"></i>Connection
+                            <i class="bi bi-plug"></i><span class="sm-rail-lbl">Connection</span>
                         </button>
                     </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-health" type="button">
-                            <i class="bi bi-clipboard-check me-1"></i>Setup Health
-                            <!-- Inline attention marker (⚠/❗/✓) stamped by runReadinessProbe
-                                 so a red/amber tab shouts for attention even when the user
-                                 lands on General first. Hidden by default; populated after
-                                 the probe resolves. -->
-                            <span class="ms-1 d-none" id="editHealthTabMarker" aria-hidden="true"></span>
+                            <i class="bi bi-clipboard-check"></i><span class="sm-rail-lbl">Setup Health</span>
+                            <!-- Count badge stamped by runReadinessProbe (red when anything must be fixed, amber for
+                                 recommendations, hidden when healthy) so the tab asks for attention from any tab. -->
+                            <span class="sm-nb d-none" id="editHealthTabMarker" aria-hidden="true"></span>
                         </button>
                     </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-processing" type="button">
-                            <i class="bi bi-gear me-1"></i>Processing
+                            <i class="bi bi-gear"></i><span class="sm-rail-lbl">Processing</span>
                         </button>
                     </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-libraries" type="button">
-                            <i class="bi bi-collection-play me-1"></i>Libraries
+                            <i class="bi bi-collection-play"></i><span class="sm-rail-lbl">Libraries</span>
+                            <span class="sm-nb d-none" id="editLibrariesTabBadge" aria-hidden="true"></span>
                         </button>
                     </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-paths" type="button">
-                            <i class="bi bi-signpost-split me-1"></i>Path mappings
+                            <i class="bi bi-signpost-split"></i><span class="sm-rail-lbl">Path mappings</span>
+                            <span class="sm-nb d-none" id="editPathsTabBadge" aria-hidden="true"></span>
                         </button>
                     </li>
                     <li class="nav-item">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-excludes" type="button">
-                            <i class="bi bi-slash-circle me-1"></i>Exclude paths
+                            <i class="bi bi-slash-circle"></i><span class="sm-rail-lbl">Exclude paths</span>
+                            <span class="sm-nb d-none" id="editExcludesTabBadge" aria-hidden="true"></span>
                         </button>
                     </li>
                     <!-- Starts hidden; openEditModal un-hides it for every server type
                          once the server's vendor is known. -->
                     <li class="nav-item d-none" id="editTabAutomationLi">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-automation" type="button">
-                            <i class="bi bi-lightning-charge me-1"></i>Webhook &amp; Scanner
+                            <i class="bi bi-lightning-charge"></i><span class="sm-rail-lbl">Webhook &amp; Scanner</span>
+                            <span class="sm-nb sm-nb-dot d-none" id="editAutomationTabDot" aria-hidden="true"></span>
                         </button>
                     </li>
                 </ul>
 
-                <div class="tab-content">
-                    <!-- General -->
+                <div class="tab-content sm-panes">
+                    <!-- Connection -->
                     <div class="tab-pane fade show active" id="edit-tab-general">
-                        <div class="mb-3">
-                            <label class="form-label">Display name
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="What this server is called in the UI. Cosmetic only — pick anything memorable (e.g. 'Living Room Plex', 'NAS Jellyfin')."><i class="bi bi-info-circle"></i></button>
-                            </label>
-                            <input type="text" id="editServerDisplayName" class="form-control">
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Server URL
-                                <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
-                                        data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="How this app reaches your media server."
-                                        data-explain-title="Server URL — Docker &amp; networking"
-                                        data-explain-template="infoServerUrlTpl"
-                                        aria-label="Explain Server URL">
-                                    <i class="bi bi-info-circle"></i>
-                                </button>
-                            </label>
-                            <input type="text" id="editServerUrl" class="form-control" autocomplete="off">
-                        </div>
-                        <div class="form-check mb-3">
-                            <input type="checkbox" id="editServerVerifySsl" class="form-check-input">
-                            <label class="form-check-label" for="editServerVerifySsl">Verify SSL certificate
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks the server's HTTPS certificate. Turn it off only for a self-signed one; it does nothing on plain HTTP."><i class="bi bi-info-circle"></i></button>
-                            </label>
-                        </div>
-                        <div class="form-check mb-3">
-                            <input type="checkbox" id="editServerEnabled" class="form-check-input">
-                            <label class="form-check-label" for="editServerEnabled">Server enabled
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Off = this server is ignored entirely (no webhooks, no scans, no publishes). Use to pause one server without deleting it from your config."><i class="bi bi-info-circle"></i></button>
-                            </label>
-                            <div class="form-text">Uncheck to pause publishing to this server.</div>
-                        </div>
+                        <section class="sm-sec">
+                            <div class="sm-sec-h">Server</div>
+                            <div class="sm-row2">
+                                <div class="sm-fld">
+                                    <label class="sm-lab" for="editServerDisplayName">Display name
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="What this server is called in the UI. Cosmetic only — pick anything memorable (e.g. 'Living Room Plex', 'NAS Jellyfin')."><i class="bi bi-info-circle"></i></button>
+                                    </label>
+                                    <input type="text" id="editServerDisplayName" class="form-control">
+                                </div>
+                                <div class="sm-fld">
+                                    <label class="sm-lab" for="editServerUrl">Server URL
+                                        <button type="button" class="info-icon info-icon-more" tabindex="0"
+                                                data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="How this app reaches your media server."
+                                                data-explain-title="Server URL — Docker &amp; networking"
+                                                data-explain-template="infoServerUrlTpl"
+                                                aria-label="Explain Server URL">
+                                            <i class="bi bi-info-circle"></i>
+                                        </button>
+                                    </label>
+                                    <input type="text" id="editServerUrl" class="form-control font-monospace" autocomplete="off" aria-describedby="editServerUrlMsg">
+                                    <div class="sm-vmsg bad d-none" id="editServerUrlMsg" role="alert"></div>
+                                </div>
+                            </div>
+                            <div class="sm-line">
+                                <label class="sm-lab" for="editServerVerifySsl">Verify SSL certificate
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks the server's HTTPS certificate. Turn it off only for a self-signed one; it does nothing on plain HTTP."><i class="bi bi-info-circle"></i></button>
+                                </label>
+                                <div class="form-check form-switch mb-0"><input type="checkbox" role="switch" id="editServerVerifySsl" class="form-check-input"></div>
+                            </div>
 
-                        <!-- Test Connection — verify URL + credentials right here in
-                             the modal, especially after a Re-authenticate flow. The
-                             result pill below shows the last probe outcome. -->
-                        <div class="mb-3 d-flex align-items-center gap-2 flex-wrap">
-                            <button type="button" class="btn btn-sm btn-outline-primary" id="editTestConnectionBtn">
-                                <i class="bi bi-broadcast me-1"></i>Test Connection
-                            </button>
-                            <span id="editTestConnectionResult" class="small text-muted"></span>
-                        </div>
+                            <!-- Test Connection — verify URL + credentials right here in the modal, especially
+                                 after a Re-authenticate flow. The pill shows the last probe outcome. -->
+                            <div class="sm-testrow">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" id="editTestConnectionBtn">
+                                    <i class="bi bi-broadcast me-1"></i>Test Connection
+                                </button>
+                                <span id="editTestConnectionResult" class="sm-tres" role="status"></span>
+                            </div>
+                        </section>
 
                         <!-- Plex-only: config folder -->
-                        <div id="editPlexConfigGroup" class="mb-3 d-none">
-                            <label class="form-label">Plex config folder
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Path inside this container to Plex's data folder (where this app writes preview bundles). Same value as Setup → Step 3."><i class="bi bi-info-circle"></i></button>
-                            </label>
-                            <div class="input-group">
-                                <input type="text" id="editPlexConfigFolder" class="form-control">
-                                <button type="button" class="btn btn-outline-secondary"
-                                        id="editPlexConfigBrowseBtn"
-                                        title="Browse folders">
-                                    <i class="bi bi-folder2-open"></i>
-                                </button>
-                                <div class="invalid-feedback small"></div>
-                                <div class="valid-feedback small">Path exists</div>
-                            </div>
-                            <div class="form-text">Where this server's preview bundles are written. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Mirrors the Setup wizard Step 3 field." data-explain-title="Plex config folder" data-explain-template="infoEditPlexPathTpl"><i class="bi bi-info-circle"></i></button>
+                        <section id="editPlexConfigGroup" class="sm-sec d-none">
+                            <div class="sm-sec-h">Where previews are written</div>
+                            <div class="sm-fld">
+                                <label class="sm-lab" for="editPlexConfigFolder">Plex config folder
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                            title="Path inside this container to Plex's data folder (where this app writes preview bundles). Same value as Setup → Step 3."><i class="bi bi-info-circle"></i></button>
+                                </label>
+                                <div class="input-group sm-vf has-validation">
+                                    <input type="text" id="editPlexConfigFolder" class="form-control font-monospace">
+                                    <button type="button" class="btn btn-outline-secondary"
+                                            id="editPlexConfigBrowseBtn"
+                                            title="Browse folders" aria-label="Browse folders">
+                                        <i class="bi bi-folder2-open"></i>
+                                    </button>
+                                    <div class="invalid-feedback small"></div>
+                                    <div class="valid-feedback small">Path exists</div>
+                                </div>
+                                <div class="sm-hint">Where this server's preview bundles are written. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Mirrors the Setup wizard Step 3 field." data-explain-title="Plex config folder" data-explain-template="infoEditPlexPathTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditPlexPathTpl">
     <p>Where this Plex server's preview bundles will be written. Mirrors the <a href="{{ url_for('main.setup_wizard') }}">Setup wizard</a> &rarr; Step 3 field.</p>
 </template>
-</div>
-
-                        </div>
+                                </div>
+                            </div>
+                        </section>
 
                         <!-- Jellyfin-only: store trickplay off the media drive -->
-                        <div id="editJellyfinOffMediaGroup" class="d-none">
-                            <div class="form-check mb-2">
-                                <input type="checkbox" id="editJellyfinSaveOffMedia" class="form-check-input">
-                                <label class="form-check-label" for="editJellyfinSaveOffMedia">Store trickplay off the media drive
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                            title="Write Jellyfin previews into Jellyfin's data folder instead of next to each video." data-explain-title="Store trickplay off the media drive" data-explain-template="infoJellyfinOffMediaTpl"><i class="bi bi-info-circle"></i></button>
-                                </label>
-                                <div class="form-text">Choose where Jellyfin previews are stored. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Off keeps previews next to the media; on uses Jellyfin's data folder." data-explain-title="Store trickplay off the media drive" data-explain-template="infoEditJfOffMediaHintTpl"><i class="bi bi-info-circle"></i></button>
+                        <section id="editJellyfinOffMediaGroup" class="sm-sec d-none">
+                            <div class="sm-sec-h">Where previews are written</div>
+                            <div class="sm-line">
+                                <div>
+                                    <label class="sm-lab" for="editJellyfinSaveOffMedia">Store trickplay off the media drive
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="Write Jellyfin previews into Jellyfin's data folder instead of next to each video." data-explain-title="Store trickplay off the media drive" data-explain-template="infoJellyfinOffMediaTpl"><i class="bi bi-info-circle"></i></button>
+                                    </label>
+                                    <div class="sm-hint">Previews go in Jellyfin's data folder, not next to videos. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Off keeps previews next to the media; on uses Jellyfin's data folder." data-explain-title="Store trickplay off the media drive" data-explain-template="infoEditJfOffMediaHintTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditJfOffMediaHintTpl">
     <p>Off (default) = previews live next to the media (<code>&lt;media&gt;.trickplay/</code>). On = previews live in Jellyfin's data folder (<code>&lt;config&gt;/data/trickplay/</code>).</p>
 </template>
-</div>
+                                    </div>
+                                </div>
+                                <div class="form-check form-switch mb-0"><input type="checkbox" role="switch" id="editJellyfinSaveOffMedia" class="form-check-input"></div>
                             </div>
-                            <div id="editJellyfinConfigFolderGroup" class="mb-3 d-none">
-                                <label class="form-label">Jellyfin config folder (this container)
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                            <div id="editJellyfinConfigFolderGroup" class="sm-fld d-none">
+                                <label class="sm-lab" for="editJellyfinConfigFolder">Jellyfin config folder (this container)
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
                                             title="Where Jellyfin's config folder is mounted in this container. It must be mounted read-write (:rw)."><i class="bi bi-info-circle"></i></button>
                                 </label>
-                                <div class="input-group has-validation">
-                                    <input type="text" id="editJellyfinConfigFolder" class="form-control" placeholder="/jellyfin-config">
-                                    <button type="button" class="btn btn-outline-secondary" id="editJellyfinConfigBrowseBtn" title="Browse folders">
+                                <div class="input-group sm-vf has-validation">
+                                    <input type="text" id="editJellyfinConfigFolder" class="form-control font-monospace" placeholder="/jellyfin-config">
+                                    <button type="button" class="btn btn-outline-secondary" id="editJellyfinConfigBrowseBtn" title="Browse folders" aria-label="Browse folders">
                                         <i class="bi bi-folder2-open"></i>
                                     </button>
                                     <div class="invalid-feedback small"></div>
                                     <div class="valid-feedback small">Valid Jellyfin config folder</div>
                                 </div>
-                                <div class="alert alert-warning small mt-2 mb-0" id="editJellyfinOffMediaWarning">
-                                    <i class="bi bi-exclamation-triangle me-1"></i>With this on, the app writes to Jellyfin's config dir (not your media). Jellyfin's <code>SaveTrickplayWithMedia</code> must be <strong>off</strong> &mdash; the <strong>Setup Health</strong> tab guides you and flags the plugin + read-write mount.
+                                <div class="sm-warnline" id="editJellyfinOffMediaWarning">
+                                    <i class="bi bi-exclamation-triangle-fill"></i><span>Writes to Jellyfin's config folder, not your media. Mount it :rw.</span>
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="With this on, the app writes to Jellyfin's config dir (not your media). Click for the full requirements." data-explain-title="Jellyfin config folder" data-explain-template="infoEditJfOffMediaWarnTpl" aria-label="About the Jellyfin config folder"><i class="bi bi-info-circle"></i></button>
+<template id="infoEditJfOffMediaWarnTpl">
+    <p>With this on, the app writes to Jellyfin's config dir (not your media). Jellyfin's <code>SaveTrickplayWithMedia</code> must be <strong>off</strong> &mdash; the <strong>Setup Health</strong> tab guides you and flags the plugin + read-write mount.</p>
+</template>
                                 </div>
                             </div>
-                        </div>
+                        </section>
 
                         <!-- Plex only: the marker agent beside a Plex on another machine. Its address and shared
                              key are stored in markers.plex.agent; the key comes back masked and is posted back
                              masked unless the user types a new one. -->
-                        <div class="markers-opt d-none border-top pt-3 mt-3" id="markersPlexAgentGroup">
-                            <div>
-                                <label class="fw-semibold" for="markersAgentEnabled">Plex helper</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Runs next to Plex on another machine. Writes chapter image references and intro or credits markers. Each feature is enabled separately."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Runs next to Plex on another machine. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Shared by chapter thumbnails and Intro & Credits." data-explain-title="Plex helper" data-explain-template="infoEditPlexHelperTpl"><i class="bi bi-info-circle"></i></button>
+                        <section class="sm-sec d-none" id="markersPlexAgentGroup">
+                            <div class="sm-sec-h">Plex on another machine</div>
+                            <div class="sm-card"><div class="sm-card-b">
+                                <div class="sm-line">
+                                    <div>
+                                        <label class="sm-lab" for="markersAgentEnabled">Plex helper
+                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                    title="Runs next to Plex on another machine. Writes chapter image references and intro or credits markers. Each feature is enabled separately."><i class="bi bi-info-circle"></i></button>
+                                        </label>
+                                        <div class="sm-hint">Runs next to Plex on another machine. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Shared by chapter thumbnails and Intro & Credits." data-explain-title="Plex helper" data-explain-template="infoEditPlexHelperTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditPlexHelperTpl">
     <p>Shared by chapter thumbnails and Intro &amp; Credits when Plex runs on another machine. Intro &amp; Credits can stay off.</p>
 </template>
-</div>
-                            </div>
-                            <div class="form-check form-switch markers-switch">
-                                <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">
-                            </div>
-                        </div>
-                        <div class="d-none mb-3" id="markersPlexAgentFields">
-                            <div class="row g-2">
-                                <div class="col-md-7">
-                                    <label class="form-label small mb-1" for="markersAgentUrl">Address</label>
-                                    <input type="url" class="form-control form-control-sm" id="markersAgentUrl"
-                                           placeholder="http://plex-host.lan:9494" autocomplete="off">
+                                        </div>
+                                    </div>
+                                    <div class="form-check form-switch markers-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">
+                                    </div>
                                 </div>
-                                <div class="col-md-5">
-                                    <label class="form-label small mb-1" for="markersAgentToken">Shared key
-                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                                title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button>
-                                    </label>
-                                    <input type="password" class="form-control form-control-sm" id="markersAgentToken"
-                                           autocomplete="new-password">
+                                <div class="d-none" id="markersPlexAgentFields">
+                                    <div class="sm-row2">
+                                        <div class="sm-fld">
+                                            <label class="sm-lab" for="markersAgentUrl">Address</label>
+                                            <input type="url" class="form-control font-monospace" id="markersAgentUrl"
+                                                   placeholder="http://plex-host.lan:9494" autocomplete="off">
+                                        </div>
+                                        <div class="sm-fld">
+                                            <label class="sm-lab" for="markersAgentToken">Shared key
+                                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                        title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button>
+                                            </label>
+                                            <input type="password" class="form-control" id="markersAgentToken"
+                                                   autocomplete="new-password">
+                                        </div>
+                                    </div>
+                                    <div id="markersAgentState" class="sm-hint mt-2"></div>
                                 </div>
-                            </div>
-                            <div id="markersAgentState" class="small mt-2"></div>
-                        </div>
+                            </div></div>
+                        </section>
 
-
-                        <details class="mb-3">
-                            <summary class="text-muted small">Re-authenticate (only if needed)</summary>
-                            <div class="mt-3" id="editReauthSection">
-                                <p class="small text-muted mb-2">
-                                    Existing credentials are kept until you confirm a new one. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Each vendor has its own auth options." data-explain-title="Re-authenticate" data-explain-template="infoEditReauthTpl"><i class="bi bi-info-circle"></i></button>
+                        <section class="sm-sec">
+                            <div class="sm-sec-h">Credentials</div>
+                            <div class="sm-card"><div class="sm-card-b">
+                                <div class="sm-line">
+                                    <div>
+                                        <b id="editCredWho">Credentials stored</b>
+                                        <div class="sm-hint" id="editCredHint">Stored; never shown in full.</div>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="editCredToggle" aria-expanded="false" aria-controls="editReauthSection">
+                                        <i class="bi bi-key me-1"></i>Re-authenticate
+                                    </button>
+                                </div>
+                                <div class="sm-cred-forms d-none" id="editReauthSection">
+                                    <div class="sm-hint">
+                                        Existing credentials are kept until you confirm a new one. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Each vendor has its own auth options." data-explain-title="Re-authenticate" data-explain-template="infoEditReauthTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditReauthTpl">
     <p>Existing credentials are kept until you confirm a new one. Each vendor has its own auth options; click <strong>Save changes</strong> at the bottom of the modal once you've chosen one.</p>
 </template>
-</p>
+                                    </div>
 
-                                <!-- Plex re-auth (token paste). Plex OAuth re-flow lives in the Add Server wizard;
-                                     to switch accounts, delete the server and re-add it. -->
-                                <div id="editReauthPlex" class="d-none">
-                                    <label class="form-label">Plex token</label>
-                                    <input type="password" id="editReauthPlexToken" class="form-control" placeholder="paste a new X-Plex-Token to rotate" autocomplete="off">
-                                    <div class="form-text">
-                                        Paste a new X-Plex-Token to rotate it. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to find the token and how to switch accounts." data-explain-title="Plex token" data-explain-template="infoEditPlexTokenTpl"><i class="bi bi-info-circle"></i></button>
+                                    <!-- Plex re-auth (token paste). Plex OAuth re-flow lives in the Add Server wizard;
+                                         to switch accounts, delete the server and re-add it. -->
+                                    <div id="editReauthPlex" class="sm-fld d-none">
+                                        <label class="sm-lab" for="editReauthPlexToken">Plex token
+                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to find the token and how to switch accounts." data-explain-title="Plex token" data-explain-template="infoEditPlexTokenTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditPlexTokenTpl">
     <p>Find it via <a href="https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/" target="_blank">Plex's docs</a>. To switch Plex accounts entirely, delete this server and re-add via the Plex sign-in flow.</p>
 </template>
-</div>
-                                </div>
+                                        </label>
+                                        <input type="password" id="editReauthPlexToken" class="form-control" placeholder="paste a new X-Plex-Token to rotate" autocomplete="off">
+                                    </div>
 
-                                <!-- Jellyfin re-auth: Quick Connect / Password / API Key -->
-                                <div id="editReauthJellyfin" class="d-none">
-                                    <label class="form-label">Method</label>
-                                    <div class="btn-group w-100 mb-2" role="group">
-                                        <input type="radio" class="btn-check" name="editReauthJfMethod" id="editReauthJfQc" value="quick_connect" autocomplete="off" checked>
-                                        <label class="btn btn-outline-primary" for="editReauthJfQc">Quick Connect</label>
-                                        <input type="radio" class="btn-check" name="editReauthJfMethod" id="editReauthJfPw" value="password" autocomplete="off">
-                                        <label class="btn btn-outline-primary" for="editReauthJfPw">Username + Password</label>
-                                        <input type="radio" class="btn-check" name="editReauthJfMethod" id="editReauthJfKey" value="api_key" autocomplete="off">
-                                        <label class="btn btn-outline-primary" for="editReauthJfKey">API Key</label>
+                                    <!-- Jellyfin re-auth: Quick Connect / Password / API Key -->
+                                    <div id="editReauthJellyfin" class="sm-fld d-none">
+                                        <span class="sm-lab">Method</span>
+                                        <div class="btn-group sm-mseg" role="group" aria-label="Method">
+                                            <input type="radio" class="btn-check" name="editReauthJfMethod" id="editReauthJfQc" value="quick_connect" autocomplete="off" checked>
+                                            <label class="btn" for="editReauthJfQc">Quick Connect</label>
+                                            <input type="radio" class="btn-check" name="editReauthJfMethod" id="editReauthJfPw" value="password" autocomplete="off">
+                                            <label class="btn" for="editReauthJfPw">Username + Password</label>
+                                            <input type="radio" class="btn-check" name="editReauthJfMethod" id="editReauthJfKey" value="api_key" autocomplete="off">
+                                            <label class="btn" for="editReauthJfKey">API Key</label>
+                                        </div>
+                                        <div id="editReauthJfFieldsQc" class="">
+                                            <button type="button" class="btn btn-sm btn-primary mb-2" id="editReauthJfQcStart"><i class="bi bi-magic me-1"></i>Start Quick Connect</button>
+                                            <div id="editReauthJfQcStatus" class="sm-status d-none" role="status"></div>
+                                        </div>
+                                        <div id="editReauthJfFieldsPw" class="d-none">
+                                            <div class="sm-row2">
+                                                <div class="sm-fld">
+                                                    <label class="sm-lab" for="editReauthJfUsername">Username</label>
+                                                    <input type="text" id="editReauthJfUsername" class="form-control" autocomplete="username">
+                                                </div>
+                                                <div class="sm-fld">
+                                                    <label class="sm-lab" for="editReauthJfPassword">Password</label>
+                                                    <input type="password" id="editReauthJfPassword" class="form-control" autocomplete="current-password">
+                                                </div>
+                                            </div>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary mt-2" id="editReauthJfPwSubmit">Verify password</button>
+                                            <div id="editReauthJfPwStatus" class="sm-status d-none mt-2" role="status"></div>
+                                        </div>
+                                        <div id="editReauthJfFieldsKey" class="d-none">
+                                            <label class="sm-lab" for="editReauthJfApiKey">API key</label>
+                                            <input type="password" id="editReauthJfApiKey" class="form-control" autocomplete="off">
+                                        </div>
                                     </div>
-                                    <div id="editReauthJfFieldsQc" class="">
-                                        <button type="button" class="btn btn-primary mb-2" id="editReauthJfQcStart"><i class="bi bi-magic me-1"></i>Start Quick Connect</button>
-                                        <div id="editReauthJfQcStatus" class="alert alert-info d-none"></div>
-                                    </div>
-                                    <div id="editReauthJfFieldsPw" class="d-none">
-                                        <label class="form-label">Username</label>
-                                        <input type="text" id="editReauthJfUsername" class="form-control mb-2" autocomplete="username">
-                                        <label class="form-label">Password</label>
-                                        <input type="password" id="editReauthJfPassword" class="form-control" autocomplete="current-password">
-                                        <button type="button" class="btn btn-outline-primary mt-2" id="editReauthJfPwSubmit">Verify password</button>
-                                        <div id="editReauthJfPwStatus" class="alert alert-info d-none mt-2"></div>
-                                    </div>
-                                    <div id="editReauthJfFieldsKey" class="d-none">
-                                        <label class="form-label">API key</label>
-                                        <input type="password" id="editReauthJfApiKey" class="form-control" autocomplete="off">
-                                    </div>
-                                </div>
 
-                                <!-- Emby re-auth: Password / API Key -->
-                                <div id="editReauthEmby" class="d-none">
-                                    <label class="form-label">Method</label>
-                                    <div class="btn-group w-100 mb-2" role="group">
-                                        <input type="radio" class="btn-check" name="editReauthEmbyMethod" id="editReauthEmbyPw" value="password" autocomplete="off" checked>
-                                        <label class="btn btn-outline-primary" for="editReauthEmbyPw">Username + Password</label>
-                                        <input type="radio" class="btn-check" name="editReauthEmbyMethod" id="editReauthEmbyKey" value="api_key" autocomplete="off">
-                                        <label class="btn btn-outline-primary" for="editReauthEmbyKey">API Key</label>
+                                    <!-- Emby re-auth: Password / API Key -->
+                                    <div id="editReauthEmby" class="sm-fld d-none">
+                                        <span class="sm-lab">Method</span>
+                                        <div class="btn-group sm-mseg" role="group" aria-label="Method">
+                                            <input type="radio" class="btn-check" name="editReauthEmbyMethod" id="editReauthEmbyPw" value="password" autocomplete="off" checked>
+                                            <label class="btn" for="editReauthEmbyPw">Username + Password</label>
+                                            <input type="radio" class="btn-check" name="editReauthEmbyMethod" id="editReauthEmbyKey" value="api_key" autocomplete="off">
+                                            <label class="btn" for="editReauthEmbyKey">API Key</label>
+                                        </div>
+                                        <div id="editReauthEmbyFieldsPw" class="">
+                                            <div class="sm-row2">
+                                                <div class="sm-fld">
+                                                    <label class="sm-lab" for="editReauthEmbyUsername">Username</label>
+                                                    <input type="text" id="editReauthEmbyUsername" class="form-control" autocomplete="username">
+                                                </div>
+                                                <div class="sm-fld">
+                                                    <label class="sm-lab" for="editReauthEmbyPassword">Password</label>
+                                                    <input type="password" id="editReauthEmbyPassword" class="form-control" autocomplete="current-password">
+                                                </div>
+                                            </div>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary mt-2" id="editReauthEmbyPwSubmit">Verify password</button>
+                                            <div id="editReauthEmbyPwStatus" class="sm-status d-none mt-2" role="status"></div>
+                                        </div>
+                                        <div id="editReauthEmbyFieldsKey" class="d-none">
+                                            <label class="sm-lab" for="editReauthEmbyApiKey">API key</label>
+                                            <input type="password" id="editReauthEmbyApiKey" class="form-control" autocomplete="off">
+                                        </div>
                                     </div>
-                                    <div id="editReauthEmbyFieldsPw" class="">
-                                        <label class="form-label">Username</label>
-                                        <input type="text" id="editReauthEmbyUsername" class="form-control mb-2" autocomplete="username">
-                                        <label class="form-label">Password</label>
-                                        <input type="password" id="editReauthEmbyPassword" class="form-control" autocomplete="current-password">
-                                        <button type="button" class="btn btn-outline-primary mt-2" id="editReauthEmbyPwSubmit">Verify password</button>
-                                        <div id="editReauthEmbyPwStatus" class="alert alert-info d-none mt-2"></div>
-                                    </div>
-                                    <div id="editReauthEmbyFieldsKey" class="d-none">
-                                        <label class="form-label">API key</label>
-                                        <input type="password" id="editReauthEmbyApiKey" class="form-control" autocomplete="off">
-                                    </div>
-                                </div>
 
-                                <!-- Hidden state field — JS writes the validated auth payload here (when applicable)
-                                     and saveEditedServer reads it on submit. -->
-                                <input type="hidden" id="editReauthPending" value="">
+                                    <!-- Hidden state field — JS writes the validated auth payload here (when applicable)
+                                         and saveEditedServer reads it on submit. -->
+                                    <input type="hidden" id="editReauthPending" value="">
+                                </div>
+                            </div></div>
+                        </section>
+
+                        <!-- Same DELETE as the card's trash button (a native confirm there, appConfirm here). -->
+                        <div class="sm-dz">
+                            <div class="sm-dz-text">
+                                <b>Delete this server</b>
+                                <div class="sm-hint">Removes it from this app. Existing previews on the server are not touched.</div>
                             </div>
-                        </details>
+                            <button type="button" class="btn btn-sm btn-outline-danger" id="editDeleteServerBtn"><i class="bi bi-trash me-1"></i>Delete server</button>
+                        </div>
                     </div>
 
-                    <!-- Setup Health — dedicated tab so users aren't hunting under
-                         General for the one set of controls that matters when
-                         something's wrong. The tab label carries a per-state
-                         marker (⚠ / ❗) stamped by runReadinessProbe whenever
-                         the probe finds issues, so the tab shouts for attention
-                         even while the user is looking at General first.
-
-                         The card body is the v3 unified readiness card — one
-                         probe, one fix-and-enable button, replacing the
-                         separate Vendor-extraction / Health-check / Plugin
-                         panels that lived here in v2. -->
+                    <!-- Setup Health — dedicated tab so users aren't hunting under General for the one set of
+                         controls that matters when something's wrong. The card body is the v3 unified readiness
+                         card — one probe, one fix-and-enable button. -->
                     <div class="tab-pane fade" id="edit-tab-health">
-                        <div id="editReadinessGroup" class="card bg-body-tertiary mb-3 d-none">
-                            <div class="card-body p-3">
-                                <h6 class="mb-1 d-flex align-items-center gap-2 flex-wrap">
-                                    <i class="bi bi-clipboard-check me-1"></i>Setup Health
-                                    <span id="editReadinessBadge" class="badge ms-1">checking…</span>
-                                    <button type="button" class="btn btn-sm btn-link p-0 ms-1"
-                                            id="editReadinessRecheckBtn"
-                                            data-bs-toggle="tooltip"
-                                            title="Re-probe the server (e.g. after you've changed something in Jellyfin/Emby admin)">
-                                        <i class="bi bi-arrow-clockwise"></i>
-                                    </button>
-                                    <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
-                                            data-bs-toggle="tooltip" data-bs-placement="top"
-                                            title="What Setup Health checks, and how the toggles work."
-                                            data-explain-title="Setup Health overview"
-                                            data-explain-template="infoSetupHealthTpl"
-                                            aria-label="Explain Setup Health overview">
-                                        <i class="bi bi-info-circle"></i>
-                                    </button>
-                                </h6>
+                        <div id="editReadinessGroup" class="sm-health d-none">
+                            <div class="sm-hsum">
+                                <h6 class="sm-hsum-title"><i class="bi bi-clipboard-check"></i>Setup Health</h6>
+                                <span id="editReadinessBadge" class="pill">checking…</span>
+                                <span class="sm-sp"></span>
+                                <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        id="editReadinessRecheckBtn"
+                                        data-bs-toggle="tooltip"
+                                        title="Re-probe the server (e.g. after you've changed something in Jellyfin/Emby admin)">
+                                    <i class="bi bi-arrow-clockwise me-1"></i>Re-check
+                                </button>
+                                <button type="button" class="info-icon info-icon-more" tabindex="0"
+                                        data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="What Setup Health checks, and how the toggles work."
+                                        data-explain-title="Setup Health overview"
+                                        data-explain-template="infoSetupHealthTpl"
+                                        aria-label="Explain Setup Health overview">
+                                    <i class="bi bi-info-circle"></i>
+                                </button>
+                            </div>
 
                                 <!-- Rich explanation for the Setup Health overview ⓘ. -->
                                 <template id="infoSetupHealthTpl">
@@ -465,57 +513,54 @@
                                     changes.</p>
                                 </template>
 
-                                <!-- Rendered list of checks. Each row is a ✓ / ⚠ / ✗ line. -->
-                                <div id="editReadinessBody" class="d-flex flex-column gap-2 mb-2 small"></div>
+                            <!-- Rendered list of checks, grouped Must fix / Recommended / All good. -->
+                            <div id="editReadinessBody" class="sm-health-body"></div>
 
-                                <!-- Jellyfin-only: plugin install toggle (default ticked).
-                                     Renders inside editReadinessBody when relevant; JS
-                                     injects the checkbox + warning copy when unticked. -->
-                                <div id="editReadinessPluginControls" class="d-none small mb-2">
-                                    <div class="form-check">
-                                        <input type="checkbox" class="form-check-input" id="editReadinessPluginOptIn" checked>
-                                        <label class="form-check-label" for="editReadinessPluginOptIn">
+                            <!-- Jellyfin-only: plugin install toggle (default ticked). Install happens inline via the
+                                 per-check toggle now, so this stays hidden; it is kept for the plan builder. -->
+                            <div id="editReadinessPluginControls" class="d-none sm-card">
+                                <div class="sm-card-b">
+                                    <div class="sm-line">
+                                        <label class="sm-lab" for="editReadinessPluginOptIn">
                                             Install Media Preview Bridge plugin (recommended — instant previews, no races)
-                                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="With the plugin, previews appear in Jellyfin as soon as they're made." data-explain-title="Media Preview Bridge plugin" data-explain-template="infoJellyfinPluginTpl"><i class="bi bi-info-circle"></i></button>
+                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="With the plugin, previews appear in Jellyfin as soon as they're made." data-explain-title="Media Preview Bridge plugin" data-explain-template="infoJellyfinPluginTpl"><i class="bi bi-info-circle"></i></button>
                                         </label>
+                                        <div class="form-check form-switch mb-0"><input type="checkbox" role="switch" class="form-check-input" id="editReadinessPluginOptIn" checked></div>
                                     </div>
-                                    <div id="editReadinessPluginOptOutWarning" class="alert alert-warning small mt-2 mb-0 d-none">
-                                        <i class="bi bi-exclamation-triangle me-1"></i>
-                                        Without the plugin, Jellyfin may briefly generate its own previews
+                                    <div id="editReadinessPluginOptOutWarning" class="sm-warnline d-none">
+                                        <i class="bi bi-exclamation-triangle-fill"></i>
+                                        <span>Without the plugin, Jellyfin may briefly generate its own previews
                                         in parallel when new files arrive. This wastes CPU but won't corrupt
-                                        output. Recommended: leave this ticked.
+                                        output. Recommended: leave this ticked.</span>
                                     </div>
                                 </div>
+                            </div>
 
-                                <!-- Fix-all controls: critical-only and full
-                                     buttons. Both open a confirm modal that
-                                     lists the exact changes about to be applied
-                                     so the user can scan-and-cancel before
-                                     anything mutates the server. -->
-                                <div id="editReadinessFixControls" class="d-flex align-items-center gap-2 flex-wrap d-none">
-                                    <button type="button" class="btn btn-sm btn-danger d-none" id="editReadinessFixCriticalBtn">
-                                        <i class="bi bi-shield-exclamation me-1"></i>Fix critical
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-warning" id="editReadinessFixAllBtn">
-                                        <i class="bi bi-magic me-1"></i>Fix all
-                                    </button>
-                                    <span id="editReadinessFixResult" class="small text-muted"></span>
-                                </div>
+                            <!-- Fix-all controls (sticky at the bottom of the pane): critical-only and full buttons.
+                                 Both open a confirm modal that lists the exact changes before anything mutates the
+                                 server. -->
+                            <div id="editReadinessFixControls" class="sm-stickybar d-none">
+                                <button type="button" class="btn btn-sm btn-danger d-none" id="editReadinessFixCriticalBtn">
+                                    <i class="bi bi-shield-exclamation me-1"></i>Fix critical
+                                </button>
+                                <button type="button" class="btn btn-sm btn-warning" id="editReadinessFixAllBtn">
+                                    <i class="bi bi-magic me-1"></i>Fix all
+                                </button>
+                                <span id="editReadinessFixResult" class="sm-hint"></span>
                             </div>
                         </div>
                     </div>
 
                     <!-- Libraries -->
                     <div class="tab-pane fade" id="edit-tab-libraries">
-                        <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
-                            <p class="small text-muted mb-0">
-                                <strong>Libraries to monitor</strong> — Previews covers every preview job for this server. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Webhooks, scheduled scans and Recently Added all use these." data-explain-title="Libraries to monitor" data-explain-template="infoEditLibrariesNoteTpl"><i class="bi bi-info-circle"></i></button>
+                        <div class="sm-line">
+                            <p class="sm-hint mb-0">
+                                <strong class="sm-strong">Libraries to monitor.</strong> Previews covers every preview job for this server. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Webhooks, scheduled scans and Recently Added all use these." data-explain-title="Libraries to monitor" data-explain-template="infoEditLibrariesNoteTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditLibrariesNoteTpl">
     <p><strong>Libraries to monitor</strong> — Previews covers every preview job for this server (webhooks, scheduled scans, Recently Added).</p>
+    <p>Untick Previews to make this app make no previews for anything in that library. Intro &amp; Credits, when it's on for this server, has its own column.</p>
+    <p>For a one-off run against a different subset, use the New Job button on the Dashboard — that picker is per-run only.</p>
 </template>
-
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Which libraries on this server get previews." data-explain-title="Libraries" data-explain-template="infoServerLibrariesTpl"><i class="bi bi-info-circle"></i></button>
                             </p>
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="editRefreshLibrariesBtn">
                                 <i class="bi bi-arrow-clockwise me-1"></i>Refresh libraries
@@ -524,40 +569,38 @@
                         <!-- Previews switches come from servers.js; the Intro & Credits column (markers.library_ids)
                              is filled and shown by markers_server_tab.js while that tab's switch is on. -->
                         <div class="table-responsive">
-                            <table class="table table-sm align-middle small mb-0" id="editLibraryTable">
-                                <thead>
-                                    <tr>
-                                        <th scope="col">Library</th>
-                                        <th scope="col" class="text-center edit-lib-switch-col">Previews</th>
-                                        <th scope="col" class="text-center edit-lib-switch-col markers-lib-col d-none">Intro &amp; Credits
-                                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                                    title="Libraries that get intro and credits markers here, whatever their Previews switch says. Sports libraries start off."><i class="bi bi-info-circle"></i></button>
-                                        </th>
-                                        <th scope="col" class="text-center edit-lib-switch-col loudness-lib-col d-none">Loudness
-                                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                                    title="Libraries whose audio tracks get Plex's loudness analysis here, whatever their Previews switch says. Movie and TV libraries start on."><i class="bi bi-info-circle"></i></button>
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody id="editLibraryList"></tbody>
-                            </table>
+                        <table class="table table-sm align-middle sm-tbl sm-libs mb-0" id="editLibraryTable">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Library</th>
+                                    <th scope="col" class="text-center edit-lib-switch-col">Previews</th>
+                                    <th scope="col" class="text-center edit-lib-switch-col markers-lib-col d-none">Intro &amp; Credits
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="Libraries that get intro and credits markers here, whatever their Previews switch says. Sports libraries start off."><i class="bi bi-info-circle"></i></button>
+                                    </th>
+                                    <th scope="col" class="text-center edit-lib-switch-col loudness-lib-col d-none">Loudness
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="Libraries whose audio tracks get Plex's loudness analysis here, whatever their Previews switch says. Movie and TV libraries start on."><i class="bi bi-info-circle"></i></button>
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody id="editLibraryList"></tbody>
+                        </table>
                         </div>
                     </div>
 
-                    <!-- Path mappings — restructured Apr 2026: leads with a 1-line
-                         summary + worked example; the union-mount edge case moved
-                         into a "More details" expander so it doesn't drown out
-                         the simple case. -->
+                    <!-- Path mappings: one-line purpose; the worked example and the union-mount edge case sit in a
+                         collapsed disclosure and in the (i). -->
                     <div class="tab-pane fade" id="edit-tab-paths">
-                        <p class="small text-muted mb-2">
-                            <strong>Use this when your media server and this app see files at different paths.</strong> <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Most installs don't need any rows here." data-explain-title="Path mappings" data-explain-template="infoEditPathMapTpl"><i class="bi bi-info-circle"></i></button>
+                        <p class="sm-hint mb-0">
+                            <strong class="sm-strong">Only needed when paths differ.</strong> Leave empty if both see the same paths. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Most installs don't need any rows here." data-explain-title="Path mappings" data-explain-template="infoEditPathMapTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditPathMapTpl">
     <p><strong>Use this when your media server and this app see the same files at different paths.</strong> Most installs don't need any rows here — leave the table empty if the server and this app mount media at the same paths.</p>
 </template>
-</p>
-                        <details class="mb-3">
-                            <summary class="small text-muted">Worked example + when you'd need this</summary>
-                            <div class="small text-muted mt-2">
+                        </p>
+                        <details class="sm-ex">
+                            <summary>Worked example + when you'd need this</summary>
+                            <div class="sm-ex-box">
                                 <p class="mb-2">
                                     Suppose your server stores a file at <code>/data_16tb/movies/Inception.mkv</code> but this app's container mounts that disk as <code>/mnt/plex/movies/Inception.mkv</code> — the server tells this app "the file is at /data_16tb/...", but this app can't open that path because it doesn't exist inside the container. Add a row:
                                 </p>
@@ -570,16 +613,16 @@
                                 </p>
                             </div>
                         </details>
-                        <table class="table table-sm" id="editPathMappingsTable">
+                        <table class="table table-sm sm-tbl sm-tbl-stack" id="editPathMappingsTable">
                             <thead><tr>
                                 <th>Path on Media Server
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The path your media server reports (what's stored in its database / shown in its admin UI)."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The path your media server reports (what's stored in its database / shown in its admin UI)."><i class="bi bi-info-circle"></i></button>
                                 </th>
                                 <th>Local path on this app
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The path the same file appears at INSIDE this app's container — i.e. the volume mount target."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The path the same file appears at INSIDE this app's container — i.e. the volume mount target."><i class="bi bi-info-circle"></i></button>
                                 </th>
                                 <th>Path on Apps (Sonarr, Radarr, Webhooks)
-                                    <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
+                                    <button type="button" class="info-icon info-icon-more" tabindex="0"
                                             data-bs-toggle="tooltip" data-bs-placement="top"
                                             title="For Sonarr/Radarr/Tdarr webhooks that send a different path than your server reports."
                                             data-explain-title="Webhook path mapping"
@@ -588,15 +631,15 @@
                                         <i class="bi bi-info-circle"></i>
                                     </button>
                                 </th>
-                                <th></th>
+                                <th class="sm-col-x"><span class="visually-hidden">Remove</span></th>
                             </tr></thead>
                             <tbody></tbody>
                         </table>
-                        <div class="d-flex justify-content-between mb-3">
+                        <div class="sm-tfoot">
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="editAddPathMapping">
                                 <i class="bi bi-plus-lg me-1"></i>Add row
                             </button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" id="editApplyPathMappingsAll" title="Copy these mappings to every other configured server">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="editApplyPathMappingsAll" title="Copy these mappings to every other configured server">
                                 <i class="bi bi-arrow-left-right me-1"></i>Apply to all servers
                             </button>
                         </div>
@@ -604,147 +647,132 @@
 
                     <!-- Exclude paths -->
                     <div class="tab-pane fade" id="edit-tab-excludes">
-                        <p class="small text-muted mb-2">
-                            <strong>Skip preview generation for files matching these rules.</strong> <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Useful for trailer folders or sample videos." data-explain-title="Exclude paths" data-explain-template="infoEditExcludeNoteTpl"><i class="bi bi-info-circle"></i></button>
+                        <p class="sm-hint mb-0">
+                            <strong class="sm-strong">Skip preview generation for files matching these rules.</strong> <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Useful for trailer folders or sample videos." data-explain-title="Exclude paths" data-explain-template="infoEditExcludeNoteTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditExcludeNoteTpl">
     <p><strong>Skip preview generation for files matching these rules.</strong> Useful for things like trailer folders or sample videos.</p>
 </template>
-</p>
-                        <table class="table table-sm" id="editExcludePathsTable">
+                        </p>
+                        <table class="table table-sm sm-tbl sm-tbl-stack" id="editExcludePathsTable">
                             <thead><tr>
                                 <th>Value</th>
-                                <th>Type
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Path prefix skips everything under a folder; Regex matches the full file path." data-explain-title="Exclude paths" data-explain-template="infoExcludeTypeTpl"><i class="bi bi-info-circle"></i></button>
+                                <th class="sm-col-type">Type
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Path prefix skips everything under a folder; Regex matches the full file path." data-explain-title="Exclude paths" data-explain-template="infoExcludeTypeTpl"><i class="bi bi-info-circle"></i></button>
                                 </th>
-                                <th></th>
+                                <th class="sm-col-x"><span class="visually-hidden">Remove</span></th>
                             </tr></thead>
                             <tbody></tbody>
                         </table>
-                        <div class="d-flex justify-content-between mb-3">
+                        <div class="sm-tfoot">
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="editAddExcludePath">
                                 <i class="bi bi-plus-lg me-1"></i>Add row
                             </button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" id="editApplyExcludePathsAll" title="Copy these rules to every other configured server">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="editApplyExcludePathsAll" title="Copy these rules to every other configured server">
                                 <i class="bi bi-arrow-left-right me-1"></i>Apply to all servers
                             </button>
                         </div>
                     </div>
 
-                    <!-- Webhook & Scanner: Plex shows the registration controls;
-                         Emby/Jellyfin show plugin-install instructions + the URL the
-                         user needs to paste into their server's webhook plugin (the
-                         #editVendorWebhookCard below, populated by JS at modal-open
-                         time). Pre-fix this tab was Plex-only and Emby/Jellyfin users
-                         had no place to find the webhook URL. -->
+                    <!-- Webhook & Scanner: Plex shows the registration controls; Emby/Jellyfin show the URL the
+                         user pastes into their server's webhook plugin (the #editVendorWebhookCard, populated by JS
+                         at modal-open time). -->
                     <div class="tab-pane fade" id="edit-tab-automation">
-                        <p class="small text-muted mb-3">
-                            Webhook jobs use the delay set in Automation &rarr; Triggers. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Override it per URL with the delay parameter." data-explain-title="Webhook delay" data-explain-template="infoEditWebhookDelayTpl"><i class="bi bi-info-circle"></i></button>
+                        <p class="sm-hint mb-0">
+                            Webhook jobs use the delay set in Automation &rarr; Triggers. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Override it per URL with the delay parameter." data-explain-title="Webhook delay" data-explain-template="infoEditWebhookDelayTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditWebhookDelayTpl">
     <p>Webhook jobs use <strong>Delay before processing</strong> in Automation &rarr; Triggers. To override it, append <code>?delay=30</code> to the webhook URL, or <code>&amp;delay=30</code> if it already contains <code>?</code>. Valid values are 1–3600 seconds; each file version waits independently.</p>
 </template>
-</p>
-                        <div id="editPlexWebhookServerCaption" class="small text-muted mb-3"></div>
+                        </p>
+                        <div id="editPlexWebhookServerCaption" class="sm-hint"></div>
 
                         <!-- Emby / Jellyfin Webhook info card (shown by JS for non-Plex servers). -->
-                        <div id="editVendorWebhookCard" class="card mb-3 d-none">
-                            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-                                <div>
-                                    <i class="bi bi-broadcast me-2"></i>
-                                    <span id="editVendorWebhookHeader">Webhook</span>
-                                </div>
-                                <span class="badge bg-secondary" id="editVendorWebhookPluginBadge">Plugin required</span>
+                        <div id="editVendorWebhookCard" class="sm-card d-none">
+                            <div class="sm-card-h" id="editVendorWebhookCardHead">
+                                <h3><i class="bi bi-broadcast"></i><span id="editVendorWebhookHeader">Webhook</span></h3>
+                                <span class="sm-sp"></span>
+                                <span class="pill" id="editVendorWebhookPluginBadge">Plugin required</span>
                             </div>
-                            <div class="card-body">
-                                <p class="mb-2">
-                                    Configure your media server's webhook plugin to POST events to this URL.
-                                    Each server has its own URL so payloads can be routed to the right server
-                                    even when you have multiple Emby or Jellyfin installs.
-                                </p>
-                                <label class="form-label small text-muted">
-                                    Webhook URL
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pinned to this server's ID. The router dispatches previews only to this server, even if a sibling server owns the same path."><i class="bi bi-info-circle"></i></button>
-                                </label>
-                                <div class="input-group input-group-sm mb-3">
-                                    <input type="text" class="form-control font-monospace" id="editVendorWebhookUrl" readonly>
-                                    <button class="btn btn-outline-secondary" type="button" id="editVendorWebhookCopyBtn" title="Copy URL to clipboard">
-                                        <i class="bi bi-clipboard"></i>
-                                    </button>
+                            <div class="sm-card-b">
+                                <div class="sm-hint">Point your server's webhook plugin at this URL (one per server).</div>
+                                <div class="sm-fld">
+                                    <label class="sm-lab" for="editVendorWebhookUrl">Webhook URL
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pinned to this server's ID, so previews go only to this server." data-explain-title="Webhook URL" data-explain-template="infoVendorWebhookUrlTpl"><i class="bi bi-info-circle"></i></button>
+                                    </label>
+                                    <div class="input-group">
+                                        <input type="text" class="form-control font-monospace" id="editVendorWebhookUrl" readonly>
+                                        <button class="btn btn-outline-secondary" type="button" id="editVendorWebhookCopyBtn" title="Copy URL to clipboard" aria-label="Copy URL to clipboard">
+                                            <i class="bi bi-clipboard"></i>
+                                        </button>
+                                    </div>
                                 </div>
-                                <div id="editVendorWebhookAuthBlock" class="alert alert-warning small mb-3">
-                                    <div class="fw-semibold mb-1">
-                                        <i class="bi bi-shield-lock me-1"></i>Auth header (required)
-                                    </div>
-                                    <div>
-                                        In your plugin's <strong>Headers</strong> / <strong>Request Headers</strong> section, add a custom header:
-                                    </div>
-                                    <ul class="mb-1 mt-1" style="margin-bottom:0;">
-                                        <li>Name: <code id="editVendorWebhookHeaderName">X-Auth-Token</code></li>
-                                        <li>Value: <code id="editVendorWebhookHeaderValuePlaceholder">[THIS APP'S TOKEN]</code></li>
-                                    </ul>
-                                    <div class="small text-muted">
-                                        Use this app's web-auth token as the value. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to find the token and why a header is safer." data-explain-title="Webhook token header" data-explain-template="infoEditWebhookTokenTpl"><i class="bi bi-info-circle"></i></button>
+                                <div id="editVendorWebhookAuthBlock" class="sm-warnline">
+                                    <i class="bi bi-shield-lock-fill"></i>
+                                    <span><strong>Auth header (required).</strong> Add header <code id="editVendorWebhookHeaderName">X-Auth-Token</code> with value <code id="editVendorWebhookHeaderValuePlaceholder">[THIS APP'S TOKEN]</code>.</span>
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to find the token and why a header is safer." data-explain-title="Webhook token header" data-explain-template="infoEditWebhookTokenTpl" aria-label="About the auth header"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditWebhookTokenTpl">
+    <p>In your plugin's <strong>Headers</strong> / <strong>Request Headers</strong> section, add a custom header: Name <code>X-Auth-Token</code>, Value this app's web-auth token.</p>
     <p>Use this app's web-auth token as the value. You can find or rotate it under <a href="/settings#section-auth">Settings → Authentication</a>. Sending the token as a header keeps it out of access logs, screenshots, and clipboard history.</p>
 </template>
-</div>
                                 </div>
-                                <div id="editVendorWebhookPluginHint" class="alert alert-info small mb-2"></div>
-                                <ol id="editVendorWebhookSteps" class="mb-3 small"></ol>
+                                <div id="editVendorWebhookPluginHint" class="sm-hint"></div>
+                                <details class="sm-ex">
+                                    <summary id="editVendorWebhookStepsSummary">Setup steps</summary>
+                                    <ol id="editVendorWebhookSteps" class="sm-ex-box sm-steps"></ol>
+                                </details>
                             </div>
                         </div>
 
                         <!-- Plex Direct Webhook -->
-                        <div class="card mb-3" id="editPlexWebhookCard">
-                            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-                                <div>
-                                    <i class="bi bi-lightning-charge me-2"></i>Plex Direct Webhook
-                                    <span class="badge bg-info ms-2">Instant</span>
-                                    <span class="badge bg-warning text-dark ms-1">Plex Pass required</span>
-                                </div>
+                        <div class="sm-card" id="editPlexWebhookCard">
+                            <div class="sm-card-h">
+                                <h3><i class="bi bi-lightning-charge"></i>Plex Direct Webhook</h3>
+                                <span class="pill run">Instant</span>
+                                <span class="pill warn">Plex Pass required</span>
+                                <span class="sm-sp"></span>
                                 <span class="badge badge-status bg-secondary" id="plexWebhookStatusBadge">Checking…</span>
                             </div>
-                            <div class="card-body">
-                                <p class="mb-3">Instant: Plex pings this app the moment it adds a library item.</p>
+                            <div class="sm-card-b">
+                                <div class="sm-hint">Instant: Plex pings this app the moment it adds a library item.</div>
 
-                                <h6 class="mb-2">Prerequisites</h6>
-                                <ul class="mb-3">
-                                    <li><strong>Plex Pass</strong> active on your server-owner account.</li>
-                                    <li>
-                                        <strong>Mobile Push Notifications enabled</strong> in Plex Web → Settings → General.
-                                        <div class="text-muted small mt-1">
-                                            Needed for the <code>library.new</code> webhook to fire. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The toggle just needs to be on; no pushes are sent." data-explain-title="Mobile push notifications" data-explain-template="infoEditPlexPushTpl"><i class="bi bi-info-circle"></i></button>
+                                <details class="sm-ex">
+                                    <summary>Prerequisites</summary>
+                                    <ul class="sm-ex-box sm-steps">
+                                        <li><strong>Plex Pass</strong> active on your server-owner account.</li>
+                                        <li>
+                                            <strong>Mobile Push Notifications enabled</strong> in Plex Web → Settings → General.
+                                            Needed for the <code>library.new</code> webhook to fire. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The toggle just needs to be on; no pushes are sent." data-explain-title="Mobile push notifications" data-explain-template="infoEditPlexPushTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditPlexPushTpl">
     <p>Plex quirk: the <code>library.new</code> webhook only fires when push notifications are on. The toggle just needs to be enabled — you don't actually need to send pushes anywhere.</p>
 </template>
-</div>
-                                    </li>
-                                </ul>
+                                        </li>
+                                    </ul>
+                                </details>
 
-                                <div id="plexWebhookNoPlexPass" class="alert alert-warning small d-none">
-                                    <i class="bi bi-exclamation-circle me-1"></i>
-                                    Your Plex account doesn't appear to have an active Plex Pass subscription. Plex's webhook feature is Plex-Pass-only — use the Recently Added Scanner below instead.
+                                <div id="plexWebhookNoPlexPass" class="sm-warnline d-none">
+                                    <i class="bi bi-exclamation-circle-fill"></i>
+                                    <span>Your Plex account doesn't appear to have an active Plex Pass subscription. Plex's webhook feature is Plex-Pass-only — use the Recently Added Scanner below instead.</span>
                                 </div>
-                                <div id="plexWebhookError" class="alert alert-danger small d-none"></div>
-                                <div id="plexWebhookWarning" class="alert alert-warning small d-none"></div>
+                                <div id="plexWebhookError" class="sm-warnline bad d-none"></div>
+                                <div id="plexWebhookWarning" class="sm-warnline d-none"></div>
 
-                                <h6 class="mb-2">Setup</h6>
-                                <ol class="mb-3">
-                                    <li class="mb-3">
-                                        Confirm the URL Plex will POST to. The default is the URL you're using right now, which works for most same-host setups. Override it if Plex is on a different machine or behind a different network/proxy.
-                                        <div class="input-group input-group-sm mt-2">
-                                            <input type="text" class="form-control" id="plexWebhookPublicUrl" placeholder="http://your-host:8080/api/webhooks/server/&lt;this-server-id&gt;">
-                                            <button class="btn btn-outline-secondary" type="button" id="plexWebhookResetUrlBtn" title="Reset to detected URL">
-                                                <i class="bi bi-arrow-counterclockwise"></i>
-                                            </button>
-                                        </div>
-                                        <div class="form-text">Must be reachable from your <strong>Plex Media Server</strong>, not just your browser.</div>
-                                    </li>
-                                    <li>
-                                        Click <strong>Register with Plex</strong> below. The global webhook secret (set under <a href="/automation#section-webhooks-settings">Triggers &rarr; Settings</a>) is embedded in the registered URL so Plex can authenticate. <strong>If you change the secret later</strong>, click Register again to push the new value.
-                                    </li>
-                                </ol>
+                                <div class="sm-fld">
+                                    <label class="sm-lab" for="plexWebhookPublicUrl">URL Plex will POST to
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Must be reachable from your Plex Media Server, not just your browser." data-explain-title="URL Plex will POST to" data-explain-template="infoEditPlexWebhookUrlTpl" aria-label="About the webhook URL"><i class="bi bi-info-circle"></i></button>
+<template id="infoEditPlexWebhookUrlTpl">
+    <p>Confirm the URL Plex will POST to. The default is the URL you're using right now, which works for most same-host setups. Override it if Plex is on a different machine or behind a different network/proxy.</p>
+    <p>It must be reachable from your <strong>Plex Media Server</strong>, not just your browser.</p>
+    <p>Click <strong>Register with Plex</strong>. The global webhook secret (set under <a href="/automation#section-webhooks-settings">Triggers &rarr; Settings</a>) is embedded in the registered URL so Plex can authenticate. <strong>If you change the secret later</strong>, click Register again to push the new value.</p>
+</template>
+                                    </label>
+                                    <div class="input-group">
+                                        <input type="text" class="form-control font-monospace" id="plexWebhookPublicUrl" placeholder="http://your-host:8080/api/webhooks/server/&lt;this-server-id&gt;">
+                                        <button class="btn btn-outline-secondary" type="button" id="plexWebhookResetUrlBtn" title="Reset to detected URL" aria-label="Reset to detected URL">
+                                            <i class="bi bi-arrow-counterclockwise"></i>
+                                        </button>
+                                    </div>
+                                </div>
 
-                                <div class="d-flex gap-2 flex-wrap">
+                                <div class="sm-testrow">
                                     <button class="btn btn-sm btn-primary" type="button" id="plexWebhookRegisterBtn">
                                         <i class="bi bi-plus-circle me-1"></i><span>Register with Plex</span>
                                     </button>
@@ -755,171 +783,180 @@
                             </div>
                         </div>
 
-                        <!-- Recently Added Scanner — universal across vendors,
-                             but the full config (intervals, lookback windows,
-                             per-server libraries) lives on the dedicated
-                             Schedules page. This card surfaces the status +
-                             a deep-link so users land in the right place
-                             instead of seeing two competing forms (modal vs.
-                             Schedules page) for the same setting. -->
-                        <div class="card mb-3" id="editRecentlyAddedCard">
-                            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-                                <div>
-                                    <i class="bi bi-arrow-repeat me-2"></i>Recently Added Scanner
-                                    <span class="badge bg-success ms-2" id="editRecentlyAddedSafetyNetBadge">Safety net</span>
-                                </div>
+                        <!-- Recently Added Scanner — universal across vendors, but the full config (intervals,
+                             lookback windows, per-server libraries) lives on the dedicated Schedules page. This card
+                             surfaces the status + a deep-link. -->
+                        <div class="sm-card" id="editRecentlyAddedCard">
+                            <div class="sm-card-h">
+                                <h3><i class="bi bi-arrow-repeat"></i>Recently Added Scanner</h3>
+                                <span class="pill ok" id="editRecentlyAddedSafetyNetBadge">Safety net</span>
+                                <span class="sm-sp"></span>
                                 <span class="badge badge-status bg-secondary" id="recentlyAddedStatusBadge">Loading…</span>
                             </div>
-                            <div class="card-body">
-                                <p class="mb-2" id="editRecentlyAddedBlurb">
-                                    Polls this server's recently-added list on a schedule so files the live webhook missed (server down, plugin not configured) still get picked up.
-                                </p>
-                                <div id="recentlyAddedScannerSummary" class="small text-muted mb-3">
+                            <div class="sm-card-b">
+                                <div class="sm-hint" id="editRecentlyAddedBlurb">
+                                    Polls recently added items so files the webhook missed still get picked up. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Polls this server's recently-added list on a schedule so files the live webhook missed (server down, plugin not configured) still get picked up." aria-label="About the Recently Added Scanner"><i class="bi bi-info-circle"></i></button>
+                                </div>
+                                <div id="recentlyAddedScannerSummary" class="sm-hint">
                                     <span class="spinner-border spinner-border-sm me-1"></span>Loading scanners…
                                 </div>
-                                <div class="d-flex gap-2 flex-wrap align-items-center">
+                                <div class="sm-testrow">
                                     <a href="{{ url_for('main.automation_page') }}#section-schedules-list"
                                        class="btn btn-sm btn-primary" id="recentlyAddedManageLink">
                                         <i class="bi bi-sliders me-1"></i>Configure on Schedules page
                                     </a>
-                                    <button class="btn btn-sm btn-outline-primary d-none" type="button" id="recentlyAddedScanNowBtn">
+                                    <button class="btn btn-sm btn-outline-secondary d-none" type="button" id="recentlyAddedScanNowBtn">
                                         <i class="bi bi-play-circle me-1"></i>Scan all now
                                     </button>
+                                    <span id="recentlyAddedScanResult" class="sm-hint"></span>
                                 </div>
-                                <div id="recentlyAddedScanResult" class="small mt-2"></div>
                             </div>
                         </div>
                     </div>
 
+                    <!-- Processing: what this server receives. Intro & Credits and Loudness fill from
+                         markers_server_tab.js / loudness_server_tab.js. -->
                     <div class="tab-pane fade" id="edit-tab-processing">
-                        <nav class="processing-feature-nav" aria-label="Processing features">
+                        <nav class="processing-feature-nav sm-jump" aria-label="Processing features">
                             <a href="#processingPreviewsTitle" data-feature-jump>Previews</a>
                             <a href="#processingChaptersTitle" data-feature-jump class="processing-plex-link d-none">Chapter thumbnails</a>
                             <a href="#processingMarkersTitle" data-feature-jump>Intro &amp; Credits</a>
                             <a href="#processingLoudnessTitle" data-feature-jump class="processing-plex-link d-none">Loudness</a>
                         </nav>
-                        <p class="text-muted mb-3">Choose what this server receives. Select libraries for each feature in <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Libraries</a>.</p>
-                        <section class="processing-feature" aria-labelledby="processingPreviewsTitle">
-                            <h3 id="processingPreviewsTitle" class="h5" tabindex="-1">Previews</h3>
-                            <p class="small mb-2" id="processingPreviewOutput"></p>
-                            <p class="small text-muted mb-0">Selected libraries receive scrubber previews. <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Choose libraries</a>. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to choose libraries and edit quality." data-explain-title="Previews" data-explain-template="infoEditPreviewsTpl"><i class="bi bi-info-circle"></i></button>
+                        <p class="sm-lead">Choose what this server receives. Select libraries for each feature in <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Libraries</a>.</p>
+                        <section class="processing-feature sm-sec" aria-labelledby="processingPreviewsTitle">
+                            <h3 id="processingPreviewsTitle" class="sm-ph" tabindex="-1">Previews</h3>
+                            <div class="sm-card"><div class="sm-card-b">
+                                <div class="sm-dl-row"><span class="sm-dl-k">Written to</span><span class="sm-dl-v" id="processingPreviewOutput"></span></div>
+                                <div class="sm-hint">Selected libraries receive scrubber previews. <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Choose libraries</a>. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to choose libraries and edit quality." data-explain-title="Previews" data-explain-template="infoEditPreviewsTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditPreviewsTpl">
     <p>Selected libraries receive scrubber previews. <a href="#edit-tab-libraries" class="processing-section-link" data-section="libraries">Choose libraries</a> or <a href="{{ url_for('main.settings') }}#section-processing">edit shared quality and processing settings</a>.</p>
 </template>
-</p>
+                                </div>
+                            </div></div>
                         </section>
-                        <section class="processing-feature d-none" id="processingChapters" aria-labelledby="processingChaptersTitle">
-                            <h3 id="processingChaptersTitle" class="h5" tabindex="-1">Chapter thumbnails <span class="small text-muted">Plex only · CPU</span></h3>
-                            <p class="small text-muted mb-2">Included in preview jobs for the selected libraries. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Separate from scrubber images; off by default." data-explain-title="Chapter thumbnails" data-explain-template="infoEditChaptersNoteTpl"><i class="bi bi-info-circle"></i></button>
+                        <section class="processing-feature sm-sec d-none" id="processingChapters" aria-labelledby="processingChaptersTitle">
+                            <h3 id="processingChaptersTitle" class="sm-ph" tabindex="-1">Chapter thumbnails <small>Plex only · CPU</small></h3>
+                            <div class="sm-card"><div class="sm-card-b">
+                                <div class="sm-line">
+                                    <div>
+                                        <label class="sm-lab" for="editPlexChapterThumbnails">Generate chapter thumbnails
+                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Separate from scrubber images; off by default." data-explain-title="Chapter thumbnails" data-explain-template="infoEditChaptersNoteTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditChaptersNoteTpl">
-    <p>Included in preview jobs for the selected preview libraries. Separate from scrubber images; off by default.</p>
+    <p>Included in preview jobs for the selected preview libraries. Separate from scrubber images; off by default. Adds pictures to Plex's chapter menu and updates Plex's database. Plex may still show older cached images.</p>
+    <p>Requires Plex 1.43.4.x and supported chapter data. For Plex on another machine, configure the Plex helper in the Connection tab.</p>
 </template>
-</p>
-                            <div class="form-check form-switch mt-3">
-                                <input class="form-check-input" type="checkbox" role="switch" id="editPlexChapterThumbnails" aria-describedby="editPlexChapterThumbnailsHelp">
-                                <label class="form-check-label" for="editPlexChapterThumbnails">Generate chapter thumbnails</label>
-                            </div>
-                            <div class="form-text" id="editPlexChapterThumbnailsHelp">
-                                Adds pictures to Plex's chapter menu and updates Plex's database.
-                                Plex may still show older cached images.
-                                Check <a href="#" id="editPlexChapterHealthLink">Setup Health</a>.
-                            </div>
-                            <p class="small text-muted mt-2 mb-0">Requires Plex 1.43.4.x and supported chapter data. For Plex on another machine, configure the <a href="#edit-tab-general" class="processing-section-link" data-section="general">Plex helper in Connection</a>.</p>
+                                        </label>
+                                        <div class="sm-hint" id="editPlexChapterThumbnailsHelp">Pictures in Plex's chapter menu.</div>
+                                    </div>
+                                    <div class="form-check form-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="editPlexChapterThumbnails" aria-describedby="editPlexChapterThumbnailsHelp">
+                                    </div>
+                                </div>
+                                <div class="sm-hint">Check <a href="#" id="editPlexChapterHealthLink">Setup Health</a>. <a href="#edit-tab-general" class="processing-section-link" data-section="general">Plex helper in Connection</a></div>
+                            </div></div>
                         </section>
-                    <!-- Intro & Credits: this server's switch and status. Filled by markers_server_tab.js; its library
-                         choice is the Libraries tab's Intro & Credits column; detection settings shared by every
-                         server live in Settings. -->
-                    <section class="processing-feature" id="edit-tab-markers" aria-labelledby="processingMarkersTitle">
-                        <h3 id="processingMarkersTitle" class="h5" tabindex="-1">Intro &amp; Credits</h3>
-                        <p class="small text-muted">Detection is shared across servers. <a href="{{ url_for('main.settings') }}#section-markers">Edit detection settings</a>.</p>
-                        <div class="markers-opt mb-2">
-                            <div>
-                                <label class="fw-semibold" for="markersEnabled">Send intro &amp; credits markers to this server</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Send the markers found for each file to this server too. Detection settings live in Settings → Intro &amp; Credits."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Viewers on this server see Skip Intro / Skip Credits</div>
-                            </div>
-                            <div class="form-check form-switch markers-switch">
-                                <input class="form-check-input" type="checkbox" role="switch" id="markersEnabled">
-                            </div>
-                        </div>
+                        <!-- Intro & Credits: this server's switch and status. Filled by markers_server_tab.js; its library
+                             choice is the Libraries tab's Intro & Credits column; detection settings shared by every
+                             server live in Settings. -->
+                        <section class="processing-feature sm-sec" id="edit-tab-markers" aria-labelledby="processingMarkersTitle">
+                            <h3 id="processingMarkersTitle" class="sm-ph" tabindex="-1">Intro &amp; Credits</h3>
+                            <div class="sm-card"><div class="sm-card-b">
+                                <div class="sm-line markers-opt">
+                                    <div>
+                                        <label class="sm-lab" for="markersEnabled">Send intro &amp; credits markers to this server
+                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                    title="Send the markers found for each file to this server too. Detection settings live in Settings → Intro &amp; Credits."><i class="bi bi-info-circle"></i></button>
+                                        </label>
+                                        <div class="sm-hint">Viewers on this server see Skip Intro / Skip Credits. <a href="{{ url_for('main.settings') }}#section-markers">Edit detection settings</a></div>
+                                    </div>
+                                    <div class="form-check form-switch markers-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="markersEnabled">
+                                    </div>
+                                </div>
 
-                        <hr class="my-3">
-                        <div id="markersStatusBlock">
-                            <div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Checking…</div>
-                        </div>
-                        <hr class="my-3">
+                                <div id="markersStatusBlock">
+                                    <div class="sm-hint"><span class="spinner-border spinner-border-sm me-1"></span>Checking…</div>
+                                </div>
 
-                        <p class="small text-muted mb-3" id="markersLibrariesPointer">
-                            Choose which libraries get markers on the <a href="#" class="markers-libraries-link">Libraries</a> tab once this is on.
-                        </p>
+                                <div class="sm-hint" id="markersLibrariesPointer">
+                                    Choose which libraries get markers on the <a href="#" class="markers-libraries-link">Libraries</a> tab once this is on.
+                                </div>
 
-                        <div class="markers-opt d-none" id="markersPlexRedetectGroup">
-                            <div class="fw-semibold small">When Plex has its own markers
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Which markers win when Plex has intro or credits markers of its own." data-explain-title="When Plex has its own markers" data-explain-template="infoPlexOwnMarkersTpl"><i class="bi bi-info-circle"></i></button>
-                            </div>
-                            <div class="btn-group btn-group-sm" role="group" aria-label="When Plex has its own markers">
-                                <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectRestore" value="restore" autocomplete="off">
-                                <label class="btn btn-outline-secondary" for="markersRedetectRestore">Use ours</label>
-                                <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectKeep" value="keep_plex" autocomplete="off">
-                                <label class="btn btn-outline-secondary" for="markersRedetectKeep">Keep Plex's</label>
-                            </div>
-                        </div>
+                                <div class="sm-line markers-opt d-none" id="markersPlexRedetectGroup">
+                                    <span class="sm-lab fw-semibold">When Plex has its own markers
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="Which markers win when Plex has intro or credits markers of its own." data-explain-title="When Plex has its own markers" data-explain-template="infoPlexOwnMarkersTpl"><i class="bi bi-info-circle"></i></button>
+                                    </span>
+                                    <div class="btn-group btn-group-sm sm-mseg" role="group" aria-label="When Plex has its own markers">
+                                        <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectRestore" value="restore" autocomplete="off">
+                                        <label class="btn" for="markersRedetectRestore">Use ours</label>
+                                        <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectKeep" value="keep_plex" autocomplete="off">
+                                        <label class="btn" for="markersRedetectKeep">Keep Plex's</label>
+                                    </div>
+                                </div>
 
-                        <div class="markers-opt d-none" id="markersEmbyRedetectGroup">
-                            <div class="fw-semibold small">When Emby has its own markers
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Which markers win when Emby has intro or credits markers of its own." data-explain-title="When Emby has its own markers" data-explain-template="infoEmbyOwnMarkersTpl"><i class="bi bi-info-circle"></i></button>
-                            </div>
-                            <div class="btn-group btn-group-sm" role="group" aria-label="When Emby has its own markers">
-                                <input type="radio" class="btn-check" name="markersEmbyRedetect" id="markersEmbyRedetectRestore" value="restore" autocomplete="off">
-                                <label class="btn btn-outline-secondary" for="markersEmbyRedetectRestore">Use ours</label>
-                                <input type="radio" class="btn-check" name="markersEmbyRedetect" id="markersEmbyRedetectKeep" value="keep_emby" autocomplete="off">
-                                <label class="btn btn-outline-secondary" for="markersEmbyRedetectKeep">Keep Emby's</label>
-                            </div>
-                        </div>
-                    </section>
+                                <div class="sm-line markers-opt d-none" id="markersEmbyRedetectGroup">
+                                    <span class="sm-lab fw-semibold">When Emby has its own markers
+                                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="Which markers win when Emby has intro or credits markers of its own." data-explain-title="When Emby has its own markers" data-explain-template="infoEmbyOwnMarkersTpl"><i class="bi bi-info-circle"></i></button>
+                                    </span>
+                                    <div class="btn-group btn-group-sm sm-mseg" role="group" aria-label="When Emby has its own markers">
+                                        <input type="radio" class="btn-check" name="markersEmbyRedetect" id="markersEmbyRedetectRestore" value="restore" autocomplete="off">
+                                        <label class="btn" for="markersEmbyRedetectRestore">Use ours</label>
+                                        <input type="radio" class="btn-check" name="markersEmbyRedetect" id="markersEmbyRedetectKeep" value="keep_emby" autocomplete="off">
+                                        <label class="btn" for="markersEmbyRedetectKeep">Keep Emby's</label>
+                                    </div>
+                                </div>
+                            </div></div>
+                        </section>
 
-                    <!-- Loudness (Plex only): this server's switch. Filled by loudness_server_tab.js; its library choice is
-                         the Libraries tab's Loudness column. -->
-                    <section class="processing-feature d-none" id="edit-tab-loudness" aria-labelledby="processingLoudnessTitle">
-                        <h3 id="processingLoudnessTitle" class="h5" tabindex="-1">Loudness <span class="small text-muted">Plex only · CPU</span></h3>
-                        <div class="markers-opt mb-2">
-                            <div>
-                                <label class="fw-semibold" for="loudnessEnabled">Analyse loudness for this server</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Analyses each audio track on this app's workers and stores its loudness measurements in Plex for Normalize Loudness."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Viewers on this server get Normalize Loudness sooner</div>
-                            </div>
-                            <div class="form-check form-switch markers-switch">
-                                <input class="form-check-input" type="checkbox" role="switch" id="loudnessEnabled">
-                            </div>
-                        </div>
-                        <p class="small text-muted mb-2">
-                            Needs Plex 1.43.4.x on the same machine. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Requirements, CPU worker group and database writes." data-explain-title="Loudness requirements" data-explain-template="infoEditLoudnessReqTpl"><i class="bi bi-info-circle"></i></button>
+                        <!-- Loudness (Plex only): this server's switch. Filled by loudness_server_tab.js; its library choice is
+                             the Libraries tab's Loudness column. -->
+                        <section class="processing-feature sm-sec d-none" id="edit-tab-loudness" aria-labelledby="processingLoudnessTitle">
+                            <h3 id="processingLoudnessTitle" class="sm-ph" tabindex="-1">Loudness <small>Plex only · CPU</small></h3>
+                            <div class="sm-card"><div class="sm-card-b">
+                                <div class="sm-line markers-opt">
+                                    <div>
+                                        <label class="sm-lab" for="loudnessEnabled">Analyse loudness for this server
+                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                    title="Analyses each audio track on this app's workers and stores its loudness measurements in Plex for Normalize Loudness."><i class="bi bi-info-circle"></i></button>
+                                        </label>
+                                        <div class="sm-hint">Viewers on this server get Normalize Loudness sooner. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Requirements, CPU worker group and database writes." data-explain-title="Loudness requirements" data-explain-template="infoEditLoudnessReqTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditLoudnessReqTpl">
     <p>Requires Plex 1.43.4.x on the same machine, with Plex's config folder mounted locally. Network-mounted databases are not supported. Analysis requires a CPU worker group that allows Plex loudness; configure it in <a href="/settings#section-workers">Settings → Workers</a>. It does not use GPU workers or rewrite source media. Enabling this writes loudness measurements to Plex's database. Intro &amp; Credits can stay off.</p>
 </template>
-</p>
-                        <p class="small text-warning mb-2 d-none" id="loudnessHelperHint">
-                            The Plex helper does not support loudness analysis. Use a local Plex database to enable it.
-                        </p>
-                        <p class="small text-muted mb-3" id="loudnessLibrariesPointer">
-                            Choose movie and TV libraries on the <a href="#" class="loudness-libraries-link">Libraries</a> tab. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Music libraries are not supported." data-explain-title="Loudness libraries" data-explain-template="infoEditLoudnessLibsTpl"><i class="bi bi-info-circle"></i></button>
+                                        </div>
+                                    </div>
+                                    <div class="form-check form-switch markers-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="loudnessEnabled">
+                                    </div>
+                                </div>
+                                <div class="sm-warnline d-none" id="loudnessHelperHint">
+                                    <i class="bi bi-exclamation-triangle-fill"></i><span>The Plex helper does not support loudness analysis. Use a local Plex database to enable it.</span>
+                                </div>
+                                <div class="sm-hint" id="loudnessLibrariesPointer">
+                                    Choose movie and TV libraries on the <a href="#" class="loudness-libraries-link">Libraries</a> tab. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Music libraries are not supported." data-explain-title="Loudness libraries" data-explain-template="infoEditLoudnessLibsTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditLoudnessLibsTpl">
     <p>Choose movie and TV libraries on the <a href="#" class="loudness-libraries-link">Libraries</a> tab once this is on. Music libraries are not supported. Playback Normalize Loudness requires Plex Pass or Plex Home access and Plex audio transcoding.</p>
 </template>
-</p>
-                    </section>
-
+                                </div>
+                            </div></div>
+                        </section>
                     </div>
                 </div>
-
-                <div id="editServerResult" class="d-none"></div>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <div class="modal-footer sm-footer">
+                <div class="sm-foot-msg">
+                    <span class="sm-dirty d-none" id="editServerDirty"><i class="bi bi-circle-fill"></i>Unsaved changes</span>
+                    <div id="editServerResult" class="d-none" role="alert"></div>
+                    <div class="sm-discard d-none" id="editServerDiscardBar" role="alert">
+                        <span>Discard unsaved changes?</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="editServerKeepEditing">Keep editing</button>
+                        <button type="button" class="btn btn-sm btn-danger" id="editServerDiscardConfirm">Discard</button>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="editServerCancel">Cancel</button>
                 <button type="button" class="btn btn-primary" id="editServerSave">
                     <i class="bi bi-save me-1"></i>Save changes
                 </button>
@@ -927,6 +964,7 @@
         </div>
     </div>
 </div>
+
 
 <!-- Asked once per Plex server before Intro & Credits may write into Plex's database
      (stores markers.plex.db_write_confirmed_at). Opened over the Edit dialog by markers_server_tab.js. -->
@@ -1032,10 +1070,9 @@
     <p>Without it: Jellyfin picks up our previews on its next scan (usually within seconds), or at worst on the 3 AM scheduled task.</p>
     <p>Installing requires a Jellyfin restart.</p>
 </template>
-<template id="infoServerLibrariesTpl">
-    <p>Server-level scope. Untick Previews to make this app make no previews for anything in that library.</p>
-    <p>Intro &amp; Credits, when it's on for this server, has its own column.</p>
-    <p>For a one-off run against a different subset, use the New Job button on the Dashboard — that picker is per-run only.</p>
+<template id="infoVendorWebhookUrlTpl">
+    <p>The router dispatches previews only to this server, even if a sibling server owns the same path.</p>
+    <p>Each server has its own URL so payloads reach the right one when you run several Emby or Jellyfin installs.</p>
 </template>
 <template id="infoPlexOwnMarkersTpl">
     <p>Plex can show intro and credits markers of its own, from its detection (for example Analyze on an item).</p>

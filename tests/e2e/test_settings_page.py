@@ -211,3 +211,48 @@ class TestThumbnailQualityDirection:
     def test_visible_label_hints_direction_without_hovering(self, settings_page: Page) -> None:
         label = settings_page.locator('label[for="thumbnailQuality"]')
         expect(label).to_contain_text("lower = sharper")
+
+
+@pytest.mark.e2e
+class TestSettingsPolish:
+    def test_pause_chart_is_hidden_when_quiet_hours_are_off(self, settings_page: Page) -> None:
+        enabled = settings_page.locator("#quietHoursEnabled")
+        if enabled.is_checked():
+            enabled.evaluate("el => { el.checked = false; el.dispatchEvent(new Event('change', { bubbles: true })); }")
+        expect(settings_page.locator("#pauseWeekCard")).to_be_hidden()
+        expect(settings_page.locator("#quietHoursNextHint")).to_have_text("Applied when on.")
+
+    def test_pause_chart_shows_when_quiet_hours_are_on(self, settings_page: Page) -> None:
+        enabled = settings_page.locator("#quietHoursEnabled")
+        enabled.evaluate("el => { el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); }")
+        expect(settings_page.locator("#pauseWeekCard")).to_be_visible()
+
+    def test_pause_rules_sentence_lives_in_the_info_dialog_when_page_loads(self, settings_page: Page) -> None:
+        assert "Missed scheduled runs are not caught up" in settings_page.evaluate(
+            "document.getElementById('infoPauseRulesTpl').content.textContent"
+        )
+        expect(settings_page.locator("#section-worker-quiet-hours .lead-note")).to_have_count(0)
+
+    def test_every_switch_uses_the_accent_colour_when_checked(self, settings_page: Page) -> None:
+        colours = settings_page.evaluate(
+            """() => {
+                const probe = (parent) => { const i = document.createElement('input'); i.type = 'checkbox';
+                    i.className = 'form-check-input'; i.checked = true; parent.appendChild(i);
+                    const c = getComputedStyle(i).backgroundColor; i.remove(); return c; };
+                return ['section-processing', 'section-markers'].map(id => probe(document.getElementById(id)));
+            }"""
+        )
+        assert len(set(colours)) == 1
+
+    def test_markers_decision_link_has_an_accessible_name(self, settings_page: Page) -> None:
+        link = settings_page.locator("#markersHowItDecidesMore")
+        # The link sits in a collapsed fold, so read its text rather than its rendered text.
+        assert (link.text_content() or "").strip() or link.get_attribute("aria-label")
+
+    def test_section_subtitles_fit_on_one_line_when_desktop(self, settings_page: Page) -> None:
+        for desc in settings_page.locator(".sec-desc").all():
+            assert len(desc.inner_text()) <= 90
+
+    def test_backup_restore_panel_is_neutral_when_page_loads(self, settings_page: Page) -> None:
+        expect(settings_page.locator("#section-backups .danger-zone")).to_have_count(0)
+        expect(settings_page.locator("#section-backups .restore-zone")).to_be_visible()

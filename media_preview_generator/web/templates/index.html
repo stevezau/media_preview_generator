@@ -62,6 +62,7 @@
                 <div id="systemWorkerGroups"></div>
             </section>
 
+            {# The build version is in the navbar; this row only appears when there is an update note to show. #}
             <div class="dash-foot system-version-row">
                 <i class="bi bi-box-seam" aria-hidden="true"></i>
                 <span>Version</span>
@@ -96,7 +97,7 @@
                 <a class="dash-tile-link" href="{{ url_for('main.inspector') }}">
                     <i class="bi bi-search" aria-hidden="true"></i><span><b>Inspector</b><small>Check a file</small></span>
                 </a>
-                <a class="dash-tile-link" href="{{ url_for('main.webhook_activity_page') }}">
+                <a class="dash-tile-link" href="{{ url_for('main.webhook_activity_page') }}" title="Webhook activity">
                     <i class="bi bi-broadcast" aria-hidden="true"></i><span><b>Webhook activity</b><small>Incoming events</small></span>
                     <span class="dash-tile-pill" id="quickWebhookPending" aria-label="Pending webhooks" hidden>0</span>
                 </a>
@@ -227,21 +228,26 @@
         </div>
         <div class="card-body p-0">
             <div class="queue-tools" role="search" aria-label="Find jobs">
-                <div class="seg" role="group" aria-label="Show jobs by status" id="jobStatusTabs">
-                    <button type="button" class="on" data-status="active" aria-pressed="true" onclick="changeJobStatus('active')">Unfinished <span class="c" data-status-count="active"></span></button>
-                    <button type="button" data-status="running" aria-pressed="false" onclick="changeJobStatus('running')"><span class="dot run" aria-hidden="true"></span>Running <span class="c" data-status-count="running"></span></button>
-                    <button type="button" data-status="pending" aria-pressed="false" onclick="changeJobStatus('pending')"><span class="dot warn" aria-hidden="true"></span>Pending <span class="c" data-status-count="pending"></span></button>
-                    <button type="button" data-status="completed" aria-pressed="false" onclick="changeJobStatus('completed')"><span class="dot ok" aria-hidden="true"></span>Completed <span class="c" data-status-count="completed"></span></button>
-                    <button type="button" data-status="failed" aria-pressed="false" onclick="changeJobStatus('failed')"><span class="dot bad" aria-hidden="true"></span>Failed <span class="c" data-status-count="failed"></span></button>
-                    <button type="button" data-status="cancelled" aria-pressed="false" onclick="changeJobStatus('cancelled')"><span class="dot" aria-hidden="true"></span>Cancelled <span class="c" data-status-count="cancelled"></span></button>
-                    <button type="button" id="chapterWarningsTab" data-status="chapter_warnings" aria-pressed="false" hidden onclick="changeJobStatus('chapter_warnings')"><span class="dot warn" aria-hidden="true"></span>Chapter warnings <span class="c" data-status-count="chapter_warnings"></span></button>
-                    <button type="button" data-status="" aria-pressed="false" title="All jobs and history" onclick="changeJobStatus('')">All <span class="c" data-status-count="total"></span></button>
+                <div class="queue-tabs-row">
+                    <div class="seg" role="group" aria-label="Show jobs by status" id="jobStatusTabs">
+                        <button type="button" class="on" data-status="active" aria-pressed="true" onclick="changeJobStatus('active')">Unfinished <span class="c" data-status-count="active"></span></button>
+                        <button type="button" data-status="running" aria-pressed="false" onclick="changeJobStatus('running')"><span class="dot run" aria-hidden="true"></span>Running <span class="c" data-status-count="running"></span></button>
+                        <button type="button" data-status="pending" aria-pressed="false" onclick="changeJobStatus('pending')"><span class="dot warn" aria-hidden="true"></span>Pending <span class="c" data-status-count="pending"></span></button>
+                        <button type="button" data-status="completed" aria-pressed="false" onclick="changeJobStatus('completed')"><span class="dot ok" aria-hidden="true"></span>Completed <span class="c" data-status-count="completed"></span></button>
+                        <button type="button" data-status="failed" aria-pressed="false" onclick="changeJobStatus('failed')"><span class="dot bad" aria-hidden="true"></span>Failed <span class="c" data-status-count="failed"></span></button>
+                        <button type="button" data-status="cancelled" aria-pressed="false" onclick="changeJobStatus('cancelled')"><span class="dot" aria-hidden="true"></span>Cancelled <span class="c" data-status-count="cancelled"></span></button>
+                        <button type="button" id="chapterWarningsTab" data-status="chapter_warnings" aria-pressed="false" hidden onclick="changeJobStatus('chapter_warnings')"><span class="dot warn" aria-hidden="true"></span>Chapter warnings <span class="c" data-status-count="chapter_warnings"></span></button>
+                        <button type="button" data-status="" aria-pressed="false" title="All jobs and history" onclick="changeJobStatus('')">All <span class="c" data-status-count="total"></span></button>
+                    </div>
                 </div>
+                <div class="queue-filter-row">
                 <div class="queue-search">
                     <label for="jobSearch" class="visually-hidden">Search jobs</label>
                     <i class="bi bi-search" aria-hidden="true"></i>
                     <input type="search" class="form-control" id="jobSearch" placeholder="Search jobs, titles, IDs" oninput="changeJobSearch(this.value)">
                 </div>
+                <button type="button" class="btn dash-btn-sm queue-filters-toggle" id="queueFiltersToggle" aria-expanded="false" aria-controls="queueFilterGroup" onclick="toggleQueueFilters()"><i class="bi bi-funnel" aria-hidden="true"></i>Filters<span id="queueFiltersToggleCount"></span></button>
+                <div class="queue-filter-group" id="queueFilterGroup">
                 <div class="queue-filter queue-filter-server">
                     <label for="jobServerFilter" class="visually-hidden">Server</label>
                     <i class="bi bi-hdd-stack" aria-hidden="true"></i>
@@ -257,17 +263,19 @@
                     <i class="bi bi-tag" aria-hidden="true"></i>
                     <select id="jobKindFilter" class="form-select" onchange="changeJobKind(this.value)"><option value="">All job types</option><option value="previews">Previews</option><option value="intro_credits">Intro &amp; Credits</option><option value="loudness">Plex loudness</option></select>
                 </div>
+                </div>
                 <!-- The status tabs above drive this select; it stays for keyboard and assistive tech and is the
                      only way to reach the "Job paused" filter. -->
                 <div class="visually-hidden"><label for="jobStatusFilter">Status</label><select id="jobStatusFilter" onchange="changeJobStatus(this.value)"><option value="active" selected>Unfinished</option><option value="chapter_warnings">Chapter warnings</option><option value="">All jobs and history</option><option value="running">Running</option><option value="pending">Pending</option><option value="paused">Job paused</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
-                <button type="button" class="btn btn-link btn-sm queue-clear-filters" id="clearJobFilters" onclick="clearJobFilters()" hidden>Clear filters</button>
+                <button type="button" class="btn dash-btn-sm queue-clear-filters" id="clearJobFilters" aria-label="Clear filters" onclick="clearJobFilters()" hidden><i class="bi bi-x-lg" aria-hidden="true"></i>Clear</button>
                 <span class="queue-filter-count" id="jobFilterCount" role="status" aria-live="polite" hidden></span>
+                </div>
             </div>
             <div class="queue-notice d-none" id="chapterWarningsNotice" role="status">
                 <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
                 <span id="chapterWarningsText"></span>
                 <span class="flex-fill"></span>
-                <button type="button" class="btn dash-btn-sm" onclick="clearJobFilters('chapter_warnings')">Review chapter warnings</button>
+                <button type="button" class="btn dash-btn-sm" id="chapterWarningsReview" onclick="clearJobFilters('chapter_warnings')">Review chapter warnings</button>
             </div>
             <div class="queue-table-wrap">
                 <table class="table align-middle mb-0 jobs-table">
@@ -336,6 +344,14 @@
         // runs expensive GPU detection subprocesses).
         initDashboard();
         loadDashboardVersionInfo();
+        // The tile text is cut with an ellipsis in a narrow card; the full name stays one hover or long-press away.
+        const quickTitle = document.getElementById('quickRunNextTitle');
+        const quickTile = document.getElementById('quickRunNextSchedule');
+        if (quickTitle && quickTile) {
+            const syncQuickTitle = () => quickTile.setAttribute('title', quickTitle.textContent.trim());
+            syncQuickTitle();
+            new MutationObserver(syncQuickTitle).observe(quickTitle, {childList: true, characterData: true, subtree: true});
+        }
         setTimeout(checkWhatsNew, 2000);
 
         // Tooltip init is handled centrally by app.js (_initBootstrapTooltips

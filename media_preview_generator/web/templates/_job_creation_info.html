@@ -21,9 +21,15 @@
     <p>Paths come straight from your servers, so you don't need to know the container path.</p>
 </template>
 
+<template id="infoManualPreviewsTpl">
+    <p>Creates previews for Plex, Emby and Jellyfin servers that own the selected files. Chapter thumbnails follow each Plex server&rsquo;s preview setting.</p>
+</template>
+<template id="infoManualSearchOnTpl">
+    <p>Filters search results only. The job runs on enabled servers that own the selected files.</p>
+</template>
 <template id="infoManualMarkersTpl">
     <p>Find Skip Intro and Skip Credits markers for the selected files or folders. Runs on enabled servers that own those files, with Intro &amp; Credits enabled for the server and library.</p>
-    <p>Requires the server’s publisher setup and a worker group that allows Intro &amp; Credits. This selection does not enable server or library settings. Search on only limits search results.</p>
+    <p>Requires the server’s publisher setup and a worker group that allows Intro &amp; Credits. This selection does not enable server or library settings. Search on only limits search results; it does not restrict publishing.</p>
 </template>
 <template id="infoManualLoudnessTpl">
     <p>Analyze movie and TV audio tracks for owning Plex servers and libraries with Loudness enabled. Existing complete measurements are preserved.</p>

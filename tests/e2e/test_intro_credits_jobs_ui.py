@@ -247,7 +247,7 @@ def _open_start_modal(page: Page) -> None:
 
 
 def _start_button(page: Page):
-    return page.locator('#newJobModal .modal-footer button:has-text("Start Job")')
+    return page.locator("#newJobModal .modal-footer .btn-primary")
 
 
 @pytest.mark.e2e
@@ -1307,13 +1307,13 @@ class TestFilesPanel:
             "generated",
             "skipped_bif_exists",
             "skipped_not_indexed",
-            "failed",
             "no_media_parts",
             "skipped_excluded",
-            "skipped_file_not_found",
-            "skipped_source_gone",
             "skipped_invalid_hash",
             "unresolved_plex",
+            "failed",
+            "skipped_file_not_found",
+            "skipped_source_gone",
         ]
 
     def test_file_rows_show_markers_statuses_and_the_not_in_library_retry(self, dashboard) -> None:

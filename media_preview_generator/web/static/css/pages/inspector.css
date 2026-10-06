@@ -439,7 +439,7 @@ html[data-bs-theme="light"] .insp {
 .insp-crumb {
     margin-bottom: 4px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.08em;
     color: var(--insp-faint);
     text-transform: uppercase;
@@ -449,7 +449,7 @@ html[data-bs-theme="light"] .insp {
 .insp-search-title {
     margin: 0;
     font-size: 1.75rem;
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1.2;
 }
 
@@ -472,11 +472,9 @@ html[data-bs-theme="light"] .insp {
 
 .insp-label,
 .insp-label-caps {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--insp-faint);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--insp-muted);
 }
 
 .insp-searchbox {
@@ -575,7 +573,7 @@ html[data-bs-theme="light"] .insp {
     padding-top: 10px;
     padding-bottom: 10px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.08em;
     color: var(--insp-faint);
 }
@@ -761,7 +759,7 @@ button.insp-row:focus-visible {
 .insp-title {
     margin: 0;
     font-size: 34px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: -0.01em;
     line-height: 1.15;
     overflow-wrap: anywhere;
@@ -1368,13 +1366,13 @@ button.insp-row:focus-visible {
 
 .insp-band.is-tint.is-credits {
     background: var(--insp-amber-tint);
-    color: var(--insp-amber-text);
+    color: var(--insp-text);
     border: 1.5px solid var(--insp-amber);
 }
 
 .insp-band.is-tint.is-intro {
     background: var(--insp-blue-tint);
-    color: var(--insp-blue-text);
+    color: var(--insp-text);
     border: 1.5px solid var(--insp-blue);
 }
 
@@ -2089,7 +2087,7 @@ button.insp-frame:focus-visible {
     border: 1px solid var(--insp-control);
     border-radius: 8px;
     font-size: 14px;
-    font-weight: 700;
+    font-weight: 600;
     color: var(--insp-text);
 }
 
@@ -2593,7 +2591,7 @@ button.insp-season-row:focus-visible {
     border-radius: 999px;
 }
 
-/* Panel headings: small caps with an icon, a rule under them across the card. */
+/* Panel headings: an icon and a title, with a rule under them across the card. */
 .insp-card-title,
 .insp-card-heading {
     display: flex;
@@ -2601,9 +2599,7 @@ button.insp-season-row:focus-visible {
     gap: 8px;
     margin: 0;
     font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-weight: 600;
     color: var(--insp-muted);
 }
 
@@ -2650,16 +2646,14 @@ button.insp-season-row:focus-visible {
 }
 
 .insp-stat-label {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--insp-faint);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--insp-muted);
 }
 
 .insp-stat-title {
     font-size: 18px;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 .insp-stats {
@@ -2939,7 +2933,7 @@ button.insp-row:focus-visible,
 
 .insp-title {
     font-size: 22px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0;
     line-height: 1.2;
 }

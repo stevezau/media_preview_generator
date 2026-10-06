@@ -23,7 +23,7 @@ class TestToolsMenuEntry:
         authed_page.locator("#navToolsDropdown").hover()
         expect(authed_page.locator("#navToolsMenu")).to_be_visible()
 
-        items = authed_page.locator("#navToolsDropdown + .dropdown-menu .dropdown-item")
+        items = authed_page.locator("#navToolsDropdown + .dropdown-menu .dropdown-item b")
         labels = [t.strip() for t in items.all_inner_texts()]
         assert "Inspector" in labels
         # The two old entries are one page now.
