@@ -3,15 +3,6 @@
 {% block title %}Inspector - Media Preview Generator{% endblock %}
 
 {% block head %}
-{# The Inspector's type: IBM Plex Sans and Mono, from the same CDN as Bootstrap. The page falls back to the system
-   fonts when it can't reach it. #}
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-400.css" integrity="sha384-KAoV+iN2OQM4nX8cLQwXAmxUpLLXBew80mRTAMwu9s6Qc2HHFDByndI1icVmJ9Mb" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-500.css" integrity="sha384-52y4Whr2v4Zdfrr/tDzM2gvi5+yKwGbHPH406s95qGkmjfXhaNO+Gf2IGdtIIYnq" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-600.css" integrity="sha384-JyLG9ggsH+KTlK4Vm1MJQ3ImRVsZr00dz86Xq3GWAYPdswFE0QQzcZXLCbmgyRdg" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.3.0/latin-700.css" integrity="sha384-QY4Rb8q7h64DA1CJ9JDtcSfibv5lUCQpnskK/2ulLqqogyY6qlDds4NNu8tMmqGX" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.3.0/latin-400.css" integrity="sha384-gmcmgZJ3SePhkdTXTGuZ/8KFvswox1OAZgOI2fPRjJYwxwqZbjQbzM5Htb673EGZ" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.3.0/latin-500.css" integrity="sha384-jJBRof6uIBCAFnrM/Riy3vKp83V7JHomeoJaXYfnmI8f6uWadY1l56XztI2WC4j4" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.3.0/latin-600.css" integrity="sha384-A75I9qmmE5fTE5MC2L6Oc2qBdwETTaGdNYGQBYESl3XDopSOVzAjn4RoQXbd6hl3" crossorigin="anonymous">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/inspector.css') }}">
 {% endblock %}
 
@@ -19,17 +10,21 @@
 {# One page for a file's preview frames and its intro & credits. Everything below the search is drawn by
    static/js/inspector.js from GET /api/inspector/file and GET /api/markers/item. #}
 <div class="insp" id="inspector">
-    <section id="inspSearch" aria-labelledby="inspSearchTitle">
-        <div class="insp-crumb">Tools › Inspector</div>
-        <h1 class="insp-search-title" id="inspSearchTitle">Inspector</h1>
-        <p class="insp-lead">Find a film or episode to see its preview frames, intro and credits, and Plex loudness measurements.</p>
+    <header class="insp-page-header">
+        <div class="insp-page-title">
+            <div class="insp-crumb">Tools › Inspector</div>
+            <h1 class="insp-search-title" id="inspSearchTitle">Inspector</h1>
+            <p class="insp-lead">Find a film or episode to see its preview frames, intro and credits, and Plex loudness measurements.</p>
+        </div>
+    </header>
 
+    <section id="inspSearch" aria-label="Find a file">
         <div class="insp-search-field">
             <label for="inspQuery" class="insp-label">Title or file path</label>
             <div class="insp-searchbox">
                 <i class="bi bi-search" aria-hidden="true"></i>
                 <input id="inspQuery" type="text" autocomplete="off" spellcheck="false"
-                       placeholder="e.g. The Matrix, or a path starting with /">
+                       placeholder="e.g. The Matrix, or a path starting with /" data-short-placeholder="Title or path">
                 <label for="inspScope" class="visually-hidden">Servers to search</label>
                 <select id="inspScope">
                     <option value="">All servers</option>
@@ -43,6 +38,20 @@
         </div>
 
         <div id="inspResults" class="insp-results" hidden aria-live="polite"></div>
+
+        <div id="inspEmpty" class="insp-card insp-empty">
+            <div class="insp-empty-tile"><i class="bi bi-film" aria-hidden="true"></i></div>
+            <b>Search to inspect a file</b>
+            <p>Type a title, or paste a file path, to see its preview frames, intro and credits, and loudness.</p>
+            <div class="insp-chips">
+                <button type="button" class="insp-suggest" id="inspChipPath"><i class="bi bi-input-cursor-text" aria-hidden="true"></i> Paste a path</button>
+                <button type="button" class="insp-suggest" id="inspChipSearch"><i class="bi bi-search" aria-hidden="true"></i> Search a title</button>
+            </div>
+            <div class="insp-recent" id="inspRecent" hidden>
+                <div class="insp-label-caps">Recent files</div>
+                <div id="inspRecentList" class="insp-recent-list"></div>
+            </div>
+        </div>
     </section>
 
     <div id="inspFolded" class="insp-folded" hidden>
@@ -52,10 +61,12 @@
     </div>
 
     <nav id="inspSectionNav" class="insp-section-nav" aria-label="Inspector sections" hidden>
-        <a href="#inspTimeline">Timeline</a>
-        <a href="#inspLoudness">Loudness</a>
-        <a href="#inspEvidence">Evidence</a>
-        <a href="#inspServers">Servers</a>
+        <div class="insp-section-seg">
+            <a href="#inspTimeline">Timeline</a>
+            <a href="#inspLoudness">Loudness</a>
+            <a href="#inspEvidence">Evidence</a>
+            <a href="#inspServers">Servers</a>
+        </div>
     </nav>
 
     <section id="inspFile" class="insp-file" hidden aria-live="polite"></section>
