@@ -92,11 +92,15 @@
         const dot = document.getElementById('settingsNavPauseDot');
         const timeZone = function () { return window.WorkerGroups?.getSnapshot()?.timezone; };
 
+        const weekCard = document.getElementById('pauseWeekCard');
+
         function paint() {
+            // An empty chart while the schedule is off is noise; the windows below stay editable.
+            if (weekCard) weekCard.hidden = !enabled.checked;
             graph.innerHTML = window.WeekGraph.render([], window.WeekGraph.pauseSegments(), { height: 14, timeZone: timeZone() });
             if (hint) {
                 const next = window.WeekGraph.nextStart(timeZone());
-                if (!enabled.checked) hint.textContent = 'Windows are saved but not applied while this is off.';
+                if (!enabled.checked) hint.textContent = 'Applied when on.';
                 else if (window.WeekGraph.pausedNow(timeZone())) hint.textContent = 'Everything is paused, including current files.';
                 else hint.textContent = next ? `Next pause ${next}.` : 'Add a window to pause on a schedule.';
             }

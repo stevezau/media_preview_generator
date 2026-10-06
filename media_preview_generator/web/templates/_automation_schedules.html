@@ -72,227 +72,199 @@
             </div>
         </div>
 
-<!-- Schedule Modal (Create / Edit) -->
-<div class="modal fade" id="newScheduleModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-scrollable">
+<!-- Schedule Modal (Create / Edit). The scan mode colours the header tile and the selected card (data-kind). -->
+<div class="modal fade ov-modal" id="newScheduleModal" tabindex="-1" aria-labelledby="scheduleModalTitle" data-kind="previews">
+    <div class="modal-dialog modal-dialog-scrollable modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title" id="scheduleModalTitle"><i class="bi bi-calendar-plus me-2"></i>Add Schedule</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <span class="ov-tile" aria-hidden="true"><i class="bi bi-calendar-plus" id="scheduleModalIcon"></i></span>
+                <h5 class="modal-title" id="scheduleModalTitle">Add Schedule</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
                 <form id="newScheduleForm">
-                    <div class="sched-group-label">What to run</div>
-                    <div class="mb-3">
-                        <label for="scheduleName" class="form-label">Name</label>
-                        <input type="text" class="form-control" id="scheduleName" placeholder="e.g., Nightly Scan" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Scan mode</label>
-                        <div class="d-flex flex-column gap-1">
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="scanMode" id="scanModeFull" value="full_library" checked onchange="onScanModeChange()">
-                                <label class="form-check-label" for="scanModeFull">
-                                    <strong>Full library scan</strong>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Walks the whole library for anything missing previews." data-explain-title="Full library scan" data-explain-template="infoScanModeFullTpl"><i class="bi bi-info-circle"></i></button>
-                                    <div class="small text-muted">Checks the whole library for anything missing.</div>
-                                </label>
+                    <section class="ov-sec">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>What to run</div>
+                        <div class="ov-fld">
+                            <label for="scheduleName" class="ov-lbl">Name <span class="ov-req" aria-hidden="true">*</span></label>
+                            <input type="text" class="form-control" id="scheduleName" placeholder="e.g., Nightly Scan" required>
+                            <div class="ov-err" id="scheduleNameError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                        </div>
+                        <div class="ov-tcards" role="radiogroup" aria-label="Scan mode">
+                            <div class="ov-tcard" data-type="previews">
+                                <input class="ov-tcard-input" type="radio" name="scanMode" id="scanModeFull" value="full_library" checked onchange="onScanModeChange()">
+                                <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-collection"></i></span><label for="scanModeFull">Full library scan</label>
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Walks the whole library for anything missing previews." data-explain-title="Full library scan" data-explain-template="infoScanModeFullTpl" aria-label="Walks the whole library for anything missing previews."><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+                                <span class="ov-tp">Checks the whole library for anything missing.</span>
+                                <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
                             </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="scanMode" id="scanModeRecent" value="recently_added" onchange="onScanModeChange()">
-                                <label class="form-check-label" for="scanModeRecent">
-                                    <strong>Recently added only</strong>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Fast poll of items added within the lookback window." data-explain-title="Recently added only" data-explain-template="infoScanModeRecentTpl"><i class="bi bi-info-circle"></i></button>
-                                    <div class="small text-muted">Fast poll of items added within the lookback window.</div>
-                                </label>
+                            <div class="ov-tcard" data-type="previews">
+                                <input class="ov-tcard-input" type="radio" name="scanMode" id="scanModeRecent" value="recently_added" onchange="onScanModeChange()">
+                                <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-lightning-charge"></i></span><label for="scanModeRecent">Recently added only</label>
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Fast poll of items added within the lookback window." data-explain-title="Recently added only" data-explain-template="infoScanModeRecentTpl" aria-label="Fast poll of items added within the lookback window."><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+                                <span class="ov-tp">Fast poll of items added within the lookback window.</span>
+                                <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
                             </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="scanMode" id="scanModeMarkers" value="intro_credits" onchange="onScanModeChange()">
-                                <label class="form-check-label" for="scanModeMarkers">
-                                    <strong>Intro &amp; Credits</strong>
-                                </label>
-                                <button type="button" class="info-icon ms-1" id="scanModeMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks the chosen libraries for intro and credits markers. Files already done are skipped. Low priority unless you pick otherwise."><i class="bi bi-info-circle"></i></button>
-                                <div class="mt-1" id="scheduleMarkersModeGroup" hidden><div class="d-flex flex-wrap gap-3">
-                                    <div class="form-check mb-0">
-                                        <input class="form-check-input" type="radio" name="scheduleMarkersMode" id="scheduleMarkersFind" value="find" checked onchange="onScanModeChange()">
-                                        <label class="form-check-label" for="scheduleMarkersFind">Find markers</label>
-                                    </div>
-                                    <div class="form-check mb-0">
-                                        <input class="form-check-input" type="radio" name="scheduleMarkersMode" id="scheduleMarkersCheckServers" value="check_servers" onchange="onScanModeChange()">
-                                        <label class="form-check-label" for="scheduleMarkersCheckServers">Check servers</label>
-                                        <button type="button" class="info-icon ms-1" id="scheduleMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks your servers still show the markers this app sent, and resends any missing or changed." data-explain-title="Check servers" data-explain-template="infoScheduleCheckServersTpl"><i class="bi bi-info-circle"></i></button>
-                                    </div>
-                                </div></div>
+                            <div class="ov-tcard" data-type="intro_credits">
+                                <input class="ov-tcard-input" type="radio" name="scanMode" id="scanModeMarkers" value="intro_credits" onchange="onScanModeChange()">
+                                <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-skip-forward"></i></span><label for="scanModeMarkers">Intro &amp; Credits</label>
+                                <button type="button" class="info-icon" id="scanModeMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks the chosen libraries for intro and credits markers. Files already done are skipped. Low priority unless you pick otherwise." aria-label="Checks the chosen libraries for intro and credits markers. Files already done are skipped. Low priority unless you pick otherwise."><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+                                <span class="ov-tp">Checks libraries for skip markers.</span>
+                                <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
                             </div>
                         </div>
-                    </div>
-                    <div class="mb-3" id="scheduleLookbackGroup" style="display:none;">
-                        <label for="scheduleLookback" class="form-label">Lookback window
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far back a Recently Added scan looks for new items." data-explain-title="Lookback window" data-explain-template="infoScheduleLookbackTpl"><i class="bi bi-info-circle"></i></button>
-                        </label>
-                        <select class="form-select" id="scheduleLookback">
-                            <option value="0.25">Last 15 minutes</option>
-                            <option value="0.5">Last 30 minutes</option>
-                            <option value="1" selected>Last 1 hour</option>
-                            <option value="2">Last 2 hours</option>
-                            <option value="6">Last 6 hours</option>
-                            <option value="24">Last 24 hours</option>
-                            <option value="72">Last 3 days</option>
-                            <option value="168">Last 7 days</option>
-                        </select>
-                        <div class="form-text">How far back to look for newly added items.</div>
-                    </div>
-                    <div class="mb-3" id="scheduleServerGroup">
-                        <label for="scheduleServer" class="form-label">Media Server
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Limits this schedule to one configured server." data-explain-title="Media Server" data-explain-template="infoScheduleServerTpl"><i class="bi bi-info-circle"></i></button>
-                        </label>
-                        <select class="form-select" id="scheduleServer" onchange="onScheduleServerChange()">
-                            <option value="">All servers</option>
-                        </select>
-                        <div class="form-text">Pin this schedule to one configured server.</div>
-                    </div>
-                    <div class="mb-3" id="scheduleLibrariesGroup">
-                        <label class="form-label">Libraries</label>
-                        <div class="d-flex justify-content-between align-items-center mb-2">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="scheduleLibraryAll" checked onchange="onScheduleLibraryAllChange(this)">
-                                <label class="form-check-label fw-bold" for="scheduleLibraryAll">All Libraries</label>
+                        <div class="ov-row" id="scheduleMarkersModeGroup" hidden>
+                            <div class="ov-seg" role="radiogroup" aria-label="Intro and credits mode">
+                                <span class="ov-seg-opt"><input type="radio" name="scheduleMarkersMode" id="scheduleMarkersFind" value="find" checked onchange="onScanModeChange()"><label for="scheduleMarkersFind">Find markers</label></span>
+                                <span class="ov-seg-opt"><input type="radio" name="scheduleMarkersMode" id="scheduleMarkersCheckServers" value="check_servers" onchange="onScanModeChange()"><label for="scheduleMarkersCheckServers">Check servers</label></span>
                             </div>
-                            <div class="btn-group btn-group-sm">
-                                <button type="button" class="btn btn-link p-0 small me-2" onclick="setScheduleLibrariesChecked(true)">Select all</button>
-                                <button type="button" class="btn btn-link p-0 small" onclick="setScheduleLibrariesChecked(false)">None</button>
-                            </div>
+                            <button type="button" class="info-icon" id="scheduleMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks your servers still show the markers this app sent, and resends any missing or changed." data-explain-title="Check servers" data-explain-template="infoScheduleCheckServersTpl" aria-label="Checks your servers still show the markers this app sent, and resends any missing or changed."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                         </div>
-                        <div id="scheduleLibraryList" class="ms-3 border-start ps-3" style="max-height: 220px; overflow-y: auto;">
-                            <div class="text-muted small">Loading libraries…</div>
-                        </div>
-                    </div>
-                    <div class="sched-group-label">When</div>
-                    <div class="mb-3">
-                        <label class="form-label">Schedule Type</label>
-                        <div class="d-flex gap-3">
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="scheduleType" id="scheduleTypeTime" value="specific-time" checked onchange="onScheduleTypeChange()">
-                                <label class="form-check-label" for="scheduleTypeTime">Specific Time</label>
-                            </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="scheduleType" id="scheduleTypeInterval" value="interval" onchange="onScheduleTypeChange()">
-                                <label class="form-check-label" for="scheduleTypeInterval">Interval</label>
-                            </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="scheduleType" id="scheduleTypeCron" value="cron" onchange="onScheduleTypeChange()">
-                                <label class="form-check-label" for="scheduleTypeCron">Cron Expression</label>
-                            </div>
-                        </div>
-                    </div>
-                    <div id="scheduleFieldsTime">
-                        <div class="mb-3">
-                            <label for="scheduleTime" class="form-label">Time</label>
-                            <input type="time" class="form-control" id="scheduleTime" value="02:00">
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Days</label>
-                            <div class="d-flex flex-wrap gap-2">
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="0" id="daySun">
-                                    <label class="form-check-label" for="daySun">Sun</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="1" id="dayMon" checked>
-                                    <label class="form-check-label" for="dayMon">Mon</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="2" id="dayTue" checked>
-                                    <label class="form-check-label" for="dayTue">Tue</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="3" id="dayWed" checked>
-                                    <label class="form-check-label" for="dayWed">Wed</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="4" id="dayThu" checked>
-                                    <label class="form-check-label" for="dayThu">Thu</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="5" id="dayFri" checked>
-                                    <label class="form-check-label" for="dayFri">Fri</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input schedule-day" type="checkbox" value="6" id="daySat">
-                                    <label class="form-check-label" for="daySat">Sat</label>
-                                </div>
-                            </div>
-                            <div class="form-text">Select which days to run</div>
-                        </div>
-                    </div>
-                    <div id="scheduleFieldsInterval" class="d-none">
-                        <div class="mb-3">
-                            <label for="scheduleIntervalValue" class="form-label">Run every</label>
-                            <div class="input-group">
-                                <input type="number" class="form-control" id="scheduleIntervalValue" min="1" value="2" placeholder="2">
-                                <select class="form-select" id="scheduleIntervalUnit" style="max-width: 120px;">
-                                    <option value="minutes">Minutes</option>
-                                    <option value="hours" selected>Hours</option>
-                                </select>
-                            </div>
-                            <div class="form-text">How often the schedule should repeat</div>
-                        </div>
-                    </div>
-                    <div id="scheduleFieldsCron" class="d-none">
-                        <div class="mb-3">
-                            <label for="scheduleCronInput" class="form-label">Cron Expression
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Five-field cron: minute, hour, day of month, month, day of week." data-explain-title="Cron Expression" data-explain-template="infoScheduleCronTpl"><i class="bi bi-info-circle"></i></button>
+                        <div class="ov-fld" id="scheduleLookbackGroup" style="display:none;">
+                            <label for="scheduleLookback" class="ov-lbl">Lookback window
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far back a Recently Added scan looks for new items." data-explain-title="Lookback window" data-explain-template="infoScheduleLookbackTpl" aria-label="How far back a Recently Added scan looks for new items."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                             </label>
-                            <input type="text" class="form-control font-monospace" id="scheduleCronInput" placeholder="0 */2 * * *">
-                            <div class="form-text">Standard five-field cron schedule.</div>
+                            <select class="form-select" id="scheduleLookback">
+                                <option value="0.25">Last 15 minutes</option>
+                                <option value="0.5">Last 30 minutes</option>
+                                <option value="1" selected>Last 1 hour</option>
+                                <option value="2">Last 2 hours</option>
+                                <option value="6">Last 6 hours</option>
+                                <option value="24">Last 24 hours</option>
+                                <option value="72">Last 3 days</option>
+                                <option value="168">Last 7 days</option>
+                            </select>
+                            <div class="ov-hint">How far back to look for newly added items.</div>
                         </div>
-                    </div>
-                    <div class="mb-3" id="scheduleStopTimeGroup">
-                        <label for="scheduleStopTime" class="form-label">Stop time (optional)
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pauses a running job from this schedule at this time of day." data-explain-title="Stop time" data-explain-template="infoScheduleStopTimeTpl"><i class="bi bi-info-circle"></i></button>
-                        </label>
-                        <input type="time" class="form-control" id="scheduleStopTime" value="">
-                        <div class="form-text">Pauses the running job at this time of day.</div>
-                    </div>
-                    <div class="sched-group-label">Priority &amp; order</div>
-                    <div class="mb-3">
-                        <label for="schedulePriority" class="form-label">Job Priority
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Default follows the kind of job. Pick High, Normal or Low to fix this schedule's priority." data-explain-title="Priority" data-explain-template="infoSchedulePriorityTpl"><i class="bi bi-info-circle"></i></button>
-                        </label>
-                        <select class="form-select" id="schedulePriority">
-                            <option value="" selected>Default (from Settings)</option>
-                            <option value="1">High</option>
-                            <option value="2">Normal</option>
-                            <option value="3">Low</option>
-                        </select>
-                        <div class="form-text">Priority assigned to jobs created by this schedule.</div>
-                    </div>
-                    {% with filter_prefix='schedule' %}{% include '_scan_filters.html' %}{% endwith %}
-                    <div class="mb-3" id="scheduleSortByGroup">
-                        <label for="scheduleSortBy" class="form-label">Processing Order
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Controls which files are processed first." data-explain-title="Processing Order" data-explain-template="infoScheduleSortTpl"><i class="bi bi-info-circle"></i></button>
-                        </label>
-                        <select class="form-select" id="scheduleSortBy">
-                            <option value="default" selected>Default (server order)</option>
-                            <option value="newest">Newest added first</option>
-                            <option value="oldest">Oldest added first</option>
-                            <option value="random">Random</option>
-                        </select>
-                        <div class="form-text">Which files are processed first.</div>
-                    </div>
-                    <div class="mb-3">
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="scheduleEnabled" checked>
-                            <label class="form-check-label" for="scheduleEnabled">
-                                Enable schedule
+                    </section>
+                    <section class="ov-sec" id="scheduleScopeSection">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Scope</div>
+                        <div class="ov-fld" id="scheduleServerGroup">
+                            <label for="scheduleServer" class="ov-lbl">Media Server
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Limits this schedule to one configured server." data-explain-title="Media Server" data-explain-template="infoScheduleServerTpl" aria-label="Limits this schedule to one configured server."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                             </label>
+                            <select class="form-select" id="scheduleServer" onchange="onScheduleServerChange()">
+                                <option value="">All servers</option>
+                            </select>
+                            <div class="ov-hint">Pin this schedule to one configured server.</div>
                         </div>
-                    </div>
+                        <div class="ov-fld" id="scheduleLibrariesGroup">
+                            <div class="ov-lbl">Libraries</div>
+                            <div class="ov-libbox">
+                                <div class="ov-libtop">
+                                    <div class="form-check mb-0">
+                                        <input class="form-check-input" type="checkbox" id="scheduleLibraryAll" checked onchange="onScheduleLibraryAllChange(this)">
+                                        <label class="form-check-label fw-bold" for="scheduleLibraryAll">All Libraries</label>
+                                    </div>
+                                    <span class="ov-sp"></span>
+                                    <button type="button" class="ov-link" onclick="setScheduleLibrariesChecked(true)">Select all</button>
+                                    <button type="button" class="ov-link" onclick="setScheduleLibrariesChecked(false)">None</button>
+                                </div>
+                                <div id="scheduleLibraryList" class="ov-liblist ov-liblist-sm">
+                                    <div class="ov-skel" aria-hidden="true"></div><div class="ov-skel" aria-hidden="true"></div>
+                                    <span class="visually-hidden">Loading libraries…</span>
+                                </div>
+                            </div>
+                            <div class="ov-err" id="scheduleLibrariesError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                        </div>
+                    </section>
+                    <div class="ov-note" id="scheduleCheckServersNote" hidden><i class="bi bi-hdd-network" aria-hidden="true"></i><span>Checks every server and library. Nothing to pick here.</span></div>
+                    <section class="ov-sec">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>When</div>
+                        <div class="ov-seg ov-seg-full" role="radiogroup" aria-label="Schedule type">
+                            <span class="ov-seg-opt"><input type="radio" name="scheduleType" id="scheduleTypeTime" value="specific-time" checked onchange="onScheduleTypeChange()"><label for="scheduleTypeTime"><i class="bi bi-clock" aria-hidden="true"></i>Specific Time</label></span>
+                            <span class="ov-seg-opt"><input type="radio" name="scheduleType" id="scheduleTypeInterval" value="interval" onchange="onScheduleTypeChange()"><label for="scheduleTypeInterval"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>Interval</label></span>
+                            <span class="ov-seg-opt"><input type="radio" name="scheduleType" id="scheduleTypeCron" value="cron" onchange="onScheduleTypeChange()"><label for="scheduleTypeCron"><i class="bi bi-terminal" aria-hidden="true"></i>Cron Expression</label></span>
+                        </div>
+                        <div id="scheduleFieldsTime" class="ov-sec">
+                            <div class="ov-fld ov-narrow">
+                                <label for="scheduleTime" class="ov-lbl">Time <span class="ov-req" aria-hidden="true">*</span></label>
+                                <input type="time" class="form-control" id="scheduleTime" value="02:00">
+                                <div class="ov-err" id="scheduleTimeError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                            </div>
+                            <div class="ov-fld">
+                                <div class="ov-lbl" id="scheduleDaysLabel">Days</div>
+                                <div class="ov-days" role="group" aria-labelledby="scheduleDaysLabel">
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="0" id="daySun"><span>Sun</span></label>
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="1" id="dayMon" checked><span>Mon</span></label>
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="2" id="dayTue" checked><span>Tue</span></label>
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="3" id="dayWed" checked><span>Wed</span></label>
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="4" id="dayThu" checked><span>Thu</span></label>
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="5" id="dayFri" checked><span>Fri</span></label>
+                                    <label class="ov-day"><input class="schedule-day" type="checkbox" value="6" id="daySat"><span>Sat</span></label>
+                                </div>
+                                <div class="ov-err" id="scheduleDaysError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                            </div>
+                        </div>
+                        <div id="scheduleFieldsInterval" class="d-none">
+                            <div class="ov-fld">
+                                <label for="scheduleIntervalValue" class="ov-lbl">Run every</label>
+                                <div class="ov-interval">
+                                    <input type="number" class="form-control" id="scheduleIntervalValue" min="1" value="2" placeholder="2">
+                                    <select class="form-select" id="scheduleIntervalUnit">
+                                        <option value="minutes">Minutes</option>
+                                        <option value="hours" selected>Hours</option>
+                                    </select>
+                                </div>
+                                <div class="ov-hint">How often the schedule repeats.</div>
+                                <div class="ov-err" id="scheduleIntervalError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                            </div>
+                        </div>
+                        <div id="scheduleFieldsCron" class="d-none">
+                            <div class="ov-fld">
+                                <label for="scheduleCronInput" class="ov-lbl">Cron Expression <span class="ov-req" aria-hidden="true">*</span>
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Five-field cron: minute, hour, day of month, month, day of week." data-explain-title="Cron Expression" data-explain-template="infoScheduleCronTpl" aria-label="Five-field cron: minute, hour, day of month, month, day of week."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                                </label>
+                                <input type="text" class="form-control font-monospace" id="scheduleCronInput" placeholder="0 */2 * * *">
+                                <div class="ov-hint">Standard five-field cron schedule.</div>
+                                <div class="ov-err" id="scheduleCronError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
+                            </div>
+                        </div>
+                        <div class="ov-fld ov-narrow" id="scheduleStopTimeGroup">
+                            <label for="scheduleStopTime" class="ov-lbl">Stop time (optional)
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pauses a running job from this schedule at this time of day." data-explain-title="Stop time" data-explain-template="infoScheduleStopTimeTpl" aria-label="Pauses a running job from this schedule at this time of day."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </label>
+                            <input type="time" class="form-control" id="scheduleStopTime" value="">
+                            <div class="ov-hint">Pauses the running job at this time of day.</div>
+                        </div>
+                        <div class="ov-when-sum" id="scheduleWhenSummary" aria-live="polite"><i class="bi bi-calendar-check" aria-hidden="true"></i><span></span></div>
+                    </section>
+                    <section class="ov-sec">
+                        <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Priority &amp; order</div>
+                        <div class="ov-fld">
+                            <label for="schedulePriority" class="ov-lbl">Job Priority
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Default follows the kind of job. Pick High, Normal or Low to fix this schedule's priority." data-explain-title="Priority" data-explain-template="infoSchedulePriorityTpl" aria-label="Default follows the kind of job. Pick High, Normal or Low to fix this schedule's priority."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </label>
+                            <select class="form-select ov-seg-select" id="schedulePriority">
+                                <option value="" selected>Default (from Settings)</option>
+                                <option value="1">High</option>
+                                <option value="2">Normal</option>
+                                <option value="3">Low</option>
+                            </select>
+                            <div class="ov-hint">Default follows the scan mode. Pick one to pin it.</div>
+                        </div>
+                        <div class="ov-fld" id="scheduleSortByGroup">
+                            <label for="scheduleSortBy" class="ov-lbl">Processing Order
+                                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Controls which files are processed first." data-explain-title="Processing Order" data-explain-template="infoScheduleSortTpl" aria-label="Controls which files are processed first."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            </label>
+                            <select class="form-select" id="scheduleSortBy">
+                                <option value="default" selected>Default (server order)</option>
+                                <option value="newest">Newest added first</option>
+                                <option value="oldest">Oldest added first</option>
+                                <option value="random">Random</option>
+                            </select>
+                            <div class="ov-hint">Which files are processed first.</div>
+                        </div>
+                        {% with filter_prefix='schedule' %}{% include '_scan_filters.html' %}{% endwith %}
+                    </section>
                     <input type="hidden" id="scheduleCron" value="">
                     <input type="hidden" id="scheduleEditId" value="">
                 </form>
             </div>
             <div class="modal-footer">
+                <label class="ov-switch me-auto" for="scheduleEnabled">
+                    <input type="checkbox" id="scheduleEnabled" checked><span class="ov-track" aria-hidden="true"></span>Enable schedule
+                </label>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" id="scheduleSubmitBtn" onclick="saveSchedule()">
                     <i class="bi bi-check me-1"></i>Create Schedule

@@ -27,3 +27,13 @@ class TestLoginPage:
         page.goto(f"{app_url}/login")
         # Old copy is gone.
         assert "Enter your authentication token to continue" not in page.content()
+
+    def test_token_field_and_reveal_button_are_touch_sized_when_viewport_is_phone(
+        self, page: Page, app_url: str
+    ) -> None:
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.goto(f"{app_url}/login")
+        token = page.locator("#token").bounding_box()
+        reveal = page.locator("#tokenReveal").bounding_box()
+        assert token["height"] >= 44
+        assert reveal["width"] >= 44 and reveal["height"] >= 44

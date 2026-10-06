@@ -16,14 +16,14 @@ body:has(.setup-container) > .navbar { display: none; }
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    font-weight: 700;
+    font-weight: 600;
     color: var(--accent-text);
     white-space: nowrap;
 }
 .setup-topbar-actions { display: flex; align-items: center; gap: 10px; }
 .setup-icon-btn {
-    width: 38px;
-    height: 38px;
+    width: 44px;
+    height: 44px;
     display: grid;
     place-items: center;
     border: 0;
@@ -45,7 +45,7 @@ body:has(.setup-container) > .navbar { display: none; }
 }
 .setup-header h1 {
     font-size: 1.5rem;
-    font-weight: 700;
+    font-weight: 600;
     margin-bottom: 0.25rem;
 }
 .setup-header p { margin: 0; }
@@ -86,7 +86,7 @@ body:has(.setup-container) > .navbar { display: none; }
     align-items: center;
     justify-content: center;
     font-size: 0.8125rem;
-    font-weight: 700;
+    font-weight: 600;
     border: 1.5px solid var(--line-strong);
     margin-right: 0.5rem;
     background: transparent;
@@ -135,7 +135,7 @@ body:has(.setup-container) > .navbar { display: none; }
 .setup-step-title {
     margin: 0;
     font-size: 1.125rem;
-    font-weight: 700;
+    font-weight: 600;
 }
 .setup-lead {
     margin: -0.6rem 0 0;
@@ -157,18 +157,6 @@ body:has(.setup-container) > .navbar { display: none; }
 /* Skip sits with Next on the right; every other step puts Back on the left. */
 .setup-step[data-step="1"] .setup-card-footer { justify-content: flex-end; }
 
-/* Secondary buttons read as dim grey elsewhere in the app; on a focused wizard they carry the Back/Skip/Check actions. */
-.setup-card .btn-outline-secondary,
-.setup-topbar .btn-outline-secondary {
-    color: var(--bs-body-color);
-    border-color: var(--line-strong);
-}
-.setup-card .btn-outline-secondary:hover,
-.setup-topbar .btn-outline-secondary:hover {
-    background: var(--inset);
-    border-color: var(--bs-body-color);
-    color: var(--bs-body-color);
-}
 .setup-card label.form-label { font-size: 0.8125rem; font-weight: 600; }
 /* A disabled Next must look unavailable rather than a dimmer blue. */
 .setup-card .btn-primary:disabled {
@@ -191,11 +179,9 @@ body:has(.setup-container) > .navbar { display: none; }
     width: auto;
     padding: 0;
     margin: 0 0 0.6rem;
-    font-size: 0.6875rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--faint);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted);
 }
 .setup-group > .setup-helper { margin-bottom: 0.75rem; }
 
@@ -332,6 +318,7 @@ body:has(.setup-container) > .navbar { display: none; }
 @media (max-width: 575.98px) {
     .setup-container { padding: 1.25rem 0.75rem 2rem; }
     .setup-topbar { padding: 8px 12px; }
+    #setupLogoutBtn { min-width: 44px; min-height: 44px; }
     .setup-card .card-body { padding: 1.125rem 1rem; }
     .setup-vendors { grid-template-columns: 1fr; gap: 8px; }
     .wizard-vendor-btn {
@@ -363,3 +350,10 @@ body:has(.setup-container) > .navbar { display: none; }
     #setupPathMappingsContainer td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 0.3rem; font-size: 0.875rem; color: var(--bs-secondary-color); }
     #setupPathMappingsContainer tr { border-bottom: 1px solid var(--bs-border-color); padding-bottom: 0.5rem; }
 }
+
+/* Same accent and visible track as the Settings sliders. */
+.setup-card .form-range { accent-color: var(--accent); }
+.setup-card .form-range::-webkit-slider-runnable-track { height: 0.375rem; border-radius: 99px; background: var(--line-strong); }
+.setup-card .form-range::-moz-range-track { height: 0.375rem; border-radius: 99px; background: var(--line-strong); }
+.setup-card .form-range::-webkit-slider-thumb { background-color: var(--accent); }
+.setup-card .form-range::-moz-range-thumb { background-color: var(--accent); }

@@ -174,6 +174,16 @@ def _wait_for_post(page: Page, captured: list[dict], predicate: Callable[[dict],
     )
 
 
+def _is_one_line(locator) -> bool:
+    return locator.evaluate(
+        "el => el.getBoundingClientRect().height < parseFloat(getComputedStyle(el).lineHeight) * 1.5"
+    )
+
+
+def _template_text(page: Page, template_id: str) -> str:
+    return page.evaluate(f"document.getElementById('{template_id}').content.textContent.trim()")
+
+
 def _source_ids(page: Page) -> list[str]:
     return page.locator("#markersSourceList .markers-source").evaluate_all("els => els.map((el) => el.dataset.id)")
 
@@ -215,6 +225,19 @@ class TestIntroCreditsSettings:
         sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
         assert sent["sources"] == markers["sources"]
 
+    def test_season_audio_note_is_one_line_with_its_cost_in_the_info_dialog(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        note = row.locator(".markers-source-note")
+        expect(note).to_have_text("Matches a season's shared theme · CPU")
+        assert _is_one_line(note)
+        assert _template_text(authed_page, "infoSeasonAudioTpl") == (
+            "Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode"
+        )
+        expect(row.locator(".info-icon")).to_have_attribute("data-explain-template", "infoSeasonAudioTpl")
+
     def test_no_source_is_coming_soon(self, authed_page: Page, app_url: str) -> None:
         _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
         expect(authed_page.locator("#markersSourceList .markers-source-soon-badge")).to_have_count(0)
@@ -230,16 +253,21 @@ class TestIntroCreditsSettings:
         row = authed_page.locator("#markersSourceList .markers-source[data-id='credits_text']")
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
         expect(row.locator(".markers-source-reason")).to_be_hidden()
-        expect(row).to_contain_text(
+        note = row.locator(".markers-source-note")
+        expect(note).to_have_text("Reads the end of the file · GPU or CPU")
+        assert _is_one_line(note)
+        # The cost detail moved behind the info icon's dialog, not away.
+        assert _template_text(authed_page, "infoCreditTextTpl") == (
             "Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without "
             "a GPU up to about 2 min"
         )
+        expect(row.locator(".info-icon")).to_have_attribute("data-explain-template", "infoCreditTextTpl")
         tooltip = row.locator(".info-icon").evaluate(
             "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
         )
         assert tooltip == (
             "Reads the credit roll on screen near the end of the file. Used on its own for credits, and to correct a "
-            "credits chapter's start."
+            "credits chapter's start. Click for more."
         )
         row.locator(".markers-source-enabled").click()
         sent = _wait_for_post(
@@ -319,7 +347,7 @@ class TestIntroCreditsSettings:
         )
         assert tooltip == (
             "Finds the theme tune a season's episodes share, so shows no database has still get intros. Used on its own "
-            "unless another source disagrees."
+            "unless another source disagrees. Click for more."
         )
 
         switch.click()
@@ -401,11 +429,11 @@ class TestIntroCreditsSettings:
             ),
             "season_audio": (
                 "Finds the theme tune a season's episodes share, so shows no database has still get intros. Used on "
-                "its own unless another source disagrees."
+                "its own unless another source disagrees. Click for more."
             ),
             "credits_text": (
                 "Reads the credit roll on screen near the end of the file. Used on its own for credits, and to "
-                "correct a credits chapter's start."
+                "correct a credits chapter's start. Click for more."
             ),
             "server_markers": (
                 "Intro and credits markers your servers already have. Used only to confirm another source, never on "

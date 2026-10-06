@@ -367,3 +367,34 @@ class TestPageChrome:
         card.locator("#inspRetry").click()
         expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy")
         expect(card).to_have_count(0)
+
+
+@pytest.mark.e2e
+class TestPolish:
+    def test_the_lead_is_one_line_when_viewport_is_desktop(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page)
+        authed_page.set_viewport_size({"width": 1440, "height": 900})
+        authed_page.goto(f"{app_url}/inspector")
+        one_line = authed_page.locator(".insp-lead").evaluate(
+            "el => el.getBoundingClientRect().height < parseFloat(getComputedStyle(el).lineHeight) * 1.5"
+        )
+        assert one_line
+
+    def test_ours_band_labels_use_the_body_text_colour_when_a_file_is_open(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        fx.install(authed_page)
+        _open(authed_page, app_url, fx.EPISODE)
+        labels = authed_page.locator(".insp-band.is-tint .insp-band-text")
+        expect(labels.first).to_be_visible()
+        body = authed_page.locator("#inspector").evaluate("el => getComputedStyle(el).color")
+        for i in range(labels.count()):
+            assert labels.nth(i).evaluate("el => getComputedStyle(el).color") == body
+
+    def test_section_labels_are_sentence_case_when_a_file_is_open(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page)
+        _open(authed_page, app_url, fx.EPISODE)
+        transforms = authed_page.locator(".insp-card-title, .insp-card-heading, .insp-stat-label").evaluate_all(
+            "els => els.map(el => getComputedStyle(el).textTransform)"
+        )
+        assert transforms and set(transforms) == {"none"}

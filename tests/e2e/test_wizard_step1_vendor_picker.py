@@ -102,3 +102,13 @@ class TestSkipSetup:
         accept_app_confirm(wizard_page)
         wizard_page.wait_for_url("**/servers", timeout=5000)
         assert called, "POST /api/setup/skip was never called"
+
+
+@pytest.mark.e2e
+def test_logout_button_has_an_accessible_name_when_icon_only(wizard_page, app_url_wizard: str) -> None:
+    wizard_page.set_viewport_size({"width": 390, "height": 844})
+    wizard_page.goto(f"{app_url_wizard}/setup")
+    logout = wizard_page.locator("#setupLogoutBtn")
+    expect(logout).to_have_attribute("aria-label", "Log out")
+    box = logout.bounding_box()
+    assert box["height"] >= 44

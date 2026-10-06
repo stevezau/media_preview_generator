@@ -1,6 +1,8 @@
 /* Logs page. Tokens live in style.css. The log body stays a dark terminal in both themes, so it carries its own
  * palette (--log-*) rather than the theme tokens, which go dark-on-dark in the light theme. */
-main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport below the navbar */
+/* The viewer fills the viewport below the navbar; only the vertical padding goes (the gutter stays). Bootstrap's py-4
+ * is !important, so this has to be too. */
+main.page-shell:has(.log-page) { padding-block: 0 !important; }
 
 .log-page {
     display: flex;
@@ -8,15 +10,13 @@ main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport
     gap: 14px;
     height: calc(100vh - 56px); /* below navbar */
     min-height: 560px;
-    max-width: 1480px;
-    margin: 0 auto;
-    padding: 24px 20px 16px;
+    padding: 24px 0 16px;
     overflow: hidden;
 }
 .log-heading { margin-bottom: 0; flex-shrink: 0; }
-.log-heading .page-title { font-weight: 700; }
+.log-heading .page-title { font-weight: 600; }
 .log-heading .page-subtitle { color: var(--muted); font-size: 14px; max-width: 70ch; }
-.log-crumb { margin-bottom: 4px; color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.log-crumb { margin-bottom: 4px; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 
 /* Toolbar follows the theme; only the log body below is forced dark. */
 .log-toolbar { flex-shrink: 0; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-radius: var(--radius-card); }
@@ -71,11 +71,13 @@ main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport
     --log-info: #5b9dff;
     --log-warn: #e5a00d;
     --log-bad: #f0616d;
+    --log-bg: #0b0b14;
+    --log-muted: #aeaec4;
     height: 100%;
     overflow-y: auto;
     padding: .5rem 0 4rem;
     scroll-padding-top: .5rem;
-    background: #0b0b14;
+    background: var(--log-bg);
     border: 1px solid var(--line);
     border-radius: var(--radius-card);
     color: var(--log-text);
@@ -96,7 +98,8 @@ main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport
 #logContainer .log-line-hidden { display: none; }
 .log-line .log-ts, .log-line .log-mod { color: var(--log-faint); margin: 0; }
 .log-line .log-mod { overflow-wrap: anywhere; }
-.log-line .log-lvl { min-width: 0; margin: 0; font-weight: 700; text-transform: uppercase; color: var(--log-faint); }
+.log-line .log-lvl { min-width: 0; margin: 0; font-size: 12px; font-weight: 600; text-transform: lowercase; color: var(--log-faint); }
+.log-line .log-lvl::first-letter { text-transform: uppercase; }
 .log-line .log-msg { color: var(--log-text); overflow-wrap: anywhere; white-space: pre-wrap; }
 /* Only the level word is coloured; warnings and errors also get a tinted row and a stripe, info and debug stay plain. */
 #logContainer .log-level-info .log-lvl { color: var(--log-info); }
@@ -117,9 +120,9 @@ main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport
 .log-raw-view .log-line.expanded .log-detail { display: none; }
 #logContainer.log-no-wrap .log-msg, #logContainer.log-no-wrap .log-raw { white-space: pre; overflow-wrap: normal; }
 .log-no-wrap .log-line { min-width: max-content; }
-.log-source-heading { margin: 1rem 0 .25rem; padding: 6px 16px 2px; color: var(--log-faint); font: 700 11px var(--bs-font-sans-serif); letter-spacing: .06em; text-transform: uppercase; }
+.log-source-heading { margin: 1rem 0 .25rem; padding: 6px 16px 2px; color: var(--log-faint); font: 600 11px var(--bs-font-sans-serif); letter-spacing: .06em; text-transform: uppercase; }
 
-#loadOlderBtn { display: none; margin: 6px auto; }
+#loadOlderBtn { display: none; margin: 6px auto; color: var(--log-muted); }
 #logContainer .log-state { display: grid; justify-items: center; gap: 6px; padding: 48px 20px; text-align: center; color: var(--log-faint); font-family: var(--bs-font-sans-serif); }
 #logContainer .log-state[hidden] { display: none; }
 #logContainer .log-state b { color: var(--log-text); font-size: 15px; }
@@ -134,13 +137,13 @@ main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport
 }
 
 /* Floating "new logs" pill shown when user scrolls up and live messages arrive. JS sets its display. */
-.log-follow { display: none; align-items: center; gap: 6px; position: absolute; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 5; height: 32px; padding: 0 14px; border: 0; border-radius: 99px; background: var(--accent); color: var(--accent-ink); font-size: 13px; font-weight: 700; box-shadow: 0 6px 18px rgba(0, 0, 0, .4); }
+.log-follow { display: none; align-items: center; gap: 6px; position: absolute; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 5; height: 32px; padding: 0 14px; border: 0; border-radius: 99px; background: var(--accent); color: var(--accent-ink); font-size: 13px; font-weight: 600; box-shadow: 0 6px 18px rgba(0, 0, 0, .4); }
 .log-nav-btns { position: absolute; right: 1rem; bottom: 3.5rem; z-index: 5; display: flex; flex-direction: column; gap: 6px; }
 .log-nav-btn { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius-ctl); background: #1e1e33; color: #9a9ab0; }
 .log-nav-btn:hover { color: #fff; }
 
 @media (max-width: 767.98px) {
-    .log-page { height: calc(100dvh - 56px); padding: 16px 16px 12px; }
+    .log-page { height: calc(100dvh - 56px); padding: 16px 0 12px; }
     .log-heading .page-subtitle { font-size: .875rem; }
     .log-seg { width: 100%; }
     .log-seg button { flex: 1; }
@@ -152,9 +155,14 @@ main.container-fluid { padding: 0 !important; } /* the viewer fills the viewport
     .log-line .log-mod { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .log-line .log-msg { grid-column: 1 / -1; }
 }
+/* A near-black slab on the light page is the harshest jump in the app; use a softened slate terminal instead. */
+html[data-bs-theme="light"] #logContainer { --log-bg: #1e293b; --log-text: #cbd5e1; --log-faint: #94a3b8; --log-muted: #cbd5e1; }
 @media (prefers-reduced-motion: reduce) { #liveIndicator .live-dot { animation: none; } }
 
 @media (pointer: coarse) {
     .log-search input { height: 44px; padding-right: 100px; }
+    .log-ibtn, .log-nav-btn { width: 44px; height: 44px; }
+    .log-fbtn, .log-seg button { min-height: 44px; }
+    .log-seg button { height: 38px; }
     .log-search-inline button { height: 40px; min-width: 40px; }
 }

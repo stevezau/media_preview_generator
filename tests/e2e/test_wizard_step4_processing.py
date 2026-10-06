@@ -183,3 +183,22 @@ class TestThumbnailQualityDirection:
         # setup.html puts the visible hint in the .form-text under the
         # slider, not in the label like settings.html does.
         expect(wizard_page.locator("#qualityValue").locator("..")).to_contain_text("lower = sharper")
+
+
+@pytest.mark.e2e
+class TestWorkerGroupStyling:
+    def test_worker_group_rows_are_styled_and_charted_when_wizard_reaches_step4(
+        self, wizard_page: Page, app_url_wizard: str
+    ) -> None:
+        mock_plex_libraries(wizard_page)
+        capture_settings_save(wizard_page)
+        mock_setup_status(wizard_page, complete=False)
+        mock_validate_plex_config_folder(wizard_page, valid=True)
+        mock_settings_get(wizard_page)
+        mock_system_status(wizard_page)
+        _drive_to_step4(wizard_page, app_url_wizard)
+        item = wizard_page.locator("#workerGroupSettings .wg-item").first
+        expect(item).to_be_visible()
+        # The settings stylesheet gives each group a bordered card; unstyled it would be 0px.
+        assert item.evaluate("el => getComputedStyle(el).borderTopWidth") == "1px"
+        expect(wizard_page.locator("#workerWeekGraph .wkg-row")).to_have_count(7)
