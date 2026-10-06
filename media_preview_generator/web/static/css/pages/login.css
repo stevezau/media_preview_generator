@@ -1,124 +1,162 @@
-/* Login screen — first impression. Centred panel on a soft gradient
- * background, brand-orange film icon, generous breathing room.
- */
+/* Login: one centred card on a flat background. Amber is reserved for the Sign In button. */
 
-html, body { height: 100%; }
+html { min-height: 100%; }
 
 body {
+    min-height: 100dvh;
     display: flex;
-    align-items: center;
-    padding: 40px 16px;
+    align-items: flex-start;
+    justify-content: center;
     margin: 0;
+    padding: 16px;
 }
 
-/* Subtle radial gradient on the page background — gives the login
- * screen a sense of depth without distracting from the form. */
+/* One neutral radial for depth; the light theme stays flat. */
 html[data-bs-theme="dark"] body {
     background:
-        radial-gradient(circle at 20% 0%, rgba(229, 160, 13, 0.08), transparent 45%),
-        radial-gradient(circle at 80% 100%, rgba(74, 158, 255, 0.06), transparent 50%),
-        var(--plex-gray, #1a1a2e);
+        radial-gradient(900px 500px at 50% 0%, rgba(255, 255, 255, 0.04), transparent 70%),
+        var(--plex-dark, #0f0f1a);
 }
-html[data-bs-theme="light"] body {
-    /* Cool slate base matching --bs-body-bg + a single quiet slate
-       radial for a hint of depth. The previous warm orange wash in
-       the upper-left clashed with the cool slate palette and read as
-       an accidental tint rather than intentional depth. Brand orange
-       is reserved for the CTA + film-strip logo on this page. */
-    background:
-        radial-gradient(circle at 80% 100%, rgba(15, 23, 42, 0.04), transparent 55%),
-        #e4e7eb;
-}
+html[data-bs-theme="light"] body { background: #e4e7eb; }
 
 .form-signin {
     max-width: 420px;
     padding: 0;
+    margin: clamp(16px, 12vh, 120px) auto 0 !important;
 }
 
-.form-signin .form-floating:focus-within {
-    z-index: 2;
-}
-
-/* Card uses the global .card panel style + a stronger shadow so it
- * floats on the gradient background. */
-.login-card {
-    box-shadow: var(--shadow-2);
-}
+.login-card { box-shadow: var(--shadow-2); }
+.login-card .card-body { padding: clamp(1.25rem, 5vw, 1.75rem) !important; display: grid; gap: 1.1rem; }
+.login-card .alert { display: flex; gap: 0.6rem; margin: 0; padding: 0.65rem 0.8rem; font-size: 0.8125rem; }
+.login-card .alert > .bi { margin-top: 0.15rem; }
 
 .logo-container {
+    display: grid;
+    justify-items: center;
+    gap: 0.25rem;
     text-align: center;
-    margin-bottom: 1.5rem;
 }
-
-.logo-container i {
-    font-size: 3.5rem;
-    color: var(--plex-orange);
-    line-height: 1;
-}
-
+.login-logo { margin-bottom: 0.5rem; }
 .logo-container h1 {
-    margin-top: 0.85rem;
-    margin-bottom: 0.25rem;
-    font-size: 1.4rem;
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+    text-wrap: balance;
+}
+
+.login-label {
+    display: block;
+    margin-bottom: 0.4rem;
+    font-size: 0.8125rem;
     font-weight: 600;
-    letter-spacing: -0.01em;
 }
 
-/* "How do I find my token?" list — three icons + lines, more visual
- * structure than plain bullets. */
-.login-help-list {
-    list-style: none;
-    padding: 0;
-    margin: 0 0 0.5rem;
-}
-.login-help-list li {
+.login-token-group {
     display: flex;
-    gap: 0.6rem;
-    align-items: flex-start;
-    padding: 0.4rem 0.6rem;
-    border-radius: var(--radius-sm);
-    line-height: 1.45;
+    align-items: center;
+    height: 44px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
 }
-.login-help-list li + li { margin-top: 0.1rem; }
-.login-help-list li:hover { background: var(--surface-1); }
-.login-help-list li > .bi {
-    color: var(--plex-orange);
-    font-size: 0.95rem;
-    flex-shrink: 0;
-    margin-top: 0.15rem;
+.login-token-group:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
 }
-/* Light mode: quiet slate icons so they don't fight the orange CTA.
- * Dark mode keeps the brand orange because it pops on navy. */
-html[data-bs-theme="light"] .login-help-list li > .bi {
-    color: var(--bs-secondary-color);
-}
-
-.login-help-summary {
-    cursor: pointer;
-    user-select: none;
-    padding: 0.3rem 0;
-}
-.login-help-summary:hover { color: var(--bs-body-color); }
-
-.login-help-detail {
-    line-height: 1.6;
-}
-.login-help { border-top: 1px solid var(--bs-border-color); padding-top: 1.25rem; }
-.login-help-summary { min-height: 44px; align-content: center; }
-.login-card .alert { font-size: .925rem; }
-.login-card .card-body { padding: clamp(1.25rem, 5vw, 2rem) !important; }
-.logo-container h1 { text-wrap: balance; }
-.login-help code { overflow-wrap: anywhere; }
-@media (max-width: 575.98px) { body { align-items: flex-start; padding-top: 24px; } .logo-container i { font-size: 2.5rem; } }
-
-.login-help-snippet {
-    background-color: var(--surface-1);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-sm);
-    padding: 0.6rem 0.75rem;
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-    font-size: 0.78rem;
-    margin: 0.4rem 0 0.4rem;
-    white-space: pre-wrap;
+.login-token-group > .bi { padding: 0 4px 0 12px; color: var(--faint); }
+.login-token-group input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding: 0 0.6rem;
+    border: 0;
+    background: transparent;
     color: var(--bs-body-color);
+    font: inherit;
+    outline: 0;
+}
+.login-reveal {
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+}
+.login-reveal:hover { color: var(--bs-body-color); background: var(--inset); }
+.login-reveal:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The red border must read on both themes (>=3:1), so it also gets a soft ring. */
+.login-token-group:has(input[aria-invalid="true"]) {
+    border-color: var(--bad);
+    box-shadow: 0 0 0 2px var(--bad-soft);
+}
+
+.login-submit { height: 48px; margin-top: 0.875rem; }
+
+.login-help {
+    margin: 0;
+    padding-top: 0.875rem;
+    border-top: 1px solid var(--line);
+}
+.login-help > summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 44px;
+    margin-top: -0.5rem;
+    cursor: pointer;
+    list-style: none;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted);
+}
+.login-help > summary::-webkit-details-marker { display: none; }
+.login-help > summary:hover { color: var(--bs-body-color); }
+.login-chevron { margin-left: auto; transition: transform 0.2s ease; }
+.login-help[open] > summary .login-chevron { transform: rotate(180deg); }
+
+.login-help-body {
+    display: grid;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--muted);
+    line-height: 1.5;
+}
+.login-help-body p,
+.login-help-body ul { margin: 0; }
+.login-help-body ul { padding-left: 1.1rem; display: grid; gap: 0.4rem; }
+.login-help-sub {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+}
+.login-help code {
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--inset);
+    color: var(--bs-body-color);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+}
+.login-help-snippet {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--inset);
+    color: var(--bs-body-color);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 575.98px) {
+    .form-signin { margin-top: 24px !important; }
 }

@@ -40,13 +40,13 @@
                         </div>
                         <div class="modal-body">
                             <div class="input-group input-group-sm mb-2">
-                                <button type="button" class="btn btn-outline-secondary" id="folderPickerUpBtn" title="Go to parent folder">
+                                <button type="button" class="btn btn-outline-secondary" id="folderPickerUpBtn" title="Go to parent folder" aria-label="Go to parent folder">
                                     <i class="bi bi-arrow-up"></i>
                                 </button>
                                 <input type="text" class="form-control" id="folderPickerPathInput"
                                        placeholder="/path/to/folder" aria-label="Folder path"
                                        autocomplete="off" spellcheck="false">
-                                <button type="button" class="btn btn-outline-secondary" id="folderPickerGoBtn" title="Go to typed path (Enter)">
+                                <button type="button" class="btn btn-outline-secondary" id="folderPickerGoBtn" title="Go to typed path (Enter)" aria-label="Go to typed path">
                                     <i class="bi bi-arrow-right-circle"></i>
                                 </button>
                             </div>

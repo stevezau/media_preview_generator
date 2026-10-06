@@ -100,6 +100,8 @@ class TestPathMappingRows:
 
         # Step 3 entry calls settingsManager.get() which renders one default
         # empty row. Wait for that to render before counting.
+        # Mappings live under the collapsed "Advanced" section when none are saved.
+        wizard_page.locator("#setupAdvancedDetails > summary").click()
         first_row = wizard_page.locator("#setupPathMappingsContainer .path-mapping-row").first
         expect(first_row).to_be_visible(timeout=2000)
         rows_before = wizard_page.locator("#setupPathMappingsContainer .path-mapping-row").count()
@@ -120,6 +122,7 @@ class TestPathMappingRows:
         mock_validate_local_path(wizard_page, exists=False, error="Directory not found")
         _drive_to_step3(wizard_page, app_url_wizard)
 
+        wizard_page.locator("#setupAdvancedDetails > summary").click()
         local_input = wizard_page.locator("#setupPathMappingsContainer .path-mapping-row .path-mapping-local").first
         local_input.fill("/nope/not/here")
         wizard_page.wait_for_timeout(700)

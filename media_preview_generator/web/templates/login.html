@@ -30,84 +30,103 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/login.css') }}">
 </head>
-<body class="text-center">
+<body>
     <main class="form-signin w-100 m-auto">
         <div class="card login-card">
             <div class="card-body p-4">
+                <div class="logo-container">
+                    <img class="login-logo" src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="44" height="44">
+                    <h1>Media Preview Generator</h1>
+                    <p class="text-muted mb-0">Enter your token to continue</p>
+                </div>
+
+                {% if rate_limited %}
+                <div class="alert alert-warning" role="alert">
+                    <i class="bi bi-hourglass-split" aria-hidden="true"></i>
+                    <div>
+                        <div class="fw-semibold">Too many attempts.</div>
+                        <div class="small">Wait a minute, then try again.</div>
+                    </div>
+                </div>
+                {% elif page_expired %}
+                <div class="alert alert-warning" role="alert">
+                    <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+                    <div>
+                        <div class="fw-semibold">This sign-in page expired.</div>
+                        <div class="small">Enter your token again. If this keeps happening, allow cookies for this site.</div>
+                    </div>
+                </div>
+                {% elif error %}
+                <div class="alert alert-danger" role="alert">
+                    <i class="bi bi-exclamation-triangle" aria-hidden="true"></i>
+                    <div>
+                        <div class="fw-semibold">That token didn&rsquo;t work.</div>
+                        <div class="small">Check the token in your config volume or the configured WEB_AUTH_TOKEN, then try again.</div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <form method="POST" action="{{ url_for('main.login') }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                    <div class="logo-container">
-                        <i class="bi bi-film"></i>
-                        <h1>Media Preview Generator</h1>
-                        <p class="text-muted mb-0">Sign in to manage your media processing.</p>
+                    <label class="login-label" for="token">Authentication token</label>
+                    <div class="login-token-group">
+                        <i class="bi bi-key" aria-hidden="true"></i>
+                        <input type="password" id="token" name="token" required autofocus
+                               autocomplete="current-password" aria-describedby="loginTokenHelp"{% if error %} aria-invalid="true"{% endif %}>
+                        <button type="button" class="login-reveal" id="tokenReveal" aria-label="Show token"
+                                aria-pressed="false" title="Show token">
+                            <i class="bi bi-eye" aria-hidden="true"></i>
+                        </button>
                     </div>
 
-                    {% if rate_limited %}
-                    <div class="alert alert-warning text-start" role="alert">
-                        <div class="fw-semibold">
-                            <i class="bi bi-hourglass-split me-2"></i>Too many attempts.
-                        </div>
-                        <div class="small mt-1">
-                            Wait a minute, then try again.
-                        </div>
-                    </div>
-                    {% elif page_expired %}
-                    <div class="alert alert-warning text-start" role="alert">
-                        <div class="fw-semibold">
-                            <i class="bi bi-arrow-clockwise me-2"></i>This sign-in page expired.
-                        </div>
-                        <div class="small mt-1">
-                            Enter your token again. If this keeps happening, allow cookies for this site.
-                        </div>
-                    </div>
-                    {% elif error %}
-                    <div class="alert alert-danger text-start" role="alert">
-                        <div class="fw-semibold">
-                            <i class="bi bi-exclamation-triangle me-2"></i>That token didn&rsquo;t work.
-                        </div>
-                        <div class="small mt-1">Check the token in your config volume or the configured WEB_AUTH_TOKEN, then try again.</div>
-                    </div>
-                    {% endif %}
-
-                    <div class="form-floating mb-3">
-                        <input type="password" class="form-control" id="token" name="token"
-                               placeholder=" " required autofocus autocomplete="current-password" aria-describedby="loginTokenHelp"{% if error %} aria-invalid="true"{% endif %}>
-                        <label for="token"><i class="bi bi-key me-2"></i>Authentication Token</label>
-                    </div>
-
-                    <button class="btn btn-lg btn-primary w-100 py-2" type="submit">
+                    <button class="btn btn-lg btn-primary w-100 login-submit" type="submit">
                         <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
                     </button>
                 </form>
 
-                <div class="mt-4 text-start login-help" id="loginTokenHelp">
-                    <p class="text-muted small mb-2">
-                        <i class="bi bi-question-circle me-1"></i><strong>How do I find my token?</strong>
-                    </p>
-                    <ul class="login-help-list small text-muted">
-                        <li><i class="bi bi-file-earmark-lock"></i><span>Check <code>/config/auth.json</code> in your config volume.</span></li>
-                        <li><i class="bi bi-terminal"></i><span>Or run <code>docker logs &lt;container&gt;</code> for the file path.</span></li>
-                        <li><i class="bi bi-gear"></i><span>Or set <code>WEB_AUTH_TOKEN</code> in your environment / docker-compose.</span></li>
-                    </ul>
-                    <details class="mt-2 small text-muted"{% if error or rate_limited %} open{% endif %}>
-                        <summary class="login-help-summary">
-                            <i class="bi bi-info-circle me-1"></i>First time? More details&hellip;
-                        </summary>
-                        <div class="mt-2 ps-3 login-help-detail">
+                <details class="login-help" id="loginTokenHelp"{% if error or rate_limited %} open{% endif %}>
+                    <summary>
+                        <i class="bi bi-question-circle" aria-hidden="true"></i>
+                        <span>How do I find my token?</span>
+                        <i class="bi bi-chevron-down login-chevron" aria-hidden="true"></i>
+                    </summary>
+                    <div class="login-help-body">
+                        <ul>
+                            <li>Check <code>/config/auth.json</code> in your config volume.</li>
+                            <li>Or run <code>docker logs &lt;container&gt;</code> for the file path.</li>
+                            <li>Or set <code>WEB_AUTH_TOKEN</code> in your environment / docker-compose.</li>
+                        </ul>
+                        <p class="login-help-sub">First time?</p>
+                        <p>
                             A random token was generated on first startup and saved to
                             <code>/config/auth.json</code> inside the container. This maps to
                             whichever host path you mounted as <code>/config</code>.
-                            <br><br>
-                            To use your own password instead, add this to your
-                            <code>docker-compose.yml</code>:
-                            <pre class="login-help-snippet"><span class="text-info">environment:</span>
-  - <span class="text-warning">WEB_AUTH_TOKEN=your-password</span></pre>
-                            Then restart the container.
-                        </div>
-                    </details>
-                </div>
+                        </p>
+                        <p>To use your own password instead, add this to your <code>docker-compose.yml</code>, then restart the container:</p>
+                        <pre class="login-help-snippet">environment:
+  - WEB_AUTH_TOKEN=your-password</pre>
+                    </div>
+                </details>
             </div>
         </div>
     </main>
+    <script>
+        // The token field stays a password input by default; the eye button only reveals it while the user asks.
+        (function () {
+            var input = document.getElementById('token');
+            var btn = document.getElementById('tokenReveal');
+            if (!input || !btn) return;
+            btn.addEventListener('click', function () {
+                var show = input.type === 'password';
+                var label = show ? 'Hide token' : 'Show token';
+                input.type = show ? 'text' : 'password';
+                btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+                btn.setAttribute('aria-label', label);
+                btn.title = label;
+                btn.firstElementChild.className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
+                input.focus();
+            });
+        })();
+    </script>
 </body>
 </html>
