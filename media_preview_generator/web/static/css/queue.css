@@ -59,7 +59,7 @@
 .dashboard-layout .jobs-table thead th { position: sticky; top: 0; z-index: 1; padding: 10px 14px; background: var(--bs-secondary-bg, transparent); color: var(--faint); border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; text-align: left; white-space: nowrap; }
 .dashboard-layout .jobs-table thead th.text-end { text-align: right; }
 .dashboard-layout .jobs-table th:nth-child(1) { width: 88px; }
-.dashboard-layout .jobs-table th:nth-child(3) { width: 236px; }
+.dashboard-layout .jobs-table th:nth-child(3) { width: 260px; }
 .dashboard-layout .jobs-table th:nth-child(4) { width: 104px; }
 .dashboard-layout .jobs-table th:nth-child(5) { width: 14%; }
 .dashboard-layout .jobs-table th:nth-child(6) { width: 100px; }

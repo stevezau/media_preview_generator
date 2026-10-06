@@ -19,8 +19,12 @@ body:has(.setup-container) > .navbar { display: none; }
     font-weight: 600;
     color: var(--accent-text);
     white-space: nowrap;
+    min-width: 0;
 }
-.setup-topbar-actions { display: flex; align-items: center; gap: 10px; }
+/* Wider fallback fonts (CI, Linux without the preferred face) make the brand text outgrow a 390px bar. */
+.setup-brand > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.setup-brand > img { flex: none; }
+.setup-topbar-actions { display: flex; align-items: center; gap: 10px; flex: none; }
 .setup-icon-btn {
     width: 44px;
     height: 44px;
