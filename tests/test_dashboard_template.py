@@ -99,5 +99,5 @@ class TestDashboardPlacement:
 
     def test_status_tabs_cover_every_status_the_clear_menu_and_stats_report_when_page_renders(self, dashboard_html):
         tabs = _section(dashboard_html, "jobStatusTabs", "jobSearch")
-        statuses = re.findall(r'data-status="([a-z]*)"', tabs)
-        assert statuses == ["", "running", "pending", "completed", "failed", "cancelled"]
+        statuses = re.findall(r'data-status="([a-z_]*)"', tabs)
+        assert statuses == ["active", "running", "pending", "completed", "failed", "cancelled", "chapter_warnings", ""]
