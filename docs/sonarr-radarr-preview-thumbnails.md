@@ -70,7 +70,7 @@ The Plex direct webhook and the Recently Added poll only see new library items, 
 - **401 from the webhook:** the token is wrong or missing. Leave Username empty and put the token in Password.
 - **Radarr or Sonarr can't reach the URL:** use the host's IP or a Docker hostname they can resolve, not `localhost`.
 - **The test works but imports do nothing:** check that the import events are ticked, and that webhooks are enabled on the Automation page.
-- **The job sits in Pending:** check that **Incoming job priority** is **High**, and that **Pause Processing** is off.
+- **The job sits in Pending:** check that **Incoming job priority** is **High**, and that processing is not paused (the Workers header shows **Resume** while it is).
 
 More in the [troubleshooting table](guides.md#troubleshooting).
 

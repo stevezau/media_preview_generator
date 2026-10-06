@@ -92,7 +92,7 @@ In the top bar, **Automation** and **Settings** open their page when clicked, an
 > up to the configured concurrent-job cap; extra jobs sit in **Pending** and the
 > gate releases them in priority order as slots free up. Manual, webhook, and
 > scheduled jobs all share the same gate. To hard-stop everything, use
-> **Pause Processing** — the global pause is persisted and survives restarts.
+> **Pause** (in the Workers header) — the global pause is persisted and survives restarts.
 >
 > Priority also decides who gets the next free worker **file by file**, so a
 > High job overtakes a running full scan without cancelling or pausing it — the
@@ -182,16 +182,16 @@ information when available. A pending or retried job may already have saved resu
 claim that the current queue entry has finished. **Current activity** shows the current item when the job
 provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
 An expanded queue row shows up to five requested paths. **View all** opens the Files tab, where **Requested paths** lists the complete selection with search and pagination, separately from **Recorded outcomes**. Requested paths do not imply completed processing. File Inspector links open the Inspector tool in a new tab.
-The full worker grid remains above the list, grouped by worker group and including idle workers. Queue search and status filters apply across the full history; job statistics remain totals for all visible jobs.
+The full worker grid remains above the list, grouped by worker group and including idle workers. Each group has its own **−** and **+** stepper for its worker count; the change is saved straight away, and lowering it lets current files finish first. The status tabs above the list (**All**, **Running**, **Pending**, **Completed**, **Failed**, **Cancelled**) each show a count; pick one to filter the list. Queue search and status filters apply across the full history; job statistics remain totals for all visible jobs.
 
 **Pause / Resume (global):**
 
-- **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
-- **Resume Processing** — Clears your manual global pause. Quiet hours can still hold processing until their window ends.
-- One global control appears beside **Clear Jobs** in **All jobs**. State is persisted and survives restarts.
+- **Pause** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
+- **Resume** — Clears your manual global pause. Quiet hours can still hold processing until their window ends.
+- One global control sits in the **Workers** header, beside **Manage groups**. **Pause** shows while there is work to hold; **Resume** shows whenever processing is paused. State is persisted and survives restarts.
 - Each pending or running job has its own **Pause** and **Resume**, including Previews, Intro & Credits and loudness.
   Pausing one job does not pause other jobs. Manual and schedule holds are independent: resuming by hand cannot
-  clear a schedule stop, and a schedule start cannot clear a manual pause. Global **Resume Processing** does not
+  clear a schedule stop, and a schedule start cannot clear a manual pause. Global **Resume** does not
   resume a job you paused on its own.
 
 **Scheduling:**
@@ -222,7 +222,8 @@ means history could not be fetched. Neither proves that no webhook was sent.
 
 ### Settings Page
 
-Access settings at `/settings` to manage:
+Access settings at `/settings` to manage. On a wide screen a side menu (**Run**, **System**, **Info**) jumps to each section and highlights the one in view; on a phone the same sections are in a picker at the top.
+
 
 - **Plex Connection** — re-authenticate, test connection
 - **Libraries** — select which libraries to process
@@ -243,7 +244,7 @@ Most Settings controls and the Automation page's **Triggers** tab **save automat
 Open **Settings → Workers** to choose which jobs can use your hardware. A group has a name, a CPU or detected GPU,
 its number of workers, allowed job types, and either **Always** or weekly availability. Start with one group per
 resource; add groups when different jobs need different counts or hours. Use **Edit** for the details, then
-**Apply changes** to save the whole group configuration. The editor opens directly below the selected group. An edit in another Settings session
+**Apply changes** to save the whole group configuration. The editor opens directly below the selected group (inline, not in a dialog). For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph that updates as you change the windows. An edit in another Settings session
 causes a conflict instead of silently overwriting the newer settings; discard and reload before applying again.
 
 CPU groups can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU groups can run previews and
@@ -256,7 +257,7 @@ audio analysis at a time without assigning video jobs to that CPU group. The nor
 applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU group.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
-The dashboard shows group activity. Use its **Edit group** link to open that group's controls in Settings:
+The dashboard shows group activity and has +/- steppers for each group's worker count. Use **Manage groups** in the Workers header to open the group controls in Settings; groups are edited only there:
 
 - Change the group's worker count or Enabled setting, then **Apply changes**. A decrease retires workers from that group after their current files finish; an increase can restore compatible workers that were about to retire. Disabling a group remembers its saved count for when you enable it again.
 - **Desired** is the enabled group's saved count. **Available**, **Busy** and **Finishing** show its current
@@ -1688,7 +1689,7 @@ Use this table to diagnose common failures quickly.
 | New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |
 | Job warning: "N file(s) still weren't indexed by the media server after N retries, so no more retries are queued. The next scheduled scan will pick them up." | The media server hadn't added the file to its library by the last retry | Nothing, if you have a scheduled scan: it picks the file up once the server has it. Otherwise raise **Retry count** or **Initial retry delay** (Settings → Retry policy), or check the file is under a library folder the server scans. |
 | Radarr/Sonarr cannot reach webhook URL | Network routing or hostname issue | Use host IP or reachable Docker hostname (not `localhost`), then verify firewall and port `8080`. |
-| New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause Processing** (Current Job or Job Queue header). Global pause is persisted and pauses in-flight processing. Group reductions and closing worker hours instead let current files finish. |
+| New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause** in the **Workers** header. Global pause is persisted and pauses in-flight processing. Group reductions and closing worker hours instead let current files finish. |
 | DV Profile 5 thumbnails have a green and purple tint, and the log warns that no working Vulkan device was found | The container can't reach a hardware Vulkan device, so the app skips Profile 5 tone mapping and extracts plain frames instead | Pass an iGPU to the container with `--device /dev/dri:/dev/dri` (Intel/AMD), or for NVIDIA set `NVIDIA_DRIVER_CAPABILITIES=all` so the NVIDIA Vulkan driver gets injected. Most users already pass `/dev/dri` for hardware video acceleration, which brings the Vulkan driver along for free. |
 
 ### Validate Plex Config Path

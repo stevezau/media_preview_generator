@@ -67,19 +67,20 @@ function describeSchedule(triggerType, triggerValue) {
 }
 
 // Compact schedule summary rendered inside the Job Statistics card on the
-// Dashboard.  Shows next upcoming run + a small configured/enabled count.
+// Dashboard: an amber block for the next run, then a one-line health summary.
 // The Automation page (Schedules tab) is the authoritative place for CRUD —
 // this is just an at-a-glance pointer.
 function updateScheduleTeaser() {
     const body = document.getElementById('scheduleTeaserBody');
     if (!body) return;
+    updateQuickRunTile();
 
     if (!schedules || schedules.length === 0) {
         body.innerHTML =
-            '<div class="d-flex align-items-center gap-2 text-muted small">' +
-            '<i class="bi bi-calendar-x"></i>' +
-            '<span>No schedules configured.</span>' +
-            '<a href="/automation#schedules" class="ms-auto">Create one →</a>' +
+            '<div class="dash-sched is-empty">' +
+            '<span class="dash-sched-ico"><i class="bi bi-calendar-x" aria-hidden="true"></i></span>' +
+            '<div><div class="dash-sched-label">Schedules</div><div class="dash-sched-name">No schedules</div></div>' +
+            '<a href="/automation#schedules" class="btn btn-sm btn-outline-secondary dash-btn-sm">Create one <i class="bi bi-arrow-right" aria-hidden="true"></i></a>' +
             '</div>';
         return;
     }
@@ -95,44 +96,82 @@ function updateScheduleTeaser() {
 
     const countWord = total === 1 ? 'schedule' : 'schedules';
     let summary = total + ' ' + countWord;
-    if (total > 0 && enabledCount === total) {
-        summary += ' · all enabled';
+    if (enabledCount === total) {
+        summary += ', all enabled';
     } else if (enabledCount === 0) {
-        summary += ' · all disabled';
-    } else if (disabledCount === 1) {
-        summary += ' · 1 disabled';
+        summary += ', all disabled';
     } else {
-        summary += ' · ' + disabledCount + ' disabled';
+        summary += ', ' + disabledCount + ' disabled';
     }
+    const healthy = enabledCount === total;
 
-    let topLine;
+    let block;
     if (nextOne) {
         const dt = new Date(nextOne.next_run);
         const rel = _formatRelativeToNow(dt);
         const absolute = _formatAbsoluteShort(dt);
-        const tooltip = dt.toLocaleString();
-        topLine =
-            '<div class="d-flex align-items-baseline gap-2" title="' + escapeHtml(tooltip) + '">' +
-            '<i class="bi bi-clock-history text-muted"></i>' +
-            '<div class="text-truncate">' +
-            '<span class="text-muted">Next:</span> ' +
-            '<strong>' + escapeHtml(nextOne.name) + '</strong>' +
-            '<span class="text-muted"> — ' + escapeHtml(rel) + '</span>' +
-            '<span class="text-muted small ms-1">(' + escapeHtml(absolute) + ')</span>' +
+        block =
+            '<div class="dash-sched" title="' + escapeHtml(dt.toLocaleString()) + '">' +
+            '<span class="dash-sched-ico"><i class="bi bi-calendar-event" aria-hidden="true"></i></span>' +
+            '<div class="dash-sched-text">' +
+            '<div class="dash-sched-label">Next schedule</div>' +
+            '<div class="dash-sched-name text-truncate">' + escapeHtml(nextOne.name) + '</div>' +
+            '<div class="dash-sched-when"><b>' + escapeHtml(rel) + '</b><span>' + escapeHtml(absolute) + '</span></div>' +
             '</div>' +
+            '<a href="/automation#schedules" class="ibtn" aria-label="Manage schedules" title="Manage schedules"><i class="bi bi-sliders" aria-hidden="true"></i></a>' +
             '</div>';
     } else {
-        topLine =
-            '<div class="d-flex align-items-center gap-2 text-muted">' +
-            '<i class="bi bi-clock-history"></i>' +
-            '<span>No upcoming runs</span>' +
+        block =
+            '<div class="dash-sched is-empty">' +
+            '<span class="dash-sched-ico"><i class="bi bi-clock-history" aria-hidden="true"></i></span>' +
+            '<div class="dash-sched-text"><div class="dash-sched-label">Next schedule</div><div class="dash-sched-name">No upcoming runs</div></div>' +
+            '<a href="/automation#schedules" class="ibtn" aria-label="Manage schedules" title="Manage schedules"><i class="bi bi-sliders" aria-hidden="true"></i></a>' +
             '</div>';
     }
 
     body.innerHTML =
-        topLine +
-        '<div class="small text-muted mt-1">' + escapeHtml(summary) + '</div>';
+        block +
+        '<div class="dash-sched-foot' + (healthy ? '' : ' is-warn') + '">' +
+        '<i class="bi ' + (healthy ? 'bi-check-circle-fill' : 'bi-exclamation-circle-fill') + '" aria-hidden="true"></i>' +
+        '<span>' + escapeHtml(summary) + '</span></div>';
 }
+
+// Quick actions tile: one click runs the schedule the teaser calls "next".
+function _nextSchedule() {
+    return (schedules || [])
+        .filter(s => s.enabled !== false && s.next_run)
+        .sort((a, b) => new Date(a.next_run) - new Date(b.next_run))[0] || null;
+}
+
+function updateQuickRunTile() {
+    const tile = document.getElementById('quickRunNextSchedule');
+    if (!tile) return;
+    const next = _nextSchedule();
+    tile.disabled = !next;
+    tile.dataset.scheduleId = next ? next.id : '';
+    document.getElementById('quickRunNextTitle').textContent = next ? 'Run ' + next.name + ' now' : 'No schedules';
+    document.getElementById('quickRunNextSub').textContent = next ? 'Next schedule' : 'Nothing to run';
+    tile.setAttribute('aria-label', next ? 'Run schedule ' + next.name + ' now' : 'No schedule to run');
+}
+
+async function runNextScheduleNow() {
+    const tile = document.getElementById('quickRunNextSchedule');
+    const id = tile && tile.dataset.scheduleId;
+    if (!id) return;
+    tile.disabled = true;
+    try {
+        await apiPost('/api/schedules/' + encodeURIComponent(id) + '/run');
+        showToast('Schedule started', 'The schedule was queued to run now.', 'success');
+    } catch (error) {
+        showToast('Could not run schedule', error.message, 'danger');
+    } finally {
+        updateQuickRunTile();
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('quickRunNextSchedule')?.addEventListener('click', runNextScheduleNow);
+});
 
 // Natural-language "time until" for the schedule teaser.  Kept separate from
 // the generic formatDate helper so we can tune the copy for the dashboard
@@ -373,6 +412,44 @@ async function recoverSchedulesFromBackup() {
 }
 window.recoverSchedulesFromBackup = recoverSchedulesFromBackup;
 
+// Header chip, count pill and the "next run" hero above the list; each element exists only on /automation.
+function _renderScheduleSummary() {
+    const total = schedules.length;
+    const enabled = schedules.filter(s => s.enabled !== false);
+
+    const countPill = document.getElementById('scheduleCountPill');
+    if (countPill) {
+        countPill.hidden = total === 0;
+        countPill.className = 'pill ms-2' + (enabled.length ? ' ok' : '');
+        countPill.textContent = enabled.length + ' enabled';
+    }
+    const headerPill = document.getElementById('automationSchedulePill');
+    if (headerPill) {
+        headerPill.innerHTML = '<i class="bi bi-calendar-check" aria-hidden="true"></i> ' + enabled.length
+            + (enabled.length === 1 ? ' schedule enabled' : ' schedules enabled');
+    }
+
+    const hero = document.getElementById('scheduleNextHero');
+    if (!hero) return;
+    const next = enabled
+        .filter(s => s.next_run)
+        .sort((a, b) => new Date(a.next_run) - new Date(b.next_run))[0];
+    if (!next) {
+        hero.hidden = true;
+        hero.innerHTML = '';
+        return;
+    }
+    const dt = new Date(next.next_run);
+    hero.hidden = false;
+    hero.innerHTML =
+        '<span class="tile" aria-hidden="true"><i class="bi bi-alarm"></i></span>' +
+        '<div class="next-hero-text"><div class="next-hero-label">Next run</div>' +
+        '<div class="next-hero-name">' + escapeHtml(next.name) + '</div>' +
+        '<div class="next-hero-when"><b>' + escapeHtml(_formatRelativeToNow(dt)) + '</b><span>' + escapeHtml(_formatAbsoluteShort(dt)) + '</span></div></div>' +
+        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="runScheduleNow(\'' + escapeHtml(next.id) + '\')">' +
+        '<i class="bi bi-play-fill me-1" aria-hidden="true"></i>Run now</button>';
+}
+
 function updateScheduleList() {
     // Always update the teaser card if it exists (Dashboard).
     updateScheduleTeaser();
@@ -383,6 +460,7 @@ function updateScheduleList() {
     if (!tbody) return;
 
     _renderScheduleLoadBanner();
+    _renderScheduleSummary();
 
     if (schedules.length === 0) {
         tbody.innerHTML = `
@@ -399,12 +477,14 @@ function updateScheduleList() {
 
     for (const schedule of schedules) {
         const statusBadge = schedule.enabled ?
-            '<span class="badge bg-success">Enabled</span>' :
-            '<span class="badge bg-secondary">Disabled</span>';
+            '<span class="pill ok"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>Enabled</span>' :
+            '<span class="pill"><i class="bi bi-pause-circle" aria-hidden="true"></i>Disabled</span>';
 
         const cronDisplay = describeSchedule(schedule.trigger_type, schedule.trigger_value);
 
-        const nextRun = schedule.next_run ? formatDate(schedule.next_run) : '-';
+        const nextRun = schedule.enabled && schedule.next_run
+            ? '<span class="next"><i class="bi bi-clock" aria-hidden="true"></i>' + formatDate(schedule.next_run) + '</span>'
+            : '<span class="next off">' + (schedule.next_run ? formatDate(schedule.next_run) : '-') + '</span>';
 
         // Recently-added schedules get a subtle primary badge next to
         // the name so users can tell them apart from full-library scans.
@@ -450,28 +530,32 @@ function updateScheduleList() {
             ? ' <i class="bi bi-exclamation-triangle text-warning" title="' + escapeHtml(overlapTip) + '" data-bs-toggle="tooltip"></i>'
             : '';
 
+        const kindIcon = isMarkers ? 'bi-skip-forward-circle' : (isRecentlyAdded ? 'bi-arrow-repeat' : 'bi-collection');
+        const toggleLabel = schedule.enabled ? 'Disable' : 'Enable';
+        const sid = escapeHtml(schedule.id);
+
         html += `
             <tr>
-                <td>${escapeHtml(schedule.name)}${typeBadge}${overlapBadge}</td>
+                <td class="sched-name"><span class="tile" aria-hidden="true"><i class="bi ${kindIcon}"></i></span><div class="sched-name-text"><span class="sched-title">${escapeHtml(schedule.name)}</span>${typeBadge}${overlapBadge}</div></td>
                 <td>${escapeHtml(schedule.library_name) || 'All Libraries'}${_serverBadge(schedule)}</td>
                 <td><code>${escapeHtml(cronDisplay)}</code>${stopBadge}</td>
                 <td><span class="badge ${schedPriBadge} priority-badge" title="${escapeHtml(schedPriTitle)}">${schedPriLabel}</span></td>
                 <td>${nextRun}</td>
                 <td>${statusBadge}</td>
                 <td class="text-nowrap">
-                    <div class="btn-group btn-group-sm icon-btn-group" role="group">
-                        <button class="btn btn-outline-secondary" onclick="runScheduleNow('${escapeHtml(schedule.id)}')" title="Run now" aria-label="Run now">
-                            <i class="bi bi-play-fill"></i>
+                    <div class="racts" role="group" aria-label="Schedule actions">
+                        <button type="button" class="ibtn" onclick="runScheduleNow('${sid}')" title="Run now" aria-label="Run now">
+                            <i class="bi bi-play-fill" aria-hidden="true"></i>
                         </button>
-                        <button class="btn btn-outline-secondary" onclick="showEditScheduleModal('${escapeHtml(schedule.id)}')" title="Edit" aria-label="Edit schedule">
-                            <i class="bi bi-pencil"></i>
+                        <button type="button" class="ibtn" onclick="showEditScheduleModal('${sid}')" title="Edit" aria-label="Edit schedule">
+                            <i class="bi bi-pencil" aria-hidden="true"></i>
                         </button>
-                        <button class="btn btn-outline-secondary" onclick="toggleSchedule('${escapeHtml(schedule.id)}', ${!schedule.enabled})"
-                                title="${schedule.enabled ? 'Disable' : 'Enable'}" aria-label="${schedule.enabled ? 'Disable schedule' : 'Enable schedule'}">
-                            <i class="bi bi-${schedule.enabled ? 'pause' : 'play'}"></i>
+                        <button type="button" class="ibtn" onclick="toggleSchedule('${sid}', ${!schedule.enabled})"
+                                title="${toggleLabel}" aria-label="${toggleLabel} schedule">
+                            <i class="bi bi-${schedule.enabled ? 'pause' : 'play'}" aria-hidden="true"></i>
                         </button>
-                        <button class="btn btn-outline-danger" onclick="deleteSchedule('${escapeHtml(schedule.id)}')" title="Delete" aria-label="Delete schedule">
-                            <i class="bi bi-trash"></i>
+                        <button type="button" class="ibtn danger" onclick="deleteSchedule('${sid}')" title="Delete" aria-label="Delete schedule">
+                            <i class="bi bi-trash3" aria-hidden="true"></i>
                         </button>
                     </div>
                 </td>

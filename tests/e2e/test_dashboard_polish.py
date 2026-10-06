@@ -204,13 +204,13 @@ def test_hidden_occupied_group_remains_discoverable_and_keeps_paused_state(authe
     page.route("**/api/jobs/workers", lambda route: _fulfill_json(route, {"workers": [worker]}))
     page.goto(app_url + "/")
     controls = page.locator("#workerGroupFilters")
-    expect(page.get_by_text("Archive work", exact=True)).to_be_hidden()
+    expect(page.locator("#workerGroupDashboard").get_by_text("Archive work", exact=True)).to_be_hidden()
     expect(page.locator("#workerGroupSummary")).to_contain_text("7 groups · 1 occupied")
     outside = controls.get_by_role("button", name="1 occupied group outside this view", exact=True)
     expect(outside).to_be_visible()
     outside.focus()
     page.keyboard.press("Enter")
-    expect(page.get_by_text("Archive work", exact=True)).to_be_visible()
+    expect(page.locator("#workerGroupDashboard").get_by_text("Archive work", exact=True)).to_be_visible()
     expect(page.get_by_text("1 paused", exact=True)).to_be_visible()
     expect(page.locator("#workerGroupSummary")).to_contain_text("Showing 1 of 1 matching groups")
     controls.get_by_role("button", name="Clear filters", exact=True).click()
@@ -218,15 +218,10 @@ def test_hidden_occupied_group_remains_discoverable_and_keeps_paused_state(authe
     expect(page.locator("#workerGroupSummary")).to_contain_text("7 groups · 1 occupied")
     expect(page.locator("#workerGroupSummary")).to_contain_text("Showing 1 of 1 matching groups")
     expect(outside).to_be_visible()
-    indicator = page.locator('[data-group-id="group-1"] [data-group-indicator="configured"] summary')
-    indicator.focus()
-    page.keyboard.press("Enter")
-    expect(
-        page.locator('[data-group-id="group-1"]').get_by_text(
-            "1 configured worker. Worker counts set simultaneous tasks, not CPU cores.", exact=True
-        )
-    ).to_be_visible()
-    assert indicator.bounding_box()["height"] >= 44
+    chip = page.locator('[data-group-id="group-1"] [data-group-indicator="configured"]')
+    expect(chip).to_have_attribute(
+        "aria-label", "0 of 1 configured worker busy. Worker counts set simultaneous tasks, not CPU cores."
+    )
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
@@ -353,3 +348,56 @@ def test_server_owner_disclosure_keeps_keyboard_focus_during_queue_refresh(dashb
     expect(summary).to_be_focused()
     expect(row.get_by_text("Home Jellyfin", exact=True)).to_be_visible()
     expect(row.get_by_text("Home Emby", exact=True)).to_be_visible()
+
+
+@pytest.mark.e2e
+def test_system_details_start_open_on_phone_and_toggle_collapses(authed_page: Page, app_url: str) -> None:
+    page = authed_page
+    page.set_viewport_size({"width": 390, "height": 844})
+    mock_dashboard_defaults(page)
+    mock_worker_groups(page)
+    page.goto(f"{app_url}/")
+    details = page.locator("#systemDetails")
+    toggle = page.locator(".system-details-toggle")
+
+    expect(details).to_be_visible()
+    expect(toggle).to_have_attribute("aria-expanded", "true")
+
+    toggle.click()
+    expect(details).to_be_hidden()
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+
+    toggle.click()
+    expect(details).to_be_visible()
+
+
+@pytest.mark.e2e
+def test_settings_touch_targets_reach_switches_and_day_chips(browser, app_url: str, session_cookie: dict) -> None:
+    context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+    context.add_cookies([session_cookie])
+    page = context.new_page()
+    page.goto(f"{app_url}/settings")
+    page.evaluate("document.querySelectorAll('details').forEach(d => { d.open = true; })")
+    switch = page.locator("#autoRequeueOnRestart")
+    switch.scroll_into_view_if_needed()
+
+    # The 44px box edge sits ~21px from the centre; the switch itself is only ~38x22.
+    hit_ids = page.evaluate(
+        """() => {
+            const box = document.getElementById('autoRequeueOnRestart').getBoundingClientRect();
+            const cy = box.top + box.height / 2;
+            return [box.left + box.width / 2 - 21, box.left + box.width / 2 + 21].map(
+                x => document.elementFromPoint(x, cy)?.id);
+        }"""
+    )
+    day_chips = page.evaluate(
+        """() => [...document.querySelectorAll('label.day-chip')].map(l => {
+            const r = l.getBoundingClientRect();
+            return [Math.round(r.width), Math.round(r.height)];
+        })"""
+    )
+    context.close()
+
+    assert hit_ids == ["autoRequeueOnRestart", "autoRequeueOnRestart"]
+    assert day_chips
+    assert all(width >= 44 and height >= 44 for width, height in day_chips)

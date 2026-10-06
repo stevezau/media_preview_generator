@@ -114,7 +114,7 @@ writes should use `media_servers[]` via `/api/servers`.
 ### Worker groups (`worker_groups`)
 
 Named groups are the authoritative worker allocation, edited in **Settings → Workers** and the setup wizard.
-The dashboard shows group activity; its **Edit group** link opens that group's settings. See the [worker guide](guides.md#worker-groups-and-availability)
+The dashboard shows group activity; its **Manage groups** button opens the group settings. See the [worker guide](guides.md#worker-groups-and-availability)
 for scheduling, scaling and migration behavior.
 
 Each group contains `id` (unique stable identifier), `name` (1–80 characters), `enabled`, `resource` (`cpu` or `gpu`),

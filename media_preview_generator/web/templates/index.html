@@ -12,6 +12,7 @@
 
 {% block content %}
 <div class="dashboard-layout">
+<h1 class="visually-hidden">Dashboard</h1>
 <!-- Setup Required Banner (hidden by default) -->
 <div id="setupRequiredBanner" class="alert alert-info d-none mb-4">
     <i class="bi bi-gear me-2"></i>
@@ -26,7 +27,7 @@
             <i class="bi bi-hdd-stack"></i>
         </div>
         <div class="flex-grow-1">
-            <h5 class="mb-1">No media servers configured yet</h5>
+            <h2 class="h5 mb-1">No media servers configured yet</h2>
             <p class="mb-2 text-muted">
                 Add a Plex, Emby, or Jellyfin server to start generating previews.
             </p>
@@ -37,129 +38,118 @@
     </div>
 </div>
 
-<div class="row dashboard-summary-row">
-    <!-- System & Workers Card -->
-    <div class="col-lg-6 mb-4">
-        <div class="card dashboard-system-card system-details-collapsed">
-            <div class="card-header dashboard-system-header">
-                <span class="dashboard-system-heading"><span><i class="bi bi-pc-display me-2"></i>System &amp; Workers</span><span id="systemConnectionSummary" class="system-connection-summary">Checking connections</span></span>
-                <div id="systemStatus"></div>
-                <button type="button" class="btn btn-link text-body-secondary system-details-toggle" onclick="toggleSystemDetails()" aria-controls="systemDetails" aria-expanded="false" aria-label="Show system details"><i class="bi bi-chevron-down" aria-hidden="true"></i></button>
-            </div>
-            <div class="card-body system-card-body" id="systemDetails">
-                <!-- Media Servers Status (one row per configured server) -->
-                <section class="system-section">
-                    <h6 class="system-section-title">Media Servers</h6>
-                    <div id="mediaServersStatus">
-                        <div class="text-muted small d-flex align-items-center gap-2">
-                            <span class="spinner-border spinner-border-sm" role="status"></span>
-                            Checking media servers&hellip;
-                        </div>
+<div class="dashboard-summary-row">
+    <!-- System card: servers, worker-group steppers and the build version. The header pill is the one status. -->
+    <section class="card dash-card dashboard-system-card" aria-labelledby="systemCardTitle">
+        <div class="card-header dashboard-system-header">
+            <span class="dashboard-system-heading"><span id="systemCardTitle" role="heading" aria-level="2"><i class="bi bi-pc-display me-2" aria-hidden="true"></i>System</span><span id="systemConnectionSummary" class="system-connection-summary">Checking connections</span></span>
+            <div id="systemStatus"></div>
+            <button type="button" class="btn btn-link text-body-secondary system-details-toggle" onclick="toggleSystemDetails()" aria-controls="systemDetails" aria-expanded="true" aria-label="Hide system details"><i class="bi bi-chevron-up" aria-hidden="true"></i></button>
+        </div>
+        <div class="card-body system-card-body" id="systemDetails">
+            <section class="system-section">
+                <h3 class="sec-label">Media servers</h3>
+                <div id="mediaServersStatus">
+                    <div class="text-muted small d-flex align-items-center gap-2">
+                        <span class="spinner-border spinner-border-sm" role="status"></span>
+                        Checking media servers&hellip;
                     </div>
-                </section>
+                </div>
+            </section>
 
-                <!-- Version Info -->
-                <div class="d-flex justify-content-between align-items-center pt-2 border-top system-version-row">
-                    <span class="small text-muted">Version</span>
-                    <span class="d-flex align-items-center gap-2">
-                        <span id="dashboardVersion" class="small text-muted">
-                            <span class="spinner-border spinner-border-sm" role="status"></span>
-                        </span>
-                        <a id="dashboardUpdateBadge" class="badge bg-warning text-dark text-decoration-none d-none"
-                           href="https://github.com/stevezau/media_preview_generator/releases/latest"
-                           target="_blank" title="View release notes">Update available</a>
-                    </span>
+            <section class="system-section" id="systemWorkerGroupsSection" hidden>
+                <h3 class="sec-label">Worker groups</h3>
+                <div id="systemWorkerGroups"></div>
+            </section>
+
+            <div class="dash-foot system-version-row">
+                <i class="bi bi-box-seam" aria-hidden="true"></i>
+                <span>Version</span>
+                <code id="dashboardVersion"><span class="spinner-border spinner-border-sm" role="status"></span></code>
+                <span class="flex-fill"></span>
+                <a id="dashboardUpdateBadge" class="pill warn text-decoration-none d-none"
+                   href="https://github.com/stevezau/media_preview_generator/releases/latest"
+                   target="_blank" rel="noopener noreferrer" title="View release notes">Update available</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Quick actions: two buttons and a 2x2 grid of shortcut tiles. -->
+    <section class="card dash-card dashboard-quick-card" aria-labelledby="quickActionsTitle">
+        <div class="card-header">
+            <span id="quickActionsTitle" role="heading" aria-level="2"><i class="bi bi-lightning me-2" aria-hidden="true"></i>Quick actions</span>
+        </div>
+        <div class="card-body">
+            <div class="d-grid gap-2">
+                <button class="btn btn-primary dash-btn-primary" onclick="showNewJobModal()">
+                    <i class="bi bi-play-fill me-2" aria-hidden="true"></i>Start new job
+                </button>
+                <button class="btn btn-outline-secondary dash-btn" onclick="showManualTriggerModal()">
+                    <i class="bi bi-file-earmark-play me-2" aria-hidden="true"></i>Process a file or folder
+                </button>
+            </div>
+
+            <div class="dash-qa-links">
+                <button type="button" class="dash-tile-link" id="quickRunNextSchedule" aria-label="Run next schedule now" disabled>
+                    <i class="bi bi-calendar-check" aria-hidden="true"></i><span><b id="quickRunNextTitle">No schedules</b><small id="quickRunNextSub">Nothing to run</small></span>
+                </button>
+                <a class="dash-tile-link" href="{{ url_for('main.inspector') }}">
+                    <i class="bi bi-search" aria-hidden="true"></i><span><b>Inspector</b><small>Check a file</small></span>
+                </a>
+                <a class="dash-tile-link" href="{{ url_for('main.webhook_activity_page') }}">
+                    <i class="bi bi-broadcast" aria-hidden="true"></i><span><b>Webhook activity</b><small>Incoming events</small></span>
+                    <span class="dash-tile-pill" id="quickWebhookPending" aria-label="Pending webhooks" hidden>0</span>
+                </a>
+                <a class="dash-tile-link" href="{{ url_for('main.logs_page') }}">
+                    <i class="bi bi-terminal" aria-hidden="true"></i><span><b>Logs</b><small>Live tail</small></span>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Job statistics: six tiles, an outcome bar, then the next schedule. -->
+    <section class="card dash-card dashboard-stats-card" aria-labelledby="jobStatsTitle">
+        <div class="card-header">
+            <span id="jobStatsTitle" role="heading" aria-level="2"><i class="bi bi-bar-chart me-2" aria-hidden="true"></i>Job statistics</span>
+        </div>
+        <div class="card-body">
+            <div id="jobStats">
+                <div class="dash-stats">
+                    <div class="dash-stat">
+                        <div class="dash-stat-label"><i class="bi bi-hourglass-split" aria-hidden="true"></i>Pending</div>
+                        <div class="dash-stat-value" id="statPending">—</div>
+                    </div>
+                    <div class="dash-stat run">
+                        <div class="dash-stat-label"><i class="bi bi-activity" aria-hidden="true"></i>Running</div>
+                        <div class="dash-stat-value" id="statRunning">—</div>
+                    </div>
+                    <div class="dash-stat ok">
+                        <div class="dash-stat-label"><i class="bi bi-check-circle" aria-hidden="true"></i>Completed</div>
+                        <div class="dash-stat-value" id="statCompleted">—</div>
+                    </div>
+                    <div class="dash-stat bad">
+                        <div class="dash-stat-label"><i class="bi bi-x-circle" aria-hidden="true"></i>Failed</div>
+                        <div class="dash-stat-value" id="statFailed">—</div>
+                    </div>
+                    <div class="dash-stat warn">
+                        <div class="dash-stat-label"><i class="bi bi-slash-circle" aria-hidden="true"></i>Cancelled</div>
+                        <div class="dash-stat-value" id="statCancelled">—</div>
+                    </div>
+                    <div class="dash-stat">
+                        <div class="dash-stat-label"><i class="bi bi-stack" aria-hidden="true"></i>Total</div>
+                        <div class="dash-stat-value" id="statTotal">—</div>
+                    </div>
+                </div>
+                <div class="dash-mix" id="jobOutcomeBar" role="img" aria-label="Job outcomes" hidden></div>
+            </div>
+
+            <div id="scheduleTeaserBody" class="dash-schedule">
+                <div class="text-muted small">
+                    <span class="spinner-border spinner-border-sm me-1"></span>Loading…
                 </div>
             </div>
         </div>
-    </div>
-
-    <!-- Quick Actions Card -->
-    <div class="col-lg-3 col-md-6 mb-4">
-        <div class="card">
-            <div class="card-header">
-                <i class="bi bi-lightning me-2"></i>Quick Actions
-            </div>
-            <div class="card-body">
-                <div class="d-grid gap-2">
-                    <button class="btn btn-primary" onclick="showNewJobModal()">
-                        <i class="bi bi-play-fill me-2" aria-hidden="true"></i>Start New Job
-                    </button>
-                    <button class="btn btn-outline-primary" onclick="showManualTriggerModal()">
-                        <i class="bi bi-file-earmark-play me-2" aria-hidden="true"></i>Process a file or folder
-                    </button>
-                </div>
-
-                <hr>
-
-                <!-- Phase H6: replaces the old "Libraries to Process" flat list
-                     (which couldn't disambiguate same-named libraries on
-                     multiple servers) with a compact summary that defers the
-                     full list to the Servers page. -->
-                <h6 class="mb-2"><i class="bi bi-collection me-2"></i>Libraries</h6>
-                <div id="libraryList">
-                    <div class="text-muted small">
-                        <span class="spinner-border spinner-border-sm me-1"></span>Counting libraries…
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Job Stats Card -->
-    <div class="col-lg-3 col-md-6 mb-4">
-        <div class="card">
-            <div class="card-header">
-                <i class="bi bi-bar-chart me-2"></i>Job Statistics
-            </div>
-            <div class="card-body d-flex flex-column">
-                <div id="jobStats">
-                    <div class="kpi-grid">
-                        <div class="kpi-tile kpi-pending">
-                            <div class="kpi-label">Pending</div>
-                            <div class="kpi-value" id="statPending">—</div>
-                        </div>
-                        <div class="kpi-tile kpi-running">
-                            <div class="kpi-label">Running</div>
-                            <div class="kpi-value" id="statRunning">—</div>
-                        </div>
-                        <div class="kpi-tile kpi-completed">
-                            <div class="kpi-label">Completed</div>
-                            <div class="kpi-value" id="statCompleted">—</div>
-                        </div>
-                        <div class="kpi-tile kpi-failed">
-                            <div class="kpi-label">Failed</div>
-                            <div class="kpi-value" id="statFailed">—</div>
-                        </div>
-                        <div class="kpi-tile kpi-cancelled">
-                            <div class="kpi-label">Cancelled</div>
-                            <div class="kpi-value" id="statCancelled">—</div>
-                        </div>
-                        <div class="kpi-tile">
-                            <div class="kpi-label">Total</div>
-                            <div class="kpi-value" id="statTotal">—</div>
-                        </div>
-                    </div>
-                </div>
-
-                <hr class="my-2">
-
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <span class="small text-muted text-uppercase" style="letter-spacing:0.05em;font-size:0.72rem;">
-                        <i class="bi bi-calendar-event me-1"></i>Schedules
-                    </span>
-                    <a href="{{ url_for('main.automation_page') }}#schedules" class="small text-decoration-none" title="Manage schedules">
-                        Manage <i class="bi bi-arrow-right-short"></i>
-                    </a>
-                </div>
-                <div id="scheduleTeaserBody">
-                    <div class="text-muted small">
-                        <span class="spinner-border spinner-border-sm me-1"></span>Loading…
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+    </section>
 </div>
 
 
@@ -169,121 +159,148 @@
      yellow banner; per-row countdown + Fire-now lives in the queue
      itself now post-issue-237 UX consolidation.) -->
 
-<!-- Worker Status Cards -->
-<div class="row" id="dashboard-workers">
-    <div class="col-12 mb-4">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span class="workers-heading"><i class="bi bi-cpu me-2"></i>Workers<details class="worker-group-disclosure worker-group-help"><summary aria-label="How worker groups behave" data-bs-toggle="tooltip" data-bs-title="How worker groups behave"><i class="bi bi-info-circle" aria-hidden="true"></i></summary><div class="worker-group-disclosure-panel"><p>Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.</p><a href="/settings#section-workers">Manage groups and availability</a></div></details></span>
-                <div class="d-flex align-items-center gap-3"><span class="badge bg-secondary" id="workersHeaderCount" style="text-transform: none; letter-spacing: 0;">—</span><a class="small" href="/settings#section-workers">Manage groups</a></div>
-            </div>
-            <div class="card-body" id="workerStatusContainer">
-                <div id="workerGroupDashboard"><p class="small text-body-secondary">Loading worker groups…</p></div>
-            </div>
+<!-- Workers: occupancy meter, global Pause/Resume, the only Manage groups entry, then one column per group. -->
+<div id="dashboard-workers" class="dash-block">
+    <section class="card dashboard-workers-card" aria-labelledby="workersTitle">
+        <div class="card-header dash-workers-head">
+            <span class="workers-heading" id="workersTitle" role="heading" aria-level="2"><i class="bi bi-cpu me-2" aria-hidden="true"></i>Workers
+                <button type="button" class="info-icon ms-2" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                        title="How worker groups behave" aria-label="How worker groups behave"
+                        data-explain-title="How worker groups behave"
+                        data-explain-html="&lt;p&gt;Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.&lt;/p&gt;">
+                    <i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
+            <span class="flex-fill"></span>
+            <span class="dash-occupancy" title="Workers busy right now">
+                <span class="occ" id="workersOccupancyMeter" aria-hidden="true"></span>
+                <span class="num" id="workersHeaderCount" role="status">—</span>
+            </span>
+            <span class="pill warn" id="workersPausedPill" hidden><i class="bi bi-pause-fill" aria-hidden="true"></i>Paused</span>
+            <span id="globalPauseResumeQueue"></span>
+            <a class="btn dash-btn-sm" href="/settings#section-workers" title="Manage groups and availability" aria-label="Manage groups">
+                <i class="bi bi-sliders" aria-hidden="true"></i><span class="lbl-long">Manage groups</span>
+            </a>
         </div>
-    </div>
+        <div class="card-body p-0" id="workerStatusContainer">
+            <div id="workerGroupDashboard"><p class="small text-body-secondary p-3 mb-0">Loading worker groups…</p></div>
+        </div>
+    </section>
 </div>
 
-<!-- Unified job list -->
-<div class="row" id="dashboard-all-jobs">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-list-task me-2"></i>All jobs <small class="dashboard-list-scope">Queue and history</small></span>
-                <div class="d-flex align-items-center gap-2">
-                    <!-- Pending-webhooks chip — at-a-glance "N waiting"
-                         counter, click to scroll to the first row. Per-row
-                         countdown + Fire-now controls live on the row
-                         itself (issue #237 UX consolidation, May 2026). -->
-                    <button type="button" id="pendingWebhooksChip"
-                            class="btn btn-sm btn-warning d-none align-items-center gap-1"
-                            title="Click to jump to the waiting webhook in the queue">
-                        <i class="bi bi-hourglass-split"></i>
-                        <span id="pendingWebhooksChipText">0 waiting</span>
+<!-- Job queue -->
+<div id="dashboard-all-jobs" class="dash-block">
+    <section class="card dashboard-queue-card" aria-labelledby="jobQueueTitle">
+        <div class="card-header dash-queue-head">
+            <span id="jobQueueTitle" role="heading" aria-level="2"><i class="bi bi-list-task me-2" aria-hidden="true"></i>Job queue <small class="dashboard-list-scope">Queue and history</small></span>
+            <span class="flex-fill"></span>
+            <!-- At-a-glance "N webhooks pending" counter; click scrolls to the first waiting row. Per-row countdown
+                 and Fire-now live on the row itself. -->
+            <button type="button" id="pendingWebhooksChip"
+                    class="pill warn d-none align-items-center gap-1 border-0"
+                    title="Click to jump to the waiting webhook in the queue">
+                <i class="bi bi-lightning-charge-fill" aria-hidden="true"></i>
+                <span id="pendingWebhooksChipText">0 waiting</span>
+            </button>
+            <div class="dropdown d-inline-block">
+                <button class="btn dash-btn-sm dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Clear finished jobs" aria-label="Clear jobs">
+                    <i class="bi bi-trash" aria-hidden="true"></i><span>Clear jobs</span>
+                </button>
+                <div class="dropdown-menu dropdown-menu-end clear-jobs-menu">
+                    <div class="menu-head">Clear finished jobs <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Removes the ticked kinds of finished jobs from the list. Running and waiting jobs are never cleared." aria-label="What Clear jobs removes"><i class="bi bi-info-circle" aria-hidden="true"></i></button></div>
+                    <label class="clear-row" for="clearCompleted">
+                        <input class="form-check-input clear-status-cb" type="checkbox" value="completed" id="clearCompleted" checked>
+                        <span class="pill ok">Completed</span><span class="n" data-clear-count="completed">0</span>
+                    </label>
+                    <label class="clear-row" for="clearFailed">
+                        <input class="form-check-input clear-status-cb" type="checkbox" value="failed" id="clearFailed" checked>
+                        <span class="pill bad">Failed</span><span class="n" data-clear-count="failed">0</span>
+                    </label>
+                    <label class="clear-row" for="clearCancelled">
+                        <input class="form-check-input clear-status-cb" type="checkbox" value="cancelled" id="clearCancelled" checked>
+                        <span class="pill warn">Cancelled</span><span class="n" data-clear-count="cancelled">0</span>
+                    </label>
+                    <hr>
+                    <button type="button" class="btn btn-sm btn-danger w-100" id="clearJobsButton" onclick="clearJobsByStatus()">
+                        <i class="bi bi-trash me-1" aria-hidden="true"></i><span id="clearJobsButtonText">Clear jobs</span>
                     </button>
-                    <span id="globalPauseResumeQueue"></span>
-                    <div class="dropdown d-inline-block">
-                        <button class="btn btn-sm btn-outline-danger dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" title="Clear jobs by status" aria-label="Clear jobs">
-                            <i class="bi bi-trash"></i><span class="ms-1">Clear Jobs</span>
-                        </button>
-                        <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 200px;">
-                            <div class="form-check mb-2">
-                                <input class="form-check-input clear-status-cb" type="checkbox" value="completed" id="clearCompleted" checked>
-                                <label class="form-check-label" for="clearCompleted">
-                                    <span class="badge bg-success me-1">Completed</span>
-                                </label>
-                            </div>
-                            <div class="form-check mb-2">
-                                <input class="form-check-input clear-status-cb" type="checkbox" value="failed" id="clearFailed" checked>
-                                <label class="form-check-label" for="clearFailed">
-                                    <span class="badge bg-danger me-1">Failed</span>
-                                </label>
-                            </div>
-                            <div class="form-check mb-3">
-                                <input class="form-check-input clear-status-cb" type="checkbox" value="cancelled" id="clearCancelled" checked>
-                                <label class="form-check-label" for="clearCancelled">
-                                    <span class="badge bg-warning text-dark me-1">Cancelled</span>
-                                </label>
-                            </div>
-                            <button class="btn btn-sm btn-danger w-100" onclick="clearJobsByStatus()">
-                                <i class="bi bi-trash me-1"></i>Clear Selected
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="card-body p-0">
-                <div class="queue-toolbar" role="search" aria-label="Find jobs">
-                    <div class="queue-search"><label for="jobSearch">Search jobs</label><input type="search" class="form-control form-control-sm" id="jobSearch" placeholder="Title, ID, library, source, or server" oninput="changeJobSearch(this.value)"></div>
-                    <div class="queue-filter queue-filter-server"><label for="jobServerFilter">Server</label><select id="jobServerFilter" class="form-select form-select-sm" onchange="changeJobServer(this.value)" title="Matches the originating server or a library associated with the job; it does not indicate publication success."><option value="">All servers</option></select></div>
-                    <div class="queue-filter queue-filter-library"><label for="jobLibraryFilter">Library</label><select id="jobLibraryFilter" class="form-select form-select-sm" onchange="changeJobLibrary(this.value)"><option value="">All libraries</option></select></div>
-                    <div class="queue-filter"><label for="jobKindFilter">Job type</label><select id="jobKindFilter" class="form-select form-select-sm" onchange="changeJobKind(this.value)"><option value="">All job types</option><option value="previews">Previews</option><option value="intro_credits">Intro &amp; Credits</option><option value="loudness">Plex loudness</option></select></div>
-                    <div class="queue-filter-status"><label for="jobStatusFilter">Status</label><select id="jobStatusFilter" class="form-select form-select-sm" onchange="changeJobStatus(this.value)"><option value="">All statuses</option><option value="running">Running</option><option value="pending">Pending</option><option value="paused">Job paused</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
-                    <button type="button" class="btn btn-link btn-sm queue-clear-filters" id="clearJobFilters" onclick="clearJobFilters()" hidden>Clear filters</button>
-                    <span class="queue-filter-count" id="jobFilterCount" role="status" aria-live="polite" hidden></span>
-                </div>
-                <div class="queue-table-wrap">
-                    <table class="table table-hover align-middle mb-0 jobs-table">
-                        <thead>
-                            <tr class="text-uppercase small text-muted">
-                                <th>ID</th>
-                                <th>Job</th>
-                                <th>Status</th>
-                                <th>Priority</th>
-                                <th>Progress</th>
-                                <th>Created</th>
-                                <th class="text-end">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="jobQueue">
-                            <tr>
-                                <td colspan="7" class="text-center text-muted py-4">
-                                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading jobs…
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="card-footer d-none py-2 px-3" id="jobPaginationFooter">
-                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                    <div class="d-flex align-items-center gap-2">
-                        <label class="form-label mb-0 small text-muted" for="jobPerPageSelect">Show</label>
-                        <select class="form-select form-select-sm" id="jobPerPageSelect" style="width: auto;" onchange="changeJobPerPage(this.value)">
-                            <option value="10">10</option>
-                            <option value="25">25</option>
-                            <option value="50" selected>50</option>
-                            <option value="100">100</option>
-                        </select>
-                        <span class="small text-muted" id="jobPaginationInfo"></span>
-                    </div>
-                    <nav aria-label="Job queue pagination">
-                        <ul class="pagination pagination-sm mb-0" id="jobPaginationControls"></ul>
-                    </nav>
                 </div>
             </div>
         </div>
-    </div>
+        <div class="card-body p-0">
+            <div class="queue-tools" role="search" aria-label="Find jobs">
+                <div class="seg" role="group" aria-label="Show jobs by status" id="jobStatusTabs">
+                    <button type="button" class="on" data-status="" aria-pressed="true" onclick="changeJobStatus('')">All <span class="c" data-status-count="total"></span></button>
+                    <button type="button" data-status="running" aria-pressed="false" onclick="changeJobStatus('running')"><span class="dot run" aria-hidden="true"></span>Running <span class="c" data-status-count="running"></span></button>
+                    <button type="button" data-status="pending" aria-pressed="false" onclick="changeJobStatus('pending')"><span class="dot warn" aria-hidden="true"></span>Pending <span class="c" data-status-count="pending"></span></button>
+                    <button type="button" data-status="completed" aria-pressed="false" onclick="changeJobStatus('completed')"><span class="dot ok" aria-hidden="true"></span>Completed <span class="c" data-status-count="completed"></span></button>
+                    <button type="button" data-status="failed" aria-pressed="false" onclick="changeJobStatus('failed')"><span class="dot bad" aria-hidden="true"></span>Failed <span class="c" data-status-count="failed"></span></button>
+                    <button type="button" data-status="cancelled" aria-pressed="false" onclick="changeJobStatus('cancelled')"><span class="dot" aria-hidden="true"></span>Cancelled <span class="c" data-status-count="cancelled"></span></button>
+                </div>
+                <div class="queue-search">
+                    <label for="jobSearch" class="visually-hidden">Search jobs</label>
+                    <i class="bi bi-search" aria-hidden="true"></i>
+                    <input type="search" class="form-control" id="jobSearch" placeholder="Search jobs, titles, IDs" oninput="changeJobSearch(this.value)">
+                </div>
+                <div class="queue-filter queue-filter-server">
+                    <label for="jobServerFilter" class="visually-hidden">Server</label>
+                    <i class="bi bi-hdd-stack" aria-hidden="true"></i>
+                    <select id="jobServerFilter" class="form-select" onchange="changeJobServer(this.value)" title="Matches the originating server or a library associated with the job; it does not indicate publication success."><option value="">All servers</option></select>
+                </div>
+                <div class="queue-filter queue-filter-library">
+                    <label for="jobLibraryFilter" class="visually-hidden">Library</label>
+                    <i class="bi bi-collection" aria-hidden="true"></i>
+                    <select id="jobLibraryFilter" class="form-select" onchange="changeJobLibrary(this.value)"><option value="">All libraries</option></select>
+                </div>
+                <div class="queue-filter">
+                    <label for="jobKindFilter" class="visually-hidden">Job type</label>
+                    <i class="bi bi-tag" aria-hidden="true"></i>
+                    <select id="jobKindFilter" class="form-select" onchange="changeJobKind(this.value)"><option value="">All job types</option><option value="previews">Previews</option><option value="intro_credits">Intro &amp; Credits</option><option value="loudness">Plex loudness</option></select>
+                </div>
+                <!-- The status tabs above drive this select; it stays for keyboard and assistive tech and is the
+                     only way to reach the "Job paused" filter. -->
+                <div class="visually-hidden"><label for="jobStatusFilter">Status</label><select id="jobStatusFilter" onchange="changeJobStatus(this.value)"><option value="">All statuses</option><option value="running">Running</option><option value="pending">Pending</option><option value="paused">Job paused</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
+                <button type="button" class="btn btn-link btn-sm queue-clear-filters" id="clearJobFilters" onclick="clearJobFilters()" hidden>Clear filters</button>
+                <span class="queue-filter-count" id="jobFilterCount" role="status" aria-live="polite" hidden></span>
+            </div>
+            <div class="queue-table-wrap">
+                <table class="table align-middle mb-0 jobs-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Job</th>
+                            <th>Status</th>
+                            <th>Priority <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Waiting jobs start in priority order: High, then Normal, then Low, oldest first within each. Change it per job from this column." aria-label="How job priority works"><i class="bi bi-info-circle" aria-hidden="true"></i></button></th>
+                            <th>Progress</th>
+                            <th>Created</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobQueue">
+                        <tr>
+                            <td colspan="7" class="text-center text-muted py-4">
+                                <div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading jobs…
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="card-footer d-none queue-foot" id="jobPaginationFooter">
+            <div class="d-flex align-items-center gap-2">
+                <label class="mb-0" for="jobPerPageSelect">Show</label>
+                <select class="form-select form-select-sm" id="jobPerPageSelect" onchange="changeJobPerPage(this.value)">
+                    <option value="10">10</option>
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                </select>
+                <span id="jobPaginationInfo"></span>
+            </div>
+            <span class="flex-fill"></span>
+            <nav aria-label="Job queue pagination">
+                <ul class="pagination pagination-sm mb-0" id="jobPaginationControls"></ul>
+            </nav>
+        </div>
+    </section>
 </div>
 
 </div>
@@ -332,22 +349,30 @@
     }
 
     async function loadDashboardVersionInfo() {
+        const badge = document.getElementById('dashboardUpdateBadge');
         try {
             const response = await fetch('/api/system/version');
             const data = await response.json();
-            const el = document.getElementById('dashboardVersion');
-            el.textContent = data.current_version || 'unknown';
+            const versionEl = document.getElementById('dashboardVersion');
+            versionEl.textContent = data.current_version || 'unknown';
+            versionEl.title = versionEl.textContent;
 
             if (data.install_type === 'local_docker' || data.install_type === 'pr_build') {
-                const badge = document.getElementById('dashboardUpdateBadge');
+                // A local or PR build has no release to be "up to date" against; just name the latest release.
                 if (data.latest_version) {
-                    badge.textContent = `Latest: ${data.latest_version}`;
-                    badge.classList.remove('d-none', 'bg-warning', 'text-dark');
-                    badge.classList.add('bg-info', 'text-white');
+                    badge.textContent = `Latest ${data.latest_version}`;
+                    badge.className = 'pill text-decoration-none';
                     badge.removeAttribute('title');
                 }
             } else if (data.update_available) {
-                document.getElementById('dashboardUpdateBadge').classList.remove('d-none');
+                badge.textContent = data.latest_version ? `Update ${data.latest_version}` : 'Update available';
+                badge.className = 'pill warn text-decoration-none';
+            } else if (data.latest_version) {
+                badge.innerHTML = '<i class="bi bi-check2" aria-hidden="true"></i>Up to date';
+                badge.className = 'pill ok text-decoration-none';
+                badge.removeAttribute('href');
+                badge.removeAttribute('target');
+                badge.removeAttribute('title');
             }
         } catch (error) {
             document.getElementById('dashboardVersion').textContent = 'unknown';

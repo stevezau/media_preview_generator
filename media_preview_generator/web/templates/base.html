@@ -92,12 +92,12 @@
                 <div class="offcanvas-body">
                 <ul class="navbar-nav me-auto">
                     <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint == 'main.index' %}active{% endif %}" href="{{ url_for('main.index') }}">
+                        <a class="nav-link {% if request.endpoint == 'main.index' %}active{% endif %}" href="{{ url_for('main.index') }}"{% if request.endpoint == 'main.index' %} aria-current="page"{% endif %}>
                             <i class="bi bi-speedometer2 me-1"></i>Dashboard
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint == 'main.servers_page' %}active{% endif %}" href="{{ url_for('main.servers_page') }}">
+                        <a class="nav-link {% if request.endpoint == 'main.servers_page' %}active{% endif %}" href="{{ url_for('main.servers_page') }}"{% if request.endpoint == 'main.servers_page' %} aria-current="page"{% endif %}>
                             <i class="bi bi-hdd-stack me-1"></i>Servers
                         </a>
                     </li>
@@ -108,7 +108,7 @@
                        data-anchor lets nav_menus.js mark the one the URL's #hash points at. #}
                     <li class="nav-item dropdown nav-hover-menu">
                         <a class="nav-link dropdown-toggle {% if request.endpoint == 'main.automation_page' %}active{% endif %}"
-                           href="{{ url_for('main.automation_page') }}" id="navAutomationDropdown" data-nav-menu-toggle
+                           href="{{ url_for('main.automation_page') }}" id="navAutomationDropdown" data-nav-menu-toggle{% if request.endpoint == 'main.automation_page' %} aria-current="page"{% endif %}
                            aria-haspopup="true" aria-expanded="false" aria-controls="navAutomationMenu">
                             <i class="bi bi-magic me-1"></i>Automation
                         </a>
@@ -131,7 +131,7 @@
                     </li>
                     <li class="nav-item dropdown nav-hover-menu">
                         <a class="nav-link dropdown-toggle {% if request.endpoint == 'main.settings' %}active{% endif %}"
-                           href="{{ url_for('main.settings') }}" id="navSettingsDropdown" data-nav-menu-toggle
+                           href="{{ url_for('main.settings') }}" id="navSettingsDropdown" data-nav-menu-toggle{% if request.endpoint == 'main.settings' %} aria-current="page"{% endif %}
                            aria-haspopup="true" aria-expanded="false" aria-controls="navSettingsMenu">
                             <i class="bi bi-gear me-1"></i>Settings
                         </a>
@@ -187,24 +187,24 @@
                        lets users re-onboard after swapping servers. #}
                     <li class="nav-item dropdown nav-hover-menu">
                         <a class="nav-link dropdown-toggle {% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector') %}active{% endif %}"
-                           href="{{ url_for('main.inspector') }}" id="navToolsDropdown" data-nav-menu-toggle
+                           href="{{ url_for('main.inspector') }}" id="navToolsDropdown" data-nav-menu-toggle{% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector') %} aria-current="page"{% endif %}
                            aria-haspopup="true" aria-expanded="false" aria-controls="navToolsMenu">
                             <i class="bi bi-wrench-adjustable me-1"></i>Tools
                         </a>
                         <ul class="dropdown-menu" id="navToolsMenu" aria-labelledby="navToolsDropdown">
                             <li>
                                 {# One page for a file's preview frames and its intro & credits. #}
-                                <a class="dropdown-item {% if request.endpoint == 'main.inspector' %}active{% endif %}" href="{{ url_for('main.inspector') }}">
+                                <a class="dropdown-item {% if request.endpoint == 'main.inspector' %}active{% endif %}" href="{{ url_for('main.inspector') }}"{% if request.endpoint == 'main.inspector' %} aria-current="page"{% endif %}>
                                     <i class="bi bi-film me-2"></i>Inspector
                                 </a>
                             </li>
                             <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.logs_page' %}active{% endif %}" href="{{ url_for('main.logs_page') }}">
+                                <a class="dropdown-item {% if request.endpoint == 'main.logs_page' %}active{% endif %}" href="{{ url_for('main.logs_page') }}"{% if request.endpoint == 'main.logs_page' %} aria-current="page"{% endif %}>
                                     <i class="bi bi-terminal me-2"></i>Logs
                                 </a>
                             </li>
                             <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.webhook_activity_page' %}active{% endif %}" href="{{ url_for('main.webhook_activity_page') }}">
+                                <a class="dropdown-item {% if request.endpoint == 'main.webhook_activity_page' %}active{% endif %}" href="{{ url_for('main.webhook_activity_page') }}"{% if request.endpoint == 'main.webhook_activity_page' %} aria-current="page"{% endif %}>
                                     <i class="bi bi-clock-history me-2"></i>Webhook Activity
                                 </a>
                             </li>
@@ -233,7 +233,7 @@
                     </li>
                     <li class="nav-item dropdown notification-bell-wrapper">
                         <button type="button"
-                                class="nav-link btn btn-link position-relative d-flex align-items-center"
+                                class="nav-link nav-ibtn btn btn-link position-relative d-flex align-items-center"
                                 id="notificationBellBtn"
                                 data-bs-toggle="dropdown"
                                 data-bs-auto-close="outside"
@@ -248,9 +248,8 @@
                                  of the menu. Desktop hides it (icon + tooltip
                                  is enough where horizontal space is tight). -->
                             <span class="d-xl-none ms-2" id="notificationBellLabel">Notifications</span>
-                            <span class="position-absolute translate-middle badge rounded-pill bg-danger d-none"
-                                  id="notificationBellBadge"
-                                  style="top: 35%; left: 70%; font-size: 0.65rem;">
+                            <span class="badge rounded-pill d-none"
+                                  id="notificationBellBadge">
                                 0
                                 <span class="visually-hidden">unread notifications</span>
                             </span>
@@ -276,7 +275,7 @@
                     </li>
                     <li class="nav-item dropdown">
                         <button type="button"
-                                class="nav-link btn btn-link d-flex align-items-center"
+                                class="nav-link nav-ibtn btn btn-link d-flex align-items-center"
                                 id="helpMenuBtn"
                                 data-bs-toggle="dropdown"
                                 aria-expanded="false"
@@ -334,7 +333,7 @@
                            says what a click does where a heart didn't. Both sit between Help and the theme
                            toggle so they read as utilities, not a nag. #sponsorLinkBtn gets the 38px circle
                            of the bell and theme toggle on desktop and a labelled row in the phone menu. #}
-                        <a class="nav-link btn btn-link d-flex align-items-center" id="sponsorLinkBtn"
+                        <a class="nav-link nav-ibtn btn btn-link d-flex align-items-center" id="sponsorLinkBtn"
                            href="https://ko-fi.com/stevezau"
                            target="_blank" rel="noopener noreferrer"
                            aria-label="Buy me a coffee on Ko-fi" title="Buy me a coffee on Ko-fi">
@@ -354,7 +353,7 @@
                         </a>
                     </li>
                     <li class="nav-item">
-                        <button type="button" class="nav-link btn btn-link d-flex align-items-center" id="themeToggleBtn"
+                        <button type="button" class="nav-link nav-ibtn btn btn-link d-flex align-items-center" id="themeToggleBtn"
                                 aria-label="Toggle dark/light theme" title="Toggle dark/light theme">
                             <i class="bi bi-moon-stars-fill" id="themeToggleIcon"></i>
                             <span class="d-xl-none ms-2" id="themeToggleLabel">Switch to light theme</span>
@@ -564,6 +563,7 @@
                 btn.setAttribute('title',
                     current === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
                 if (label) label.textContent = current === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+                btn.setAttribute('aria-pressed', current === 'dark' ? 'true' : 'false');
             }
 
             syncIcon();
