@@ -22,6 +22,15 @@
     let groupSearch = '';
     let occupiedOnly = false;
     let showAllGroups = false;
+    // Groups with this many workers or more switch the Workers panel to the dense table.
+    const DENSE_TABLE_MIN_WORKERS = 5;
+    // Rows shown per group before the "Show N more" expander; problem rows are always shown.
+    const DENSE_TABLE_ROW_CAP = 8;
+    const EXPANDED_KEY = 'workerGroupsExpanded';
+    let idleByGroup = new Map();
+    let denseMode = false;
+    let denseQueued = false;
+    let groupSeq = 0;
     const settings = () => document.getElementById('workerGroupSettings');
     const dashboard = () => document.getElementById('workerGroupDashboard');
 
@@ -205,7 +214,7 @@
                     <div class="worker-group-filter-row"><label class="worker-group-search"><span class="visually-hidden">Search worker groups</span><input type="search" class="form-control form-control-sm" id="workerGroupSearch" placeholder="Search groups" aria-label="Search worker groups"></label>
                     <div class="btn-group btn-group-sm" role="group" aria-label="Worker groups shown"><button type="button" class="btn btn-outline-secondary" data-group-filter="all">All groups</button><button type="button" class="btn btn-outline-secondary" data-group-filter="occupied">Occupied</button></div><button type="button" class="btn btn-sm btn-link" data-group-clear hidden>Clear filters</button></div>
                     <div class="worker-group-results small text-body-secondary"><span id="workerGroupSummary" role="status" aria-live="polite"></span><button type="button" class="btn btn-sm btn-link" data-group-outside hidden></button><button type="button" class="btn btn-sm btn-link" data-group-reveal hidden></button></div>
-                </div><div id="workerGroupLiveRows"></div><p id="workerGroupEmpty" class="text-body-secondary" hidden>No worker groups configured. Jobs wait until a compatible group is available.</p><div id="workerGroupLiveWarnings" class="small text-warning-emphasis mt-2"></div><div id="workerGroupLiveMessage" role="status" aria-live="polite"></div>`;
+                </div><div id="workerGroupCols" class="wg-cols" aria-hidden="true" hidden><span>Worker</span><span>Media</span><span>Task</span><span>Progress</span><span>Job</span><span></span></div><div id="workerGroupLiveRows"></div><p id="workerGroupEmpty" class="text-body-secondary" hidden>No worker groups configured. Jobs wait until a compatible group is available.</p><div id="workerGroupLiveWarnings" class="small text-warning-emphasis mt-2"></div><div id="workerGroupLiveMessage" role="status" aria-live="polite"></div>`;
             mount.querySelector('#workerGroupSearch').addEventListener('input', event => {
                 groupSearch = event.target.value.trim().toLocaleLowerCase(); showAllGroups = false; renderGroupVisibility();
             });
@@ -219,7 +228,76 @@
                 renderGroupVisibility();
             });
         }
-        return document.getElementById('workerGroupLiveRows');
+        const live = document.getElementById('workerGroupLiveRows');
+        if (!live._denseObserver) {
+            // Cards are created and patched by app.js; the table re-applies its ordering and row cap after each change.
+            live._denseObserver = new MutationObserver(queueDenseRows);
+            live._denseObserver.observe(live, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-status'] });
+        }
+        return live;
+    }
+
+    // Held in memory too so expanding still works when storage is blocked.
+    const expandedIds = (() => {
+        try { return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) || '[]')); } catch (_) { return new Set(); }
+    })();
+
+    function setExpanded(id, open) {
+        if (open) expandedIds.add(id); else expandedIds.delete(id);
+        try { localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expandedIds])); } catch (_) { /* storage unavailable */ }
+    }
+
+    function queueDenseRows() {
+        if (denseQueued) return;
+        denseQueued = true;
+        requestAnimationFrame(() => { denseQueued = false; applyDenseRows(); });
+    }
+
+    const isProblemSlot = slot => !!slot.querySelector('.wk.border-warning');
+    const isRunningSlot = slot => !!slot.querySelector('.wk.busy');
+
+    // Busy workers first, rows beyond the cap folded behind an in-place expander; fallback/odd-state rows stay visible.
+    function applyDenseRows() {
+        const expanded = expandedIds;
+        for (const [id, entry] of dashboardGroups) {
+            const slots = [...entry.host.querySelectorAll(':scope > .worker-slot')];
+            const rows = slots.filter(slot => !slot.querySelector('.wk.idle') || isProblemSlot(slot));
+            const sorted = denseMode ? rows.map((slot, index) => ({ slot, index }))
+                .sort((a, b) => (isProblemSlot(b.slot) - isProblemSlot(a.slot)) || (isRunningSlot(b.slot) - isRunningSlot(a.slot)) || a.index - b.index)
+                .map(item => item.slot) : [];
+            const open = expanded.has(id);
+            const overCap = denseMode && sorted.length > DENSE_TABLE_ROW_CAP;
+            const shown = new Set(sorted.filter((slot, index) => !overCap || open || index < DENSE_TABLE_ROW_CAP || isProblemSlot(slot)));
+            sorted.forEach((slot, index) => { if (slot.style.order !== String(index)) slot.style.order = String(index); });
+            for (const slot of slots) {
+                const capped = denseMode && rows.includes(slot) && !shown.has(slot);
+                if (slot.hasAttribute('data-wg-capped') !== capped) slot.toggleAttribute('data-wg-capped', capped);
+                if (!denseMode && slot.style.order) slot.style.order = '';
+            }
+            const hidden = sorted.filter(slot => !shown.has(slot));
+            const running = hidden.filter(isRunningSlot).length;
+            if (!entry.host.id) entry.host.id = `wgWorkers${++groupSeq}`;
+            const button = entry.more;
+            button.hidden = !overCap;
+            if (!overCap) continue;
+            const label = open ? 'Show less' : `Show ${hidden.length} more`;
+            const suffix = !open && running ? ` · ${running} running` : '';
+            const markup = `<i class="bi bi-chevron-${open ? 'up' : 'down'}" aria-hidden="true"></i><span>${label}</span>${suffix ? `<span class="wg-more-run">${suffix}</span>` : ''}`;
+            if (button._markup !== markup) { button._markup = markup; button.innerHTML = markup; }
+            button.setAttribute('aria-expanded', String(open));
+            button.setAttribute('aria-controls', entry.host.id);
+        }
+    }
+
+    // One muted line per group for workers with nothing to do; they are never listed as full rows.
+    function renderIdleRows() {
+        for (const [id, entry] of dashboardGroups) {
+            const ids = idleByGroup.get(id) || [];
+            entry.idle.hidden = !ids.length;
+            const markup = ids.length
+                ? `<i class="bi bi-moon-stars" aria-hidden="true"></i><span class="wg-idle-label">${ids.length} ${ids.length === 1 ? 'worker' : 'workers'} idle</span><span class="wg-idle-chips">${ids.map(n => `<span class="wg-idle-n">#${escape(n)}</span>`).join('')}</span>` : '';
+            if (entry.idle._markup !== markup) { entry.idle._markup = markup; entry.idle.innerHTML = markup; }
+        }
     }
 
     function dashboardGroup(id, name) {
@@ -235,9 +313,21 @@
             const host = document.createElement('div');
             host.className = 'worker-group-workers';
             host.dataset.groupWorkers = key;
-            section.append(header, host);
+            const more = document.createElement('button');
+            more.type = 'button';
+            more.className = 'wg-more';
+            more.hidden = true;
+            more.addEventListener('click', () => {
+                setExpanded(key, more.getAttribute('aria-expanded') !== 'true');
+                applyDenseRows();
+            });
+            const idle = document.createElement('div');
+            idle.className = 'wg-idle-row';
+            idle.dataset.groupIdle = key;
+            idle.hidden = true;
+            section.append(header, host, more, idle);
             rows.append(section);
-            dashboardGroups.set(key, { section, header, host, name });
+            dashboardGroups.set(key, { section, header, host, name, more, idle });
             header.innerHTML = `<div class="worker-group-description"><strong>${escape(name || 'Workers without group details')}</strong><span class="small text-body-secondary">Group details unavailable</span></div>`;
             renderGroupVisibility();
         }
@@ -247,6 +337,13 @@
     function setWorkerActivity(workers) {
         const next = {};
         occupiedWorkerGroups = new Set((workers || []).filter(worker => worker.status !== 'idle').map(worker => String(worker.group_id || 'unassigned')));
+        idleByGroup = new Map();
+        for (const worker of workers || []) {
+            if (worker.status === 'processing' || worker.fallback_active) continue;
+            const key = String(worker.group_id || 'unassigned');
+            idleByGroup.set(key, [...(idleByGroup.get(key) || []), worker.worker_id]);
+        }
+        renderIdleRows();
         for (const worker of workers || []) {
             if (worker.group_id && worker.paused && !worker.retiring && worker.status !== 'idle') {
                 next[worker.group_id] = (next[worker.group_id] || 0) + 1;
@@ -442,6 +539,12 @@
                 replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(entry.name || 'Workers without group details')}</strong><span class="small text-body-secondary">Live worker activity remains visible while group details refresh.</span></div>`);
             }
         }
+        denseMode = snapshot.groups.some(group => group.enabled && group.count >= DENSE_TABLE_MIN_WORKERS);
+        const liveRows = document.getElementById('workerGroupLiveRows');
+        liveRows.classList.toggle('wg-dense', denseMode);
+        document.getElementById('workerGroupCols').hidden = !denseMode;
+        renderIdleRows();
+        applyDenseRows();
         document.getElementById('workerGroupEmpty').hidden = dashboardGroups.size > 0;
         document.getElementById('workerGroupLiveWarnings').textContent = warnings().join(' ');
         renderSystemGroups();
