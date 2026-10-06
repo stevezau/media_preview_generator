@@ -8,67 +8,90 @@
 
 {% block content %}
 <div class="log-page">
-    <header class="log-heading"><h1 class="page-title mb-1">Logs</h1><p class="page-subtitle mb-0">Live application messages. Filter by level, source or text; select a message for its full source location.</p></header>
-    <div class="log-toolbar bg-body-tertiary">
-        <div class="d-flex flex-wrap align-items-center gap-2">
-            <div class="btn-group btn-group-sm" role="group" aria-label="Minimum level to show">
-                <button type="button" class="btn btn-outline-secondary log-level-btn" data-level="DEBUG">Debug</button>
-                <button type="button" class="btn btn-outline-info log-level-btn" data-level="INFO">Info</button>
-                <button type="button" class="btn btn-outline-warning log-level-btn" data-level="WARNING">Warning</button>
-                <button type="button" class="btn btn-outline-danger log-level-btn" data-level="ERROR">Error</button>
-            </div>
-
-            <div class="input-group input-group-sm" style="max-width: 300px;">
-                <span class="input-group-text"><i class="bi bi-search"></i></span>
-                <input type="text" class="form-control" id="logSearch" placeholder="Filter logs..." aria-label="Search log messages" autocomplete="off">
-                <button class="btn btn-outline-secondary" type="button" id="logSearchRegex" title="Toggle regex mode">.*</button>
-                <button class="btn btn-outline-secondary" type="button" id="logSearchClear" title="Clear search">
-                    <i class="bi bi-x"></i>
-                </button>
-            </div>
-
-            <button class="btn btn-sm btn-outline-secondary" id="logClearBtn" title="Clear log buffer">
-                <i class="bi bi-trash"></i> Clear
-            </button>
-            <button class="btn btn-sm btn-outline-secondary" id="logCopyBtn" title="Copy visible logs to clipboard">
-                <i class="bi bi-clipboard"></i> Copy
-            </button>
-            <button class="btn btn-sm btn-outline-secondary" id="logDownloadBtn"><i class="bi bi-download me-1"></i>Download</button>
-            <label class="log-select-label" for="logView">View<select class="form-select form-select-sm" id="logView"><option value="structured">Structured</option><option value="raw">Raw</option></select></label>
-            <label class="log-select-label" for="logSource">Source<select class="form-select form-select-sm" id="logSource"><option value="">All sources</option></select></label>
-            <label class="form-check-label small"><input class="form-check-input me-1" type="checkbox" id="logWrap" checked>Wrap lines</label>
-            <label class="form-check-label small"><input class="form-check-input me-1" type="checkbox" id="logGroupSource">Group by source</label>
-
-            <!-- Right-side status group: server-side level + visible-line
-                 count + live socket indicator + connection state. Grouped
-                 here (vs. having the server-level pill on the far left) so
-                 the toolbar reads "controls on the left, meta on the
-                 right" instead of mixed. -->
-            <span id="serverLevelBadge" class="badge bg-secondary ms-auto" title="Server log level (change in Settings)">…</span>
-            <span id="logCount" class="text-muted small">0 lines</span>
-            <span id="liveIndicator" class="text-muted small">Connecting</span>
-            <span id="logConnStatus" class="badge bg-secondary">connecting...</span>
+    <header class="page-header log-heading">
+        <div>
+            <div class="log-crumb">Tools › Logs</div>
+            <h1 class="page-title">Logs</h1>
+            <p class="page-subtitle mb-0">Live application messages. Filter by level, source or text; select a message for its full source location.</p>
         </div>
+        <div class="page-actions">
+            <button type="button" class="log-ibtn danger" id="logClearBtn" aria-label="Clear log buffer" title="Clear log buffer"><i class="bi bi-trash"></i></button>
+            <button type="button" class="log-ibtn" id="logCopyBtn" aria-label="Copy visible logs to clipboard" title="Copy visible logs to clipboard"><i class="bi bi-clipboard"></i></button>
+            <button type="button" class="log-ibtn" id="logDownloadBtn" aria-label="Download logs" title="Download logs"><i class="bi bi-download"></i></button>
+        </div>
+    </header>
+    <section class="log-toolbar card" aria-label="Log filters">
+        <div class="log-seg" role="group" aria-label="Minimum level to show">
+            <button type="button" class="log-level-btn" data-level="DEBUG">Debug</button>
+            <button type="button" class="log-level-btn" data-level="INFO">Info</button>
+            <button type="button" class="log-level-btn" data-level="WARNING">Warning</button>
+            <button type="button" class="log-level-btn" data-level="ERROR">Error</button>
+        </div>
+
+        <div class="log-search">
+            <i class="bi bi-search log-search-icon" aria-hidden="true"></i>
+            <input type="text" id="logSearch" placeholder="Filter logs..." aria-label="Search log messages" autocomplete="off">
+            <span class="log-search-inline">
+                <button type="button" id="logSearchRegex" title="Toggle regex mode" aria-label="Toggle regex mode">.*</button>
+                <button type="button" id="logSearchClear" title="Clear search" aria-label="Clear search"><i class="bi bi-x-lg"></i></button>
+            </span>
+        </div>
+
+        <div class="dropdown">
+            <button type="button" class="log-fbtn" id="logViewBtn" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" aria-label="View options">
+                <i class="bi bi-sliders2"></i><span class="log-fbtn-label">View</span><i class="bi bi-chevron-down log-caret"></i>
+            </button>
+            <div class="dropdown-menu log-menu">
+                <div class="log-menu-row"><label for="logView">View</label><select class="form-select form-select-sm" id="logView"><option value="structured">Structured</option><option value="raw">Raw</option></select></div>
+                <div class="log-menu-row"><label for="logSource">Source</label><select class="form-select form-select-sm" id="logSource"><option value="">All sources</option></select></div>
+                <hr class="my-2">
+                <label class="log-menu-check"><input class="form-check-input" type="checkbox" id="logWrap" checked>Wrap lines</label>
+                <label class="log-menu-check"><input class="form-check-input" type="checkbox" id="logGroupSource">Group by source</label>
+            </div>
+        </div>
+
+        <!-- Right-side status group: server-side level, visible-line count and one live/connection pill. -->
+        <div class="log-status">
+            <span id="serverLevelBadge" class="log-pill" title="Server log level (change in Settings)">…</span>
+            <span id="logCount" class="log-count">0 lines</span>
+            <span class="log-pill warn" id="logConnPill">
+                <span id="liveIndicator">Connecting</span>
+                <span id="logConnStatus" class="visually-hidden">connecting...</span>
+            </span>
+        </div>
+    </section>
+    <div id="logFeedback" class="log-feedback d-none" role="status">
+        <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
+        <span id="logFeedbackText"></span>
+        <button type="button" class="log-fbtn d-none" id="logFeedbackRetry"><i class="bi bi-arrow-repeat"></i>Retry</button>
     </div>
-    <div id="logFeedback" class="log-feedback d-none" role="status"></div>
 
     <div class="log-scroll-wrap">
-        <div id="logContainer" class="bg-body-tertiary text-body">
-            <button id="loadOlderBtn" class="btn btn-sm btn-outline-secondary w-100 my-1">
-                <i class="bi bi-clock-history me-1"></i>Load older...
+        <div id="logContainer" tabindex="0" aria-label="Log output">
+            <button id="loadOlderBtn" type="button" class="log-fbtn">
+                <i class="bi bi-clock-history"></i>Load older...
             </button>
-            <span id="logPlaceholder" class="text-muted">Loading log history...</span>
+            <div id="logPlaceholder" class="log-state">
+                <span class="log-tile"><i class="bi bi-terminal"></i></span>
+                <b>Loading log history...</b>
+            </div>
+            <div id="logNoMatch" class="log-state" hidden>
+                <span class="log-tile"><i class="bi bi-funnel"></i></span>
+                <b>No lines match</b>
+                <p>Nothing loaded fits the current source or search.</p>
+                <button type="button" class="log-fbtn" id="logResetFilters">Reset filters</button>
+            </div>
         </div>
 
-        <button type="button" id="followPill" class="badge rounded-pill bg-info text-dark px-3 py-2">
+        <button type="button" id="followPill" class="log-follow">
             <i class="bi bi-arrow-down-short"></i> New logs — click to follow
         </button>
 
         <div class="log-nav-btns">
-            <button class="btn btn-sm btn-outline-secondary opacity-75" id="logScrollTop" title="Scroll to top">
+            <button type="button" class="log-nav-btn" id="logScrollTop" title="Scroll to top" aria-label="Scroll to top">
                 <i class="bi bi-chevron-double-up"></i>
             </button>
-            <button class="btn btn-sm btn-outline-secondary opacity-75" id="logScrollBottom" title="Scroll to bottom & follow">
+            <button type="button" class="log-nav-btn" id="logScrollBottom" title="Scroll to bottom & follow" aria-label="Scroll to bottom and follow">
                 <i class="bi bi-chevron-double-down"></i>
             </button>
         </div>
@@ -98,11 +121,26 @@
     const placeholder = document.getElementById('logPlaceholder');
     const sourceSelect = document.getElementById('logSource');
     const feedback = document.getElementById('logFeedback');
+    const feedbackText = document.getElementById('logFeedbackText');
+    const feedbackRetry = document.getElementById('logFeedbackRetry');
+    const noMatch = document.getElementById('logNoMatch');
+    const connPill = document.getElementById('logConnPill');
+    let historyRetry = null;
 
+    // Retry is only offered for history load failures, not for e.g. an invalid regex.
     function showFeedback(message) {
-        feedback.textContent = message;
+        feedbackText.textContent = message;
         feedback.classList.toggle('d-none', !message);
+        feedbackRetry.classList.toggle('d-none', !(message && message === historyError && historyRetry));
     }
+    feedbackRetry.addEventListener('click', () => { if (historyRetry) historyRetry(); });
+    document.getElementById('logResetFilters').addEventListener('click', () => {
+        searchInput.value = '';
+        sourceSelect.value = '';
+        regexMode = false;
+        regexBtn.classList.remove('active');
+        applySearch();
+    });
     document.getElementById('logView').addEventListener('change', event => container.classList.toggle('log-raw-view', event.target.value === 'raw'));
     document.getElementById('logWrap').addEventListener('change', event => container.classList.toggle('log-no-wrap', !event.target.checked));
     sourceSelect.addEventListener('change', applySearch);
@@ -155,22 +193,12 @@
         CRITICAL: 'log-level-critical',
     };
 
-    // --- Server level badge ---
-    const LEVEL_BADGE_CLASS = {
-        DEBUG: 'bg-secondary', INFO: 'bg-info text-dark',
-        WARNING: 'bg-warning text-dark', ERROR: 'bg-danger',
-    };
-
     const LEVEL_RANK = { DEBUG: 0, INFO: 1, WARNING: 2, ERROR: 3, CRITICAL: 4 };
 
     function applyServerLevel(level) {
         serverLevel = level;
-        serverLevelBadge.textContent = 'Server: ' + level;
-        // Preserve `ms-auto` so the badge stays in the right-side status
-        // group on the toolbar (template gives it that class on first
-        // render). Without it, this className reset slides the badge
-        // back next to the level filters.
-        serverLevelBadge.className = 'badge ms-auto ' + (LEVEL_BADGE_CLASS[level] || 'bg-secondary');
+        // The localStorage override below reads this back as 'Server: <level>', so the text must stay exactly that.
+        serverLevelBadge.innerHTML = '<i class="bi bi-sliders"></i>Server: ' + esc(level);
         const minRank = LEVEL_RANK[level] ?? 0;
         document.querySelectorAll('.log-level-btn').forEach(btn => {
             const rank = LEVEL_RANK[btn.dataset.level] ?? 0;
@@ -216,6 +244,7 @@
         currentLevel = level;
         document.querySelectorAll('.log-level-btn').forEach(b => {
             b.classList.toggle('active', b.dataset.level === level);
+            b.setAttribute('aria-pressed', String(b.dataset.level === level));
         });
     }
 
@@ -246,7 +275,7 @@
     }
 
     function showFollowPill() {
-        followPill.style.display = '';
+        followPill.style.display = 'inline-flex';
         followPill.innerHTML = '<i class="bi bi-arrow-down-short"></i> ' +
             (newWhileAway > 0 ? newWhileAway + ' new — click to follow' : 'Click to follow');
     }
@@ -312,7 +341,8 @@
         const data = await loadHistory();
         if (placeholder) placeholder.remove();
         if (data.error) {
-            historyError = 'Log history could not be loaded. Choose a level again to retry; live messages will reconnect automatically.';
+            historyError = 'Log history could not be loaded. Retry, or choose a level again; live messages will reconnect automatically.';
+            historyRetry = async () => { clearLogContent(); following = true; await loadInitialHistory(); };
             showFeedback(historyError);
             return;
         }
@@ -334,7 +364,7 @@
             scrollToBottom();
             applySearch();
         } else {
-            container.insertAdjacentHTML('beforeend', '<span id="logEmpty" class="text-muted">No log history available. New messages will appear here.</span>');
+            container.insertAdjacentHTML('beforeend', '<div id="logEmpty" class="log-state"><span class="log-tile"><i class="bi bi-terminal"></i></span><b>Waiting for log lines</b><p>Messages appear here as the app writes them.</p></div>');
         }
     }
 
@@ -342,11 +372,12 @@
         if (loadingOlder || !hasMore) return;
         loadingOlder = true;
         loadOlderBtn.disabled = true;
-        loadOlderBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Loading...';
+        loadOlderBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>Loading...';
 
         const scrollBefore = container.scrollHeight;
         const data = await loadHistory(oldestTs);
         historyError = data.error ? 'Older messages could not be loaded. Try Load older again.' : '';
+        historyRetry = () => loadOlderBtn.click();
 
         if (data.lines.length > 0) {
             const refNode = loadOlderBtn.nextSibling;
@@ -365,7 +396,7 @@
 
         loadOlderBtn.style.display = hasMore ? 'block' : 'none';
         loadOlderBtn.disabled = false;
-        loadOlderBtn.innerHTML = '<i class="bi bi-clock-history me-1"></i>Load older...';
+        loadOlderBtn.innerHTML = '<i class="bi bi-clock-history"></i>Load older...';
         loadingOlder = false;
         regroupLogs();
         applySearch();
@@ -383,23 +414,20 @@
 
         socket.on('connect', () => {
             connBadge.textContent = 'connected';
-            connBadge.className = 'badge bg-success';
-            liveIndicator.className = 'text-success small';
+            connPill.className = 'log-pill ok';
             liveIndicator.innerHTML = following ? '<span class="live-dot"></span>Live' : 'Follow paused';
             socket.emit('set_level', { level: currentLevel });
         });
 
         socket.on('disconnect', () => {
             connBadge.textContent = 'disconnected';
-            connBadge.className = 'badge bg-danger';
-            liveIndicator.className = 'text-muted small';
+            connPill.className = 'log-pill bad';
             liveIndicator.textContent = 'Reconnecting';
         });
 
         socket.on('connect_error', () => {
             connBadge.textContent = 'error';
-            connBadge.className = 'badge bg-danger';
-            liveIndicator.className = 'text-muted small';
+            connPill.className = 'log-pill bad';
             liveIndicator.textContent = 'Waiting for connection';
         });
 
@@ -431,9 +459,8 @@
     }
 
     function clearLogContent() {
-        container.querySelectorAll('.log-line, .text-muted').forEach(el => {
-            if (el.id !== 'logPlaceholder') el.remove();
-        });
+        container.querySelectorAll('.log-line, #logEmpty').forEach(el => el.remove());
+        noMatch.hidden = true;
         container.querySelectorAll('.log-source-group').forEach(group => group.remove());
         lineCount = 0;
         oldestTs = '';
@@ -478,7 +505,8 @@
         }
         countEl.textContent = `${visible.toLocaleString()} of ${lineCount.toLocaleString()} lines`;
         container.querySelectorAll('.log-source-group').forEach(group => { group.hidden = !group.querySelector('.log-line:not(.log-line-hidden)'); });
-        showFeedback(historyError || (lineCount && !visible ? 'No loaded messages match these filters.' : ''));
+        noMatch.hidden = !(lineCount && !visible);
+        showFeedback(historyError);
     }
 
     let searchDebounce = null;
@@ -540,6 +568,14 @@
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
+    function markCopied() {
+        copyBtn.innerHTML = '<i class="bi bi-check2"></i>';
+        copyBtn.title = 'Copied!';
+        setTimeout(() => {
+            copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
+            copyBtn.title = 'Copy visible logs to clipboard';
+        }, 2000);
+    }
     copyBtn.addEventListener('click', async () => {
         const lines = container.querySelectorAll('.log-line:not(.log-line-hidden)');
         if (!lines.length) return;
@@ -548,8 +584,7 @@
         const wrapped = '```\n' + text + '\n```';
         try {
             await navigator.clipboard.writeText(wrapped);
-            copyBtn.innerHTML = '<i class="bi bi-check2"></i> Copied!';
-            setTimeout(() => { copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy'; }, 2000);
+            markCopied();
         } catch {
             const ta = document.createElement('textarea');
             ta.value = wrapped;
@@ -559,8 +594,7 @@
             ta.select();
             document.execCommand('copy');
             ta.remove();
-            copyBtn.innerHTML = '<i class="bi bi-check2"></i> Copied!';
-            setTimeout(() => { copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy'; }, 2000);
+            markCopied();
         }
     });
 

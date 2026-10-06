@@ -1,182 +1,365 @@
+/* First-run wizard. Reuses the dashboard tokens (--line, --inset, --accent, --ok, --muted, --faint) from style.css. */
+
+/* base.html has no navbar block to override, and a full app nav invites leaving mid-wizard. The slim
+ * .setup-topbar below replaces it. */
+body:has(.setup-container) > .navbar { display: none; }
+
+.setup-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--line);
+}
+.setup-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    color: var(--accent-text);
+    white-space: nowrap;
+}
+.setup-topbar-actions { display: flex; align-items: center; gap: 10px; }
+.setup-icon-btn {
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--muted);
+}
+.setup-icon-btn:hover { background: var(--inset); color: var(--bs-body-color); }
+
 .setup-container {
     max-width: 720px;
     margin: 0 auto;
-    padding: 2rem 1.25rem;
+    padding: 2rem 1rem 3rem;
 }
 
 .setup-header {
     text-align: center;
-    margin-bottom: 2.25rem;
+    margin-bottom: 1.5rem;
 }
-
 .setup-header h1 {
-    font-size: 1.85rem;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    margin-bottom: 0.35rem;
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
 }
+.setup-header p { margin: 0; }
 
-.setup-header h1 > .bi {
-    color: var(--plex-orange, #e5a00d);
-}
-
+/* Stepper */
 .setup-progress {
     display: flex;
     justify-content: center;
-    margin-bottom: 2.25rem;
+    align-items: center;
+    margin-bottom: 1.5rem;
 }
-.setup-progress-current { display: none; }
-@media (max-width: 767.98px) {
-    .setup-progress { margin-bottom: 0.65rem; }
-    .setup-progress-current {
-        display: block;
-        margin: 0 0 1.5rem;
-        text-align: center;
-        font-size: 0.9rem;
-        font-weight: 600;
-        color: var(--bs-body-color);
-    }
+.setup-progress-current {
+    display: none;
+    text-align: center;
+    margin: 0 0 1.25rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted);
 }
 
 .progress-step {
     display: flex;
     align-items: center;
-    color: var(--bs-secondary-color);
-    /* Keep step labels ("Sign In", "Server", etc.) on a single line.
-       Without this the flex container squashes the column at narrow
-       viewports and short labels wrap onto two lines. */
+    color: var(--faint);
+    /* Short labels must stay on one line when the flex row is squeezed. */
     white-space: nowrap;
-    font-size: 0.875rem;
-    font-weight: 500;
+    font-size: 0.8125rem;
+    font-weight: 600;
 }
-
-/* Brand-aligned step states — active uses brand orange (matches the
- * primary-action colour throughout the app), completed uses the
- * status-completed green so the user can scan past steps at a glance. */
-.progress-step.active {
-    color: var(--plex-orange, #e5a00d);
-}
-
-.progress-step.completed {
-    color: #2ecc71;
-}
+.progress-step.active { color: var(--accent-text); }
+.progress-step.completed { color: var(--bs-body-color); }
 
 .step-number {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
+    font-size: 0.8125rem;
     font-weight: 700;
-    border: 2px solid currentColor;
-    margin-right: 0.55rem;
+    border: 1.5px solid var(--line-strong);
+    margin-right: 0.5rem;
+    background: transparent;
     transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-    background-color: transparent;
 }
-
 .progress-step.active .step-number {
-    background-color: var(--plex-orange, #e5a00d);
-    color: #161616;
-    border-color: var(--plex-orange, #e5a00d);
-    box-shadow: 0 0 0 4px rgba(229, 160, 13, 0.18);
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    box-shadow: 0 0 0 4px var(--accent-soft);
 }
-
+/* JS writes the digit into .step-number; completed steps swap it for a check so state is not colour-only. */
 .progress-step.completed .step-number {
-    background-color: #2ecc71;
-    color: #fff;
-    border-color: #2ecc71;
+    background: var(--ok-soft);
+    border-color: var(--ok);
+    color: var(--ok);
+    font-size: 0;
+}
+.progress-step.completed .step-number::before {
+    content: "\f633";
+    font-family: "bootstrap-icons";
+    font-size: 0.9rem;
+    line-height: 1;
 }
 
 .step-connector {
-    flex: 1 1 1rem;
+    flex: 0 1 28px;
     min-width: 0.5rem;
-    max-width: 2rem;
     height: 2px;
-    background-color: var(--surface-border, rgba(255, 255, 255, 0.12));
-    margin: 0 0.35rem;
-    border-radius: 1px;
+    background: var(--line-strong);
+    margin: 0 0.4rem;
+    border-radius: 2px;
+}
+.step-connector.completed { background: var(--ok); }
+
+.setup-step { display: none; }
+.setup-step.active { display: block; }
+
+/* Card + footer */
+.setup-card .card-body {
+    padding: 1.5rem;
+    display: grid;
+    gap: 1.25rem;
+    align-content: start;
+}
+.setup-step-title {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 700;
+}
+.setup-lead {
+    margin: -0.6rem 0 0;
+    color: var(--muted);
+}
+.setup-helper {
+    margin: 0;
+    color: var(--faint);
+    font-size: 0.8125rem;
+}
+.setup-card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0.875rem 1.5rem;
+    border-top: 1px solid var(--line);
+}
+/* Skip sits with Next on the right; every other step puts Back on the left. */
+.setup-step[data-step="1"] .setup-card-footer { justify-content: flex-end; }
+
+/* Secondary buttons read as dim grey elsewhere in the app; on a focused wizard they carry the Back/Skip/Check actions. */
+.setup-card .btn-outline-secondary,
+.setup-topbar .btn-outline-secondary {
+    color: var(--bs-body-color);
+    border-color: var(--line-strong);
+}
+.setup-card .btn-outline-secondary:hover,
+.setup-topbar .btn-outline-secondary:hover {
+    background: var(--inset);
+    border-color: var(--bs-body-color);
+    color: var(--bs-body-color);
+}
+.setup-card label.form-label { font-size: 0.8125rem; font-weight: 600; }
+/* A disabled Next must look unavailable rather than a dimmer blue. */
+.setup-card .btn-primary:disabled {
+    background: var(--inset);
+    border-color: var(--line);
+    color: var(--faint);
+    opacity: 1;
 }
 
-.step-connector.completed {
-    background-color: #2ecc71;
+/* Groups */
+.setup-group {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+}
+.setup-group > legend,
+.setup-legend {
+    float: none;
+    width: auto;
+    padding: 0;
+    margin: 0 0 0.6rem;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+}
+.setup-group > .setup-helper { margin-bottom: 0.75rem; }
+
+.setup-note {
+    padding: 0.6rem 0.75rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--inset);
+    color: var(--muted);
+    font-size: 0.8125rem;
 }
 
-.setup-step {
-    display: none;
+/* Vendor picker: neutral cards, amber only on hover/focus (amber is reserved for the primary action). */
+.setup-vendors {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
 }
-
-.setup-step.active {
-    display: block;
+.wizard-vendor-btn {
+    display: grid;
+    justify-items: center;
+    gap: 10px;
+    padding: 1.25rem 0.75rem 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--inset);
+    color: var(--bs-body-color);
+    text-align: center;
+    transition: border-color 0.16s ease, background-color 0.16s ease;
 }
-.setup-path-preview { padding: 1rem 0; border-block: 1px solid var(--bs-border-color); }
-.setup-path-preview p { max-width: 70ch; }
-#setupPathPreviewResult { overflow-wrap: anywhere; }
-.setup-progress-current { display: block; text-align: center; margin-bottom: 1.25rem; }
-.setup-progress { margin-bottom: .75rem; }
-@media (max-width: 575.98px) {
-    .setup-container { padding: 1.25rem .5rem; }
-    .setup-path-preview .input-group { display: flex; flex-direction: column; gap: .5rem; }
-    .setup-path-preview .input-group > * { width: 100%; border-radius: var(--bs-border-radius) !important; margin: 0; min-height: 44px; }
-    #setupPathMappingsContainer { overflow-x: auto; }
-    #setupPathMappingsContainer table, #setupPathMappingsContainer tbody, #setupPathMappingsContainer tr, #setupPathMappingsContainer td { display: block; width: 100%; }
-    #setupPathMappingsContainer thead { display: none; }
-    #setupPathMappingsContainer td { border: 0; padding: .4rem 0; }
-    #setupPathMappingsContainer td[data-label]::before { content: attr(data-label); display: block; margin-bottom: .3rem; font-size: .875rem; color: var(--bs-secondary-color); }
-    #setupPathMappingsContainer tr { border-bottom: 1px solid var(--bs-border-color); padding-bottom: .5rem; }
+.wizard-vendor-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
+.wizard-vendor-btn:focus-visible { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.vendor-logo {
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    flex: none;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel-2);
 }
+.vendor-text { display: grid; gap: 2px; }
+.vendor-text b { font-size: 0.9375rem; }
+.vendor-text small { color: var(--muted); font-size: 0.75rem; line-height: 1.35; }
 
 .plex-sign-in-btn {
-    background-color: #e5a00d;
-    border-color: #e5a00d;
-    color: #1f2326;
-    font-size: 1.1rem;
-    padding: 0.75rem 2rem;
+    background-color: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    padding: 0.6rem 1.5rem;
 }
-
-.plex-sign-in-btn:hover {
-    background-color: #cc8f0c;
-    border-color: #cc8f0c;
-    color: #1f2326;
+.plex-sign-in-btn:hover,
+.plex-sign-in-btn:focus-visible {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    filter: brightness(1.08);
 }
 
 .auth-status {
     margin-top: 1.5rem;
     padding: 1rem;
-    border-radius: 0.5rem;
+    border-radius: var(--radius);
 }
-
 .auth-status.authenticated {
-    background-color: rgba(25, 135, 84, 0.1);
-    border: 1px solid var(--bs-success);
+    background-color: var(--ok-soft);
+    border: 1px solid var(--ok);
 }
 
+/* Libraries */
 .library-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 1rem;
+    gap: 0.75rem;
 }
-
 .library-card {
-    padding: 1rem;
-    border: 1px solid var(--surface-border, rgba(255, 255, 255, 0.12));
-    border-radius: var(--radius, 0.5rem);
-    background-color: var(--surface-1, rgba(255, 255, 255, 0.04));
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background-color: var(--inset);
     cursor: pointer;
-    transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
 }
-
-.library-card:hover {
-    border-color: rgba(229, 160, 13, 0.4);
-    background-color: var(--surface-2, rgba(255, 255, 255, 0.06));
-    transform: translateY(-1px);
-}
-
+.library-card:hover { border-color: var(--accent); }
 .library-card.selected {
-    border-color: var(--plex-orange, #e5a00d);
-    background-color: var(--plex-orange-soft, rgba(229, 160, 13, 0.12));
+    border-color: var(--accent);
+    background-color: var(--accent-soft);
+}
+.library-card input[type="checkbox"] { margin-right: 0.5rem; }
+
+/* Check a file */
+.setup-path-preview { display: block; }
+.setup-path-preview .setup-helper { margin-bottom: 0.75rem; max-width: 70ch; }
+#setupPathPreviewResult { overflow-wrap: anywhere; }
+
+/* Advanced disclosure */
+.setup-advanced {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+}
+.setup-advanced > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0.6rem 0.875rem;
+    cursor: pointer;
+    list-style: none;
+    font-weight: 600;
+    color: var(--muted);
+}
+.setup-advanced > summary::-webkit-details-marker { display: none; }
+.setup-advanced > summary:hover { color: var(--bs-body-color); }
+.setup-advanced > summary small { color: var(--faint); font-weight: 500; }
+.setup-chevron { margin-left: auto; transition: transform 0.2s ease; }
+.setup-advanced[open] > summary .setup-chevron { transform: rotate(180deg); }
+.setup-advanced-body {
+    display: grid;
+    gap: 1.25rem;
+    padding: 0.875rem;
+    border-top: 1px solid var(--line);
 }
 
-.library-card input[type="checkbox"] {
-    margin-right: 0.5rem;
+/* Narrow screens: compact vendor rows, single-column tables, sticky Back/Next bar. */
+@media (max-width: 767.98px) {
+    .setup-progress { margin-bottom: 0.75rem; }
+    .setup-progress-current { display: block; }
+    .setup-progress .step-number { margin-right: 0; }
+    .step-connector { flex-basis: 12px; margin: 0 0.25rem; }
+    .setup-header h1 { font-size: 1.375rem; }
+}
+@media (max-width: 575.98px) {
+    .setup-container { padding: 1.25rem 0.75rem 2rem; }
+    .setup-topbar { padding: 8px 12px; }
+    .setup-card .card-body { padding: 1.125rem 1rem; }
+    .setup-vendors { grid-template-columns: 1fr; gap: 8px; }
+    .wizard-vendor-btn {
+        grid-template-columns: 40px 1fr;
+        justify-items: start;
+        align-items: center;
+        column-gap: 12px;
+        min-height: 64px;
+        padding: 0 0.75rem;
+        text-align: left;
+    }
+    .setup-card-footer {
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+        padding: 0.75rem 1rem;
+        background: var(--bs-card-bg, var(--bs-body-bg));
+        border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    }
+    .setup-card-footer > .btn { flex: 1; min-height: 44px; }
+    .setup-step[data-step="1"] .setup-card-footer { flex-wrap: wrap; }
+    .setup-card-footer > #skipSetupBtn { flex: 1 1 100%; }
+    .setup-path-preview .input-group { display: flex; flex-direction: column; gap: 0.5rem; }
+    .setup-path-preview .input-group > * { width: 100%; border-radius: var(--bs-border-radius) !important; margin: 0; min-height: 44px; }
+    #setupPathMappingsContainer { overflow-x: auto; }
+    #setupPathMappingsContainer table, #setupPathMappingsContainer tbody, #setupPathMappingsContainer tr, #setupPathMappingsContainer td { display: block; width: 100%; }
+    #setupPathMappingsContainer thead { display: none; }
+    #setupPathMappingsContainer td { border: 0; padding: 0.4rem 0; }
+    #setupPathMappingsContainer td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 0.3rem; font-size: 0.875rem; color: var(--bs-secondary-color); }
+    #setupPathMappingsContainer tr { border-bottom: 1px solid var(--bs-border-color); padding-bottom: 0.5rem; }
 }

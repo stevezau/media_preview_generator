@@ -90,32 +90,82 @@ class TestDashboardWorkerGroups:
         expect(dashboard_page.locator("#workerGroupDashboard")).to_contain_text("GPU 0")
         expect(dashboard_page.locator("#gpuWorkerConfig, #cpuWorkers")).to_have_count(0)
 
-    def test_group_controls_are_read_only_with_direct_edit_link(self, authed_page: Page, app_url: str) -> None:
+    def test_system_stepper_scales_that_group_only_when_plus_is_clicked(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)
         groups = mock_worker_groups(authed_page)
         legacy = capture_settings_save(authed_page)
         authed_page.goto(app_url + "/")
-        row = authed_page.locator('[data-group-id="cpu"]')
-        expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
-            "aria-label", "1 configured worker. Worker counts set simultaneous tasks, not CPU cores."
-        )
-        expect(row.locator('[data-scale], input[type="checkbox"]')).to_have_count(0)
-        expect(row.get_by_role("link", name="Edit CPU workers", exact=True)).to_have_attribute(
-            "href", "/settings?worker_group=cpu#section-workers"
-        )
-        assert not groups["writes"]
+        row = authed_page.locator('[data-system-group="cpu"]')
+        expect(row.locator("output")).to_have_text("1")
+        # One worker is the floor: zero is reached by disabling the group in its editor.
+        expect(row.get_by_role("button", name="Remove one worker from CPU workers")).to_be_disabled()
+        row.get_by_role("button", name="Add one worker to CPU workers").click()
+        expect(row.locator("output")).to_have_text("2")
+        assert [(w["method"], w["url"].rsplit("/api/", 1)[1], w["body"]) for w in groups["writes"]] == [
+            ("POST", "worker-groups/cpu/scale", {"delta": 1})
+        ]
         assert not legacy
+        expect(authed_page.locator('[data-system-group="gpu"] output')).to_have_text("1")
 
-    def test_configured_capacity_does_not_require_dashboard_stepper(self, authed_page: Page, app_url: str) -> None:
+    def test_group_header_shows_capacity_chip_and_capability_icons(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)
-        groups = mock_worker_groups(authed_page, cpu_count=32)
+        groups = mock_worker_groups(authed_page)
         authed_page.goto(app_url + "/")
         row = authed_page.locator('[data-group-id="cpu"]')
-        expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
-            "aria-label", "32 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+        expect(row.locator('[data-group-indicator="configured"]')).to_have_attribute(
+            "aria-label", "0 of 1 configured worker busy. Worker counts set simultaneous tasks, not CPU cores."
         )
-        expect(row.locator("[data-scale]")).to_have_count(0)
+        expect(row.get_by_role("img", name="Previews", exact=True)).to_be_visible()
+        expect(row.get_by_role("img", name="Plex loudness", exact=True)).to_be_visible()
+        gpu = authed_page.locator('[data-group-id="gpu"]')
+        expect(gpu.get_by_role("img", name="Plex loudness (not allowed)", exact=True)).to_be_visible()
         assert not groups["writes"]
+
+    def test_dashboard_has_no_edit_pencil_and_manage_groups_appears_once(self, authed_page: Page, app_url: str) -> None:
+        mock_dashboard_defaults(authed_page)
+        groups = mock_worker_groups(authed_page)
+        authed_page.goto(app_url + "/")
+        expect(authed_page.locator('[data-group-id="gpu"]')).to_be_visible()
+        expect(authed_page.locator("[data-group-edit], .worker-group-edit, #workerGroupEditor")).to_have_count(0)
+        expect(authed_page.get_by_role("button", name="Edit GPU video", exact=True)).to_have_count(0)
+        manage = authed_page.get_by_role("link", name="Manage groups")
+        expect(manage).to_have_count(1)
+        expect(manage).to_have_attribute("href", "/settings#section-workers")
+        assert not groups["writes"]
+
+    def test_pause_button_sits_in_workers_header_and_flips_to_resume(self, authed_page: Page, app_url: str) -> None:
+        mock_dashboard_defaults(authed_page)
+        mock_worker_groups(authed_page)
+        authed_page.route(
+            "**/api/jobs/workers",
+            lambda route: _fulfill_json(
+                route,
+                {
+                    "workers": [
+                        {
+                            "worker_id": 1,
+                            "worker_type": "CPU",
+                            "worker_name": "CPU workers 1",
+                            "group_id": "cpu",
+                            "group_name": "CPU workers",
+                            "status": "processing",
+                            "progress_percent": 10,
+                            "current_title": "Movie",
+                        }
+                    ]
+                },
+            ),
+        )
+        authed_page.goto(app_url + "/")
+        header = authed_page.locator("#dashboard-workers .card-header")
+        pause = header.get_by_role("button", name="Pause all processing, including current files", exact=True)
+        expect(pause).to_have_text("Pause")
+        expect(header.get_by_role("link", name="Manage groups")).to_have_attribute("href", "/settings#section-workers")
+        expect(authed_page.get_by_role("link", name="Manage groups")).to_have_count(1)
+        authed_page.route("**/api/processing/pause", lambda route: _fulfill_json(route, {"paused": True}))
+        pause.click()
+        expect(header.get_by_role("button", name="Resume all processing", exact=True)).to_have_text("Resume")
+        expect(header.get_by_text("Paused", exact=True)).to_be_visible()
 
 
 @pytest.mark.e2e
@@ -127,7 +177,7 @@ class TestDashboardVersion:
         authed_page.wait_for_load_state("domcontentloaded")
         badge = authed_page.locator("#dashboardUpdateBadge")
         expect(badge).to_be_visible(timeout=3000)
-        expect(badge).to_contain_text("Update available")
+        expect(badge).to_contain_text("Update 2.0.0")
 
 
 @pytest.mark.e2e

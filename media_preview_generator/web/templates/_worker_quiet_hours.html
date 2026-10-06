@@ -1,73 +1,102 @@
         <!-- Quiet Hours (D21 + D26) — global queue pause / resume, multi-window with per-day filter -->
         <div class="card section-card" id="section-worker-quiet-hours">
-            <div role="heading" aria-level="2" class="card-header d-flex justify-content-between align-items-center">
-                <span>
-                    <i class="bi bi-moon-stars me-2"></i>Global pause schedule (Quiet Hours)
-                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pause all processing at set times. Scheduled runs during a global pause are skipped."><i class="bi bi-info-circle"></i></button>
-                </span>
-                <span class="badge bg-secondary" id="quietHoursStateBadge" title="Whether the queue is currently paused by quiet hours">off</span>
+            <div role="heading" aria-level="2" class="card-header">
+                <i class="bi bi-moon-stars sec-ico" aria-hidden="true"></i>
+                <div class="sec-title">
+                    <span class="sec-name">Global pause schedule
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pause all processing at set times. Scheduled runs during a global pause are skipped."><i class="bi bi-info-circle"></i></button>
+                    </span>
+                    <span class="sec-desc">Pause all processing, including current files (Quiet Hours).</span>
+                </div>
+                <span class="badge bg-secondary ms-auto" id="quietHoursStateBadge" title="Whether the queue is currently paused by quiet hours">off</span>
             </div>
             <div class="card-body">
-                <p class="mb-3">Pause all processing, including current files. Scheduled runs during a global pause are skipped; manual and webhook jobs may queue. Missed scheduled runs are not caught up automatically.</p>
-                <div class="row g-3 align-items-center mb-3">
-                    <div class="col-auto">
+                <p class="lead-note">Scheduled runs during a global pause are skipped; manual and webhook jobs may queue. Missed scheduled runs are not caught up automatically.</p>
+                <div class="setting-row">
+                    <div class="sr-label">
+                        <label for="quietHoursEnabled" class="sr-title">Enable quiet hours</label>
+                        <div class="sr-hint" id="quietHoursNextHint">Windows are saved but not applied while this is off.</div>
+                    </div>
+                    <div class="sr-control">
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" role="switch" id="quietHoursEnabled">
-                            <label class="form-check-label" for="quietHoursEnabled">Enable quiet hours</label>
                         </div>
                     </div>
-                    <div class="col-auto ms-auto d-flex gap-2">
-                        <button type="button" class="btn btn-sm btn-outline-secondary" id="quietHoursAddWindowBtn">
-                            <i class="bi bi-plus me-1"></i>Add window
-                        </button>
-                        <button type="button" class="btn btn-sm btn-primary" id="quietHoursSaveBtn">
-                            <i class="bi bi-check me-1"></i>Save
-                        </button>
-                    </div>
                 </div>
+
+                <div class="week-card" id="pauseWeekCard">
+                    <div class="week-head">
+                        <strong>Pause windows this week</strong>
+                        <span class="week-tz" data-week-tz></span>
+                    </div>
+                    <div id="pauseWeekGraph"></div>
+                    <div class="week-legend"><span><i class="swatch swatch-pause"></i>Paused</span><span><i class="swatch swatch-now"></i>Now</span></div>
+                </div>
+
                 <div id="quietHoursWindows"></div>
-                <div class="form-text mt-2">
-                    Times use the app timezone. Days select when a window starts: Monday 23:00–07:00 ends Tuesday. Existing windows were preserved on upgrade. Manual Pause All stays active until you resume it; opening worker groups does not clear it. Group hours only stop new files and let current work finish.
+                <div class="form-actions form-actions-split">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="quietHoursAddWindowBtn">
+                        <i class="bi bi-plus me-1"></i>Add window
+                    </button>
+                    <span class="flex-fill"></span>
+                    <span class="sr-hint">This section has its own Save.</span>
+                    <button type="button" class="btn btn-sm btn-primary" id="quietHoursSaveBtn">
+                        <i class="bi bi-check me-1"></i>Save
+                    </button>
+                </div>
+                <div class="hint-line">
+                    <i class="bi bi-info-circle" aria-hidden="true"></i>
+                    <span>Times use the app timezone; days select when a window starts. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Overnight windows, upgrades, Pause All and what group hours stop." data-explain-title="Pause schedule" data-explain-template="infoQuietHoursTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoQuietHoursTpl">
+    <p>Times use the app timezone. Days select when a window starts: Monday 23:00–07:00 ends Tuesday. Existing windows were preserved on upgrade. Manual Pause All stays active until you resume it; opening worker groups does not clear it. Group hours only stop new files and let current work finish.</p>
+</template>
+</span>
                 </div>
             </div>
         </div>
 
         <!-- D26 — Quiet Hours window row template (cloned by JS) -->
         <template id="quietHoursWindowTemplate">
-            <div class="border rounded p-3 mb-2 bg-body-tertiary qh-window">
-                <div class="d-flex justify-content-between align-items-start mb-2">
-                    <strong class="qh-window-title text-muted small">Window</strong>
-                    <button type="button" class="btn btn-sm btn-link text-danger p-0 qh-window-remove" title="Remove window">
-                        <i class="bi bi-x-circle"></i>
+            <div class="week-window qh-window">
+                <div class="week-window-head">
+                    <strong class="qh-window-title">Window</strong>
+                    <button type="button" class="btn btn-sm btn-icon btn-icon-danger qh-window-remove" title="Remove window" aria-label="Remove window">
+                        <i class="bi bi-trash"></i>
                     </button>
                 </div>
-                <div class="row g-2 align-items-end">
-                    <div class="col-md-3">
-                        <label class="form-label small mb-1">Pause at</label>
-                        <input type="time" class="form-control form-control-sm qh-window-start" value="08:00">
-                    </div>
-                    <div class="col-md-3">
-                        <label class="form-label small mb-1">Resume at</label>
-                        <input type="time" class="form-control form-control-sm qh-window-end" value="01:00">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small mb-1">Start days</label>
-                        <div class="btn-group btn-group-sm w-100 qh-window-days" role="group">
+                <div class="week-window-fields">
+                    <div class="week-field week-field-days">
+                        <span class="week-field-label">Start days
+                            <span class="day-presets">
+                                <button type="button" data-qh-preset="all">Every day</button>
+                                <button type="button" data-qh-preset="weekdays">Weekdays</button>
+                                <button type="button" data-qh-preset="weekends">Weekends</button>
+                            </span>
+                        </span>
+                        <div class="qh-window-days day-chips" role="group" aria-label="Start days">
                             <input type="checkbox" class="btn-check qh-day" id="" value="mon" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="mon">Mon</label>
+                            <label class="day-chip qh-day-label" data-day="mon">Mon</label>
                             <input type="checkbox" class="btn-check qh-day" id="" value="tue" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="tue">Tue</label>
+                            <label class="day-chip qh-day-label" data-day="tue">Tue</label>
                             <input type="checkbox" class="btn-check qh-day" id="" value="wed" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="wed">Wed</label>
+                            <label class="day-chip qh-day-label" data-day="wed">Wed</label>
                             <input type="checkbox" class="btn-check qh-day" id="" value="thu" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="thu">Thu</label>
+                            <label class="day-chip qh-day-label" data-day="thu">Thu</label>
                             <input type="checkbox" class="btn-check qh-day" id="" value="fri" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="fri">Fri</label>
+                            <label class="day-chip qh-day-label" data-day="fri">Fri</label>
                             <input type="checkbox" class="btn-check qh-day" id="" value="sat" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="sat">Sat</label>
+                            <label class="day-chip qh-day-label" data-day="sat">Sat</label>
                             <input type="checkbox" class="btn-check qh-day" id="" value="sun" autocomplete="off">
-                            <label class="btn btn-outline-secondary qh-day-label" data-day="sun">Sun</label>
+                            <label class="day-chip qh-day-label" data-day="sun">Sun</label>
                         </div>
+                    </div>
+                    <div class="week-field">
+                        <span class="week-field-label">Pause at</span>
+                        <input type="time" class="form-control qh-window-start" value="08:00" aria-label="Pause at">
+                    </div>
+                    <div class="week-field">
+                        <span class="week-field-label">Resume at</span>
+                        <input type="time" class="form-control qh-window-end" value="01:00" aria-label="Resume at">
                     </div>
                 </div>
             </div>

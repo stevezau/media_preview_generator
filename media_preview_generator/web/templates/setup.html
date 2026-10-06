@@ -7,10 +7,30 @@
 {% endblock %}
 
 {% block content %}
+{# First run should not invite leaving mid-wizard, so setup.css hides the full app navbar for this page and this
+   slim bar replaces it. base.html has no navbar block to override. #}
+<header class="setup-topbar">
+    <span class="setup-brand">
+        <img src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="26" height="26">
+        <span>Media Preview Generator</span>
+    </span>
+    <span class="setup-topbar-actions">
+        <button type="button" class="setup-icon-btn" id="setupThemeBtn" aria-label="Toggle dark/light theme" title="Toggle dark/light theme">
+            <i class="bi bi-moon-stars-fill" aria-hidden="true"></i>
+        </button>
+        <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-outline-secondary btn-sm" id="setupLogoutBtn">
+                <i class="bi bi-box-arrow-right me-1"></i><span class="d-none d-sm-inline">Logout</span>
+            </button>
+        </form>
+    </span>
+</header>
+
 <div class="setup-container">
     <div class="setup-header">
-        <h1><i class="bi bi-film me-2"></i>Media Preview Generator</h1>
-        <p class="text-muted">Setup wizard</p>
+        <h1>Set up your server</h1>
+        <p class="text-muted">You can change everything later in Settings.</p>
     </div>
 
     <!-- Progress Indicator -->
@@ -22,7 +42,7 @@
         <div class="step-connector"></div>
         <div class="progress-step" data-step="2">
             <div class="step-number">2</div>
-            <span class="d-none d-md-inline">Server &amp; libraries</span>
+            <span class="d-none d-md-inline">Connect</span>
         </div>
         <div class="step-connector"></div>
         <div class="progress-step" data-step="3">
@@ -32,7 +52,7 @@
         <div class="step-connector"></div>
         <div class="progress-step" data-step="4">
             <div class="step-number">4</div>
-            <span class="d-none d-md-inline">Processing</span>
+            <span class="d-none d-md-inline">Options</span>
         </div>
         <div class="step-connector"></div>
         <div class="progress-step" data-step="5">
@@ -44,36 +64,25 @@
 
     <!-- Step 1: Choose your media server (vendor picker → vendor-specific flow) -->
     <div class="setup-step active" data-step="1">
-        <div class="card">
+        <div class="card setup-card">
             <div class="card-body">
-                <h4 class="card-title text-center mb-2">Choose your media server</h4>
-                <p class="text-muted text-center mb-4">
-                    Pick your first server. You can add more from the Servers page later.
-                </p>
+                <h2 class="setup-step-title">Choose your media server</h2>
+                <p class="setup-lead">Pick your first server. You can add more from the Servers page later.</p>
 
                 <!-- Vendor picker (visible by default) -->
-                <div id="vendorPicker" class="row g-2 mb-2">
-                    <div class="col-md-4">
-                        <button type="button" class="btn btn-outline-primary w-100 h-100 py-3 wizard-vendor-btn" data-vendor="plex">
-                            <img src="{{ url_for('static', filename='images/vendors/plex.svg') }}" width="36" height="36" class="d-block mx-auto mb-1" alt="Plex">
-                            Plex
-                            <div class="small text-muted">auto-discovery via plex.tv</div>
-                        </button>
-                    </div>
-                    <div class="col-md-4">
-                        <button type="button" class="btn btn-outline-success w-100 h-100 py-3 wizard-vendor-btn" data-vendor="emby">
-                            <img src="{{ url_for('static', filename='images/vendors/emby.svg') }}" width="36" height="36" class="d-block mx-auto mb-1" alt="Emby">
-                            Emby
-                            <div class="small text-muted">URL + API key or password</div>
-                        </button>
-                    </div>
-                    <div class="col-md-4">
-                        <button type="button" class="btn btn-outline-info w-100 h-100 py-3 wizard-vendor-btn" data-vendor="jellyfin">
-                            <img src="{{ url_for('static', filename='images/vendors/jellyfin.svg') }}" width="36" height="36" class="d-block mx-auto mb-1" alt="Jellyfin">
-                            Jellyfin
-                            <div class="small text-muted">Quick Connect or URL+key</div>
-                        </button>
-                    </div>
+                <div id="vendorPicker" class="setup-vendors">
+                    <button type="button" class="wizard-vendor-btn" data-vendor="plex">
+                        <span class="vendor-logo"><img src="{{ url_for('static', filename='images/vendors/plex.svg') }}" width="24" height="24" alt=""></span>
+                        <span class="vendor-text"><b>Plex</b><small>auto-discovery via plex.tv</small></span>
+                    </button>
+                    <button type="button" class="wizard-vendor-btn" data-vendor="emby">
+                        <span class="vendor-logo"><img src="{{ url_for('static', filename='images/vendors/emby.svg') }}" width="24" height="24" alt=""></span>
+                        <span class="vendor-text"><b>Emby</b><small>URL + API key or password</small></span>
+                    </button>
+                    <button type="button" class="wizard-vendor-btn" data-vendor="jellyfin">
+                        <span class="vendor-logo"><img src="{{ url_for('static', filename='images/vendors/jellyfin.svg') }}" width="24" height="24" alt=""></span>
+                        <span class="vendor-text"><b>Jellyfin</b><small>Quick Connect or URL+key</small></span>
+                    </button>
                 </div>
 
                 <!-- Plex sign-in panel — revealed when the Plex card is clicked. The
@@ -99,8 +108,11 @@
                             <i class="bi bi-sliders me-1"></i>Can&rsquo;t reach <code>plex.tv</code>? Enter server details manually
                         </summary>
                         <p class="text-muted small mt-2 mb-3">
-                            Use this if your network blocks <code>plex.tv</code>, or if you&rsquo;d rather
-                            paste a URL and token directly. You&rsquo;ll still see your libraries on the next step.
+                            Use this if your network blocks <code>plex.tv</code>. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Or paste a URL and token directly; libraries appear on the next step." data-explain-title="Enter a URL and token" data-explain-template="infoSetupManualPlexTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupManualPlexTpl">
+    <p>Use this if your network blocks <code>plex.tv</code>, or if you&rsquo;d rather paste a URL and token directly. You&rsquo;ll still see your libraries on the next step.</p>
+</template>
+
                         </p>
                         <div class="mb-2">
                             <label for="manualPlexUrl" class="form-label small mb-1">Plex Server URL</label>
@@ -122,14 +134,14 @@
                                 Verify Plex HTTPS certificate
                             </label>
                         </div>
-                        <button type="button" class="btn btn-outline-primary btn-sm" id="manualPlexTestBtn">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="manualPlexTestBtn">
                             <i class="bi bi-plug me-1"></i>Verify connection
                         </button>
                         <div id="manualPlexResult" class="small mt-2"></div>
                     </details>
 
                     <div class="d-flex justify-content-start mt-4">
-                        <button type="button" class="btn btn-link" id="vendorPickerBackBtn">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="vendorPickerBackBtn">
                             <i class="bi bi-arrow-left me-1"></i>Back
                         </button>
                     </div>
@@ -146,86 +158,89 @@
                     {% include "_server_connection_form.html" %}
                 </div>
             </div>
-        </div>
-
-        <div class="d-flex justify-content-between align-items-center mt-4">
-            <button type="button" class="btn btn-link text-muted small p-0" id="skipSetupBtn"
-                    title="Mark setup complete and add servers later from the Servers page">
-                <i class="bi bi-skip-end me-1"></i>Skip — I&rsquo;ll add servers later
-            </button>
-            <button type="button" class="btn btn-primary d-none" id="step1Next" disabled>
-                Next <i class="bi bi-arrow-right ms-1"></i>
-            </button>
+            <div class="setup-card-footer">
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="skipSetupBtn"
+                        title="Mark setup complete and add servers later from the Servers page">
+                    <i class="bi bi-skip-forward me-1"></i>Skip for now
+                </button>
+                <button type="button" class="btn btn-primary d-none" id="step1Next" disabled>
+                    Next <i class="bi bi-arrow-right ms-1"></i>
+                </button>
+            </div>
         </div>
     </div>
 
-    <!-- Step 2: Server & Libraries -->
+    <!-- Step 2: Connect (server + libraries) -->
     <div class="setup-step" data-step="2">
-        <div class="card mb-4">
+        <div class="card setup-card">
             <div class="card-body">
-                <h4 class="card-title mb-3">Select Your Server</h4>
+                <h2 class="setup-step-title">Connect your server</h2>
+                <p class="setup-lead">Pick the server to use, then choose which libraries to process.</p>
 
-                <div id="serverLoading" class="text-center py-3">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading...</span>
-                    </div>
-                    <p class="text-muted mt-2">Discovering servers...</p>
-                </div>
+                <fieldset class="setup-group">
+                    <legend>Server</legend>
 
-                <select class="form-select d-none" id="serverSelect">
-                    <option value="">Select a server...</option>
-                </select>
+                    <div id="serverLoading" class="text-center py-3">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="text-muted mt-2">Discovering servers...</p>
+                    </div>
 
-                <div id="serverUrlOverride" class="mt-3 d-none">
-                    <label for="serverUrlInput" class="form-label">Server URL</label>
-                    <div class="input-group">
-                        <input type="text" class="form-control" id="serverUrlInput"
-                               placeholder="http://192.168.1.100:32400">
-                        <button class="btn btn-outline-secondary" type="button" id="serverUrlApply">
-                            Apply
-                        </button>
+                    <select class="form-select d-none" id="serverSelect" aria-label="Plex server">
+                        <option value="">Select a server...</option>
+                    </select>
+
+                    <div id="serverUrlOverride" class="mt-3 d-none">
+                        <label for="serverUrlInput" class="form-label">Server URL</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="serverUrlInput"
+                                   placeholder="http://192.168.1.100:32400">
+                            <button class="btn btn-outline-secondary" type="button" id="serverUrlApply">
+                                Apply
+                            </button>
+                        </div>
+                        <div class="form-text">
+                            Auto-detected from Plex. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Override it if the URL isn't reachable from this host." data-explain-title="Plex URL" data-explain-template="infoSetupPlexUrlTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupPlexUrlTpl">
+    <p>Auto-detected from Plex. Override if the URL isn't reachable from this host (e.g. inside Docker use the container network IP or <code>host.docker.internal</code>).</p>
+</template>
+
+                        </div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" id="setupPlexVerifySsl" checked>
+                            <label class="form-check-label" for="setupPlexVerifySsl">
+                                Verify Plex HTTPS certificate
+                            </label>
+                        </div>
+                        <div class="form-text">Disable only if your Plex server uses a self-signed certificate.</div>
                     </div>
-                    <div class="form-text">
-                        Auto-detected from Plex. Override if the URL isn't reachable from this
-                        host (e.g. inside Docker use the container network IP or
-                        <code>host.docker.internal</code>).
+                </fieldset>
+
+                <fieldset class="setup-group" id="librariesCard" style="display: none;">
+                    <legend>Libraries to monitor
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                title="Which libraries this app may touch on this server, for every kind of job." data-explain-title="Libraries to monitor" data-explain-template="infoSetupLibrariesTpl"><i class="bi bi-info-circle"></i></button>
+                    </legend>
+                    <p class="setup-helper">Tick the libraries this app should monitor on this server. Tick none to monitor all.</p>
+
+                    <div id="libraryLoading" class="text-center py-3 d-none">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
                     </div>
-                    <div class="form-check mt-2">
-                        <input class="form-check-input" type="checkbox" id="setupPlexVerifySsl" checked>
-                        <label class="form-check-label" for="setupPlexVerifySsl">
-                            Verify Plex HTTPS certificate
-                        </label>
-                    </div>
-                    <div class="form-text">Disable only if your Plex server uses a self-signed certificate.</div>
-                </div>
+
+                    <div id="libraryGrid" class="library-grid"></div>
+                </fieldset>
             </div>
-        </div>
-
-        <div class="card" id="librariesCard" style="display: none;">
-            <div class="card-body">
-                <h4 class="card-title mb-3">Libraries to monitor
-                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                            title="Which libraries this app may touch on this server, for every kind of job." data-explain-title="Libraries to monitor" data-explain-template="infoSetupLibrariesTpl"><i class="bi bi-info-circle"></i></button>
-                </h4>
-                <p class="text-muted mb-3">Tick the libraries this app should monitor on this server. Tick none to monitor all.</p>
-
-                <div id="libraryLoading" class="text-center py-3 d-none">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading...</span>
-                    </div>
-                </div>
-
-                <div id="libraryGrid" class="library-grid"></div>
+            <div class="setup-card-footer">
+                <button type="button" class="btn btn-outline-secondary" id="step2Back">
+                    <i class="bi bi-arrow-left me-1"></i> Back
+                </button>
+                <button type="button" class="btn btn-primary" id="step2Next" disabled>
+                    Next <i class="bi bi-arrow-right ms-1"></i>
+                </button>
             </div>
-        </div>
-
-        <div class="d-flex justify-content-between mt-4">
-            <button type="button" class="btn btn-outline-secondary" id="step2Back">
-                <i class="bi bi-arrow-left me-1"></i> Back
-            </button>
-            <button type="button" class="btn btn-primary" id="step2Next" disabled>
-                Next <i class="bi bi-arrow-right ms-1"></i>
-            </button>
         </div>
     </div>
 
@@ -236,11 +251,13 @@
          and resolved at runtime via .step3-server-name updates from the
          mediaServerAdded event handler. -->
     <div class="setup-step" data-step="3">
-        <div class="card">
+        <div class="card setup-card">
             <div class="card-body">
-                <h4 class="card-title mb-4">Path Configuration</h4>
+                <h2 class="setup-step-title">Where are your files?</h2>
+                <p class="setup-lead">Check that this app can see your media, and where previews are written.</p>
 
-                <div class="mb-3" id="step3PlexConfigSection">
+                <fieldset class="setup-group" id="step3PlexConfigSection">
+                    <legend>Plex data</legend>
                     {# id is wizardPlexConfigFolder (not plexConfigFolder) to avoid
                        colliding with the same-named input inside the included
                        _server_connection_form partial — that one is hidden in
@@ -264,19 +281,46 @@
                         <div class="invalid-feedback small"></div>
                         <div class="valid-feedback small">Looks like a valid Plex config folder</div>
                     </div>
-                    <div class="form-text">Enter the path <strong>inside this container</strong>. On your server Plex might use <code>/config/plex/Library/Application Support/Plex Media Server</code>—but if you mounted that folder as <code>/plex</code> in this container, then enter <code>/plex</code> here.</div>
+                    <div class="form-text">Enter the path <strong>inside this container</strong>. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Example using a /plex mount." data-explain-title="Plex config folder path" data-explain-template="infoSetupPlexPathTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupPlexPathTpl">
+    <p>Enter the path <strong>inside this container</strong>. On your server Plex might use <code>/config/plex/Library/Application Support/Plex Media Server</code>—but if you mounted that folder as <code>/plex</code> in this container, then enter <code>/plex</code> here.</p>
+</template>
+</div>
                     <div class="form-text mt-1">
                         <i class="bi bi-info-circle text-muted me-1"></i>
                         Already past Setup? Change this any time on
                         <a href="{{ url_for('main.servers_page') }}">Servers</a> &rarr; your Plex card &rarr; <strong>Edit</strong> &rarr; <strong>General</strong>.
                     </div>
-                    <hr class="my-4">
-                </div>
+                </fieldset>
 
-                <h5 class="mb-2">Media path mapping (optional)
+                <section class="setup-path-preview" aria-labelledby="setupPathPreviewHeading">
+                    <h3 class="setup-legend" id="setupPathPreviewHeading">Check a real file</h3>
+                    <p class="setup-helper">Paste a media file path reported by your server or webhook. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="What this check does and does not do." data-explain-title="Check a file path" data-explain-template="infoSetupSamplePathTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupSamplePathTpl">
+    <p>Paste a media file path reported by your server or webhook. This uses your path mappings (Advanced), including unsaved edits, and checks whether this container can read that file. It does not generate previews or confirm library ownership.</p>
+</template>
+</p>
+                    <label class="form-label small" for="setupSamplePath">File path on the server or webhook</label>
+                    <div class="input-group">
+                        <input class="form-control" id="setupSamplePath" type="text" placeholder="/media/movies/Example.mkv" autocomplete="off" maxlength="4096">
+                        <button class="btn btn-outline-secondary" type="button" id="setupCheckFile"><i class="bi bi-search me-1"></i>Check file</button>
+                    </div>
+                    <div id="setupPathPreviewResult" class="small mt-2" role="status" aria-live="polite"></div>
+                </section>
+
+                <details class="setup-advanced" id="setupAdvancedDetails">
+                    <summary>
+                        <i class="bi bi-sliders" aria-hidden="true"></i>
+                        <span>Advanced</span>
+                        <small>path mappings, excluded paths</small>
+                        <i class="bi bi-chevron-down setup-chevron" aria-hidden="true"></i>
+                    </summary>
+                    <div class="setup-advanced-body">
+                <fieldset class="setup-group">
+                <legend>Media path mapping (optional)
                     <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only needed when your media server and this app see the same files at different paths; otherwise leave it empty."><i class="bi bi-info-circle"></i></button>
-                </h5>
-                <div class="alert alert-info py-2 mb-3 small" role="alert">
+                </legend>
+                <div class="setup-note" role="note">
                     Only needed if your media server and this app see the same files at different paths.
                     <strong>Example:</strong> the server sees <code>/data</code>, this app sees <code>/mnt/data</code> → one row: <code>/data</code> → <code>/mnt/data</code>. The third column is for when Sonarr/Radarr/Tdarr webhooks send your media at a different path than the server reports — enter that app's path there.
                 </div>
@@ -315,27 +359,18 @@
                         <i class="bi bi-plus-lg me-1"></i>Add another mapping
                     </button>
                 </div>
+                </fieldset>
 
-                <section class="setup-path-preview mt-4" aria-labelledby="setupPathPreviewHeading">
-                    <h3 class="h6" id="setupPathPreviewHeading">Check a real file</h3>
-                    <p class="small text-muted">Paste a media file path reported by your server or webhook. This uses the mapping rows above, including unsaved edits, and checks whether this container can read that file. It does not generate previews or confirm library ownership.</p>
-                    <label class="form-label small" for="setupSamplePath">File path on the server or webhook</label>
-                    <div class="input-group">
-                        <input class="form-control" id="setupSamplePath" type="text" placeholder="/media/movies/Example.mkv" autocomplete="off" maxlength="4096">
-                        <button class="btn btn-outline-primary" type="button" id="setupCheckFile">Check file</button>
-                    </div>
-                    <div id="setupPathPreviewResult" class="small mt-2" role="status" aria-live="polite"></div>
-                </section>
-
-                <hr class="my-4">
-                <details>
-                    <summary class="fw-semibold text-muted mb-2" style="cursor:pointer;">
-                        <i class="bi bi-slash-circle me-1"></i>Advanced: Exclude paths (optional)
+                <fieldset class="setup-group">
+                    <legend>Exclude paths (optional)
                         <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Folders or patterns to skip when generating previews. Useful for trailer folders, sample videos, etc."><i class="bi bi-info-circle"></i></button>
-                    </summary>
-                    <p class="text-muted small mt-2 mb-2">
-                        Folders or patterns to skip — useful for things like <code>/Trailers</code> or sample files.
-                        Pick <strong>Path prefix</strong> (matches anything under that folder) or <strong>Regex</strong> (advanced pattern matching).
+                    </legend>
+                    <p class="setup-helper">
+                        Folders or patterns to skip. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Path prefix versus Regex, with examples." data-explain-title="Exclude paths" data-explain-template="infoSetupExcludeTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupExcludeTpl">
+    <p>Folders or patterns to skip — useful for things like <code>/Trailers</code> or sample files. Pick <strong>Path prefix</strong> (matches anything under that folder) or <strong>Regex</strong> (advanced pattern matching).</p>
+</template>
+
                     </p>
                     <div id="setupExcludePathsContainer">
                         <table class="table table-sm align-middle mb-2" id="setupExcludePathsTable">
@@ -354,29 +389,36 @@
                             <i class="bi bi-plus-lg me-1"></i>Add exclude path
                         </button>
                     </div>
+                </fieldset>
+                    </div>
                 </details>
 
             </div>
-        </div>
-
-        <div class="d-flex justify-content-between mt-4">
-            <button type="button" class="btn btn-outline-secondary" id="step3Back">
-                <i class="bi bi-arrow-left me-1"></i> Back
-            </button>
-            <button type="button" class="btn btn-primary" id="step3Next">
-                Next <i class="bi bi-arrow-right ms-1"></i>
-            </button>
+            <div class="setup-card-footer">
+                <button type="button" class="btn btn-outline-secondary" id="step3Back">
+                    <i class="bi bi-arrow-left me-1"></i> Back
+                </button>
+                <button type="button" class="btn btn-primary" id="step3Next">
+                    Next <i class="bi bi-arrow-right ms-1"></i>
+                </button>
+            </div>
         </div>
     </div>
 
     <!-- Step 4: Processing Options -->
     <div class="setup-step" data-step="4">
-        <div class="card">
+        <div class="card setup-card">
             <div class="card-body">
-                <h4 class="card-title mb-4">Processing Options</h4>
+                <h2 class="setup-step-title">Processing options</h2>
+                <p class="setup-lead">Sensible defaults are already filled in.</p>
 
-                <h6 class="mb-3"><i class="bi bi-gpu-card me-2"></i>GPU device tuning</h6>
-                <p class="form-text mt-0 mb-3">GPU workers use both GPU and CPU. For standard content, the GPU does most of the work. For HDR and Dolby Vision content, CPU usage will be higher due to additional tone mapping processing.</p>
+                <fieldset class="setup-group">
+                <legend>GPU device tuning</legend>
+                <p class="setup-helper">GPU workers use both GPU and CPU. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How HDR and Dolby Vision change CPU use." data-explain-title="GPU workers" data-explain-template="infoSetupGpuTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupGpuTpl">
+    <p>GPU workers use both GPU and CPU. For standard content, the GPU does most of the work. For HDR and Dolby Vision content, CPU usage will be higher due to additional tone mapping processing.</p>
+</template>
+</p>
                 <div id="gpuConfigContainer">
                     <div class="text-muted mb-3" id="gpuDetecting">
                         <div class="spinner-border spinner-border-sm me-2" role="status">
@@ -386,14 +428,16 @@
                     </div>
                     <div id="gpuConfigList"></div>
                 </div>
-                <button type="button" class="btn btn-outline-secondary btn-sm mt-2 mb-4"
+                <button type="button" class="btn btn-outline-secondary btn-sm mt-2"
                         id="gpuRescanBtn">
                     <i class="bi bi-arrow-clockwise me-1"></i>Re-scan GPUs
                 </button>
+                </fieldset>
 
-                <div id="workerGroupSettings" class="mb-4"><p class="text-body-secondary">Loading worker groups…</p></div>
+                <div class="setup-group" id="workerGroupSettings"><p class="text-body-secondary">Loading worker groups…</p></div>
 
-                <h6 class="mb-3"><i class="bi bi-image me-2"></i>Thumbnail Settings</h6>
+                <fieldset class="setup-group">
+                <legend>Thumbnails</legend>
                 <div class="row">
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailInterval" class="form-label">
@@ -418,32 +462,34 @@
                         </div>
                     </div>
                 </div>
+                </fieldset>
             </div>
-        </div>
-
-        <div class="d-flex justify-content-between mt-4">
-            <button type="button" class="btn btn-outline-secondary" id="step4Back">
-                <i class="bi bi-arrow-left me-1"></i> Back
-            </button>
-            <button type="button" class="btn btn-primary" id="step4Next">
-                Next <i class="bi bi-arrow-right ms-1"></i>
-            </button>
+            <div class="setup-card-footer">
+                <button type="button" class="btn btn-outline-secondary" id="step4Back">
+                    <i class="bi bi-arrow-left me-1"></i> Back
+                </button>
+                <button type="button" class="btn btn-primary" id="step4Next">
+                    Next <i class="bi bi-arrow-right ms-1"></i>
+                </button>
+            </div>
         </div>
     </div>
 
     <!-- Step 5: Security / Access Token -->
     <div class="setup-step" data-step="5">
-        <div class="card">
+        <div class="card setup-card">
             <div class="card-body">
-                <h4 class="card-title mb-2"><i class="bi bi-shield-lock me-2"></i>Set your access token</h4>
+                <h2 class="setup-step-title">Set your access token</h2>
 
-                <p class="text-muted mb-2">
+                <p class="setup-lead">
                     The access token is what you'll type to log in to this web UI.
                 </p>
-                <p class="text-muted mb-4">
-                    Pick a new one below — it has to be different from the auto-generated token
-                    you're using right now. You can change it again later from
-                    <strong>Settings &rarr; Web Authentication</strong>.
+                <p class="setup-helper">
+                    Pick a new token below; it must differ from the one in use. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="You can change it later in Settings." data-explain-title="New token" data-explain-template="infoSetupTokenTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoSetupTokenTpl">
+    <p>Pick a new one below — it has to be different from the auto-generated token you're using right now. You can change it again later from <strong>Settings &rarr; Web Authentication</strong>.</p>
+</template>
+
                 </p>
 
                 <!-- Environment variable notice -->
@@ -453,7 +499,8 @@
                     <br>The <code>WEB_AUTH_TOKEN</code> environment variable is set, so the token cannot be changed here.
                 </div>
 
-                <div id="customTokenSection">
+                <fieldset class="setup-group" id="customTokenSection">
+                    <legend>Access token</legend>
                     <div class="mb-3">
                         <label for="newToken" class="form-label">New token</label>
                         <input type="password" class="form-control" id="newToken"
@@ -471,17 +518,16 @@
                     <div id="tokenSuccess" class="alert alert-success d-none">
                         <i class="bi bi-check-circle me-2"></i>Token updated successfully!
                     </div>
-                </div>
+                </fieldset>
             </div>
-        </div>
-
-        <div class="d-flex justify-content-between mt-4">
-            <button type="button" class="btn btn-outline-secondary" id="step5Back">
-                <i class="bi bi-arrow-left me-1"></i> Back
-            </button>
-            <button type="button" class="btn btn-success" id="finishSetup">
-                <i class="bi bi-check-lg me-1"></i> Complete Setup
-            </button>
+            <div class="setup-card-footer">
+                <button type="button" class="btn btn-outline-secondary" id="step5Back">
+                    <i class="bi bi-arrow-left me-1"></i> Back
+                </button>
+                <button type="button" class="btn btn-primary" id="finishSetup">
+                    <i class="bi bi-check-lg me-1"></i> Complete Setup
+                </button>
+            </div>
         </div>
     </div>
 </div>
@@ -509,6 +555,26 @@
 // /settings autosave. The wizard advances on Next, not autosave, so
 // stub this out — it's intentionally a no-op here.
 function markDirty() {}
+</script>
+<script>
+// base.html's theme toggle lives in the navbar, which this page hides; mirror its behaviour for the slim top bar.
+(function () {
+    var btn = document.getElementById('setupThemeBtn');
+    if (!btn) return;
+    var icon = btn.querySelector('i');
+    function sync() {
+        var dark = (document.documentElement.getAttribute('data-bs-theme') || 'dark') === 'dark';
+        icon.className = dark ? 'bi bi-moon-stars-fill' : 'bi bi-sun-fill';
+        btn.setAttribute('aria-pressed', dark ? 'true' : 'false');
+    }
+    sync();
+    btn.addEventListener('click', function () {
+        var next = (document.documentElement.getAttribute('data-bs-theme') || 'dark') === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-bs-theme', next);
+        try { localStorage.setItem('theme', next); } catch (e) { /* best-effort */ }
+        sync();
+    });
+})();
 </script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
@@ -568,7 +634,7 @@ document.addEventListener('DOMContentLoaded', function() {
         currentStep = step;
         const sequence = ++navigationSequence;
         const progress = document.querySelector('.setup-progress');
-        const stepLabels = ['Server type', 'Server & libraries', 'Paths', 'Processing', 'Security'];
+        const stepLabels = ['Server type', 'Connect', 'Paths', 'Options', 'Security'];
         const flowSteps = chosenEjServerId ? [1, 3, 4, 5] : [1, 2, 3, 4, 5];
         const stepPosition = flowSteps.indexOf(step) + 1;
         if (progress) {
@@ -1160,6 +1226,13 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         rows.forEach(r => container.appendChild(setupCreatePathMappingRow(r)));
+        openSetupAdvanced();
+    }
+
+    // Saved mappings and exclusions must not hide behind a collapsed section.
+    function openSetupAdvanced() {
+        const details = document.getElementById('setupAdvancedDetails');
+        if (details) details.open = true;
     }
 
     function setupRenderExcludePathRows(rows) {
@@ -1171,6 +1244,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         rows.forEach(r => container.appendChild(setupCreateExcludePathRow({ value: r.value || '', type: (r.type || 'path') })));
+        openSetupAdvanced();
     }
 
     function setupCreateExcludePathRow(row) {

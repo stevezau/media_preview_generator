@@ -81,8 +81,11 @@
     </div>
     <div id="auth-fields-quick-connect" class="d-none">
         <p class="text-muted small mb-1">
-            Click <strong>Start Quick Connect</strong> to get a code, then enter it in your Jellyfin profile menu.
-            <em>Quick Connect must be enabled by your Jellyfin admin under Server → Quick Connect.</em>
+            Click <strong>Start Quick Connect</strong> to get a code. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to enter the code and what must be enabled." data-explain-title="Quick Connect" data-explain-template="infoQuickConnectTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoQuickConnectTpl">
+    <p>Click <strong>Start Quick Connect</strong> to get a code, then enter it in your Jellyfin profile menu. <em>Quick Connect must be enabled by your Jellyfin admin under Server → Quick Connect.</em></p>
+</template>
+
         </p>
         <button type="button" class="btn btn-primary mb-2" id="quickConnectStart">
             <i class="bi bi-magic me-1"></i>Start Quick Connect
@@ -100,7 +103,11 @@
                 <i class="bi bi-shield-check me-1"></i>Sign in with Plex (auto-discover servers)
             </button>
             <small class="text-muted d-block mt-1">
-                Recommended. Lists every Plex server your account can access so you can pick one (or add several from one sign-in).
+                Recommended. Lists every Plex server your account can access. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="You can add several servers from one sign-in." data-explain-title="Sign in with Plex" data-explain-template="infoPlexSigninTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoPlexSigninTpl">
+    <p>Recommended. Lists every Plex server your account can access so you can pick one (or add several from one sign-in).</p>
+</template>
+
             </small>
         </div>
 
@@ -111,9 +118,11 @@
             </div>
             <div id="plexDiscoveredServers" class="list-group"></div>
             <div class="form-text mt-2">
-                Picking a server fills the fields below — set its config folder, then
-                Test connection. To add another Plex from the same account, sign in
-                again after saving this one.
+                Picking a server fills the fields below. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="What to do next and how to add another Plex." data-explain-title="Discovered Plex servers" data-explain-template="infoPlexPickTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoPlexPickTpl">
+    <p>Picking a server fills the fields below — set its config folder, then Test connection. To add another Plex from the same account, sign in again after saving this one.</p>
+</template>
+
             </div>
         </div>
 
@@ -142,8 +151,11 @@
                 <div class="valid-feedback small">Looks like a valid Plex config folder</div>
             </div>
             <div class="form-text">
-                Preview files land in <code>{this folder}/Media/localhost/...</code>.
-                Common Docker bind: <code>-v /path/to/plex/config:/config/plex</code>.
+                Preview files land in <code>{this folder}/Media/localhost/...</code>. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Common Docker bind example." data-explain-title="Plex config folder" data-explain-template="infoPlexFolderTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoPlexFolderTpl">
+    <p>Preview files land in <code>{this folder}/Media/localhost/...</code>. Common Docker bind: <code>-v /path/to/plex/config:/config/plex</code>.</p>
+</template>
+
             </div>
         </div>
     </div>

@@ -3,82 +3,91 @@
         <!-- Section 1: Overview -->
         <div class="card section-card" id="section-webhooks-overview">
             <div role="heading" aria-level="2" class="card-header">
-                <i class="bi bi-info-circle me-2"></i>Choose a trigger
+                <i class="bi bi-info-circle me-2"></i>Overview
             </div>
             <div class="card-body">
-                <p class="mb-3">
+                <p class="lead-copy mb-3">
                     Webhooks generate previews automatically when new media lands in Plex, Emby, or Jellyfin. Pick the trigger source below that matches how your media gets in.
                 </p>
 
-                <h3 class="automation-subheading mb-2"><i class="bi bi-signpost me-1"></i>How do you add media?</h3>
-                <nav class="trigger-jump mb-3" aria-label="Trigger instructions">
-                    <a href="#section-webhooks-sonarr-radarr" class="btn btn-sm btn-outline-secondary">Sonarr / Radarr / Sportarr</a>
-                    <a href="#section-webhooks-custom" class="btn btn-sm btn-outline-secondary">Tdarr / scripts</a>
-                    <a href="#trigger-plex" class="btn btn-sm btn-outline-secondary">Plex</a>
-                    <a href="#trigger-emby" class="btn btn-sm btn-outline-secondary">Emby</a>
-                    <a href="#trigger-jellyfin" class="btn btn-sm btn-outline-secondary">Jellyfin</a>
-                </nav>
-                <div class="decision-list mb-4">
+                <h3 class="automation-subheading mb-2">How do you add media?</h3>
+                <div class="decision-list mb-3">
                     <div class="decision-row" id="trigger-arr">
+                        <span class="tile" aria-hidden="true"><i class="bi bi-download"></i></span>
                         <div class="decision-scenario">
-                            Sonarr / Radarr / Sportarr grab your media
-                            <div class="text-muted small">Sportarr is the Sonarr fork for sports content. Works for any server.</div>
+                            <div class="decision-title">Sonarr / Radarr / Sportarr grab your media</div>
+                            <div class="decision-desc">Sportarr is the Sonarr fork for sports content. Works for any server.</div>
                         </div>
-                        <div class="decision-arrow">→</div>
-                        <div class="decision-recommendation"><a href="#section-webhooks-sonarr-radarr"><i class="bi bi-arrow-right-circle me-1"></i>Use the *arr webhook</a></div>
+                        <a href="#section-webhooks-sonarr-radarr" class="btn btn-sm btn-outline-secondary">Use the *arr webhook <i class="bi bi-arrow-right ms-1"></i></a>
                     </div>
                     <div class="decision-row" id="trigger-custom">
-                        <div class="decision-scenario">Tdarr, FileFlows, or a script transcodes files
-                            <div class="text-muted small">Works for any server.</div>
+                        <span class="tile" aria-hidden="true"><i class="bi bi-plug"></i></span>
+                        <div class="decision-scenario">
+                            <div class="decision-title">Tdarr, FileFlows, or a script transcodes files</div>
+                            <div class="decision-desc">Works for any server.</div>
                         </div>
-                        <div class="decision-arrow">→</div>
-                        <div class="decision-recommendation"><a href="#section-webhooks-custom"><i class="bi bi-arrow-right-circle me-1"></i>Use the Custom webhook</a></div>
+                        <a href="#section-webhooks-custom" class="btn btn-sm btn-outline-secondary">Use the Custom webhook <i class="bi bi-arrow-right ms-1"></i></a>
                     </div>
                     <div class="decision-row" id="trigger-plex">
+                        <span class="tile" aria-hidden="true"><i class="bi bi-play-circle-fill" style="color:#e5a00d"></i></span>
                         <div class="decision-scenario">
-                            You add media manually to <strong>Plex</strong> (drag &amp; drop, Plex import, etc.)
-                            <div class="text-muted small">Plex-only — register the Plex Direct webhook from this app.</div>
+                            <div class="decision-title">You add media manually to <strong>Plex</strong> (drag &amp; drop, Plex import, etc.)</div>
+                            <div class="decision-desc">Plex-only: register the Plex Direct webhook from this app. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex Direct webhook + Recently Added Scanner." data-explain-title="Plex trigger" data-explain-template="infoTriggerPlexTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoTriggerPlexTpl">
+    <p>Plex-only: register the Plex Direct webhook from this app. Plex Direct webhook + Recently Added Scanner.</p>
+</template>
+</div>
                         </div>
-                        <div class="decision-arrow">→</div>
-                        <div class="decision-recommendation">
-                            <a href="/servers"><i class="bi bi-arrow-right-circle me-1"></i>Servers &rarr; Edit Plex &rarr; Webhook &amp; Scanner</a>
-                            <span class="text-muted small d-block">Plex Direct webhook + Recently Added Scanner</span>
-                        </div>
+                        <a href="/servers" class="btn btn-sm btn-outline-secondary">Servers &rarr; Edit Plex &rarr; Webhook &amp; Scanner <i class="bi bi-arrow-right ms-1"></i></a>
                     </div>
                     <div class="decision-row" id="trigger-emby">
+                        <span class="tile" aria-hidden="true"><i class="bi bi-hdd-network-fill" style="color:#52b54b"></i></span>
                         <div class="decision-scenario">
-                            You add media manually to <strong>Emby</strong>
-                            <div class="text-muted small">Emby has built-in server-side webhooks (Premiere). Dashboard &rarr; Webhooks &rarr; Add Webhook, point it at <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code> and tick the <strong>Library &rarr; New Media Added</strong> event.</div>
+                            <div class="decision-title">You add media manually to <strong>Emby</strong></div>
+                            <div class="decision-desc">Emby has built-in server-side webhooks (Premiere). <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="They post to the same /incoming URL; the vendor is auto-detected." data-explain-title="Emby trigger" data-explain-template="infoTriggerEmbyTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoTriggerEmbyTpl">
+    <p>Emby has built-in server-side webhooks (Premiere) that post to the same <code>/incoming</code> URL; the vendor is auto-detected.</p>
+</template>
+</div>
+                            <details class="mini-d">
+                                <summary>Setup steps</summary>
+                                <div>Emby Dashboard &rarr; Webhooks &rarr; Add Webhook, point it at <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code> and tick the <strong>Library &rarr; New Media Added</strong> event.</div>
+                            </details>
                         </div>
-                        <div class="decision-arrow">→</div>
-                        <div class="decision-recommendation">
-                            Emby Dashboard &rarr; Webhooks
-                            <span class="text-muted small d-block">Posts to the same <code>/incoming</code> URL — vendor auto-detected.</span>
-                        </div>
+                        <a href="/servers" class="btn btn-sm btn-outline-secondary">Open Emby setup <i class="bi bi-arrow-right ms-1"></i></a>
                     </div>
                     <div class="decision-row" id="trigger-jellyfin">
+                        <span class="tile" aria-hidden="true"><i class="bi bi-collection-play-fill" style="color:#aa5cc3"></i></span>
                         <div class="decision-scenario">
-                            You add media manually to <strong>Jellyfin</strong>
-                            <div class="text-muted small">Install the official <strong>Webhook</strong> plugin (Dashboard &rarr; Plugins &rarr; Catalog). Add a <em>Generic</em> destination &rarr; URL <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code>, subscribe to the <strong>Item Added</strong> notification.</div>
+                            <div class="decision-title">You add media manually to <strong>Jellyfin</strong></div>
+                            <div class="decision-desc">Install the official <strong>Webhook</strong> plugin; same <code>/incoming</code> URL as Plex / Emby.</div>
+                            <details class="mini-d">
+                                <summary>Setup steps</summary>
+                                <div>Jellyfin Dashboard &rarr; Plugins &rarr; Catalog &rarr; Webhook. Add a <em>Generic</em> destination &rarr; URL <code>https://&lt;your-host&gt;/api/webhooks/incoming?token=&lt;webhook secret&gt;</code>, subscribe to the <strong>Item Added</strong> notification.</div>
+                            </details>
                         </div>
-                        <div class="decision-arrow">→</div>
-                        <div class="decision-recommendation">
-                            Jellyfin Webhook plugin &rarr; Generic destination
-                            <span class="text-muted small d-block">Same <code>/incoming</code> URL as Plex / Emby.</span>
-                        </div>
+                        <a href="/servers" class="btn btn-sm btn-outline-secondary">Open Jellyfin setup <i class="bi bi-arrow-right ms-1"></i></a>
                     </div>
                 </div>
 
-                <p class="small text-muted mb-3">
-                    Every webhook URL supports <code>delay=1</code> through <code>delay=3600</code> (seconds).
-                    Append <code>&amp;delay=30</code> to a URL with a token, or <code>?delay=30</code> to a bare URL.
-                    Omit it to use <strong>Delay before processing</strong> below.
-                    Universal and per-server URLs now wait too, with a separate timer for each file version.
+                <p class="help mb-3">
+                    Every webhook URL supports a <code>delay</code> parameter of 1&ndash;3600 seconds. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How to append delay and what the default is." data-explain-title="Delay parameter" data-explain-template="infoWebhookDelayParamTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoWebhookDelayParamTpl">
+    <p>Every webhook URL supports <code>delay=1</code> through <code>delay=3600</code> (seconds). Append <code>&amp;delay=30</code> to a URL with a token, or <code>?delay=30</code> to a bare URL. Omit it to use <strong>Delay before processing</strong> below. Universal and per-server URLs now wait too, with a separate timer for each file version.</p>
+</template>
+
                 </p>
 
-                <div class="upgrade-caveat">
-                    <strong><i class="bi bi-exclamation-triangle me-1"></i>Note about file upgrades:</strong>
-                    The server-side webhook options (Plex Direct + Recently Added Scanner; Emby Webhooks; Jellyfin's Webhook plugin) only fire on <em>brand-new</em> library items. When Sonarr or Radarr <em>upgrades</em> an existing file in place, the media server keeps the same library item and the new file isn't seen as "added", so the server-side webhooks don't fire. Use the Sonarr/Radarr <strong>"On Upgrade"</strong> webhook event for those replacements &mdash; it works regardless of which media server you use.
+                <div class="note upgrade-caveat">
+                    <span class="tile" aria-hidden="true"><i class="bi bi-exclamation-triangle"></i></span>
+                    <div>
+                        <strong>Note about file upgrades</strong>
+                        <p>Plex, Emby and Jellyfin webhooks only fire for brand-new library items. For replaced files use the Sonarr/Radarr <strong>"On Upgrade"</strong> event.</p>
+                        <details class="mini-d">
+                            <summary>Why this happens</summary>
+                            <div>The server-side webhook options (Plex Direct + Recently Added Scanner; Emby Webhooks; Jellyfin's Webhook plugin) only fire on <em>brand-new</em> library items. When Sonarr or Radarr <em>upgrades</em> an existing file in place, the media server keeps the same library item and the new file isn't seen as "added", so the server-side webhooks don't fire. Use the Sonarr/Radarr <strong>"On Upgrade"</strong> webhook event for those replacements &mdash; it works regardless of which media server you use.</div>
+                        </details>
+                    </div>
                 </div>
             </div>
         </div>
@@ -87,10 +96,10 @@
         <div class="card section-card" id="section-webhooks-sonarr-radarr">
             <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-download me-2"></i>*arr apps
-                <span class="badge bg-secondary ms-2">Per-import trigger</span>
+                <span class="pill ms-2">Per-import trigger</span>
             </div>
             <div class="card-body">
-                <p class="mb-3">
+                <p class="lead-copy mb-3">
                     Sonarr, Radarr, and Sportarr POST to this app as soon as they finish importing or upgrading a file.
                     Copy the webhook URL from the relevant tab below into the app's settings, add your auth token,
                     and you're done.
@@ -99,121 +108,86 @@
                 <div class="mb-3">
                     <label for="webhookServerScope" class="form-label small mb-1">
                         <strong>Publish to which server?</strong>
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Scopes these webhook URLs to one server instead of whoever owns the file." data-explain-title="Publish to which server?" data-explain-template="infoWebhookServerScopeTpl"><i class="bi bi-info-circle"></i></button>
                     </label>
                     <select class="form-select form-select-sm" id="webhookServerScope">
                         <option value="">All servers (publish to whoever owns the file)</option>
                     </select>
-                    <div class="form-text">
-                        Pick a server to scope these webhook URLs to it (adds <code>?server_id=&lt;id&gt;</code>).
-                        Use this when the same library exists on more than one server (e.g. both Plex and Emby
-                        have <em>Movies</em>) and you want this webhook to publish previews to one specific server only.
+                    <div class="form-text">Scope these webhook URLs to one server instead of every owner.</div>
+                    <template id="infoWebhookServerScopeTpl">
+    <p>Pick a server to scope these webhook URLs to it (adds <code>?server_id=&lt;id&gt;</code>).
+        Use this when the same library exists on more than one server (e.g. both Plex and Emby
+        have <em>Movies</em>) and you want this webhook to publish previews to one specific server only.</p>
+</template>
+                </div>
+
+                <details class="mini-d mb-3">
+                    <summary>Different delays for each app</summary>
+                    <div>
+                        Append <code>?delay=30</code> to the Radarr URL
+                        or <code>?delay=300</code> to the Sonarr URL after copying it.
+                        If the URL already contains <code>?</code>, use <code>&amp;delay=30</code> instead.
+                        Set 1–3600 seconds (up to one hour) after the latest new file, subject to the batch age limit below.
+                        Omit it to use the default delay below.
                     </div>
-                </div>
+                </details>
 
-                <div class="form-text mb-3">
-                    <strong>Different delays for each app:</strong> append <code>?delay=30</code> to the Radarr URL
-                    or <code>?delay=300</code> to the Sonarr URL after copying it.
-                    If the URL already contains <code>?</code>, use <code>&amp;delay=30</code> instead.
-                    Set 1–3600 seconds (up to one hour) after the latest new file, subject to the batch age limit below.
-                    Omit it to use the default delay below.
-                </div>
-
-                <ul class="nav nav-tabs mb-3" role="tablist">
+                <ul class="nav nav-tabs seg mb-3" role="tablist">
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link active" id="tab-sonarr-tab" data-bs-toggle="tab" data-bs-target="#tab-sonarr" type="button" role="tab">
-                            <span class="badge source-badge sonarr me-1">Sonarr</span>
-                        </button>
+                        <button class="nav-link active" id="tab-sonarr-tab" data-bs-toggle="tab" data-bs-target="#tab-sonarr" type="button" role="tab" aria-controls="tab-sonarr" aria-selected="true"><i class="bi bi-tv"></i>Sonarr</button>
                     </li>
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="tab-radarr-tab" data-bs-toggle="tab" data-bs-target="#tab-radarr" type="button" role="tab">
-                            <span class="badge source-badge radarr me-1">Radarr</span>
-                        </button>
+                        <button class="nav-link" id="tab-radarr-tab" data-bs-toggle="tab" data-bs-target="#tab-radarr" type="button" role="tab" aria-controls="tab-radarr" aria-selected="false"><i class="bi bi-film"></i>Radarr</button>
                     </li>
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="tab-sportarr-tab" data-bs-toggle="tab" data-bs-target="#tab-sportarr" type="button" role="tab">
-                            <span class="badge source-badge sportarr me-1">Sportarr</span>
-                        </button>
+                        <button class="nav-link" id="tab-sportarr-tab" data-bs-toggle="tab" data-bs-target="#tab-sportarr" type="button" role="tab" aria-controls="tab-sportarr" aria-selected="false"><i class="bi bi-trophy"></i>Sportarr</button>
                     </li>
                 </ul>
                 <div class="tab-content">
-                    <!-- Sonarr -->
-                    <div class="tab-pane fade show active" id="tab-sonarr" role="tabpanel">
-                        <label class="form-label">Sonarr Webhook URL</label>
-                        <div class="input-group mb-3">
-                            <input type="text" class="form-control webhook-url" id="sonarrUrl" readonly>
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('sonarrUrl')" aria-label="Copy Sonarr webhook URL" title="Copy Sonarr webhook URL">
+                    {% for app in [
+                        ('sonarr', 'Sonarr', 'On File Import', 'On File Upgrade'),
+                        ('radarr', 'Radarr', 'On Import', 'On Upgrade'),
+                        ('sportarr', 'Sportarr', 'On File Import', 'On File Upgrade'),
+                    ] %}
+                    <div class="tab-pane fade{% if loop.first %} show active{% endif %}" id="tab-{{ app[0] }}" role="tabpanel">
+                        <label class="form-label" for="{{ app[0] }}Url">{{ app[1] }} Webhook URL</label>
+                        <div class="input-group mb-1">
+                            <input type="text" class="form-control webhook-url" id="{{ app[0] }}Url" readonly>
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('{{ app[0] }}Url')" aria-label="Copy {{ app[1] }} webhook URL" title="Copy {{ app[1] }} webhook URL">
                                 <i class="bi bi-clipboard"></i>
                             </button>
                         </div>
-                        <h3 class="automation-subheading small text-muted mb-2">Setup in Sonarr</h3>
-                        <ol class="small mb-0">
-                            <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
-                            <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
-                            <li>Set <strong>URL</strong>: copy the URL above</li>
-                            <li>Under <strong>Events</strong>, enable <em>On File Import</em> and <em>On File Upgrade</em></li>
-                            <li><strong>Authentication</strong>:
-                                <ul class="mb-0">
-                                    <li><strong>Username/Password</strong>: Leave Username blank and put your webhook secret in Password.</li>
-                                    <li><strong>Headers</strong> (if your form has this field): Add <code>X-Auth-Token</code> = your webhook secret.</li>
-                                </ul>
-                            </li>
-                            <li>Click <strong>Test</strong>, then <strong>Save</strong></li>
-                        </ol>
+                        <div class="help mb-3">Shown with the address you opened this page from. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Replace it if your server is reached at a different address." data-explain-title="Webhook URL address" data-explain-template="info{{ app[0] }}UrlHelpTpl"><i class="bi bi-info-circle"></i></button>
+<template id="info{{ app[0] }}UrlHelpTpl">
+    <p>Shown with the address you opened this page from; replace it with your server's address if {{ app[1] }} reaches it differently.</p>
+</template>
+</div>
+                        <details class="g">
+                            <summary>Setup in {{ app[1] }}</summary>
+                            <div>
+                                <ol class="small mb-0">
+                                    <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
+                                    <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
+                                    <li>Set <strong>URL</strong>: copy the URL above</li>
+                                    <li>Under <strong>Events</strong>, enable <em>{{ app[2] }}</em> and <em>{{ app[3] }}</em></li>
+                                    <li><strong>Authentication</strong>:
+                                        <ul class="mb-0">
+                                            <li><strong>Username/Password</strong>: Leave Username blank and put your webhook secret in Password.</li>
+                                            <li><strong>Headers</strong> (if your form has this field): Add <code>X-Auth-Token</code> = your webhook secret.</li>
+                                        </ul>
+                                    </li>
+                                    <li>Click <strong>Test</strong>, then <strong>Save</strong></li>
+                                </ol>
+                            </div>
+                        </details>
                     </div>
-                    <!-- Radarr -->
-                    <div class="tab-pane fade" id="tab-radarr" role="tabpanel">
-                        <label class="form-label">Radarr Webhook URL</label>
-                        <div class="input-group mb-3">
-                            <input type="text" class="form-control webhook-url" id="radarrUrl" readonly>
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('radarrUrl')" aria-label="Copy Radarr webhook URL" title="Copy Radarr webhook URL">
-                                <i class="bi bi-clipboard"></i>
-                            </button>
-                        </div>
-                        <h3 class="automation-subheading small text-muted mb-2">Setup in Radarr</h3>
-                        <ol class="small mb-0">
-                            <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
-                            <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
-                            <li>Set <strong>URL</strong>: copy the URL above</li>
-                            <li>Under <strong>Events</strong>, enable <em>On Import</em> and <em>On Upgrade</em></li>
-                            <li><strong>Authentication</strong>:
-                                <ul class="mb-0">
-                                    <li><strong>Username/Password</strong>: Leave Username blank and put your webhook secret in Password.</li>
-                                    <li><strong>Headers</strong> (if your form has this field): Add <code>X-Auth-Token</code> = your webhook secret.</li>
-                                </ul>
-                            </li>
-                            <li>Click <strong>Test</strong>, then <strong>Save</strong></li>
-                        </ol>
-                    </div>
-                    <!-- Sportarr -->
-                    <div class="tab-pane fade" id="tab-sportarr" role="tabpanel">
-                        <label class="form-label">Sportarr Webhook URL</label>
-                        <div class="input-group mb-3">
-                            <input type="text" class="form-control webhook-url" id="sportarrUrl" readonly>
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('sportarrUrl')" aria-label="Copy Sportarr webhook URL" title="Copy Sportarr webhook URL">
-                                <i class="bi bi-clipboard"></i>
-                            </button>
-                        </div>
-                        <h3 class="automation-subheading small text-muted mb-2">Setup in Sportarr</h3>
-                        <ol class="small mb-0">
-                            <li>Go to <strong>Settings → Connect → + → Webhook</strong></li>
-                            <li>Set <strong>Name</strong>: <code>Plex Previews</code></li>
-                            <li>Set <strong>URL</strong>: copy the URL above</li>
-                            <li>Under <strong>Events</strong>, enable <em>On File Import</em> and <em>On File Upgrade</em></li>
-                            <li><strong>Authentication</strong>:
-                                <ul class="mb-0">
-                                    <li><strong>Username/Password</strong>: Leave Username blank and put your webhook secret in Password.</li>
-                                    <li><strong>Headers</strong> (if your form has this field): Add <code>X-Auth-Token</code> = your webhook secret.</li>
-                                </ul>
-                            </li>
-                            <li>Click <strong>Test</strong>, then <strong>Save</strong></li>
-                        </ol>
-                    </div>
+                    {% endfor %}
                 </div>
 
-                <div class="alert alert-info small mb-0 mt-3">
-                    <i class="bi bi-shield-lock me-1"></i>
-                    Authentication uses the webhook secret (or API token) configured in the
-                    <a href="#section-webhooks-settings">Settings section</a> below.
+                <div class="info mt-3">
+                    <i class="bi bi-shield-lock"></i>
+                    <span>Authentication uses the webhook secret (or API token) configured in the
+                    <a href="#section-webhooks-settings">Settings section</a> below.</span>
                 </div>
             </div>
         </div>
@@ -222,57 +196,60 @@
         <div class="card section-card" id="section-webhooks-custom">
             <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-plug me-2"></i>Custom Webhook
-                <span class="badge bg-secondary ms-2">Any HTTP client</span>
+                <span class="pill ms-2">Any HTTP client</span>
             </div>
             <div class="card-body">
-                <p>Use this endpoint to trigger preview generation from any tool that can send an HTTP POST — Tdarr, FileFlows, shell scripts, Bash hooks, anything. Send a file path and the app queues it through the same pipeline as Sonarr/Radarr.</p>
+                <p class="lead-copy">Use this endpoint to trigger preview generation from any tool that can send an HTTP POST — Tdarr, FileFlows, shell scripts, Bash hooks, anything. Send a file path and the app queues it through the same pipeline as Sonarr/Radarr.</p>
 
-                <label class="form-label">Custom Webhook URL</label>
+                <label class="form-label" for="customUrl">Custom Webhook URL</label>
                 <div class="input-group mb-2">
                     <input type="text" class="form-control webhook-url" id="customUrl" readonly>
                     <button class="btn btn-outline-secondary" type="button" onclick="copyUrl('customUrl')" aria-label="Copy custom webhook URL" title="Copy custom webhook URL">
                         <i class="bi bi-clipboard"></i>
                     </button>
                 </div>
-                <div class="form-text mb-3">
-                    To pin this URL to one configured server, use the
-                    <a href="#section-webhooks-sonarr-radarr">Publish to which server?</a>
-                    picker in the <em>arr apps</em> section above — it appends
-                    <code>?server_id=&lt;id&gt;</code> to every URL on this tab.
-                    You can also set a delay with <code>?delay=30</code> (or <code>&amp;delay=30</code>
-                    if the URL already contains <code>?</code>); omit it to use the default below.
-                </div>
+                <div class="help mb-3">
+                    Pin this URL to one server with the picker in the arr apps section. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Server pinning and delay parameter details." data-explain-title="Pinning and delay" data-explain-template="infoCustomPinTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoCustomPinTpl">
+    <p>To pin this URL to one configured server, use the <a href="#section-webhooks-sonarr-radarr">Publish to which server?</a> picker in the <em>arr apps</em> section above — it appends <code>?server_id=&lt;id&gt;</code> to every URL on this tab. You can also set a delay with <code>?delay=30</code> (or <code>&amp;delay=30</code> if the URL already contains <code>?</code>); omit it to use the default below.</p>
+</template>
+</div>
 
-                <h3 class="automation-subheading small text-muted">Payload — single file</h3>
-                <pre class="bg-body-tertiary p-2 rounded small mb-2"><code>{% raw %}{
+                <div class="d-grid gap-2 mb-3">
+                    <details class="g" open>
+                        <summary>Payload: single file</summary>
+                        <div><pre class="payload mb-0"><code>{% raw %}{
   "file_path": "/media/movies/Movie (2024)/Movie.mkv"
-}{% endraw %}</code></pre>
-
-                <h3 class="automation-subheading small text-muted">Payload — multiple files</h3>
-                <pre class="bg-body-tertiary p-2 rounded small mb-2"><code>{% raw %}{
+}{% endraw %}</code></pre></div>
+                    </details>
+                    <details class="g">
+                        <summary>Payload: multiple files</summary>
+                        <div><pre class="payload mb-0"><code>{% raw %}{
   "file_paths": ["/media/tv/Show/S01E01.mkv", "/media/tv/Show/S01E02.mkv"],
   "title": "Optional display label"
-}{% endraw %}</code></pre>
+}{% endraw %}</code></pre></div>
+                    </details>
+                </div>
 
-                <p class="small text-muted mb-3">
+                <p class="help mb-3">
                     Send <code>{% raw %}{"eventType": "Test"}{% endraw %}</code> to verify connectivity without triggering processing.
                 </p>
 
-                <details class="mb-2">
-                    <summary class="small fw-semibold" style="cursor:pointer;">Tdarr setup</summary>
-                    <div class="mt-2">
+                <details class="g mb-2">
+                    <summary>Tdarr setup</summary>
+                    <div>
                         <ol class="small">
                             <li>Open your Tdarr <strong>Flow</strong> and add a <strong>Send Web Request</strong> plugin after your transcode step</li>
                             <li>Set <strong>Method</strong>: <code>POST</code></li>
                             <li>Set <strong>Request URL</strong>: copy the Custom Webhook URL above</li>
                             <li>Set <strong>Request Headers</strong>:
-                                <pre class="bg-body-tertiary p-2 rounded small mt-1 mb-1"><code>{% raw %}{
+                                <pre class="payload mt-1 mb-1"><code>{% raw %}{
   "Content-Type": "application/json",
   "X-Auth-Token": "YOUR_TOKEN"
 }{% endraw %}</code></pre>
                             </li>
                             <li>Set <strong>Request Body</strong>:
-                                <pre class="bg-body-tertiary p-2 rounded small mt-1 mb-1"><code>{% raw %}{"file_path": "{{{args.inputFileObj._id}}}"}{% endraw %}</code></pre>
+                                <pre class="payload mt-1 mb-1"><code>{% raw %}{"file_path": "{{{args.inputFileObj._id}}}"}{% endraw %}</code></pre>
                             </li>
                             <li>Save the flow</li>
                         </ol>
@@ -280,9 +257,9 @@
                     </div>
                 </details>
 
-                <details class="mb-2">
-                    <summary class="small fw-semibold" style="cursor:pointer;">FileFlows setup</summary>
-                    <div class="mt-2">
+                <details class="g mb-2">
+                    <summary>FileFlows setup</summary>
+                    <div>
                         <p class="small mb-2">In FileFlows, install the <strong>Web</strong> plugin (Plugins page → search "Web") so the <strong>Web Request</strong> node becomes available, then add two nodes to the end of your flow:</p>
                         <ol class="small">
                             <li><strong>Add a Set Variable node</strong> just before the Web Request node — FileFlows doesn't expose a built-in "final output path" variable, so build it from the folder + final filename + extension:
@@ -298,7 +275,7 @@
                                     <li><strong>Content Type</strong>: <code>JSON</code></li>
                                     <li><strong>Headers</strong>: key <code>X-Auth-Token</code>, value <code>YOUR_TOKEN</code></li>
                                     <li><strong>Body</strong>:
-                                        <pre class="bg-body-tertiary p-2 rounded small mt-1 mb-1"><code>{% raw %}{"file_path": "{output_file}"}{% endraw %}</code></pre>
+                                        <pre class="payload mt-1 mb-1"><code>{% raw %}{"file_path": "{output_file}"}{% endraw %}</code></pre>
                                     </li>
                                 </ul>
                             </li>
@@ -308,12 +285,12 @@
                     </div>
                 </details>
 
-                <details>
-                    <summary class="small fw-semibold" style="cursor:pointer;">curl example</summary>
-                    <pre class="bg-body-tertiary p-2 rounded small mt-2 mb-0"><code>{% raw %}curl -X POST "http://your-server:8080/api/webhooks/custom" \
+                <details class="g">
+                    <summary>curl example</summary>
+                    <div><pre class="payload mb-0"><code>{% raw %}curl -X POST "http://your-server:8080/api/webhooks/custom" \
   -H "Content-Type: application/json" \
   -H "X-Auth-Token: YOUR_TOKEN" \
-  -d '{"file_path": "/media/movies/Movie.mkv"}'{% endraw %}</code></pre>
+  -d '{"file_path": "/media/movies/Movie.mkv"}'{% endraw %}</code></pre></div>
                 </details>
             </div>
         </div>
@@ -324,36 +301,49 @@
                 <i class="bi bi-sliders me-2"></i>Settings
             </div>
             <div class="card-body">
-                <div class="form-check form-switch mb-3">
-                    <input class="form-check-input" type="checkbox" id="webhookEnabled" checked>
-                    <label class="form-check-label" for="webhookEnabled">Enable webhook processing
-                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Master switch for every incoming webhook. Turn it off to pause them all without losing their settings."><i class="bi bi-info-circle"></i></button>
-                    </label>
-                    <div class="form-text">Master switch for all incoming webhooks. Turn off to pause without touching any individual settings.</div>
+                <div class="set">
+                    <div class="l">
+                        <label class="lbl" for="webhookEnabled">Enable webhook processing
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Master switch for every incoming webhook. Turn it off to pause them all without losing their settings." data-explain-title="Enable webhook processing" data-explain-template="infoWebhookEnabledTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
+                        <p class="help">Master switch for all incoming webhooks.</p>
+                        <template id="infoWebhookEnabledTpl">
+    <p>Master switch for all incoming webhooks. Turn off to pause without touching any individual settings.</p>
+</template>
+                    </div>
+                    <div class="r">
+                        <span class="pill ok" id="webhookStatePill"><i class="bi bi-check-circle-fill"></i> On</span>
+                        <div class="form-check form-switch m-0 p-0">
+                            <input class="form-check-input m-0" type="checkbox" id="webhookEnabled" checked>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="mb-3">
-                    <label for="webhookDelay" class="form-label">
-                        Delay before processing: <strong><span id="delayValue">60</span>s</strong>
-                        <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
-                                data-bs-toggle="tooltip" data-bs-placement="top"
-                                title="Initial wait for every webhook URL; source-specific URLs batch imports during this wait."
-                                data-explain-title="Webhook processing delay"
-                                data-explain-template="infoBatchDelayTpl"
-                                aria-label="Explain processing delay">
-                            <i class="bi bi-info-circle"></i>
-                        </button>
-                    </label>
-                    <input type="range" class="form-range" id="webhookDelay" min="10" max="300" step="10" value="60">
-                    <div class="form-text">
-                        Default initial wait for all webhook URLs. A URL's <code>delay</code> parameter overrides this value.
-                        Source-specific URLs restart the batch wait when a new file arrives.
+                <div class="set">
+                    <div class="l">
+                        <label for="webhookDelay" class="lbl">Delay before processing
+                            <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
+                                    data-bs-toggle="tooltip" data-bs-placement="top"
+                                    title="Initial wait for every webhook URL; source-specific URLs batch imports during this wait."
+                                    data-explain-title="Webhook processing delay"
+                                    data-explain-template="infoBatchDelayTpl"
+                                    aria-label="Explain processing delay">
+                                <i class="bi bi-info-circle"></i>
+                            </button>
+                        </label>
+                        <p class="help">Default initial wait for all webhook URLs.</p>
+                    </div>
+                    <div class="r">
+                        <input type="range" class="form-range" id="webhookDelay" min="10" max="300" step="10" value="60">
+                        <strong class="val"><span id="delayValue">60</span>s</strong>
                     </div>
                 </div>
 
                 <!-- Inline <template> for the batching-delay ⓘ modal. Rendered
                      into the shared #globalInfoModal via data-explain-template. -->
                 <template id="infoBatchDelayTpl">
+                    <p>Default initial wait for all webhook URLs. A URL's <code>delay</code> parameter overrides this value.
+                    Source-specific URLs restart the batch wait when a new file arrives.</p>
                     <p><strong>What it does:</strong> every webhook URL waits before processing.
                     Universal and per-server URLs keep a separate timer for each file version.
                     On the source-specific Radarr, Sonarr, Sportarr, Custom, and legacy Plex URLs,
@@ -400,28 +390,38 @@
                     batching delay does not change the wait between retries.</p>
                 </template>
 
-                <div class="mb-3">
-                    <label for="webhookSecret" class="form-label">Webhook Secret
-                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Optional secret webhooks can send instead of your API token, for when Sonarr/Radarr can't send custom headers."><i class="bi bi-info-circle"></i></button>
-                    </label>
-                    <div class="input-group">
-                        <input type="password" class="form-control" id="webhookSecret" placeholder="Optional — falls back to API token">
-                        <button class="btn btn-outline-secondary" type="button" onclick="toggleSecretVisibility()">
-                            <i class="bi bi-eye" id="secretToggleIcon"></i>
-                        </button>
-                        <button class="btn btn-outline-secondary" type="button" onclick="generateSecret()">
-                            Generate
-                        </button>
+                <div class="set col">
+                    <div class="l">
+                        <label for="webhookSecret" class="lbl">Webhook Secret
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Optional secret webhooks can send instead of your API token, for when Sonarr/Radarr can't send custom headers." data-explain-title="Webhook Secret" data-explain-template="infoWebhookSecretTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
+                        <p class="help">Authenticates incoming webhooks.</p>
+                        <template id="infoWebhookSecretTpl">
+    <p>Used by Sonarr/Radarr/Custom webhooks and embedded in the Plex Direct webhook URL
+        (Servers &rarr; your Plex card &rarr; Webhook &amp; Scanner).</p>
+    <p>Leave empty to use the main API token instead.</p>
+    <p>Rotating this value automatically re-registers any Plex Direct webhook the next time you save it from the Servers page.</p>
+</template>
                     </div>
-                    <div class="form-text">
-                        Dedicated secret for webhook authentication (Sonarr/Radarr/Custom, and also embedded in the Plex Direct webhook URL configured in Servers &rarr; your Plex card &rarr; Webhook &amp; Scanner). Leave empty to use the main API token instead. Rotating this value automatically re-registers any Plex Direct webhook the next time you save it from the Servers page.
+                    <div class="r">
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="webhookSecret" placeholder="Optional — falls back to API token">
+                            <button class="btn btn-outline-secondary" type="button" onclick="toggleSecretVisibility()" aria-label="Show or hide secret" title="Show or hide secret">
+                                <i class="bi bi-eye" id="secretToggleIcon"></i>
+                            </button>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" onclick="generateSecret()">
+                            <i class="bi bi-magic me-1"></i>Generate
+                        </button>
                     </div>
                 </div>
 
-                <p class="form-text mb-0 mt-2">
-                    Retry policy, restart recovery, and queue concurrency have moved to
-                    <a href="{{ url_for('main.settings') }}#section-processing">Settings → Processing → Job Execution</a>.
-                    Those controls apply to every job type, not just webhooks.
+                <p class="help mb-0 pt-3">
+                    Retry and queue settings moved to <a href="{{ url_for('main.settings') }}#section-processing">Settings &rarr; Processing</a>. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Those controls apply to every job type, not just webhooks." data-explain-title="Moved controls" data-explain-template="infoMovedControlsTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoMovedControlsTpl">
+    <p>Retry policy, restart recovery, and queue concurrency have moved to <a href="{{ url_for('main.settings') }}#section-processing">Settings → Processing → Job Execution</a>. Those controls apply to every job type, not just webhooks.</p>
+</template>
+
                 </p>
             </div>
         </div>
@@ -495,6 +495,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('webhookDelay').addEventListener('input', function() {
         document.getElementById('delayValue').textContent = this.value;
     });
+    document.getElementById('webhookEnabled').addEventListener('change', _syncWebhookStatePills);
 
     // Auto-save: any stateful control inside #pane-triggers that isn't
     // explicitly skipped kicks a debounced save through saveWebhookSettings.
@@ -513,10 +514,26 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// The header chip and the settings pill both mirror the master switch so the state is visible without scrolling.
+function _syncWebhookStatePills() {
+    var on = document.getElementById('webhookEnabled').checked;
+    var cls = 'pill ' + (on ? 'ok' : 'warn');
+    var html = on
+        ? '<i class="bi bi-check-circle-fill"></i> '
+        : '<i class="bi bi-pause-circle-fill"></i> ';
+    ['webhookStatePill', 'automationWebhookPill'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.className = cls + (id === 'automationWebhookPill' ? ' header-pill' : '');
+        el.innerHTML = html + (id === 'automationWebhookPill' ? (on ? 'Webhooks on' : 'Webhooks paused') : (on ? 'On' : 'Paused'));
+    });
+}
+
 async function loadWebhookSettings() {
     try {
         const data = await apiGet('/api/settings');
         document.getElementById('webhookEnabled').checked = data.webhook_enabled !== false;
+        _syncWebhookStatePills();
         document.getElementById('webhookDelay').value = data.webhook_delay || 60;
         document.getElementById('delayValue').textContent = data.webhook_delay || 60;
         if (data.webhook_secret && data.webhook_secret !== '****') {
@@ -550,6 +567,10 @@ async function saveWebhookSettings() {
 function copyUrl(elementId) {
     const input = document.getElementById(elementId);
     copyToClipboard(input.value, 'URL copied to clipboard.', 'Failed to copy URL.');
+    const button = input.nextElementSibling;
+    if (!button) return;
+    button.classList.add('copied');
+    setTimeout(function() { button.classList.remove('copied'); }, 1200);
 }
 
 function generateSecret() {

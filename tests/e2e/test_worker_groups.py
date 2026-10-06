@@ -196,21 +196,18 @@ def test_revision_conflict_preserves_draft_and_discard_reloads(
     expect(page.locator("#workerGroupName")).to_have_value("Overnight loudness")
 
 
-def test_dashboard_group_configuration_is_read_only_and_links_to_its_editor(
+def test_dashboard_group_header_reports_capacity_and_has_no_edit_pencil(
     authed_page: Page, app_url: str, group_api: dict
 ) -> None:
     page = authed_page
     mock_dashboard_defaults(page)
     page.goto(app_url + "/")
     row = page.locator('#workerGroupDashboard [data-group-id="cpu-night"]')
-    expect(row).to_contain_text("2 running")
-    expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
-        "aria-label", "2 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+    expect(row.locator('[data-group-indicator="configured"]')).to_have_attribute(
+        "aria-label", "2 of 2 configured workers busy. Worker counts set simultaneous tasks, not CPU cores."
     )
     expect(page.locator("#workerGroupDashboard [data-scale], #workerGroupDashboard [data-enable]")).to_have_count(0)
-    expect(row.get_by_role("link", name="Edit Overnight loudness")).to_have_attribute(
-        "href", "/settings?worker_group=cpu-night#section-workers"
-    )
+    expect(row.get_by_role("button", name="Edit Overnight loudness")).to_have_count(0)
     group_api["state"]["groups"][0]["enabled"] = False
     group_api["state"]["capacity"]["groups"][0].update(busy=0, finishing=2, state="disabled")
     page.evaluate("WorkerGroups.load()")
@@ -295,7 +292,9 @@ def test_group_refresh_preserves_worker_nodes_and_per_job_pause_occupancy(
     page.route("**/api/jobs/workers", lambda route: route.fulfill(json={"workers": [worker]}))
     page.goto(app_url + "/")
     row = page.locator('#workerGroupDashboard [data-group-id="cpu-night"]')
-    expect(row).to_contain_text("1 running")
+    expect(row.locator('[data-group-indicator="configured"]')).to_have_attribute(
+        "aria-label", "2 of 2 configured workers busy. Worker counts set simultaneous tasks, not CPU cores."
+    )
     expect(row).to_contain_text("1 paused")
     host = page.locator('[data-group-workers="cpu-night"]')
     expect(host.locator("[data-worker-key]")).to_have_count(1)
@@ -308,7 +307,6 @@ def test_group_refresh_preserves_worker_nodes_and_per_job_pause_occupancy(
     group_api["state"]["processing_paused"] = False
     page.evaluate("WorkerGroups.load()")
     expect(row).to_contain_text("1 paused")
-    expect(row).to_contain_text("1 running")
     assert page.evaluate(
         "window.savedWorkerNode === document.querySelector('[data-group-workers=\"cpu-night\"] [data-worker-key]')"
     )
@@ -348,12 +346,15 @@ def test_worker_wait_states_remain_distinct(
     row_data["next_available_at"] = "2099-10-05T23:00:00+11:00"
     authed_page.goto(app_url + "/")
     row = authed_page.locator('[data-group-id="cpu-night"]')
-    expect(row).to_contain_text(expected)
+    # The group's hours ride in the clock icon's label; only exceptional states get words in the header.
+    expect(row.get_by_role("img", name="Mon 23:00–07:00 next day")).to_be_visible()
+    if state != "active":
+        expect(row).to_contain_text(expected)
     if state in ("off_hours", "draining"):
         expect(row).to_contain_text("Next")
         expect(row).to_contain_text("Australia/Sydney")
-        expect(row.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
-            "aria-label", "2 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+        expect(row.locator('[data-group-indicator="configured"]')).to_have_attribute(
+            "aria-label", "0 of 2 configured workers busy. Worker counts set simultaneous tasks, not CPU cores."
         )
     else:
         expect(row).not_to_contain_text("Next")
@@ -577,7 +578,9 @@ def test_worker_group_editor_and_dashboard_fit_supported_sizes(
     page.locator('[data-edit="cpu-night"]').click()
     expect(page.locator("#workerGroupApplyRow")).to_be_hidden()
     expect(page.locator("#workerGroupName")).to_be_focused()
-    expect(page.locator("#workerGroupWindows")).to_contain_text("ends Tuesday")
+    expect(page.locator("#workerGroupWindows .tz-note .info-icon")).to_have_attribute(
+        "data-explain-html", re.compile("ends Tuesday")
+    )
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     if screenshots:
         if width < 576:
@@ -626,23 +629,21 @@ def test_paused_idle_groups_show_one_hold_and_no_redundant_zero_activity(
     expect(authed_page.locator("#workerGroupDashboard")).not_to_contain_text("Globally paused")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
     assert gpu.locator(".worker-group-description").inner_text().count("NVIDIA card") == 1
-    expect(gpu.locator('[data-group-indicator="configured"] summary')).to_have_attribute(
-        "aria-label", "2 configured workers. Worker counts set simultaneous tasks, not CPU cores."
+    expect(gpu.locator('[data-group-indicator="configured"]')).to_have_attribute(
+        "aria-label", "0 of 2 configured workers busy. Worker counts set simultaneous tasks, not CPU cores."
     )
-    expect(gpu.get_by_role("link", name="Edit NVIDIA card", exact=True)).to_have_attribute(
-        "href", "/settings?worker_group=gpu-video#section-workers"
-    )
+    expect(gpu.get_by_role("button", name="Edit NVIDIA card", exact=True)).to_have_count(0)
 
 
-def test_named_gpu_keeps_full_hardware_accessible_on_demand(authed_page: Page, app_url: str, group_api: dict) -> None:
+def test_named_gpu_shows_full_hardware_name_as_the_group_subtitle(
+    authed_page: Page, app_url: str, group_api: dict
+) -> None:
     mock_dashboard_defaults(authed_page)
     group_api["state"]["groups"][1]["name"] = "Video work"
     authed_page.goto(app_url + "/")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
-    expect(gpu.locator(".worker-group-hardware > span")).not_to_be_visible()
-    gpu.locator(".worker-group-hardware summary").click()
-    expect(gpu.locator(".worker-group-hardware > span")).to_be_visible()
-    expect(gpu.locator(".worker-group-hardware > span")).to_have_text("NVIDIA card")
+    expect(gpu.locator(".hw")).to_have_text("NVIDIA card")
+    expect(authed_page.locator('[data-system-group="gpu-video"] small')).to_have_text("NVIDIA card")
 
 
 @pytest.mark.parametrize("group_id", ["cpu-night", "gpu-video", "deleted-group"])

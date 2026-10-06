@@ -322,3 +322,48 @@ class TestAdjust:
             "Intro 2:45 – 2:59"
         )
         assert api.saves == []
+
+
+@pytest.mark.e2e
+class TestPageChrome:
+    def test_the_empty_search_offers_chips_and_remembers_recent_files(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page)
+        authed_page.goto(f"{app_url}/inspector")
+        empty = authed_page.locator("#inspEmpty")
+        expect(empty).to_be_visible()
+        expect(authed_page.locator("#inspRecent")).to_be_hidden()
+
+        authed_page.locator("#inspChipPath").click()
+        expect(authed_page.locator("#inspQuery")).to_have_value("/")
+        authed_page.locator("#inspQuery").fill("")
+
+        _open(authed_page, app_url, fx.EPISODE)
+        authed_page.locator("#inspShowResults").click()
+        expect(authed_page.locator("#inspRecentList .insp-recent-row")).to_have_count(1)
+        authed_page.locator("#inspRecentList .insp-recent-row").click()
+        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy")
+
+        authed_page.locator("#inspShowResults").click()
+        authed_page.locator("#inspQuery").fill("matrix")
+        expect(empty).to_be_hidden()
+
+    def test_the_page_header_stays_without_a_logs_button(self, authed_page: Page, app_url: str) -> None:
+        fx.install(authed_page)
+        _open(authed_page, app_url, fx.EPISODE)
+        expect(authed_page.locator("#inspSearchTitle")).to_have_text("Inspector")
+        expect(authed_page.locator(".insp-page-action")).to_have_count(0)
+        expect(authed_page.locator("#inspSectionNav a:visible")).to_have_text(["Timeline", "Evidence", "Servers"])
+
+    def test_a_file_that_cant_be_opened_offers_retry_and_copy_path(self, authed_page: Page, app_url: str) -> None:
+        api = fx.install(authed_page)
+        good = api.files[fx.EPISODE]
+        api.files[fx.EPISODE] = (500, {"error": "The server hung up"})
+        _open(authed_page, app_url, fx.EPISODE)
+        card = authed_page.locator('[data-state="Couldn\'t open this file"]')
+        expect(card).to_contain_text("The server hung up")
+        expect(card.locator("#inspErrorCopyPath")).to_be_visible()
+
+        api.files[fx.EPISODE] = good
+        card.locator("#inspRetry").click()
+        expect(authed_page.locator("#inspTitle")).to_have_text("Blood Legacy")
+        expect(card).to_have_count(0)

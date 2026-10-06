@@ -62,7 +62,9 @@ function renderNotifications(notifications) {
 
     if (empty) empty.classList.add('d-none');
     if (badge) {
-        badge.textContent = notifications.length.toString();
+        // The pill is 16px wide: past 9 it reads "9+" and the full count stays in the tooltip.
+        badge.textContent = notifications.length > 9 ? '9+' : String(notifications.length);
+        badge.title = notifications.length + ' unread notifications';
         badge.classList.remove('d-none');
     }
     // Mobile-collapsed label includes the count so users see "Notifications (3)"

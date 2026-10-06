@@ -46,8 +46,54 @@ function changeJobSearch(value) {
 function changeJobStatus(value) {
     jobStatusFilter = value;
     jobPage = 1;
+    renderStatusTabs();
     loadJobs({force: true});
 }
+
+// Latest /api/jobs/stats, kept so the status tabs and the Clear jobs menu can show counts.
+let _jobStats = null;
+// Latest chapter_warning_count from /api/jobs; drives the Chapter warnings tab.
+let _chapterWarningCount = 0;
+
+// The tabs and the hidden Status select describe the same filter; this keeps both in step with jobStatusFilter.
+function renderStatusTabs() {
+    const select = document.getElementById('jobStatusFilter');
+    if (select) select.value = jobStatusFilter;
+    document.querySelectorAll('#jobStatusTabs [data-status]').forEach(tab => {
+        const on = tab.dataset.status === jobStatusFilter;
+        tab.classList.toggle('on', on);
+        tab.setAttribute('aria-pressed', String(on));
+    });
+    const warningTab = document.getElementById('chapterWarningsTab');
+    if (warningTab) warningTab.hidden = !(_chapterWarningCount > 0 || jobStatusFilter === 'chapter_warnings');
+    const warningCount = document.querySelector('[data-status-count="chapter_warnings"]');
+    if (warningCount) warningCount.textContent = _chapterWarningCount > 0 ? _chapterWarningCount.toLocaleString() : '';
+    if (!_jobStats) return;
+    document.querySelectorAll('[data-status-count]').forEach(el => {
+        const key = el.dataset.statusCount;
+        if (key === 'chapter_warnings') return;
+        const n = key === 'active' ? Number(_jobStats.pending || 0) + Number(_jobStats.running || 0) : Number(_jobStats[key] || 0);
+        el.textContent = n.toLocaleString();
+    });
+    document.querySelectorAll('[data-clear-count]').forEach(el => {
+        el.textContent = Number(_jobStats[el.dataset.clearCount] || 0).toLocaleString();
+    });
+    updateClearJobsButton();
+}
+
+// "Clear N jobs": N follows the ticked statuses.
+function updateClearJobsButton() {
+    const text = document.getElementById('clearJobsButtonText');
+    const button = document.getElementById('clearJobsButton');
+    if (!text || !button) return;
+    const checked = Array.from(document.querySelectorAll('.clear-status-cb:checked')).map(cb => cb.value);
+    const total = checked.reduce((sum, status) => sum + Number((_jobStats || {})[status] || 0), 0);
+    text.textContent = `Clear ${total.toLocaleString()} ${total === 1 ? 'job' : 'jobs'}`;
+    button.disabled = checked.length === 0;
+}
+document.addEventListener('change', event => {
+    if (event.target.closest && event.target.closest('.clear-status-cb')) updateClearJobsButton();
+});
 
 function jobFiltersActive() {
     return !!(jobSearch || jobStatusFilter !== 'active' || jobServerFilter || jobLibraryFilter || jobKindFilter);
@@ -125,6 +171,7 @@ function clearJobFilters(status = 'active') {
         const control = document.getElementById(id);
         if (control) control.value = id === 'jobStatusFilter' ? status : '';
     }
+    renderStatusTabs();
     updateJobLibraryChoices();
     _reloadFilteredJobs();
 }
@@ -628,6 +675,15 @@ const _MEDIA_SERVER_STATUS_BADGES = {
     disabled:      { label: 'Disabled',      cls: 'bg-secondary' },
 };
 
+// A server row shows its state as a coloured dot only; the label or error text rides in title + aria-label.
+const _MEDIA_SERVER_DOT_CLASS = {
+    connected:     'ok',
+    unreachable:   'bad',
+    unauthorised:  'bad',
+    misconfigured: 'bad',
+    disabled:      '',
+};
+
 const _MEDIA_SERVER_TYPE_ICONS = {
     plex:     'bi-play-btn',
     emby:     'bi-emoji-laughing',
@@ -747,28 +803,29 @@ async function updateMediaServersStatus() {
         const badge = _MEDIA_SERVER_STATUS_BADGES[s.status]
             || { label: s.status || 'Unknown', cls: 'bg-secondary' };
         const typeLabel = (s.type || '').toUpperCase();
-        const tooltip = s.error ? ` title="${escapeHtmlAttr(s.error)}"` : '';
-        // URL is reference info, not the primary anchor — render smaller
-        // and dimmer than the server name above it so the eye lands on
-        // the name + status badge first.
-        const url = s.url ? `<div class="text-muted text-truncate" style="max-width: 100%; font-size: 0.72rem; opacity: 0.7;" title="${escapeHtmlAttr(s.url)}">${escapeHtmlText(s.url)}</div>` : '';
+        const dotClass = _MEDIA_SERVER_DOT_CLASS[s.status] ?? 'warn';
+        const stateText = s.error || badge.label;
+        // URL is reference info, not the primary anchor — mono and faint under the name.
+        const url = s.url ? `<div class="dash-server-host text-truncate" title="${escapeHtmlAttr(s.url)}">${escapeHtmlText(s.url)}</div>` : '';
         // Prefer the vendor SVG logo; fall back to the Bootstrap icon when
         // the server type is unknown (defensive — should never happen for
         // configured servers).
         const logo = _vendorLogo(s.type, 18) ||
-            `<i class="bi ${_MEDIA_SERVER_TYPE_ICONS[s.type] || 'bi-hdd-network'} me-2"></i>`;
+            `<i class="bi ${_MEDIA_SERVER_TYPE_ICONS[s.type] || 'bi-hdd-network'}" aria-hidden="true"></i>`;
+        const failed = dotClass === 'bad';
         return `
-            <div class="d-flex justify-content-between align-items-start mb-2">
-                <div class="d-flex flex-column" style="min-width: 0;">
-                    <span>${logo}<strong>${escapeHtmlText(s.name || typeLabel || 'Server')}</strong></span>
+            <div class="dash-server${failed ? ' is-failed' : ''}">
+                <span class="dash-server-logo">${logo}</span>
+                <div class="dash-server-text">
+                    <div class="dash-server-name text-truncate">${escapeHtmlText(s.name || typeLabel || 'Server')}</div>
                     ${url}
                 </div>
-                <span class="badge ${badge.cls}"${tooltip}>${escapeHtmlText(badge.label)}</span>
+                <span class="dot ${dotClass}" role="img" aria-label="${escapeHtmlAttr(stateText)}" title="${escapeHtmlAttr(stateText)}"></span>
             </div>
         `;
     }).join('');
 
-    container.innerHTML = rows;
+    container.innerHTML = `<div class="dash-servers">${rows}</div>`;
 }
 
 // Kept for their callers: escapeHtml itself is safe in both places now.
@@ -785,7 +842,6 @@ async function loadLibraries() {
         const data = await apiGet('/api/libraries');
         libraries = data.libraries || [];
         librariesLoadError = null;
-        await updateLibraryList();
         if (document.getElementById('newJobModal')?.classList.contains('show')) {
             _renderJobLibraryList(libraries);
             _updateJobScopeBadge();
@@ -795,29 +851,22 @@ async function loadLibraries() {
         console.error('Failed to load libraries:', error);
         librariesLoadError = error.message || 'Unknown error';
         updateMediaServersStatus();
-
-        const listEl = document.getElementById('libraryList');
-        if (!listEl) return;
-
-        // Dashboard Quick Actions teaser stays short and actionable; the
-        // Settings page gets the full backend-supplied detail since it's a
-        // dedicated troubleshooting surface.
-        const parentCardHeader = listEl.closest('.card')?.querySelector('.card-header')?.textContent || '';
-        const isDashboardTeaser = parentCardHeader.includes('Quick Actions');
-
-        if (isDashboardTeaser) {
-            listEl.innerHTML =
-                '<div class="text-warning small d-flex align-items-start gap-2">' +
-                '<i class="bi bi-exclamation-triangle-fill mt-1"></i>' +
-                '<span>Can\'t load libraries right now. ' +
-                '<a href="/settings" class="text-decoration-none">Check your Plex connection</a>.</span>' +
-                '</div>';
-        } else {
-            listEl.innerHTML =
-                `<div class="text-danger small">Failed to load libraries. ${escapeHtml(librariesLoadError)}</div>`;
-        }
     }
 }
+
+// The bar line already shows "processed / total"; a backend step message that ends with the same numbers
+// ("Checking Plex loudness… 382/124896", "2340/126811 completed") would print them twice. Only a trailing
+// count that equals the displayed one is removed, so other status text is left as the backend wrote it.
+function _dedupeActivityCount(text, processed, total) {
+    const shownProcessed = Number(processed) || 0;
+    const shownTotal = Number(total) || 0;
+    if (!text || shownTotal <= 0) return text;
+    const match = String(text).match(/^(.*?)[\s·—:–-]*(\d[\d,]*)\s*\/\s*(\d[\d,]*)(?:\s+completed)?\s*$/i);
+    if (!match) return text;
+    if (Number(match[2].replace(/,/g, '')) !== shownProcessed || Number(match[3].replace(/,/g, '')) !== shownTotal) return text;
+    return match[1].replace(/[\s…·.:—–-]+$/, '').trim();
+}
+window._dedupeActivityCount = _dedupeActivityCount;
 
 // ``{force: true}`` re-renders even while the pointer is over the queue: after the user's own Pause/Resume click has
 // landed, the hover guard would otherwise keep the row stale until the pointer moves away.
@@ -857,6 +906,8 @@ async function _loadJobsPage(request) {
         const chapterNoticeText = document.getElementById('chapterWarningsText');
         const chapterWarnings = Number(data.chapter_warning_count);
         const hasChapterWarnings = Number.isInteger(chapterWarnings) && chapterWarnings > 0;
+        _chapterWarningCount = hasChapterWarnings ? chapterWarnings : 0;
+        renderStatusTabs();
         if (chapterNotice) chapterNotice.classList.toggle('d-none', !hasChapterWarnings);
         if (chapterNoticeText && hasChapterWarnings) {
             chapterNoticeText.textContent = `${chapterWarnings.toLocaleString()} ${chapterWarnings === 1 ? 'job ended' : 'jobs ended'} with chapter issues. Review the saved results before running those jobs again.`;
@@ -870,6 +921,7 @@ async function _loadJobsPage(request) {
         jobsLoadedOnce = true;
         updateJobQueue(force);
         renderJobPagination();
+        renderGlobalPauseResume();
 
         // Deep-link auto-open (Tier 3.15 of job-modal rebuild): if the
         // page was loaded with ``?job=<id>`` in the URL, pop the modal
@@ -995,9 +1047,29 @@ async function loadJobStats() {
         document.getElementById('statFailed').textContent = stats.failed || 0;
         document.getElementById('statCancelled').textContent = stats.cancelled || 0;
         document.getElementById('statTotal').textContent = stats.total || 0;
+        renderJobOutcomeBar(stats);
+        _jobStats = stats;
+        renderStatusTabs();
     } catch (error) {
         console.error('Failed to load job stats:', error);
     }
+}
+
+// 6px segmented bar under the stat tiles: finished outcomes plus whatever is still active.
+function renderJobOutcomeBar(stats) {
+    const bar = document.getElementById('jobOutcomeBar');
+    if (!bar) return;
+    const total = Number(stats.total) || 0;
+    const segments = [
+        ['completed', 'ok', Number(stats.completed) || 0],
+        ['failed', 'bad', Number(stats.failed) || 0],
+        ['cancelled', 'warn', Number(stats.cancelled) || 0],
+        ['active', 'run', (Number(stats.running) || 0) + (Number(stats.pending) || 0)],
+    ].filter(([, , count]) => count > 0);
+    bar.hidden = total === 0 || segments.length === 0;
+    bar.innerHTML = segments.map(([label, tone, count]) =>
+        `<i class="${tone}" style="flex: ${count} 1 0" title="${count.toLocaleString()} ${label}"></i>`).join('');
+    bar.setAttribute('aria-label', 'Job outcomes: ' + segments.map(([label, , count]) => `${count} ${label}`).join(', '));
 }
 
 async function loadProcessingState() {
@@ -1023,11 +1095,16 @@ async function loadProcessingState() {
 async function loadPendingWebhooks() {
     const chip = document.getElementById('pendingWebhooksChip');
     const chipText = document.getElementById('pendingWebhooksChipText');
+    const quickPill = document.getElementById('quickWebhookPending');
     if (!chip || !chipText) return;
 
     try {
         const data = await apiGet('/api/webhooks/pending');
         const pending = data.pending || [];
+        if (quickPill) {
+            quickPill.textContent = pending.length;
+            quickPill.hidden = pending.length === 0;
+        }
         if (pending.length === 0) {
             chip.classList.add('d-none');
             chip.classList.remove('d-inline-flex');
@@ -1039,12 +1116,13 @@ async function loadPendingWebhooks() {
         chip.classList.remove('d-none');
         chip.classList.add('d-inline-flex');
         const n = pending.length;
-        chipText.textContent = `${n} waiting`;
+        chipText.textContent = n === 1 ? '1 webhook pending' : `${n} webhooks pending`;
         chip.title = n === 1
             ? 'One webhook is waiting — click to jump to its row in the queue'
             : `${n} webhooks waiting — click to jump to the next one in the queue`;
     } catch (error) {
         // Network blip: hide rather than show a stale count.
+        if (quickPill) quickPill.hidden = true;
         chip.classList.add('d-none');
         chip.classList.remove('d-inline-flex');
     }
@@ -1105,22 +1183,29 @@ async function retryNowFromRow(jobId) {
     }
 }
 
+// Pause lives in the Workers header because it controls workers. It only offers itself while there is work to hold;
+// Resume is always offered while paused.
 function renderGlobalPauseResume() {
     const pauseTitle = 'Pause all processing, including current files. Worker-group reductions instead let current files finish.';
     const resumeTitle = 'Clear the manual pause. Global pause schedules and job-specific pauses still apply.';
-    // Hide the verbose "Pause Processing" / "Resume Processing" label on
-    // mobile (xs <576px) — keep the icon. Title attr + aria-label keep
-    // it accessible and tooltip-discoverable. On desktop the full label
-    // returns via .d-sm-inline.
-    const pauseBtn = `<button class="btn btn-sm btn-outline-warning text-nowrap" onclick="pauseProcessing()" title="${escapeHtml(pauseTitle)}" aria-label="Pause all processing, including current files">
-        <i class="bi bi-pause-fill"></i><span class="d-none d-sm-inline ms-1">Pause Processing</span>
+    const pauseBtn = `<button type="button" class="btn dash-btn-sm" onclick="pauseProcessing()" title="${escapeHtml(pauseTitle)}" aria-label="Pause all processing, including current files">
+        <i class="bi bi-pause-fill" aria-hidden="true"></i><span>Pause</span>
+    </button><button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(pauseTitle)}" aria-label="What Pause does"><i class="bi bi-info-circle" aria-hidden="true"></i></button>`;
+    const resumeBtn = `<button type="button" class="btn dash-btn-sm dash-resume" onclick="resumeProcessing()" title="${escapeHtml(resumeTitle)}" aria-label="Resume all processing">
+        <i class="bi bi-play-fill" aria-hidden="true"></i><span>Resume</span>
     </button>`;
-    const resumeBtn = `<button class="btn btn-sm btn-outline-success text-nowrap" onclick="resumeProcessing()" title="${escapeHtml(resumeTitle)}" aria-label="Resume all processing">
-        <i class="bi bi-play-fill"></i><span class="d-none d-sm-inline ms-1">Resume Processing</span>
-    </button>`;
-    const html = processingPaused ? resumeBtn : pauseBtn;
-    const elQueue = document.getElementById('globalPauseResumeQueue');
-    if (elQueue) elQueue.innerHTML = html;
+    const hasWork = _latestDashboardWorkers.some(w => w.status === 'processing')
+        || jobs.some(j => j.status === 'running' || j.status === 'pending');
+    const html = processingPaused ? resumeBtn : hasWork ? pauseBtn : '';
+    const el = document.getElementById('globalPauseResumeQueue');
+    if (el && el._html !== html) {
+        el._html = html;
+        _disposeBootstrapTooltips(el);
+        el.innerHTML = html;
+        _initBootstrapTooltips(el);
+    }
+    const pill = document.getElementById('workersPausedPill');
+    if (pill) pill.hidden = !processingPaused;
 }
 
 async function pauseProcessing() {
@@ -1160,15 +1245,13 @@ function updateSystemStatus(status) {
         cachedDetectedGpus = [];
     }
 
-    html += '<div class="d-flex align-items-center">';
     if (status.running_job) {
-        html += `<span class="badge bg-primary">Processing</span>`;
+        html = '<span class="pill run"><span class="dot run live" aria-hidden="true"></span>Processing</span>';
     } else if (status.pending_jobs > 0) {
-        html += `<span class="badge bg-secondary">${status.pending_jobs} job(s) pending</span>`;
+        html = `<span class="pill"><span class="dot" aria-hidden="true"></span>${status.pending_jobs} job(s) pending</span>`;
     } else {
-        html += `<span class="badge bg-success">Idle</span>`;
+        html = '<span class="pill"><span class="dot" aria-hidden="true"></span>Idle</span>';
     }
-    html += '</div>';
 
     document.getElementById('systemStatus').innerHTML = html;
 
@@ -1313,9 +1396,9 @@ function renderDashboardGpuConfig() {
         html += `</span>`;
         if (enabled) {
             html += `<span class="d-flex align-items-center gap-1">`;
-            html += `<button type="button" class="btn btn-sm btn-outline-secondary gpu-scale-btn" onclick="scaleGpuWorkers('${safeDevice}', -1)" title="Remove one worker"${workers <= 0 ? ' disabled' : ''}><i class="bi bi-dash-lg"></i></button>`;
+            html += `<button type="button" class="btn btn-sm btn-outline-secondary gpu-scale-btn" onclick="scaleGpuWorkers('${safeDevice}', -1)" title="Remove one worker" aria-label="Remove one worker"${workers <= 0 ? ' disabled' : ''}><i class="bi bi-dash-lg"></i></button>`;
             html += `<span class="badge bg-primary gpu-worker-badge" data-device="${safeDevice}" style="min-width: 1.5rem;">${workers}</span>`;
-            html += `<button type="button" class="btn btn-sm btn-outline-success gpu-scale-btn" onclick="scaleGpuWorkers('${safeDevice}', 1)" title="Add one worker"><i class="bi bi-plus-lg"></i></button>`;
+            html += `<button type="button" class="btn btn-sm btn-outline-success gpu-scale-btn" onclick="scaleGpuWorkers('${safeDevice}', 1)" title="Add one worker" aria-label="Add one worker"><i class="bi bi-plus-lg"></i></button>`;
             html += `</span>`;
         } else {
             const enableTitle = (saved.workers || 0) > 0
@@ -1393,37 +1476,6 @@ async function scaleGpuWorkers(device, direction) {
         renderDashboardGpuConfig();
         showToast('Error', `Failed to update GPU workers: ${error.message}`, 'danger');
     }
-}
-
-async function updateLibraryList() {
-    const listEl = document.getElementById('libraryList');
-    if (!listEl) return;
-
-    // Phase H6: replaced the flat per-library list with a compact summary.
-    // The full per-server library detail lives on /servers; the new New Job
-    // modal handles per-server picking. This card just orients the user.
-    if (!libraries || libraries.length === 0) {
-        listEl.innerHTML =
-            '<div class="text-muted small">' +
-            'No libraries enabled. <a href="/servers" class="text-decoration-none">Add or enable libraries on the Servers page</a>.' +
-            '</div>';
-        return;
-    }
-
-    const distinctServers = new Set();
-    for (const l of libraries) {
-        if (l && l.server_id) distinctServers.add(l.server_id);
-    }
-    const serverCount = distinctServers.size || 1;
-    const libCount = libraries.length;
-
-    listEl.innerHTML =
-        `<div class="d-flex justify-content-between align-items-center">` +
-        `<span class="small"><strong>${libCount}</strong> librar${libCount === 1 ? 'y' : 'ies'} ` +
-        `across <strong>${serverCount}</strong> server${serverCount === 1 ? '' : 's'}</span>` +
-        `<a href="/servers" class="small text-decoration-none">Manage <i class="bi bi-arrow-right-short"></i></a>` +
-        `</div>` +
-        `<div class="form-text mt-1">Use <strong>Start New Job</strong> above to scan a specific server / libraries.</div>`;
 }
 
 // Refresh the Schedules library checkbox group when the user picks a different
@@ -1586,23 +1638,25 @@ function toggleActiveJobFiles(jobId) {
 
 const PRIORITY_LABELS = {1: 'High', 2: 'Normal', 3: 'Low'};
 const PRIORITY_BADGE_CLASS = {1: 'bg-danger', 2: 'bg-primary', 3: 'bg-secondary'};
-const PRIORITY_DOT_CLASS = {1: 'priority-dot-high', 2: 'priority-dot-normal', 3: 'priority-dot-low'};
+const PRIORITY_ICONS = {1: 'bi-arrow-up', 2: 'bi-dash', 3: 'bi-arrow-down'};
 
+function _priorityLabelHtml(pri) {
+    return `<i class="bi ${PRIORITY_ICONS[pri] || 'bi-dash'}" aria-hidden="true"></i><span>${PRIORITY_LABELS[pri] || 'Normal'}</span>`;
+}
+
+// Running and pending jobs get a borderless dropdown (icon + word + caret); finished jobs show plain read-only text.
 function renderPriorityCell(job) {
     const pri = job.priority || 2;
-    const label = PRIORITY_LABELS[pri] || 'Normal';
-    const badgeClass = PRIORITY_BADGE_CLASS[pri] || 'bg-primary';
     const isActive = job.status === 'running' || job.status === 'pending';
     if (!isActive) {
-        return `<span class="priority-readonly priority-${pri}">${label}</span>`;
+        return `<span class="priority-readonly priority-${pri}">${_priorityLabelHtml(pri)}</span>`;
     }
     const items = [1, 2, 3].map(function (p) {
-        const active = p === pri ? ' active' : '';
-        const dot = `<span class="priority-dot ${PRIORITY_DOT_CLASS[p]}"></span>`;
-        return `<li><a class="dropdown-item${active}" href="#" onclick="setJobPriority('${escapeHtml(job.id)}', ${p}); return false;">${dot}${PRIORITY_LABELS[p]}</a></li>`;
+        const current = p === pri;
+        return `<li><a class="dropdown-item priority-item priority-${p}${current ? ' active' : ''}" href="#" role="menuitemradio" aria-checked="${current}" onclick="setJobPriority('${escapeHtml(job.id)}', ${p}); return false;">${_priorityLabelHtml(p)}${current ? '<i class="bi bi-check2 ms-auto" aria-hidden="true"></i>' : ''}</a></li>`;
     }).join('');
     return `<div class="dropdown d-inline-block">
-        <button class="btn dropdown-toggle priority-btn priority-${pri}" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="cursor:pointer;">${label}</button>
+        <button class="btn priority-btn priority-${pri}" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Priority: ${PRIORITY_LABELS[pri] || 'Normal'}. Change priority" title="Change priority">${_priorityLabelHtml(pri)}<i class="bi bi-chevron-down caret" aria-hidden="true"></i></button>
         <ul class="dropdown-menu">${items}</ul>
     </div>`;
 }
@@ -1620,7 +1674,8 @@ async function setJobPriority(jobId, priority) {
         if (btn) {
             btn.classList.remove('priority-1', 'priority-2', 'priority-3');
             btn.classList.add('priority-' + priority);
-            btn.textContent = PRIORITY_LABELS[priority] || 'Normal';
+            btn.innerHTML = _priorityLabelHtml(priority) + '<i class="bi bi-chevron-down caret" aria-hidden="true"></i>';
+            btn.setAttribute('aria-label', `Priority: ${PRIORITY_LABELS[priority] || 'Normal'}. Change priority`);
         }
     }
 
@@ -1812,7 +1867,19 @@ function _queueMetadataHtml(job, title) {
     else if (associated.length > 1) owners = `<details class="queue-owner-details"><summary aria-label="Show associated library servers">${hasOrigin ? '+' : ''}${associated.length} servers</summary><div class="queue-owner-list">${associated.map(pair => `<div>${ownerBadge(pair)}</div>`).join('')}</div></details>`;
     const servers = primary || owners ? `<span class="queue-server-group">${primary}${owners}</span>` : '';
     const source = job.config?.source ? `<span class="queue-trigger-context">${_serverBadge({config: job.config})}</span>` : '';
-    return _jobKindBadgeHtml(job) + _libraryTagHtml(job, title) + servers + source;
+    const failedFiles = job.status === 'failed' ? Number(job.progress?.outcome?.failed) || 0 : 0;
+    const failure = failedFiles > 0
+        ? `<span class="queue-fail-note">${failedFiles.toLocaleString()} ${failedFiles === 1 ? 'file' : 'files'} failed</span>` : '';
+    return _libraryTagHtml(job, title) + servers + source + _jobKindBadgeHtml(job) + failure;
+}
+
+// The 30px tile left of a job's title: its type colour, or a red warning once it failed.
+function _jobTypeTileHtml(job) {
+    const failed = job.status === 'failed';
+    const tone = ({intro_credits: 'intro', loudness: 'loud'})[job.kind] || 'previews';
+    const icon = failed ? 'bi-exclamation-triangle-fill'
+        : ({intro_credits: 'bi-skip-forward', loudness: 'bi-soundwave'})[job.kind] || 'bi-film';
+    return `<span class="tico ${failed ? 'bad' : tone}" aria-hidden="true"><i class="bi ${icon}"></i></span>`;
 }
 
 // 'own' = paused on its own (it has handed its job slot back), 'all' = held by Pause all (keeps its slot), '' = neither.
@@ -1877,11 +1944,11 @@ function _markersFilesBody(job) {
         const requested = paths.length ? paths.slice(0, 5).map((path, index) => ({path, name: names[index] || '', title: titles.get(path) || ''})) : names.slice(0, 5).map(name => ({name}));
         return `<h3 class="job-detail-heading">Requested paths <span class="text-body-secondary">${total.toLocaleString()}</span></h3>`
             + _queueFileRows(requested)
-            + (total > 5 ? `<p class="small text-body-secondary mb-1">Showing 5 of ${total.toLocaleString()} requested paths.</p>` : '')
-            + `<button type="button" class="btn btn-sm btn-outline-secondary queue-files-all" onclick="openJobDetails('${escapeHtml(job.id)}', 'files', 'requested')">View all requested paths<i class="bi bi-arrow-right ms-2" aria-hidden="true"></i></button>`;
+            + (total > 5 ? `<p class="queue-files-note">Showing 5 of ${total.toLocaleString()} requested paths.</p>` : '')
+            + `<button type="button" class="btn dash-btn-sm queue-files-all" onclick="openJobDetails('${escapeHtml(job.id)}', 'files', 'requested')">View all requested paths<i class="bi bi-arrow-right" aria-hidden="true"></i></button>`;
     }
-    if (!cached || !cached.data) return '<strong>Files:</strong> <span class="text-muted">Loading…</span>';
-    if (cached.data.error) return '<strong>Files:</strong> <span class="text-muted">Could not read files. Open logs and files below, or try again.</span>';
+    if (!cached || !cached.data) return '<div class="queue-state">Loading…</div>';
+    if (cached.data.error) return '<div class="queue-state is-error">Could not read files. Open logs and files below, or try again.</div>';
     return _markersFilesHtml(cached.data, job);
 }
 
@@ -1891,7 +1958,7 @@ function _queueFileRows(files) {
         const basename = String(file.name || path.split(/[\\/]/).pop() || file.title || 'File');
         const title = String(file.title || '');
         const inspector = /\.(mkv|mp4|avi|m4v|ts|wmv|mov|flv|webm)$/i.test(path) && (/^\//.test(path) || /^[a-z]:[\\/]/i.test(path) || /^\\\\/.test(path))
-            ? `<a class="btn btn-sm queue-inspector" href="/inspector?path=${escapeHtmlAttr(encodeURIComponent(path))}" target="_blank" rel="noopener" title="Open in Inspector" aria-label="Inspect ${escapeHtmlAttr(basename)}"><i class="bi bi-eye" aria-hidden="true"></i></a>` : '';
+            ? `<a class="ibtn queue-inspector" href="/inspector?path=${escapeHtmlAttr(encodeURIComponent(path))}" target="_blank" rel="noopener" title="Open in Inspector" aria-label="Inspect ${escapeHtmlAttr(basename)}"><i class="bi bi-eye" aria-hidden="true"></i></a>` : '';
         return `<div class="queue-file-row"><div class="queue-file-text">${path
             ? `<details data-file-index="${index}"><summary>${escapeHtml(basename)}</summary><div class="queue-full-path">${escapeHtml(path)}</div></details>`
             : `<span>${escapeHtml(basename)}</span>`}${title && title !== basename ? `<span class="queue-file-title text-body-secondary">${escapeHtml(title)}</span>` : ''}</div>${inspector}</div>`;
@@ -1902,11 +1969,12 @@ function _markersFilesHtml(data, job) {
     const files = Array.isArray(data.files) ? data.files : [];
     const total = Math.max(Number(data.total) || 0, files.length);
     if (!files.length) {
-        return `<p class="text-body-secondary small mb-0">${job.status === 'pending' ? 'Files will be listed when the job runs.' : 'No files listed yet.'}</p>`;
+        return `<div class="queue-state">${job.status === 'pending' ? 'Files will be listed when the job runs.' : 'No files listed yet.'}</div>`;
     }
     return `<h3 class="job-detail-heading">Files <span class="text-body-secondary">${total.toLocaleString()}</span></h3>`
         + _queueFileRows(files)
-        + `<button type="button" class="btn btn-sm btn-outline-secondary queue-files-all" onclick="openJobDetails('${escapeHtml(job.id)}', 'files')">View all files and results<i class="bi bi-arrow-right ms-2" aria-hidden="true"></i></button>`;
+        + `<button type="button" class="btn dash-btn-sm queue-files-all" onclick="openJobDetails('${escapeHtml(job.id)}', 'files')">View all files and results<i class="bi bi-arrow-right" aria-hidden="true"></i></button>`
+        + (total > files.length ? `<p class="queue-files-note">Showing the first ${files.length.toLocaleString()} of ${total.toLocaleString()} files</p>` : '');
 }
 
 function _loadJobFileList(job) {
@@ -2190,7 +2258,8 @@ function _renderPublishersBlock(job) {
         const badges = badgeSpecs.map(function (b) {
             const tip = b.tip ? ` title="${escapeHtmlAttr(b.tip)}"` : '';
             const suffix = b.suffix ? ` · ${escapeHtmlText(b.suffix)}` : '';
-            const tone = b.cls.includes('danger') ? 'job-result-error' : b.cls.includes('warning') ? 'job-result-warning' : '';
+            const tone = b.cls.includes('danger') ? 'job-result-error' : b.cls.includes('warning') ? 'job-result-warning'
+                : b.cls.includes('success') ? 'job-result-ok' : b.cls.includes('bg-info') ? 'job-result-info' : '';
             return `<div class="job-result-item ${tone}"${tip}><span>${escapeHtmlText(b.label)}${suffix}</span> <strong>× ${b.count}</strong></div>`;
         }).join(' ');
         return `<section class="job-server-results"><h4 class="job-detail-heading">${logo}${escapeHtmlText(sname)}</h4><div class="job-result-list">${badges}</div></section>`;
@@ -2297,11 +2366,11 @@ function _markersPauseButton(job) {
         && ['scheduled', 'queued_for_slot', 'running'].includes(job.config.last_outcome)) return '';
     const jid = escapeHtml(job.id);
     if (job.paused) {
-        return `<button class="btn btn-outline-success" onclick="resumeJob('${jid}')" title="Resume this job" aria-label="Resume job">
+        return `<button class="ibtn ok" onclick="resumeJob('${jid}')" title="Resume this job" aria-label="Resume job">
                     <i class="bi bi-play-fill"></i>
                 </button>`;
     }
-    return `<button class="btn btn-outline-warning" onclick="pauseJob('${jid}')" title="Pause this job" aria-label="Pause job">
+    return `<button class="ibtn" onclick="pauseJob('${jid}')" title="Pause this job" aria-label="Pause job">
                     <i class="bi bi-pause-fill"></i>
                 </button>`;
 }
@@ -2342,10 +2411,11 @@ function updateJobQueue(force) {
         if (jobTotal === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center text-muted py-5">
-                        <i class="bi bi-inbox fs-2 d-block mb-2 opacity-50"></i>
-                        <div>${jobFiltersActive() ? 'No jobs match these filters.' : 'Nothing queued.'}</div>
-                        <div class="small">${jobFiltersActive() ? 'Change a filter or use Clear filters to see other jobs.' : 'Start a job, or choose All jobs and history in Status to review past work.'}</div>
+                    <td colspan="7" class="queue-empty">
+                        <i class="bi bi-inbox" aria-hidden="true"></i>
+                        <div class="queue-empty-title">${jobFiltersActive() ? 'No jobs match these filters.' : 'Nothing queued'}</div>
+                        <div class="queue-empty-sub">${jobFiltersActive() ? 'Change a filter or use Clear filters to see other jobs.' : 'Start a job, or choose All jobs and history (the All tab) to review past work.'}</div>
+                        ${jobFiltersActive() ? '' : '<button type="button" class="btn btn-primary dash-btn-primary queue-empty-action" onclick="showNewJobModal()"><i class="bi bi-play-fill me-2" aria-hidden="true"></i>Start new job</button>'}
                     </td>
                 </tr>
             `;
@@ -2376,7 +2446,7 @@ function updateJobQueue(force) {
         const markersPause = _markersPauseState(job);
         const statusBadge = getStatusBadge(
             job.status, job.paused || markersPause === 'all', job.error, job.progress && job.progress.outcome,
-            _markersPauseNote(markersPause, job),
+            _markersPauseNote(markersPause, job), true,
         );
         const progress = (Number(job.progress?.percent) || 0).toFixed(1);
         const created = formatRelativeTime(job.created_at);
@@ -2425,35 +2495,35 @@ function updateJobQueue(force) {
             // map to different upstream actions, even though both feel
             // like "do it now" from the user's seat.
             const fireWebhookBtn = isWaitingWebhookRow
-                ? `<button class="btn btn-outline-warning" onclick="fireWebhookNow('${escapeHtml(job.id)}')" title="Skip the webhook wait — dispatch now" aria-label="Fire webhook now">
+                ? `<button class="ibtn warn" onclick="fireWebhookNow('${escapeHtml(job.id)}')" title="Skip the webhook wait — dispatch now" aria-label="Fire webhook now">
                     <i class="bi bi-lightning-fill"></i>
                 </button>`
                 : '';
             // Retry now drives retry chains (preview and Intro & Credits); a "Retry: …" Intro & Credits or loudness
             // job just waits out its delay.
             const retryNowBtn = isWaitingRetryRow && (!ownRunner || !!(job.config && job.config.is_retry_chain))
-                ? `<button class="btn btn-outline-warning" onclick="retryNowFromRow('${escapeHtml(job.id)}')" title="Skip the retry backoff — attempt now" aria-label="Retry now">
+                ? `<button class="ibtn warn" onclick="retryNowFromRow('${escapeHtml(job.id)}')" title="Skip the retry backoff — attempt now" aria-label="Retry now">
                     <i class="bi bi-arrow-clockwise"></i>
                 </button>`
                 : '';
-            actionButtons = `<div class="btn-group btn-group-sm icon-btn-group" role="group">
-                <button class="btn btn-outline-secondary" onclick="showLogsModal('${escapeHtml(job.id)}')" title="View logs" aria-label="View logs">
+            actionButtons = `<div class="rowact" role="group" aria-label="Job actions">
+                <button class="ibtn" onclick="showLogsModal('${escapeHtml(job.id)}')" title="View logs" aria-label="View logs">
                     <i class="bi bi-file-text"></i>
                 </button>
                 ${fireWebhookBtn}${retryNowBtn}${_markersPauseButton(job)}
-                <button class="btn btn-outline-danger" onclick="cancelJob('${escapeHtml(job.id)}')" title="Cancel" aria-label="Cancel job">
+                <button class="ibtn danger" onclick="cancelJob('${escapeHtml(job.id)}')" title="Cancel" aria-label="Cancel job">
                     <i class="bi bi-x-lg"></i>
                 </button>
             </div>`;
         } else {
-            actionButtons = `<div class="btn-group btn-group-sm icon-btn-group" role="group">
-                <button class="btn btn-outline-secondary" onclick="showLogsModal('${escapeHtml(job.id)}')" title="View logs" aria-label="View logs">
+            actionButtons = `<div class="rowact" role="group" aria-label="Job actions">
+                <button class="ibtn" onclick="showLogsModal('${escapeHtml(job.id)}')" title="View logs" aria-label="View logs">
                     <i class="bi bi-file-text"></i>
                 </button>
-                <button class="btn btn-outline-secondary" onclick="reprocessJob('${escapeHtml(job.id)}')" title="Re-run" aria-label="Re-run job">
+                <button class="ibtn" onclick="reprocessJob('${escapeHtml(job.id)}')" title="Re-run" aria-label="Re-run job">
                     <i class="bi bi-arrow-repeat"></i>
                 </button>
-                <button class="btn btn-outline-danger" onclick="deleteJob('${escapeHtml(job.id)}')" title="Delete" aria-label="Delete job">
+                <button class="ibtn danger" onclick="deleteJob('${escapeHtml(job.id)}')" title="Delete" aria-label="Delete job">
                     <i class="bi bi-trash"></i>
                 </button>
             </div>`;
@@ -2466,7 +2536,7 @@ function updateJobQueue(force) {
             webhookBasenames = job.config.webhook_paths.map(function (p) { return p.split('/').pop() || p; });
         }
         const isFilesExpanded = expandedJobFileRows.has(String(job.id));
-        const filesToggleBtn = ` <button type="button" class="btn job-details-toggle" id="job-files-toggle-${escapeHtml(job.id)}"
+        const filesToggleBtn = `<button type="button" class="exp job-details-toggle" id="job-files-toggle-${escapeHtml(job.id)}"
                         onclick="toggleJobFiles('${escapeHtml(job.id)}')" aria-expanded="${isFilesExpanded ? 'true' : 'false'}" aria-controls="job-detail-${escapeHtml(job.id)}" title="Job details" aria-label="Job details">
                    <span class="visually-hidden">Job details</span><i class="bi ${isFilesExpanded ? 'bi-chevron-up' : 'bi-chevron-down'}"></i>
                  </button>`;
@@ -2507,27 +2577,17 @@ function updateJobQueue(force) {
                 : job.status === 'running' ? 'Retry in progress' : 'Queued for retry';
             progressCell = `<span class="small text-warning">${retryLabel}${chapterRetry ? ' · Chapter thumbnails' : ''}</span>${checked}`;
         } else {
-            // Color the bar by status — blue (primary) is reserved for
-            // running. Completed/failed/cancelled get the matching outcome
-            // colour so the bar reinforces the status pill rather than
-            // contradicting it (a 100% blue bar next to a green
-            // "Completed" pill was confusing the eye).
-            // A paused Intro & Credits job does no work, so its bar doesn't animate.
-            const barClass = markersPause ? 'bg-warning' : (({
-                completed: 'bg-success',
-                failed: 'bg-danger',
-                cancelled: 'bg-secondary',
-                running: 'progress-bar-striped progress-bar-animated',
-                pending: 'bg-secondary',
-            })[job.status] || '');
+            // Bar colour per status comes from queue.css via [data-status]; only a running bar animates, and a
+            // paused Intro & Credits job does no work.
+            const barClass = !markersPause && job.status === 'running' ? 'progress-bar-striped progress-bar-animated' : '';
             const processed = Number(job.progress.processed_items) || 0;
             const total = Number(job.progress.total_items) || 0;
             const hasProgress = total > 0 || Number(progress) > 0;
             progressCell = job.status === 'pending' && !processed && Number(progress) === 0
                 ? `<span class="small text-body-secondary">Queued${total ? ` · ${total.toLocaleString()} ${total === 1 ? 'item' : 'items'}` : ''}</span>`
                 : hasProgress
-                ? `<div class="queue-progress-label"><span data-queue-percent>${progress}%</span><span data-queue-items>${processed.toLocaleString()} / ${total ? total.toLocaleString() : '?'}</span></div>
-                    <div class="progress queue-progress" data-status="${escapeHtml(job.status)}"><div class="progress-bar ${barClass}" role="progressbar" aria-label="Job progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" style="width: ${Math.min(100, Math.max(0, Number(progress)))}%"></div></div>`
+                ? `<div class="mini"><div class="progress queue-progress" data-status="${escapeHtml(job.status)}"${markersPause ? ' data-held="true"' : ''}><div class="progress-bar ${barClass}" role="progressbar" aria-label="Job progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" style="transform: scaleX(${Math.min(100, Math.max(0, Number(progress))) / 100})"></div></div><span class="mini-pct" data-queue-percent>${progress}%</span></div>
+                    <div class="queue-items" data-queue-items>${processed.toLocaleString()} / ${total ? total.toLocaleString() : '?'}</div>`
                 : `<span class="small text-body-secondary">${job.status === 'pending' ? 'Queued' : job.status === 'running' ? 'Starting…' : 'No progress recorded'}</span>`;
 
         }
@@ -2551,12 +2611,13 @@ function updateJobQueue(force) {
             const total = Number(job.progress.total_items) || 0;
             progressCell = `<span class="small text-body-secondary" tabindex="0" title="${escapeHtmlAttr(activityText)}">${total ? `${total.toLocaleString()} ${total === 1 ? 'item' : 'items'} · ` : ''}Awaiting worker</span>`;
         }
-        const phase = activityText && !genericWait ? `<span class="queue-phase text-body-secondary">${escapeHtml(activityText)}</span>` : '';
+        const phaseText = _dedupeActivityCount(activityText, job.progress.processed_items, job.progress.total_items);
+        const phase = phaseText && !genericWait ? `<span class="queue-phase text-body-secondary">${escapeHtml(phaseText)}</span>` : '';
         html += `
-            <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}">
-                <td class="queue-id" data-label="ID"><code title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
+            <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}${isFilesExpanded ? ' open' : ''}">
+                <td class="queue-id" data-label="ID"><code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
                 <td class="queue-job" data-label="Job">
-                    <div class="queue-job-main">${filesToggleBtn}<div class="queue-job-copy"><div class="queue-title-line">${nameHtml}</div>
+                    <div class="queue-job-main">${filesToggleBtn}${_jobTypeTileHtml(job)}<div class="queue-job-copy"><div class="queue-title-line">${nameHtml}</div>
                     <div class="queue-metadata">${_queueMetadataHtml(job, rowTitle)}</div></div></div>
                 </td>
                 <td class="queue-status" data-label="Status">${statusBadge}${retryLabel}</td>
@@ -2568,16 +2629,18 @@ function updateJobQueue(force) {
         const filesBlock = `<section class="job-detail-files">${_markersFilesBlock(job)}</section>`;
         const publishersBlock = _renderPublishersBlock(job);
         const currentItem = job.progress?.current_item;
-        const started = job.started_at ? `<span>Started ${escapeHtml(formatDate(job.started_at))}${job.status === 'running' ? ` · Job elapsed <span data-elapsed-since="${escapeHtmlAttr(job.started_at)}">${formatElapsed(job.started_at)}</span>` : ''}${job.completed_at ? ` · Finished ${escapeHtml(formatDate(job.completed_at))}` : ''}</span>` : '';
+        const started = job.started_at ? `<span>Started <b>${escapeHtml(formatDate(job.started_at))}</b>${job.status === 'running' ? ` · Job elapsed <b data-elapsed-since="${escapeHtmlAttr(job.started_at)}">${formatElapsed(job.started_at)}</b>` : ''}${job.completed_at ? ` · Finished <b>${escapeHtml(formatDate(job.completed_at))}</b>` : ''}</span>` : '';
         const nextEligible = wait?.next_eligible ? `<p class="small mb-0">Next eligible: ${escapeHtml(formatDate(wait.next_eligible))}</p>` : '';
         const activity = currentItem || started || wait?.reason
             ? `<section class="job-current-activity"><h3 class="job-detail-heading">${['running', 'pending'].includes(job.status) ? 'Current activity' : 'Last activity'}</h3>${currentItem || wait?.reason ? `<p class="mb-1 queue-full-path">${escapeHtml(wait?.reason || currentItem)}</p>` : ''}${nextEligible}${started ? `<div class="small text-body-secondary">${started}</div>` : ''}</section>` : '';
         const error = job.error ? `<section class="job-detail-error"><h3 class="job-detail-heading text-danger-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>Job error</h3><p class="mb-0 queue-full-path">${escapeHtml(job.error)}</p></section>` : '';
         html += `<tr id="job-detail-${escapeHtml(job.id)}" class="${isFilesExpanded ? '' : 'd-none'} job-files-detail" aria-hidden="${isFilesExpanded ? 'false' : 'true'}">
-            <td colspan="7" class="bg-body-tertiary job-expanded-cell"><div class="job-expanded-content">
-                <div class="queue-detail-summary">${activity}<div class="queue-results" id="queue-publishers-${escapeHtml(job.id)}">${publishersBlock}</div>${error}</div>
-                ${filesBlock}
-                <div class="job-detail-actions"><button class="btn btn-sm btn-outline-secondary" onclick="openJobDetails('${escapeHtml(job.id)}')"><i class="bi bi-file-text me-1"></i>Open logs and files</button></div>
+            <td colspan="7" class="job-expanded-cell"><div class="job-expanded-content">
+                <div class="queue-detail-grid">
+                    <div class="queue-detail-summary">${error}${activity}<div class="queue-results" id="queue-publishers-${escapeHtml(job.id)}">${publishersBlock}</div></div>
+                    ${filesBlock}
+                </div>
+                <div class="job-detail-actions"><button class="btn dash-btn-sm" onclick="openJobDetails('${escapeHtml(job.id)}')"><i class="bi bi-file-text" aria-hidden="true"></i>Open logs and files</button></div>
             </div></td></tr>`;
 
     }
@@ -2904,7 +2967,7 @@ function updateJobProgress(jobId, progress, publishers) {
     if (!waiting) {
         const bar = row.querySelector('.queue-progress .progress-bar');
         if (bar) {
-            bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+            bar.style.transform = `scaleX(${Math.min(100, Math.max(0, pct)) / 100})`;
             bar.setAttribute('aria-valuenow', pct.toFixed(1));
         }
         const label = row.querySelector('[data-queue-percent]');
@@ -2940,6 +3003,24 @@ window.addEventListener('worker-groups-updated', function () {
     if (_latestDashboardWorkers.length) updateWorkerStatuses(_latestDashboardWorkers);
 });
 
+function renderWorkersOccupancy(workers) {
+    const count = document.getElementById('workersHeaderCount');
+    const meter = document.getElementById('workersOccupancyMeter');
+    const total = workers.length;
+    const busy = workers.filter(w => w.status === 'processing');
+    const paused = busy.filter(w => processingPaused || w.paused).length;
+    if (count) {
+        count.textContent = total === 0 ? 'No worker slots' : `${busy.length} / ${total} busy${paused ? ` · ${paused} paused` : ''}`;
+    }
+    if (meter) {
+        meter.innerHTML = workers.map(w => {
+            const isBusy = w.status === 'processing';
+            return `<i class="${isBusy ? (processingPaused || w.paused ? 'paused' : 'on') : ''}"></i>`;
+        }).join('');
+    }
+    renderGlobalPauseResume();
+}
+
 function updateWorkerStatuses(workers, options = {}) {
     const {
         fallbackCounts = null,
@@ -2957,8 +3038,7 @@ function updateWorkerStatuses(workers, options = {}) {
 
     if (!workers || workers.length === 0) {
         container.querySelectorAll('[data-worker-key]').forEach(node => node.remove());
-        const badge = document.getElementById('workersHeaderCount');
-        if (badge) badge.textContent = 'No worker slots';
+        renderWorkersOccupancy([]);
         if (keepBadgeCounts) {
             return;
         }
@@ -2973,29 +3053,8 @@ function updateWorkerStatuses(workers, options = {}) {
     const cpuCount = workers.filter(w => w.worker_type === 'CPU').length;
     if (cpuWorkersEl) cpuWorkersEl.textContent = String(cpuCount);
 
-    // Workers panel header count badge — "N active / M slots". Gives the
-    // user a glance-able signal of how busy the queue is without forcing
-    // them to count rows. Hidden when there's nothing to count.
-    const headerBadge = document.getElementById('workersHeaderCount');
-    if (headerBadge) {
-        const total = workers.length;
-        const active = workers.filter(w => w.status === 'processing').length;
-        const paused = workers.filter(w => w.status === 'processing' && (processingPaused || w.paused)).length;
-        if (total === 0) {
-            headerBadge.textContent = '—';
-            headerBadge.className = 'badge bg-secondary';
-        } else if (active === 0) {
-            headerBadge.textContent = `${total} idle`;
-            headerBadge.className = 'badge bg-secondary';
-        } else {
-            headerBadge.textContent = `${active} of ${total} occupied${paused ? ` · ${paused} paused` : ''}`;
-            headerBadge.className = 'badge bg-primary';
-        }
-        // Match the all-caps card-header style suppression we set in HTML
-        // so the badge text stays case-as-typed.
-        headerBadge.style.textTransform = 'none';
-        headerBadge.style.letterSpacing = '0';
-    }
+    // Workers panel header: one pill per worker (filled = busy) and "N / M busy" beside it.
+    renderWorkersOccupancy(workers);
 
     // Surface GPU→CPU fallback transitions as a warning toast (once per switch).
     for (const w of workers) {
@@ -3035,22 +3094,27 @@ function updateWorkerStatuses(workers, options = {}) {
             col.className = 'worker-slot';
             col.dataset.workerKey = key;
             col.innerHTML = `
-                <article class="card bg-body-tertiary workers-panel-card" data-card data-status="idle">
+                <article class="card workers-panel-card wk" data-card data-status="idle">
                     <div class="card-body">
-                        <div class="worker-card-heading"><span data-name-wrap><i class="bi" data-icon></i><strong data-name></strong></span><span class="worker-id" data-worker-id></span><span class="badge" data-status-badge></span></div>
-                        <span class="badge bg-warning text-dark d-none" data-fallback-badge><i class="bi bi-arrow-down-circle me-1"></i>CPU fallback</span>
+                        <div class="worker-card-heading wk-top"><span data-name-wrap class="kind"><i class="bi" data-icon aria-hidden="true"></i><strong data-name></strong></span><span class="worker-id wk-n" data-worker-id></span><span class="pill warn" data-status-badge hidden></span></div>
+                        <span class="pill warn d-none" data-fallback-badge><i class="bi bi-arrow-down-circle" aria-hidden="true"></i>CPU fallback</span>
                         <div class="small text-warning d-none" data-fallback-note><i class="bi bi-exclamation-triangle me-1"></i><span data-fallback-reason></span></div>
+                        <div class="wk-idle-note" data-idle-note>Waiting for work</div>
                         <div class="worker-current-job" data-current-job>
-                            <details class="worker-file" data-file><summary data-title></summary><div class="queue-full-path" data-file-path></div></details>
-                            <div class="worker-card-context"><span data-library></span><span class="worker-job-type"><i class="bi" data-kind-icon aria-hidden="true"></i><span data-worker-kind></span></span><button type="button" class="worker-job-link" data-worker-job></button></div>
+                            <details class="worker-file wk-title" data-file><summary data-title></summary><div class="queue-full-path" data-file-path></div></details>
+                            <div class="worker-card-context wk-meta"><span class="worker-job-type task" data-kind-chip><i class="bi" data-kind-icon aria-hidden="true"></i><span data-worker-kind></span></span><span class="wk-library" data-library></span><button type="button" class="worker-job-link jobref" data-worker-job></button><button type="button" class="worker-job-logs" data-worker-logs hidden><i class="bi bi-file-text" aria-hidden="true"></i>Logs</button></div>
                         </div>
-                        <div class="worker-card-metrics" data-metrics><span data-percent></span><span class="d-none" data-chapter-stage></span><span class="worker-speed"><span class="text-body-secondary">Speed </span><strong data-speed></strong></span><span class="worker-eta"><span class="text-body-secondary">ETA </span><strong data-eta></strong></span></div>
                         <div class="progress" data-progress-wrap><div class="progress-bar" data-progress></div></div>
+                        <div class="worker-card-metrics" data-metrics><span data-percent></span><span class="d-none" data-chapter-stage></span><span class="worker-speed"><span class="text-body-secondary">Speed </span><strong data-speed></strong></span><span class="worker-eta"><span class="text-body-secondary">ETA </span><strong data-eta></strong></span></div>
                     </div>
                 </article>`;
             const jobLink = col.querySelector('[data-worker-job]');
             jobLink.addEventListener('click', function () {
                 if (jobLink.dataset.jobId) openJobDetails(jobLink.dataset.jobId);
+            });
+            const logsButton = col.querySelector('[data-worker-logs]');
+            logsButton.addEventListener('click', function () {
+                if (logsButton.dataset.jobId) openJobDetails(logsButton.dataset.jobId, 'logs');
             });
         }
         if (col.parentElement !== host) host.appendChild(col);
@@ -3116,13 +3180,24 @@ function _patchWorkerCard(col, worker) {
     kind.parentElement.hidden = !kind.textContent;
     col.querySelector('[data-kind-icon]').className = 'bi ' +
         (worker.job_kind === 'loudness' ? 'bi-soundwave' : worker.job_kind === 'intro_credits' ? 'bi-skip-forward' : 'bi-film');
+    col.querySelector('[data-kind-chip]').className = 'worker-job-type task ' +
+        (worker.job_kind === 'loudness' ? 'loud' : worker.job_kind === 'intro_credits' ? 'intro' : 'previews');
+    col.querySelector('[data-idle-note]').hidden = isProcessing;
+    card.classList.toggle('busy', isProcessing);
+    card.classList.toggle('idle', !isProcessing);
     col.querySelector('[data-current-job]').hidden = !isProcessing;
     const jobLink = col.querySelector('[data-worker-job]');
     jobLink.hidden = !isProcessing || !worker.job_id;
     jobLink.dataset.jobId = isProcessing ? worker.job_id || '' : '';
-    jobLink.textContent = worker.job_id ? 'Job ' + String(worker.job_id).substring(0, 8) : '';
+    jobLink.innerHTML = worker.job_id
+        ? `<i class="bi bi-box-arrow-up-right" aria-hidden="true"></i>${escapeHtml(String(worker.job_id).substring(0, 8))}` : '';
     jobLink.title = worker.job_id ? 'Open job ' + worker.job_id : '';
     jobLink.setAttribute('aria-label', worker.job_id ? 'Open job ' + worker.job_id : 'Job details');
+    const logsButton = col.querySelector('[data-worker-logs]');
+    logsButton.hidden = jobLink.hidden;
+    logsButton.dataset.jobId = jobLink.dataset.jobId;
+    logsButton.title = 'Job logs';
+    logsButton.setAttribute('aria-label', worker.job_id ? 'View logs for job ' + worker.job_id : 'View job logs');
     const file = col.querySelector('[data-file]');
     file.hidden = !isProcessing;
     const fullPath = worker.current_file || worker.current_title || '';
@@ -3140,10 +3215,12 @@ function _patchWorkerCard(col, worker) {
         icon.className = `bi me-2 ${iconClass}`;
     }
 
-    // Name (only update if changed — avoids tearing during text selection)
-    if (nameEl.textContent !== worker.worker_name) {
-        nameEl.textContent = worker.worker_name;
+    // The group header names the hardware, so the card says only what kind of worker it is; the full name is the tooltip.
+    const kindName = worker.worker_type === 'GPU' ? 'GPU worker' : 'CPU worker';
+    if (nameEl.textContent !== kindName) {
+        nameEl.textContent = kindName;
     }
+    nameEl.title = worker.worker_name || '';
 
     // Fallback badge + note
     fallbackBadge.classList.toggle('d-none', !fallbackActive);
@@ -3157,15 +3234,12 @@ function _patchWorkerCard(col, worker) {
         fallbackNote.title = worker.fallback_reason;
     }
 
-    // Status badge — colour AND text
-    const statusColor = paused || worker.retiring ? 'bg-warning text-dark' : (isProcessing ? 'bg-primary' : 'bg-secondary');
-    if (statusEl.className !== `badge ${statusColor}`) {
-        statusEl.className = `badge ${statusColor}`;
-    }
+    // Status badge: only the exceptional states get a pill; busy and idle show through the card style.
     const workerStatus = paused ? (worker.retiring ? 'Paused · finishing after resume' : 'Paused') : worker.retiring ? 'Finishing current file' : isProcessing ? 'Processing' : 'Idle';
     if (statusEl.textContent !== workerStatus) {
         statusEl.textContent = workerStatus;
     }
+    statusEl.hidden = !(paused || worker.retiring);
     card.classList.toggle('worker-long-status', !!worker.retiring);
 
     const title = isProcessing ? worker.current_title || worker.current_file || 'Processing…' : '';
@@ -3979,7 +4053,8 @@ function _buildOutcomeTooltip(outcome) {
     return lines.length > 0 ? lines.join('&#10;') : 'No items processed';
 }
 
-function getStatusBadge(status, paused, error, outcome, pauseNote) {
+// ``asPill`` renders the queue's pill (icon + label, tone by status); other callers keep the dot + label.
+function getStatusBadge(status, paused, error, outcome, pauseNote, asPill) {
     if (paused === undefined) paused = false;
     if (error === undefined) error = null;
     if (outcome === undefined) outcome = null;
@@ -3999,15 +4074,16 @@ function getStatusBadge(status, paused, error, outcome, pauseNote) {
         ? ' data-bs-toggle="tooltip" data-bs-placement="top" data-bs-html="false" title="' + tooltipText + '"'
         : '';
 
-    // Modern status indicator: a coloured dot + neutral label reads
-    // cleaner than a stack of full-fill pills in a dense table. The
-    // CSS lives under .status-dot in style.css.
-    function dot(cls, label) {
-        return '<span class="status-dot ' + cls + '"' + tooltipAttrs + '>' + label + '</span>';
+    // The CSS lives under .status-dot in style.css; the queue's pill look is in queue.css (#jobQueue .status-dot).
+    function dot(cls, label, tone, icon) {
+        var lead = asPill
+            ? (icon === 'live' ? '<span class="dot run live" aria-hidden="true"></span>' : '<i class="bi ' + icon + '" aria-hidden="true"></i>')
+            : '';
+        return '<span class="status-dot ' + cls + (asPill ? ' pill ' + tone : '') + '"' + tooltipAttrs + '>' + lead + label + '</span>';
     }
 
-    if ((status === 'running' || status === 'pending') && paused) return dot('status-warning', 'Paused');
-    if (status === 'completed' && error) return dot('status-warning', 'Completed with warnings');
+    if ((status === 'running' || status === 'pending') && paused) return dot('status-warning', 'Paused', 'warn', 'bi-pause-circle');
+    if (status === 'completed' && error) return dot('status-warning', 'Completed with warnings', 'warn', 'bi-exclamation-circle');
 
     var clsMap = {
         'pending':   'status-pending',
@@ -4023,7 +4099,9 @@ function getStatusBadge(status, paused, error, outcome, pauseNote) {
         'failed':    'Failed',
         'cancelled': 'Cancelled'
     };
-    return dot(clsMap[status] || 'status-pending', labelMap[status] || status);
+    var toneMap = {pending: 'warn', running: 'run', completed: 'ok', failed: 'bad', cancelled: 'warn'};
+    var iconMap = {pending: 'bi-hourglass-split', running: 'live', completed: 'bi-check-circle', failed: 'bi-x-circle', cancelled: 'bi-slash-circle'};
+    return dot(clsMap[status] || 'status-pending', labelMap[status] || status, toneMap[status] || '', iconMap[status] || 'bi-circle');
 }
 
 function formatDate(dateStr) {
@@ -4666,6 +4744,14 @@ function _applyInfoIconAffordance(el) {
     }
     const attr = el.hasAttribute('data-bs-original-title') ? 'data-bs-original-title' : 'title';
     if ((el.getAttribute(attr) || '') !== hint) el.setAttribute(attr, hint);
+    if (!el.hasAttribute('aria-label')) el.setAttribute('aria-label', hint || 'More information');
+}
+
+// A title alone is not reliably announced on a focusable control, so icon-only buttons get it as their name.
+function _labelIconOnlyButtons(root) {
+    root.querySelectorAll('button[title]:not([aria-label])').forEach((btn) => {
+        if (!btn.textContent.trim()) btn.setAttribute('aria-label', btn.getAttribute('title'));
+    });
 }
 window._applyInfoIconAffordance = _applyInfoIconAffordance;
 
@@ -4684,6 +4770,7 @@ function _initBootstrapTooltips(scope) {
     const icons = Array.from(root.querySelectorAll('.info-icon'));
     if (root.classList && root.classList.contains('info-icon')) icons.push(root);
     icons.forEach(_applyInfoIconAffordance);
+    _labelIconOnlyButtons(root);
     if (typeof bootstrap === 'undefined' || !bootstrap.Tooltip) return;
     root.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => {
         if (!bootstrap.Tooltip.getInstance(el)) {

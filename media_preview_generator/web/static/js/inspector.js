@@ -130,6 +130,12 @@
         return node;
     }
 
+    function cardTitle(className, text, iconName) {
+        const node = el('div', className);
+        node.append(icon(iconName), document.createTextNode(text));
+        return node;
+    }
+
     function icon(name) {
         const i = el('i', 'bi bi-' + name);
         i.setAttribute('aria-hidden', 'true');
@@ -363,6 +369,12 @@
         fetchStatuses(seq);
     }
 
+    function resultIcon(kind) {
+        const tile = el('div', 'insp-row-ico');
+        tile.appendChild(icon(kind === 'show' ? 'tv' : kind === 'file' ? 'file-earmark-play' : 'film'));
+        return tile;
+    }
+
     function renderPathRow(path) {
         const box = resultsBox();
         box.hidden = false;
@@ -371,7 +383,7 @@
         row.dataset.path = path;
         const cell = el('div');
         cell.append(el('div', 'insp-row-title', 'Open this file'), el('div', 'insp-row-meta insp-mono text-break', path));
-        row.append(cell, el('div'), el('div'), el('i', 'bi bi-chevron-right'));
+        row.append(resultIcon('file'), cell, el('div'), el('div'), el('i', 'bi bi-chevron-right'));
         row.addEventListener('click', function () { openFile(path, {}); });
         box.replaceChildren(row);
     }
@@ -427,7 +439,7 @@
             return;
         }
         const head = el('div', 'insp-row insp-row-head');
-        head.append(el('div', '', 'TITLE'), el('div', 'insp-cell-preview', 'PREVIEW'), el('div', 'insp-cell-markers', 'INTRO & CREDITS'), el('div'));
+        head.append(el('div'), el('div', '', 'TITLE'), el('div', 'insp-cell-preview', 'PREVIEW'), el('div', 'insp-cell-markers', 'INTRO & CREDITS'), el('div'));
         const nodes = [head];
         state.results.forEach(function (r, index) {
             const row = el('button', 'insp-row' + (state.openShow === index ? ' is-open' : ''));
@@ -448,6 +460,7 @@
                 markers = markersText(status);
             }
             row.append(
+                resultIcon(r.kind),
                 titleCell,
                 el('div', 'insp-cell-preview ' + previewCell[1], previewCell[0]),
                 el('div', 'insp-cell-markers ' + markers[1], markers[0]),
@@ -581,6 +594,41 @@
         nav.hidden = !available || !$('inspSearch').hidden;
     }
 
+    const RECENT_KEY = 'inspector.recent';
+    const RECENT_MAX = 5;
+
+    function readRecent() {
+        try {
+            const list = JSON.parse(window.localStorage.getItem(RECENT_KEY) || '[]');
+            return Array.isArray(list) ? list.filter(function (r) { return r && typeof r.path === 'string'; }) : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function rememberRecent(path, title) {
+        const list = readRecent().filter(function (r) { return r.path !== path; });
+        list.unshift({ path: path, title: title || path.split('/').pop() });
+        try {
+            window.localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX)));
+        } catch (e) {
+            // Private browsing or a full quota: the list is a convenience, so losing it is harmless.
+        }
+    }
+
+    function renderRecent() {
+        const list = readRecent();
+        $('inspRecent').hidden = !list.length;
+        $('inspRecentList').replaceChildren.apply($('inspRecentList'), list.map(function (r) {
+            const row = el('button', 'insp-recent-row');
+            row.type = 'button';
+            row.title = r.path;
+            row.append(icon('clock-history'), el('span', 'insp-recent-name', r.title));
+            row.addEventListener('click', function () { openFile(r.path, { title: r.title }); });
+            return row;
+        }));
+    }
+
     function showSearch(push) {
         closeBig();
         state.path = '';
@@ -589,6 +637,7 @@
         state.item = null;
         state.adjust = null;
         fold(false);
+        renderRecent();
         if (push) setUrl(null, false);
         $('inspQuery').focus();
     }
@@ -643,6 +692,7 @@
         if (fileRes.ok) {
             state.file = fileRes.data;
             state.job = fileRes.data.job || null;
+            if (fileRes.data.exists !== false && fileRes.data.in_library) rememberRecent(path, state.titleHint || fileRes.data.title);
         } else {
             state.file = { error: (fileRes.data && fileRes.data.error) || `HTTP ${fileRes.status}`, canonical_path: path };
         }
@@ -854,7 +904,7 @@
         if (!state.file) {
             parts.push(loadingCard());
         } else if (state.file.error) {
-            parts.push(messageCard('Couldn\'t open this file', state.file.error, 'bad'));
+            parts.push(openErrorCard(state.file.error));
         } else if (state.bifOnly) {
             parts.push(statTiles([previewStat()]));
             parts.push(timelineCard());
@@ -894,12 +944,11 @@
     function header(title, path, buttons, chips) {
         const head = el('div', 'insp-head');
         const text = el('div', 'insp-head-text');
-        text.appendChild(el('div', 'insp-crumb', 'Tools › Inspector'));
         const parts = splitTitle(title);
         const titleRow = el('div', 'insp-titlerow');
-        const h1 = el('h1', 'insp-title', parts.main);
-        h1.id = 'inspTitle';
-        titleRow.appendChild(h1);
+        const heading = el('h2', 'insp-title', parts.main);
+        heading.id = 'inspTitle';
+        titleRow.appendChild(heading);
         if (parts.sub) {
             const sub = el('div', 'insp-title-sub', parts.sub);
             sub.id = 'inspTitleSub';
@@ -1105,7 +1154,31 @@
     function messageCard(title, text, tone) {
         const card = el('div', `insp-card insp-message is-${tone || 'muted'}`);
         card.dataset.state = title;
-        card.append(el('div', 'insp-message-title', title), el('div', 'insp-message-text', text));
+        const glyph = { bad: 'exclamation-circle', warn: 'exclamation-triangle' }[tone] || 'info-circle';
+        card.append(icon(glyph), el('div', 'insp-message-title', title), el('div', 'insp-message-text', text));
+        return card;
+    }
+
+    function openErrorCard(message) {
+        const card = messageCard('Couldn\'t open this file', message, 'bad');
+        const path = state.bifOnly || state.path;
+        const actions = el('div', 'insp-message-actions');
+        const retry = iconButton('arrow-clockwise', 'Retry', 'btn insp-btn btn-sm', function () {
+            if (state.bifOnly) openBif(state.bifOnly, { replace: true });
+            else {
+                state.file = null;
+                state.item = null;
+                loadFile();
+            }
+        });
+        retry.id = 'inspRetry';
+        actions.appendChild(retry);
+        if (path) {
+            const copy = iconButton('copy', 'Copy path', 'btn insp-btn btn-sm', function () { copyPath(path); });
+            copy.id = 'inspErrorCopyPath';
+            actions.appendChild(copy);
+        }
+        card.appendChild(actions);
         return card;
     }
 
@@ -1401,7 +1474,7 @@
         card.id = 'inspTimeline';
         if (!duration() && !lengthUnknown()) {
             const head = el('div', 'insp-tl-head');
-            head.appendChild(el('div', 'insp-card-title', 'Timeline'));
+            head.appendChild(cardTitle('insp-card-title', 'Timeline', 'bar-chart-steps'));
             card.append(head, el('div', 'insp-empty-strip', 'This file\'s length isn\'t known yet, so there is no timeline. Checking its intro & credits reads it.'));
             return card;
         }
@@ -1594,7 +1667,7 @@
         const head = el('div', 'insp-tl-head');
         const titleRow = el('div', 'insp-tl-title');
         const range = numbered ? `${frames.toLocaleString()} frames` : `0:00 – ${clock(dur)}`;
-        titleRow.append(el('div', 'insp-card-title', 'Timeline'), el('div', 'insp-tl-range insp-mono', range), infoIcon(timelineTip(step, numbered), TIMELINE_HOW_TO));
+        titleRow.append(cardTitle('insp-card-title', 'Timeline', 'bar-chart-steps'), el('div', 'insp-tl-range insp-mono', range), infoIcon(timelineTip(step, numbered), TIMELINE_HOW_TO));
         if (!plain) {
             const legend = el('div', 'insp-legend');
             const oursKey = el('span', 'insp-legend-item');
@@ -2916,7 +2989,7 @@
     function evidenceCard() {
         const card = el('div', 'insp-card');
         card.id = 'inspEvidence';
-        card.appendChild(el('div', 'insp-card-heading', 'How it was decided'));
+        card.appendChild(cardTitle('insp-card-heading', 'How it was decided', 'search-heart'));
         if (lockedTypes().length) card.appendChild(lockedRow());
         const rows = (state.item && state.item.evidence) || [];
         if (!rows.length) {
@@ -2987,14 +3060,14 @@
         const b = button('Check intro & credits now', 'btn insp-btn-primary align-self-start', redetect);
         b.id = 'inspCheckNow';
         if (state.busy) b.disabled = true;
-        card.append(el('div', 'insp-card-heading', 'Not checked by Intro & Credits yet'), el('div', 'insp-notchecked-text', notCheckedText()), b);
+        card.append(cardTitle('insp-card-heading', 'Not checked by Intro & Credits yet', 'search-heart'), el('div', 'insp-notchecked-text', notCheckedText()), b);
         return card;
     }
 
     function itemErrorCard() {
         const card = el('div', 'insp-card');
         card.id = 'inspItemError';
-        card.append(el('div', 'insp-card-heading', 'Intro & Credits couldn\'t be read for this file'), el('div', 'insp-small insp-item-error', state.itemError));
+        card.append(cardTitle('insp-card-heading', 'Intro & Credits couldn\'t be read for this file', 'exclamation-triangle'), el('div', 'insp-small insp-item-error', state.itemError));
         return card;
     }
 
@@ -3049,7 +3122,7 @@
         const card = el('div', 'insp-card');
         card.id = 'inspServers';
         const head = el('div', 'insp-servers-head');
-        head.appendChild(el('div', 'insp-card-heading', 'On your servers'));
+        head.appendChild(cardTitle('insp-card-heading', 'On your servers', 'hdd-network'));
         if (state.item && servers().length) {
             const need = attention();
             let pill;
@@ -3125,7 +3198,8 @@
         const card = el('section', 'insp-card insp-loudness');
         card.id = 'inspLoudness';
         card.setAttribute('aria-labelledby', 'inspLoudnessTitle');
-        const heading = el('h2', 'insp-card-heading', 'Loudness');
+        const heading = el('h2', 'insp-card-heading');
+        heading.append(icon('soundwave'), document.createTextNode('Loudness'));
         heading.id = 'inspLoudnessTitle';
         card.append(heading, el('p', 'insp-loudness-note',
             'Measurements reported by Plex for this file’s audio tracks.'));
@@ -3347,6 +3421,21 @@
             target.scrollIntoView({ behavior: 'instant', block: 'start' });
             history.replaceState(history.state, '', link.getAttribute('href'));
         });
+        const phone = window.matchMedia('(max-width: 575.98px)');
+        const fitPlaceholder = function () {
+            const input = $('inspQuery');
+            if (!input.dataset.longPlaceholder) input.dataset.longPlaceholder = input.placeholder;
+            input.placeholder = phone.matches ? input.dataset.shortPlaceholder : input.dataset.longPlaceholder;
+        };
+        fitPlaceholder();
+        phone.addEventListener('change', fitPlaceholder);
+        $('inspChipPath').addEventListener('click', function () {
+            const input = $('inspQuery');
+            if (!input.value.startsWith('/')) input.value = '/';
+            input.focus();
+        });
+        $('inspChipSearch').addEventListener('click', function () { $('inspQuery').focus(); });
+        renderRecent();
         $('inspQuery').addEventListener('input', queryChanged);
         $('inspQuery').addEventListener('keydown', function (e) {
             if (e.key !== 'Enter') return;

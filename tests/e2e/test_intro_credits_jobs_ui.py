@@ -240,7 +240,7 @@ def _capture_posts(page: Page, pattern: str, response: dict, status: int = 201) 
 def _open_start_modal(page: Page) -> None:
     # A test may close the dialog it just opened: the open waits until it has finished opening (``watch_modal_shown``).
     watch_modal_shown(page, "newJobModal")
-    page.locator('button:has-text("Start New Job")').first.click()
+    page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
     expect(page.locator("#newJobForm")).to_be_visible(timeout=3000)
     expect(page.locator('.job-library-checkbox[data-server-id="plex-1"][value="2"]')).to_be_attached(timeout=3000)
     expect_modal_shown(page, "newJobModal")
@@ -1727,8 +1727,9 @@ class TestPerJobPause:
 
         expect(row.locator(".status-dot")).to_have_text("Paused", timeout=3000)
         expect(row.locator('button[aria-label="Resume job"]')).to_have_attribute("title", "Resume this job")
-        expect(page.locator("#globalPauseResumeQueue")).to_contain_text("Pause Processing")
-        expect(page.locator("#globalPauseResumeQueue")).not_to_contain_text("Resume Processing")
+        # Pausing one job leaves the global control on Pause (the Workers header button).
+        expect(page.locator("#globalPauseResumeQueue")).to_have_text("Pause")
+        expect(page.locator("#globalPauseResumeQueue")).not_to_contain_text("Resume")
         # The unified queue retains this job while its own pause is active.
         expect(row).to_be_visible()
         expect(page.locator(f"#job-row-{job['id']}")).to_have_count(1)

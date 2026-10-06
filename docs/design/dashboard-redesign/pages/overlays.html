@@ -1,0 +1,1048 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overlays mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+<link rel="stylesheet" href="../shared.css">
+<style>
+/* ===== page chrome (spec only) ===== */
+html, body { overflow-x: clip; }
+.nav { overflow: visible; position: sticky; top: 0; z-index: 50; }
+.nav .tab { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 0; }
+.nav .grow { display: contents; }
+.nav .burger { display: none; margin-left: auto; }
+.dd { position: relative; display: inline-flex; }
+.menu-dd { display: none; position: absolute; z-index: 60; top: calc(100% + 8px); left: 0; min-width: 300px; padding: 6px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line-strong); box-shadow: 0 16px 40px rgba(0,0,0,.4); }
+.menu-dd.right { left: auto; right: 0; }
+.dd.open > .menu-dd { display: block; }
+.dd.open > .tab, .dd.open > .ibtn { color: var(--text); background: var(--inset); }
+.menu-dd .gl { padding: 8px 10px 4px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.menu-dd .it { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 8px; color: var(--text); position: relative; }
+.menu-dd .it:hover, .menu-dd .it:focus-visible { background: var(--inset); }
+.menu-dd .it .ic { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; background: var(--inset); color: var(--muted); flex: none; }
+.menu-dd .it b { display: block; font-weight: 600; font-size: 14px; line-height: 1.25; }
+.menu-dd .it small { display: block; color: var(--faint); font-size: 12px; line-height: 1.3; }
+.menu-dd .it.on { background: var(--accent-soft); }
+.menu-dd .it.on .ic { background: var(--accent-soft); color: var(--accent); }
+.menu-dd .it .ext { margin-left: auto; color: var(--faint); font-size: 12px; }
+.menu-dd hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+.menu-dd.compact { min-width: 270px; }
+.menu-dd.compact .it { gap: 10px; padding: 9px 10px; }
+.menu-dd.compact .it .ic { width: 24px; height: 24px; background: transparent; }
+.bell-dd { width: 380px; padding: 0; min-width: 0; }
+.bell-h { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.bell-h b { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.bell-h .sp { flex: 1; }
+.bell-h a { color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; }
+.nt { display: grid; grid-template-columns: 4px 1fr; border-bottom: 1px solid var(--line); }
+.nt:last-child { border-bottom: 0; }
+.nt > i.bar-s { background: var(--run); }
+.nt.warn > i.bar-s { background: var(--warn); } .nt.bad > i.bar-s { background: var(--bad); }
+.nt .nb { padding: 12px 14px; display: grid; gap: 6px; }
+.nt .nt-t { display: flex; gap: 8px; align-items: flex-start; font-weight: 600; }
+.nt .nt-t i { margin-top: 2px; }
+.nt.warn .nt-t i { color: var(--warn); } .nt.bad .nt-t i { color: var(--bad); } .nt.info .nt-t i { color: var(--run); }
+.nt .more { color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; background: none; border: 0; padding: 0; text-align: left; width: fit-content; }
+.nt .det { font-size: 13px; color: var(--muted); display: none; gap: 8px; }
+.nt.open .det { display: grid; }
+.nt .acts { display: flex; gap: 6px; align-items: center; }
+.bell-empty { display: none; padding: 28px 14px; text-align: center; color: var(--muted); }
+.bell-empty i { font-size: 26px; display: block; margin-bottom: 6px; opacity: .6; }
+.bell-dd.empty .nt { display: none; } .bell-dd.empty .bell-empty { display: block; }
+.bell-f { padding: 10px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--faint); }
+
+.spec { position: sticky; top: 56px; z-index: 40; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px dashed var(--line-strong); padding: 10px 20px; display: flex; gap: 8px; align-items: center; overflow-x: auto; white-space: nowrap; }
+.spec .lab { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--warn); margin-right: 4px; flex: none; }
+.spec .btn { flex: none; }
+.spec .gap { width: 1px; height: 22px; background: var(--line-strong); flex: none; margin: 0 4px; }
+.behind { max-width: 1100px; margin: 0 auto; padding: 28px 20px 80px; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 20px; opacity: .8; }
+.behind .panel { min-height: 220px; }
+.behind .ph { height: 10px; border-radius: 6px; background: var(--inset); margin: 4px 0; }
+@media (max-width: 800px) { .behind { grid-template-columns: 1fr; } }
+
+/* ===== overlay primitives ===== */
+.scrim { position: fixed; inset: 0; z-index: 100; display: none; align-items: flex-start; justify-content: center; padding: 6vh 16px 16px; background: rgba(6,6,14,.62); backdrop-filter: blur(3px); overflow-y: auto; }
+:root[data-theme="light"] .scrim { background: rgba(20,24,40,.42); }
+.scrim.open { display: flex; }
+.scrim.top { z-index: 110; }
+.dlg { --tk: var(--accent); --tk-soft: var(--accent-soft); width: 640px; max-width: 100%; max-height: 88vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: 0 24px 64px rgba(0,0,0,.5); animation: pop .18s cubic-bezier(.16,1,.3,1); }
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.985); } }
+@media (prefers-reduced-motion: reduce) { .dlg, .toast { animation: none; } }
+.dlg.w-sm { width: 480px; } .dlg.w-md { width: 560px; } .dlg.w-lg { width: 720px; } .dlg.w-xl { width: 1120px; }
+[data-kind="previews"] { --tk: var(--t-previews); --tk-soft: var(--t-previews-soft); }
+[data-kind="intro"], [data-kind="check"] { --tk: var(--t-intro); --tk-soft: var(--t-intro-soft); }
+[data-kind="loud"] { --tk: var(--t-loud); --tk-soft: var(--t-loud-soft); }
+.dlg-h { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); flex: none; }
+.dlg-h .tile { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--tk-soft); color: var(--tk); font-size: 18px; flex: none; transition: background .2s, color .2s; }
+.dlg-h h2 { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.25; }
+.dlg-h .sub { color: var(--faint); font-size: 12px; margin-top: 1px; }
+.dlg-h .sp { flex: 1; }
+.dlg-b { grid-auto-rows: max-content; padding: 18px 20px 22px; overflow-y: auto; display: grid; gap: 22px; flex: 1; min-height: 0; align-content: start; }
+.dlg-f { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line); flex: none; background: var(--panel); border-radius: 0 0 16px 16px; flex-wrap: wrap; }
+.dlg-f .sum { color: var(--muted); font-size: 13px; min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
+.dlg-f .sum b { color: var(--text); }
+.dlg-f .btn { white-space: nowrap; }
+.dlg-f .btn.primary { min-width: 150px; }
+.btn[disabled] { opacity: .45; cursor: not-allowed; }
+.dlg-b { counter-reset: s; }
+.sec-h .n::before { counter-increment: s; content: counter(s); }
+.sec { display: grid; gap: 12px; }
+.sec-h { display: flex; align-items: center; gap: 10px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.sec-h .n { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--inset); border: 1px solid var(--line-strong); font-size: 11px; color: var(--muted); letter-spacing: 0; }
+.sec-h .sp { flex: 1; }
+.sec-h a { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--accent); font-weight: 600; cursor: pointer; }
+.fld { display: grid; gap: 6px; }
+.fld > label, .lbl { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.lbl .req { color: var(--bad); }
+.hint { color: var(--faint); font-size: 12px; line-height: 1.4; }
+.inp, .sel { width: 100%; height: 40px; border-radius: 9px; border: 1px solid var(--line-strong); background: transparent; color: var(--text); padding: 0 12px; font: inherit; }
+.sel { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 17px, calc(100% - 13px) 17px; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
+.sel option { background: var(--panel-2); color: var(--text); }
+.inp::placeholder { color: var(--faint); }
+textarea.inp { height: auto; padding: 10px 12px; font-family: var(--mono); font-size: 12.5px; }
+.inp:focus-visible, .sel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.inp.mono { font-family: var(--mono); }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .row2 { grid-template-columns: 1fr; } }
+.err { display: none; align-items: center; gap: 6px; color: var(--bad); font-size: 12px; font-weight: 600; }
+.errs .err { display: flex; }
+.errs .inp.needs { border-color: var(--bad); }
+.sw { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; font-size: 13px; user-select: none; }
+.sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+.sw .tr { width: 34px; height: 20px; border-radius: 99px; background: var(--line-strong); position: relative; transition: background .16s; flex: none; }
+.sw .tr::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .16s; }
+.sw input:checked + .tr { background: var(--accent); }
+.sw input:checked + .tr::after { transform: translateX(14px); }
+.sw input:focus-visible + .tr { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ib { width: 20px; height: 20px; border-radius: 50%; border: 0; background: transparent; color: var(--faint); display: inline-grid; place-items: center; font-size: 13px; padding: 0; flex: none; }
+.ib:hover { color: var(--accent); }
+.ck { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
+.ck input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; flex: none; }
+
+/* segmented (form) */
+.sg { justify-self: start; display: inline-flex; padding: 3px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); gap: 2px; max-width: 100%; flex-wrap: wrap; }
+.sg button { height: 32px; padding: 0 13px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 7px; }
+.sg button:hover { color: var(--text); }
+.sg button.on { background: var(--panel-2); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.sg button.on.warn { color: var(--warn); }
+.sg.full { display: flex; justify-self: stretch; } .sg.full button { flex: 1; justify-content: center; }
+.sg .def { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+
+/* job-type cards */
+.tcards { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+.tcard { position: relative; display: grid; gap: 8px; padding: 12px; border-radius: 12px; border: 1px solid var(--line-strong); background: transparent; cursor: pointer; transition: border-color .16s, background .16s; align-content: start; }
+.tcard:hover { background: var(--inset); }
+.tcard input { position: absolute; opacity: 0; inset: 0; cursor: pointer; }
+.tcard .tt1 { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+.tcard .ti { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-size: 15px; background: var(--c-soft); color: var(--c); flex: none; }
+.tcard .tp { color: var(--faint); font-size: 12px; line-height: 1.35; }
+.tcard .ib { margin-left: auto; position: relative; z-index: 1; }
+.tcard .ok { position: absolute; top: -7px; right: -7px; color: var(--c); background: var(--panel); border-radius: 50%; font-size: 17px; line-height: 1; display: none; }
+.tcard.previews { --c: var(--t-previews); --c-soft: var(--t-previews-soft); }
+.tcard.intro { --c: var(--t-intro); --c-soft: var(--t-intro-soft); }
+.tcard.loud { --c: var(--t-loud); --c-soft: var(--t-loud-soft); }
+.tcard.on { border-color: var(--c); background: var(--c-soft); box-shadow: 0 0 0 1px var(--c) inset; }
+.tcard.on .ok { display: block; }
+.tcard:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tcards.compact .tcard .tp { display: none; }
+@media (max-width: 640px) { .tcards { grid-template-columns: 1fr; } .tcard { grid-template-columns: 1fr; } .tcard .tp { display: block !important; } }
+
+/* libraries */
+.libbox { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.libtop { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--inset); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.libtop .sp { flex: 1; }
+.libtop a { color: var(--accent); font-weight: 600; font-size: 13px; cursor: pointer; }
+.liblist { max-height: 230px; overflow-y: auto; padding: 4px 6px 8px; }
+.liblist.off { opacity: .45; pointer-events: none; }
+.lg-h { display: flex; align-items: center; gap: 8px; padding: 10px 6px 4px; font-weight: 700; font-size: 13px; }
+.lg-h .vl { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: var(--panel-2); font-size: 12px; }
+.lg-h .c { margin-left: auto; font-weight: 500; color: var(--faint); font-size: 12px; }
+.lg-h a { color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; }
+.lib { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 30px; border-radius: 8px; font-size: 14px; }
+.lib:hover { background: var(--inset); }
+.lib .tag { margin-left: auto; }
+.scope { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px; background: var(--tk-soft); color: var(--tk); font-size: 13px; font-weight: 600; }
+.scope.one { background: var(--ok-soft); color: var(--ok); }
+.skel { height: 14px; border-radius: 6px; background: linear-gradient(90deg, var(--inset), var(--line), var(--inset)); background-size: 200% 100%; animation: sk 1.4s linear infinite; margin: 10px 6px; }
+@keyframes sk { to { background-position: -200% 0; } }
+
+/* filters */
+.flt { border: 1px solid var(--line); border-radius: 12px; }
+.flt > summary { list-style: none; display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; }
+.flt > summary::-webkit-details-marker { display: none; }
+.flt > summary .ft { font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.flt > summary .fs { color: var(--faint); font-size: 12px; margin-top: 2px; font-weight: 500; }
+.flt > summary .ch { margin-left: auto; color: var(--muted); transition: transform .2s; }
+.flt[open] > summary .ch { transform: rotate(180deg); }
+.flt .fb { padding: 4px 14px 16px; display: grid; gap: 14px; border-top: 1px solid var(--line); }
+.flt .fh { display: flex; align-items: center; gap: 10px; padding-top: 10px; }
+.flt .fh .hint { flex: 1; }
+.flt fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 8px; }
+.flt legend { font-weight: 700; font-size: 13px; padding: 0; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+.flt .grp { padding: 12px; border-radius: 10px; background: var(--inset); display: grid; gap: 8px; }
+.flt [data-sub][hidden] { display: none; }
+
+/* chips list / results */
+.chips { display: grid; gap: 8px; }
+.chip { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--inset); }
+.chip .ci { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--tk-soft); color: var(--tk); }
+.chip b { font-weight: 600; display: block; overflow-wrap: anywhere; }
+.chip details summary { cursor: pointer; font-size: 12px; color: var(--faint); list-style: none; }
+.chip details summary::-webkit-details-marker { display: none; }
+.chip details code { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin-top: 4px; }
+.empty-box { padding: 16px; border: 1px dashed var(--line-strong); border-radius: 10px; text-align: center; color: var(--faint); font-size: 13px; }
+.searchbox { position: relative; }
+.searchbox .inp { padding-left: 36px; padding-right: 110px; }
+.searchbox > i { position: absolute; left: 12px; top: 12px; color: var(--faint); }
+.searchbox .btn { position: absolute; right: 4px; top: 4px; height: 32px; }
+.results { display: none; margin-top: 6px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel-2); max-height: 280px; overflow-y: auto; box-shadow: 0 12px 28px rgba(0,0,0,.3); }
+.results.open { display: block; }
+.results .gh { padding: 6px 12px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); background: var(--inset); position: sticky; top: 0; }
+.results .tip { padding: 8px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+.results .tip i { color: var(--warn); }
+.results .ri { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.results .ri:last-of-type { border-bottom: 0; }
+.results .ri button.add { background: none; border: 0; text-align: left; flex: 1; min-width: 120px; font-weight: 600; display: flex; gap: 8px; align-items: center; color: var(--text); }
+.results .ri button.add small { color: var(--faint); font-weight: 500; }
+.results .ri .meta { color: var(--faint); font-size: 12px; }
+.results .bar-sel { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel-2); border-top: 1px solid var(--line-strong); }
+.results .bar-sel .sp { flex: 1; }
+.vtag { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong); font-size: 11px; font-weight: 600; color: var(--muted); }
+.vtag.plex { color: #e5a00d; border-color: rgba(229,160,13,.4); } .vtag.emby { color: #52b54b; border-color: rgba(82,181,75,.4); } .vtag.jf { color: #5aa0e8; border-color: rgba(90,160,232,.4); }
+details.adv > summary { cursor: pointer; font-size: 13px; color: var(--muted); font-weight: 600; list-style: none; display: flex; align-items: center; gap: 8px; }
+details.adv > summary::-webkit-details-marker { display: none; }
+details.adv[open] > summary i { transform: rotate(90deg); }
+details.adv > summary i { transition: transform .15s; }
+.note { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: var(--inset); color: var(--muted); font-size: 13px; }
+.note i { color: var(--tk); margin-top: 2px; }
+.note.warn { background: var(--warn-soft); color: var(--warn); } .note.warn i { color: var(--warn); }
+[hidden] { display: none !important; }
+.spec-chip { height: 24px; padding: 0 8px; border-radius: 6px; border: 1px dashed var(--warn); color: var(--warn); background: transparent; font-size: 11px; font-weight: 700; }
+.spec-chip.on { background: var(--warn-soft); }
+
+/* schedule */
+.days { display: flex; gap: 6px; flex-wrap: wrap; }
+.days button { width: 44px; height: 36px; border-radius: 9px; border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font-weight: 600; font-size: 13px; }
+.days button.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.when-sum { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 13px; }
+.lookback { display: grid; gap: 6px; }
+
+/* job details */
+.jd-h { display: grid; gap: 8px; padding: 16px 20px 12px; border-bottom: 1px solid var(--line); flex: none; }
+.jd-t { display: flex; align-items: center; gap: 12px; }
+.jd-t h2 { margin: 0; font-size: 18px; font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.jd-t .tile { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--tk-soft); color: var(--tk); font-size: 18px; flex: none; }
+.jd-t .sp { flex: 1; }
+.jd-m { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-left: 48px; }
+.jd-id { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--faint); }
+.jd-id button { background: none; border: 0; color: var(--muted); padding: 2px; }
+.jd-id button:hover { color: var(--accent); }
+.jd-b { grid-auto-rows: max-content; padding: 16px 20px 6px; overflow-y: auto; display: grid; gap: 14px; flex: 1; min-height: 0; align-content: start; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--line); }
+.facts > div { background: var(--panel); padding: 10px 14px; }
+.facts dt { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin: 0 0 2px; }
+.facts dd { margin: 0; font-weight: 600; }
+.facts dd small { color: var(--faint); font-weight: 500; }
+.cur { display: grid; gap: 4px; padding: 10px 14px; border-radius: 10px; background: var(--inset); font-size: 13px; }
+.cur .k { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.cur code { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.errbox { padding: 12px 14px; border-radius: 10px; background: var(--bad-soft); color: var(--bad); font-size: 13px; display: grid; gap: 2px; }
+.errbox b { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.srv { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.srv:last-child { border-bottom: 0; }
+.srv .nm { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; min-width: 150px; }
+.srv .nm .vl { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: var(--panel-2); font-size: 12px; }
+.srv .cs { display: flex; gap: 6px; flex-wrap: wrap; }
+.ch2 { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); }
+.ch2.ok { background: var(--ok-soft); color: var(--ok); } .ch2.warn { background: var(--warn-soft); color: var(--warn); } .ch2.bad { background: var(--bad-soft); color: var(--bad); } .ch2.run { background: var(--run-soft); color: var(--run); }
+.rd { border: 1px solid var(--line); border-radius: 12px; }
+.rd > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; font-weight: 700; }
+.rd > summary::-webkit-details-marker { display: none; }
+.rd > summary small { color: var(--faint); font-weight: 500; }
+.rd > summary .chv { margin-left: auto; transition: transform .2s; color: var(--muted); }
+.rd[open] > summary .chv { transform: rotate(180deg); }
+.rd > .rb { padding: 0 14px 8px; }
+.attempts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; }
+.attempts .al { color: var(--faint); font-size: 12px; display: inline-flex; gap: 6px; align-items: center; }
+.ap { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: transparent; font-weight: 700; font-size: 12px; color: var(--muted); }
+.ap.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); } .ap.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.ap.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.ap.cur { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.ap small { font-weight: 500; color: var(--faint); }
+.attempts .sp { flex: 1; }
+.rr { flex-basis: 100%; color: var(--muted); font-size: 12px; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+.tabs button { height: 38px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-weight: 600; display: inline-flex; align-items: center; gap: 8px; margin-bottom: -1px; }
+.tabs button.on { color: var(--accent); border-color: var(--accent); }
+.tabs button .c { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--inset); }
+.tabs button.on .c { background: var(--accent-soft); }
+.tbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tbar .sp { flex: 1; }
+.tbar .search { max-width: 260px; min-width: 150px; flex: 1; }
+.tbar .sel { width: auto; height: 34px; }
+.tbar .sw { margin-right: 4px; }
+.log { position: relative; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--bg) 70%, black); overflow: hidden; }
+:root[data-theme="light"] .log { background: #f6f7fb; }
+.log pre { margin: 0; padding: 12px 14px; max-height: 300px; overflow: auto; font: 12.5px/1.65 var(--mono); color: var(--muted); }
+.log pre .ts { color: var(--faint); } .log pre .w { color: var(--warn); } .log pre .e { color: var(--bad); } .log pre .t { color: var(--text); } .log pre .g { color: var(--ok); }
+.log .fl { position: absolute; right: 14px; bottom: 10px; display: grid; gap: 4px; }
+.log .fl .ibtn { background: var(--panel-2); border: 1px solid var(--line-strong); width: 28px; height: 28px; }
+.ftab { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+.ftab table { min-width: 760px; }
+.ftab td { vertical-align: top; }
+.fbn { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.fbn .eye { margin-left: 4px; }
+.ftab details summary { font-size: 12px; color: var(--faint); cursor: pointer; }
+.ftab details code { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+.wb { display: inline-grid; place-items: center; min-width: 28px; height: 22px; border-radius: 6px; border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.pgf { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+.pgf .sp { flex: 1; } .pgf .sel { width: auto; height: 32px; }
+.pgf .pg button { min-width: 32px; }
+.jd-f { display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); flex-wrap: wrap; flex: none; border-radius: 0 0 16px 16px; }
+.jd-f .sp { flex: 1; }
+.btn.amber { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.btn.amber:hover { filter: brightness(1.15); }
+.btn.dng { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, transparent); }
+.btn.dng:hover { background: var(--bad-soft); border-color: var(--bad); }
+.btn.dngf { background: var(--bad); border-color: var(--bad); color: #fff; height: 40px; }
+.btn.warnf { background: var(--warn); border-color: var(--warn); color: var(--accent-ink); height: 40px; }
+
+/* picker */
+.pick-path { display: flex; gap: 6px; }
+.pick-path .inp { font-family: var(--mono); font-size: 13px; }
+.crumb { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.crumb a { color: var(--accent); font-weight: 600; cursor: pointer; } .crumb i { font-size: 10px; opacity: .6; }
+.plist { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; max-height: 300px; overflow-y: auto; }
+.pr { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.pr:last-child { border-bottom: 0; } .pr:hover { background: var(--inset); }
+.pr .nm { flex: 1; display: flex; align-items: center; gap: 10px; background: none; border: 0; text-align: left; color: var(--text); font-weight: 600; }
+.pr .nm i { color: var(--warn); } .pr .nm i.v { color: var(--t-previews); }
+.pr small { color: var(--faint); }
+
+/* confirm / info / toasts */
+.cf-b { padding: 20px; display: grid; grid-template-columns: 40px 1fr; gap: 14px; }
+.cf-ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-size: 20px; background: var(--bad-soft); color: var(--bad); }
+.cf-ic.warn { background: var(--warn-soft); color: var(--warn); } .cf-ic.pri { background: var(--accent-soft); color: var(--accent); }
+.cf-b h2 { margin: 0 0 6px; font-size: 17px; } .cf-b p { margin: 0; color: var(--muted); }
+.cf-b ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+.cf-f { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.info-b { padding: 18px 20px; display: grid; gap: 10px; color: var(--muted); line-height: 1.55; overflow-y: auto; }
+.info-b p { margin: 0; } .info-b strong { color: var(--text); } .info-b code { font-family: var(--mono); font-size: 12.5px; background: var(--inset); padding: 1px 6px; border-radius: 5px; color: var(--text); }
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 130; display: grid; gap: 10px; width: 360px; max-width: calc(100vw - 32px); pointer-events: none; }
+.toast { pointer-events: auto; display: grid; grid-template-columns: 4px 1fr auto; background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; animation: pop .2s cubic-bezier(.16,1,.3,1); }
+.toast > i.bar-s { background: var(--run); }
+.toast.success > i.bar-s { background: var(--ok); } .toast.danger > i.bar-s { background: var(--bad); } .toast.warning > i.bar-s { background: var(--warn); }
+.toast .tb { padding: 10px 12px; display: grid; grid-template-columns: 20px 1fr; gap: 2px 10px; }
+.toast .tb > i { grid-row: span 2; margin-top: 2px; }
+.toast.success .tb > i { color: var(--ok); } .toast.danger .tb > i { color: var(--bad); } .toast.warning .tb > i { color: var(--warn); } .toast.info .tb > i { color: var(--run); }
+.toast .tb b { font-size: 13px; } .toast .tb span { color: var(--muted); font-size: 13px; }
+.toast .ibtn { margin: 6px 6px 0 0; }
+
+/* offcanvas */
+.oc-scrim { position: fixed; inset: 0; z-index: 100; display: none; background: rgba(6,6,14,.62); }
+.oc-scrim.open { display: block; }
+.oc { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 100vw; background: var(--panel); border-left: 1px solid var(--line-strong); display: flex; flex-direction: column; animation: slidein .22s cubic-bezier(.16,1,.3,1); }
+@keyframes slidein { from { transform: translateX(24px); opacity: 0; } }
+.oc-h { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.oc-h .mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
+.oc-h b { font-size: 16px; flex: 1; }
+.oc-b { overflow-y: auto; padding: 8px 10px; flex: 1; display: grid; align-content: start; gap: 2px; }
+.oc-b .gl { padding: 14px 10px 6px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.oc-i { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 0 12px; border-radius: 10px; color: var(--text); background: none; border: 0; width: 100%; text-align: left; font-weight: 600; font-size: 15px; }
+.oc-i i.l { width: 22px; text-align: center; color: var(--muted); font-size: 17px; }
+.oc-i:hover { background: var(--inset); }
+.oc-i.on { background: var(--accent-soft); color: var(--accent); } .oc-i.on i.l { color: var(--accent); }
+.oc-i .cv { margin-left: auto; transition: transform .2s; color: var(--faint); font-size: 12px; }
+.oc-i[aria-expanded="true"] .cv { transform: rotate(180deg); }
+.oc-i .badge-dot { position: static; margin-left: auto; }
+.oc-sub { display: none; padding: 0 0 6px 34px; }
+.oc-sub.open { display: grid; }
+.oc-sub a { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border-radius: 10px; color: var(--muted); font-weight: 500; }
+.oc-sub a:hover { background: var(--inset); color: var(--text); }
+.oc-f { padding: 12px 16px; border-top: 1px solid var(--line); display: grid; gap: 10px; }
+.oc-f .vers { color: var(--faint); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+.oc-f .btn { width: 100%; height: 44px; }
+
+/* responsive: navbar collapses at 1200 like navbar-expand-xl */
+@media (max-width: 1199.98px) {
+  .nav > *:not(.brand):not(.burger) { display: none !important; }
+  .nav .burger { display: inline-grid; }
+}
+@media (max-width: 640px) {
+  .scrim { padding: 0; align-items: stretch; }
+  .dlg, .dlg.w-sm, .dlg.w-md, .dlg.w-lg, .dlg.w-xl { width: 100vw; max-width: none; height: 100dvh; max-height: none; border-radius: 0; border: 0; }
+  .dlg.sheet-auto { height: auto; align-self: flex-end; border-radius: 16px 16px 0 0; max-height: 92dvh; }
+  .dlg-f, .jd-f { border-radius: 0; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .dlg-f .btn.primary { flex: 1; min-width: 0; }
+  .dlg-f .sum { flex-basis: 100%; }
+  .jd-m { padding-left: 0; }
+  .jd-t { flex-wrap: wrap; gap: 8px 10px; }
+  .jd-t h2 { flex: 1 1 calc(100% - 140px); min-width: 0; font-size: 16px; }
+  .jd-t .sp { display: none; }
+  .jd-id { order: 9; flex-basis: 100%; min-width: 0; }
+  .jd-id span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jd-t .ibtn[data-close] { order: 2; margin-left: auto; }
+  .facts { grid-template-columns: 1fr 1fr; }
+  .dlg-h, .dlg-b, .jd-b { padding-left: 16px; padding-right: 16px; }
+  .jd-h { padding-left: 16px; padding-right: 16px; }
+  .spec { padding: 8px 12px; }
+  .spec-chip { display: none; }
+  .toasts { right: 8px; left: 8px; width: auto; bottom: 8px; }
+  .bell-dd { width: min(380px, calc(100vw - 24px)); }
+  .jd-f .btn { flex: 1; }
+  #jd-var { display: none !important; }
+}
+</style>
+</head>
+<body>
+<header class="nav" id="nav">
+  <a class="brand" href="#"><span class="mark"><i class="bi bi-play-btn-fill"></i></span><span><b>Media Preview Generator</b><small>local build</small></span></a>
+  <a class="tab" href="#"><i class="bi bi-speedometer2"></i> Dashboard</a>
+  <a class="tab" href="#"><i class="bi bi-hdd-network"></i> Servers</a>
+  <div class="dd" id="dd-auto"><button class="tab" aria-haspopup="true" aria-expanded="false"><i class="bi bi-magic"></i> Automation <i class="bi bi-chevron-down caret"></i></button>
+    <div class="menu-dd" role="menu">
+      <a class="it on" href="#" role="menuitem"><span class="ic"><i class="bi bi-lightning-charge"></i></span><span><b>Triggers</b><small>Webhooks that start jobs as media arrives</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-calendar-event"></i></span><span><b>Schedules</b><small>Recurring library scans</small></span></a>
+    </div></div>
+  <div class="dd" id="dd-set"><button class="tab" aria-haspopup="true" aria-expanded="false"><i class="bi bi-gear"></i> Settings <i class="bi bi-chevron-down caret"></i></button>
+    <div class="menu-dd" role="menu" style="min-width:330px">
+      <div class="gl">Processing</div>
+      <a class="it on" href="#" role="menuitem"><span class="ic"><i class="bi bi-cpu"></i></span><span><b>Workers</b><small>Groups, job permissions and availability</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-moon-stars"></i></span><span><b>Global pause schedule</b><small>Times when all processing pauses</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-speedometer"></i></span><span><b>Processing options</b><small>Job limits, device tuning, thumbnails</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-skip-forward"></i></span><span><b>Intro &amp; Credits</b><small>Skip-intro and credits markers</small></span></a>
+      <div class="gl">System</div>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-journal-text"></i></span><span><b>Logging</b><small>Level, log files, job history</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-key"></i></span><span><b>Authentication</b><small>The token that signs in to this app</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-clock-history"></i></span><span><b>Backups</b><small>Earlier copies of the config files</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-info-circle"></i></span><span><b>About</b><small>Version and project links</small></span></a>
+    </div></div>
+  <div class="dd" id="dd-tools"><button class="tab" aria-haspopup="true" aria-expanded="false"><i class="bi bi-wrench"></i> Tools <i class="bi bi-chevron-down caret"></i></button>
+    <div class="menu-dd" role="menu">
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-film"></i></span><span><b>Inspector</b><small>A file's preview frames and markers</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-terminal"></i></span><span><b>Logs</b><small>Live application log</small></span></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-clock-history"></i></span><span><b>Webhook activity</b><small>History of incoming webhooks</small></span></a>
+      <hr>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-magic"></i></span><span><b>Run setup again</b><small>Re-open the setup wizard</small></span></a>
+    </div></div>
+  <span class="sp"></span>
+  <div class="dd" id="dd-bell"><button class="ibtn" aria-label="System notifications" title="System notifications" aria-haspopup="true" aria-expanded="false"><i class="bi bi-bell"></i><span class="badge-dot" id="bellBadge">3</span></button>
+    <div class="menu-dd right bell-dd" id="bellDd">
+      <div class="bell-h"><b>Notifications</b><span class="pill" id="bellCount">3</span><span class="sp"></span><a id="bellReset" role="button" tabindex="0" title="Restore dismissed notifications">Restore dismissed</a></div>
+      <div class="nt warn open"><i class="bar-s"></i><div class="nb">
+        <div class="nt-t"><i class="bi bi-exclamation-triangle-fill"></i><span>Vulkan GPU probe failed</span></div>
+        <button class="more" type="button">Hide details</button>
+        <div class="det"><span>The Intel iGPU did not start Vulkan, so HDR previews use the CPU path.</span><div><button class="btn sm"><i class="bi bi-clipboard"></i> Copy diagnostic bundle</button></div></div>
+        <div class="acts"><button class="btn sm">Dismiss</button><button class="btn sm danger" title="Never show this notification again">Dismiss permanently</button></div></div></div>
+      <div class="nt bad"><i class="bar-s"></i><div class="nb">
+        <div class="nt-t"><i class="bi bi-x-octagon-fill"></i><span>Media folder not mounted</span></div>
+        <button class="more" type="button">Show details</button>
+        <div class="det"><span>/data/movies is empty. Jobs for this library will fail until it is mounted.</span></div>
+        <div class="acts"><button class="btn sm">Dismiss</button><span class="hint">Returns on restart if still broken</span></div></div></div>
+      <div class="nt info"><i class="bar-s"></i><div class="nb">
+        <div class="nt-t"><i class="bi bi-info-circle-fill"></i><span>Settings migrated</span></div>
+        <button class="more" type="button">Show details</button>
+        <div class="det"><span>Settings were moved to the new format. Nothing to do.</span></div>
+        <div class="acts"><button class="btn sm">Dismiss</button><button class="btn sm danger">Dismiss permanently</button></div></div></div>
+      <div class="bell-empty"><i class="bi bi-bell-slash"></i>You're all caught up.</div>
+    </div></div>
+  <div class="dd" id="dd-help"><button class="ibtn" aria-label="Help and report an issue" title="Help &amp; feedback" aria-haspopup="true" aria-expanded="false"><i class="bi bi-question-circle"></i></button>
+    <div class="menu-dd right compact" role="menu">
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-bug"></i></span><b>Report an issue</b><i class="bi bi-box-arrow-up-right ext" aria-label="Opens in a new tab"></i></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-chat-dots"></i></span><b>Ask a question</b><i class="bi bi-box-arrow-up-right ext" aria-label="Opens in a new tab"></i></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-book"></i></span><b>Documentation</b><i class="bi bi-box-arrow-up-right ext" aria-label="Opens in a new tab"></i></a>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-hdd-stack"></i></span><b>Multi-server guide</b><i class="bi bi-box-arrow-up-right ext" aria-label="Opens in a new tab"></i></a>
+      <hr>
+      <a class="it" href="#" role="menuitem"><span class="ic"><i class="bi bi-github"></i></span><b>GitHub repository</b><i class="bi bi-box-arrow-up-right ext" aria-label="Opens in a new tab"></i></a>
+    </div></div>
+  <a class="ibtn coffee" href="#" aria-label="Buy me a coffee on Ko-fi" title="Buy me a coffee on Ko-fi"><i class="bi bi-cup-hot-fill"></i></a>
+  <a class="btn sm" href="#" title="Star Media Preview Generator on GitHub"><i class="bi bi-star-fill" style="color:var(--accent)"></i> Star</a>
+  <button class="ibtn" id="themeBtn" aria-label="Toggle dark/light theme" title="Toggle dark/light theme"><i class="bi bi-moon-stars"></i></button>
+  <button class="btn sm"><i class="bi bi-box-arrow-right"></i> Logout</button>
+  <button class="ibtn burger" id="burger" aria-label="Open navigation menu"><i class="bi bi-list" style="font-size:22px"></i></button>
+</header>
+
+<div class="spec" role="toolbar" aria-label="Spec only: open an overlay">
+  <span class="lab">Spec only</span>
+  <button class="btn sm" data-open="ov-newjob"><i class="bi bi-play-fill"></i> Start new job</button>
+  <button class="btn sm" data-open="ov-manual"><i class="bi bi-file-earmark-play"></i> Process file / folder</button>
+  <button class="btn sm" data-open="ov-picker"><i class="bi bi-folder2-open"></i> Folder picker</button>
+  <button class="btn sm" data-open="ov-sched" data-edit="0"><i class="bi bi-calendar-plus"></i> Add schedule</button>
+  <button class="btn sm" data-open="ov-sched" data-edit="1"><i class="bi bi-pencil"></i> Edit schedule</button>
+  <button class="btn sm" data-open="ov-job"><i class="bi bi-file-text"></i> Job details</button>
+  <span class="gap"></span>
+  <button class="btn sm" data-open="ov-info"><i class="bi bi-info-circle"></i> (i) dialog</button>
+  <button class="btn sm" data-open="ov-new"><i class="bi bi-megaphone"></i> What's new</button>
+  <button class="btn sm" data-confirm="danger"><i class="bi bi-trash"></i> Confirm: clear</button>
+  <button class="btn sm" data-confirm="warn"><i class="bi bi-exclamation-triangle"></i> Confirm: warning</button>
+  <button class="btn sm" data-confirm="cancel"><i class="bi bi-x-octagon"></i> Confirm: cancel job</button>
+  <button class="btn sm" data-toast="success"><i class="bi bi-check-circle"></i> Toast</button>
+  <button class="btn sm" data-toast="danger"><i class="bi bi-exclamation-circle"></i> Toast error</button>
+  <span class="gap"></span>
+  <button class="btn sm" data-menu="dd-auto">Automation menu</button>
+  <button class="btn sm" data-menu="dd-set">Settings menu</button>
+  <button class="btn sm" data-menu="dd-tools">Tools menu</button>
+  <button class="btn sm" data-menu="dd-bell">Notifications</button>
+  <button class="btn sm" id="bellEmptyBtn">Notifications: empty</button>
+  <button class="btn sm" data-menu="dd-help">Help menu</button>
+  <button class="btn sm" data-open="oc"><i class="bi bi-list"></i> Mobile menu</button>
+</div>
+
+<div class="behind" aria-hidden="true">
+  <div class="panel"><div class="panel-h"><h2>System &amp; workers</h2></div><div class="panel-b"><div class="ph"></div><div class="ph" style="width:70%"></div><div class="ph" style="width:85%"></div></div></div>
+  <div class="panel"><div class="panel-h"><h2>Quick actions</h2></div><div class="panel-b"><div class="ph"></div><div class="ph" style="width:60%"></div></div></div>
+  <div class="panel"><div class="panel-h"><h2>Job statistics</h2></div><div class="panel-b"><div class="ph"></div><div class="ph" style="width:75%"></div></div></div>
+</div>
+
+<!-- ============ 1. START NEW JOB ============ -->
+<div class="scrim" id="ov-newjob" role="dialog" aria-modal="true" aria-labelledby="nj-title">
+ <div class="dlg w-md" id="nj" data-kind="previews">
+  <div class="dlg-h"><span class="tile"><i class="bi bi-play-fill"></i></span><div><h2 id="nj-title">Start new job</h2></div><span class="sp"></span><button class="spec-chip" data-errs title="Spec only: show validation messages">Spec: validation</button><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+  <div class="dlg-b">
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> Job type</div>
+    <div class="tcards" role="radiogroup" aria-label="Job type">
+     <label class="tcard previews on"><input type="radio" name="njk" value="previews" checked><span class="tt1"><span class="ti"><i class="bi bi-film"></i></span>Previews<button type="button" class="ib" data-info="Previews" aria-label="About Previews"><i class="bi bi-info-circle"></i></button></span><span class="tp">Scrubbing thumbnails for Plex, Emby and Jellyfin.</span><i class="bi bi-check-circle-fill ok"></i></label>
+     <label class="tcard intro"><input type="radio" name="njk" value="intro"><span class="tt1"><span class="ti"><i class="bi bi-skip-forward"></i></span>Intro &amp; Credits<button type="button" class="ib" data-info="Intro &amp; Credits job" aria-label="About Intro and Credits"><i class="bi bi-info-circle"></i></button></span><span class="tp">Skip Intro and Skip Credits markers.</span><i class="bi bi-check-circle-fill ok"></i></label>
+     <label class="tcard loud"><input type="radio" name="njk" value="loud"><span class="tt1"><span class="ti"><i class="bi bi-soundwave"></i></span>Plex loudness<button type="button" class="ib" data-info="Plex loudness" aria-label="About Plex loudness"><i class="bi bi-info-circle"></i></button></span><span class="tp">Audio loudness, stored in Plex.</span><i class="bi bi-check-circle-fill ok"></i></label>
+    </div>
+    <div class="fld" data-k="intro check" hidden>
+     <div style="display:flex;align-items:center;gap:8px"><div class="sg" id="nj-mode" role="radiogroup" aria-label="Intro and credits mode"><button class="on" data-mode="find" role="radio">Find markers</button><button data-mode="check" role="radio">Check servers</button></div><button type="button" class="ib" data-info="Check servers" aria-label="About Check servers"><i class="bi bi-info-circle"></i></button></div>
+    </div>
+   </div>
+
+   <div class="sec" data-k="previews intro loud">
+    <div class="sec-h"><span class="n"></span> Libraries <a id="nj-info-libs" data-info="Run against these libraries">What does this pick?</a></div>
+    <div class="libbox">
+     <div class="libtop"><label class="ck"><input type="checkbox" id="nj-all" checked> <b>All libraries</b></label><span class="hint" id="nj-cap">34 libraries across 5 servers</span><span class="sp"></span><a id="nj-sel-all">Select all</a><a id="nj-sel-none">None</a></div>
+     <div class="liblist off" id="nj-list">
+      <div class="lg-h"><span class="vl" style="color:#e5a00d"><i class="bi bi-chevron-right"></i></span>Lab Plex <span class="c">3</span><a data-srv>Select server</a></div>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Plex"> Movies <span class="tag">Movies</span></label>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Plex"> TV Shows <span class="tag">TV shows</span></label>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Plex"> Anime <span class="tag">TV shows</span></label>
+      <div class="lg-h"><span class="vl" style="color:#5aa0e8"><i class="bi bi-triangle-fill"></i></span>Lab Jellyfin 10.11 <span class="c">2</span><a data-srv>Select server</a></div>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Jellyfin 10.11"> Movies <span class="tag">Movies</span></label>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Jellyfin 10.11"> Shows <span class="tag">TV shows</span></label>
+      <div class="lg-h"><span class="vl" style="color:#52b54b"><i class="bi bi-play-circle-fill"></i></span>Lab Emby <span class="c">2</span><a data-srv>Select server</a></div>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Emby"> Movies <span class="tag">Movies</span></label>
+      <label class="lib"><input type="checkbox" class="ck-lib" data-srv="Lab Emby"> Documentaries <span class="tag">Movies</span></label>
+     </div>
+    </div>
+    <div class="scope" id="nj-scope"><i class="bi bi-globe2"></i><span>Scanning every enabled library on all servers</span></div>
+    <div class="err"><i class="bi bi-exclamation-circle"></i> Pick at least one library, or turn on All libraries.</div>
+   </div>
+
+   <div class="note" data-k="check" hidden><i class="bi bi-hdd-network"></i><span>Checks every server. There are no libraries to pick.</span></div>
+
+   <div class="sec" data-k="previews intro loud check">
+    <div class="sec-h"><span class="n"></span> Options</div>
+    <div class="fld" data-k="previews">
+     <label class="lbl">Processing mode <button type="button" class="ib" data-info="Processing mode" aria-label="About processing mode"><i class="bi bi-info-circle"></i></button></label>
+     <div class="sg" role="radiogroup" aria-label="Processing mode"><button class="on" data-pm="missing" role="radio"><i class="bi bi-funnel"></i> Missing only</button><button data-pm="regen" role="radio"><i class="bi bi-arrow-repeat"></i> Regenerate all</button></div>
+     <div class="hint" id="nj-pm-hint">Skips files that already have a preview.</div>
+    </div>
+    <div class="fld" data-k="intro" hidden>
+     <label class="sw"><input type="checkbox"><span class="tr"></span> Re-check files already done <button type="button" class="ib" data-info="Re-check files already done" aria-label="About re-checking"><i class="bi bi-info-circle"></i></button></label>
+     <div class="hint">Off skips files that were already checked.</div>
+    </div>
+    <div class="fld">
+     <label class="lbl">Priority <button type="button" class="ib" data-info="Priority" aria-label="About priority"><i class="bi bi-info-circle"></i></button></label>
+     <div class="sg" id="nj-prio" role="radiogroup" aria-label="Priority"><button data-p="1" role="radio">High</button><button class="on" data-p="2" role="radio">Normal <span class="def">default</span></button><button data-p="3" role="radio">Low</button></div>
+    </div>
+    <div class="fld" data-k="previews">
+     <label class="lbl" for="nj-order">Processing order <button type="button" class="ib" data-info="Processing order" aria-label="About processing order"><i class="bi bi-info-circle"></i></button></label>
+     <select class="sel" id="nj-order"><option>Default (server order)</option><option>Newest added first</option><option>Oldest added first</option><option>Random</option></select>
+     <div class="hint">Which files are processed first.</div>
+    </div>
+    <details class="flt" id="nj-flt" data-k="previews">
+     <summary><span><span class="ft"><i class="bi bi-funnel"></i> Filter media</span><span class="fs" data-fsum>All selected media</span></span><span class="hint" style="margin-left:auto">Edit filters</span><i class="bi bi-chevron-down ch" style="margin-left:0"></i></summary>
+     <div class="fb">
+      <div class="fh"><span class="hint">Filters combine. Only matching media is included.</span><button class="btn sm" data-fclear type="button" aria-label="Clear media filters">Clear</button></div>
+      <div class="hint" data-scope-note hidden>Select at least one library to choose media filters.</div>
+      <fieldset>
+       <div class="fld"><label class="lbl" for="nj-added">Added to library <button type="button" class="ib" data-info="Date added filter" aria-label="About the date filter"><i class="bi bi-info-circle"></i></button></label>
+        <select class="sel" id="nj-added" data-fsel="added"><option value="all">Any time</option><option value="days">Within the last…</option><option value="range">Date range</option></select></div>
+       <div class="fld" data-sub="days" hidden><label class="lbl" for="nj-days">Number of days</label><input class="inp" id="nj-days" type="number" min="1" step="1" value="30"><div class="err"><i class="bi bi-exclamation-circle"></i> Enter a whole number of days.</div></div>
+       <div class="row2" data-sub="range" hidden><div class="fld"><label class="lbl" for="nj-from">From</label><input class="inp" id="nj-from" type="date"></div><div class="fld"><label class="lbl" for="nj-to">Through</label><input class="inp" id="nj-to" type="date"></div><div class="err" style="grid-column:1/-1"><i class="bi bi-exclamation-circle"></i> Through date must be on or after From date.</div></div>
+      </fieldset>
+      <div class="grp" data-type="tv"><fieldset><legend><i class="bi bi-tv"></i> TV shows</legend>
+       <div class="fld"><label class="lbl" for="nj-seasons">Seasons to include</label><select class="sel" id="nj-seasons" data-fsel="seasons"><option value="all">All seasons</option><option value="latest">Most recent available seasons</option></select></div>
+       <div class="fld" data-sub="latest" hidden><label class="lbl" for="nj-nseasons">Number of seasons per show <button type="button" class="ib" data-info="Seasons per show" aria-label="About seasons"><i class="bi bi-info-circle"></i></button></label><input class="inp" id="nj-nseasons" type="number" min="1" value="1"><div class="hint">Highest-numbered seasons per show.</div></div></fieldset></div>
+      <div class="grp" data-type="movie"><fieldset><legend><i class="bi bi-film"></i> Movies</legend>
+       <div class="fld"><label class="lbl" for="nj-year">Release year</label><select class="sel" id="nj-year" data-fsel="year"><option value="all">All release years</option><option value="range">Year range</option></select></div>
+       <div class="row2" data-sub="range" hidden><div class="fld"><label class="lbl" for="nj-yf">From year</label><input class="inp" id="nj-yf" type="number" placeholder="Any"></div><div class="fld"><label class="lbl" for="nj-yt">Through year</label><input class="inp" id="nj-yt" type="number" placeholder="Any"></div><div class="hint" style="grid-column:1/-1">Inclusive release years, for movies only.</div></div></fieldset></div>
+      <div class="hint">Media missing a value an active filter needs is excluded. <button type="button" class="ib" data-info="Filter matching" aria-label="About filter matching"><i class="bi bi-info-circle"></i></button></div>
+     </div>
+    </details>
+    <div class="note" data-k="intro loud" hidden><i class="bi bi-info-circle"></i><span>Checks every eligible file. Date, episode and order filters do not apply. <button type="button" class="ib" data-info="Filters for this job type" aria-label="About filters"><i class="bi bi-info-circle"></i></button></span></div>
+   </div>
+  </div>
+  <div class="dlg-f"><span class="sum" id="nj-sum"><span class="task previews"><i class="bi bi-film"></i> Previews</span> <span>All libraries · <b>Normal</b></span></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="nj-go"><i class="bi bi-play-fill"></i> <span id="nj-golbl">Start previews job</span></button></div>
+ </div>
+</div>
+
+<!-- ============ 2. PROCESS A FILE OR FOLDER ============ -->
+<div class="scrim" id="ov-manual" role="dialog" aria-modal="true" aria-labelledby="pm-title">
+ <div class="dlg w-md" id="pm" data-kind="previews">
+  <div class="dlg-h"><span class="tile"><i class="bi bi-file-earmark-play"></i></span><div><h2 id="pm-title">Process a file or folder</h2></div><span class="sp"></span><button class="spec-chip" data-errs title="Spec only: show validation messages">Spec: validation</button><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+  <div class="dlg-b">
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> Job type</div>
+    <div class="tcards compact" role="radiogroup" aria-label="Job type">
+     <label class="tcard previews on"><input type="radio" name="pmk" value="previews" checked><span class="tt1"><span class="ti"><i class="bi bi-film"></i></span>Previews</span><i class="bi bi-check-circle-fill ok"></i></label>
+     <label class="tcard intro"><input type="radio" name="pmk" value="intro"><span class="tt1"><span class="ti"><i class="bi bi-skip-forward"></i></span>Intro &amp; Credits<button type="button" class="ib" data-info="Intro &amp; Credits" aria-label="About Intro and Credits"><i class="bi bi-info-circle"></i></button></span><i class="bi bi-check-circle-fill ok"></i></label>
+     <label class="tcard loud"><input type="radio" name="pmk" value="loud"><span class="tt1"><span class="ti"><i class="bi bi-soundwave"></i></span>Plex loudness<button type="button" class="ib" data-info="Plex loudness" aria-label="About Plex loudness"><i class="bi bi-info-circle"></i></button></span><i class="bi bi-check-circle-fill ok"></i></label>
+    </div>
+    <div class="hint" id="pm-help">Creates previews on every server that owns these files.</div>
+   </div>
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> Media</div>
+    <div class="fld"><label class="lbl" for="pm-server" id="pm-server-lbl">Publish to</label>
+     <select class="sel" id="pm-server"><option>All servers (whoever owns the file)</option><option>Lab Plex</option><option>Lab Jellyfin 10.11</option><option>Lab Emby</option></select>
+     <div class="hint" id="pm-server-hint">Also limits the search below.</div>
+     <div class="err"><i class="bi bi-exclamation-circle"></i> Could not load server choices. Search and publishing stay on all servers.</div></div>
+    <div class="fld"><label class="lbl" for="pm-q">Find media <button type="button" class="ib" data-info="Find media" aria-label="About Find media"><i class="bi bi-info-circle"></i></button></label>
+     <div class="searchbox"><i class="bi bi-search"></i><input class="inp" id="pm-q" placeholder="Show, movie or episode, e.g. The Office S01E01" autocomplete="off" spellcheck="false"><button class="btn sm" id="pm-browse" type="button"><i class="bi bi-folder2-open"></i> Browse</button></div>
+     <div class="results" id="pm-results">
+      <div class="tip"><i class="bi bi-lightbulb"></i> Add an episode like <code>S01E01</code> to pick just one episode.</div>
+      <div class="gh">Shows</div>
+      <div class="ri"><input type="checkbox" class="ck-r" aria-label="Select The Office"><button class="add" data-add="The Office|show|/data/tv/The Office (2005)"><i class="bi bi-tv"></i>The Office <small>(2005)</small></button><span class="meta">201 eps · 2 folders</span><span class="vtag plex">Lab Plex</span><span class="vtag jf">Lab Jellyfin</span></div>
+      <div class="ri"><input type="checkbox" class="ck-r" aria-label="Select The Office (UK)"><button class="add" data-add="The Office (UK)|show|/data/tv/The Office UK (2001)"><i class="bi bi-tv"></i>The Office (UK) <small>(2001)</small></button><span class="meta">14 eps</span><span class="vtag emby">Lab Emby</span></div>
+      <div class="gh">Movies</div>
+      <div class="ri"><input type="checkbox" class="ck-r" aria-label="Select Office Space"><button class="add" data-add="Office Space|movie|/data/movies/Office Space (1999)/Office Space (1999).mkv"><i class="bi bi-film"></i>Office Space <small>(1999)</small></button><span class="vtag plex">Lab Plex</span></div>
+      <div class="bar-sel"><span class="hint"><b id="pm-nsel">0</b> selected</span><span class="sp"></span><button class="btn sm" id="pm-addsel" type="button"><i class="bi bi-plus-lg"></i> Add selected</button></div>
+     </div>
+     <div class="hint" id="pm-nores" hidden>No matches. <span class="vtag">Searching…</span></div>
+    </div>
+    <div class="fld"><div style="display:flex;align-items:center"><label class="lbl">Selected</label><span class="sp" style="flex:1"></span><a id="pm-clear" class="hint" style="color:var(--accent);cursor:pointer;font-weight:600" hidden>Clear all</a></div>
+     <div class="chips" id="pm-chips"></div>
+     <div class="empty-box" id="pm-empty">Nothing selected yet. Search or browse above.</div>
+     <div class="err"><i class="bi bi-exclamation-circle"></i> Pick at least one show, movie, file or folder.</div></div>
+    <details class="adv"><summary><i class="bi bi-chevron-right"></i> Or paste paths manually</summary>
+     <div class="fld" style="margin-top:10px"><label class="lbl" for="pm-paths">Container paths <button type="button" class="ib" data-info="Paste paths manually" aria-label="About pasted paths"><i class="bi bi-info-circle"></i></button></label>
+      <textarea class="inp" id="pm-paths" rows="3" placeholder="/data/media/tv/Show Name (2024)&#10;/data/media/movies/Movie (2024)/Movie (2024).mkv"></textarea>
+      <div class="hint">One absolute container path per line.</div>
+      <div class="err"><i class="bi bi-exclamation-circle"></i> Use absolute paths starting with /, without .. segments.</div></div></details>
+   </div>
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> Options</div>
+    <div class="fld" data-k="previews"><label class="lbl">Processing mode <button type="button" class="ib" data-info="Processing mode" aria-label="About processing mode"><i class="bi bi-info-circle"></i></button></label>
+     <div class="sg" role="radiogroup" aria-label="Processing mode"><button class="on" role="radio"><i class="bi bi-funnel"></i> Missing only</button><button role="radio"><i class="bi bi-arrow-repeat"></i> Regenerate all</button></div>
+     <div class="hint">Skips files that already have a preview.</div></div>
+    <div class="fld" data-k="intro" hidden><label class="sw"><input type="checkbox"><span class="tr"></span> Re-check files already done <button type="button" class="ib" data-info="Re-check files already done" aria-label="About re-checking"><i class="bi bi-info-circle"></i></button></label><div class="hint">Off skips files that were already checked.</div></div>
+    <div class="fld"><label class="lbl">Priority <button type="button" class="ib" data-info="Priority" aria-label="About priority"><i class="bi bi-info-circle"></i></button></label>
+     <div class="sg" id="pm-prio" role="radiogroup" aria-label="Priority"><button data-p="1" role="radio">High</button><button class="on" data-p="2" role="radio">Normal <span class="def">default</span></button><button data-p="3" role="radio">Low</button></div></div>
+    <div class="err" style="padding:10px 12px;background:var(--bad-soft);border-radius:10px"><i class="bi bi-x-octagon"></i> Failed to start job: server returned 503. Your selection is kept.</div>
+   </div>
+  </div>
+  <div class="dlg-f"><span class="sum" id="pm-sum">Nothing selected</span><button class="btn" data-close>Cancel</button><button class="btn primary" id="pm-go" disabled><i class="bi bi-play-fill"></i> <span id="pm-golbl">Start job</span></button></div>
+ </div>
+</div>
+
+<!-- ============ folder picker (stacks over Process) ============ -->
+<div class="scrim top" id="ov-picker" role="dialog" aria-modal="true" aria-labelledby="fp-title">
+ <div class="dlg w-lg" data-kind="previews">
+  <div class="dlg-h"><span class="tile"><i class="bi bi-folder2-open"></i></span><div><h2 id="fp-title">Pick folders or video files</h2></div><span class="sp"></span><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+  <div class="dlg-b" style="gap:12px">
+   <div class="pick-path"><button class="btn" aria-label="Go to parent folder" title="Go to parent folder"><i class="bi bi-arrow-up"></i></button><input class="inp" value="/data/tv/The Office (2005)" aria-label="Folder path" spellcheck="false"><button class="btn" aria-label="Go to typed path" title="Go to typed path (Enter)"><i class="bi bi-arrow-right-circle"></i></button></div>
+   <nav class="crumb" aria-label="folder breadcrumb"><a>/</a><i class="bi bi-chevron-right"></i><a>data</a><i class="bi bi-chevron-right"></i><a>tv</a><i class="bi bi-chevron-right"></i><b>The Office (2005)</b></nav>
+   <label class="ck hint"><input type="checkbox"> Show hidden directories</label>
+   <div class="plist" id="fp-list">
+    <div class="pr"><input type="checkbox" class="ck-f" aria-label="Select Season 1"><button class="nm"><i class="bi bi-folder-fill"></i>Season 1</button></div>
+    <div class="pr"><input type="checkbox" class="ck-f" aria-label="Select Season 2"><button class="nm"><i class="bi bi-folder-fill"></i>Season 2</button></div>
+    <div class="pr"><input type="checkbox" class="ck-f" aria-label="Select Specials"><button class="nm"><i class="bi bi-folder-fill"></i>Specials</button></div>
+    <div class="pr"><input type="checkbox" class="ck-f" aria-label="Select pilot.mkv"><button class="nm"><i class="bi bi-file-earmark-play v"></i>The Office - Pilot.mkv</button><small>1.4 GB</small></div>
+   </div>
+   <div class="errbox" style="background:var(--warn-soft);color:var(--warn)" hidden id="fp-err"><b>Could not list folder</b>Permission denied.</div>
+   <div class="hint">States: Loading… (spinner row) · "No subfolders or videos." · inline warning for read errors.</div>
+  </div>
+  <div class="dlg-f"><span class="sum" id="fp-sum">Selected: <code>/data/tv/The Office (2005)</code></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="fp-go"><i class="bi bi-check2"></i> <span id="fp-golbl">Pick this folder</span></button></div>
+ </div>
+</div>
+
+<!-- ============ 3. ADD / EDIT SCHEDULE ============ -->
+<div class="scrim" id="ov-sched" role="dialog" aria-modal="true" aria-labelledby="sc-title">
+ <div class="dlg w-lg" id="sc" data-kind="previews" data-scan="full" data-freq="time">
+  <div class="dlg-h"><span class="tile"><i class="bi bi-calendar-plus" id="sc-ico"></i></span><div><h2 id="sc-title">Add schedule</h2></div><span class="sp"></span><button class="spec-chip" data-errs title="Spec only: show validation messages">Spec: validation</button><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+  <div class="dlg-b">
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> What to run</div>
+    <div class="fld"><label class="lbl" for="sc-name">Name <span class="req">*</span></label><input class="inp needs" id="sc-name" placeholder="e.g. Nightly scan"><div class="err"><i class="bi bi-exclamation-circle"></i> Name is required.</div></div>
+    <div class="tcards" role="radiogroup" aria-label="Scan mode">
+     <label class="tcard previews on"><input type="radio" name="scm" value="full" checked><span class="tt1"><span class="ti"><i class="bi bi-collection"></i></span>Full library scan<button type="button" class="ib" data-info="Full library scan" aria-label="About full library scan"><i class="bi bi-info-circle"></i></button></span><span class="tp">Checks the whole library for anything missing.</span><i class="bi bi-check-circle-fill ok"></i></label>
+     <label class="tcard previews"><input type="radio" name="scm" value="recent"><span class="tt1"><span class="ti"><i class="bi bi-lightning-charge"></i></span>Recently added only<button type="button" class="ib" data-info="Recently added only" aria-label="About recently added"><i class="bi bi-info-circle"></i></button></span><span class="tp">Fast poll of items added within the lookback window.</span><i class="bi bi-check-circle-fill ok"></i></label>
+     <label class="tcard intro"><input type="radio" name="scm" value="intro"><span class="tt1"><span class="ti"><i class="bi bi-skip-forward"></i></span>Intro &amp; Credits<button type="button" class="ib" data-info="Intro &amp; Credits schedule" aria-label="About Intro and Credits"><i class="bi bi-info-circle"></i></button></span><span class="tp">Checks libraries for skip markers.</span><i class="bi bi-check-circle-fill ok"></i></label>
+    </div>
+    <div class="fld" data-sk="intro check" hidden><div style="display:flex;align-items:center;gap:8px"><div class="sg" id="sc-mode" role="radiogroup" aria-label="Intro and credits mode"><button class="on" data-mode="find" role="radio">Find markers</button><button data-mode="check" role="radio">Check servers</button></div><button type="button" class="ib" data-info="Check servers" aria-label="About Check servers"><i class="bi bi-info-circle"></i></button></div></div>
+    <div class="fld" data-sk="recent" hidden><label class="lbl" for="sc-look">Lookback window <button type="button" class="ib" data-info="Lookback window" aria-label="About lookback"><i class="bi bi-info-circle"></i></button></label>
+     <select class="sel" id="sc-look"><option>Last 15 minutes</option><option>Last 30 minutes</option><option selected>Last 1 hour</option><option>Last 2 hours</option><option>Last 6 hours</option><option>Last 24 hours</option><option>Last 3 days</option><option>Last 7 days</option></select><div class="hint">How far back to look for new items.</div></div>
+   </div>
+   <div class="sec" data-sk="full recent intro">
+    <div class="sec-h"><span class="n"></span> Scope</div>
+    <div class="fld"><label class="lbl" for="sc-server">Media server <button type="button" class="ib" data-info="Media server" aria-label="About media server"><i class="bi bi-info-circle"></i></button></label>
+     <select class="sel" id="sc-server"><option>All servers</option><option>Lab Plex</option><option>Lab Jellyfin 10.11</option><option>Lab Emby</option></select><div class="hint">Pin this schedule to one server.</div></div>
+    <div class="fld"><label class="lbl">Libraries</label>
+     <div class="libbox"><div class="libtop"><label class="ck"><input type="checkbox" id="sc-all" checked> <b>All libraries</b></label><span class="sp"></span><a id="sc-sel-all">Select all</a><a id="sc-sel-none">None</a></div>
+      <div class="liblist off" id="sc-list">
+       <div class="lg-h"><span class="vl" style="color:#e5a00d"><i class="bi bi-chevron-right"></i></span>Lab Plex <span class="c">3</span></div>
+       <label class="lib"><input type="checkbox" class="ck-sl"> Movies <span class="tag">Movies</span></label><label class="lib"><input type="checkbox" class="ck-sl"> TV Shows <span class="tag">TV shows</span></label><label class="lib"><input type="checkbox" class="ck-sl"> Anime <span class="tag">TV shows</span></label>
+       <div class="lg-h"><span class="vl" style="color:#5aa0e8"><i class="bi bi-triangle-fill"></i></span>Lab Jellyfin 10.11 <span class="c">2</span></div>
+       <label class="lib"><input type="checkbox" class="ck-sl"> Movies <span class="tag">Movies</span></label><label class="lib"><input type="checkbox" class="ck-sl"> Shows <span class="tag">TV shows</span></label></div></div>
+     <div class="err"><i class="bi bi-exclamation-circle"></i> Select at least one library or check All libraries.</div></div>
+   </div>
+   <div class="note" data-sk="check" hidden><i class="bi bi-hdd-network"></i><span>Checks every server and library. Nothing to pick here.</span></div>
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> When</div>
+    <div class="sg full" id="sc-freq" role="radiogroup" aria-label="Schedule type"><button class="on" data-f="time" role="radio"><i class="bi bi-clock"></i> Specific time</button><button data-f="interval" role="radio"><i class="bi bi-arrow-repeat"></i> Interval</button><button data-f="cron" role="radio"><i class="bi bi-terminal"></i> Cron</button></div>
+    <div class="sec" data-f="time">
+     <div class="fld" style="max-width:200px"><label class="lbl" for="sc-time">Time <span class="req">*</span></label><input class="inp needs" id="sc-time" type="time" value="02:00"><div class="err"><i class="bi bi-exclamation-circle"></i> Time is required.</div></div>
+     <div class="fld"><label class="lbl">Days</label><div class="days" id="sc-days"><button>Sun</button><button class="on">Mon</button><button class="on">Tue</button><button class="on">Wed</button><button class="on">Thu</button><button class="on">Fri</button><button>Sat</button></div><div class="err"><i class="bi bi-exclamation-circle"></i> Select at least one day.</div></div>
+    </div>
+    <div class="fld" data-f="interval" hidden><label class="lbl" for="sc-iv">Run every</label><div class="row2" style="grid-template-columns:110px 160px"><input class="inp" id="sc-iv" type="number" min="1" value="2"><select class="sel" id="sc-unit"><option>Minutes</option><option selected>Hours</option></select></div><div class="hint">How often the schedule repeats.</div><div class="err"><i class="bi bi-exclamation-circle"></i> Interval must be at least 1.</div></div>
+    <div class="fld" data-f="cron" hidden><label class="lbl" for="sc-cron">Cron expression <span class="req">*</span> <button type="button" class="ib" data-info="Cron expression" aria-label="About cron"><i class="bi bi-info-circle"></i></button></label><input class="inp mono needs" id="sc-cron" placeholder="0 */2 * * *"><div class="hint">Five fields: minute hour day month weekday.</div><div class="err"><i class="bi bi-exclamation-circle"></i> Cron expression must have 5 fields.</div></div>
+    <div class="fld" data-f="time cron" id="sc-stop"><label class="lbl" for="sc-stoptime">Stop time (optional) <button type="button" class="ib" data-info="Stop time" aria-label="About stop time"><i class="bi bi-info-circle"></i></button></label><input class="inp" id="sc-stoptime" type="time" style="max-width:200px"><div class="hint">Pauses the running job at this time of day.</div></div>
+    <div class="when-sum" id="sc-sum"><i class="bi bi-calendar-check"></i><span>Mon to Fri at 02:00, container time</span></div>
+   </div>
+   <div class="sec">
+    <div class="sec-h"><span class="n"></span> Priority &amp; order</div>
+    <div class="fld"><label class="lbl">Job priority <button type="button" class="ib" data-info="Schedule priority" aria-label="About priority"><i class="bi bi-info-circle"></i></button></label>
+     <div class="sg" role="radiogroup" aria-label="Job priority"><button class="on" role="radio">Default</button><button role="radio">High</button><button role="radio">Normal</button><button role="radio">Low</button></div><div class="hint">Default follows the scan mode. Pick one to pin it.</div></div>
+    <div class="fld" data-sk="full"><label class="lbl" for="sc-order">Processing order <button type="button" class="ib" data-info="Processing order" aria-label="About order"><i class="bi bi-info-circle"></i></button></label><select class="sel" id="sc-order"><option>Default (server order)</option><option>Newest added first</option><option>Oldest added first</option><option>Random</option></select><div class="hint">Which files are processed first.</div></div>
+    <details class="flt" data-sk="full"><summary><span><span class="ft"><i class="bi bi-funnel"></i> Filter media</span><span class="fs">All selected media</span></span><span class="hint" style="margin-left:auto">Edit filters</span><i class="bi bi-chevron-down ch" style="margin-left:0"></i></summary><div class="fb"><div class="hint" style="padding-top:10px">Same fields as Start new job: Added to library, TV seasons, Movie release year, Clear.</div></div></details>
+   </div>
+  </div>
+  <div class="dlg-f"><label class="sw" style="margin-right:auto"><input type="checkbox" checked><span class="tr"></span> Enabled</label><button class="btn" data-close>Cancel</button><button class="btn primary" id="sc-go"><i class="bi bi-check2"></i> <span id="sc-golbl">Create schedule</span></button></div>
+ </div>
+</div>
+
+<!-- ============ 4. JOB DETAILS ============ -->
+<div class="scrim" id="ov-job" role="dialog" aria-modal="true" aria-labelledby="jd-title">
+ <div class="dlg w-xl" id="jd" data-kind="intro" data-v="completed">
+  <div class="jd-h">
+   <div class="jd-t"><span class="tile"><i class="bi bi-file-text"></i></span><h2 id="jd-title">Row 13 reset: our markers off</h2><span class="pill ok" id="jd-pill"><i class="bi bi-check-circle-fill"></i> Completed</span><span class="sp"></span><span class="jd-id" id="jd-id"><span title="Job ID">7de7f3b0-83f1-4243-8cf1-69c796451b88</span><button aria-label="Copy Job ID" title="Copy Job ID"><i class="bi bi-clipboard"></i></button></span><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+   <div class="jd-m"><span class="task intro"><i class="bi bi-skip-forward"></i> Intro &amp; Credits</span><span class="tag"><i class="bi bi-person"></i> manual</span><span class="tag">Lab Emby</span><span class="tag"><i class="bi bi-clock"></i> <span id="jd-dur">3s</span></span><span class="tag" data-v-show="chain"><i class="bi bi-arrow-clockwise"></i> 3 runs · 1 original + 2 retries / 6 max</span></div>
+  </div>
+  <div class="jd-b">
+   <div class="errbox" data-v-show="failed"><b>Job error</b>Plex returned 401 Unauthorized. Check the token on the Servers page.</div>
+   <div class="attempts" data-v-show="chain" role="region" aria-label="Retry attempts timeline"><span class="al"><i class="bi bi-arrow-clockwise"></i> Attempts</span>
+    <button class="ap ok"><i class="bi bi-play-fill"></i> 1 <small>12s</small></button><button class="ap bad"><i class="bi bi-arrow-clockwise"></i> 2 <small>9s</small> <span class="vtag jf" style="height:18px">Jelly</span></button><button class="ap warn cur"><i class="bi bi-arrow-clockwise"></i> 3 <small>waiting</small></button><button class="ap" disabled style="opacity:.5">Run 1 (deleted)</button>
+    <span class="sp"></span><span class="pill warn" id="jd-chain"><i class="bi bi-hourglass-split"></i> Next attempt in 0:42 (attempt 3/5) <button class="ib" data-info="Why this file is auto-retrying" aria-label="About retry chain" style="color:inherit"><i class="bi bi-info-circle"></i></button></span>
+    <div class="rr">Retried 2 times because Lab Jellyfin was still indexing.</div></div>
+   <dl class="facts"><div><dt>Files</dt><dd>37 of 37 <small>processed</small></dd></div><div><dt>Priority</dt><dd>Low</dd></div><div data-v-show="chain failed"><dt>Requested paths</dt><dd>1</dd></div><div><dt>Created</dt><dd>Sep 28, 07:48:35</dd></div><div><dt>Started</dt><dd>Sep 28, 07:48:35</dd></div><div><dt id="jd-fin-l">Finished</dt><dd id="jd-fin">Sep 28, 07:48:38</dd></div></dl>
+   <div class="cur" data-v-show="running chain"><span class="k" id="jd-cur-k">Current activity</span><span>Checking Lab Emby's own markers…</span><details><summary class="hint" style="cursor:pointer">Current file path</summary><code>/data/tv/Synth Show (2020)/Season 01/Synth Show (2020) S01E01.mkv</code></details></div>
+   <details class="rd" open><summary><i class="bi bi-hdd-network"></i> Results by server <small>5 servers</small><i class="bi bi-chevron-down chv"></i></summary>
+    <div class="rb">
+     <div class="srv"><span class="nm"><span class="vl" style="color:#e5a00d"><i class="bi bi-chevron-right"></i></span>Lab Plex</span><span class="cs"><span class="ch2 ok">Up to date × 36</span><span class="ch2">No markers found × 3</span></span></div>
+     <div class="srv"><span class="nm"><span class="vl" style="color:#5aa0e8"><i class="bi bi-triangle-fill"></i></span>Lab Jellyfin 10.11</span><span class="cs"><span class="ch2 ok">Up to date × 37</span><span class="ch2">No markers found × 4</span></span></div>
+     <div class="srv"><span class="nm"><span class="vl" style="color:#5aa0e8"><i class="bi bi-triangle-fill"></i></span>Lab Jellyfin 12.0</span><span class="cs"><span class="ch2 ok">Up to date × 37</span><span class="ch2">No markers found × 4</span></span></div>
+     <div class="srv"><span class="nm"><span class="vl" style="color:#52b54b"><i class="bi bi-play-circle-fill"></i></span>Lab Emby</span><span class="cs"><span class="ch2 ok">Up to date × 37</span><span class="ch2">No markers found × 4</span><span class="ch2 warn" data-v-show="chain failed">Waiting × 2</span><span class="ch2 bad" data-v-show="failed">Failed × 1</span></span></div>
+     <div class="srv"><span class="nm"><span class="vl" style="color:#52b54b"><i class="bi bi-play-circle-fill"></i></span>Lab Emby 4.9</span><span class="cs"><span class="ch2 ok">Up to date × 13</span></span></div>
+    </div></details>
+   <div class="tabs" role="tablist"><button class="on" role="tab" data-tab="logs"><i class="bi bi-terminal"></i> Logs</button><button role="tab" data-tab="files"><i class="bi bi-files"></i> Files <span class="c">37</span></button></div>
+   <div data-pane="logs" style="display:grid;gap:10px">
+    <div class="tbar"><div class="search"><i class="bi bi-search"></i><input aria-label="Filter logs" placeholder="Filter logs…"></div><label class="sw"><input type="checkbox" checked><span class="tr"></span> Auto-scroll</label><span class="sp"></span><button class="btn sm" title="Copy to clipboard"><i class="bi bi-clipboard"></i> Copy</button><button class="btn sm" title="Download as text file"><i class="bi bi-download"></i> Download</button><button class="btn sm"><i class="bi bi-arrow-clockwise"></i> Refresh</button></div>
+    <div class="hint" data-v-show="chain">Showing the log of run 3, not the original dispatch.</div>
+    <div style="text-align:center"><button class="btn sm"><i class="bi bi-arrow-up"></i> Load earlier logs</button> <button class="btn sm">Load all</button></div>
+    <div class="log" role="log" aria-live="polite" aria-label="Job log output"><pre><span class="ts">[07:48:38]</span> INFO  - <span class="t">Synth Credits Open (2025)</span> · Checking Lab Emby's own markers… none <span class="g">(saved 2026-09-28)</span>
+<span class="ts">[07:48:38]</span> INFO  - <span class="t">Synth Credits (2024)</span> · Checking Lab Jellyfin 12.0's own markers… none
+<span class="ts">[07:48:38]</span> INFO  - <span class="t">Synth Chapters (2021) S01E01</span> · [Lab Plex] Nothing to send
+<span class="ts">[07:48:38]</span> <span class="w">WARN  - Synth Movie (2023) · Lab Jellyfin 10.11 has not indexed this file yet</span>
+<span class="ts">[07:48:38]</span> INFO  - <span class="t">Synth Show (2020) S01E01</span> · Decided: nothing to detect for this file
+<span class="ts">[07:48:39]</span> <span class="e">ERROR - Synth Audio (2023) · File not found on disk</span>
+<span class="ts">[07:48:39]</span> INFO  - Job finished: 37 of 37 files</pre><div class="fl"><button class="ibtn" aria-label="Scroll logs to top"><i class="bi bi-chevron-double-up"></i></button><button class="ibtn" aria-label="Scroll logs to bottom"><i class="bi bi-chevron-double-down"></i></button></div></div>
+    <div class="hint">Showing last 500 of 727 log lines</div>
+   </div>
+   <div data-pane="files" style="display:none;gap:10px">
+    <div class="tbar"><select class="sel" aria-label="Files view" data-v-show="chain"><option>Recorded outcomes</option><option>Requested paths</option></select>
+     <select class="sel" aria-label="Filter files by outcome"><option>All outcomes</option>
+      <optgroup label="Intro &amp; Credits"><option>Markers written</option><option>Up to date</option><option>Waiting</option><option>Skipped</option><option>No markers found</option><option>No server with Intro &amp; Credits on</option></optgroup>
+      <optgroup label="Previews"><option>Generated</option><option>Already existed</option><option>Not indexed</option><option>No media parts</option><option>Excluded</option><option>Invalid hash</option><option>Unresolved</option></optgroup>
+      <optgroup label="Loudness"><option>Loudness written</option><option>Up to date</option><option>Not in Plex yet</option><option>Waiting for Plex</option><option>No server with Loudness on</option></optgroup>
+      <optgroup label="Any job"><option>Failed</option><option>File not found</option><option>Gone from disk</option></optgroup></select>
+     <div class="search"><i class="bi bi-search"></i><input aria-label="Search files" placeholder="Search files…"></div><span class="hint">Showing 1–6 of 37</span><span class="sp"></span><button class="btn sm"><i class="bi bi-arrow-clockwise"></i> Refresh</button></div>
+    <div class="hint" hidden>Requested paths may be files or folders. They are separate from recorded outcomes; this list does not confirm that a path exists or has been processed.</div>
+    <div class="ftab"><table><thead><tr><th style="width:42%">File</th><th>Outcome</th><th>Servers</th><th>Details</th><th>Worker</th></tr></thead><tbody>
+     <tr><td><div class="fbn"><span>Synth Credits Open (2025).mkv</span><a class="ibtn eye" aria-label="Open in the Inspector" title="Open in the Inspector"><i class="bi bi-eye"></i></a></div><details><summary>Full path</summary><code>/data/movies/Synth Credits Open (2025)/Synth Credits Open (2025).mkv</code></details></td><td><span class="ch2 ok">Up to date</span></td><td><span class="vtag emby">Lab Emby · Up to date</span></td><td><span class="hint">Keeping Emby's credits</span></td><td><span class="wb" title="CPU Worker 1">C1</span></td></tr>
+     <tr><td><div class="fbn"><span>Synth Chapters (2021) S01E01.mkv</span><a class="ibtn eye" aria-label="Open in the Inspector"><i class="bi bi-eye"></i></a></div><details><summary>Full path</summary><code>/data/tv/Synth Chapters (2021)/Season 01/Synth Chapters (2021) S01E01.mkv</code></details></td><td><span class="ch2 ok">Markers written</span></td><td><span class="vtag plex">Lab Plex · Written</span> <span class="vtag jf" style="opacity:.55">Lab Jellyfin · Up to date</span></td><td></td><td><span class="wb">C0</span></td></tr>
+     <tr><td><div class="fbn"><span>Synth Movie (2023) - 1080p.mkv</span><a class="ibtn eye" aria-label="Open in the Inspector"><i class="bi bi-eye"></i></a></div><details><summary>Full path</summary><code>/data/movies/Synth Movie (2023)/Synth Movie (2023) - 1080p.mkv</code></details></td><td><span class="ch2 warn">Waiting</span></td><td><span class="vtag jf">Lab Jellyfin · Waiting</span></td><td><span class="hint">Lab Jellyfin: not in library yet</span></td><td><span class="wb">C1</span></td></tr>
+     <tr><td><div class="fbn"><span>Synth Show (2020) S01E01.mkv</span><a class="ibtn eye" aria-label="Open in the Inspector"><i class="bi bi-eye"></i></a></div><details><summary>Full path</summary><code>/data/tv/Synth Show (2020)/Season 01/Synth Show (2020) S01E01.mkv</code></details></td><td><span class="ch2">No markers found</span></td><td><span class="vtag plex">Lab Plex</span></td><td><span class="hint">Decided: nothing to detect</span></td><td><span class="wb">C0</span></td></tr>
+     <tr><td><div class="fbn"><span>Synth Audio (2023).mkv</span></div><details><summary>Full path</summary><code>/data/movies/Synth Audio (2023)/Synth Audio (2023).mkv</code></details></td><td><span class="ch2 bad">File not found</span></td><td><span class="hint">—</span></td><td><span class="hint">Not on disk</span></td><td><span class="hint" aria-label="Worker not recorded">—</span></td></tr>
+    </tbody></table></div>
+    <div class="pgf"><label for="jd-per">Show</label><select class="sel" id="jd-per"><option>50</option><option selected>100</option><option>250</option><option>500</option></select><span>1–37 of 37</span><span class="sp"></span><span class="pg"><button class="on">1</button></span></div>
+   </div>
+  </div>
+  <div class="jd-f"><span class="hint" id="jd-live" data-v-show="running" aria-live="polite"><span class="dot live run" style="display:inline-block"></span> Live: updates every few seconds</span><span class="sp"></span>
+   <button class="btn amber" data-v-show="chain"><i class="bi bi-lightning-charge-fill"></i> Retry now</button>
+   <button class="btn dng" data-v-show="chain"><i class="bi bi-x-octagon"></i> Cancel chain</button>
+   <a class="btn" data-v-show="completed failed"><i class="bi bi-eye"></i> Open in Inspector</a>
+   <button class="btn" data-close>Close</button></div>
+ </div>
+ <div style="position:fixed;left:50%;transform:translateX(-50%);top:8px;z-index:140;display:none" class="sp-var" id="jd-var"></div>
+</div>
+
+<!-- ============ 6. (i) DIALOG / WHAT'S NEW / CONFIRM ============ -->
+<div class="scrim top" id="ov-info" role="dialog" aria-modal="true" aria-labelledby="in-title">
+ <div class="dlg w-md" data-kind="previews" style="--tk:var(--run);--tk-soft:var(--run-soft)">
+  <div class="dlg-h"><span class="tile"><i class="bi bi-info-circle-fill"></i></span><div><h2 id="in-title">Processing order</h2></div><span class="sp"></span><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+  <div class="info-b">
+   <p>Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</p>
+   <p>Pick <strong>Random</strong> if your media is split across multiple disks, so workers do not all hit one disk at the same time.</p>
+  </div>
+  <div class="dlg-f" style="justify-content:space-between"><a class="btn" href="#"><i class="bi bi-book"></i> Open full documentation</a><button class="btn primary" data-close style="min-width:96px;height:38px;font-size:14px">Close</button></div>
+ </div>
+</div>
+<div class="scrim top" id="ov-new" role="dialog" aria-modal="true" aria-labelledby="wn-title">
+ <div class="dlg w-lg"><div class="dlg-h"><span class="tile"><i class="bi bi-megaphone"></i></span><div><h2 id="wn-title">What's new</h2></div><span class="sp"></span><button class="ibtn" data-close aria-label="Close"><i class="bi bi-x-lg"></i></button></div>
+  <div class="info-b"><div style="display:flex;gap:10px;align-items:center"><span class="pill warn">v4.4.2</span><b style="color:var(--text)">Queue filters and worker groups</b><span class="hint" style="margin-left:auto">Oct 4, 2026</span></div>
+   <p>Loading state: spinner row "Loading changelog…". Body renders each release's notes; this panel scrolls.</p></div>
+  <div class="dlg-f" style="justify-content:flex-end"><button class="btn primary" data-close style="height:38px;font-size:14px"><i class="bi bi-check-lg"></i> Got it</button></div></div>
+</div>
+<div class="scrim top" id="ov-confirm" role="alertdialog" aria-modal="true" aria-labelledby="cf-title" aria-describedby="cf-body">
+ <div class="dlg w-sm sheet-auto" style="height:auto">
+  <div class="cf-b"><span class="cf-ic" id="cf-ic"><i class="bi bi-exclamation-triangle"></i></span><div><h2 id="cf-title">Clear job history</h2><p id="cf-body">Clear all completed, failed and cancelled jobs from the history? Their logs and file results are removed too.</p></div></div>
+  <div class="cf-f"><button class="btn" id="cf-cancel" data-close>Cancel</button><button class="btn dngf" id="cf-ok" data-close>Clear history</button></div>
+ </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- ============ 5. MOBILE OFFCANVAS ============ -->
+<div class="oc-scrim" id="oc" aria-hidden="true">
+ <aside class="oc" role="dialog" aria-modal="true" aria-label="Menu">
+  <div class="oc-h"><span class="mark"><i class="bi bi-play-btn-fill"></i></span><b>Menu</b><button class="ibtn" data-close aria-label="Close menu"><i class="bi bi-x-lg"></i></button></div>
+  <div class="oc-b">
+   <a class="oc-i on" href="#"><i class="l bi bi-speedometer2"></i>Dashboard</a>
+   <a class="oc-i" href="#"><i class="l bi bi-hdd-network"></i>Servers</a>
+   <button class="oc-i" data-acc="oc-a" aria-expanded="false"><i class="l bi bi-magic"></i>Automation<i class="cv bi bi-chevron-down"></i></button>
+   <div class="oc-sub" id="oc-a"><a href="#"><i class="bi bi-lightning-charge"></i>Triggers</a><a href="#"><i class="bi bi-calendar-event"></i>Schedules</a></div>
+   <button class="oc-i" data-acc="oc-s" aria-expanded="false"><i class="l bi bi-gear"></i>Settings<i class="cv bi bi-chevron-down"></i></button>
+   <div class="oc-sub" id="oc-s"><a href="#"><i class="bi bi-cpu"></i>Workers</a><a href="#"><i class="bi bi-moon-stars"></i>Global pause schedule</a><a href="#"><i class="bi bi-speedometer"></i>Processing options</a><a href="#"><i class="bi bi-skip-forward"></i>Intro &amp; Credits</a><a href="#"><i class="bi bi-journal-text"></i>Logging</a><a href="#"><i class="bi bi-key"></i>Authentication</a><a href="#"><i class="bi bi-clock-history"></i>Backups</a><a href="#"><i class="bi bi-info-circle"></i>About</a></div>
+   <button class="oc-i" data-acc="oc-t" aria-expanded="false"><i class="l bi bi-wrench"></i>Tools<i class="cv bi bi-chevron-down"></i></button>
+   <div class="oc-sub" id="oc-t"><a href="#"><i class="bi bi-film"></i>Inspector</a><a href="#"><i class="bi bi-terminal"></i>Logs</a><a href="#"><i class="bi bi-clock-history"></i>Webhook activity</a><a href="#"><i class="bi bi-magic"></i>Run setup again</a></div>
+   <div class="gl">Account &amp; help</div>
+   <button class="oc-i" id="oc-bell"><i class="l bi bi-bell"></i><span>3 notifications</span><span class="badge-dot">3</span></button>
+   <button class="oc-i" data-acc="oc-h" aria-expanded="false"><i class="l bi bi-question-circle"></i>Help &amp; feedback<i class="cv bi bi-chevron-down"></i></button>
+   <div class="oc-sub" id="oc-h"><a href="#"><i class="bi bi-bug"></i>Report an issue</a><a href="#"><i class="bi bi-chat-dots"></i>Ask a question</a><a href="#"><i class="bi bi-book"></i>Documentation</a><a href="#"><i class="bi bi-hdd-stack"></i>Multi-server guide</a><a href="#"><i class="bi bi-github"></i>GitHub repository</a></div>
+   <a class="oc-i" href="#"><i class="l bi bi-cup-hot-fill" style="color:#f472b6"></i>Buy me a coffee</a>
+   <a class="oc-i" href="#"><i class="l bi bi-star-fill" style="color:var(--accent)"></i>Star on GitHub</a>
+   <button class="oc-i" id="oc-theme"><i class="l bi bi-moon-stars"></i><span id="oc-theme-l">Switch to light theme</span></button>
+  </div>
+  <div class="oc-f"><div class="vers"><span>Version local build</span><span class="pill run">Update available</span></div><button class="btn"><i class="bi bi-box-arrow-right"></i> Logout</button></div>
+ </aside>
+</div>
+
+<script>
+(function () {
+  var $ = function (s, r) { return (r || document).querySelector(s); }, $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var root = document.documentElement;
+  function setTheme(t) { root.dataset.theme = t; var l = $('#oc-theme-l'); if (l) l.textContent = t === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'; $('#themeBtn i').className = 'bi ' + (t === 'dark' ? 'bi-moon-stars' : 'bi-sun'); }
+  $('#themeBtn').onclick = $('#oc-theme').onclick = function () { setTheme(root.dataset.theme === 'dark' ? 'light' : 'dark'); };
+
+  /* ---- generic open/close ---- */
+  function open(id) { var el = document.getElementById(id); el.classList.add('open'); el.setAttribute('aria-hidden', 'false'); var f = $('input,button,select', el.querySelector('.dlg-b, .jd-b, .oc-b') || el); }
+  function closeEl(el) { el.classList.remove('open'); }
+  function topmost() { var o = $$('.scrim.open, .oc-scrim.open'); return o.sort(function (a, b) { return (+getComputedStyle(b).zIndex) - (+getComputedStyle(a).zIndex); })[0]; }
+  $$('[data-open]').forEach(function (b) { b.addEventListener('click', function () {
+    closeMenus();
+    var id = b.dataset.open;
+    if (id === 'ov-sched') setSched(b.dataset.edit === '1');
+    if (id === 'ov-job') jdVariantBar(true); else jdVariantBar(false);
+    open(id);
+  }); });
+  $$('[data-close]').forEach(function (b) { b.addEventListener('click', function () { closeEl(b.closest('.scrim, .oc-scrim')); jdVariantBar(false); }); });
+  $$('.scrim, .oc-scrim').forEach(function (s) { s.addEventListener('mousedown', function (e) { if (e.target === s) { closeEl(s); jdVariantBar(false); } }); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { var t = topmost(); if (t) closeEl(t); else closeMenus(); }
+    if (e.key === 'Tab') { var t2 = topmost(); if (t2 && !t2.contains(document.activeElement)) { var f = $('button,input,select,a[href]', t2); if (f) { f.focus(); e.preventDefault(); } } }
+  });
+
+  /* ---- (i) buttons open the shared dialog ---- */
+  var INFO = {
+    'Previews': 'Makes the scrubbing thumbnails shown when you drag the progress bar. Written for Plex, Emby and Jellyfin servers that own the files.',
+    'Run against these libraries': 'Which libraries this job processes, for this run only. Libraries are grouped by server so same-named libraries stay distinct.',
+    'Processing mode': 'Missing only skips files that already have a preview. Regenerate all redoes every file, for example after changing thumbnail quality.',
+    'Priority': 'Which waiting job runs first: High, then Normal, then Low. Intro & Credits and loudness default to Low.'
+  };
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-info]'); if (!b) return;
+    e.preventDefault(); e.stopPropagation();
+    var t = b.dataset.info; $('#in-title').innerHTML = t;
+    if (INFO[t]) $('#ov-info .info-b').innerHTML = '<p>' + INFO[t] + '</p>';
+    open('ov-info');
+  });
+
+  /* ---- nav menus ---- */
+  function closeMenus() { $$('.dd.open').forEach(function (d) { d.classList.remove('open'); var b = $('button', d); if (b) b.setAttribute('aria-expanded', 'false'); }); }
+  function toggleMenu(d, force) { var was = d.classList.contains('open'); closeMenus(); if (force !== false && (!was || force === true)) { d.classList.add('open'); var b = $('button', d); b.setAttribute('aria-expanded', 'true'); } }
+  $$('.dd').forEach(function (d) {
+    var b = $('button', d); b.addEventListener('click', function (e) { e.stopPropagation(); toggleMenu(d); });
+    if (d.id === 'dd-auto' || d.id === 'dd-set' || d.id === 'dd-tools') { d.addEventListener('mouseenter', function () { if (matchMedia('(hover:hover)').matches) toggleMenu(d, true); }); d.addEventListener('mouseleave', function () { d.classList.remove('open'); }); }
+    b.addEventListener('keydown', function (e) { if (e.key === 'ArrowDown') { toggleMenu(d, true); var i = $('.it', d); if (i) i.focus(); e.preventDefault(); } });
+  });
+  document.addEventListener('click', function (e) { if (!e.target.closest('.dd')) closeMenus(); });
+  $$('[data-menu]').forEach(function (b) { b.addEventListener('click', function (e) { e.stopPropagation(); if (matchMedia('(max-width:1199.98px)').matches) { open('oc'); return; } toggleMenu(document.getElementById(b.dataset.menu), true); }); });
+  $('#burger').onclick = function () { open('oc'); };
+  $$('[data-acc]').forEach(function (b) { b.onclick = function () { var s = document.getElementById(b.dataset.acc), o = s.classList.toggle('open'); b.setAttribute('aria-expanded', o); }; });
+  $('#oc-bell').onclick = function () { closeEl($('#oc')); toggleMenu($('#dd-bell'), true); };
+  /* notifications */
+  $$('.nt .more').forEach(function (m) { m.onclick = function () { var n = m.closest('.nt'), o = n.classList.toggle('open'); m.textContent = o ? 'Hide details' : 'Show details'; }; });
+  $('#bellEmptyBtn').onclick = function (e) { e.stopPropagation(); var d = $('#bellDd'); d.classList.toggle('empty'); $('#bellBadge').style.display = d.classList.contains('empty') ? 'none' : ''; toggleMenu($('#dd-bell'), true); };
+  $('#bellReset').onclick = function () { $('#bellDd').classList.remove('empty'); };
+  $$('#bellDd .acts .btn').forEach(function (b) { b.onclick = function () { var n = b.closest('.nt'); n.style.display = 'none'; toast(b.classList.contains('danger') ? 'Dismissed permanently' : 'Dismissed', b.classList.contains('danger') ? 'This notification will not appear again.' : 'Hidden until the next restart.', 'info'); var left = $$('#bellDd .nt').filter(function (x) { return x.style.display !== 'none'; }).length; $('#bellCount').textContent = left; $('#bellBadge').textContent = left; if (!left) $('#bellDd').classList.add('empty'); }; });
+
+  /* ---- toasts ---- */
+  var ICON = { success: 'bi-check-circle-fill', danger: 'bi-exclamation-circle-fill', warning: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill' };
+  function toast(title, msg, type) {
+    var t = document.createElement('div'); t.className = 'toast ' + type; t.setAttribute('role', type === 'danger' ? 'alert' : 'status');
+    t.innerHTML = '<i class="bar-s"></i><div class="tb"><i class="bi ' + ICON[type] + '"></i><b>' + title + '</b><span>' + msg + '</span></div><button class="ibtn" aria-label="Close"><i class="bi bi-x"></i></button>';
+    $('#toasts').appendChild(t); var kill = function () { t.remove(); }; t.querySelector('button').onclick = kill;
+    while ($$('#toasts .toast').length > 3) $('#toasts .toast').remove();
+    if (type !== 'danger') setTimeout(kill, 5000);
+  }
+  $$('[data-toast]').forEach(function (b) { b.onclick = function () { b.dataset.toast === 'danger' ? toast('Could not start job', 'Server returned 503. Your selection is kept. Try again.', 'danger') : toast('Job started', 'Previews: All libraries', 'success'); }; });
+
+  /* ---- confirm ---- */
+  var CF = {
+    danger: ['Clear job history', 'Clear all completed, failed and cancelled jobs from the history? Their logs and file results are removed too.', 'Clear history', '', 'dngf'],
+    warn: ['Schedule overlaps quiet hours', 'Mon to Fri 02:00 to 04:00 falls inside the global pause (01:00 to 06:00). The job will wait until the pause ends.', 'Save anyway', 'warn', 'warnf'],
+    cancel: ['Cancel job', 'Cancel this job? Any in-flight FFmpeg work will be killed.', 'Cancel job', '', 'dngf']
+  };
+  $$('[data-confirm]').forEach(function (b) { b.onclick = function () {
+    var c = CF[b.dataset.confirm]; $('#cf-title').textContent = c[0]; $('#cf-body').textContent = c[1];
+    var ok = $('#cf-ok'); ok.textContent = c[2]; ok.className = 'btn ' + c[4]; $('#cf-ic').className = 'cf-ic ' + c[3];
+    $('#cf-cancel').textContent = b.dataset.confirm === 'cancel' ? 'Keep running' : 'Cancel';
+    open('ov-confirm'); (b.dataset.confirm === 'warn' ? ok : $('#cf-cancel')).focus();
+  }; });
+
+  /* ---- job-kind cards (shared) ---- */
+  function wireCards(dlg, cb) { $$('.tcard input', dlg).forEach(function (r) { r.addEventListener('change', function () { $$('.tcard', r.closest('.tcards')).forEach(function (c) { c.classList.toggle('on', c.querySelector('input').checked); }); cb(r.value); }); }); }
+  function show(dlg, attr, val) { $$('[' + attr + ']', dlg).forEach(function (el) { el.hidden = el.getAttribute(attr).split(' ').indexOf(val) < 0; }); }
+  function seg(sg, cb) { $$('button', sg).forEach(function (b) { b.addEventListener('click', function (e) { if (e.target.closest('.ib')) return; $$('button', sg).forEach(function (x) { x.classList.toggle('on', x === b); x.setAttribute('aria-checked', x === b); }); cb && cb(b); }); }); }
+  function prioLabel(sg) { return $('button.on', sg).firstChild.textContent.trim(); }
+  $$('.sg').forEach(function (s) { if (!s.id) seg(s); });
+
+  /* ---- start new job ---- */
+  var nj = $('#nj'), njKind = 'previews', njMode = 'find';
+  var NJ_LABEL = { previews: ['Start previews job', 'film', 'Previews', 'previews'], intro: ['Start intro & credits job', 'skip-forward', 'Intro & Credits', 'intro'], loud: ['Start loudness job', 'soundwave', 'Plex loudness', 'loud'], check: ['Check servers', 'hdd-network', 'Check servers', 'intro'] };
+  function njRefresh() {
+    var eff = njKind === 'intro' && njMode === 'check' ? 'check' : njKind;
+    nj.dataset.kind = njKind === 'intro' ? 'intro' : njKind; show(nj, 'data-k', eff);
+    var L = NJ_LABEL[eff]; $('#nj-golbl').textContent = L[0];
+    var checks = $$('.ck-lib:checked').length, all = $('#nj-all').checked;
+    var verb = njKind === 'previews' ? 'Scanning' : 'Checking', what = njKind === 'previews' ? 'every enabled library on all servers' : (njKind === 'intro' ? 'every library with Intro & Credits on' : 'every library with Loudness on');
+    var sc = $('#nj-scope'), srv = {}; $$('.ck-lib:checked').forEach(function (c) { srv[c.dataset.srv] = 1; }); var ns = Object.keys(srv).length;
+    sc.className = 'scope' + (!all && ns === 1 ? ' one' : '');
+    sc.innerHTML = all ? '<i class="bi bi-globe2"></i><span>' + verb + ' ' + what + '</span>' : (ns === 1 ? '<i class="bi bi-bullseye"></i><span>' + verb + ' ' + Object.keys(srv)[0] + ' only</span>' : ns > 1 ? '<i class="bi bi-diagram-3"></i><span>' + verb + ' ' + ns + ' servers (cross-server)</span>' : '<i class="bi bi-dash-circle"></i><span>No library picked</span>');
+    var pr = prioLabel($('#nj-prio'));
+    $('#nj-sum').innerHTML = '<span class="task ' + L[3] + '"><i class="bi bi-' + L[1] + '"></i> ' + L[2] + '</span> <span>' + (eff === 'check' ? 'All servers' : all ? 'All libraries' : checks + (checks === 1 ? ' library' : ' libraries')) + ' · <b>' + pr + '</b></span>';
+    $('#nj-sel-all').parentNode.hidden = false;
+    $$('#nj-prio button').forEach(function (b) { var d = b.querySelector('.def'); if (d) d.remove(); });
+    var defP = njKind === 'previews' ? '2' : '3'; var db = $('#nj-prio [data-p="' + defP + '"]'); db.insertAdjacentHTML('beforeend', ' <span class="def">default</span>');
+  }
+  wireCards(nj, function (v) { njKind = v; var d = v === 'previews' ? '2' : '3'; $$('#nj-prio button').forEach(function (b) { b.classList.toggle('on', b.dataset.p === d); }); njRefresh(); });
+  seg($('#nj-mode'), function (b) { njMode = b.dataset.mode; njRefresh(); });
+  seg($('#nj-prio'), njRefresh);
+  seg($('#nj [data-pm]').parentNode, function (b) { $('#nj-pm-hint').textContent = b.dataset.pm === 'regen' ? 'Rebuilds every preview, including ones that already exist.' : 'Skips files that already have a preview.'; });
+  $('#nj-all').onchange = function () { $('#nj-list').classList.toggle('off', this.checked); if (this.checked) $$('.ck-lib').forEach(function (c) { c.checked = false; }); njRefresh(); };
+  function setLibs(v) { $('#nj-all').checked = false; $('#nj-list').classList.remove('off'); $$('.ck-lib').forEach(function (c) { c.checked = v; }); njRefresh(); }
+  $('#nj-sel-all').onclick = function () { setLibs(true); }; $('#nj-sel-none').onclick = function () { setLibs(false); };
+  $$('#nj-list [data-srv]').forEach(function (a) { if (a.tagName === 'A') a.onclick = function () { var name = a.closest('.lg-h').firstChild.nextSibling.textContent.trim(); $('#nj-all').checked = false; $('#nj-list').classList.remove('off'); $$('.ck-lib').forEach(function (c) { if (c.dataset.srv === name) c.checked = true; }); njRefresh(); }; });
+  $$('.ck-lib').forEach(function (c) { c.onchange = njRefresh; });
+  $('#nj-go').onclick = function () { if (!$('#nj-all').checked && !$$('.ck-lib:checked').length && njKind + njMode !== 'introcheck') { $('#nj').classList.add('errs'); return; } closeEl($('#ov-newjob')); toast('Job started', NJ_LABEL[njKind][2] + ': ' + ($('#nj-all').checked ? 'All libraries' : 'Selected libraries'), 'success'); };
+  /* filters */
+  function fsum(flt) {
+    var p = [], a = $('[data-fsel="added"]', flt); if (a) { if (a.value === 'days') p.push('Added in last ' + $('#nj-days').value + ' days'); if (a.value === 'range') p.push('Added ' + ($('#nj-from').value || '…') + ' through ' + ($('#nj-to').value || '…')); }
+    if ($('[data-fsel="seasons"]', flt).value === 'latest') p.push('TV: latest ' + $('#nj-nseasons').value + ' seasons per show');
+    if ($('[data-fsel="year"]', flt).value === 'range') p.push('Movies: ' + ($('#nj-yf').value || 'any') + '–' + ($('#nj-yt').value || 'any'));
+    $('[data-fsum]', flt).textContent = p.join(' · ') || 'All selected media';
+  }
+  var flt = $('#nj-flt');
+  $$('[data-fsel]', flt).forEach(function (s) { s.onchange = function () { var grp = s.closest('.fld').parentNode; $$('[data-sub]', grp).forEach(function (x) { var v = s.value; x.hidden = !(x.dataset.sub === v || (x.dataset.sub === 'days' && v === 'days') || (x.dataset.sub === 'range' && v === 'range') || (x.dataset.sub === 'latest' && v === 'latest')); }); fsum(flt); }; });
+  $$('input', flt).forEach(function (i) { i.oninput = function () { fsum(flt); }; });
+  $('[data-fclear]', flt).onclick = function (e) { e.preventDefault(); $$('select', flt).forEach(function (s) { s.value = s.options[0].value; s.onchange(); }); fsum(flt); };
+  njRefresh();
+
+  /* ---- process a file or folder ---- */
+  var pm = $('#pm'), pmKind = 'previews', pmSel = [];
+  var PM_HELP = { previews: 'Creates previews on every server that owns these files.', intro: 'Runs on owning servers with Intro & Credits on.', loud: 'Runs on owning Plex movie and TV libraries with Loudness on.' };
+  wireCards(pm, function (v) { pmKind = v; pm.dataset.kind = v; show(pm, 'data-k', v); $('#pm-help').textContent = PM_HELP[v]; var p = v === 'previews'; $('#pm-server-lbl').textContent = p ? 'Publish to' : 'Search on'; $('#pm-server-hint').textContent = p ? 'Also limits the search below.' : 'Narrows search results only. The job runs where the files live.'; var d = p ? '2' : '3'; $$('#pm-prio button').forEach(function (b) { b.classList.toggle('on', b.dataset.p === d); var x = b.querySelector('.def'); if (x) x.remove(); }); $('#pm-prio [data-p="' + d + '"]').insertAdjacentHTML('beforeend', ' <span class="def">default</span>'); pmRender(); });
+  seg($('#pm-prio'));
+  var pmQ = $('#pm-q'), pmRes = $('#pm-results');
+  pmQ.addEventListener('input', function () { pmRes.classList.toggle('open', pmQ.value.trim().length >= 2); });
+  pmQ.addEventListener('keydown', function (e) { if (e.key === 'Escape') { pmRes.classList.remove('open'); e.stopPropagation(); } });
+  function pmAdd(spec) { var p = spec.split('|'); if (pmSel.some(function (s) { return s[2] === p[2]; })) { toast('Already added', p[0] + ' is already selected', 'info'); return; } pmSel.push(p); pmRender(); }
+  $$('[data-add]', pmRes).forEach(function (b) { b.onclick = function () { pmAdd(b.dataset.add); pmRes.classList.remove('open'); pmQ.value = ''; }; });
+  $$('.ck-r', pmRes).forEach(function (c) { c.onchange = function () { var n = $$('.ck-r:checked', pmRes).length; $('#pm-nsel').textContent = n; $('.bar-sel', pmRes).style.display = n ? 'flex' : 'none'; }; });
+  $('.bar-sel', pmRes).style.display = 'none';
+  $('#pm-addsel').onclick = function () { $$('.ck-r:checked', pmRes).forEach(function (c) { pmAdd($('[data-add]', c.parentNode).dataset.add); c.checked = false; }); $('.bar-sel', pmRes).style.display = 'none'; pmRes.classList.remove('open'); pmQ.value = ''; };
+  $('#pm-clear').onclick = function () { pmSel = []; pmRender(); };
+  $('#pm-browse').onclick = function () { fpOpen(); };
+  function pmRender() {
+    var ico = { show: 'tv', movie: 'film', folder: 'folder-fill', file: 'file-earmark-play' };
+    $('#pm-chips').innerHTML = pmSel.map(function (s, i) { return '<div class="chip"><span class="ci"><i class="bi bi-' + ico[s[1]] + '"></i></span><div><b>' + s[0] + '</b><details><summary>Paths</summary><code>' + s[2] + '</code></details></div><button class="ibtn" data-rm="' + i + '" aria-label="Remove ' + s[0] + '"><i class="bi bi-x-lg"></i></button></div>'; }).join('');
+    $$('[data-rm]', pm).forEach(function (b) { b.onclick = function () { pmSel.splice(+b.dataset.rm, 1); pmRender(); }; });
+    $('#pm-empty').hidden = !!pmSel.length; $('#pm-clear').hidden = !pmSel.length;
+    var go = $('#pm-go'); go.disabled = !pmSel.length;
+    var noun = pmKind === 'previews' ? 'Start previews job' : pmKind === 'intro' ? 'Start intro & credits job' : 'Start loudness job';
+    $('#pm-golbl').textContent = pmSel.length ? noun : 'Start job';
+    $('#pm-sum').innerHTML = pmSel.length ? '<b>' + pmSel.length + '</b> selected' : 'Nothing selected';
+  }
+  $('#pm-go').onclick = function () { closeEl($('#ov-manual')); toast('Job started', 'Previews: ' + pmSel[0][0] + (pmSel.length > 1 ? ' + ' + (pmSel.length - 1) + ' more' : ''), 'success'); pmSel = []; pmRender(); };
+  pmRender();
+
+  /* ---- folder picker ---- */
+  function fpOpen() { open('ov-picker'); }
+  function fpSync() { var n = $$('.ck-f:checked').length; $('#fp-golbl').textContent = n ? 'Add ' + n + ' selected' : 'Pick this folder'; $('#fp-sum').innerHTML = n ? '<b>' + n + ' item' + (n > 1 ? 's' : '') + ' selected</b>' : 'Selected: <code>/data/tv/The Office (2005)</code>'; }
+  $$('.ck-f').forEach(function (c) { c.onchange = fpSync; });
+  $('#fp-go').onclick = function () { var picked = $$('.ck-f:checked'); if (picked.length) picked.forEach(function (c) { var nm = c.getAttribute('aria-label').replace('Select ', ''); pmAdd(nm + '|folder|/data/tv/The Office (2005)/' + nm); }); else pmAdd('The Office (2005)|folder|/data/tv/The Office (2005)'); closeEl($('#ov-picker')); };
+
+  /* ---- schedule ---- */
+  var sc = $('#sc'), scMode = 'full', scFind = 'find', scEdit = false;
+  function scRefresh() {
+    var eff = scMode === 'intro' && scFind === 'check' ? 'check' : scMode;
+    sc.dataset.kind = scMode === 'intro' ? 'intro' : 'previews'; show(sc, 'data-sk', eff);
+    $$('.sec-h .n', sc).forEach(function () {});
+    var f = sc.dataset.freq; $$('[data-f]', sc).forEach(function (el) { if (el.tagName === 'BUTTON') return; el.hidden = el.dataset.f.split(' ').indexOf(f) < 0; });
+    var days = $$('#sc-days .on').map(function (b) { return b.textContent; });
+    var txt = f === 'time' ? (days.length === 7 ? 'Every day' : days.join(', ') || 'No days selected') + ' at ' + $('#sc-time').value + ', container time' : f === 'interval' ? 'Every ' + $('#sc-iv').value + ' ' + $('#sc-unit').value.toLowerCase() + ', starting when saved' : 'Cron: ' + ($('#sc-cron').value || 'enter an expression');
+    if (f === 'time' && days.join() === 'Mon,Tue,Wed,Thu,Fri') txt = 'Mon to Fri at ' + $('#sc-time').value + ', container time';
+    $('#sc-sum span').textContent = txt;
+  }
+  function setSched(edit) { scEdit = edit; $('#sc-title').textContent = edit ? 'Edit schedule' : 'Add schedule'; $('#sc-golbl').textContent = edit ? 'Save changes' : 'Create schedule'; $('#sc-ico').className = 'bi ' + (edit ? 'bi-pencil' : 'bi-calendar-plus'); $('#sc-name').value = edit ? 'Nightly Movies' : ''; }
+  wireCards(sc, function (v) { scMode = v; if (v === 'recent' && !scEdit && sc.dataset.freq === 'time') { sc.dataset.freq = 'interval'; $$('#sc-freq button').forEach(function (b) { b.classList.toggle('on', b.dataset.f === 'interval'); }); $('#sc-iv').value = 15; $('#sc-unit').value = 'Minutes'; } scRefresh(); });
+  seg($('#sc-mode'), function (b) { scFind = b.dataset.mode; scRefresh(); });
+  seg($('#sc-freq'), function (b) { sc.dataset.freq = b.dataset.f; scRefresh(); });
+  $$('#sc-days button').forEach(function (b) { b.onclick = function () { b.classList.toggle('on'); scRefresh(); }; });
+  ['sc-time', 'sc-iv', 'sc-unit', 'sc-cron'].forEach(function (i) { $('#' + i).oninput = scRefresh; });
+  $('#sc-all').onchange = function () { $('#sc-list').classList.toggle('off', this.checked); };
+  $('#sc-sel-all').onclick = function () { $('#sc-all').checked = false; $('#sc-list').classList.remove('off'); $$('.ck-sl').forEach(function (c) { c.checked = true; }); };
+  $('#sc-sel-none').onclick = function () { $('#sc-all').checked = false; $('#sc-list').classList.remove('off'); $$('.ck-sl').forEach(function (c) { c.checked = false; }); };
+  $('#sc-go').onclick = function () { closeEl($('#ov-sched')); toast(scEdit ? 'Schedule updated' : 'Schedule created', 'Schedule "' + ($('#sc-name').value || 'Untitled') + '" saved', 'success'); };
+  scRefresh();
+
+  /* ---- job details ---- */
+  var jd = $('#jd');
+  var JV = { completed: ['ok', 'check-circle-fill', 'Completed', 'Finished'], running: ['run', 'play-circle-fill', 'Running', 'Finished'], failed: ['bad', 'x-circle-fill', 'Failed', 'Finished'], chain: ['warn', 'hourglass-split', 'Pending', 'Next attempt'] };
+  function jdVariant(v) {
+    jd.dataset.v = v; var m = JV[v];
+    $$('[data-v-show]', jd).forEach(function (el) { el.hidden = el.dataset.vShow.split(' ').indexOf(v) < 0; });
+    $('#jd-pill').className = 'pill ' + m[0]; $('#jd-pill').innerHTML = '<i class="bi bi-' + m[1] + '"></i> ' + m[2];
+    $('#jd-fin-l').textContent = m[3]; $('#jd-fin').textContent = v === 'chain' ? 'in 0:42' : v === 'running' ? 'in progress' : 'Sep 28, 07:48:38'; $('#jd-cur-k').textContent = v === 'chain' ? 'Waiting' : 'Current activity';
+    $$('#jd-vars button').forEach(function (b) { b.classList.toggle('on', b.dataset.v === v); });
+  }
+  var bar = $('#jd-var'); bar.innerHTML = '<div class="seg" id="jd-vars" style="background:var(--panel);box-shadow:0 8px 24px rgba(0,0,0,.35)"><button data-v="completed" class="on">Completed</button><button data-v="running">Running</button><button data-v="failed">Failed</button><button data-v="chain">Retry chain</button></div>';
+  $$('#jd-vars button').forEach(function (b) { b.onclick = function () { jdVariant(b.dataset.v); }; });
+  function jdVariantBar(on) { bar.style.display = on ? 'block' : 'none'; }
+  $$('.tabs button', jd).forEach(function (b) { b.onclick = function () { $$('.tabs button', jd).forEach(function (x) { x.classList.toggle('on', x === b); }); $$('[data-pane]', jd).forEach(function (p) { p.style.display = p.dataset.pane === b.dataset.tab ? 'grid' : 'none'; }); }; });
+  jdVariant('completed');
+
+  /* ---- validation demo ---- */
+  $$('[data-errs]').forEach(function (b) { b.onclick = function () { var on = b.closest('.dlg').classList.toggle('errs'); b.classList.toggle('on', on); }; });
+  /* open from the URL for screenshots: overlays.html#ov-job */
+  if (location.hash.length > 1) { var h = location.hash.slice(1).split(':'); setTimeout(function () { var b = document.querySelector('[data-open="' + h[0] + '"]'); if (b) { b.click(); if (h[1] && h[0]==='ov-job') jdVariant(h[1]); if (h[1] && h[0]==='ov-sched') { var c=document.querySelector('#sc input[value="'+h[1]+'"]'); if (c) { c.checked=true; c.dispatchEvent(new Event('change')); } } if (h[1]==='errs') document.querySelector('#'+b.dataset.open.replace('ov-','')+' [data-errs], [id="'+b.dataset.open+'"] [data-errs]').click(); } else if (h[0].indexOf('dd-') === 0) toggleMenu(document.getElementById(h[0]), true); }, 60); }
+})();
+</script>
+</body>
+</html>

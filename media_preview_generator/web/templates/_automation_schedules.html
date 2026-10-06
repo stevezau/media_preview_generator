@@ -1,12 +1,10 @@
-<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation_schedules.css') }}">
-
         <!-- Overview -->
         <div class="card section-card" id="section-schedules-overview">
             <div role="heading" aria-level="2" class="card-header">
                 <i class="bi bi-info-circle me-2"></i>Overview
             </div>
             <div class="card-body">
-                <p class="mb-3">
+                <p class="lead-copy mb-3">
                     Schedules run preview-generation jobs on a timer so you don't have to kick them off by hand.
                     Pick the <strong>scan mode</strong> that matches what you want:
                 </p>
@@ -21,35 +19,42 @@
                     </li>
                 </ul>
                 <div class="small text-muted">
-                    You can have as many schedules as you like — e.g. <em>"Nightly full scan of Movies at 2 AM"</em> and
-                    <em>"Recently Added scan every 15 minutes with 1h lookback"</em> can coexist.
+                    You can have as many schedules as you like. <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Example schedules that can coexist." data-explain-title="Multiple schedules" data-explain-template="infoScheduleExamplesTpl"><i class="bi bi-info-circle"></i></button>
+<template id="infoScheduleExamplesTpl">
+    <p>You can have as many schedules as you like — e.g. <em>"Nightly full scan of Movies at 2 AM"</em> and <em>"Recently Added scan every 15 minutes with 1h lookback"</em> can coexist.</p>
+</template>
+
                 </div>
             </div>
         </div>
 
-        <div class="alert alert-secondary" id="section-schedules-quiet-hours">
-            <strong>Jobs request work; worker groups provide capacity.</strong>
-            <p class="mb-1">Jobs wait while their groups are outside available hours. A global pause skips scheduled runs. A schedule's optional Stop pauses its own current work.</p>
-            <a href="/settings#section-worker-quiet-hours">Edit the global pause schedule in Workers</a>
+        <div class="note" id="section-schedules-quiet-hours">
+            <span class="tile" aria-hidden="true"><i class="bi bi-moon-stars"></i></span>
+            <div>
+                <strong>Jobs request work; worker groups provide capacity.</strong>
+                <p>Jobs wait while their groups are outside available hours. A global pause skips scheduled runs. A schedule's optional Stop pauses its own current work.</p>
+                <a href="/settings#section-worker-quiet-hours">Edit the global pause schedule in Workers</a>
+            </div>
         </div>
 
         <!-- All Schedules -->
         <div class="card section-card" id="section-schedules-list">
-            <div role="heading" aria-level="2" class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-calendar-event me-2"></i>All Schedules</span>
+            <div role="heading" aria-level="2" class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <span><i class="bi bi-calendar-event me-2"></i>All Schedules <span class="pill ms-2" id="scheduleCountPill" hidden></span></span>
                 <button class="btn btn-sm btn-primary" onclick="showNewScheduleModal()">
                     <i class="bi bi-plus me-1"></i>Add Schedule
                 </button>
             </div>
-            <div class="card-body p-0">
+            <div class="card-body">
+                <div id="scheduleNextHero" class="next-hero" hidden></div>
                 <div class="table-responsive">
-                    <table class="table table-hover mb-0 schedules-table">
+                    <table class="table mb-0 sched-table">
                         <thead>
                             <tr>
                                 <th>Name</th>
                                 <th>Library</th>
                                 <th>Schedule</th>
-                                <th style="width:100px">Priority</th>
+                                <th>Priority</th>
                                 <th>Next Run</th>
                                 <th>Status</th>
                                 <th>Actions</th>
@@ -77,6 +82,7 @@
             </div>
             <div class="modal-body">
                 <form id="newScheduleForm">
+                    <div class="sched-group-label">What to run</div>
                     <div class="mb-3">
                         <label for="scheduleName" class="form-label">Name</label>
                         <input type="text" class="form-control" id="scheduleName" placeholder="e.g., Nightly Scan" required>
@@ -88,14 +94,16 @@
                                 <input class="form-check-input" type="radio" name="scanMode" id="scanModeFull" value="full_library" checked onchange="onScanModeChange()">
                                 <label class="form-check-label" for="scanModeFull">
                                     <strong>Full library scan</strong>
-                                    <div class="small text-muted">Walk the whole library and generate previews for anything missing.</div>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Walks the whole library for anything missing previews." data-explain-title="Full library scan" data-explain-template="infoScanModeFullTpl"><i class="bi bi-info-circle"></i></button>
+                                    <div class="small text-muted">Checks the whole library for anything missing.</div>
                                 </label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="scanMode" id="scanModeRecent" value="recently_added" onchange="onScanModeChange()">
                                 <label class="form-check-label" for="scanModeRecent">
                                     <strong>Recently added only</strong>
-                                    <div class="small text-muted">Fast poll — only processes items added within the lookback window (works for Plex, Emby, and Jellyfin).</div>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Fast poll of items added within the lookback window." data-explain-title="Recently added only" data-explain-template="infoScanModeRecentTpl"><i class="bi bi-info-circle"></i></button>
+                                    <div class="small text-muted">Fast poll of items added within the lookback window.</div>
                                 </label>
                             </div>
                             <div class="form-check">
@@ -119,7 +127,9 @@
                         </div>
                     </div>
                     <div class="mb-3" id="scheduleLookbackGroup" style="display:none;">
-                        <label for="scheduleLookback" class="form-label">Lookback window</label>
+                        <label for="scheduleLookback" class="form-label">Lookback window
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far back a Recently Added scan looks for new items." data-explain-title="Lookback window" data-explain-template="infoScheduleLookbackTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
                         <select class="form-select" id="scheduleLookback">
                             <option value="0.25">Last 15 minutes</option>
                             <option value="0.5">Last 30 minutes</option>
@@ -130,14 +140,16 @@
                             <option value="72">Last 3 days</option>
                             <option value="168">Last 7 days</option>
                         </select>
-                        <div class="form-text">How far back to look for newly added items. Items that already have previews are skipped automatically — a generous window is safe.</div>
+                        <div class="form-text">How far back to look for newly added items.</div>
                     </div>
                     <div class="mb-3" id="scheduleServerGroup">
-                        <label for="scheduleServer" class="form-label">Media Server</label>
+                        <label for="scheduleServer" class="form-label">Media Server
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Limits this schedule to one configured server." data-explain-title="Media Server" data-explain-template="infoScheduleServerTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
                         <select class="form-select" id="scheduleServer" onchange="onScheduleServerChange()">
                             <option value="">All servers</option>
                         </select>
-                        <div class="form-text">Pin this schedule to one configured server. Required if multiple servers share a library name (e.g. both Plex and Emby have "Movies").</div>
+                        <div class="form-text">Pin this schedule to one configured server.</div>
                     </div>
                     <div class="mb-3" id="scheduleLibrariesGroup">
                         <label class="form-label">Libraries</label>
@@ -155,6 +167,7 @@
                             <div class="text-muted small">Loading libraries…</div>
                         </div>
                     </div>
+                    <div class="sched-group-label">When</div>
                     <div class="mb-3">
                         <label class="form-label">Schedule Type</label>
                         <div class="d-flex gap-3">
@@ -227,22 +240,21 @@
                     </div>
                     <div id="scheduleFieldsCron" class="d-none">
                         <div class="mb-3">
-                            <label for="scheduleCronInput" class="form-label">Cron Expression</label>
+                            <label for="scheduleCronInput" class="form-label">Cron Expression
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Five-field cron: minute, hour, day of month, month, day of week." data-explain-title="Cron Expression" data-explain-template="infoScheduleCronTpl"><i class="bi bi-info-circle"></i></button>
+                            </label>
                             <input type="text" class="form-control font-monospace" id="scheduleCronInput" placeholder="0 */2 * * *">
-                            <div class="form-text">
-                                Format: <code>minute hour day-of-month month day-of-week</code><br>
-                                Examples: <code>0 */2 * * *</code> (every 2 hrs), <code>0,30 * * * *</code> (every 30 min), <code>0 3 * * 0</code> (Sun 3 AM)
-                            </div>
+                            <div class="form-text">Standard five-field cron schedule.</div>
                         </div>
                     </div>
                     <div class="mb-3" id="scheduleStopTimeGroup">
-                        <label for="scheduleStopTime" class="form-label">Stop time (optional)</label>
+                        <label for="scheduleStopTime" class="form-label">Stop time (optional)
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Pauses a running job from this schedule at this time of day." data-explain-title="Stop time" data-explain-template="infoScheduleStopTimeTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
                         <input type="time" class="form-control" id="scheduleStopTime" value="">
-                        <div class="form-text">
-                            Pauses any running job from this schedule at this time of day. The next start tick resumes from where it stopped &mdash; no progress lost.
-                            Uses the container's local timezone. Leave blank to disable.
-                        </div>
+                        <div class="form-text">Pauses the running job at this time of day.</div>
                     </div>
+                    <div class="sched-group-label">Priority &amp; order</div>
                     <div class="mb-3">
                         <label for="schedulePriority" class="form-label">Job Priority
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Default follows the kind of job. Pick High, Normal or Low to fix this schedule's priority." data-explain-title="Priority" data-explain-template="infoSchedulePriorityTpl"><i class="bi bi-info-circle"></i></button>
@@ -253,19 +265,20 @@
                             <option value="2">Normal</option>
                             <option value="3">Low</option>
                         </select>
-                        <div class="form-text">Priority assigned to jobs created by this schedule. <strong>Default</strong> lets Recently Added sweeps follow the global <em>Incoming job priority</em> setting; full-library scans stay at Normal.</div>
+                        <div class="form-text">Priority assigned to jobs created by this schedule.</div>
                     </div>
                     {% with filter_prefix='schedule' %}{% include '_scan_filters.html' %}{% endwith %}
                     <div class="mb-3" id="scheduleSortByGroup">
-                        <label for="scheduleSortBy" class="form-label">Processing Order</label>
+                        <label for="scheduleSortBy" class="form-label">Processing Order
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Controls which files are processed first." data-explain-title="Processing Order" data-explain-template="infoScheduleSortTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
                         <select class="form-select" id="scheduleSortBy">
                             <option value="default" selected>Default (server order)</option>
                             <option value="newest">Newest added first</option>
                             <option value="oldest">Oldest added first</option>
                             <option value="random">Random</option>
                         </select>
-                        <div class="form-text">Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</div>
-                        <div class="form-text">Pick <strong>Random</strong> if your library spans multiple physical disks (e.g. unraid shfs, mergerfs) — parallel workers will read from different disks at once instead of hammering one.</div>
+                        <div class="form-text">Which files are processed first.</div>
                     </div>
                     <div class="mb-3">
                         <div class="form-check">
@@ -303,7 +316,32 @@ document.addEventListener('DOMContentLoaded', function() {
     <p>Covers all servers and libraries.</p>
     <p>Low priority unless you pick otherwise.</p>
 </template>
+<template id="infoScanModeFullTpl">
+    <p>Walk the whole library and generate previews for anything missing.</p>
+</template>
+<template id="infoScanModeRecentTpl">
+    <p>Fast poll — only processes items added within the lookback window (works for Plex, Emby, and Jellyfin).</p>
+</template>
+<template id="infoScheduleLookbackTpl">
+    <p>How far back to look for newly added items. Items that already have previews are skipped automatically — a generous window is safe.</p>
+</template>
+<template id="infoScheduleServerTpl">
+    <p>Pin this schedule to one configured server. Required if multiple servers share a library name (e.g. both Plex and Emby have "Movies").</p>
+</template>
+<template id="infoScheduleCronTpl">
+    <p>Format: <code>minute hour day-of-month month day-of-week</code></p>
+    <p>Examples: <code>0 */2 * * *</code> (every 2 hrs), <code>0,30 * * * *</code> (every 30 min), <code>0 3 * * 0</code> (Sun 3 AM)</p>
+</template>
+<template id="infoScheduleStopTimeTpl">
+    <p>Pauses any running job from this schedule at this time of day. The next start tick resumes from where it stopped &mdash; no progress lost.
+    Uses the container's local timezone. Leave blank to disable.</p>
+</template>
+<template id="infoScheduleSortTpl">
+    <p>Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</p>
+    <p>Pick <strong>Random</strong> if your library spans multiple physical disks (e.g. unraid shfs, mergerfs) — parallel workers will read from different disks at once instead of hammering one.</p>
+</template>
 <template id="infoSchedulePriorityTpl">
     <p><strong>Default</strong>: a Recently Added sweep follows Settings → Processing Options → Incoming job priority (High out of the box, so new imports overtake a running full scan); a full-library scan runs at Normal.</p>
     <p>Pick High/Normal/Low to pin this schedule regardless of that setting.</p>
+    <p>Priority assigned to jobs created by this schedule. <strong>Default</strong> lets Recently Added sweeps follow the global <em>Incoming job priority</em> setting; full-library scans stay at Normal.</p>
 </template>

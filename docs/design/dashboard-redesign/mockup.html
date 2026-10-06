@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard redesign mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+<style>
+/* Tokens reuse the existing brand (--plex-orange etc.). New: type colours + status colours. */
+:root {
+  --bg: #0f0f1a;
+  --panel: #171728;
+  --panel-2: #1e1e33;
+  --inset: rgba(255,255,255,.035);
+  --line: rgba(255,255,255,.08);
+  --line-strong: rgba(255,255,255,.14);
+  --text: #e8e8f0;
+  --muted: #9a9ab0;
+  --faint: #8686a0;
+  --accent: #e5a00d;
+  --accent-ink: #1a1203;
+  --accent-soft: rgba(229,160,13,.14);
+  --ok: #3ecf8e;   --ok-soft: rgba(62,207,142,.14);
+  --bad: #f0616d;  --bad-soft: rgba(240,97,109,.14);
+  --run: #5b9dff;  --run-soft: rgba(91,157,255,.15);
+  --warn: #e5a00d; --warn-soft: rgba(229,160,13,.14);
+  /* task-type colours: one hue per capability, reused everywhere (worker icons, job chips, queue rows) */
+  --t-previews: #5b9dff;  --t-previews-soft: rgba(91,157,255,.15);
+  --t-intro: #b49cff;     --t-intro-soft: rgba(180,156,255,.15);
+  --t-loud: #36d1c4;      --t-loud-soft: rgba(54,209,196,.15);
+  --radius: 12px; --radius-sm: 8px; --radius-xs: 6px;
+  --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px rgba(0,0,0,.28);
+  --font: "Noto Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+}
+:root[data-theme="light"] {
+  --bg: #f3f4f8; --panel: #ffffff; --panel-2: #f7f8fb; --inset: rgba(15,23,42,.035);
+  --line: #e3e6ee; --line-strong: #cfd4e0; --text: #1b1d2a; --muted: #5d6275; --faint: #6b7186;
+  --accent: #b87a00; --accent-ink: #fff; --accent-soft: rgba(229,160,13,.16);
+  --ok: #138a58; --ok-soft: rgba(19,138,88,.12); --bad: #c8323f; --bad-soft: rgba(200,50,63,.10);
+  --run: #2563d6; --run-soft: rgba(37,99,214,.10); --warn: #9a6500; --warn-soft: rgba(229,160,13,.16);
+  --t-previews: #2563d6; --t-previews-soft: rgba(37,99,214,.10);
+  --t-intro: #6d4fd8;    --t-intro-soft: rgba(109,79,216,.10);
+  --t-loud: #0c8f84;     --t-loud-soft: rgba(12,143,132,.10);
+  --shadow: 0 1px 2px rgba(15,23,42,.06), 0 6px 18px rgba(15,23,42,.06);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--font); }
+.num { font-variant-numeric: tabular-nums; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--accent-soft); }
+
+/* top bar (unchanged in scope; stub) */
+.nav { overflow-x: auto; white-space: nowrap; height: 56px; display: flex; align-items: center; gap: 20px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.nav .brand { display: flex; align-items: center; gap: 10px; margin-right: 8px; }
+.nav .brand .mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 17px; }
+.nav .brand b { color: var(--accent); font-size: 16px; display: block; line-height: 1.1; }
+.nav .brand small { color: var(--faint); font-size: 11px; display: block; }
+.nav .tab .caret { font-size: 10px; opacity: .7; }
+.nav .ibtn { position: relative; }
+.nav .coffee { color: #f472b6; }
+.nav .badge-dot { position: absolute; top: 2px; right: 2px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; background: var(--bad); color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; }
+.nav .tab { color: var(--muted); padding: 6px 10px; border-radius: 8px; }
+.nav .tab.on { color: var(--accent); background: var(--accent-soft); }
+.nav .sp { flex: 1; }
+.page { max-width: 1480px; margin: 0 auto; padding: 24px 20px 64px; display: grid; gap: 20px; }
+
+/* panel */
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); display: flex; flex-direction: column; min-width: 0; }
+.panel-h { display: flex; align-items: center; gap: 10px; padding: 14px 18px; min-height: 52px; border-bottom: 1px solid var(--line); }
+.panel-h h2 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.panel-h .sp { flex: 1; }
+.panel-b { padding: 16px 18px; flex: 1; display: flex; flex-direction: column; gap: 14px; }
+
+/* buttons */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 14px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong); background: transparent; font-weight: 600; transition: background .16s, border-color .16s, transform .16s; }
+.btn:hover { background: var(--inset); border-color: var(--faint); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); height: 44px; font-size: 15px; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.sm { height: 32px; padding: 0 10px; font-size: 13px; }
+.btn.danger:hover { color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
+.ibtn { width: 32px; height: 32px; display: inline-grid; place-items: center; border-radius: var(--radius-xs); border: 1px solid transparent; background: transparent; color: var(--muted); transition: background .16s, color .16s; }
+.ibtn:hover { background: var(--inset); color: var(--text); }
+.ibtn.danger:hover { background: var(--bad-soft); color: var(--bad); }
+
+/* ===== Row 1: three cards, equal height, min-height so they never collapse ===== */
+.summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
+.summary .panel { min-height: 340px; }
+@media (max-width: 1100px) { .summary { grid-template-columns: 1fr; } .summary .panel { min-height: 0; } }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); white-space: nowrap; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.run { background: var(--run-soft); color: var(--run); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.ok { background: var(--ok); } .dot.run { background: var(--run); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+.dot.live { box-shadow: 0 0 0 0 currentColor; animation: pulse 1.8s ease-out infinite; color: var(--run); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--run) 55%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
+
+/* System card: servers as compact rows, status = dot (word in tooltip) */
+.servers { display: grid; gap: 4px; }
+.server { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--inset); }
+.server .logo { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; background: var(--panel-2); font-size: 15px; }
+.server .nm { font-weight: 600; line-height: 1.2; }
+.server .host { color: var(--faint); font-size: 12px; font-family: var(--mono); }
+.sec-label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin: 2px 0 -6px; }
+.pool { display: grid; gap: 6px; }
+.pool-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--radius-sm); background: var(--inset); }
+.pool-row .lbl { flex: 1; display: flex; align-items: center; gap: 8px; }
+.pool-row .lbl small { color: var(--faint); }
+.stepper { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+.stepper button { width: 28px; height: 28px; border: 0; background: transparent; color: var(--muted); }
+.stepper button:hover { background: var(--inset); color: var(--text); }
+.stepper output { min-width: 26px; text-align: center; font-weight: 700; }
+.foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.foot .sp { flex: 1; }
+.foot code { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+
+/* Quick actions */
+.qa-stack { display: grid; gap: 10px; }
+.libs { display: flex; align-items: center; gap: 14px; padding: 14px; border-radius: var(--radius); background: var(--inset); border: 1px solid var(--line); }
+.libs .ico { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-size: 20px; }
+.libs .big { font-size: 20px; font-weight: 700; line-height: 1.1; }
+.libs .sub { color: var(--muted); font-size: 13px; }
+.libs .sp { flex: 1; }
+.qa-links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: auto; }
+.tile-link { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: transparent; text-align: left; transition: background .16s, border-color .16s; }
+.tile-link:hover { background: var(--inset); border-color: var(--line-strong); }
+.tile-link i { font-size: 18px; color: var(--muted); }
+.tile-link b { display: block; font-size: 13px; line-height: 1.2; }
+.tile-link span { color: var(--faint); font-size: 12px; }
+
+/* Job stats */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--inset); border: 1px solid var(--line); }
+.stat .k { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.stat .v { font-size: 26px; font-weight: 700; line-height: 1.15; }
+.stat.ok .v { color: var(--ok); } .stat.bad .v { color: var(--bad); } .stat.run .v { color: var(--run); } .stat.warn .v { color: var(--warn); }
+.mix { display: flex; height: 6px; border-radius: 99px; overflow: hidden; background: var(--inset); gap: 2px; }
+.mix i { display: block; }
+.sched { margin-top: auto; display: grid; grid-template-columns: 40px 1fr auto; gap: 12px; align-items: center; padding: 12px; border-radius: var(--radius); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
+.sched .ico { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); font-size: 19px; }
+.sched .lbl { font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--accent); }
+.sched .nm { font-weight: 700; font-size: 15px; line-height: 1.2; }
+.sched .when { color: var(--muted); font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sched .when b { color: var(--text); }
+.sched-foot { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: -4px; }
+
+/* ===== Workers ===== */
+.occ { display: inline-flex; align-items: center; gap: 4px; }
+.occ i { width: 14px; height: 6px; border-radius: 99px; background: var(--line-strong); }
+.occ i.on { background: var(--run); }
+.groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.group { padding: 16px 18px 18px; display: grid; gap: 12px; align-content: start; min-width: 0; }
+.group + .group { border-left: 1px solid var(--line); }
+@media (max-width: 1100px) { .groups { grid-template-columns: 1fr; } .group + .group { border-left: 0; border-top: 1px solid var(--line); } }
+.g-h { display: flex; align-items: center; gap: 12px; }
+.g-h .ttl { flex: 1; min-width: 0; }
+.g-h h3 { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.2; }
+.g-h .hw { color: var(--faint); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.caps { display: inline-flex; gap: 4px; }
+.cap { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; font-size: 14px; background: var(--inset); color: var(--faint); opacity: .55; }
+.cap.previews { background: var(--t-previews-soft); color: var(--t-previews); opacity: 1; }
+.cap.intro { background: var(--t-intro-soft); color: var(--t-intro); opacity: 1; }
+.cap.loud { background: var(--t-loud-soft); color: var(--t-loud); opacity: 1; }
+.cap.off { text-decoration: none; position: relative; }
+.occ-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: var(--inset); font-weight: 700; font-size: 13px; }
+.occ-chip small { color: var(--faint); font-weight: 600; }
+
+.wk { display: grid; gap: 10px; padding: 14px; border-radius: var(--radius); background: var(--panel-2); border: 1px solid var(--line); transition: border-color .16s; }
+.wk.busy { border-color: color-mix(in srgb, var(--run) 30%, var(--line)); }
+.wk-top { display: flex; align-items: center; gap: 10px; }
+.wk-top .kind { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.wk-top .sp { flex: 1; }
+.wk-n { min-width: 26px; height: 24px; padding: 0 7px; display: grid; place-items: center; border-radius: 7px; background: var(--inset); color: var(--muted); font-weight: 700; font-size: 12px; }
+.wk-title { font-weight: 600; font-size: 15px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.wk-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.task { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px; font-size: 12px; font-weight: 600; }
+.task.previews { background: var(--t-previews-soft); color: var(--t-previews); }
+.task.intro { background: var(--t-intro-soft); color: var(--t-intro); }
+.task.loud { background: var(--t-loud-soft); color: var(--t-loud); }
+.jobref { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px; font-family: var(--mono); font-size: 12px; background: var(--accent-soft); color: var(--accent); margin-left: auto; transition: filter .16s; }
+.jobref:hover { filter: brightness(1.2); }
+.prog { display: grid; gap: 6px; }
+.bar { height: 6px; border-radius: 99px; background: var(--inset); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 99px; background: var(--run); transition: width .6s cubic-bezier(.16,1,.3,1); }
+.bar.ind > i { width: 28%; animation: slide 1.4s cubic-bezier(.45,0,.2,1) infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(360%); } }
+.prog-row { display: flex; align-items: baseline; gap: 12px; font-size: 13px; color: var(--muted); }
+.prog-row .stat-i b { color: var(--text); font-size: 15px; }
+.prog-row .stat-i b.good { color: var(--ok); }
+.prog-row .pct { margin-left: auto; font-weight: 700; color: var(--text); }
+.step { color: var(--muted); font-size: 13px; }
+.wk.idle { background: transparent; border-style: dashed; color: var(--faint); }
+.wk.idle .wk-title { color: var(--faint); font-weight: 500; }
+
+/* ===== Queue ===== */
+.q-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.seg { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); gap: 2px; }
+.seg button { height: 30px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 7px; transition: background .16s, color .16s; }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--panel-2); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.seg button .c { font-size: 11px; padding: 1px 6px; border-radius: 99px; background: var(--inset); color: var(--muted); }
+.seg button.on .c { background: var(--accent-soft); color: var(--accent); }
+.search { position: relative; flex: 1; min-width: 200px; max-width: 320px; }
+.search i { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--faint); }
+.search input { width: 100%; height: 36px; border-radius: 9px; border: 1px solid var(--line-strong); background: transparent; color: var(--text); padding: 0 12px 0 34px; font: inherit; }
+.search input::placeholder { color: var(--faint); }
+.filter { height: 36px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; }
+.filter:hover { color: var(--text); background: var(--inset); }
+.q-tools .sp { flex: 1; }
+.seg { max-width: 100%; overflow-x: auto; }
+@media (max-width: 700px) { .panel-h { flex-wrap: wrap; } .panel-h .btn .lbl-long { display:none; } .groups .g-h { flex-wrap: wrap; } }
+table { width: 100%; border-collapse: collapse; }
+thead th { position: sticky; top: 0; background: var(--panel); text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); padding: 10px 14px; border-bottom: 1px solid var(--line); }
+tbody td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tbody tr { transition: background .14s; }
+tbody tr:hover { background: var(--inset); }
+tbody tr:last-child td { border-bottom: 0; }
+.jid { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+.jt { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.jt .tico { width: 30px; height: 30px; flex: none; border-radius: 8px; display: grid; place-items: center; font-size: 15px; }
+.jt .name { font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jt .sub { color: var(--faint); font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tag { padding: 1px 7px; border-radius: 6px; background: var(--inset); color: var(--muted); font-size: 11px; font-weight: 600; }
+.pri { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.pri.normal { color: var(--accent); } .pri.high { color: var(--bad); }
+.mini { display: flex; align-items: center; gap: 10px; min-width: 130px; }
+.mini .bar { flex: 1; } .mini span { font-size: 12px; color: var(--muted); width: 40px; text-align: right; }
+.mini.done .bar > i { background: var(--ok); } .mini.fail .bar > i { background: var(--bad); }
+.rowact { display: flex; justify-content: flex-end; gap: 2px; }
+.q-foot { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.q-foot .sp { flex: 1; }
+.q-foot { flex-wrap: wrap; }
+.pg { display: inline-flex; gap: 4px; }
+.pg button { min-width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-weight: 600; }
+.pg button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.tt { position: relative; }
+
+.menu-wrap { position: relative; display: inline-block; }
+.menu { position: absolute; z-index: 20; top: calc(100% + 6px); min-width: 190px; padding: 6px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line-strong); box-shadow: 0 12px 32px rgba(0,0,0,.45); display: none; }
+.menu.right { right: 0; }
+.menu.open { display: block; }
+.menu .mi { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; text-align: left; font-weight: 600; color: var(--text); }
+.menu .mi:hover { background: var(--inset); }
+.menu .mi.on { background: var(--accent-soft); }
+.menu .mi .chk { margin-left: auto; color: var(--accent); }
+.menu .mh { padding: 6px 10px 8px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.menu .ck { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 7px; font-weight: 600; cursor: pointer; }
+.menu .ck:hover { background: var(--inset); }
+.menu .ck input { accent-color: var(--accent); width: 16px; height: 16px; }
+.menu .ck .n { margin-left: auto; color: var(--faint); font-size: 12px; font-weight: 600; }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+.menu .btn { width: 100%; }
+.pri-btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px; margin-left: -6px; border-radius: 8px; border: 0; background: transparent; font-weight: 600; font-size: 12px; color: var(--muted); transition: background .16s; }
+.pri-btn:hover, .pri-btn:focus-visible, .pri-btn[aria-expanded="true"] { background: var(--inset); }
+.pri-btn.normal { color: var(--accent); } .pri-btn.high { color: var(--bad); }
+.pri-btn i.caret { font-size: 9px; opacity: .55; }
+.exp { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); transition: background .16s; }
+.exp:hover { background: var(--inset); color: var(--text); }
+.exp i { transition: transform .2s cubic-bezier(.16,1,.3,1); }
+tr.open .exp i { transform: rotate(180deg); }
+tr.detail { display: none; } tr.detail.show { display: table-row; }
+tr.detail:hover { background: transparent; }
+tr.detail td { padding: 0; background: var(--inset); }
+.dx { padding: 14px 18px 18px 62px; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 18px 28px; }
+.dx h4 { margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); display: flex; align-items: center; gap: 8px; }
+.dx h4 .n { color: var(--muted); letter-spacing: 0; }
+.dx-col { display: grid; gap: 16px; align-content: start; min-width: 0; }
+.dx-sec { min-width: 0; }
+.dx .path { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.dx .small { font-size: 12px; color: var(--faint); }
+.dx .small b { color: var(--muted); font-weight: 600; }
+.dx-err { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bad-soft); color: var(--text); }
+.dx-err h4 { color: var(--bad); }
+.dx-srv { display: grid; gap: 8px; }
+.dx-srv .sn { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.rchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rchip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); }
+.rchip b { color: var(--text); }
+.rchip.ok { background: var(--ok-soft); color: var(--ok); } .rchip.ok b { color: inherit; }
+.rchip.run { background: var(--run-soft); color: var(--run); } .rchip.run b { color: inherit; }
+.rchip.warn { background: var(--warn-soft); color: var(--warn); } .rchip.warn b { color: inherit; }
+.rchip.bad { background: var(--bad-soft); color: var(--bad); } .rchip.bad b { color: inherit; }
+.cpufb { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--warn); }
+.src { font-size: 12px; color: var(--muted); line-height: 1.7; }
+.src b { color: var(--text); }
+.fr { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); }
+.fr summary { cursor: pointer; font-weight: 600; font-size: 13px; list-style: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fr summary::-webkit-details-marker { display: none; }
+.fr summary::before { content: "\F285"; font-family: bootstrap-icons; font-size: 10px; margin-right: 6px; color: var(--faint); display: inline-block; transition: transform .16s; }
+.fr details[open] summary::before { transform: rotate(90deg); }
+.fr details[open] summary { white-space: normal; }
+.fr .ft { display: block; color: var(--faint); font-size: 12px; }
+.fr .path { margin-top: 4px; }
+.files-stack { display: grid; gap: 4px; }
+.state { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--inset); color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.dx-foot { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--line); }
+.dx-foot .sp { flex: 1; }
+.dx-time { color: var(--faint); font-size: 12px; }
+.dx-time b { color: var(--muted); font-weight: 600; }
+
+/* inline group editor: opens inside the group's own column, between its header and its workers */
+.g-edit { display: none; gap: 14px; padding: 14px; border-radius: var(--radius); background: var(--panel-2); border: 1px solid var(--line-strong); }
+.group.editing .g-edit { display: grid; }
+.group.editing .g-h .pen { background: var(--accent-soft); color: var(--accent); }
+.ge-h { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+.ge-h .sp { flex: 1; }
+.fld { display: grid; gap: 6px; min-width: 0; }
+.fld > label, .fld > legend { font-size: 12px; font-weight: 600; color: var(--muted); padding: 0; }
+.fld .hint { font-size: 12px; color: var(--faint); }
+.inp { height: 36px; width: 100%; border-radius: 8px; border: 1px solid var(--line-strong); background: transparent; color: var(--text); padding: 0 10px; font: inherit; }
+select.inp option { background: var(--panel-2); color: var(--text); }
+.ge-row { display: grid; grid-template-columns: minmax(0,1fr) 96px; gap: 10px; }
+.togs { display: grid; gap: 6px; border: 0; margin: 0; padding: 0; }
+.tog { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; background: var(--inset); font-weight: 600; font-size: 13px; cursor: pointer; }
+.tog input { accent-color: var(--accent); width: 16px; height: 16px; }
+.tog .task { margin-left: auto; }
+.tog.dis { opacity: .5; cursor: not-allowed; }
+.days { display: flex; flex-wrap: wrap; gap: 4px; }
+.day { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 6px; background: var(--inset); font-size: 12px; font-weight: 600; }
+.day input { accent-color: var(--accent); }
+.win { display: grid; gap: 8px; padding: 10px; border-radius: 8px; border: 1px solid var(--line); }
+.win .tm { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+.sw { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 13px; }
+.sw input { accent-color: var(--accent); width: 16px; height: 16px; }
+.ge-err { color: var(--bad); font-size: 12px; display: none; }
+.ge-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-top: 12px; border-top: 1px solid var(--line); }
+.ge-actions .sp { flex: 1; }
+@media (max-width: 700px) { .ge-actions { position: sticky; bottom: 0; background: var(--panel-2); padding-bottom: 4px; } .ge-actions .btn { flex: 1; } .ge-actions .sp { display: none; } }
+@media (max-width: 1100px) { .dx { grid-template-columns: minmax(0,1fr); padding-left: 18px; } }
+.theme { position: fixed; right: 16px; bottom: 16px; z-index: 5; }
+</style>
+</head>
+<body>
+<header class="nav">
+  <a class="brand" href="#"><span class="mark"><i class="bi bi-play-btn-fill"></i></span><span><b>Media Preview Generator</b><small>local build</small></span></a>
+  <a class="tab on" href="#"><i class="bi bi-speedometer2"></i> Dashboard</a>
+  <a class="tab" href="#"><i class="bi bi-hdd-network"></i> Servers</a>
+  <a class="tab" href="#"><i class="bi bi-magic"></i> Automation <i class="bi bi-chevron-down caret"></i></a>
+  <a class="tab" href="#"><i class="bi bi-gear"></i> Settings <i class="bi bi-chevron-down caret"></i></a>
+  <a class="tab" href="#"><i class="bi bi-wrench"></i> Tools <i class="bi bi-chevron-down caret"></i></a>
+  <span class="sp"></span>
+  <button class="ibtn" aria-label="Notifications" title="Notifications"><i class="bi bi-bell"></i><span class="badge-dot">1</span></button>
+  <button class="ibtn" aria-label="Help" title="Help"><i class="bi bi-question-circle"></i></button>
+  <a class="ibtn coffee" href="#" aria-label="Buy me a coffee" title="Buy me a coffee"><i class="bi bi-cup-hot-fill"></i></a>
+  <a class="btn sm" href="#"><i class="bi bi-star-fill" style="color:var(--accent)"></i> Star</a>
+  <button class="ibtn" aria-label="Toggle theme" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
+  <button class="btn sm"><i class="bi bi-box-arrow-right"></i> Logout</button>
+</header>
+
+<main class="page">
+
+<!-- ============ ROW 1 ============ -->
+<section class="summary">
+
+  <!-- System -->
+  <article class="panel" aria-labelledby="h-sys">
+    <div class="panel-h"><h2 id="h-sys"><i class="bi bi-hdd-network"></i> System</h2><span class="sp"></span>
+      <span class="pill run"><span class="dot run live"></span> Processing</span></div>
+    <div class="panel-b">
+      <div class="sec-label">Media servers</div>
+      <div class="servers">
+        <div class="server"><span class="logo" style="color:#e5a00d"><i class="bi bi-chevron-right"></i></span><div><div class="nm">Plex</div><div class="host">172.16.10.240:32400</div></div><span class="dot ok" title="Connected" role="img" aria-label="Connected"></span></div>
+      </div>
+      <div class="sec-label">Worker groups <span style="text-transform:none;letter-spacing:0;font-weight:500">· − / + changes that group's worker count (full settings: Workers panel)</span></div>
+      <div class="pool">
+        <div class="pool-row"><span class="lbl"><i class="bi bi-gpu-card"></i> NVIDIA <small>TITAN RTX</small></span><span class="caps"><span class="cap previews" title="Previews"><i class="bi bi-film"></i></span><span class="cap intro" title="Intro &amp; credits"><i class="bi bi-skip-forward-fill"></i></span></span><span class="stepper"><button aria-label="Fewer workers">&minus;</button><output class="num">2</output><button aria-label="More workers">+</button></span></div>
+        <div class="pool-row"><span class="lbl"><i class="bi bi-gpu-card"></i> UHD Graphics 770 <small>Intel</small></span><span class="caps"><span class="cap previews" title="Previews"><i class="bi bi-film"></i></span><span class="cap intro" title="Intro &amp; credits"><i class="bi bi-skip-forward-fill"></i></span></span><span class="stepper"><button aria-label="Fewer workers">&minus;</button><output class="num">2</output><button aria-label="More workers">+</button></span></div>
+        <div class="pool-row"><span class="lbl"><i class="bi bi-cpu"></i> CPU loudness</span><span class="caps"><span class="cap loud" title="Plex loudness"><i class="bi bi-soundwave"></i></span></span><span class="stepper"><button aria-label="Fewer workers">&minus;</button><output class="num">1</output><button aria-label="More workers">+</button></span></div>
+      </div>
+      <div class="foot">
+        <i class="bi bi-box-seam"></i> Version <code>local/queue-view-fix-20261006@0cc6a60</code>
+        <span class="sp"></span><span class="pill ok"><i class="bi bi-check2"></i> Up to date</span>
+      </div>
+    </div>
+  </article>
+
+  <!-- Quick actions -->
+  <article class="panel" aria-labelledby="h-qa">
+    <div class="panel-h"><h2 id="h-qa"><i class="bi bi-lightning-charge"></i> Quick actions</h2></div>
+    <div class="panel-b">
+      <div class="qa-stack">
+        <button class="btn primary"><i class="bi bi-play-fill"></i> Start new job</button>
+        <button class="btn"><i class="bi bi-file-earmark-play"></i> Process a file or folder</button>
+      </div>
+      <div class="qa-links">
+        <a class="tile-link" href="#"><i class="bi bi-calendar-check"></i><div><b>Run Nightly scan now</b><span>Next schedule</span></div></a>
+        <a class="tile-link" href="#"><i class="bi bi-search"></i><div><b>Inspector</b><span>Check a file</span></div></a>
+        <a class="tile-link" href="#"><i class="bi bi-broadcast"></i><div><b>Webhook activity</b><span>Incoming events</span></div></a>
+        <a class="tile-link" href="#"><i class="bi bi-journal-text"></i><div><b>Logs</b><span>Live tail</span></div></a>
+      </div>
+    </div>
+  </article>
+
+  <!-- Job stats -->
+  <article class="panel" aria-labelledby="h-js">
+    <div class="panel-h"><h2 id="h-js"><i class="bi bi-bar-chart"></i> Job statistics</h2></div>
+    <div class="panel-b">
+      <div class="stats">
+        <div class="stat"><div class="k"><i class="bi bi-hourglass-split"></i> Pending</div><div class="v num">15</div></div>
+        <div class="stat run"><div class="k"><i class="bi bi-activity"></i> Running</div><div class="v num">4</div></div>
+        <div class="stat ok"><div class="k"><i class="bi bi-check2-circle"></i> Completed</div><div class="v num">588</div></div>
+        <div class="stat bad"><div class="k"><i class="bi bi-x-octagon"></i> Failed</div><div class="v num">20</div></div>
+        <div class="stat warn"><div class="k"><i class="bi bi-slash-circle"></i> Cancelled</div><div class="v num">500</div></div>
+        <div class="stat"><div class="k"><i class="bi bi-stack"></i> Total</div><div class="v num">1127</div></div>
+      </div>
+      <div class="mix" role="img" aria-label="Outcome mix: 52% completed, 2% failed, 44% cancelled, 2% active/pending">
+        <i style="width:52%;background:var(--ok)"></i><i style="width:2%;background:var(--bad)"></i><i style="width:44%;background:var(--warn)"></i><i style="width:2%;background:var(--run)"></i>
+      </div>
+      <div class="sched">
+        <span class="ico"><i class="bi bi-calendar-event"></i></span>
+        <div>
+          <div class="lbl">Next schedule</div>
+          <div class="nm">Movies Daily</div>
+          <div class="when"><b>in about 16 hours</b><span>Wed 01:00</span></div>
+        </div>
+        <a class="ibtn" href="#" aria-label="Manage schedules" title="Manage schedules"><i class="bi bi-sliders"></i></a>
+      </div>
+      <div class="sched-foot"><i class="bi bi-check-circle-fill" style="color:var(--ok)"></i> 3 schedules, all enabled</div>
+    </div>
+  </article>
+</section>
+
+<!-- ============ WORKERS ============ -->
+<section class="panel" aria-labelledby="h-wk">
+  <div class="panel-h">
+    <h2 id="h-wk"><i class="bi bi-cpu"></i> Workers <button class="ibtn" aria-label="About workers" title="Workers pick up queued jobs. Each group has its own hardware, tasks and active hours."><i class="bi bi-info-circle"></i></button></h2>
+    <span class="sp"></span>
+    <span class="occ" aria-label="5 of 5 workers busy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span>
+    <span class="num" style="font-weight:700">5<small style="color:var(--faint);font-weight:600"> / 5 busy</small></span>
+    <button class="btn sm"><i class="bi bi-pause-fill"></i> Pause</button>
+    <a class="btn sm" href="#"><i class="bi bi-sliders2"></i> Manage groups</a>
+  </div>
+
+  <div class="groups">
+
+    <!-- NVIDIA -->
+    <div class="group">
+      <div class="g-h">
+        <div class="ttl"><h3>NVIDIA</h3><div class="hw"><i class="bi bi-gpu-card"></i> TITAN RTX</div></div>
+        <span class="caps">
+          <span class="cap previews" title="Previews"><i class="bi bi-film"></i></span>
+          <span class="cap intro" title="Intro &amp; credits"><i class="bi bi-skip-forward-fill"></i></span>
+          <span class="cap loud off" title="Plex loudness (off)"><i class="bi bi-soundwave"></i></span>
+        </span>
+        <span class="occ-chip num">2<small>/ 2</small></span>
+      </div>
+
+      <article class="wk busy">
+        <div class="wk-top"><span class="kind"><i class="bi bi-gpu-card"></i> GPU worker</span><span class="sp"></span><span class="wk-n num" title="Worker number">5</span></div>
+        <div class="wk-title">The Accountant (2016) {imdb-tt2140479} - [Bluray-2160p][Remux]</div>
+        <div class="wk-meta"><span class="task previews"><i class="bi bi-film"></i> Previews</span><button class="wk-logs" type="button" aria-label="View logs for job" title="Job logs"><i class="bi bi-file-text"></i> Logs</button><a class="jobref" href="#"><i class="bi bi-box-arrow-up-right"></i> 11fbf92c</a></div>
+        <div class="prog"><div class="bar"><i style="width:54.9%"></i></div>
+          <div class="prog-row"><span class="stat-i">Speed <b class="good num">5.55×</b></span><span class="stat-i">ETA <b class="num">10m 23s</b></span><span class="pct num">54.9%</span></div></div>
+      </article>
+
+      <article class="wk busy">
+        <div class="wk-top"><span class="kind"><i class="bi bi-gpu-card"></i> GPU worker</span><span class="sp"></span><span class="wk-n num">6</span></div>
+        <div class="wk-title">Expedition X S12E04</div>
+        <div class="wk-meta"><span class="task previews"><i class="bi bi-film"></i> Previews</span><button class="wk-logs" type="button" aria-label="View logs for job" title="Job logs"><i class="bi bi-file-text"></i> Logs</button><a class="jobref" href="#"><i class="bi bi-box-arrow-up-right"></i> f9b51714</a></div>
+        <div class="prog"><div class="bar"><i style="width:75%"></i></div>
+          <div class="prog-row"><span class="step">Generating chapters <b class="num" style="color:var(--text)">3/4</b></span><span class="pct num">75%</span></div></div>
+      </article>
+    </div>
+
+    <!-- Intel -->
+    <div class="group">
+      <div class="g-h">
+        <div class="ttl"><h3>UHD Graphics 770</h3><div class="hw"><i class="bi bi-gpu-card"></i> Intel iGPU</div></div>
+        <span class="caps">
+          <span class="cap previews" title="Previews"><i class="bi bi-film"></i></span>
+          <span class="cap intro" title="Intro &amp; credits"><i class="bi bi-skip-forward-fill"></i></span>
+          <span class="cap loud off" title="Plex loudness (off)"><i class="bi bi-soundwave"></i></span>
+        </span>
+        <span class="occ-chip num">2<small>/ 2</small></span>
+      </div>
+      <article class="wk busy">
+        <div class="wk-top"><span class="kind"><i class="bi bi-gpu-card"></i> GPU worker</span><span class="sp"></span><span class="wk-n num">7</span></div>
+        <div class="wk-title">How to Catch a Dirtbag S01E06</div>
+        <div class="wk-meta"><span class="task previews"><i class="bi bi-film"></i> Previews</span><button class="wk-logs" type="button" aria-label="View logs for job" title="Job logs"><i class="bi bi-file-text"></i> Logs</button><a class="jobref" href="#"><i class="bi bi-box-arrow-up-right"></i> f9b51714</a></div>
+        <div class="prog"><div class="bar"><i style="width:25%"></i></div>
+          <div class="prog-row"><span class="step">Generating chapters <b class="num" style="color:var(--text)">1/4</b></span><span class="pct num">25%</span></div></div>
+      </article>
+      <article class="wk busy">
+        <div class="wk-top"><span class="kind"><i class="bi bi-gpu-card"></i> GPU worker</span><span class="sp"></span><span class="wk-n num">8</span></div>
+        <div class="wk-title">The Boyfriend S01E08</div>
+        <div class="wk-meta"><span class="task previews"><i class="bi bi-film"></i> Previews</span><button class="wk-logs" type="button" aria-label="View logs for job" title="Job logs"><i class="bi bi-file-text"></i> Logs</button><a class="jobref" href="#"><i class="bi bi-box-arrow-up-right"></i> f9b51714</a></div>
+        <div class="prog"><div class="bar"><i style="width:0%"></i></div>
+          <div class="prog-row"><span class="step">Generating chapters <b class="num" style="color:var(--text)">0/6</b></span><span class="pct num">0%</span></div></div>
+      </article>
+    </div>
+
+    <!-- CPU loudness -->
+    <div class="group">
+      <div class="g-h">
+        <div class="ttl"><h3>CPU loudness</h3><div class="hw"><i class="bi bi-cpu"></i> CPU</div></div>
+        <span class="caps">
+          <span class="cap previews off" title="Previews (off)" style="background:var(--inset);color:var(--faint);opacity:.55"><i class="bi bi-film"></i></span>
+          <span class="cap intro off" title="Intro &amp; credits (off)" style="background:var(--inset);color:var(--faint);opacity:.55"><i class="bi bi-skip-forward-fill"></i></span>
+          <span class="cap loud" title="Plex loudness"><i class="bi bi-soundwave"></i></span>
+        </span>
+        <span class="occ-chip num">1<small>/ 1</small></span>
+      </div>
+      <article class="wk busy">
+        <div class="wk-top"><span class="kind"><i class="bi bi-cpu"></i> CPU worker</span><span class="sp"></span><span class="wk-n num">9</span></div>
+        <div class="wk-title">Boxing - S2026E93 - Katie Taylor vs Flora Pili - WEBDL-720p</div>
+        <div class="wk-meta"><span class="task loud"><i class="bi bi-soundwave"></i> Plex loudness</span><button class="wk-logs" type="button" aria-label="View logs for job" title="Job logs"><i class="bi bi-file-text"></i> Logs</button><a class="jobref" href="#"><i class="bi bi-box-arrow-up-right"></i> 2fceb9de</a></div>
+        <div class="prog"><div class="bar ind"><i></i></div>
+          <div class="prog-row"><span class="step">Analyzing audio · stream 1/1</span></div></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ QUEUE ============ -->
+<section class="panel" aria-labelledby="h-q">
+  <div class="panel-h">
+    <h2 id="h-q"><i class="bi bi-list-task"></i> Job queue</h2><span class="sp"></span><span class="pill warn" title="Webhook events waiting to be turned into jobs"><i class="bi bi-lightning-charge-fill"></i> 3 webhooks pending</span>
+    <div class="menu-wrap"><button class="btn sm danger" data-menu aria-haspopup="menu"><i class="bi bi-trash3"></i> Clear jobs <i class="bi bi-chevron-down" style="font-size:11px"></i></button>
+      <div class="menu right"><div class="mh">Clear finished jobs</div>
+        <label class="ck"><input type="checkbox" checked> <span class="pill ok">Completed</span><span class="n num">588</span></label>
+        <label class="ck"><input type="checkbox" checked> <span class="pill bad">Failed</span><span class="n num">20</span></label>
+        <label class="ck"><input type="checkbox" checked> <span class="pill warn">Cancelled</span><span class="n num">500</span></label>
+        <hr><button class="btn sm danger" style="height:34px"><i class="bi bi-trash3"></i> Clear 1,108 jobs</button></div></div>
+  </div>
+  <div class="q-tools">
+    <div class="seg" role="tablist" aria-label="Status">
+      <button class="on" role="tab">All <span class="c num">1127</span></button>
+      <button role="tab"><span class="dot run"></span> Running <span class="c num">4</span></button>
+      <button role="tab"><span class="dot warn"></span> Pending <span class="c num">15</span></button>
+      <button role="tab"><span class="dot ok"></span> Completed <span class="c num">588</span></button>
+      <button role="tab"><span class="dot bad"></span> Failed <span class="c num">20</span></button>
+    </div>
+    <label class="search"><i class="bi bi-search"></i><input placeholder="Search jobs, titles, IDs" aria-label="Search jobs"></label>
+    <button class="filter"><i class="bi bi-hdd-network"></i> All servers <i class="bi bi-chevron-down" style="font-size:11px"></i></button>
+    <button class="filter"><i class="bi bi-collection"></i> All libraries <i class="bi bi-chevron-down" style="font-size:11px"></i></button>
+    <button class="filter"><i class="bi bi-tags"></i> All types <i class="bi bi-chevron-down" style="font-size:11px"></i></button>
+    <span class="sp"></span>
+  </div>
+  <div style="overflow-x:auto"><table style="min-width:900px">
+    <thead><tr><th style="width:90px">ID</th><th>Job</th><th style="width:140px">Status</th><th style="width:110px">Priority</th><th style="width:190px">Progress</th><th style="width:110px">Created</th><th style="width:130px"></th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="jid">11fbf92c</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--t-previews-soft);color:var(--t-previews)"><i class="bi bi-film"></i></span><div style="min-width:0"><div class="name">The Accountant (2016)</div><div class="sub"><span class="tag">Movies</span><span class="tag">Plex</span><span>Previews</span></div></div></div></td>
+        <td><span class="pill run"><span class="dot run live"></span> Running</span></td>
+        <td><div class="menu-wrap"><button class="pri-btn normal" data-menu aria-haspopup="menu"><i class="bi bi-dash-lg"></i> Normal <i class="bi bi-chevron-down caret"></i></button><div class="menu" role="menu"><div class="mh">Priority</div><button class="mi"><i class="bi bi-arrow-up" style="color:var(--bad)"></i> High</button><button class="mi on"><i class="bi bi-dash-lg" style="color:var(--accent)"></i> Normal<i class='bi bi-check2 chk'></i></button><button class="mi"><i class="bi bi-arrow-down" style="color:var(--muted)"></i> Low</button></div></div></td>
+        <td><div class="mini"><div class="bar"><i style="width:54.9%"></i></div><span class="num">54.9%</span></div></td>
+        <td class="num" style="color:var(--muted)">2 min ago</td>
+        <td><div class="rowact"><button class="ibtn" title="Details"><i class="bi bi-file-text"></i></button><button class="ibtn" title="Pause"><i class="bi bi-pause"></i></button><button class="ibtn danger" title="Cancel"><i class="bi bi-x-lg"></i></button></div></td>
+      </tr>
+      <tr class="open">
+        <td class="jid">f9b51714</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--t-previews-soft);color:var(--t-previews)"><i class="bi bi-film"></i></span><div style="min-width:0"><div class="name">Season: Expedition X · Season 12</div><div class="sub"><span class="tag">TV</span><span class="tag">Plex</span><span class="tag">season</span><span>3 workers</span></div></div></div></td>
+        <td><span class="pill run"><span class="dot run live"></span> Running</span></td>
+        <td><div class="menu-wrap"><button class="pri-btn " data-menu aria-haspopup="menu"><i class="bi bi-arrow-down"></i> Low <i class="bi bi-chevron-down caret"></i></button><div class="menu" role="menu"><div class="mh">Priority</div><button class="mi"><i class="bi bi-arrow-up" style="color:var(--bad)"></i> High</button><button class="mi"><i class="bi bi-dash-lg" style="color:var(--accent)"></i> Normal</button><button class="mi on"><i class="bi bi-arrow-down" style="color:var(--muted)"></i> Low<i class='bi bi-check2 chk'></i></button></div></div></td>
+        <td><div class="mini"><div class="bar"><i style="width:48%"></i></div><span class="num">48%</span></div></td>
+        <td class="num" style="color:var(--muted)">9 min ago</td>
+        <td><div class="rowact"><button class="ibtn"><i class="bi bi-file-text"></i></button><button class="ibtn"><i class="bi bi-pause"></i></button><button class="ibtn danger"><i class="bi bi-x-lg"></i></button></div></td>
+      </tr>
+      <tr class="detail show"><td colspan="7"><div class="dx">
+<div class="dx-col">
+ <section class="dx-sec"><h4>Current activity</h4><div class="path">Season: Expedition X - S12E04 - Generating chapters 3/4</div><div class="dx-time" style="margin-top:6px">Started <b>Oct 6, 14:02</b> &middot; Job elapsed <b>9m 41s</b></div></section>
+ <section class="dx-sec"><h4>Results recorded so far</h4>
+  <div class="dx-srv"><div><div class="sn"><span style="color:#e5a00d"><i class="bi bi-chevron-right"></i></span> Plex</div><div class="rchips"><span class="rchip ok" title="FFmpeg ran fresh for this server">Generated <b>&times; 2</b></span><span class="rchip run" title="Frames reused from another server - no second FFmpeg">Reused <b>&times; 1</b></span><span class="rchip " title="Output was already on disk and unchanged">Already Existed <b>&times; 1</b></span><span class="rchip bad" title="">Failed <b>&times; 1</b></span></div></div></div>
+  <div class="sn" style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin:12px 0 6px">File issues</div>
+  <div class="rchips"><span class="rchip warn" title="The file is no longer at its path">Not found on disk <b>&times; 1</b></span><span class="rchip " title="">Excluded <b>&times; 1</b></span></div>
+  <div class="cpufb" style="margin-top:10px"><i class="bi bi-arrow-down-circle"></i> 1 file ran on the CPU because the GPU failed</div>
+ </section>
+</div>
+<div class="dx-col"><section class="dx-sec"><h4>Files <span class="n num">12</span></h4><div class="files-stack">
+ <div class="fr"><div style="min-width:0"><details><summary>Expedition X - S12E01.mkv</summary><div class="path">/media/tv/Expedition X/Season 12/Expedition X - S12E01.mkv</div></details><span class="ft">Expedition X S12E01</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Expedition X - S12E01.mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Expedition X - S12E02.mkv</summary><div class="path">/media/tv/Expedition X/Season 12/Expedition X - S12E02.mkv</div></details><span class="ft">Expedition X S12E02</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Expedition X - S12E02.mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Expedition X - S12E03.mkv</summary><div class="path">/media/tv/Expedition X/Season 12/Expedition X - S12E03.mkv</div></details><span class="ft">Expedition X S12E03</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Expedition X - S12E03.mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Expedition X - S12E04.mkv</summary><div class="path">/media/tv/Expedition X/Season 12/Expedition X - S12E04.mkv</div></details><span class="ft">Expedition X S12E04</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Expedition X - S12E04.mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Expedition X - S12E05.mkv</summary><div class="path">/media/tv/Expedition X/Season 12/Expedition X - S12E05.mkv</div></details><span class="ft">Expedition X S12E05</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Expedition X - S12E05.mkv"><i class="bi bi-eye"></i></a></div>
+ </div><div style="margin-top:8px"><button class="btn sm">View all files and results <i class="bi bi-arrow-right"></i></button></div></section></div>
+<div class="dx-foot"><span class="dx-time">Showing the first 5 of 12 files</span><span class="sp"></span><button class="btn sm"><i class="bi bi-file-text"></i> Open logs and files</button></div>
+</div></td></tr>
+
+      <tr>
+        <td class="jid">2fceb9de</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--t-loud-soft);color:var(--t-loud)"><i class="bi bi-soundwave"></i></span><div style="min-width:0"><div class="name">Boxing · Katie Taylor vs Flora Pili</div><div class="sub"><span class="tag">Sports</span><span class="tag">Plex</span><span>Plex loudness</span></div></div></div></td>
+        <td><span class="pill run"><span class="dot run live"></span> Running</span></td>
+        <td><div class="menu-wrap"><button class="pri-btn " data-menu aria-haspopup="menu"><i class="bi bi-arrow-down"></i> Low <i class="bi bi-chevron-down caret"></i></button><div class="menu" role="menu"><div class="mh">Priority</div><button class="mi"><i class="bi bi-arrow-up" style="color:var(--bad)"></i> High</button><button class="mi"><i class="bi bi-dash-lg" style="color:var(--accent)"></i> Normal</button><button class="mi on"><i class="bi bi-arrow-down" style="color:var(--muted)"></i> Low<i class='bi bi-check2 chk'></i></button></div></div></td>
+        <td><div class="mini"><div class="bar ind"><i></i></div><span class="num">…</span></div></td>
+        <td class="num" style="color:var(--muted)">14 min ago</td>
+        <td><div class="rowact"><button class="ibtn"><i class="bi bi-file-text"></i></button><button class="ibtn"><i class="bi bi-pause"></i></button><button class="ibtn danger"><i class="bi bi-x-lg"></i></button></div></td>
+      </tr>
+      <tr>
+        <td class="jid">7de7f3b0</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--t-intro-soft);color:var(--t-intro)"><i class="bi bi-skip-forward-fill"></i></span><div style="min-width:0"><div class="name">Row 13 reset: our markers off</div><div class="sub"><span class="tag">7 libraries</span><span class="tag">manual</span><span>Intro &amp; credits</span></div></div></div></td>
+        <td><span class="pill warn"><i class="bi bi-hourglass-split"></i> Pending</span></td>
+        <td><div class="menu-wrap"><button class="pri-btn high" data-menu aria-haspopup="menu"><i class="bi bi-arrow-up"></i> High <i class="bi bi-chevron-down caret"></i></button><div class="menu" role="menu"><div class="mh">Priority</div><button class="mi on"><i class="bi bi-arrow-up" style="color:var(--bad)"></i> High<i class='bi bi-check2 chk'></i></button><button class="mi"><i class="bi bi-dash-lg" style="color:var(--accent)"></i> Normal</button><button class="mi"><i class="bi bi-arrow-down" style="color:var(--muted)"></i> Low</button></div></div></td>
+        <td><div class="mini"><div class="bar"><i style="width:0"></i></div><span class="num">0%</span></div></td>
+        <td class="num" style="color:var(--muted)">1 h ago</td>
+        <td><div class="rowact"><button class="ibtn"><i class="bi bi-file-text"></i></button><button class="ibtn" title="Raise priority"><i class="bi bi-chevron-double-up"></i></button><button class="ibtn danger"><i class="bi bi-x-lg"></i></button></div></td>
+      </tr>
+      <tr class="detail"><td colspan="7"><div class="dx">
+<div class="dx-col"><section class="dx-sec"><h4>Current activity</h4><div class="path">Waiting for the Plex library scan to finish</div><div class="small" style="margin-top:6px">Next eligible: <b>Oct 6, 15:30</b></div><div class="dx-time" style="margin-top:6px">Not started yet</div></section></div>
+<div class="dx-col"><section class="dx-sec"><h4>Requested paths <span class="n num">8</span></h4><div class="files-stack">
+ <div class="fr"><div style="min-width:0"><details><summary>Heat (1995).mkv</summary><div class="path">/media/movies/Heat (1995)/Heat (1995).mkv</div></details><span class="ft">Heat</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Heat (1995).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Ronin (1998).mkv</summary><div class="path">/media/movies/Ronin (1998)/Ronin (1998).mkv</div></details></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Ronin (1998).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Thief (1981).mkv</summary><div class="path">/media/movies/Thief (1981)/Thief (1981).mkv</div></details></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Thief (1981).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Sicario (2015).mkv</summary><div class="path">/media/movies/Sicario (2015)/Sicario (2015).mkv</div></details></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Sicario (2015).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Collateral (2004).mkv</summary><div class="path">/media/movies/Collateral (2004)/Collateral (2004).mkv</div></details></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Collateral (2004).mkv"><i class="bi bi-eye"></i></a></div>
+ </div><div class="dx-time" style="margin-top:6px">Showing 5 of 8 requested paths.</div><div style="margin-top:8px"><button class="btn sm">View all requested paths <i class="bi bi-arrow-right"></i></button></div></section></div>
+<div class="dx-foot"><span class="dx-time">Files will be listed when the job runs.</span><span class="sp"></span><button class="btn sm"><i class="bi bi-file-text"></i> Open logs and files</button></div>
+</div></td></tr>
+      <tr>
+        <td class="jid">4db966b4</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--t-intro-soft);color:var(--t-intro)"><i class="bi bi-skip-forward-fill"></i></span><div style="min-width:0"><div class="name">Needs review and waiting files, decided again</div><div class="sub"><span class="tag">Synth Chapters</span><span class="tag">decide_again</span><span>Intro &amp; credits</span></div></div></div></td>
+        <td><span class="pill ok"><i class="bi bi-check2"></i> Completed</span></td>
+        <td><span class="pri"><i class="bi bi-arrow-down"></i> Low</span></td>
+        <td><div class="mini done"><div class="bar"><i style="width:100%"></i></div><span class="num">100%</span></div></td>
+        <td class="num" style="color:var(--muted)">3 d ago</td>
+        <td><div class="rowact"><button class="ibtn"><i class="bi bi-file-text"></i></button><button class="ibtn" title="Run again"><i class="bi bi-arrow-repeat"></i></button><button class="ibtn danger"><i class="bi bi-trash3"></i></button></div></td>
+      </tr>
+      <tr class="detail"><td colspan="7"><div class="dx"><div class="dx-col"><section class="dx-sec"><h4>Last activity</h4><div class="dx-time">Started <b>Oct 3, 02:10</b> &middot; Finished <b>Oct 3, 02:11</b></div></section></div><div class="dx-col"><section class="dx-sec"><h4>Files</h4><div class="state"><i class="bi bi-arrow-repeat"></i> Loading&hellip;</div></section></div><div class="dx-foot"><span class="sp"></span><button class="btn sm"><i class="bi bi-file-text"></i> Open logs and files</button></div></div></td></tr>
+      <tr class="open">
+        <td class="jid">de8912d7</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--bad-soft);color:var(--bad)"><i class="bi bi-exclamation-triangle-fill"></i></span><div style="min-width:0"><div class="name">Phase 3 row 10 harness movies</div><div class="sub"><span class="tag">movies</span><span class="tag">manual</span><span style="color:var(--bad)">Intro &amp; credits · 2 files failed</span></div></div></div></td>
+        <td><span class="pill bad"><i class="bi bi-x-circle-fill"></i> Failed</span></td>
+        <td><span class="pri"><i class="bi bi-arrow-down"></i> Low</span></td>
+        <td><div class="mini fail"><div class="bar"><i style="width:100%"></i></div><span class="num">100%</span></div></td>
+        <td class="num" style="color:var(--muted)">Sep 29</td>
+        <td><div class="rowact"><button class="ibtn"><i class="bi bi-file-text"></i></button><button class="ibtn" title="Retry"><i class="bi bi-arrow-repeat"></i></button><button class="ibtn danger"><i class="bi bi-trash3"></i></button></div></td>
+      </tr>
+      <tr class="detail show"><td colspan="7"><div class="dx">
+<div class="dx-col">
+ <section class="dx-sec dx-err"><h4><i class="bi bi-exclamation-triangle"></i> Job error</h4><div class="path">2 files could not be read: Plex has not added them to its library yet.</div></section>
+ <section class="dx-sec"><h4>Last activity</h4><div class="path">/media/movies/Heat (1995)/Heat (1995).mkv</div><div class="dx-time" style="margin-top:6px">Started <b>Sep 29, 21:10</b> &middot; Finished <b>Sep 29, 21:24</b></div></section>
+ <section class="dx-sec"><h4>Results recorded so far</h4>
+  <div class="dx-time" style="margin-bottom:8px">Counts include results recorded across all 3 runs of this retry chain.</div>
+  <div class="dx-srv"><div><div class="sn"><span style="color:#e5a00d"><i class="bi bi-chevron-right"></i></span> Plex</div><div class="rchips"><span class="rchip ok" title="">Markers written <b>&times; 14</b></span><span class="rchip " title="">Markers up to date <b>&times; 3</b></span><span class="rchip warn" title="">Markers waiting <b>&times; 1</b></span><span class="rchip " title="">Markers none <b>&times; 2</b></span><span class="rchip bad" title="">Failed <b>&times; 2</b></span></div></div></div>
+  <div class="sn" style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin:12px 0 6px">File issues</div>
+  <div class="rchips"><span class="rchip bad" title="">Failed <b>&times; 2</b></span></div>
+  <div class="src" style="margin-top:12px"><b style="font-size:12px">Decided by</b> <i class="bi bi-info-circle" title="How many files each source decided in this job." style="color:var(--faint)"></i><br>Intro: TheIntroDB + IntroDB <b>9</b> &middot; chapters <b>5</b><br>Credits: credit text <b>11</b> &middot; season audio <b>3</b> &middot; other <b>2</b></div>
+ </section>
+</div>
+<div class="dx-col"><section class="dx-sec"><h4>Files <span class="n num">19</span></h4><div class="files-stack">
+ <div class="fr"><div style="min-width:0"><details><summary>Heat (1995).mkv</summary><div class="path">/media/movies/Heat (1995)/Heat (1995).mkv</div></details><span class="ft">Heat</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Heat (1995).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Ronin (1998).mkv</summary><div class="path">/media/movies/Ronin (1998)/Ronin (1998).mkv</div></details><span class="ft">Ronin</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Ronin (1998).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Collateral (2004).mkv</summary><div class="path">/media/movies/Collateral (2004)/Collateral (2004).mkv</div></details><span class="ft">Collateral</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Collateral (2004).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Thief (1981).mkv</summary><div class="path">/media/movies/Thief (1981)/Thief (1981).mkv</div></details><span class="ft">Thief</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Thief (1981).mkv"><i class="bi bi-eye"></i></a></div>
+ <div class="fr"><div style="min-width:0"><details><summary>Sicario (2015).mkv</summary><div class="path">/media/movies/Sicario (2015)/Sicario (2015).mkv</div></details><span class="ft">Sicario</span></div><a class="ibtn" href="#" title="Open in Inspector" aria-label="Inspect Sicario (2015).mkv"><i class="bi bi-eye"></i></a></div>
+ </div><div style="margin-top:8px"><button class="btn sm">View all files and results <i class="bi bi-arrow-right"></i></button></div></section></div>
+<div class="dx-foot"><span class="dx-time">Showing the first 5 of 19 files</span><span class="sp"></span><button class="btn sm"><i class="bi bi-file-text"></i> Open logs and files</button></div>
+</div></td></tr>
+      <tr>
+        <td class="jid">863ad007</td>
+        <td><div class="jt"><button class="exp" aria-label="Show files" aria-expanded="false" data-exp><i class="bi bi-chevron-down"></i></button><span class="tico" style="background:var(--t-intro-soft);color:var(--t-intro)"><i class="bi bi-skip-forward-fill"></i></span><div style="min-width:0"><div class="name">Phase 3 row 6 cancel</div><div class="sub"><span class="tag">Synth Credits</span><span class="tag">manual</span><span>Intro &amp; credits</span></div></div></div></td>
+        <td><span class="pill warn"><i class="bi bi-slash-circle"></i> Cancelled</span></td>
+        <td><span class="pri"><i class="bi bi-arrow-down"></i> Low</span></td>
+        <td><div class="mini"><div class="bar"><i style="width:0"></i></div><span class="num">—</span></div></td>
+        <td class="num" style="color:var(--muted)">Sep 29</td>
+        <td><div class="rowact"><button class="ibtn"><i class="bi bi-file-text"></i></button><button class="ibtn"><i class="bi bi-arrow-repeat"></i></button><button class="ibtn danger"><i class="bi bi-trash3"></i></button></div></td>
+      </tr>
+      <tr class="detail"><td colspan="7"><div class="dx"><div class="dx-col"><section class="dx-sec"><h4>Last activity</h4><div class="dx-time">Cancelled before any file started</div></section></div><div class="dx-col"><section class="dx-sec"><h4>Files</h4><div class="state" style="color:var(--warn)"><i class="bi bi-exclamation-circle"></i> Could not read files. Open logs and files, or try again.</div><div class="state" style="margin-top:6px"><i class="bi bi-info-circle"></i> No files listed yet. (empty state)</div></section></div><div class="dx-foot"><span class="sp"></span><button class="btn sm"><i class="bi bi-file-text"></i> Open logs and files</button></div></div></td></tr>
+    </tbody>
+  </table></div>
+  <div class="q-foot">
+    <span>Show</span><button class="filter" style="height:30px">50 <i class="bi bi-chevron-down" style="font-size:11px"></i></button>
+    <span class="num">1–50 of 1127</span><span class="sp"></span>
+    <div class="pg"><button><i class="bi bi-chevron-left"></i></button><button class="on">1</button><button>2</button><button>3</button><button>…</button><button>23</button><button><i class="bi bi-chevron-right"></i></button></div>
+  </div>
+</section>
+
+</main>
+<button class="btn sm theme" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'"><i class="bi bi-circle-half"></i> Theme</button>
+<script>
+document.addEventListener('click',e=>{
+  const m=e.target.closest('[data-menu]');
+  document.querySelectorAll('.menu.open').forEach(x=>{ if(!m||x!==m.nextElementSibling){ x.classList.remove('open'); x.previousElementSibling&&x.previousElementSibling.setAttribute('aria-expanded','false'); } });
+  const pe=e.target.closest('[data-edit]'), pc=e.target.closest('[data-edit-close]');
+  if(pe||pc){ const g=(pe||pc).closest('.group'); const on=pc?false:!g.classList.contains('editing'); g.classList.toggle('editing',on); g.querySelector('[data-edit]').setAttribute('aria-expanded',on); if(on) g.querySelector('.g-edit .inp').focus({preventScroll:true}); return; }
+  if(m){ const o=m.nextElementSibling.classList.toggle('open'); m.setAttribute('aria-expanded',o); e.stopPropagation(); return; }
+  if(e.target.closest('.menu')) return;
+  const x=e.target.closest('[data-exp]');
+  if(x){ const tr=x.closest('tr'); tr.classList.toggle('open'); const d=tr.nextElementSibling; if(d&&d.classList.contains('detail')) d.classList.toggle('show'); x.setAttribute('aria-expanded',tr.classList.contains('open')); }
+});
+document.addEventListener('change',e=>{ if(e.target.matches('[data-avail]')) e.target.closest('.g-edit').querySelector('.win-wrap').hidden=e.target.value!=='scheduled'; });
+</script>
+</body>
+</html>

@@ -66,7 +66,10 @@
                         <div id="jobScopeBadge" class="mt-2 small"></div>
                     </div>
                     <div id="jobScanFiltersGroup">{% with filter_prefix='job' %}{% include '_scan_filters.html' %}{% endwith %}</div>
-                    <p class="form-text mb-3" id="jobOwnRunnerFiltersNote" hidden>Checks every eligible file in the chosen libraries. Preview date, episode and ordering filters do not apply.</p>
+                    <p class="form-text mb-3" id="jobOwnRunnerFiltersNote" hidden>Checks every eligible file in the chosen libraries.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Preview date, episode and ordering filters do not apply." data-explain-title="Filters for this job type" data-explain-template="infoJobOwnRunnerTpl"><i class="bi bi-info-circle"></i></button></p>
+<template id="infoJobOwnRunnerTpl">
+    <p>Checks every eligible file in the chosen libraries. Preview date, episode and ordering filters do not apply.</p>
+</template>
                     <div class="mb-3" id="jobMarkersForceGroup" hidden>
                         <div class="form-check d-flex align-items-center">
                             <input class="form-check-input" type="checkbox" id="jobMarkersForce">
@@ -111,8 +114,11 @@
                             <option value="oldest">Oldest added first</option>
                             <option value="random">Random</option>
                         </select>
-                        <div class="form-text">Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</div>
-                        <div class="form-text">Pick <strong>Random</strong> if your media is split across multiple disks, so workers don't all hit one disk at the same time.</div>
+<div class="form-text">Which files are processed first.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Newest and oldest use the date added to the library." data-explain-title="Processing Order" data-explain-template="infoJobSortTpl"><i class="bi bi-info-circle"></i></button></div>
+<template id="infoJobSortTpl">
+    <p>Newest and oldest use the date added to the library. Date ordering applies within each library; parallel workers may finish out of order.</p>
+    <p>Pick <strong>Random</strong> if your media is split across multiple disks, so workers don't all hit one disk at the same time.</p>
+</template>
                     </div>
                 </form>
             </div>

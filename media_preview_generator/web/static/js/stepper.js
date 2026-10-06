@@ -48,12 +48,14 @@
         minusBtn.type = 'button';
         minusBtn.className = 'btn btn-outline-secondary stepper-minus';
         minusBtn.title = 'Decrease';
+        minusBtn.setAttribute('aria-label', 'Decrease');
         minusBtn.innerHTML = '<i class="bi bi-dash-lg"></i>';
 
         const plusBtn = document.createElement('button');
         plusBtn.type = 'button';
         plusBtn.className = 'btn btn-outline-secondary stepper-plus';
         plusBtn.title = 'Increase';
+        plusBtn.setAttribute('aria-label', 'Increase');
         plusBtn.innerHTML = '<i class="bi bi-plus-lg"></i>';
 
         wrapper.appendChild(minusBtn);

@@ -1,144 +1,105 @@
-/* Inspector: one page for a file's preview frames and its intro & credits (the approved design canvas, boards 1-6).
- * Everything is scoped to .insp: an ink-blue ground, IBM Plex type, amber for credits and for ours, blue for the intro,
- * and slate outlines for a server's own markers. The light theme maps the same tokens to light colours. */
+/* Inspector: one page for a file's preview frames and its intro & credits. Everything is scoped to .insp. The
+ * --insp-* names stay (the rules below use them) but now resolve to the app's shared tokens (style.css), so the page
+ * follows the dashboard: amber for ours and the primary action, violet for the intro, slate outlines for a
+ * server's own markers. Only the surface ramp below is local: style.css has no card/panel token yet. */
 
 .insp {
-    --insp-ground: #0c1019;
-    --insp-card: #121824;
-    --insp-sunk: #0f141e;
-    --insp-raised: #171e2c;
-    --insp-raised-2: #1e2638;
-    --insp-hover: #1b2332;
-    --insp-row-hover: #161d2b;
-    --insp-row-current: #1a2233;
-    --insp-line: #1f2837;
-    --insp-line-2: #263043;
-    --insp-control: #2c374b;
-    --insp-control-hover: #4a5874;
-    --insp-lane: #182031;
-    --insp-track: #1f2940;
-    --insp-dashed: #334059;
-    --insp-scrollbar: #3a4660;
-    --insp-text: #e9edf5;
-    --insp-text-2: #c9d1e0;
-    --insp-text-3: #b9c2d3;
-    --insp-muted: #a3adc0;
-    --insp-muted-2: #8d98ad;
-    --insp-faint: #7f8aa0;
-    --insp-amber: #f2a93b;
-    --insp-amber-hover: #ffb955;
-    --insp-amber-fg: #f2a93b;
-    --insp-amber-ink: #1b1405;
-    --insp-amber-tint: rgba(242, 169, 59, 0.3);
-    --insp-amber-band: rgba(242, 169, 59, 0.28);
-    --insp-amber-soft: rgba(242, 169, 59, 0.14);
-    --insp-amber-text: #ffd89a;
-    --insp-amber-line: #7a5a26;
-    --insp-blue: #6aa8ff;
-    --insp-blue-fg: #6aa8ff;
-    --insp-blue-ink: #06152e;
-    --insp-blue-tint: rgba(106, 168, 255, 0.3);
-    --insp-blue-band: rgba(106, 168, 255, 0.28);
-    --insp-blue-soft: rgba(106, 168, 255, 0.14);
-    --insp-blue-text: #b8d6ff;
-    --insp-slate: #aab4d4;
-    --insp-slate-tint: rgba(170, 180, 212, 0.22);
-    --insp-slate-text: #d5dcf0;
-    --insp-slate-flag: #202a3d;
-    --insp-slate-flag-text: #c3cbe6;
-    --insp-ok: #4cc38a;
-    --insp-ok-soft: rgba(76, 195, 138, 0.14);
-    --insp-ok-text: #7fdcae;
-    --insp-bad: #ef6b6b;
-    --insp-bad-text: #ff9b9b;
-    --insp-none: #5b6680;
-    --insp-banner-bg: #13203a;
-    --insp-banner-line: #2a4675;
-    --insp-banner-link: #9cc6ff;
-    --insp-overlay: rgba(6, 9, 15, 0.78);
+    --insp-panel: #212136;
+    --insp-ground: var(--plex-gray);
+    --insp-card: var(--insp-panel);
+    --insp-sunk: rgba(255, 255, 255, 0.025);
+    --insp-raised: var(--surface-1);
+    --insp-raised-2: var(--panel-2);
+    --insp-hover: var(--surface-2);
+    --insp-row-hover: var(--surface-1);
+    --insp-row-current: var(--accent-soft);
+    --insp-line: var(--line);
+    --insp-line-2: var(--line-strong);
+    --insp-control: var(--line-strong);
+    --insp-control-hover: var(--faint);
+    --insp-lane: var(--surface-1);
+    --insp-track: var(--line-strong);
+    --insp-dashed: var(--faint);
+    --insp-scrollbar: var(--line-strong);
+    --insp-text: #e8e8f0;
+    --insp-text-2: #d2d2de;
+    --insp-text-3: #bdbdcc;
+    --insp-muted: var(--muted);
+    --insp-muted-2: var(--faint);
+    --insp-faint: var(--faint);
+    --insp-amber: var(--accent);
+    --insp-amber-hover: #f0b02a;
+    --insp-amber-fg: var(--accent);
+    --insp-amber-ink: var(--accent-ink);
+    --insp-amber-tint: rgba(229, 160, 13, 0.3);
+    --insp-amber-band: rgba(229, 160, 13, 0.28);
+    --insp-amber-soft: var(--accent-soft);
+    --insp-amber-text: var(--accent);
+    --insp-amber-line: rgba(229, 160, 13, 0.45);
+    --insp-blue: var(--t-intro);
+    --insp-blue-fg: var(--t-intro);
+    --insp-blue-ink: #1a1030;
+    --insp-blue-tint: rgba(180, 156, 255, 0.3);
+    --insp-blue-band: rgba(180, 156, 255, 0.28);
+    --insp-blue-soft: var(--t-intro-soft);
+    --insp-blue-text: var(--t-intro);
+    --insp-slate: var(--faint);
+    --insp-slate-tint: rgba(255, 255, 255, 0.08);
+    --insp-slate-text: var(--muted);
+    --insp-slate-flag: var(--panel-2);
+    --insp-slate-flag-text: #d2d2de;
+    --insp-ok: var(--ok);
+    --insp-ok-soft: var(--ok-soft);
+    --insp-ok-text: var(--ok);
+    --insp-bad: var(--bad);
+    --insp-bad-text: var(--bad);
+    --insp-none: var(--faint);
+    --insp-banner-bg: var(--run-soft);
+    --insp-banner-line: rgba(91, 157, 255, 0.35);
+    --insp-banner-link: var(--accent);
+    --insp-overlay: rgba(6, 6, 12, 0.78);
     --insp-now: #ffffff;
-    --insp-bubble-bg: #e9edf5;
-    --insp-bubble-text: #0c1019;
+    --insp-bubble-bg: #e8e8f0;
+    --insp-bubble-text: #0f0f1a;
     --insp-glow: rgba(255, 255, 255, 0.25);
-    --insp-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-    --insp-mono-font: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-    --insp-gutter: 128px;
+    --insp-sans: var(--bs-body-font-family);
+    --insp-mono-font: var(--mono);
+    --insp-gutter: 112px;
 
-    max-width: 1344px;
+    max-width: 1480px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 18px;
     color: var(--insp-text);
-    font-family: var(--insp-sans);
 }
 
 html[data-bs-theme="light"] .insp {
-    --insp-ground: #f3f5f9;
-    --insp-card: #ffffff;
+    --insp-panel: var(--bs-secondary-bg);
+    --insp-ground: var(--bs-body-bg);
     --insp-sunk: #f6f8fb;
-    --insp-raised: #eef1f6;
-    --insp-raised-2: #e4e9f1;
-    --insp-hover: #eef1f6;
-    --insp-row-hover: #f1f4f8;
-    --insp-row-current: #e9eef6;
-    --insp-line: #dde3ec;
-    --insp-line-2: #d3dae5;
-    --insp-control: #c5cedb;
-    --insp-control-hover: #9aa6b8;
-    --insp-lane: #eef1f6;
-    --insp-track: #dfe5ee;
-    --insp-dashed: #b9c3d2;
-    --insp-scrollbar: #b9c3d2;
-    --insp-text: #141a26;
-    --insp-text-2: #2b3445;
-    --insp-text-3: #3a4457;
-    --insp-muted: #5a6477;
-    --insp-muted-2: #667085;
-    --insp-faint: #7a8496;
-    --insp-amber: #f2a93b;
-    --insp-amber-hover: #e59a26;
-    --insp-amber-fg: #9a5b00;
-    --insp-amber-tint: rgba(242, 169, 59, 0.28);
-    --insp-amber-band: rgba(242, 169, 59, 0.3);
-    --insp-amber-soft: rgba(242, 169, 59, 0.16);
-    --insp-amber-text: #6b4300;
+    --insp-row-hover: var(--surface-1);
+    --insp-text: #1b1d2a;
+    --insp-text-2: #2e3144;
+    --insp-text-3: #3e4256;
+    --insp-amber-hover: #cf8a00;
+    --insp-amber-text: #7a4f00;
+    --insp-amber-fg: #8a5a00;
     --insp-amber-line: #e0b35f;
-    --insp-blue: #4f8ff0;
-    --insp-blue-fg: #1f5fcf;
+    --insp-amber-tint: rgba(229, 160, 13, 0.28);
+    --insp-amber-band: rgba(229, 160, 13, 0.3);
     --insp-blue-ink: #ffffff;
-    --insp-blue-tint: rgba(79, 143, 240, 0.22);
-    --insp-blue-band: rgba(79, 143, 240, 0.25);
-    --insp-blue-soft: rgba(79, 143, 240, 0.12);
-    --insp-blue-text: #163f86;
-    --insp-slate: #7d88a8;
-    --insp-slate-tint: rgba(125, 136, 168, 0.18);
-    --insp-slate-text: #3b4460;
-    --insp-slate-flag: #eef1f7;
-    --insp-slate-flag-text: #3b4460;
-    --insp-ok: #2f9e6c;
-    --insp-ok-soft: rgba(47, 158, 108, 0.14);
-    --insp-ok-text: #1f7a50;
-    --insp-bad: #d64545;
-    --insp-bad-text: #b42828;
-    --insp-none: #a4adbd;
-    --insp-banner-bg: #e8f0fe;
-    --insp-banner-line: #b7cdf5;
-    --insp-banner-link: #1f5fcf;
+    --insp-blue-tint: rgba(109, 79, 216, 0.22);
+    --insp-blue-band: rgba(109, 79, 216, 0.25);
+    --insp-slate-tint: rgba(15, 23, 42, 0.06);
+    --insp-slate-flag-text: #2e3144;
+    --insp-banner-line: rgba(37, 99, 214, 0.3);
+    --insp-banner-link: #8a5a00;
     --insp-overlay: rgba(20, 26, 38, 0.55);
-    --insp-now: #141a26;
-    --insp-bubble-bg: #141a26;
+    --insp-now: #1b1d2a;
+    --insp-bubble-bg: #1b1d2a;
     --insp-bubble-text: #ffffff;
     --insp-glow: rgba(20, 26, 38, 0.2);
-}
-
-/* The page's own ground; this file is only loaded on the Inspector. */
-body:has(#inspector) {
-    background-color: #0c1019;
-}
-
-html[data-bs-theme="light"] body:has(#inspector) {
-    background-color: #f3f5f9;
 }
 
 .insp button {
@@ -455,72 +416,102 @@ html[data-bs-theme="light"] body:has(#inspector) {
 #inspSearch {
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: 18px;
 }
 
 #inspSearch[hidden] {
     display: none;
 }
 
+.insp-page-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+.insp-page-title {
+    flex: 1 1 320px;
+    min-width: 0;
+}
+
 .insp-crumb {
-    font-size: 12px;
-    font-weight: 500;
+    margin-bottom: 4px;
+    font-size: 11px;
+    font-weight: 700;
     letter-spacing: 0.08em;
-    color: var(--insp-muted-2);
+    color: var(--insp-faint);
     text-transform: uppercase;
 }
 
 /* The crumb, the title and the lead sit together, 6px apart, inside the search's 22px rhythm. */
 .insp-search-title {
-    margin: -16px 0 0;
-    font-size: 30px;
-    font-weight: 600;
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: 700;
+    line-height: 1.2;
 }
 
 .insp-lead {
-    margin: -16px 0 0;
-    font-size: 15px;
-    color: var(--insp-text-2);
+    margin: 4px 0 0;
+    max-width: 70ch;
+    font-size: 14px;
+    color: var(--insp-muted);
 }
 
 .insp-search-field {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    padding: 18px;
+    background: var(--insp-card);
+    border: 1px solid var(--insp-line);
+    border-radius: 12px;
 }
 
-.insp-label {
-    font-size: 14px;
-    font-weight: 500;
+.insp-label,
+.insp-label-caps {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--insp-faint);
 }
 
 .insp-searchbox {
+    position: relative;
     display: flex;
-    align-items: stretch;
-    height: 56px;
-    background: var(--insp-card);
-    border: 2px solid var(--insp-amber);
-    border-radius: 10px;
-    overflow: hidden;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .insp-searchbox > .bi {
-    width: 52px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    color: var(--insp-text-2);
+    position: absolute;
+    left: 13px;
+    top: 22px;
+    transform: translateY(-50%);
+    color: var(--insp-faint);
+    pointer-events: none;
 }
 
 .insp-searchbox input {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
-    border: 0;
+    height: 44px;
+    padding: 0 12px 0 38px;
+    border: 1px solid var(--insp-line-2);
+    border-radius: 8px;
     background: transparent;
     color: var(--insp-text);
-    font: 400 17px var(--insp-sans);
+    font: 400 15px var(--insp-sans);
     outline: none;
+}
+
+.insp-searchbox input:focus {
+    border-color: var(--insp-amber);
+    box-shadow: 0 0 0 3px var(--insp-amber-soft);
 }
 
 .insp-searchbox input::placeholder {
@@ -529,24 +520,23 @@ html[data-bs-theme="light"] body:has(#inspector) {
 
 .insp-searchbox select {
     width: 190px;
-    border: 0;
-    border-left: 1px solid var(--insp-control);
-    background: var(--insp-raised);
+    height: 44px;
+    border: 1px solid var(--insp-line-2);
+    border-radius: 8px;
+    background-color: var(--insp-card);
     color: var(--insp-text);
-    padding: 0 14px;
-    font: 500 14px var(--insp-sans);
+    padding: 0 10px;
+    font: 400 14px var(--insp-sans);
 }
 
 .insp-scope-info {
     display: flex;
     align-items: center;
-    padding: 0 10px;
-    background: var(--insp-raised);
 }
 
 .insp-hint {
     font-size: 13px;
-    color: var(--insp-muted);
+    color: var(--insp-faint);
 }
 
 .insp-results {
@@ -564,17 +554,17 @@ html[data-bs-theme="light"] body:has(#inspector) {
 
 .insp-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 150px 220px 28px;
-    column-gap: 16px;
+    grid-template-columns: 34px minmax(0, 1fr) 190px 190px 20px;
+    column-gap: 12px;
     align-items: center;
     width: 100%;
-    padding: 14px 20px;
+    padding: 12px 16px;
     border: 0;
     border-bottom: 1px solid var(--insp-line);
     background: transparent;
     color: var(--insp-text);
     text-align: left;
-    font-size: 14px;
+    font-size: 13px;
 }
 
 .insp-row:last-child {
@@ -584,28 +574,32 @@ html[data-bs-theme="light"] body:has(#inspector) {
 .insp-row-head {
     padding-top: 10px;
     padding-bottom: 10px;
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 11px;
+    font-weight: 700;
     letter-spacing: 0.08em;
-    color: var(--insp-muted);
+    color: var(--insp-faint);
 }
 
 button.insp-row:hover,
 button.insp-row:focus-visible,
 .insp-row.is-open {
     background: var(--insp-raised);
-    outline: none;
+}
+
+button.insp-row:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
 }
 
 .insp-row-title {
-    font-size: 17px;
+    font-size: 14px;
     font-weight: 600;
     overflow-wrap: anywhere;
 }
 
 .insp-row-meta {
-    font-size: 13px;
-    color: var(--insp-muted);
+    font-size: 12px;
+    color: var(--insp-faint);
 }
 
 .insp-row .bi-chevron-right,
@@ -662,7 +656,11 @@ button.insp-row:focus-visible,
 .insp-episode:focus-visible {
     background: var(--insp-raised-2);
     border-color: var(--insp-control);
-    outline: none;
+}
+
+.insp-episode:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
 }
 
 .insp-episode-code {
@@ -1883,7 +1881,8 @@ button.insp-frame:focus-visible {
 }
 
 .insp-adjust-input input:focus {
-    outline: none;
+    outline: 2px solid var(--accent-text);
+    outline-offset: 1px;
     border-color: var(--insp-amber);
 }
 
@@ -2280,7 +2279,11 @@ button.insp-frame:focus-visible {
 button.insp-season-row:hover,
 button.insp-season-row:focus-visible {
     background: var(--insp-row-hover);
-    outline: none;
+}
+
+button.insp-season-row:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
 }
 
 .insp-season-row.is-current {
@@ -2419,9 +2422,8 @@ button.insp-season-row:focus-visible {
 
 /* --- Narrow screens ------------------------------------------------------- */
 
-.insp-section-nav { display: none; }
 .insp-stat[role="link"] { cursor: pointer; }
-.insp-stat[role="link"]:focus-visible { outline: 2px solid var(--plex-orange); outline-offset: 3px; }
+.insp-stat[role="link"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 @media (max-width: 1199.98px) {
     .insp-stats {
@@ -2465,35 +2467,6 @@ button.insp-season-row:focus-visible {
         --insp-gutter: 76px;
     }
 
-    .insp-section-nav {
-        position: sticky;
-        top: 4.4rem;
-        z-index: 20;
-        display: flex;
-        gap: 4px;
-        overflow-x: auto;
-        margin: 0 0 12px;
-        padding: 4px;
-        border: 1px solid var(--insp-line);
-        border-radius: 8px;
-        background: var(--insp-bg);
-    }
-    .insp-section-nav[hidden] { display: none; }
-    .insp-section-nav a {
-        flex: 1 0 auto;
-        min-height: 44px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0 10px;
-        color: var(--insp-text);
-        text-decoration: none;
-        border-radius: 6px;
-    }
-    #inspTimeline,
-    #inspLoudness,
-    #inspEvidence,
-    #inspServers { scroll-margin-top: 8rem; }
     .insp button,
     .insp [role="button"],
     .insp .info-icon,
@@ -2541,4 +2514,671 @@ button.insp-season-row:focus-visible {
     .insp-legend {
         margin-left: 0;
     }
+}
+
+/* --- Dashboard language (cards, buttons, pills, panel headings) ------------ */
+
+.insp-card {
+    --cx: 20px;
+    --cy: 18px;
+    padding: var(--cy) var(--cx);
+    border-radius: 12px;
+}
+
+.insp .btn.insp-btn,
+.insp .btn.insp-btn-primary,
+.insp .btn.insp-btn-danger {
+    height: 38px;
+    padding: 0 14px;
+    border-radius: 8px;
+    font: 600 14px var(--insp-sans);
+}
+
+.insp .btn.insp-btn.is-strong,
+.insp .btn.insp-btn.btn-sm {
+    height: 32px;
+    padding: 0 10px;
+    font-size: 13px;
+}
+
+.insp .btn.insp-btn-primary {
+    padding: 0 16px;
+}
+
+.insp .btn.insp-btn-danger:hover,
+.insp .btn.insp-btn-danger:focus-visible {
+    background: var(--bad-soft);
+    color: var(--insp-bad);
+}
+
+.insp-seg {
+    gap: 2px;
+    background: var(--surface-1);
+    border-radius: 10px;
+}
+
+.insp-seg-btn {
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 7px;
+    font-weight: 600;
+}
+
+.insp-scope .insp-seg-btn {
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+.insp-seg-btn.active {
+    background: var(--panel-2);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.insp-chip {
+    background: var(--surface-1);
+    border: 0;
+    border-radius: 999px;
+    font-weight: 600;
+    color: var(--insp-muted);
+}
+
+.insp-chip.is-locked {
+    background: var(--insp-amber-soft);
+    color: var(--insp-amber-text);
+}
+
+.insp-pill {
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 999px;
+}
+
+/* Panel headings: small caps with an icon, a rule under them across the card. */
+.insp-card-title,
+.insp-card-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--insp-muted);
+}
+
+.insp-card > .insp-card-heading,
+.insp-servers-head,
+.insp-tl-title {
+    margin: calc(var(--cy) * -1) calc(var(--cx) * -1) 0;
+    padding: 14px var(--cx);
+    min-height: 52px;
+    border-bottom: 1px solid var(--insp-line);
+}
+
+.insp-card > .insp-card-heading {
+    padding-bottom: 14px;
+}
+
+.insp-servers-head {
+    margin-bottom: 4px;
+}
+
+.insp-servers-head .insp-card-heading {
+    padding: 0;
+    min-height: 0;
+    border: 0;
+}
+
+.insp-tl-head .insp-tl-title {
+    flex: 0 0 calc(100% + var(--cx) * 2);
+}
+
+.insp-tl-title .insp-legend {
+    margin-left: auto;
+    font-size: 12px;
+}
+
+.insp-tl-range {
+    font-size: 12px;
+    color: var(--insp-faint);
+}
+
+.insp-stat {
+    padding: 14px 16px;
+    gap: 4px;
+}
+
+.insp-stat-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--insp-faint);
+}
+
+.insp-stat-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.insp-stats {
+    gap: 10px;
+}
+
+/* --- Search results ---------------------------------------------------------- */
+
+div.insp-row:not(.insp-row-head) {
+    display: block;
+    padding: 18px 16px;
+}
+
+div.insp-row.text-danger {
+    color: var(--insp-bad);
+}
+
+.insp-row-ico {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    background: var(--surface-1);
+    color: var(--insp-muted);
+}
+
+button.insp-row:hover,
+button.insp-row:focus-visible,
+.insp-row.is-open {
+    background: var(--surface-1);
+}
+
+.insp-row .bi-chevron-right,
+.insp-row .bi-chevron-down {
+    color: var(--insp-faint);
+}
+
+.insp-row-meta,
+.insp-row-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.insp-show {
+    gap: 10px;
+    padding: 12px 16px 16px;
+    background: var(--surface-1);
+}
+
+.insp-seasons {
+    align-self: flex-start;
+    gap: 2px;
+    padding: 3px;
+    background: var(--surface-1);
+    border: 1px solid var(--insp-line);
+    border-radius: 10px;
+}
+
+.insp .insp-seasons .btn.insp-btn {
+    height: 30px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 7px;
+    font-size: 13px;
+    color: var(--insp-muted);
+}
+
+.insp .insp-seasons .btn.insp-btn.active {
+    background: var(--panel-2);
+    color: var(--insp-text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.insp-episodes {
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+}
+
+.insp-episode {
+    padding: 8px 10px;
+    background: var(--insp-card);
+    border: 1px solid var(--insp-line);
+}
+
+.insp-episode:hover,
+.insp-episode:focus-visible {
+    background: var(--insp-card);
+    border-color: var(--insp-line-2);
+}
+
+.insp-episode-code {
+    font-family: var(--insp-mono-font);
+    font-size: 13px;
+}
+
+.insp-episode-state {
+    color: var(--insp-faint);
+}
+
+/* --- Empty state ---------------------------------------------------------------- */
+
+#inspResults:not([hidden]) ~ #inspEmpty {
+    display: none;
+}
+
+.insp-empty {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    padding: 40px 20px 28px;
+    text-align: center;
+}
+
+.insp-empty p {
+    margin: 0;
+    max-width: 46ch;
+    color: var(--insp-muted);
+}
+
+.insp-empty b {
+    font-size: 16px;
+}
+
+.insp-empty-tile {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 6px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    background: var(--insp-amber-soft);
+    color: var(--insp-amber-fg);
+    font-size: 22px;
+}
+
+.insp-chips {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.insp-suggest {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--insp-line);
+    background: transparent;
+    color: var(--insp-muted);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.insp-suggest:hover,
+.insp-suggest:focus-visible {
+    background: var(--surface-1);
+    color: var(--insp-text);
+}
+
+.insp-recent {
+    justify-self: stretch;
+    width: 100%;
+    max-width: 640px;
+    margin: 22px auto 0;
+    display: grid;
+    gap: 6px;
+    text-align: left;
+}
+
+.insp-recent[hidden] {
+    display: none;
+}
+
+.insp-recent-list {
+    display: grid;
+    gap: 6px;
+}
+
+.insp-recent-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--insp-line);
+    border-radius: 8px;
+    background: var(--surface-1);
+    color: var(--insp-text);
+    text-align: left;
+}
+
+.insp-recent-row:hover,
+.insp-recent-row:focus-visible {
+    border-color: var(--insp-line-2);
+}
+
+.insp-recent-row .bi {
+    color: var(--insp-muted);
+}
+
+.insp-recent-name {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* --- File: back bar, section nav, header card ---------------------------------- */
+
+.insp-section-nav {
+    position: sticky;
+    top: 57px;
+    z-index: 20;
+    display: flex;
+    margin: 0;
+    padding: 8px 0;
+    background: var(--insp-ground);
+}
+
+.insp-section-nav[hidden] {
+    display: none;
+}
+
+.insp-section-seg {
+    display: inline-flex;
+    gap: 2px;
+    max-width: 100%;
+    padding: 3px;
+    overflow-x: auto;
+    background: var(--surface-1);
+    border: 1px solid var(--insp-line);
+    border-radius: 10px;
+}
+
+.insp-section-nav a {
+    min-height: 30px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 12px;
+    border-radius: 7px;
+    color: var(--insp-muted);
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.insp-section-nav a[hidden] {
+    display: none;
+}
+
+.insp-section-nav a:hover,
+.insp-section-nav a:focus-visible {
+    background: var(--panel-2);
+    color: var(--insp-text);
+}
+
+#inspTimeline,
+#inspLoudness,
+#inspEvidence,
+#inspServers {
+    scroll-margin-top: 120px;
+}
+
+.insp-head {
+    padding: 18px;
+    background: var(--insp-card);
+    border: 1px solid var(--insp-line);
+    border-radius: 12px;
+}
+
+.insp-title {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1.2;
+}
+
+.insp-title-sub {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--insp-faint);
+}
+
+.insp-actions {
+    padding-top: 0;
+    gap: 8px;
+}
+
+.insp-back {
+    height: 32px;
+    padding: 0 10px;
+    border-color: var(--insp-line-2);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.insp-banner {
+    border-radius: 8px;
+}
+
+.insp-confirm-bar {
+    background: var(--insp-amber-soft);
+    border-color: var(--insp-amber-line);
+    border-radius: 12px;
+}
+
+.insp-versions {
+    padding: 10px 14px;
+    background: var(--surface-1);
+    border: 1px solid var(--insp-line);
+    border-radius: 12px;
+}
+
+/* --- Message cards (couldn't open, not in a library, gone, loading) -------------- */
+
+.insp-message {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 14px;
+    align-items: start;
+    padding: 22px 20px;
+}
+
+.insp-message > .bi {
+    grid-row: 1 / span 3;
+    font-size: 22px;
+    color: var(--insp-muted);
+}
+
+.insp-message.is-bad > .bi {
+    color: var(--insp-bad);
+}
+
+.insp-message.is-warn > .bi {
+    color: var(--insp-amber-fg);
+}
+
+.insp-message > :not(.bi) {
+    grid-column: 2;
+}
+
+.insp-message-title {
+    margin: 0;
+    font-size: 15px;
+}
+
+.insp-message-text {
+    font-size: 14px;
+    color: var(--insp-muted);
+}
+
+.insp-message-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.insp-loading {
+    padding: 28px 20px;
+    color: var(--insp-muted);
+}
+
+/* --- How it was decided ---------------------------------------------------------- */
+
+.insp-ev-icon {
+    width: 26px;
+    height: 26px;
+    border: 0;
+    border-radius: 7px;
+    background: var(--surface-1);
+}
+
+.insp-ev-icon.is-used,
+.insp-ev-icon.is-locked {
+    background: var(--insp-ok-soft);
+    color: var(--insp-ok);
+}
+
+.insp-ev-icon.is-locked {
+    background: var(--insp-amber-soft);
+    color: var(--insp-amber-fg);
+}
+
+.insp-ev-icon.is-warn {
+    background: var(--warn-soft);
+    border: 0;
+    color: var(--warn);
+}
+
+.insp-ev-icon.is-own {
+    border: 0;
+    color: var(--insp-muted);
+}
+
+.insp-ev-name {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.insp-ev-found {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.insp-ev:has(.insp-ev-icon.is-used) .insp-ev-note,
+.insp-ev:has(.insp-ev-icon.is-locked) .insp-ev-note {
+    color: var(--insp-muted);
+}
+
+.insp-grid-2 {
+    gap: 18px;
+}
+
+/* --- Narrow screens --------------------------------------------------------------- */
+
+@media (max-width: 767.98px) {
+    .insp-card {
+        --cx: 14px;
+        --cy: 14px;
+    }
+
+    .insp {
+        --insp-gutter: 62px;
+    }
+
+    .insp-title {
+        font-size: 19px;
+    }
+
+    .insp-search-title {
+        font-size: 1.5rem;
+    }
+
+    .insp-section-nav a {
+        flex: 0 0 auto;
+        min-height: 44px;
+        padding: 0 14px;
+    }
+
+    .insp-searchbox input {
+        flex: 1 1 100%;
+    }
+
+    .insp-searchbox select {
+        order: 2;
+        width: auto;
+        flex: 1 1 0;
+    }
+
+    .insp-scope-info {
+        order: 3;
+    }
+
+    .insp-searchbox > .bi {
+        top: 22px;
+    }
+
+    .insp-row {
+        grid-template-columns: 34px minmax(0, 1fr) 16px;
+        row-gap: 4px;
+    }
+
+    .insp-row.insp-row-head {
+        display: none;
+    }
+
+    .insp-row .insp-cell-preview,
+    .insp-row .insp-cell-markers {
+        display: block;
+        grid-column: 2 / 4;
+        font-size: 12px;
+    }
+
+    .insp-row .insp-cell-preview:empty,
+    .insp-row .insp-cell-markers:empty {
+        display: none;
+    }
+
+    .insp-row > .bi {
+        grid-column: 3;
+        grid-row: 1;
+    }
+
+    .insp-tl-title .insp-legend {
+        display: none;
+    }
+
+    .insp-server {
+        grid-template-columns: 32px minmax(0, 1fr);
+    }
+
+    .insp-server-body {
+        grid-column: 2;
+        padding-top: 0;
+    }
+
+    .insp-ev {
+        grid-template-columns: 26px minmax(0, 1fr);
+    }
+
+    .insp-ev > :last-child {
+        grid-column: 2;
+    }
+
+    .insp-actions .btn {
+        height: 44px;
+    }
+}
+
+.insp-card > .insp-card-heading + .insp-ev,
+.insp-servers-head + .insp-server {
+    border-top: 0;
 }

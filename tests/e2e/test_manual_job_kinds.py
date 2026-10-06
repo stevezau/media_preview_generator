@@ -154,7 +154,7 @@ def test_start_dialog_preserves_preview_filters_and_hides_them_for_other_kinds(
     creation_page: tuple[Page, list[dict]],
 ) -> None:
     page, writes = creation_page
-    page.get_by_role("button", name="Start New Job", exact=True).click()
+    page.locator(".dashboard-quick-card").get_by_role("button", name="Start new job", exact=True).click()
     expect(page.locator("#jobScanFiltersGroup")).to_be_visible()
     expect(page.locator("#jobSortBy option")).to_have_text(
         ["Default (server order)", "Newest added first", "Oldest added first", "Random"]

@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server modal redesign mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+<link rel="stylesheet" href="../shared.css">
+<style>
+.spec { display: flex; gap: 8px 14px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); color: var(--faint); font-size: 12px; }
+.spec b { letter-spacing: .08em; text-transform: uppercase; font-size: 11px; }
+.spec .sg { display: inline-flex; align-items: center; gap: 8px; }
+.info { all: unset; cursor: help; position: relative; display: inline-grid; place-items: center; width: 20px; height: 20px; color: var(--faint); font-size: 14px; border-radius: 50%; flex: none; }
+.info:hover, .info:focus-visible { color: var(--text); }
+.info:focus-visible { outline: 2px solid var(--accent); }
+.info::before { content: ""; position: absolute; inset: -6px; }
+.info::after { content: attr(data-tip); position: absolute; left: -8px; top: calc(100% + 6px); z-index: 40; width: 320px; max-width: 70vw; padding: 10px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line-strong); box-shadow: var(--shadow); color: var(--text); font: 400 13px/1.45 var(--font); text-transform: none; letter-spacing: 0; display: none; white-space: normal; text-align: left; }
+.info:hover::after, .info:focus-visible::after { display: block; }
+.stage { display: flex; justify-content: center; }
+
+/* modal frame */
+.modal { width: 100%; max-width: 1100px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: 0 24px 64px rgba(0,0,0,.45); display: flex; flex-direction: column; overflow: hidden; }
+.mh { display: flex; align-items: center; gap: 14px; padding: 16px 20px; border-bottom: 1px solid var(--line); min-height: 76px; }
+.mh .vlogo { width: 44px; height: 44px; border-radius: 11px; font-size: 22px; }
+.vlogo { display: grid; place-items: center; background: var(--panel-2); border: 1px solid var(--line); flex: none; }
+.vlogo.plex { color: #e5a00d; } .vlogo.emby { color: #52b54b; } .vlogo.jf { color: #5aa0e8; }
+.mh .tt { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.mh h2 { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.2; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mh .host { font: 12px var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mh .en { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.mh .paused { display: none; font-size: 12px; color: var(--warn); }
+.modal.paused .paused { display: inline; }
+.sw { display: inline-flex; align-items: center; gap: 8px; }
+.sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+.sw .track { width: 36px; height: 20px; border-radius: 99px; background: var(--line-strong); position: relative; transition: background .16s; cursor: pointer; flex: none; }
+.sw .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .16s; }
+.sw input:checked + .track { background: var(--accent); }
+.sw input:checked + .track::after { transform: translateX(16px); }
+.sw input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mbody { display: grid; grid-template-columns: 244px minmax(0, 1fr); height: min(70vh, 660px); min-height: 0; }
+.rail { border-right: 1px solid var(--line); padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; background: var(--inset); }
+.rail button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 600; font-size: 14px; text-align: left; white-space: nowrap; }
+.rail button i.ic { font-size: 16px; width: 18px; text-align: center; flex: none; }
+.rail button:hover { background: var(--inset); color: var(--text); }
+.rail button.on { background: var(--accent-soft); color: var(--accent); }
+.rail .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.nb { min-width: 22px; height: 20px; padding: 0 6px; border-radius: 99px; font-size: 11px; font-weight: 700; display: inline-grid; place-items: center; background: var(--inset); color: var(--muted); font-variant-numeric: tabular-nums; border: 1px solid var(--line); }
+.nb.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.nb.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.nb.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.nb.dot { min-width: 10px; width: 10px; height: 10px; padding: 0; }
+.pane { overflow-y: auto; padding: 22px 26px; min-width: 0; display: none; }
+.pane.on { display: block; }
+.pane > * + * { margin-top: 18px; }
+.mf { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--line); background: var(--panel); }
+.mf .msg { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.mf .msg .dirty { display: none; color: var(--warn); font-weight: 600; }
+.modal.dirty .mf .msg .dirty { display: inline-flex; align-items: center; gap: 6px; }
+.btn.primary.md { height: 38px; font-size: 14px; }
+.btn[disabled] { opacity: .45; cursor: default; }
+.sec { display: grid; gap: 14px; }
+.sec-h { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.sec-h::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--inset); }
+.card-h { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.card-h h3 { margin: 0; font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.card-h .sp { flex: 1; }
+.card-b { padding: 14px 16px; display: grid; gap: 12px; }
+.fld { align-content: start; display: grid; gap: 6px; min-width: 0; }
+.fld > label, .lab { font-size: 13px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 4px; }
+.hint { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.inp { height: 38px; width: 100%; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); font: 14px var(--font); min-width: 0; }
+.inp.mono { font: 13px var(--mono); }
+.inp:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+.inp[readonly] { color: var(--muted); }
+.ig { display: flex; gap: 8px; align-items: stretch; }
+.ig .inp { flex: 1; }
+.ig .ibtn { width: 38px; height: 38px; border: 1px solid var(--line-strong); }
+.vf { position: relative; }
+.vf.ok .inp { border-color: var(--ok); padding-right: 34px; }
+.vf.ok::after { content: "\F26A"; font-family: "bootstrap-icons"; position: absolute; right: 12px; top: 10px; color: var(--ok); }
+.vf.bad .inp { border-color: var(--bad); }
+.vmsg { font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
+.vmsg.ok { color: var(--ok); } .vmsg.bad { color: var(--bad); } .vmsg.warn { color: var(--warn); }
+.row2 { align-items: start; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.testrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tres { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.tres.ok { color: var(--ok); } .tres.warn { color: var(--warn); } .tres.bad { color: var(--bad); }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: sp .7s linear infinite; display: inline-block; }
+@keyframes sp { to { transform: rotate(360deg); } }
+.toggle-line { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.toggle-line .lab { flex: 1; }
+.toggle-line .sub { font-size: 12.5px; color: var(--muted); font-weight: 400; display: block; }
+.line { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.warnline { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 12.5px; }
+.danger-zone { border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent); border-radius: var(--radius); padding: 14px 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.danger-zone .sp { flex: 1; min-width: 200px; }
+.danger-zone b { display: block; }
+.danger-zone .hint { margin: 0; }
+.btn.dng { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.btn.dng:hover { background: var(--bad-soft); border-color: var(--bad); }
+.cred-forms { display: none; border-top: 1px solid var(--line); padding-top: 14px; }
+.cred-forms.open { display: grid; gap: 12px; }
+.cred-forms .vend { display: none; gap: 12px; }
+.mseg { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); gap: 2px; flex-wrap: wrap; }
+.mseg button { height: 32px; padding: 0 14px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-weight: 600; font-size: 13px; }
+.mseg button.on { background: var(--panel-2); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); white-space: nowrap; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); } .pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.warn { background: var(--warn-soft); color: var(--warn); } .pill.run { background: var(--run-soft); color: var(--run); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; display: inline-block; }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+.dl { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 10px 16px; font-size: 13.5px; align-items: center; }
+.dl dt { color: var(--muted); } .dl dd { margin: 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.dl code, code.m { font: 12.5px var(--mono); color: var(--text); background: var(--inset); padding: 2px 6px; border-radius: 5px; word-break: break-all; }
+.pane h3.ph { margin: 0; font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.pane h3.ph small { color: var(--faint); font-weight: 600; font-size: 12px; }
+.lead { color: var(--muted); font-size: 13.5px; }
+.lead a, .hint a, a.lnk { color: var(--run); text-decoration: underline; text-underline-offset: 2px; }
+.jump { display: flex; gap: 6px; flex-wrap: wrap; position: sticky; top: -22px; z-index: 3; background: var(--panel); padding: 8px 0; margin-top: -22px; }
+.jump a { height: 28px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--line-strong); display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.jump a:hover { color: var(--text); background: var(--inset); }
+
+/* health */
+.hsum { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hsum h3 { margin: 0; font-size: 16px; }
+.hsum .sp { flex: 1; }
+.bucket { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.bucket > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-weight: 700; background: var(--inset); }
+.bucket > summary::-webkit-details-marker { display: none; }
+.bucket > summary .sp { flex: 1; }
+.bucket > summary .chev { transition: transform .16s; color: var(--faint); }
+.bucket[open] > summary .chev { transform: rotate(90deg); }
+.bucket.must > summary { color: var(--bad); } .bucket.rec > summary { color: var(--warn); } .bucket.good > summary { color: var(--ok); }
+.cat { padding: 10px 16px 4px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.hgrp { border-top: 1px solid var(--line); }
+.hgrp > summary { list-style: none; cursor: pointer; padding: 10px 16px; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 13.5px; }
+.hgrp > summary::-webkit-details-marker { display: none; }
+.hgrp > summary .sp { flex: 1; }
+.hgrp > summary .chev { color: var(--faint); transition: transform .16s; }
+.hgrp[open] > summary .chev { transform: rotate(90deg); }
+.irow { display: grid; grid-template-columns: 4px minmax(0, 1fr) auto; gap: 14px; padding: 12px 16px; border-top: 1px solid var(--line); align-items: center; }
+.irow .sevbar { display: block; align-self: stretch; border-radius: 2px; background: var(--warn); }
+.irow.bad .sevbar { background: var(--bad); }
+.irow .t { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; flex-wrap: wrap; }
+.irow .diff { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--faint); flex-wrap: wrap; }
+.irow .diff .v { font: 700 12px var(--mono); padding: 3px 8px; border-radius: 6px; }
+.irow .diff .cur { background: var(--bad-soft); color: var(--bad); } .irow .diff .rec { background: var(--ok-soft); color: var(--ok); }
+.irow .acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.stickybar { position: sticky; bottom: -22px; margin: 0 -26px -22px; padding: 12px 26px; background: var(--panel); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; z-index: 3; }
+.stickybar .sp { flex: 1; }
+.btn.warnb { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.btn.badb { background: var(--bad); color: #fff; border-color: transparent; }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th { text-align: left; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); padding: 8px 10px; border-bottom: 1px solid var(--line); font-weight: 700; }
+.tbl th .info { vertical-align: middle; }
+.tbl td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.tbl tr:hover td { background: transparent; }
+.tbl td.c, .tbl th.c { text-align: center; width: 130px; }
+.kind { display: inline-flex; height: 20px; padding: 0 8px; align-items: center; border-radius: 6px; background: var(--inset); border: 1px solid var(--line); font-size: 11px; color: var(--muted); margin-left: 8px; }
+.tfoot { display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; margin-top: 12px; }
+.mono-ph::placeholder { color: var(--faint); }
+details.ex > summary { cursor: pointer; color: var(--run); font-size: 13px; }
+details.ex .box { margin-top: 8px; padding: 10px 12px; background: var(--inset); border-radius: 8px; font-size: 13px; color: var(--muted); }
+
+/* add flow */
+.addsteps { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--faint); font-weight: 600; }
+.addsteps .s { display: inline-flex; align-items: center; gap: 6px; }
+.addsteps .n { width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; background: var(--inset); border: 1px solid var(--line-strong); font-size: 11px; }
+.addsteps .s.on { color: var(--text); } .addsteps .s.on .n { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.addsteps .s.done .n { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+.addsteps .sbar { width: 28px; height: 1px; background: var(--line-strong); }
+.types { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.tcard { text-align: left; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--inset); padding: 18px; display: grid; gap: 10px; align-content: start; transition: border-color .16s, background .16s; min-height: 170px; }
+.tcard:hover { border-color: var(--accent); background: var(--accent-soft); }
+.tcard .vlogo { width: 48px; height: 48px; border-radius: 12px; font-size: 24px; }
+.tcard b { font-size: 16px; }
+.tcard span.d { color: var(--muted); font-size: 13px; }
+.tcard .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.authseg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; }
+.authseg button { height: 38px; }
+.res { display: grid; gap: 12px; }
+.res .banner { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: var(--radius); }
+.res .banner.ok { background: var(--ok-soft); } .res .banner.bad { background: var(--bad-soft); }
+.res .banner i { font-size: 20px; margin-top: 1px; }
+.res .banner.ok i { color: var(--ok); } .res .banner.bad i { color: var(--bad); }
+.pane.add { display: none; padding: 24px 28px; }
+.pane.add.on { display: block; }
+.addwrap { display: none; }
+
+
+.modal[data-mode=add] .mbody { grid-template-columns: 1fr; height: min(70vh, 620px); }
+.modal[data-mode=add] .rail { display: none; }
+
+
+.mh h2 { font-size: 18px; }
+body[data-mode=add] .mh { padding: 20px 24px; gap: 16px; }
+body[data-mode=add] .mh h2 { font-size: 20px; font-weight: 600; }
+body[data-mode=add] .mh .vlogo { width: 52px; height: 52px; border-radius: 14px; font-size: 26px; border-color: transparent; }
+body[data-mode=add] .mh .vlogo.plex { background: color-mix(in srgb, #e5a00d 18%, var(--panel)); }
+body[data-mode=add] .mh .vlogo.emby { background: color-mix(in srgb, #52b54b 18%, var(--panel)); }
+body[data-mode=add] .mh .vlogo.jf { background: color-mix(in srgb, #7c8cff 18%, var(--panel)); color: #7c8cff; }
+body[data-mode=add] .mh .vlogo.neutral { background: var(--accent-soft); color: var(--accent); }
+body[data-mode=add] .mh .host { font: 14px var(--font); color: var(--muted); white-space: normal; }
+body[data-mode=add] .mh .ibtn { width: 40px; height: 40px; }
+.prog { list-style: none; margin: 0; padding: 22px 32px 0; display: grid; grid-template-columns: repeat(3, 1fr); position: relative; border-bottom: 1px solid var(--line); padding-bottom: 20px; }
+.prog .trk { position: absolute; top: 40px; left: calc(32px + (100% - 64px) / 6); right: calc(32px + (100% - 64px) / 6); height: 3px; border-radius: 2px; background: var(--line-strong); }
+.prog .fill { display: block; height: 100%; width: calc(var(--p) * 100%); background: var(--ok); border-radius: 2px; transition: width .3s; }
+.prog .st { display: grid; justify-items: center; gap: 3px; text-align: center; position: relative; z-index: 1; color: var(--faint); }
+.prog .circ { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--panel); border: 2px solid var(--line-strong); font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.prog .circ i { display: none; }
+.prog .st b { font-size: 14px; font-weight: 600; }
+.prog .st small { font-size: 12px; color: var(--faint); }
+.prog .st.done .circ { background: linear-gradient(var(--ok-soft), var(--ok-soft)), var(--panel); border-color: var(--ok); color: var(--ok); }
+.prog .st.done .circ .n { display: none; } .prog .st.done .circ i { display: block; }
+.prog .st.done b { color: var(--text); }
+.prog .st.on .circ { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.prog .st.on b { color: var(--text); font-weight: 800; }
+body[data-mode=add] .pane.add { padding: 28px 32px 28px 92px; }
+.modal[data-mode=add] .mbody { height: auto; min-height: 0; }
+.prog .circ i { font-size: 18px; line-height: 1; }
+body[data-mode=add] .panes { overflow: visible; grid-template-rows: auto; }
+body[data-mode=add] .panes > .pane { height: auto; overflow: visible; }
+body[data-mode=add] #add-type { min-height: 280px; }
+body[data-mode=edit] .prog { display: none; }
+@media (max-width: 700px) {
+  body[data-mode=add] .mh { padding: 14px 16px; }
+  body[data-mode=add] .mh .vlogo { width: 44px; height: 44px; font-size: 22px; }
+  .prog { padding: 16px 16px 14px; }
+  .prog .trk { top: 34px; left: calc(16px + (100% - 32px) / 6); right: calc(16px + (100% - 32px) / 6); }
+  .prog .st small, .prog .st:not(.on) b { display: none; }
+  body[data-mode=add] .pane.add { padding: 22px 16px; }
+  body.sheet[data-mode=add] .panes { overflow: auto; }
+}
+
+.qc .card-b { gap: 14px; }
+.qc .qc-live { display: none; gap: 12px; }
+.qc:not([data-qc=idle]) .qc-live { display: grid; }
+.qc:not([data-qc=idle]) .qc-idle { display: none; }
+.qc-code-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.qc-code { font: 700 36px/1 var(--mono); letter-spacing: .12em; padding: 14px 20px; border-radius: 12px; background: var(--bg); border: 1px dashed var(--line-strong); }
+.qc[data-qc=expired] .qc-code { opacity: .4; text-decoration: line-through; }
+.qc .qc-st, .qc .qc-cancel, .qc .qc-retry { display: none; }
+.qc[data-qc=waiting] .qc-waiting, .qc[data-qc=waiting] .qc-cancel, .qc[data-qc=approved] .qc-approved, .qc[data-qc=expired] .qc-expired { display: inline-flex; }
+.qc[data-qc=expired] .qc-retry, .qc[data-qc=expired] .qc-cancel { display: inline-flex; }
+.qc[data-qc=expired] #qcCopy { display: none; }
+@media (max-width: 700px) { .qc-code { font-size: 28px; padding: 12px 14px; } }
+.authseg button.on { box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--accent); }
+[hidden] { display: none !important; }
+
+@media (max-width: 900px) {
+  .mbody { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .rail { flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 10px; scroll-snap-type: x proximity; }
+  .rail button { width: auto; min-height: 44px; padding: 0 14px; scroll-snap-align: start; flex: none; }
+  .rail button.on { box-shadow: inset 0 -2px 0 var(--accent); border-radius: 8px 8px 0 0; }
+}
+@media (max-width: 700px) {
+  body.sheet .spec, body.sheet .nav, body.sheet .theme { display: none; }
+  body.sheet .page { padding: 0; }
+  body.sheet .stage { display: block; }
+  body.sheet .modal { position: fixed; inset: 0; margin: 0; width: 100%; height: 100dvh; max-height: none; border: 0; z-index: 50; }
+  body.sheet .mbody { flex: 1; height: auto; min-height: 0; }
+  .page { padding: 12px 16px 24px; }
+  .modal { border-radius: 0; border-left: 0; border-right: 0; max-width: none; margin: 0 -16px; width: calc(100% + 32px); }
+  .mbody { height: calc(100dvh - 190px); min-height: 460px; }
+  .mh { padding: 12px 16px; min-height: 64px; }
+  .mh .vlogo { width: 36px; height: 36px; font-size: 18px; }
+  .mh .en .t { display: none; }
+  .pane { padding: 18px 16px; }
+  .stickybar { margin: 0 -16px -18px; padding: 12px 16px; }
+  .row2 { grid-template-columns: 1fr; }
+  .types { grid-template-columns: 1fr; }
+  .tcard { min-height: 0; grid-template-columns: 48px 1fr; align-items: center; }
+  .tcard .vlogo { grid-row: span 2; }
+  .dl { grid-template-columns: 1fr; gap: 2px 0; } .dl dd { margin-bottom: 8px; }
+  .irow { grid-template-columns: 4px minmax(0, 1fr); } .irow .acts { grid-column: 2; justify-content: flex-start; }
+  .mf { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .mf .btn { flex: 1; height: 44px; }
+  .mf .msg { display: none; }
+  .modal.dirty .mf .msg { display: flex; flex-basis: 100%; }
+  .mf { flex-wrap: wrap; }
+  .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
+  .tbl thead { display: none; }
+  .tbl tr { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .tbl td { border: 0; padding: 4px 0; }
+  .tbl td[data-l]::before { content: attr(data-l); display: block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); font-weight: 700; margin-bottom: 4px; }
+  .tbl td.c { width: auto; text-align: left; display: flex; align-items: center; justify-content: space-between; }
+  .tbl td.c::before { margin: 0; }
+  .spec .sg { width: 100%; }
+}
+.panes { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: minmax(0, 1fr); }
+.panes > .pane { height: 100%; }
+.spec .sg { display: inline-flex; align-items: center; gap: 8px; }
+.accentb { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.accentb:hover { background: var(--accent); filter: brightness(1.08); }
+.ghostb { border-color: transparent; color: var(--muted); }
+.sevtag { height: 20px; font-size: 11px; padding: 0 8px; }
+.plugin-card { margin-bottom: 14px; }
+.hlist { display: grid; gap: 0; }
+.hlist .it { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.hlist .it i { color: var(--ok); }
+body[data-mode=add] .editonly { display: none !important; }
+body[data-mode=edit] .addonly { display: none !important; }
+</style>
+</head>
+<body data-mode="edit">
+<header class="nav">
+  <a class="brand" href="#"><span class="mark"><i class="bi bi-play-btn-fill"></i></span><span><b>Media Preview Generator</b><small>local build</small></span></a>
+  <a class="tab" href="#"><i class="bi bi-speedometer2"></i> Dashboard</a>
+  <a class="tab on" href="#"><i class="bi bi-hdd-network"></i> Servers</a>
+  <a class="tab" href="#"><i class="bi bi-magic"></i> Automation <i class="bi bi-chevron-down caret"></i></a>
+  <a class="tab" href="#"><i class="bi bi-gear"></i> Settings <i class="bi bi-chevron-down caret"></i></a>
+  <a class="tab" href="#"><i class="bi bi-wrench"></i> Tools <i class="bi bi-chevron-down caret"></i></a>
+  <span class="sp"></span>
+  <button class="ibtn" aria-label="Notifications" title="Notifications"><i class="bi bi-bell"></i><span class="badge-dot">1</span></button>
+  <button class="ibtn" aria-label="Help" title="Help"><i class="bi bi-question-circle"></i></button>
+  <a class="ibtn coffee" href="#" aria-label="Buy me a coffee" title="Buy me a coffee"><i class="bi bi-cup-hot-fill"></i></a>
+  <a class="btn sm" href="#"><i class="bi bi-star-fill" style="color:var(--accent)"></i> Star</a>
+  <button class="ibtn" aria-label="Toggle theme" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
+  <button class="btn sm"><i class="bi bi-box-arrow-right"></i> Logout</button>
+</header><main class="page">
+  <div class="spec">
+    <b>Spec only</b>
+    <span class="sg grp-s">Server <span class="mseg" id="typeSeg"><button data-t="plex" class="on">Plex</button><button data-t="emby">Emby</button><button data-t="jf">Jellyfin</button></span></span>
+    <span class="sg">Mode <span class="mseg" id="modeSeg"><button data-m="edit" class="on">Edit</button><button data-m="add">Add server</button></span></span>
+    <span class="sg" id="addStepSeg" hidden>Add step <span class="mseg"><button data-s="type" class="on">1 Type</button><button data-s="connect">2 Connect</button><button data-s="result">3 Verify</button></span></span>
+    <span class="sg" id="qcSeg" hidden>Quick Connect <span class="mseg"><button data-q="idle" class="on">Idle</button><button data-q="waiting">Waiting</button><button data-q="approved">Approved</button><button data-q="expired">Expired</button></span></span>
+    <span class="sg" id="resSeg" hidden>Result <span class="mseg"><button data-r="ok" class="on">Success</button><button data-r="bad">Failure</button></span></span>
+    <span class="sg editonly">Probe <span class="mseg" id="probeSeg"><button data-p="issues" class="on">Issues found</button><button data-p="clean">Healthy</button></span></span>
+    <span class="sg">Dirty <span class="mseg" id="dirtySeg"><button data-d="0" class="on">No</button><button data-d="1">Yes</button></span></span>
+  </div>
+
+  <div class="stage">
+  <section class="modal" id="modal" data-mode="edit" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+    <header class="mh">
+      <span class="vlogo plex" id="mLogo"><i class="bi bi-chevron-right"></i></span>
+      <div class="tt">
+        <h2 id="mTitle"><span id="mName">Lab Plex</span><span class="pill ok editonly" id="mStatus"><span class="dot ok"></span> Connected</span></h2>
+        <div class="host" id="mHost">http://mlab-plex:32400</div>
+      </div>
+      <label class="en editonly"><span class="paused">Paused: no webhooks, scans or publishes</span><span class="t">Enabled</span>
+        <span class="sw"><input type="checkbox" id="editServerEnabled" checked aria-label="Server enabled"><span class="track"></span></span>
+        <button class="info" tabindex="0" type="button" aria-label="More info" data-tip="Off = this server is ignored entirely (no webhooks, no scans, no publishes). Use to pause one server without deleting it from your config."><i class="bi bi-info-circle"></i></button></label>
+      <button class="ibtn" aria-label="Close" title="Close" style="width:36px;height:36px;font-size:18px"><i class="bi bi-x-lg"></i></button>
+    </header>
+
+    <ol class="prog addonly" id="prog" aria-label="Add server progress" style="--p:0">
+      <li class="trk" aria-hidden="true"><i class="fill"></i></li>
+      <li class="st on" data-s="type"><span class="circ"><span class="n">1</span><i class="bi bi-check-lg"></i></span><b>Type</b><small>Pick a server type</small></li>
+      <li class="st" data-s="connect"><span class="circ"><span class="n">2</span><i class="bi bi-check-lg"></i></span><b>Connect</b><small>Credentials &amp; paths</small></li>
+      <li class="st" data-s="result"><span class="circ"><span class="n">3</span><i class="bi bi-check-lg"></i></span><b>Verify</b><small>Check &amp; import libraries</small></li>
+    </ol>
+    <div class="mbody">
+      <nav class="rail editonly" id="rail" aria-label="Edit section" role="tablist">
+        <button data-tab="general" class="on" role="tab"><i class="ic bi bi-plug"></i><span class="lbl">Connection</span></button>
+        <button data-tab="health" role="tab"><i class="ic bi bi-clipboard-check"></i><span class="lbl">Setup Health</span><span class="nb warn" id="nbHealth">10</span></button>
+        <button data-tab="processing" role="tab"><i class="ic bi bi-gear"></i><span class="lbl">Processing</span></button>
+        <button data-tab="libraries" role="tab"><i class="ic bi bi-collection-play"></i><span class="lbl">Libraries</span><span class="nb" id="nbLibs">7/7</span></button>
+        <button data-tab="paths" role="tab"><i class="ic bi bi-signpost-split"></i><span class="lbl">Path mappings</span><span class="nb" id="nbPaths">1</span></button>
+        <button data-tab="excludes" role="tab"><i class="ic bi bi-slash-circle"></i><span class="lbl">Exclude paths</span><span class="nb" id="nbEx">1</span></button>
+        <button data-tab="automation" role="tab"><i class="ic bi bi-lightning-charge"></i><span class="lbl">Webhook &amp; Scanner</span><span class="nb dot" id="nbAuto" title="Not registered"></span></button>
+      </nav>
+
+      <div class="panes" style="min-width:0;min-height:0;overflow:hidden;display:grid">
+
+      <!-- ============ CONNECTION ============ -->
+      <section class="pane on editonly" id="tab-general">
+        <div class="sec">
+          <div class="sec-h">Server</div>
+          <div class="row2">
+            <div class="fld"><label for="editServerDisplayName">Display name <button class="info" type="button" aria-label="More info" data-tip="What this server is called in the UI. Cosmetic only. Pick anything memorable (e.g. 'Living Room Plex', 'NAS Jellyfin')."><i class="bi bi-info-circle"></i></button></label>
+              <input class="inp" id="editServerDisplayName" value="Lab Plex"></div>
+            <div class="fld"><label for="editServerUrl">Server URL <button class="info" type="button" aria-label="Explain Server URL" data-tip="How this app reaches your media server. Inside Docker, localhost means this container, not the host: use the host's LAN IP or a container name on the same network. Default ports: Plex 32400, Emby and Jellyfin 8096."><i class="bi bi-info-circle"></i></button></label>
+              <input class="inp mono" id="editServerUrl" value="http://mlab-plex:32400" autocomplete="off"></div>
+          </div>
+          <div class="toggle-line"><span class="lab">Verify SSL certificate <button class="info" type="button" aria-label="More info" data-tip="Checks the server's HTTPS certificate. Turn it off only for a self-signed one; it does nothing on plain HTTP."><i class="bi bi-info-circle"></i></button></span>
+            <label class="sw"><input type="checkbox" id="editServerVerifySsl" checked aria-label="Verify SSL certificate"><span class="track"></span></label></div>
+          <div class="testrow">
+            <button class="btn sm" id="editTestConnectionBtn"><i class="bi bi-broadcast"></i> Test Connection</button>
+            <span class="tres" id="editTestConnectionResult" role="status"></span>
+          </div>
+        </div>
+
+        <div class="sec" data-for="plex">
+          <div class="sec-h">Where previews are written</div>
+          <div class="fld"><label for="editPlexConfigFolder">Plex config folder <button class="info" type="button" aria-label="More info" data-tip="Path inside this container to Plex's data folder (where this app writes preview bundles). Previews land in {folder}/Media/localhost/... Same value as Setup, step 3."><i class="bi bi-info-circle"></i></button></label>
+            <div class="ig"><div class="vf ok" style="flex:1"><input class="inp mono" id="editPlexConfigFolder" value="/plexcfg/Library/Application Support/Plex Media Server"></div><button class="ibtn" id="editPlexConfigBrowseBtn" title="Browse folders" aria-label="Browse folders"><i class="bi bi-folder2-open"></i></button></div>
+            <div class="vmsg ok"><i class="bi bi-check-circle-fill"></i> Looks like a valid Plex structure (16/16 hash shards under Media/localhost)</div></div>
+        </div>
+
+        <div class="sec" data-for="jf">
+          <div class="sec-h">Where previews are written</div>
+          <div class="toggle-line"><span class="lab">Store trickplay off the media drive <button class="info" type="button" aria-label="More info" data-tip="Off (default) = previews live next to the media (<media>.trickplay/). On = previews live in Jellyfin's data folder (<config>/data/trickplay/). With it on, Jellyfin's SaveTrickplayWithMedia must be off: Setup Health checks this."><i class="bi bi-info-circle"></i></button><span class="sub">Previews go in Jellyfin's data folder, not next to videos.</span></span>
+            <label class="sw"><input type="checkbox" id="editJellyfinSaveOffMedia" aria-label="Store trickplay off the media drive"><span class="track"></span></label></div>
+          <div id="jfOff" hidden>
+            <div class="fld"><label for="editJellyfinConfigFolder">Jellyfin config folder (this container) <button class="info" type="button" aria-label="More info" data-tip="Where Jellyfin's config folder is mounted in this container. It must be mounted read-write (:rw)."><i class="bi bi-info-circle"></i></button></label>
+              <div class="ig"><div class="vf" style="flex:1"><input class="inp mono mono-ph" id="editJellyfinConfigFolder" placeholder="/jellyfin-config" value=""></div><button class="ibtn" id="editJellyfinConfigBrowseBtn" title="Browse folders" aria-label="Browse folders"><i class="bi bi-folder2-open"></i></button></div>
+              <div class="vmsg warn" id="editJellyfinOffMediaWarning"><i class="bi bi-exclamation-triangle-fill"></i> Writes to Jellyfin's config folder, not your media. Mount it :rw.</div></div>
+          </div>
+        </div>
+
+        <div class="sec" data-for="plex">
+          <div class="sec-h">Plex on another machine</div>
+          <div class="card"><div class="card-b">
+            <div class="toggle-line"><span class="lab">Plex helper <button class="info" type="button" aria-label="More info" data-tip="Runs next to Plex on another machine. Writes chapter image references and intro or credits markers. Shared by chapter thumbnails and Intro &amp; Credits; each feature is enabled separately. Intro &amp; Credits can stay off."><i class="bi bi-info-circle"></i></button><span class="sub">Runs next to Plex on another machine.</span></span>
+              <label class="sw"><input type="checkbox" id="markersAgentEnabled" aria-label="Plex helper"><span class="track"></span></label></div>
+            <div id="agentFields" hidden>
+              <div class="row2"><div class="fld"><label for="markersAgentUrl">Address</label><input class="inp mono mono-ph" id="markersAgentUrl" type="url" placeholder="http://plex-host.lan:9494" autocomplete="off"></div>
+              <div class="fld"><label for="markersAgentToken">Shared key <button class="info" type="button" aria-label="More info" data-tip="The same key is set on both sides. It is never written to the logs. Leave the masked value to keep the stored key."><i class="bi bi-info-circle"></i></button></label><input class="inp" id="markersAgentToken" type="password" autocomplete="new-password" value="••••••••"></div></div>
+              <div class="hint" id="markersAgentState" style="margin-top:8px"><span class="dot warn"></span> Not connected yet. Save, then check again.</div>
+            </div>
+          </div></div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">Credentials</div>
+          <div class="card"><div class="card-b" id="editReauthSection">
+            <div class="line"><div><b id="credWho">Signed in with a Plex token</b><div class="hint" id="credHint">Token ending <code class="m">…x4f2</code>. Stored; never shown in full.</div></div>
+              <button class="btn sm" id="credToggle" aria-expanded="false"><i class="bi bi-key"></i> Re-authenticate</button></div>
+            <div class="cred-forms" id="credForms">
+              <div class="hint">Existing credentials are kept until you confirm a new one. <button class="info" type="button" aria-label="More info" data-tip="Each vendor has its own auth options. Click Save changes at the bottom once you've chosen one. To switch Plex accounts entirely, delete this server and re-add it with the Plex sign-in."><i class="bi bi-info-circle"></i></button></div>
+              <div class="vend" data-v="plex">
+                <div class="fld"><label for="editReauthPlexToken">Plex token <button class="info" type="button" aria-label="More info" data-tip="Find it in Plex's docs (finding an X-Plex-Token). To switch Plex accounts entirely, delete this server and re-add it via the Plex sign-in."><i class="bi bi-info-circle"></i></button></label><input class="inp mono-ph" id="editReauthPlexToken" type="password" placeholder="paste a new X-Plex-Token to rotate" autocomplete="off"></div>
+              </div>
+              <div class="vend" data-v="jf">
+                <div class="fld"><span class="lab">Method</span><span class="mseg authseg" id="jfAuth"><button class="on" data-a="qc" id="editReauthJfQc">Quick Connect</button><button data-a="pw" id="editReauthJfPw">Username + Password</button><button data-a="key" id="editReauthJfKey">API Key</button></span></div>
+                <div data-a="qc" class="fld"><div><button class="btn sm primary md" id="editReauthJfQcStart" style="height:36px"><i class="bi bi-magic"></i> Start Quick Connect</button></div><div class="hint" id="editReauthJfQcStatus">Quick Connect must be enabled by your Jellyfin admin (Server, Quick Connect).</div></div>
+                <div data-a="pw" hidden class="row2"><div class="fld"><label for="editReauthJfUsername">Username</label><input class="inp" id="editReauthJfUsername" autocomplete="username"></div><div class="fld"><label for="editReauthJfPassword">Password</label><input class="inp" id="editReauthJfPassword" type="password" autocomplete="current-password"></div>
+                  <div><button class="btn sm" id="editReauthJfPwSubmit">Verify password</button> <span class="hint" id="editReauthJfPwStatus"></span></div></div>
+                <div data-a="key" hidden class="fld"><label for="editReauthJfApiKey">API key</label><input class="inp" id="editReauthJfApiKey" type="password" autocomplete="off"></div>
+              </div>
+              <div class="vend" data-v="emby">
+                <div class="fld"><span class="lab">Method</span><span class="mseg authseg" id="embyAuth"><button class="on" data-a="pw" id="editReauthEmbyPw">Username + Password</button><button data-a="key" id="editReauthEmbyKey">API Key</button></span></div>
+                <div data-a="pw" class="row2"><div class="fld"><label for="editReauthEmbyUsername">Username</label><input class="inp" id="editReauthEmbyUsername" autocomplete="username"></div><div class="fld"><label for="editReauthEmbyPassword">Password</label><input class="inp" id="editReauthEmbyPassword" type="password" autocomplete="current-password"></div>
+                  <div><button class="btn sm" id="editReauthEmbyPwSubmit">Verify password</button> <span class="hint" id="editReauthEmbyPwStatus"></span></div></div>
+                <div data-a="key" hidden class="fld"><label for="editReauthEmbyApiKey">API key</label><input class="inp" id="editReauthEmbyApiKey" type="password" autocomplete="off"></div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+
+        <div class="danger-zone">
+          <div class="sp"><b>Delete this server</b><p class="hint">Removes it from this app. Existing previews on the server are not touched.</p></div>
+          <button class="btn dng" id="deleteInModal"><i class="bi bi-trash"></i> Delete server</button>
+        </div>
+      </section>
+
+      <!-- ============ SETUP HEALTH ============ -->
+      <section class="pane editonly" id="tab-health">
+        <div class="hsum"><h3><i class="bi bi-clipboard-check"></i> Setup Health</h3><span class="pill warn" id="editReadinessBadge">10 recommended</span>
+          <span class="sp"></span>
+          <button class="btn sm" id="editReadinessRecheckBtn" title="Re-probe the server (e.g. after you've changed something in Jellyfin or Emby admin)"><i class="bi bi-arrow-clockwise"></i> Re-check</button>
+          <button class="info" type="button" aria-label="Explain Setup Health overview" data-tip="Setup Health checks the server settings that decide whether previews show up. Apply recommended changes one by one, or use Fix all to see the exact list first. Nothing changes on the server until you confirm."><i class="bi bi-info-circle"></i></button></div>
+        <div id="healthBody"></div>
+        <div class="stickybar" id="healthBar">
+          <button class="btn sm badb" id="editReadinessFixCriticalBtn" hidden><i class="bi bi-shield-exclamation"></i> Fix critical</button>
+          <button class="btn sm warnb" id="editReadinessFixAllBtn"><i class="bi bi-magic"></i> Fix all</button>
+          <span class="hint" id="editReadinessFixResult">Shows the exact changes before anything is applied.</span>
+        </div>
+      </section>
+
+      <!-- ============ PROCESSING ============ -->
+      <section class="pane editonly" id="tab-processing">
+        <nav class="jump" aria-label="Processing features">
+          <a href="#" data-j="p-prev">Previews</a><a href="#" data-j="p-chap" data-for="plex">Chapter thumbnails</a><a href="#" data-j="p-mark">Intro &amp; Credits</a><a href="#" data-j="p-loud" data-for="plex">Loudness</a>
+        </nav>
+        <p class="lead">Choose what this server receives. Pick libraries for each feature on the <a href="#" data-goto="libraries">Libraries</a> tab.</p>
+
+        <section class="sec" id="p-prev">
+          <h3 class="ph">Previews</h3>
+          <div class="card"><div class="card-b">
+            <dl class="dl"><dt>Written to</dt><dd id="processingPreviewOutput"><code>…/Media/localhost/&lt;hash&gt;/Indexes/index-sd.bif</code></dd></dl>
+            <div class="hint">Selected libraries receive scrubber previews. <a href="#" data-goto="libraries">Choose libraries</a> or <a href="#">change preview settings</a>.</div>
+          </div></div>
+        </section>
+
+        <section class="sec" id="p-chap" data-for="plex">
+          <h3 class="ph">Chapter thumbnails <small>Plex only · CPU</small></h3>
+          <div class="card"><div class="card-b">
+            <div class="toggle-line"><span class="lab">Generate chapter thumbnails <button class="info" type="button" aria-label="More info" data-tip="Included in preview jobs for the selected preview libraries. Separate from scrubber images; off by default. Adds pictures to Plex's chapter menu and updates Plex's database. Plex may still show older cached images. Requires Plex 1.43.4.x and supported chapter data. For Plex on another machine, set up the Plex helper on the Connection tab."><i class="bi bi-info-circle"></i></button><span class="sub">Pictures in Plex's chapter menu.</span></span>
+              <label class="sw"><input type="checkbox" id="editPlexChapterThumbnails" aria-label="Generate chapter thumbnails"><span class="track"></span></label></div>
+            <a class="lnk" href="#" id="editPlexChapterHealthLink" data-goto="health" style="font-size:13px">Check in Setup Health</a>
+          </div></div>
+        </section>
+
+        <section class="sec" id="p-mark">
+          <h3 class="ph">Intro &amp; Credits</h3>
+          <div class="card"><div class="card-b">
+            <div class="toggle-line"><span class="lab">Send intro &amp; credits markers to this server <button class="info" type="button" aria-label="More info" data-tip="Send the markers found for each file to this server too. Detection settings are shared by every server and live in Settings, Intro &amp; Credits."><i class="bi bi-info-circle"></i></button><span class="sub">Viewers see Skip Intro / Skip Credits.</span></span>
+              <label class="sw"><input type="checkbox" id="markersEnabled" checked aria-label="Send intro and credits markers"><span class="track"></span></label></div>
+            <div id="markersStatusBlock"></div>
+            <div class="hint" id="markersLibrariesPointer">Choose libraries on the <a href="#" data-goto="libraries" class="markers-libraries-link">Libraries</a> tab.</div>
+            <div class="line" data-for="plex" id="markersPlexRedetectGroup"><span class="lab">When Plex has its own markers <button class="info" type="button" aria-label="More info" data-tip="Which markers win when Plex has intro or credits markers of its own. Use ours: replace them when this app detects markers. Keep Plex's: leave Plex's markers alone."><i class="bi bi-info-circle"></i></button></span>
+              <span class="mseg" role="group" aria-label="When Plex has its own markers"><button class="on" id="markersRedetectRestore">Use ours</button><button id="markersRedetectKeep">Keep Plex's</button></span></div>
+            <div class="line" data-for="emby" id="markersEmbyRedetectGroup"><span class="lab">When Emby has its own markers <button class="info" type="button" aria-label="More info" data-tip="Which markers win when Emby has intro or credits markers of its own. Use ours: replace them. Keep Emby's: leave Emby's markers alone."><i class="bi bi-info-circle"></i></button></span>
+              <span class="mseg" role="group" aria-label="When Emby has its own markers"><button class="on" id="markersEmbyRedetectRestore">Use ours</button><button id="markersEmbyRedetectKeep">Keep Emby's</button></span></div>
+          </div></div>
+        </section>
+
+        <section class="sec" id="p-loud" data-for="plex">
+          <h3 class="ph">Loudness <small>Plex only · CPU</small></h3>
+          <div class="card"><div class="card-b">
+            <div class="toggle-line"><span class="lab">Analyse loudness for this server <button class="info" type="button" aria-label="More info" data-tip="Analyses each audio track on this app's workers and stores its loudness measurements in Plex for Normalize Loudness. Needs Plex 1.43.4.x on the same machine with its config folder mounted locally (network-mounted databases are not supported) and a CPU worker group that allows Plex loudness."><i class="bi bi-info-circle"></i></button><span class="sub">Viewers get Normalize Loudness sooner.</span></span>
+              <label class="sw"><input type="checkbox" id="loudnessEnabled" aria-label="Analyse loudness"><span class="track"></span></label></div>
+            <div class="warnline" id="loudnessHelperHint" hidden><i class="bi bi-exclamation-triangle-fill"></i> The Plex helper does not support loudness. Use a local Plex database.</div>
+            <div class="hint" id="loudnessLibrariesPointer">Choose movie and TV libraries on the <a href="#" data-goto="libraries" class="loudness-libraries-link">Libraries</a> tab. <button class="info" type="button" aria-label="More info" data-tip="Music libraries are not supported. Playback Normalize Loudness requires Plex Pass or Plex Home access."><i class="bi bi-info-circle"></i></button></div>
+          </div></div>
+        </section>
+      </section>
+
+      <!-- ============ LIBRARIES ============ -->
+      <section class="pane editonly" id="tab-libraries">
+        <div class="line"><div class="hint" style="margin:0"><b style="color:var(--text)">Libraries to monitor.</b> Previews cover every preview job for this server. <button class="info" type="button" aria-label="More info" data-tip="Previews covers every preview job for this server: webhooks, scheduled scans and Recently Added. The Intro &amp; Credits and Loudness columns appear when those features are on, and apply whatever the Previews switch says."><i class="bi bi-info-circle"></i></button></div>
+          <button class="btn sm" id="editRefreshLibrariesBtn"><i class="bi bi-arrow-clockwise"></i> Refresh libraries</button></div>
+        <table class="tbl" id="editLibraryTable"><thead><tr><th>Library</th><th class="c">Previews</th><th class="c">Intro &amp; Credits <button class="info" type="button" aria-label="More info" data-tip="Libraries that get intro and credits markers here, whatever their Previews switch says. Sports libraries start off."><i class="bi bi-info-circle"></i></button></th><th class="c" data-for="plex">Loudness <button class="info" type="button" aria-label="More info" data-tip="Libraries whose audio tracks get Plex's loudness analysis here, whatever their Previews switch says. Movie and TV libraries start on."><i class="bi bi-info-circle"></i></button></th></tr></thead><tbody id="editLibraryList"></tbody></table>
+      </section>
+
+      <!-- ============ PATH MAPPINGS ============ -->
+      <section class="pane editonly" id="tab-paths">
+        <div class="line"><div class="hint" style="margin:0;flex:1"><b style="color:var(--text)">Only needed when paths differ.</b> Leave empty if the server and this app mount media at the same paths. <button class="info" type="button" aria-label="More info" data-tip="Use this when your media server and this app see the same files at different paths. Most installs don't need any rows here. Leave the table empty if the server and this app mount media at the same paths."><i class="bi bi-info-circle"></i></button></div></div>
+        <details class="ex"><summary>Worked example</summary><div class="box">Server sees <code class="m">/data_16tb/movies/Film.mkv</code>; this app mounts the same folder at <code class="m">/mnt/plex/movies</code>. Row: server path <code class="m">/data_16tb/movies</code>, local path <code class="m">/mnt/plex/movies</code>. Sonarr/Radarr paths are optional, separated by <code class="m">;</code>.</div></details>
+        <table class="tbl"><thead><tr>
+          <th>Path on Media Server <button class="info" type="button" aria-label="More info" data-tip="The path your media server reports (what's stored in its database / shown in its admin UI)."><i class="bi bi-info-circle"></i></button></th>
+          <th>Local path on this app <button class="info" type="button" aria-label="More info" data-tip="The path the same file appears at INSIDE this app's container, i.e. the volume mount target."><i class="bi bi-info-circle"></i></button></th>
+          <th>Path on Apps (Sonarr, Radarr, Webhooks) <button class="info" type="button" aria-label="Explain webhook path mapping" data-tip="For Sonarr/Radarr/Tdarr webhooks that send a different path than your server reports. Optional; separate several with ;"><i class="bi bi-info-circle"></i></button></th><th style="width:44px"></th></tr></thead>
+          <tbody id="pmBody"><tr>
+            <td data-l="Path on Media Server"><input class="inp pm-remote mono-ph" value="/data_16tb/movies" placeholder="/data_16tb/movies"></td>
+            <td data-l="Local path on this app"><div class="ig"><div class="vf ok" style="flex:1"><input class="inp pm-local" value="/mnt/plex/movies" placeholder="/mnt/plex/movies"></div><button class="ibtn pm-browse" title="Browse folders" aria-label="Browse folders"><i class="bi bi-folder2-open"></i></button></div></td>
+            <td data-l="Path on Apps"><input class="inp pm-webhook mono-ph" value="/data" placeholder="/data"></td>
+            <td><button class="ibtn danger pm-remove" title="Remove mapping" aria-label="Remove mapping"><i class="bi bi-x-lg"></i></button></td></tr></tbody></table>
+        <div class="tfoot"><button class="btn sm" id="editAddPathMapping"><i class="bi bi-plus-lg"></i> Add row</button><button class="btn sm" id="editApplyPathMappingsAll" title="Copy these mappings to every other configured server"><i class="bi bi-arrow-left-right"></i> Apply to all servers</button></div>
+      </section>
+
+      <!-- ============ EXCLUDES ============ -->
+      <section class="pane editonly" id="tab-excludes">
+        <div class="hint" style="margin:0"><b style="color:var(--text)">Skip files that match a rule.</b> Useful for trailer folders or sample videos. <button class="info" type="button" aria-label="More info" data-tip="Path prefix skips everything under a folder; Regex matches the full file path. Empty rows are dropped on save."><i class="bi bi-info-circle"></i></button></div>
+        <table class="tbl"><thead><tr><th>Value</th><th style="width:220px">Type</th><th style="width:44px"></th></tr></thead>
+          <tbody><tr><td data-l="Value"><input class="inp ep-value mono-ph" value="/data/Trailers/" placeholder="/data/Trailers/"></td>
+            <td data-l="Type"><select class="inp ep-type"><option>path (prefix)</option><option>regex</option></select></td>
+            <td><button class="ibtn danger ep-remove" title="Remove rule" aria-label="Remove rule"><i class="bi bi-x-lg"></i></button></td></tr></tbody></table>
+        <div class="tfoot"><button class="btn sm" id="editAddExcludePath"><i class="bi bi-plus-lg"></i> Add row</button><button class="btn sm" id="editApplyExcludePathsAll" title="Copy these rules to every other configured server"><i class="bi bi-arrow-left-right"></i> Apply to all servers</button></div>
+      </section>
+
+      <!-- ============ WEBHOOK & SCANNER ============ -->
+      <section class="pane editonly" id="tab-automation">
+        <div class="hint" style="margin:0">Webhook jobs use the delay set in Automation, Triggers. <button class="info" type="button" aria-label="More info" data-tip="Webhook jobs use Delay before processing in Automation, Triggers. To override it, append ?delay=30 to the webhook URL, or &amp;delay=30 if it already contains a query string."><i class="bi bi-info-circle"></i></button></div>
+        <div id="webhookBody"></div>
+        <div class="card" id="editRecentlyAddedCard">
+          <div class="card-h"><h3><i class="bi bi-arrow-repeat"></i> Recently Added Scanner</h3><span class="pill ok" id="editRecentlyAddedSafetyNetBadge">Safety net</span><span class="sp"></span><span class="pill" id="recentlyAddedStatusBadge">No scanners</span></div>
+          <div class="card-b">
+            <div class="hint" id="editRecentlyAddedBlurb">Polls this server's recently added list so files the webhook missed still get picked up.</div>
+            <div class="hint" id="recentlyAddedScannerSummary"><i class="bi bi-info-circle"></i> No Recently Added scanner is set up for this server yet.</div>
+            <div class="testrow"><a class="btn sm" id="recentlyAddedManageLink" href="#" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)"><i class="bi bi-sliders"></i> Configure on Schedules page</a><button class="btn sm" id="recentlyAddedScanNowBtn" hidden><i class="bi bi-play-circle"></i> Scan all now</button><span class="hint" id="recentlyAddedScanResult"></span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ADD: type ============ -->
+      <section class="pane add addonly" id="add-type">
+        <div class="types">
+          <button class="tcard server-type-btn" data-type="plex"><span class="vlogo plex"><i class="bi bi-chevron-right"></i></span><b>Plex</b><span class="d">Sign in with Plex and pick from the servers on your account.</span><span class="tags"><span class="pill">Sign-in or token</span></span></button>
+          <button class="tcard server-type-btn" data-type="emby"><span class="vlogo emby"><i class="bi bi-play-btn-fill"></i></span><b>Emby</b><span class="d">Connect with a URL and a login or API key.</span><span class="tags"><span class="pill">Login or API key</span></span></button>
+          <button class="tcard server-type-btn" data-type="jellyfin"><span class="vlogo jf"><i class="bi bi-triangle-fill"></i></span><b>Jellyfin</b><span class="d">Connect with a URL and Quick Connect, a login or an API key.</span><span class="tags"><span class="pill">Quick Connect, login or API key</span></span></button>
+        </div>
+      </section>
+
+      <!-- ============ ADD: connect ============ -->
+      <section class="pane add addonly" id="add-connect">
+        <span id="step-connect-vendor" hidden>Plex</span>
+
+        <div class="sec" data-for="plex">
+          <button class="btn primary md" id="plexOAuthStart" style="width:100%;height:44px"><i class="bi bi-shield-check"></i> Sign in with Plex (auto-discover servers)</button>
+          <div class="hint">Recommended. Lists every Plex server your account can access. <button class="info" type="button" aria-label="More info" data-tip="You can add several servers from one sign-in. Picking a server fills the fields below; set its config folder, then test the connection. To add another Plex from the same account, sign in again after saving this one."><i class="bi bi-info-circle"></i></button></div>
+          <div id="plexDiscoveredList" class="card" hidden></div>
+          <details class="ex"><summary>Or enter the token manually</summary><div class="fld" style="margin-top:10px"><label for="plexToken">Plex token</label><input class="inp" id="plexToken" type="password" autocomplete="off"><div class="hint">Find it in <a href="#">Plex's docs</a>.</div></div></details>
+        </div>
+
+        <div class="row2">
+          <div class="fld"><label for="serverUrl">Server URL <button class="info" type="button" aria-label="Explain Server URL" data-tip="How this app reaches your media server. Inside Docker, localhost means this container, not the host: use the host's LAN IP or a container name. Default port: Plex 32400, Emby and Jellyfin 8096."><i class="bi bi-info-circle"></i></button></label><input class="inp mono mono-ph" id="serverUrl" placeholder="http://hostname:port"><div class="hint" id="portHint">Default port <code class="m">:32400</code></div></div>
+          <div class="fld"><label for="serverName">Display name <button class="info" type="button" aria-label="More info" data-tip="What this server is called in the UI. Cosmetic only. Pick anything memorable."><i class="bi bi-info-circle"></i></button></label><input class="inp mono-ph" id="serverName" placeholder="e.g. Home Server, Living Room"></div>
+        </div>
+
+        <div class="sec" data-for="emby jf" id="addAuthSec">
+          <div class="fld"><span class="lab">Authentication <button class="info" type="button" aria-label="Explain authentication method" data-tip="Which credential to use, and when. Quick Connect (Jellyfin only) gives a code you enter in your Jellyfin profile menu. Username + password is exchanged once for a token. An API key is a long-lived token from Dashboard, API Keys."><i class="bi bi-info-circle"></i></button></span>
+            <span class="mseg authseg" id="addAuth" role="tablist"><button data-a="qc" id="auth-quick" data-for="jf" class="on">Quick Connect</button><button data-a="pw" id="auth-pw">Username + Password</button><button data-a="key" id="auth-key">API Key</button></span></div>
+          <div class="apanel" data-a="qc" data-for="jf">
+            <div class="card qc" id="qcCard" data-qc="idle"><div class="card-b">
+              <div class="qc-idle"><div class="line"><div><b>Sign in with a code</b><div class="hint">Approve this app from your Jellyfin profile menu. No password needed.</div></div>
+                <span><button class="btn primary md" id="quickConnectStart" style="height:38px"><i class="bi bi-magic"></i> Start Quick Connect</button> <button class="info" type="button" aria-label="More info" data-tip="Click Start Quick Connect to get a code, then enter it in your Jellyfin profile menu. Quick Connect must be enabled by your Jellyfin admin under Server, Quick Connect."><i class="bi bi-info-circle"></i></button></span></div></div>
+              <div class="qc-live" id="quickConnectCode">
+                <div class="qc-code-row"><div class="qc-code" aria-label="Quick Connect code">482 913</div><button class="btn sm" id="qcCopy"><i class="bi bi-clipboard"></i> Copy</button></div>
+                <div class="hint qc-msg"></div>
+                <div class="line"><span class="pill run qc-st qc-waiting"><span class="spin"></span> Waiting for approval</span><span class="pill ok qc-st qc-approved"><i class="bi bi-check-circle-fill"></i> Approved</span><span class="pill bad qc-st qc-expired"><i class="bi bi-clock-history"></i> Code expired</span>
+                  <span><button class="btn sm qc-cancel">Cancel</button><button class="btn sm primary qc-retry" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)"><i class="bi bi-arrow-repeat"></i> Get a new code</button></span></div>
+              </div>
+            </div></div>
+          </div>
+          <div class="apanel row2" data-a="pw" hidden><div class="fld"><label for="authUsername">Username <button class="info" type="button" aria-label="More info" data-tip="The Emby/Jellyfin user this app signs in as. Use an admin account so the app can read every library."><i class="bi bi-info-circle"></i></button></label><input class="inp" id="authUsername" autocomplete="username"></div><div class="fld"><label for="authPassword">Password <button class="info" type="button" aria-label="More info" data-tip="Your password is sent once to the server in exchange for an access token; only the token is stored. Your password itself is never saved."><i class="bi bi-info-circle"></i></button></label><input class="inp" id="authPassword" type="password" autocomplete="current-password"><div class="hint">Sent once to the server; not stored here.</div></div></div>
+          <div class="apanel fld" data-a="key" hidden><label for="authApiKey">API key <button class="info" type="button" aria-label="More info" data-tip="A long-lived authentication token. Create one in Emby/Jellyfin admin, Dashboard, API Keys, then paste it here."><i class="bi bi-info-circle"></i></button></label><div class="ig"><input class="inp mono" id="authApiKey" type="password" autocomplete="off"><button class="ibtn" id="authApiKeyShow" title="Show or hide" aria-label="Show or hide API key"><i class="bi bi-eye"></i></button></div></div>
+          <div class="warnline" data-for="jf"><i class="bi bi-exclamation-triangle-fill"></i> After saving, open Setup Health to turn on Trickplay extraction per library.</div>
+        </div>
+
+        <div class="sec" data-for="plex">
+          <div class="fld"><label for="plexConfigFolder">Plex config folder <button class="info" type="button" aria-label="More info" data-tip="Plex's config folder as this container sees it (where you mounted it), not the path on your host. Preview files land in {this folder}/Media/localhost/... Common Docker bind: -v /path/to/plex/config:/config/plex"><i class="bi bi-info-circle"></i></button></label>
+            <div class="ig"><input class="inp mono mono-ph" id="plexConfigFolder" placeholder="/config/plex"><button class="ibtn" id="plexConfigFolderBrowseBtn" title="Browse folders" aria-label="Browse folders"><i class="bi bi-folder2-open"></i></button></div>
+            <div class="hint">Where this server's preview bundles are written.</div></div>
+        </div>
+        <div class="warnline" id="connectFormError" hidden></div>
+      </section>
+
+      <!-- ============ ADD: result ============ -->
+      <section class="pane add addonly" id="add-result">
+        <div class="res" id="connectResult"></div>
+      </section>
+
+      </div>
+    </div>
+
+    <footer class="mf">
+      <div class="msg"><span class="dirty"><i class="bi bi-dot"></i> Unsaved changes</span><span id="editServerResult" role="alert"></span></div>
+      <button class="btn editonly" id="cancelBtn">Cancel</button>
+      <button class="btn primary md editonly" id="editServerSave" disabled><i class="bi bi-save"></i> Save changes</button>
+      <button class="btn addonly" id="step-back"><i class="bi bi-arrow-left"></i> Back</button>
+      <button class="btn primary md addonly" id="step-next">Test connection <i class="bi bi-arrow-right"></i></button>
+    </footer>
+  </section>
+  </div>
+</main>
+<button class="btn sm theme" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'"><i class="bi bi-circle-half"></i> Theme</button>
+<script>var $=function(s,r){return (r||document).querySelector(s)},$$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+var V={
+ plex:{cls:'plex',icon:'bi-chevron-right',name:'Lab Plex',host:'http://mlab-plex:32400',vname:'Plex',who:'Signed in with a Plex token',hint:'Token ending <code class="m">…x4f2</code>. Stored; never shown in full.',ver:'Plex 1.43.4.9937',port:':32400'},
+ emby:{cls:'emby',icon:'bi-play-btn-fill',name:'Lab Emby',host:'http://mlab-emby:8096',vname:'Emby',who:'Signed in as admin',hint:'Access token stored; the password is never saved.',ver:'Emby 4.9.1.0',port:':8096'},
+ jf:{cls:'jf',icon:'bi-triangle-fill',name:'Lab Jellyfin 10.11',host:'http://mlab-jellyfin:8096',vname:'Jellyfin',who:'Signed in as admin',hint:'Access token stored; the password is never saved.',ver:'Jellyfin 10.11.1',port:':8096'}
+};
+var LIBS={
+ plex:[['movies','movie'],['Synth Credits','movie'],['Synth Movies','movie'],['Synth Audio','episode'],['Synth Chapters','episode'],['tv','episode'],['Open Films','movie']],
+ emby:[['movies','movie'],['tv','episode'],['Synth Audio','episode'],['Synth Credits','movie'],['Synth Chapters','episode'],['Synth Movies','movie'],['Open Films','movie'],['Shorts','movie']],
+ jf:[['movies','movie'],['tv','episode'],['Synth Audio','episode'],['Synth Credits','movie'],['Synth Chapters','episode'],['Synth Movies','movie'],['Open Films','movie'],['Shorts','movie']]
+};
+var st={type:'plex',mode:'edit',tab:'general',step:'type',res:'ok',probe:'issues',dirty:false,tests:0};
+var qs=new URLSearchParams(location.search);
+if(qs.get('type')){var q=qs.get('type');st.type=q==='jellyfin'?'jf':q}
+if(qs.get('tab'))st.tab=qs.get('tab');
+if(qs.get('step')){st.mode='add';st.step=qs.get('step')}
+if(qs.get('probe'))st.probe=qs.get('probe');
+
+function tip(t){return '<button class="info" type="button" aria-label="More info" data-tip="'+t.replace(/"/g,'&quot;')+'"><i class="bi bi-info-circle"></i></button>'}
+function row(r,first,bad){
+ return '<div class="irow'+(bad?' bad':'')+'"><span class="sevbar"></span><div><div class="t">'+r.t+' <span class="pill '+(bad?'bad':'warn')+' sevtag">'+(bad?'Required':'Recommended')+'</span>'+tip(r.tip)+'</div><div class="hint">'+r.p+'</div>'
+ +'<div class="diff">Currently <span class="v cur">'+r.cur+'</span> <i class="bi bi-arrow-right"></i> Recommended <span class="v rec">'+r.rec+'</span></div></div>'
+ +'<div class="acts"><button class="btn sm '+(first?'accentb':'')+'">Apply recommended</button>'+(r.ov?'<button class="btn sm">Enable (override)</button>':'')+'<button class="btn sm ghostb">Dismiss</button></div></div>';
+}
+function bucket(cls,icon,label,n,inner,open){
+ return '<details class="bucket '+cls+'"'+(open?' open':'')+'><summary><i class="bi '+icon+'"></i> '+label+' <span class="nb '+(cls==='must'?'bad':cls==='rec'?'warn':'ok')+'">'+n+'</span><span class="sp"></span><i class="bi bi-chevron-right chev"></i></summary>'+inner+'</details>';
+}
+function health(){
+ var t=st.type,h='',n=0,kind='warn',lbl;
+ if(st.probe==='clean'||t==='emby'){
+  var items={plex:['Config folder is valid','Plex Pass is active','Library scan settings are recommended','Plex BIF generation is off for all 7 libraries','Libraries are cached'],emby:['Server is reachable','Libraries are cached','Intro & Credits plugin 1.0.0.0 is installed','Path mappings resolve'],jf:['Trickplay is enabled for all 7 libraries','Previews are read next to the media file','Media Preview Bridge plugin 10.11.1.0 is installed','Libraries are cached']}[t];
+  h=bucket('good','bi-check-circle-fill','All good',items.length,'<div class="hlist">'+items.map(function(x){return '<div class="it"><i class="bi bi-check-circle-fill"></i>'+x+'</div>'}).join('')+'</div>',true);
+  lbl=['<span class="pill ok" id="editReadinessBadge">All good</span>',0];
+ } else if(t==='plex'){
+  var a=[
+   {t:'Scan my library automatically',p:'Plex reacts to filesystem changes.',tip:"Without this, Plex doesn't react to filesystem events at all. Your only signals for new files are this app's scan nudges and the periodic timer. Most missed-file complaints come from this being off.",cur:'off',rec:'on'},
+   {t:'Run a partial scan when changes are detected',p:'Re-scans only the folder that changed.',tip:'When on, Plex only re-scans the directory that changed. Off = a full library scan every time a file is added: many minutes of work for a single new episode.',cur:'off',rec:'on'},
+   {t:'Scan my library periodically (safety net)',p:'Catches events Plex missed.',tip:'Belt-and-braces in case a filesystem event is missed (network mounts, container-restart edge cases). Keep on; the default 12 h interval is fine.',cur:'off',rec:'on'}];
+  var inner='<div class="cat">Library settings</div>'+a.map(function(r,i){return row(r,i===0,false)}).join('');
+  var bif=LIBS.plex.map(function(l){return row({t:l[0]+" - Plex's BIF generation",p:'Plex would make its own previews in parallel.',tip:"With this on, Plex generates its own preview thumbnails for this library and can overwrite or race the ones this app publishes. Recommended off. Enable (override) keeps Plex's own generation on.",cur:'on',rec:'off',ov:true},false,false)}).join('');
+  inner+='<div class="cat">Vendor-side preview generation</div><details class="hgrp"><summary><i class="bi bi-chevron-right chev"></i> Plex generates its own previews in 7 libraries <span class="sp"></span><span class="nb warn">7</span></summary>'+bif+'</details>';
+  h=bucket('rec','bi-exclamation-circle-fill','Recommended',10,inner,true); n=10; kind='warn';
+  lbl=['<span class="pill warn" id="editReadinessBadge">10 recommended</span>',10];
+ } else {
+  var names=['Synth Audio','Synth Credits','Synth Chapters','movies','tv','Synth Movies','Open Films'];
+  var g=names.map(function(nm,i){
+   return '<details class="hgrp"'+(i===0?' open':'')+'><summary><i class="bi bi-chevron-right chev"></i>'+nm+'<span class="sp"></span><span class="nb bad">2</span></summary>'
+   +row({t:'Trickplay enabled in Jellyfin',p:'Jellyfin ignores our previews when this is off.',tip:'Without this, Jellyfin ignores our published trickplay sheets entirely AND deletes them on the next library refresh. Must stay on.',cur:'off',rec:'on'},i===0,true)
+   +row({t:'Look for trickplay next to the media file',p:'Reads previews from <media>.trickplay/.'.replace(/</g,'&lt;').replace(/>/g,'&gt;'),tip:"Tells Jellyfin to look in '<media>.trickplay/' (where this app writes) instead of '<config>/data/trickplay/' (which we never write to).",cur:'off',rec:'on'},false,true)+'</details>'}).join('');
+  var plug='<div class="card plugin-card"><div class="card-b"><div class="toggle-line"><span class="lab" style="font-weight:600"><span class="line" style="justify-content:flex-start;gap:6px">Install Media Preview Bridge plugin '+tip("With the plugin, previews appear in Jellyfin as soon as they're made. Without it, Jellyfin may briefly generate its own previews in parallel when new files arrive. This wastes CPU but won't corrupt output. Recommended: leave this ticked.")+'</span><span class="sub">Recommended: instant previews, no races.</span></span><label class="sw"><input type="checkbox" id="editReadinessPluginOptIn" checked aria-label="Install Media Preview Bridge plugin"><span class="track"></span></label></div><div class="warnline" id="editReadinessPluginOptOutWarning" hidden style="margin-top:10px"><i class="bi bi-exclamation-triangle-fill"></i> Without the plugin Jellyfin may briefly make its own previews in parallel.</div></div></div>';
+  h=plug+bucket('must','bi-x-circle-fill','Must fix',14,'<div class="cat">Library settings</div>'+g,true); n=14; kind='bad';
+  lbl=['<span class="pill bad" id="editReadinessBadge">14 must fix</span>',14];
+ }
+ $('#healthBody').innerHTML=h;
+ var p=$('#editReadinessBadge');p.outerHTML=lbl[0];
+ var nb=$('#nbHealth');if(n){nb.hidden=false;nb.textContent=n;nb.className='nb '+kind}else nb.hidden=true;
+ $('#editReadinessFixCriticalBtn').hidden=kind!=='bad'||!n;$('#editReadinessFixAllBtn').hidden=!n;
+ $('#healthBar').hidden=!n;
+ var pc=$('#editReadinessPluginOptIn');if(pc)pc.addEventListener('change',function(){$('#editReadinessPluginOptOutWarning').hidden=pc.checked;dirty()});
+}
+function libs(){
+ var t=st.type,L=LIBS[t],plex=t==='plex';
+ $('#editLibraryList').innerHTML=L.map(function(l,i){
+  var sw=function(cls,label,on){return '<label class="sw"><input type="checkbox" class="'+cls+'" '+(on?'checked':'')+' aria-label="'+label+' for '+l[0]+'"><span class="track"></span></label>'};
+  return '<tr><td data-l="Library">'+l[0]+'<span class="kind">'+l[1]+'</span></td><td class="c" data-l="Previews">'+sw('edit-lib-toggle','Previews',true)+'</td><td class="c" data-l="Intro &amp; Credits">'+sw('markers-lib-toggle','Intro and credits',true)+'</td>'+(plex?'<td class="c" data-l="Loudness">'+sw('loudness-lib-toggle','Loudness',true)+'</td>':'')+'</tr>'}).join('');
+ $('#nbLibs').textContent=L.length+'/'+L.length;
+}
+function markersStatus(){
+ var t=st.type,h='';
+ if(t==='plex')h='<dl class="dl"><dt>How markers get here</dt><dd>Written into this Plex server\'s database '+tip('The app writes markers straight into the Plex database on the same machine (or through the Plex helper when Plex is on another machine). Plex briefly pauses writes while it saves.')+'</dd><dt>Plex Pass</dt><dd><span class="pill ok">Active</span></dd><dt>Database location</dt><dd><code>/plexcfg/Library/Application Support/Plex Media Server/Plug-in Support/Databases</code><span class="pill ok">local disk</span>'+tip('Markers are only written when the database is on a local disk. A network share is detected and writes stay off.')+'</dd><dt>Plex\'s own detection</dt><dd><span class="pill">Off</span>'+tip("Plex's own intro and credits detection is off for these libraries, so only this app's markers show.")+'</dd></dl>';
+ if(t==='emby')h='<dl class="dl"><dt>How markers get here</dt><dd>Media Preview Bridge for Emby plugin</dd><dt>Plugin</dt><dd><span class="pill ok">1.0.0.0 <i class="bi bi-check"></i></span></dd><dt>Can show</dt><dd>Intro · credits start '+tip('The Emby plugin can show Skip Intro and Skip Credits (Up Next).')+'</dd><dt>Emby Premiere</dt><dd><span class="pill warn">No key: Skip Intro unavailable</span>'+tip("Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works.")+'</dd></dl>';
+ if(t==='jf')h='<dl class="dl"><dt>How markers get here</dt><dd>Media Preview Bridge plugin</dd><dt>Plugin</dt><dd><span class="pill ok">10.11.1.0 <i class="bi bi-check"></i></span></dd><dt>Can show</dt><dd>Intro · credits · recap · preview</dd></dl>';
+ $('#markersStatusBlock').innerHTML=h;
+}
+function webhooks(){
+ var t=st.type,h='';
+ var steps={jf:['In Jellyfin: Dashboard, Plugins, Catalog, install "Webhook" (restart Jellyfin if prompted).','Dashboard, Plugins, Webhook, "Add Generic Destination".','Set "Webhook Url" to the address shown above.','Expand "Headers", click "Add Header", set Key "X-Auth-Token", Value: this app\'s web-auth token (Settings, Authentication).','Under "Notification Type", tick "Item Added".','Set "Item Type" to Movie + Episode at minimum.','Save. Use the "Test webhook" button to confirm the round trip.'],
+  emby:['In Emby: Settings, Notifications, Add Webhook (Emby 4.6+ ships this built-in; no plugin install).','Set "Url" to the Webhook URL shown above.','Expand "Request Headers" and add a header: Name "X-Auth-Token", Value: this app\'s web-auth token.','Tick "New Media Added" under Events. Add any other events you want to forward.','Save. Use the "Test webhook" button to confirm the round trip.']};
+ if(t==='plex'){
+  h='<div class="card" id="editPlexWebhookCard"><div class="card-h"><h3><i class="bi bi-lightning-charge"></i> Plex Direct Webhook</h3><span class="pill run sevtag">Instant</span><span class="pill warn sevtag">Plex Pass required</span><span class="sp"></span><span class="pill" id="plexWebhookStatusBadge">Not registered</span></div><div class="card-b">'
+  +'<div class="hint" id="editPlexWebhookServerCaption">Plex pings this app the moment it adds an item. Registered with <b style="color:var(--text)">Lab Plex</b> using its own Plex token.</div>'
+  +'<details class="ex"><summary>Prerequisites</summary><div class="box">Plex Pass active on the server-owner account. Mobile Push Notifications enabled in Plex Web, Settings, General. '+tip('Plex quirk: the library.new webhook only fires when push notifications are on. The toggle just needs to be enabled; you do not actually need to send pushes anywhere.')+'</div></details>'
+  +'<div class="warnline" id="plexWebhookWarning"><i class="bi bi-exclamation-triangle-fill"></i> This URL points to localhost, which is this container. Use the host\'s LAN IP. '+tip('Inside Docker, localhost refers to the container, not the host. Use the Docker host\'s LAN IP or a DNS name reachable from both this container and your Plex Media Server, e.g. http://192.168.1.50:9191/api/webhooks/incoming.')+'</div>'
+  +'<div class="fld"><label for="plexWebhookPublicUrl">URL Plex will POST to '+tip("The default is the URL you're using right now, which works for most same-host setups. Override it if Plex is on a different machine or behind a different network or proxy. Must be reachable from your Plex Media Server, not just your browser. The global webhook secret (Triggers, Settings) is embedded in the registered URL; if you change the secret later, register again.")+'</label><div class="ig"><input class="inp mono" id="plexWebhookPublicUrl" value="http://127.0.0.1:18080/api/webhooks/server/mlab-plex" placeholder="http://your-host:8080/api/webhooks/server/&lt;this-server-id&gt;"><button class="ibtn" id="plexWebhookResetUrlBtn" title="Reset to detected URL" aria-label="Reset to detected URL"><i class="bi bi-arrow-counterclockwise"></i></button></div></div>'
+  +'<div class="alert-slots"><div class="warnline" id="plexWebhookNoPlexPass" hidden>No active Plex Pass found. Use the Recently Added Scanner below instead.</div><div class="warnline" id="plexWebhookError" hidden style="background:var(--bad-soft);color:var(--bad)"></div></div>'
+  +'<div class="testrow"><button class="btn sm accentb" id="plexWebhookRegisterBtn"><i class="bi bi-plus-circle"></i> <span>Register with Plex</span></button><button class="btn sm dng" id="plexWebhookUnregisterBtn" hidden><i class="bi bi-x-circle"></i> Remove from Plex</button></div></div></div>';
+ } else {
+  var nm=t==='jf'?'Jellyfin':'Emby',id=t==='jf'?'mlab-jellyfin':'mlab-emby';
+  h='<div class="card" id="editVendorWebhookCard"><div class="card-h"><h3><i class="bi bi-broadcast"></i> <span id="editVendorWebhookHeader">'+nm+' webhook</span></h3><span class="sp"></span><span class="pill" id="editVendorWebhookPluginBadge">Plugin required</span></div><div class="card-b">'
+  +'<div class="fld"><label for="editVendorWebhookUrl">Webhook URL '+tip("Pinned to this server's ID. The router dispatches previews only to this server, even if a sibling server owns the same path.")+'</label><div class="ig"><input class="inp mono" id="editVendorWebhookUrl" readonly value="http://127.0.0.1:18080/api/webhooks/server/'+id+'"><button class="ibtn" id="editVendorWebhookCopyBtn" title="Copy URL to clipboard" aria-label="Copy URL to clipboard"><i class="bi bi-clipboard"></i></button></div></div>'
+  +'<div class="warnline"><i class="bi bi-shield-lock-fill"></i> Add the header <code class="m">X-Auth-Token</code> with this app\'s token. '+tip("In your plugin's Headers / Request Headers section, add a custom header: Name X-Auth-Token, Value this app's web-auth token (find or rotate it under Settings, Authentication). Sending the token as a header keeps it out of access logs, screenshots and clipboard history.")+'</div>'
+  +'<div class="hint" id="editVendorWebhookPluginHint"><i class="bi bi-info-circle"></i> '+(t==='jf'?'Needs the official Jellyfin Webhook plugin.':'Needs Emby Webhooks (built-in, Emby 4.6+).')+' <a href="#">Install instructions <i class="bi bi-box-arrow-up-right"></i></a></div>'
+  +'<details class="ex"><summary>Setup steps ('+steps[t].length+')</summary><ol id="editVendorWebhookSteps" class="box" style="margin:8px 0 0;padding-left:30px">'+steps[t].map(function(s){return '<li>'+s+'</li>'}).join('')+'</ol></details></div></div>';
+ }
+ $('#webhookBody').innerHTML=h;
+ var reg=$('#plexWebhookRegisterBtn');
+ if(reg)reg.addEventListener('click',function(){var b=$('#plexWebhookStatusBadge');b.className='pill ok';b.textContent='Registered';$('span',reg).textContent='Re-register with Plex';$('#plexWebhookUnregisterBtn').hidden=false;$('#nbAuto').className='nb dot ok';$('#nbAuto').title='Registered'});
+ var un=$('#plexWebhookUnregisterBtn');
+ if(un)un.addEventListener('click',function(){var b=$('#plexWebhookStatusBadge');b.className='pill';b.textContent='Not registered';$('span',reg).textContent='Register with Plex';un.hidden=true;$('#nbAuto').className='nb dot';$('#nbAuto').title='Not registered'});
+}
+function vendor(){
+ var t=st.type,v=V[t];
+ $$('[data-for]').forEach(function(e){e.hidden=e.dataset['for'].split(' ').indexOf(t)<0});
+ if(st.mode==='edit'){
+  $('#mLogo').className='vlogo '+v.cls;$('#mLogo').innerHTML='<i class="bi '+v.icon+'"></i>';
+  $('#mName').textContent=v.name;$('#mHost').textContent=v.host;$('#editServerDisplayName').value=v.name;$('#editServerUrl').value=v.host;
+  $('#mStatus').hidden=false;
+ }
+ $('#credWho').textContent=v.who;$('#credHint').innerHTML=v.hint;
+ $$('.cred-forms .vend').forEach(function(e){e.style.display=e.dataset.v===t?'grid':'none'});
+ libs();markersStatus();webhooks();health();
+ $('#nbPaths').hidden=false;
+ $('#step-connect-vendor').textContent=v.vname;$('#portHint').innerHTML='Default port <code class="m">'+v.port+'</code>';$('#serverUrl').placeholder='http://hostname:'+v.port.slice(1);
+  $('#editReadinessFixCriticalBtn');
+ $$('#typeSeg button').forEach(function(b){b.classList.toggle('on',b.dataset.t===t)});
+ if(t!=='plex')$('#agentFields').hidden=true;
+ syncTab();
+}
+function setAuth(seg,a){
+ if(!seg)return;var scope=seg.closest('.vend')||seg.closest('.sec');
+ $$('button',seg).forEach(function(b){b.classList.toggle('on',b.dataset.a===a)});
+ $$('[data-a]',scope).forEach(function(p){if(p.tagName==='BUTTON')return;p.hidden=p.dataset.a!==a||(p.dataset['for']&&p.dataset['for'].split(' ').indexOf(st.type)<0)});
+}
+function syncTab(){
+ $$('#rail button').forEach(function(b){b.classList.toggle('on',b.dataset.tab===st.tab);b.setAttribute('aria-selected',b.dataset.tab===st.tab)});
+ $$('.pane.editonly').forEach(function(p){p.classList.toggle('on',st.mode==='edit'&&p.id==='tab-'+st.tab)});
+ $$('.pane.addonly').forEach(function(p){p.classList.toggle('on',st.mode==='add'&&p.id==='add-'+st.step)});
+}
+function mode(){
+ document.body.dataset.mode=st.mode;$('#modal').dataset.mode=st.mode;
+ $$('#modeSeg button').forEach(function(b){b.classList.toggle('on',b.dataset.m===st.mode)});
+ $('#addStepSeg').hidden=st.mode!=='add';$('#resSeg').hidden=!(st.mode==='add'&&st.step==='result');
+ $$('#addStepSeg button').forEach(function(b){b.classList.toggle('on',b.dataset.s===st.step)});
+ $$('#resSeg button').forEach(function(b){b.classList.toggle('on',b.dataset.r===st.res)});
+ if(st.mode==='add'){
+  var v=V[st.type];
+  $('#mLogo').className='vlogo '+(st.step==='type'?'neutral':v.cls);$('#mLogo').innerHTML=st.step==='type'?'<i class="bi bi-plus-lg"></i>':'<i class="bi '+v.icon+'"></i>';
+  $('#mName').textContent=st.step==='type'?'Add server':'Add '+v.vname+' server';
+  var sub={type:'Choose which media server to connect',connect:{plex:'Sign in with Plex, or enter the URL and token',emby:'Enter the URL and a login or API key',jf:'Enter the URL, then use Quick Connect, a login or an API key'}[st.type],result:st.res==='ok'?'Review the details, then save':'Fix the connection and try again'}[st.step];
+  $('#mHost').textContent=sub;$('#mStatus').hidden=true;
+  var idx={type:0,connect:1,result:2}[st.step];$('#prog').style.setProperty('--p',idx/2);
+  $$('#prog .st').forEach(function(e,i){e.classList.toggle('done',i<idx);e.classList.toggle('on',i===idx)});
+  var back=$('#step-back'),next=$('#step-next');
+  back.hidden=st.step==='type';next.hidden=st.step==='type';$('.mf').hidden=st.step==='type';
+  if(st.step==='connect'){back.innerHTML='<i class="bi bi-arrow-left"></i> Back';next.innerHTML='Test connection <i class="bi bi-arrow-right"></i>';next.id='step-next';next.disabled=false}
+  if(st.step==='result'){back.innerHTML='<i class="bi bi-arrow-left"></i> Edit';if(st.res==='ok'){next.innerHTML='<i class="bi bi-check-lg"></i> Save server';next.disabled=false}else{next.innerHTML='Try again';next.disabled=false}}
+  result();
+ }else{$('.mf').hidden=false;vendor.call(null)}
+ $('#modal').classList.toggle('dirty',st.dirty);$('#modal').classList.toggle('paused',!$('#editServerEnabled').checked);
+ $('#editServerSave').disabled=!st.dirty;
+ $$('#dirtySeg button').forEach(function(b){b.classList.toggle('on',(b.dataset.d==='1')===st.dirty)});
+ vendorAdd();$$('#typeSeg button').forEach(function(b){b.classList.toggle('on',b.dataset.t===st.type)});$('#portHint').innerHTML='Default port <code class="m">'+V[st.type].port+'</code>';$('#serverUrl').placeholder='http://hostname'+V[st.type].port;syncTab();
+}
+function vendorAdd(){var t=st.type;$$('#add-connect [data-for]').forEach(function(e){if(e.dataset.a&&e.tagName!=='BUTTON')return;e.hidden=e.dataset['for'].split(' ').indexOf(t)<0});addAuthSync();$('#step-connect-vendor').textContent=V[t].vname}
+function result(){
+ var v=V[st.type],h='';
+ if(st.res==='ok')h='<div class="banner ok" id="connectResultMsg"><i class="bi bi-check-circle-fill"></i><div><b>Connected to '+v.vname+'</b><div class="hint">'+v.ver+' · '+LIBS[st.type].length+' libraries found. Saving enables the server and runs a Setup Health check.</div></div></div>'
+ +'<dl class="dl"><dt>Display name</dt><dd>'+v.name+'</dd><dt>Server URL</dt><dd><code>'+v.host+'</code></dd><dt>Sign-in</dt><dd>'+(st.type==='plex'?'Plex sign-in (token stored)':'Admin account (token stored)')+'</dd>'+(st.type==='plex'?'<dt>Config folder</dt><dd><code>/config/plex</code> <span class="pill ok">valid</span></dd>':'')+'</dl>';
+ else h='<div class="banner bad" id="connectResultMsg"><i class="bi bi-x-octagon-fill"></i><div><b>Could not connect</b><div class="hint">Connection refused at '+v.host+'.</div></div></div><div class="card"><div class="card-b hint" style="gap:6px"><b style="color:var(--text)">Check these first</b><span>Is the URL reachable from inside this container? <code class="m">localhost</code> is the container itself.</span><span>Is the port right ('+v.port+' by default)?</span><span>Self-signed HTTPS? Turn off certificate verification after saving.</span></div></div>';
+ $('#connectResult').innerHTML=h;
+}
+function dirty(){st.dirty=true;$('#modal').classList.add('dirty');$('#editServerSave').disabled=false;$$('#dirtySeg button').forEach(function(b){b.classList.toggle('on',b.dataset.d==='1')})}
+document.addEventListener('input',function(e){if(e.target.closest('#modal .pane.editonly'))dirty()});
+document.addEventListener('change',function(e){if(e.target.closest('#modal .pane.editonly'))dirty()});
+
+$$('#rail button').forEach(function(b){b.addEventListener('click',function(){st.tab=b.dataset.tab;syncTab()})});
+$$('[data-goto]').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault();st.tab=a.dataset.goto;syncTab()})});
+$$('[data-j]').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault();var t=document.getElementById(a.dataset.j);t.scrollIntoView({block:'start',behavior:'smooth'})})});
+$$('#typeSeg button').forEach(function(b){b.addEventListener('click',function(){st.type=b.dataset.t;st.dirty=false;mode()})});
+$$('#modeSeg button').forEach(function(b){b.addEventListener('click',function(){st.mode=b.dataset.m;if(st.mode==='add')st.step='type';mode()})});
+$$('#addStepSeg button').forEach(function(b){b.addEventListener('click',function(){st.step=b.dataset.s;mode()})});
+$$('#resSeg button').forEach(function(b){b.addEventListener('click',function(){st.res=b.dataset.r;mode()})});
+$$('#probeSeg button').forEach(function(b){b.addEventListener('click',function(){st.probe=b.dataset.p;$$('#probeSeg button').forEach(function(x){x.classList.toggle('on',x===b)});health()})});
+$$('#dirtySeg button').forEach(function(b){b.addEventListener('click',function(){st.dirty=b.dataset.d==='1';mode()})});
+$$('.server-type-btn').forEach(function(b){b.addEventListener('click',function(){st.type=b.dataset.type==='jellyfin'?'jf':b.dataset.type;st.step='connect';mode()})});
+$('#step-back').addEventListener('click',function(){st.step=st.step==='result'?'connect':'type';mode()});
+$('#step-next').addEventListener('click',function(){if(st.step==='connect'){st.step='result';mode()}else if(st.step==='result'&&st.res==='bad'){st.step='connect';mode()}});
+$('#editServerEnabled').addEventListener('change',function(){$('#modal').classList.toggle('paused',!this.checked);dirty()});
+$('#credToggle').addEventListener('click',function(){var f=$('#credForms'),o=!f.classList.contains('open');f.classList.toggle('open',o);this.setAttribute('aria-expanded',o)});
+$('#markersAgentEnabled').addEventListener('change',function(){$('#agentFields').hidden=!this.checked;$('#loudnessHelperHint').hidden=!(this.checked&&$('#loudnessEnabled').checked)});
+$('#loudnessEnabled').addEventListener('change',function(){$('#loudnessHelperHint').hidden=!($('#markersAgentEnabled').checked&&this.checked)});
+$('#editJellyfinSaveOffMedia').addEventListener('change',function(){$('#jfOff').hidden=!this.checked});
+$$('#jfAuth button,#embyAuth button,#addAuth button').forEach(function(b){b.addEventListener('click',function(){setAuth(b.parentNode,b.dataset.a)})});
+$('#editTestConnectionBtn').addEventListener('click',function(){
+ var r=$('#editTestConnectionResult'),b=this;st.tests++;b.disabled=true;r.className='tres';r.innerHTML='<span class="spin"></span> Testing…';
+ setTimeout(function(){b.disabled=false;
+  if(st.tests%2){r.className='tres ok';r.innerHTML='<i class="bi bi-check-circle-fill"></i> Connected - '+V[st.type].ver;var s=$('#mStatus');s.className='pill ok editonly';s.innerHTML='<span class="dot ok"></span> Connected'}
+  else{r.className='tres bad';r.innerHTML='<i class="bi bi-x-circle-fill"></i> Connection refused: check the URL and that this container can reach it.';var s=$('#mStatus');s.className='pill bad editonly';s.innerHTML='<span class="dot bad"></span> Unreachable'}
+ },700)});
+$('#cancelBtn').addEventListener('click',function(){if(st.dirty&&!this.dataset.arm){this.dataset.arm=1;this.textContent='Discard changes?';this.classList.add('dng');return}st.dirty=false;this.removeAttribute('data-arm');this.textContent='Cancel';this.classList.remove('dng');mode()});
+$('#editServerSave').addEventListener('click',function(){st.dirty=false;mode();var m=$('#editServerResult');m.innerHTML='<i class="bi bi-check-circle-fill" style="color:var(--ok)"></i> Saved';setTimeout(function(){m.textContent=''},2500)});
+document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key==='Enter'&&st.dirty)$('#editServerSave').click()});
+
+var QCMSG={idle:'',waiting:'Enter this code in your Jellyfin profile menu (Quick Connect).',approved:'Signed in. Continue with Test connection.',expired:'The code timed out after 5 minutes. Get a new one.'};
+function qc(state){var c=$('#qcCard');c.dataset.qc=state;$('.qc-msg',c).textContent=QCMSG[state];$$('#qcSeg button').forEach(function(b){b.classList.toggle('on',b.dataset.q===state)})}
+function addAuthSync(){
+ var t=st.type;if(t==='plex')return;
+ if(st.authFor!==t){st.authFor=t;setAuth($('#addAuth'),t==='jf'?'qc':'pw')}
+ $('#qcSeg').hidden=!(st.mode==='add'&&st.step==='connect'&&t==='jf');
+}
+$$('#qcSeg button').forEach(function(b){b.addEventListener('click',function(){var a=$('#addAuth');setAuth(a,'qc');qc(b.dataset.q)})});
+$('#quickConnectStart').addEventListener('click',function(){qc('waiting')});
+$('#qcCard .qc-cancel').addEventListener('click',function(){qc('idle')});
+$('#qcCard .qc-retry').addEventListener('click',function(){qc('waiting')});
+$('#qcCopy').addEventListener('click',function(){this.innerHTML='<i class="bi bi-check2"></i> Copied'});
+$('#authApiKeyShow').addEventListener('click',function(){var i=$('#authApiKey');i.type=i.type==='password'?'text':'password';this.firstChild.className='bi '+(i.type==='password'?'bi-eye':'bi-eye-slash')});
+qc(new URLSearchParams(location.search).get('qc')||'idle');
+if(qs.get('sheet'))document.body.classList.add('sheet');
+$('#modal').dataset.mode=st.mode;
+mode();
+</script>
+</body>
+</html>

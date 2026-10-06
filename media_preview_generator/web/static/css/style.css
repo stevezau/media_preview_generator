@@ -37,6 +37,32 @@
        light themes (Bootstrap's default primary blue washes out on the
        dark Plex background and is invisible against dark form fields). */
     --focus-ring: 0 0 0 0.2rem rgba(229, 160, 13, 0.45);
+
+    /* Dashboard redesign tokens. One hue per task type, reused for worker capability icons, job chips and queue
+       rows; state colours come in a solid and a tinted "-soft" pair. --inset and --line alias the surface tokens
+       above so every page shares one source. Amber is reserved for primary action, next schedule and job-ID links. */
+    --inset: var(--surface-1);
+    --line: var(--surface-border);
+    --line-strong: rgba(255, 255, 255, 0.14);
+    --panel-2: #1e1e33;
+    /* Dark text tokens measured >= 4.5:1 on the lightest dark surfaces (table head, code, tinted pills). */
+    --muted: #aeaec4;
+    --faint: #a4a4bb;
+    --accent: #e5a00d;
+    --accent-text: #e5a00d;
+    --accent-ink: #1a1203;
+    --accent-soft: rgba(229, 160, 13, 0.14);
+    --ok: #3ecf8e;   --ok-soft: rgba(62, 207, 142, 0.14);
+    --bad: #f77d88;  --bad-soft: rgba(240, 97, 109, 0.14);
+    --run: #74adff;  --run-soft: rgba(91, 157, 255, 0.15);
+    --warn: #e5a00d; --warn-soft: rgba(229, 160, 13, 0.14);
+    --t-previews: #5b9dff; --t-previews-soft: rgba(91, 157, 255, 0.15);
+    --t-intro: #b49cff;    --t-intro-soft: rgba(180, 156, 255, 0.15);
+    --t-loud: #36d1c4;     --t-loud-soft: rgba(54, 209, 196, 0.15);
+    --radius-card: 12px;
+    --radius-ctl: 8px;
+    --radius-xs: 6px;
+    --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
 }
 
 html[data-bs-theme="light"] {
@@ -126,6 +152,25 @@ html[data-bs-theme="light"] {
        paper" look. */
     --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
     --shadow-2: 0 8px 24px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+
+    /* Dashboard redesign tokens, light values. Measured against the #e4e7eb page background, not just white cards:
+       faint/ok/warn/accent-text >= 4.5:1 there, dark --accent-ink on the amber fill >= 4.5:1. Do not go lighter. */
+    --focus-ring: 0 0 0 0.2rem rgba(122, 79, 0, 0.55);
+    --line-strong: #cfd4e0;
+    --panel-2: #f2f4f8;
+    --muted: #5d6275;
+    --faint: #5f6579;
+    --accent: #b87a00;
+    --accent-text: #7a4f00;
+    --accent-ink: #1a1203;
+    --accent-soft: rgba(229, 160, 13, 0.16);
+    --ok: #0a6340;   --ok-soft: rgba(19, 138, 88, 0.12);
+    --bad: #b01f2c;  --bad-soft: rgba(200, 50, 63, 0.10);
+    --run: #1c55bd;  --run-soft: rgba(37, 99, 214, 0.10);
+    --warn: #805300; --warn-soft: rgba(229, 160, 13, 0.16);
+    --t-previews: #2563d6; --t-previews-soft: rgba(37, 99, 214, 0.10);
+    --t-intro: #6d4fd8;    --t-intro-soft: rgba(109, 79, 216, 0.10);
+    --t-loud: #0c8f84;     --t-loud-soft: rgba(12, 143, 132, 0.10);
 }
 
 .skip-link {
@@ -412,6 +457,14 @@ html[data-bs-theme="light"] .navbar .nav-link:hover {
 .navbar .nav-link.active {
     color: var(--plex-orange-text) !important;
     background-color: var(--plex-orange-soft);
+}
+@media (min-width: 1200px) {
+    .navbar .navbar-nav.me-auto > .nav-item > .nav-link:not(.active) {
+        color: var(--muted);
+    }
+    .navbar .navbar-nav.me-auto > .nav-item > .nav-link:not(.active):hover {
+        color: var(--bs-body-color);
+    }
 }
 
 /* Automation, Settings and Tools hover menus (nav_menus.js). Bootstrap places a navbar dropdown's list under its toggle
@@ -840,32 +893,36 @@ html[data-bs-theme="light"] .navbar {
  * 38×38 circle is the wrong shape for an accordion row.
  */
 @media (min-width: 1200px) {
-    .navbar .nav-item > #notificationBellBtn,
-    .navbar .nav-item > #themeToggleBtn,
-    .navbar .nav-item > #sponsorLinkBtn {
-        width: 38px;
-        height: 38px;
+    /* One shared 34px icon button (bell, help, coffee, theme). Hover is a neutral tint: amber is reserved for the
+     * primary action, the next schedule and job-ID links. */
+    .navbar .nav-item > .nav-ibtn {
+        width: 34px;
+        height: 34px;
         display: inline-flex !important;
         align-items: center;
         justify-content: center;
-        padding: 0;
-        border-radius: 50%;
-        color: var(--bs-body-color) !important;
+        padding: 0 !important;
+        border-radius: var(--radius-ctl);
+        color: var(--muted) !important;
         transition: background-color 0.15s ease, color 0.15s ease;
     }
-    .navbar .nav-item > #notificationBellBtn:hover,
-    .navbar .nav-item > #themeToggleBtn:hover,
-    .navbar .nav-item > #sponsorLinkBtn:hover,
-    .navbar .nav-item > #notificationBellBtn:focus-visible,
-    .navbar .nav-item > #themeToggleBtn:focus-visible,
-    .navbar .nav-item > #sponsorLinkBtn:focus-visible {
-        background-color: var(--surface-2, rgba(255, 255, 255, 0.08));
-        color: var(--plex-orange) !important;
+    .navbar .nav-item > .nav-ibtn:hover,
+    .navbar .nav-item > .nav-ibtn:focus-visible {
+        background-color: var(--inset);
+        color: var(--bs-body-color) !important;
     }
-    .navbar .nav-item > #notificationBellBtn .bi,
-    .navbar .nav-item > #themeToggleBtn .bi,
-    .navbar .nav-item > #sponsorLinkBtn .bi {
+    .navbar .nav-item > .nav-ibtn .bi {
         font-size: 1.05rem;
+    }
+    /* Hairline dividers: primary nav | {bell, help} | {coffee, Star, theme} | Logout. */
+    .navbar-nav-utility > .nav-item:nth-child(2),
+    .navbar-nav-utility > .nav-item:nth-child(4) {
+        margin-left: 0.125rem;
+        padding-left: 0.25rem;
+        border-left: 1px solid var(--line);
+    }
+    .navbar-nav-utility {
+        align-items: center;
     }
 
     /* Without a floor the Help menu's longest label sets the menu width and ends up only ~8px from the trailing
@@ -882,8 +939,8 @@ html[data-bs-theme="light"] .navbar {
 
 /* Ko-fi coffee cup — the docs site's pink, fixed in both themes because it's a
  * brand colour, not a semantic one. Declared on the icon itself so it survives
- * the utility-icon hover rule above, which forces brand orange onto the parent
- * <a> with !important; an inherited colour would lose, an own colour wins. */
+ * the utility-icon colour rule above, which sets the parent <a> colour with
+ * !important; an own colour on the icon wins over the inherited one. */
 .sponsor-cup {
     color: #db61a2;
 }
@@ -913,19 +970,32 @@ a:focus-visible > .sponsor-cup {
  * "favourite this page". In the phone menu it is a plain labelled row like its neighbours. */
 @media (min-width: 1200px) {
     .navbar .nav-item > #navStarBtn {
-        height: 30px;
-        margin: 4px 0.25rem;
+        height: 34px;
+        margin: 0 0.25rem;
         padding: 0 0.6rem !important;
         gap: 0.35rem;
-        border: 1px solid var(--bs-border-color);
-        border-radius: var(--radius-sm);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-ctl);
         font-size: 0.85rem;
         color: var(--bs-body-color) !important;
     }
     .navbar .nav-item > #navStarBtn:hover,
     .navbar .nav-item > #navStarBtn:focus-visible {
-        background-color: var(--surface-2, rgba(255, 255, 255, 0.08));
-        border-color: var(--plex-orange);
+        background-color: var(--inset);
+        border-color: var(--faint);
+    }
+    /* Logout is a ghost button that turns red on hover: it ends the session. */
+    .navbar-nav-utility form > #navLogoutBtn {
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        padding: 0 0.5rem !important;
+        color: var(--muted) !important;
+    }
+    .navbar-nav-utility form > #navLogoutBtn:hover,
+    .navbar-nav-utility form > #navLogoutBtn:focus-visible {
+        background-color: var(--bad-soft);
+        color: var(--bad) !important;
     }
 }
 
@@ -943,7 +1013,7 @@ a:focus-visible > .sponsor-cup {
 }
 @media (min-width: 1200px) and (max-width: 1399.98px) {
     .navbar .nav-item > #navStarBtn {
-        width: 30px;
+        width: 34px;
         justify-content: center;
         padding: 0 !important;
     }
@@ -1133,6 +1203,9 @@ html[data-bs-theme="dark"] .progress {
 
 .progress-bar {
     transition: width 0.3s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+    .progress-bar { transition: none; }
 }
 
 /* Tables */
@@ -2147,10 +2220,10 @@ html[data-bs-theme="light"] .system-version-row { border-color: rgba(0, 0, 0, 0.
 .info-icon:hover,
 .info-icon:focus-visible {
     color: var(--bs-primary);
-    outline: none;
 }
 .info-icon:focus-visible {
-    box-shadow: 0 0 0 0.15rem rgba(13, 110, 253, 0.25);
+    outline: none;
+    box-shadow: var(--focus-ring);
     border-radius: 2px;
 }
 /* Affordance: ⓘ icons that open a modal get a pointer and a chevron to
@@ -2713,4 +2786,100 @@ html[data-bs-theme="light"] #logsContent {
 }
 .job-file-list .job-file-title {
     color: var(--bs-body-color);
+}
+
+/* Notification bell badge: a 16px count pill ringed in the navbar colour (set per theme below). */
+#notificationBellBadge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    left: auto;
+    transform: none;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    background: var(--bad);
+    color: #fff;
+    box-shadow: 0 0 0 2px var(--plex-dark);
+}
+/* White on the dark theme's coral --bad is 2.6:1; dark ink clears 6:1. */
+html[data-bs-theme="dark"] #notificationBellBadge {
+    color: #1a0508;
+}
+html[data-bs-theme="light"] #notificationBellBadge {
+    box-shadow: 0 0 0 2px #fff;
+}
+
+/* Shared dropdown surface: Tools, Help and Notifications menus match. */
+.navbar .dropdown-menu {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-ctl);
+}
+.navbar .dropdown-item:hover,
+.navbar .dropdown-item:focus-visible {
+    background-color: var(--inset);
+}
+.navbar .dropdown-item.active {
+    background-color: var(--accent-soft);
+    color: var(--plex-orange-text);
+}
+
+main {
+    padding-bottom: 2rem;
+}
+
+/* Phone menu utility block: five 44px tiles in two columns, Logout anchored full-width at the bottom. */
+@media (max-width: 1199.98px) {
+    #navbarNav.offcanvas .offcanvas-body {
+        display: flex;
+        flex-direction: column;
+    }
+    .navbar-nav-utility {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: auto;
+    }
+    .navbar-nav-utility > .nav-item:first-child,
+    .navbar-nav-utility > .nav-item:last-child,
+    .navbar-nav-utility > .nav-item.dropdown:has(.dropdown-menu.show) {
+        grid-column: 1 / -1;
+    }
+    .navbar-nav-utility > .nav-item:not(:first-child):not(:last-child) > .nav-link {
+        min-height: 44px;
+        padding: 0 0.75rem;
+        background: var(--inset);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-ctl);
+    }
+    .navbar-nav-utility > .nav-item:last-child {
+        border-top: 1px solid var(--line);
+        padding-top: 0.25rem;
+    }
+    #navbarNav.offcanvas .nav-hover-menu > .dropdown-toggle.show::after {
+        transform: rotate(180deg);
+    }
+    #navbarNav.offcanvas .nav-hover-menu > .dropdown-menu {
+        padding-left: 1.75rem;
+    }
+}
+
+/* 44px touch targets for icon buttons on every page; the visual size is unchanged on pointer devices. */
+@media (pointer: coarse) {
+    .ibtn, .wh-ibtn, .log-ibtn, .pm-remove, .ep-remove, .stepper-minus, .stepper-plus, .btn-icon { min-width: 44px; min-height: 44px; }
+    .dash-btn, .dash-btn-sm { min-height: 44px; min-width: 44px; }
+    .btn, .nav-link, .log-level-btn, .log-fbtn, .log-nav-btn { min-height: 44px; }
+    .log-nav-btn, .log-level-btn { min-width: 44px; }
+    .form-control, .form-select { min-height: 44px; }
+    summary { min-height: 44px; display: flex; align-items: center; }
+    .navbar-brand, .navbar-version { display: inline-flex; align-items: center; min-height: 44px; }
+    /* Hit area only: the glyph keeps its size, a transparent 44px square centred on it takes the tap. */
+    .info-icon { position: relative; }
+    .info-icon::before { content: ''; position: absolute; top: 50%; left: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
+    .form-check-input[type="checkbox"] { position: relative; }
+    .form-check-input[type="checkbox"]::before { content: ''; position: absolute; top: 50%; left: 50%; width: 44px; height: 44px; transform: translate(-50%, -50%); }
+    .form-range { height: 44px; }
 }

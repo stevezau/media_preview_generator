@@ -205,21 +205,27 @@ function collectGpuConfig() {
     return config;
 }
 
+// Settings page only: worker counts and jobs live in worker groups, so a GPU here has just its FFmpeg thread count.
+// Failed GPUs keep their input so the saved value is not dropped from gpu_config.
 function renderGpuTuningPanel(detectedGpus, savedConfig) {
     const container = document.getElementById('gpuConfigList');
     const saved = new Map((savedConfig || []).map(gpu => [gpu.device, gpu]));
-    container.innerHTML = detectedGpus.map((gpu, index) => {
-        const esc = _gpuPanelEscapeHtml;
+    const esc = _gpuPanelEscapeHtml;
+    const rows = detectedGpus.map((gpu, index) => {
         const config = saved.get(gpu.device) || {};
-        return `<div class="row align-items-center g-3 py-3 border-bottom">
-            <div class="col-md-7"><strong>${esc(gpu.name || 'GPU')}</strong><div class="small text-body-secondary">${esc(gpu.device || '')}</div>
-            ${gpu.status === 'failed' ? `<div class="text-danger small">${esc(gpu.error || 'Hardware unavailable')}</div>` : ''}</div>
-            <div class="col-md-5"><label class="form-label small" for="gpuTuning${index}">FFmpeg threads per worker</label>
-            <input id="gpuTuning${index}" type="number" min="0" max="32" class="form-control form-control-sm gpu-tuning-threads"
-                data-device="${esc(gpu.device)}" data-name="${esc(gpu.name)}" data-type="${esc(gpu.type)}" value="${config.ffmpeg_threads ?? 2}">
-            <div class="form-text">0 = automatic. Worker counts and jobs are configured in groups.</div></div></div>`;
+        const failed = gpu.status === 'failed';
+        const failure = failed ? `<div class="hint-line hint-bad"><i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i><span><strong>${esc(gpu.error || 'Acceleration test failed')}</strong>${gpu.error_detail ? ' ' + esc(gpu.error_detail) : ''} Fix the issue and click Re-scan GPUs.</span></div>` : '';
+        return `<div class="gpu-row${failed ? ' is-failed' : ''}">
+            <span class="gpu-ico" aria-hidden="true"><i class="bi bi-gpu-card"></i></span>
+            <div class="gpu-main"><strong class="gpu-name">${esc(gpu.name || 'GPU')}</strong><div class="gpu-id">${_gpuPanelVendorMark(gpu.type)}${esc(gpu.device || '')}</div>${failure}</div>
+            <div class="gpu-control"><label for="gpuTuning${index}">FFmpeg threads per worker</label>
+            <input id="gpuTuning${index}" type="number" min="0" max="32" class="form-control gpu-tuning-threads has-stepper"
+                data-device="${esc(gpu.device)}" data-name="${esc(gpu.name)}" data-type="${esc(gpu.type)}" value="${config.ffmpeg_threads ?? 2}"></div></div>`;
     }).join('');
+    container.innerHTML = rows + `<div class="hint-line"><i class="bi bi-info-circle" aria-hidden="true"></i><span>0 = automatic. Worker counts and jobs are configured in groups.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="GPU fallback" data-explain-title="GPU fallback" data-explain-html="0 = automatic. Worker counts and jobs are configured in groups. If a GPU worker can&#39;t process a file, it retries on CPU." aria-label="About this note"><i class="bi bi-info-circle"></i></button></span></div>`;
+    window._initBootstrapTooltips?.(container);
     container.querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
         if (typeof markDirty === 'function') markDirty();
     }));
+    if (window.MPGShared && window.MPGShared.attachSteppersTo) window.MPGShared.attachSteppersTo(container);
 }

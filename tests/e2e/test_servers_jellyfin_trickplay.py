@@ -3,13 +3,13 @@
 Replaces the previous hover-pill test (`.server-health-pill`) that was
 driven by `/health-check`. The glyph architecture (Mar 2026):
 
-  * Per-card inline ✓/⚠/❗ glyph next to the server name, sourced from
+  * Per-card readiness pill in the card's reserved issue row, sourced from
     GET /api/servers/<id>/previews-readiness (NOT /health-check).
   * Class `.server-readiness-glyph`, populated by `probeServerReadiness`
     after the per-card connection probe resolves.
-  * Glyph is hidden when probe hasn't run yet OR connection failed OR
-    server is disabled. Visible with `text-danger` / `text-warning` /
-    `text-success` when critical / recommended / ok respectively.
+  * Hidden when the probe hasn't run yet OR connection failed OR the server
+    is disabled OR setup is healthy (data-state=ok). Otherwise `pill bad`
+    ("N must fix") for critical or `pill warn` ("N to fix") for recommended.
 
 Filename kept for git-history continuity even though the tests no
 longer mention trickplay.
@@ -70,7 +70,8 @@ class TestServerReadinessGlyph:
         expect(glyph).to_be_visible(timeout=3000)
         # Critical readiness → red.
         glyph_class = glyph.get_attribute("class") or ""
-        assert "text-danger" in glyph_class, f"expected critical glyph colour (text-danger), got class={glyph_class!r}"
+        assert "pill" in glyph_class and "bad" in glyph_class, f"expected critical pill (pill bad), got {glyph_class!r}"
+        expect(glyph).to_contain_text("must fix")
         # Tooltip affordance cites "click to fix".
         title = glyph.get_attribute("title") or ""
         assert "click" in title.lower(), f"expected click affordance in tooltip, got {title!r}"
@@ -89,15 +90,14 @@ class TestServerReadinessGlyph:
         glyph = authed_page.locator(".server-readiness-glyph").first
         expect(glyph).to_be_visible(timeout=3000)
         glyph_class = glyph.get_attribute("class") or ""
-        assert "text-warning" in glyph_class, (
-            f"expected recommended glyph colour (text-warning), got class={glyph_class!r}"
+        assert "pill" in glyph_class and "warn" in glyph_class, (
+            f"expected recommended pill (pill warn), got class={glyph_class!r}"
         )
+        expect(glyph).to_contain_text("to fix")
 
-    def test_glyph_is_green_when_readiness_all_ok(self, authed_page: Page, app_url: str) -> None:
-        """All green ✓ when everything passes. Regression of the older
-        'button always visible even after fix' shape — the NEW glyph
-        stays visible but flips colour / tooltip, so this test just
-        asserts the happy-path visual contract rather than visibility."""
+    def test_glyph_is_hidden_when_readiness_all_ok(self, authed_page: Page, app_url: str) -> None:
+        """A healthy server shows no readiness pill (the green status dot already says so); the element stays in
+        the DOM, flagged data-state=ok, so the glyph wiring keeps working."""
         _stub_jellyfin_card(authed_page)
         mock_server_connection_probe(authed_page, ok=True)
         mock_server_previews_readiness(authed_page, critical_count=0, recommended_count=0)
@@ -107,10 +107,8 @@ class TestServerReadinessGlyph:
         expect(authed_page.locator("#serverList")).to_contain_text("Jellyfin Test", timeout=3000)
 
         glyph = authed_page.locator(".server-readiness-glyph").first
-        expect(glyph).to_be_visible(timeout=3000)
-        glyph_class = glyph.get_attribute("class") or ""
-        assert "text-success" in glyph_class, f"expected healthy glyph colour (text-success), got class={glyph_class!r}"
+        expect(glyph).to_have_attribute("data-state", "ok", timeout=3000)
+        expect(glyph).to_be_hidden()
         title = glyph.get_attribute("title") or ""
-        assert "healthy" in title.lower() or "setup healthy" in title.lower(), (
-            f"expected healthy tooltip, got {title!r}"
-        )
+        assert "setup healthy" in title.lower(), f"expected healthy tooltip, got {title!r}"
+        expect(authed_page.locator(".srv-dot.ok").first).to_have_attribute("aria-label", "Connected")

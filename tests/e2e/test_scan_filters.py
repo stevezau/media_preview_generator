@@ -46,7 +46,7 @@ def filter_page(authed_page: Page, app_url: str) -> Page:
     _seed(authed_page)
     authed_page.goto(app_url)
     authed_page.wait_for_function("libraries.length === 2")
-    authed_page.locator('button:has-text("Start New Job")').click()
+    authed_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
     authed_page.locator("#jobScanFilters > summary").click()
     return authed_page
 
@@ -151,7 +151,7 @@ def test_clear_and_reopen_reset_filter_controls(filter_page: Page) -> None:
     expect(page.locator("#jobScanFilters [data-filter-summary]")).to_have_text("All selected media")
     page.locator("#jobAddedFilter").select_option("last_days")
     page.locator("#newJobModal .modal-footer").get_by_role("button", name="Cancel").click()
-    page.locator('button:has-text("Start New Job")').click()
+    page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
     expect(page.locator("#jobScanFilters")).not_to_have_attribute("open", "")
     page.locator("#jobScanFilters > summary").click()
     expect(page.locator("#jobAddedFilter")).to_have_value("all")
@@ -196,7 +196,7 @@ def test_unknown_library_type_keeps_both_type_filters_available(authed_page: Pag
     _seed(authed_page, libraries=[{"id": "mixed", "name": "Mixed", "type": "mixed"}])
     authed_page.goto(app_url)
     authed_page.wait_for_function("libraries.length === 1")
-    authed_page.locator('button:has-text("Start New Job")').click()
+    authed_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
     authed_page.locator("#jobScanFilters > summary").click()
     expect(authed_page.locator('#jobScanFilters [data-filter-type="tv"]')).to_be_visible()
     expect(authed_page.locator('#jobScanFilters [data-filter-type="movie"]')).to_be_visible()

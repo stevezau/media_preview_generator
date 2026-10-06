@@ -24,7 +24,9 @@ def test_paused_loudness_job_is_queued_and_cancellable_without_review(
     response = requests.post(f"{url}/api/processing/pause", headers=_HEADERS, timeout=15)
     assert response.ok, response.text
     page.goto(url + "/")
-    expect(page.locator("#globalPauseResumeQueue")).to_contain_text("Resume Processing")
+    expect(
+        page.locator("#dashboard-workers").get_by_role("button", name="Resume all processing", exact=True)
+    ).to_have_text("Resume")
     response = requests.post(
         f"{url}/api/loudness/jobs",
         headers=_HEADERS,

@@ -38,6 +38,7 @@
             state = {
                 savePromise: Promise.resolve(),
                 debounceTimers: new Map(),
+                pendingControls: new Set(),
                 lastSavedAt: null,
                 lastError: null,
                 saveFn: null,
@@ -103,9 +104,26 @@
         }
     }
 
+    // Marks which control a save is for, so the user sees WHICH field persisted rather than only a page-level state.
+    function _markControls(controls, phase) {
+        controls.forEach((el) => {
+            clearTimeout(el._autosaveRing);
+            el.classList.remove('is-saving', 'is-saved', 'is-save-error');
+            if (phase === 'saving') el.classList.add('is-saving');
+            if (phase === 'saved') {
+                el.classList.add('is-saved');
+                el._autosaveRing = setTimeout(() => el.classList.remove('is-saved'), 1000);
+            }
+            if (phase === 'error') el.classList.add('is-save-error');
+        });
+    }
+
     function _triggerSave(container) {
         const state = _getState(container);
         if (!state.saveFn) return;
+        const controls = Array.from(state.pendingControls);
+        state.pendingControls.clear();
+        _markControls(controls, 'saving');
 
         // Chain off the previous save (catch to break error propagation)
         // so we serialize per-container and never lose a later edit to an
@@ -116,6 +134,7 @@
                 await state.saveFn();
                 state.lastSavedAt = new Date();
                 state.lastError = null;
+                _markControls(controls, 'saved');
                 _render(state, 'saved');
                 // Fade to idle after a moment so the indicator doesn't
                 // stay "just saved" forever.
@@ -127,6 +146,7 @@
             } catch (err) {
                 console.error('Auto-save failed:', err);
                 state.lastError = err;
+                _markControls(controls, 'error');
                 _render(state, 'error');
             }
         });
@@ -140,6 +160,7 @@
             clearTimeout(timer);
             state.debounceTimers.delete(el);
         }
+        state.pendingControls.add(el);
         _triggerSave(container);
     }
 
@@ -149,6 +170,7 @@
         if (existing) clearTimeout(existing);
         const timer = setTimeout(() => {
             state.debounceTimers.delete(el);
+            state.pendingControls.add(el);
             _triggerSave(container);
         }, TEXT_DEBOUNCE_MS);
         state.debounceTimers.set(el, timer);
@@ -157,6 +179,7 @@
     function _render(state, phase) {
         const ind = state.indicator;
         if (!ind) return;
+        ind.dataset.phase = phase;
         const timeStr = state.lastSavedAt
             ? state.lastSavedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : '';
@@ -177,7 +200,7 @@
                 if (state.lastSavedAt) {
                     ind.className = 'autosave-indicator idle text-muted small';
                     ind.innerHTML =
-                        '<i class="bi bi-check-circle me-1"></i>Saved at ' + timeStr;
+                        '<i class="bi bi-check-circle me-1"></i>All changes saved';
                 } else {
                     ind.className = 'autosave-indicator idle';
                     ind.innerHTML = '';
@@ -190,7 +213,7 @@
                 ind.className = 'autosave-indicator error small';
                 ind.innerHTML =
                     '<a href="#" class="text-danger text-decoration-none" data-autosave-retry="1">' +
-                    '<i class="bi bi-exclamation-triangle me-1"></i>Save failed — click to retry' +
+                    '<i class="bi bi-exclamation-triangle me-1"></i>Not saved — Retry' +
                     '</a>';
                 // Attach retry handler
                 const link = ind.querySelector('[data-autosave-retry]');
