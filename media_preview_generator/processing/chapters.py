@@ -27,6 +27,7 @@ from .ffmpeg_runner import (
     DIAGNOSTIC_LIMIT_LINE,
     STALL_WATCHDOG_LINE,
     create_ffmpeg_runner,
+    has_hevc_parameter_failure,
     is_matroska_corruption_line,
 )
 from .generator import CancellationError, MediaInfo
@@ -54,12 +55,24 @@ class ChapterSourceCorruptionError(RuntimeError):
     """The demuxer identified malformed container data while extracting."""
 
 
+class ChapterDecoderCompatibilityError(RuntimeError):
+    """FFmpeg could not initialize the source's HEVC parameter sets."""
+
+
 def _check_fatal_extraction(returncode: int, stderr: list[str], start_ms: int) -> None:
-    """Stop a chapter set only for explicit container corruption or a watchdog stop."""
+    """Reject proven container/decoder failures and bounded controller stops."""
     if any(is_matroska_corruption_line(line) for line in stderr):
         raise ChapterSourceCorruptionError(
             f"Chapter extraction failed at {start_ms}ms: malformed Matroska container data; "
             "remaining chapter attempts stopped. Completed images are preserved."
+        )
+    if has_hevc_parameter_failure(stderr):
+        # A later decodable keyframe can produce rc=0 with the wrong image.
+        # Never treat that as proof that the requested timestamp was decoded.
+        raise ChapterDecoderCompatibilityError(
+            f"Chapter extraction failed at {start_ms}ms: HEVC video parameters could not be initialized by FFmpeg. "
+            "Automatic retries stopped; existing previews are preserved. "
+            "Check decoder compatibility or the source metadata before retrying."
         )
     if DIAGNOSTIC_LIMIT_LINE in stderr:
         raise ChapterExtractionStalledError(
@@ -477,11 +490,13 @@ def publish_chapters(
                 "Automatic retries stopped for this source; replace or repair the media and retry."
             )
         elif any(entry.get("recovery") for entry in images.values()):
-            failure_type = (
-                ChapterSourceCorruptionError
-                if any(entry.get("recovery", {}).get("cause") == "corruption" for entry in images.values())
-                else ChapterExtractionStalledError
-            )
+            causes = {entry.get("recovery", {}).get("cause") for entry in images.values()}
+            if "corruption" in causes:
+                failure_type = ChapterSourceCorruptionError
+            elif "decoder_compatibility" in causes:
+                failure_type = ChapterDecoderCompatibilityError
+            else:
+                failure_type = ChapterExtractionStalledError
             seek_failure = failure_type(
                 "Earlier chapter seeking failed on this source; no source-verified scrubber frame is available"
             )
@@ -511,14 +526,21 @@ def publish_chapters(
                             ffmpeg_threads_override=ffmpeg_threads_override,
                             media_info=media_info,
                         )
-                    except (ChapterSourceCorruptionError, ChapterExtractionStalledError) as exc:
+                    except (
+                        ChapterSourceCorruptionError,
+                        ChapterExtractionStalledError,
+                        ChapterDecoderCompatibilityError,
+                    ) as exc:
                         seek_failure = exc
                         recovery = recover_bif_frame(plan, chapter, staged)
                         if recovery is None:
                             raise
-                        recovery["cause"] = (
-                            "corruption" if isinstance(exc, ChapterSourceCorruptionError) else "seek_timeout"
-                        )
+                        if isinstance(exc, ChapterSourceCorruptionError):
+                            recovery["cause"] = "corruption"
+                        elif isinstance(exc, ChapterDecoderCompatibilityError):
+                            recovery["cause"] = "decoder_compatibility"
+                        else:
+                            recovery["cause"] = "seek_timeout"
                     revision = _revision(staged)
                     _check_source(plan)
                     os.replace(staged, plan.folder / f"chapter{chapter.index}.jpg")
@@ -531,7 +553,7 @@ def publish_chapters(
                     _write_manifest(plan, images)
             except CancellationError:
                 raise
-            except (ChapterExtractionStalledError, ChapterSourceCorruptionError):
+            except (ChapterExtractionStalledError, ChapterSourceCorruptionError, ChapterDecoderCompatibilityError):
                 failed += 1
                 processed += 1
                 raise

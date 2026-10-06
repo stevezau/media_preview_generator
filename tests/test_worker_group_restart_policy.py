@@ -318,6 +318,7 @@ def test_old_held_jobs_recover_without_changing_restart_preference(tmp_path, mon
     job.created_at = "2020-01-01T00:00:00+00:00"
     if state == "running":
         job.started_at = job.created_at
+        job.config["last_active_at"] = job.created_at
     before._persist_job(job)
     before._storage._conn.execute("UPDATE jobs SET created_at=? WHERE id=?", (job.created_at, job.id))
     before._storage._conn.commit()

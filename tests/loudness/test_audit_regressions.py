@@ -48,20 +48,20 @@ def test_restart_keeps_publishers_for_files_finished_before_interruption(lifecyc
     lifecycle.api_ready = True
     first = lifecycle.add_file("first.mkv")
     second = lifecycle.add_file("second.mkv")
-    parent = lifecycle.start([first])
-    # A restart recovers the same job and its first file's durable result,
-    # then enumerates both its finished and unfinished files again.
-    lifecycle.manager.merge_job_config(parent.id, {"file_paths": [first, second]})
+    lifecycle.corrupt.add((second, 1))
+    parent = lifecycle.start([first, second])
+    # Resume keeps the original selection and first file's durable provenance.
+    lifecycle.corrupt.clear()
     parent.status = JobStatus.PENDING
     parent.completed_at = None
 
     job.run_loudness_job(parent.id)
 
     assert parent.status is JobStatus.COMPLETED
-    assert parent.progress.outcome[job.WRITTEN] == 1
-    assert parent.progress.outcome[job.UP_TO_DATE] == 1
+    assert parent.progress.outcome[job.WRITTEN] == 2
+    assert not parent.progress.outcome[job.UP_TO_DATE]
     assert sum(parent.publishers[0]["counts"].values()) == 2
-    assert lifecycle.analyses == [(first, 1), (second, 1)]
+    assert lifecycle.analyses == [(first, 1), (second, 1), (second, 1)]
 
 
 def test_restart_rechecks_a_finished_path_replaced_before_resume(lifecycle: Lifecycle) -> None:  # noqa: F811

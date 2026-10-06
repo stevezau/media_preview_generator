@@ -113,6 +113,64 @@ def test_individual_frame_failure_does_not_abort_other_chapters(extraction, monk
     register.assert_not_called()
 
 
+HEVC_PARAMETER_FAILURE = [
+    "[hevc @ 0x123] VPS 0 does not exist",
+    "[hevc @ 0x123] SPS 0 does not exist.",
+    "[hevc @ 0x456] PPS id out of range: 0",
+    "[hevc @ 0x456] Skipping invalid undecodable NALU: 20",
+]
+
+
+@pytest.mark.parametrize("returncode", [0, 183, -9])
+def test_hevc_parameter_initialization_failure_is_nonretryable_even_with_success_exit(returncode):
+    with pytest.raises(RuntimeError, match="HEVC video parameters") as caught:
+        chapters._check_fatal_extraction(returncode, HEVC_PARAMETER_FAILURE, 377210)
+    assert not chapters._failure(caught.value).retryable
+    assert "corrupt" not in str(caught.value).lower()
+
+
+@pytest.mark.parametrize(
+    "diagnostics",
+    [
+        HEVC_PARAMETER_FAILURE[:2],
+        HEVC_PARAMETER_FAILURE[2:],
+        ["title: " + line for line in HEVC_PARAMETER_FAILURE],
+        [line.replace("[hevc", "[h264") for line in HEVC_PARAMETER_FAILURE],
+    ],
+)
+def test_partial_or_unrelated_decoder_diagnostics_do_not_claim_hevc_failure(diagnostics):
+    chapters._check_fatal_extraction(0, diagnostics, 377210)
+    with pytest.raises(chapters.ChapterExtractionStalledError):
+        chapters._check_fatal_extraction(-9, [*diagnostics, chapters.DIAGNOSTIC_LIMIT_LINE], 377210)
+
+
+def test_hevc_failure_stops_source_but_explicit_retry_rechecks_missing_chapters(extraction, monkeypatch):
+    plan, config, _media, register = extraction
+
+    def factory(**options):
+        def run(**_kwargs):
+            if options["chapter_start_ms"]:
+                return -9, 0, "", [*HEVC_PARAMETER_FAILURE, chapters.DIAGNOSTIC_LIMIT_LINE]
+            Image.new("RGB", (1280, 720)).save(options["chapter_output"], "JPEG")
+            return 0, 0, "", []
+
+        return run
+
+    runner = MagicMock(side_effect=factory)
+    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
+    first = chapters.publish_chapters(plan, config)
+    assert (first.status, first.completed, first.total, first.retryable) == ("failed", 1, 3, False)
+    assert "HEVC video parameters" in first.message
+    assert [call.kwargs["chapter_start_ms"] for call in runner.call_args_list] == [0, 1000]
+    ready = (plan.folder / "chapter1.jpg").read_bytes()
+    runner.reset_mock()
+    second = chapters.publish_chapters(plan, config)
+    assert not second.retryable and second.completed == 1
+    assert [call.kwargs["chapter_start_ms"] for call in runner.call_args_list] == [1000]
+    assert (plan.folder / "chapter1.jpg").read_bytes() == ready
+    register.assert_not_called()
+
+
 def test_watchdog_during_endpoint_fallback_still_aborts(extraction, monkeypatch):
     plan, config, media, _register = extraction
     runner = MagicMock(

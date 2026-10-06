@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import atexit
 import threading
+import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +42,8 @@ class PlexRefreshQueue:
         self._capacity = capacity
         self._idle_seconds = idle_seconds
         self._pending: OrderedDict[tuple[str, str], _Refresh] = OrderedDict()
+        self._inflight: set[tuple[str, str]] = set()
+        self._completed: OrderedDict[tuple[str, str], bool] = OrderedDict()
         self._condition = threading.Condition()
         self._worker: threading.Thread | None = None
         self._closed = False
@@ -68,6 +72,7 @@ class PlexRefreshQueue:
                 )
                 return False
             previous = self._pending.get(key)
+            self._completed.pop(key, None)
             self._pending[key] = _Refresh(
                 server,
                 canonical_path,
@@ -79,8 +84,39 @@ class PlexRefreshQueue:
             if self._worker is None:
                 self._worker = threading.Thread(target=self._run, name="plex-preview-notifications", daemon=True)
                 self._worker.start()
-            self._condition.notify()
+            self._condition.notify_all()
             return True
+
+    def wait(
+        self,
+        server_id: str,
+        canonical_path: str,
+        *,
+        required: bool = False,
+        timeout: float = 30.0,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Wait for this source's Analyze requests before registering chapters.
+
+        Missing completion evidence fails closed when this publication requested
+        Analyze. BIF-only callers never wait; failed requests retain their journal.
+        """
+        from .generator import CancellationError
+
+        key = (server_id, canonical_path)
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancel_check and cancel_check():
+                raise CancellationError("Chapter publication cancelled while waiting for Plex Analyze")
+            with self._condition:
+                if self._closed or threading.current_thread() is self._worker:
+                    return False
+                if key not in self._pending and key not in self._inflight:
+                    return self._completed.get(key, not required)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(remaining, 0.2))
 
     def _run(self) -> None:
         while True:
@@ -90,7 +126,9 @@ class PlexRefreshQueue:
                 if self._closed or not self._pending:
                     self._worker = None
                     return
-                _, request = self._pending.popitem(last=False)
+                key, request = self._pending.popitem(last=False)
+                self._inflight.add(key)
+            notified = False
             try:
                 notified = request.server.refresh_preview_metadata(request.canonical_path, request.item_id)
                 if notified is True and request.notification_token is not None:
@@ -108,6 +146,14 @@ class PlexRefreshQueue:
                     request.server.name,
                     exc,
                 )
+            finally:
+                with self._condition:
+                    self._inflight.discard(key)
+                    self._completed[key] = notified is True
+                    self._completed.move_to_end(key)
+                    while len(self._completed) > max(256, self._capacity):
+                        self._completed.popitem(last=False)
+                    self._condition.notify_all()
 
     def close(self) -> None:
         """Discard memory work; journal markers retry on a later job after restart."""
@@ -139,3 +185,15 @@ def enqueue_plex_refresh(
         notification_token=notification_token,
         source_fingerprint=source_fingerprint,
     )
+
+
+def wait_for_plex_refresh(
+    server_id: str,
+    canonical_path: str,
+    *,
+    required: bool = False,
+    timeout: float = 30.0,
+    cancel_check: Callable[[], bool] | None = None,
+) -> bool:
+    """Bound chapter publication behind the source's pending Analyze requests."""
+    return _queue.wait(server_id, canonical_path, required=required, timeout=timeout, cancel_check=cancel_check)

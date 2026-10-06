@@ -2020,13 +2020,14 @@ class TestPausedIntroCreditsJobsAfterAScheduleChanges:
     def test_pause_causes_are_independent_and_each_resume_clears_only_its_owner(self, jm):
         job = jm.create_job(library_name="x", config={"libraries": []}, kind="intro_credits")
         jm.start_job(job.id)
+        last_active_at = job.config["last_active_at"]
         assert jm.request_pause(job.id, by_schedule=True)
         assert jm.request_pause(job.id)
         assert job.config["pause_reasons"] == ["manual", "schedule"]
         assert jm.request_resume(job.id)
         assert job.paused and job.config["pause_reasons"] == ["schedule"]
         assert jm.request_resume(job.id, only_paused_by_schedule=True)
-        assert job.config == {"libraries": []} and not job.paused
+        assert job.config == {"libraries": [], "last_active_at": last_active_at} and not job.paused
 
     @pytest.mark.parametrize("ending", ["completed", "cancelled"])
     def test_the_pause_record_goes_when_a_job_paused_by_its_stop_time_ends(self, scheduler_manager, jm, ending):

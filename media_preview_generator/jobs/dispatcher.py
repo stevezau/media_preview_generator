@@ -168,7 +168,7 @@ class JobTracker:
             self.successful = int(carried_state.get("successful", 0))
             self.failed = int(carried_state.get("failed", 0))
             self.failed_paths = list(carried_state.get("failed_paths", []))
-            self.outcome_counts = dict(carried_state.get("outcome_counts", {}))
+            self.outcome_counts.update(carried_state.get("outcome_counts", {}))
             self.publishers_aggregate = dict(carried_state.get("publishers_aggregate", {}))
             self.cpu_fallback_files = int(carried_state.get("cpu_fallback_files", 0))
             self.total_items = len(items) + self.successful + self.failed

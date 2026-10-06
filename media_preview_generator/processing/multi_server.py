@@ -66,7 +66,7 @@ from .generator import (
     generate_images,
     gpu_fallback_announcement,
 )
-from .plex_refresh import enqueue_plex_refresh
+from .plex_refresh import enqueue_plex_refresh, wait_for_plex_refresh
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -127,6 +127,7 @@ class PublisherResult:
     message: str = ""
     frame_source: str = "extracted"  # one of: "extracted", "cache_hit", "output_existed"
     artifacts: dict = field(default_factory=dict)
+    plex_refresh_requested: bool = False
 
 
 @dataclass
@@ -1230,7 +1231,7 @@ def _refresh_after_publish(
     output_paths: list[Path],
     source_fingerprint: SourceFingerprint | None,
     new_output: bool = False,
-) -> None:
+) -> bool:
     """Notify Plex only for newly written or durably pending previews."""
     if server.type is ServerType.PLEX:
         marker = mark_plex_refresh_pending if new_output else get_plex_refresh_pending
@@ -1244,11 +1245,13 @@ def _refresh_after_publish(
                 notification_token=token,
                 source_fingerprint=source_fingerprint,
             )
-        return
+            return True
+        return False
     try:
         server.trigger_refresh(item_id=item_id, remote_path=canonical_path, deleted_paths=deleted_paths)
     except Exception as exc:
         logger.debug("trigger_refresh failed for {}: {}", server.name, exc)
+    return False
 
 
 def _publish_one(
@@ -1370,7 +1373,7 @@ def _publish_one(
         #       trigger_refresh so the registration completes and
         #       the next dispatch rolls over to plain
         #       SKIPPED_OUTPUT_EXISTS.
-        _refresh_after_publish(
+        refresh_requested = _refresh_after_publish(
             server,
             item_id,
             bundle.canonical_path,
@@ -1402,6 +1405,7 @@ def _publish_one(
             output_paths=output_paths,
             message="Output already exists (source unchanged)",
             frame_source="output_existed",
+            plex_refresh_requested=refresh_requested,
         )
 
     try:
@@ -1439,7 +1443,7 @@ def _publish_one(
         source_fingerprint=bundle.source_fingerprint,
     )
 
-    _refresh_after_publish(
+    refresh_requested = _refresh_after_publish(
         server,
         item_id,
         bundle.canonical_path,
@@ -1477,6 +1481,7 @@ def _publish_one(
         output_paths=output_paths,
         message="Published",
         frame_source=frame_source,
+        plex_refresh_requested=refresh_requested,
     )
 
 
@@ -1818,8 +1823,9 @@ def _process_canonical_path_previews(
                 # Cheap and idempotent: per-path nudge is a single POST
                 # with no rate limit, /Items/{id}/Refresh is a no-op
                 # when the item's metadata is current.
+                refresh_requested = False
                 if server.type is ServerType.PLEX or _server_needs_item_registration(server) or deleted_paths:
-                    _refresh_after_publish(
+                    refresh_requested = _refresh_after_publish(
                         server,
                         item_id,
                         canonical_path,
@@ -1840,6 +1846,7 @@ def _process_canonical_path_previews(
                                 f"this file yet — will retry to register the trickplay row."
                             ),
                             frame_source="output_existed",
+                            plex_refresh_requested=refresh_requested,
                         )
                     )
                 else:
@@ -1852,6 +1859,7 @@ def _process_canonical_path_previews(
                             output_paths=paths,
                             message="Output already exists (source unchanged)",
                             frame_source="output_existed",
+                            plex_refresh_requested=refresh_requested,
                         )
                     )
             # Even on the all-fresh fast path, run the orphan cleanup —
@@ -2460,6 +2468,13 @@ def process_canonical_path(
     if plans:
         preparing_chapters()
     needs_chapters = any(chapter_work_needed(plan, regenerate=force) for plan in plans.values())
+    if check_only and not needs_chapters:
+        needs_chapters = any(
+            publisher.plex_refresh_requested
+            or not wait_for_plex_refresh(publisher.server_id, result.canonical_path, timeout=0)
+            for publisher in result.publishers
+            if publisher.server_id in plans
+        )
     if check_only and (result.status is MultiServerStatus.NEEDS_GENERATION or needs_chapters):
         return MultiServerResult(
             result.canonical_path,
@@ -2491,17 +2506,51 @@ def process_canonical_path(
             if phase_callback:
                 phase_callback(f"Chapter thumbnails for {publisher.server_name}…")
             preparing_chapters()
-            had_work = chapter_work_needed(plan, regenerate=force)
-            outcome = publish_chapters(
-                plan,
-                config,
-                regenerate=force,
-                cancel_check=cancel_check,
-                pause_check=pause_check,
-                ffmpeg_threads_override=ffmpeg_threads_override,
-                chapter_progress_callback=chapter_progress_callback,
-            )
-            publisher_changed = had_work and outcome.status == "ready"
+            try:
+                refreshed = wait_for_plex_refresh(
+                    publisher.server_id,
+                    result.canonical_path,
+                    required=publisher.plex_refresh_requested,
+                    cancel_check=cancel_check,
+                )
+                pending = get_plex_refresh_pending(
+                    publisher.output_paths,
+                    result.canonical_path,
+                    publisher.server_id,
+                    source_fingerprint=plan.source_fingerprint,
+                )
+                if not refreshed or pending is not None:
+                    outcome = ChapterOutcome(
+                        "waiting", message="Waiting for Plex Analyze before chapter registration", retryable=True
+                    )
+                else:
+                    if get_source_fingerprint(result.canonical_path) != plan.source_fingerprint:
+                        raise SourceFileChangedError("Source changed while waiting for Plex Analyze")
+                    # Analyze replaces chapter references. Its completed request
+                    # must precede both the guarded snapshot and registration.
+                    plan = prepare_chapters(
+                        plan.server,
+                        enabled[publisher.server_id],
+                        result.canonical_path,
+                        config,
+                        item_id_hint=plan.target.rating_key if plan.target else None,
+                        cancel_check=cancel_check,
+                    )
+                    had_work = chapter_work_needed(plan, regenerate=force)
+                    outcome = publish_chapters(
+                        plan,
+                        config,
+                        regenerate=force,
+                        cancel_check=cancel_check,
+                        pause_check=pause_check,
+                        ffmpeg_threads_override=ffmpeg_threads_override,
+                        chapter_progress_callback=chapter_progress_callback,
+                    )
+                    publisher_changed = had_work and outcome.status == "ready"
+            except CancellationError:
+                raise
+            except (OSError, ValueError, RuntimeError, requests.RequestException) as exc:
+                outcome = _failure(exc)
             changed = changed or publisher_changed
         publisher.artifacts = {
             "bif": {"status": publisher.status.value},

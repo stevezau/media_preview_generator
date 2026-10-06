@@ -1920,6 +1920,7 @@ class TestRestart:
         preview = before.create_job(library_name="a", config={"webhook_paths": ["/data/tv/a.mkv"]})
         before.start_job(ic.id)
         before.start_job(preview.id)
+        expected_config = {**config, "last_active_at": ic.config["last_active_at"]}
 
         after = JobManager(config_dir=config_dir)
         monkeypatch.setattr(app_mod, "get_job_manager", lambda: after)
@@ -1952,7 +1953,7 @@ class TestRestart:
         assert runs == [ic.id]
         preview_threads.Thread.assert_called_once()
         assert len(after.get_all_jobs()) == 2
-        assert after.get_job(ic.id).config == config
+        assert after.get_job(ic.id).config == expected_config
         assert after.get_job(ic.id).kind == JOB_KIND_INTRO_CREDITS
 
 
@@ -3919,6 +3920,7 @@ class TestStartAsync:
         jm = JobManager(config_dir=str(tmp_path))
         job = jm.create_job(library_name="A", kind=JOB_KIND_INTRO_CREDITS, config={"libraries": [], "force": False})
         jm.start_job(job.id)
+        last_active_at = job.config["last_active_at"]
         # A stop tick between the resume's read of the config and its write (either writer).
         for writer in ("update_job_config", "merge_job_config"):
             real = getattr(jm, writer)
@@ -3934,6 +3936,7 @@ class TestStartAsync:
         assert jm.get_job(job.id).config == {
             "libraries": [],
             "force": True,
+            "last_active_at": last_active_at,
             PAUSED_BY_SCHEDULE: True,
             "pause_reasons": ["schedule"],
         }

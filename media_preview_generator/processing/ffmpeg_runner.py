@@ -57,12 +57,35 @@ _EBML_CORRUPTION = re.compile(
     r"|Length \d+ indicated by an EBML number's first byte .* exceeds max length \d+)",
     re.IGNORECASE,
 )
+_HEVC_PARAMETER_ERROR = re.compile(
+    r"^\[hevc(?:\s+@\s*(?:0x)?[0-9a-f]+)?\]\s*"
+    r"(?:(?P<missing>(?:VPS|SPS) \d+ does not exist\.?)"
+    r"|(?P<pps>PPS id out of range: \d+)"
+    r"|(?P<nalu>Skipping invalid undecodable NALU: \d+))$",
+    re.IGNORECASE,
+)
 
 
 def is_matroska_corruption_line(line: str) -> bool:
     """Identify explicit structural errors, not optional unknown EBML elements."""
     context = _MATROSKA_CONTEXT.match(line.strip())
     return bool(context and _EBML_CORRUPTION.match(context.group(1)))
+
+
+def hevc_parameter_error_kind(line: str) -> str | None:
+    """Recognize decoder-owned parameter errors without matching metadata text."""
+    match = _HEVC_PARAMETER_ERROR.fullmatch(line.strip())
+    return match.lastgroup if match else None
+
+
+def has_hevc_parameter_failure(lines: list[str]) -> bool:
+    """Require failed parameter initialization and undecodable packets together.
+
+    A single damaged packet or warning does not establish this failure. The
+    full signature also occurs with intact hvcC arrays in an order FFmpeg
+    cannot initialize, so it must not be described as a corrupt media file.
+    """
+    return {"missing", "pps", "nalu"}.issubset({hevc_parameter_error_kind(line) for line in lines})
 
 
 # Added to the stderr lines of a GPU run stopped at the decoder's own verdict that it can't decode the file on this
@@ -485,6 +508,7 @@ def create_ffmpeg_runner(
                 ffmpeg_output_lines.append(line)
                 if active_timeout_s is not None and (
                     is_matroska_corruption_line(line)
+                    or hevc_parameter_error_kind(line) is not None
                     or line
                     in {STALL_WATCHDOG_LINE, ACTIVE_TIMEOUT_LINE, PROCESS_EXIT_PENDING_LINE, DIAGNOSTIC_LIMIT_LINE}
                 ):
@@ -713,6 +737,13 @@ def create_ffmpeg_runner(
             ffmpeg_output_lines = sticky_diagnostics + [
                 line for line in ffmpeg_output_lines if line not in sticky_diagnostics
             ]
+            if stalled or (
+                proc.returncode == 0
+                and (DIAGNOSTIC_LIMIT_LINE in ffmpeg_output_lines or has_hevc_parameter_failure(ffmpeg_output_lines))
+            ):
+                # Controller stops still need their bounded decoder evidence.
+                # Keep the stop marker so SIGKILL is not mistaken for an OOM.
+                _save_ffmpeg_failure_log(video_file, proc.returncode, _without_metadata_tags(ffmpeg_output_lines))
         # Error logging (skip generic failure log when we stopped FFmpeg ourselves; already logged above)
         if proc.returncode != 0 and not stalled and not gpu_cant_decode:
             exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode, ffmpeg_output_lines)

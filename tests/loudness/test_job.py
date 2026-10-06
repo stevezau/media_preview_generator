@@ -215,7 +215,9 @@ def test_a_file_analysed_but_its_item_unmarked_is_marked_without_analysing_again
     with patch.object(job.analyze, "run") as run:
         outcome = job.process_item(_item(media), ctx=ctx)
     run.assert_not_called()
-    assert outcome.publisher_rows[0]["message"] == "item marked analysed"
+    assert outcome.outcome_key == job.UP_TO_DATE
+    assert outcome.publisher_rows[0]["status"] == job.UP_TO_DATE
+    assert outcome.publisher_rows[0]["message"] == "Existing loudness reused; item marked analysed"
     assert job.check_item(_item(media), ctx=ctx).outcome_key == job.UP_TO_DATE
 
 

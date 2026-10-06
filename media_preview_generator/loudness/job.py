@@ -19,10 +19,10 @@ from loguru import logger
 
 from ..config import load_config
 from ..job_kinds import JOB_KIND_LOUDNESS, ItemOutcome, KindHandlers
-from ..jobs.checkpoints import checkpoint_items, read_checkpoint
+from ..jobs.checkpoints import read_checkpoint
 from ..jobs.dispatcher import get_or_create_dispatcher
 from ..jobs.group_runtime import admission_options, runtime_capacity, wait_for_capacity
-from ..jobs.orchestrator import _build_multi_server_registry
+from ..jobs.orchestrator import _build_multi_server_registry, fold_publisher_rows_into_aggregate
 from ..jobs.parking import JobParked, park_if_unavailable
 from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
 from ..markers.job_runner import (
@@ -66,6 +66,7 @@ from .plex_db import (
     read_streams,
     write_stream,
 )
+from .resume import CompletionLedger, source_fingerprint
 from .settings import library_chosen, load_server_loudness, loudness_libraries
 
 LABEL = "Plex loudness"
@@ -327,9 +328,11 @@ def process_item(
             rows.append(_row(cfg, FAILED, "; ".join([*errors, *waiting]), retryable=bool(waiting)))
         elif waiting:
             rows.append(_row(cfg, WAITING, "; ".join(waiting)))
-        elif written or marked:
-            done = ([f"{written} stream(s)"] if written else []) + (["item marked analysed"] if marked else [])
+        elif written:
+            done = [f"{written} stream(s)"] + (["item marked analysed"] if marked else [])
             rows.append(_row(cfg, WRITTEN, ", ".join(done)))
+        elif marked:
+            rows.append(_row(cfg, UP_TO_DATE, "Existing loudness reused; item marked analysed"))
         else:
             rows.append(_row(cfg, UP_TO_DATE))
     if not rows:
@@ -347,7 +350,10 @@ def _settle(rows: list[dict]) -> ItemOutcome:
 
 
 def kind_handlers(
-    ctx: LoudnessContext, *, active_files_callback: Callable[[str, bool], None] | None = None
+    ctx: LoudnessContext,
+    *,
+    active_files_callback: Callable[[str, bool], None] | None = None,
+    completion_ledger: CompletionLedger | None = None,
 ) -> KindHandlers:
     """The loudness kind's handlers for one job."""
 
@@ -356,7 +362,11 @@ def kind_handlers(
         if active_files_callback:
             active_files_callback(path, True)
         try:
-            return fn(item, ctx=ctx, **kwargs)
+            before = source_fingerprint(item) if completion_ledger is not None else None
+            result = fn(item, ctx=ctx, **kwargs)
+            if completion_ledger is not None and result is not None:
+                completion_ledger.record(item, result, before)
+            return result
         finally:
             if active_files_callback:
                 active_files_callback(path, False)
@@ -443,7 +453,37 @@ def _run_loudness_pass(job_id: str) -> bool | None:
         if chain_head:
             jm.update_progress(chain_head, **activity)
 
+    def acquire_slot() -> bool:
+        while True:
+            if not wait_for_capacity(
+                jm,
+                job_id,
+                JOB_KIND_LOUDNESS,
+                cancel_check,
+                lambda: jm.is_pause_requested(job_id) or get_settings_manager().processing_paused,
+            ):
+                return False
+            slot["priority"] = live_priority()
+            jm.note_slot_wait(job_id)
+            if not get_job_gate().acquire(
+                priority=slot["priority"],
+                cancel_check=cancel_check,
+                on_wait=on_wait,
+                **admission_options(jm, job_id, JOB_KIND_LOUDNESS),
+            ):
+                return False
+            slot["held"] = True
+            if (
+                runtime_capacity(JOB_KIND_LOUDNESS)["open"]
+                and not jm.is_pause_requested(job_id)
+                and not get_settings_manager().processing_paused
+            ):
+                return True
+            get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
+            slot["held"] = False
+
     dispatcher = None
+    completion_ledger = None
     try:
         with failure_scope(job_id):
             try:
@@ -460,35 +500,9 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 if job.paused and not hold_pause_from_before_restart(job_id, cancel_check):
                     jm.cancel_job(job_id)
                     return
-                while True:
-                    if not wait_for_capacity(
-                        jm,
-                        job_id,
-                        JOB_KIND_LOUDNESS,
-                        cancel_check,
-                        lambda: jm.is_pause_requested(job_id) or get_settings_manager().processing_paused,
-                    ):
-                        jm.cancel_job(job_id)
-                        return
-                    slot["priority"] = live_priority()
-                    jm.note_slot_wait(job_id)
-                    if not get_job_gate().acquire(
-                        priority=slot["priority"],
-                        cancel_check=cancel_check,
-                        on_wait=on_wait,
-                        **admission_options(jm, job_id, JOB_KIND_LOUDNESS),
-                    ):
-                        jm.cancel_job(job_id)
-                        return
-                    slot["held"] = True
-                    if (
-                        runtime_capacity(JOB_KIND_LOUDNESS)["open"]
-                        and not jm.is_pause_requested(job_id)
-                        and not get_settings_manager().processing_paused
-                    ):
-                        break
-                    get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
-                    slot["held"] = False
+                if not acquire_slot():
+                    jm.cancel_job(job_id)
+                    return
                 with logger.contextualize(**{JOB_LOG_SKIP: True}):
                     if cfg.get("parked_checkpoint") or job.config.get("resource_wait"):
                         jm.resume_parked_job(job_id)
@@ -501,16 +515,11 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 registry = _build_multi_server_registry(config)
                 if registry is None:
                     raise RuntimeError("Couldn't load the media servers configuration")
-                checkpoint = (
+                if cfg.get("parked_checkpoint"):
                     read_checkpoint(jm.config_dir, job_id, cfg["parked_checkpoint"])
-                    if cfg.get("parked_checkpoint")
-                    else None
-                )
-                saved = checkpoint.get("bookkeeping", {}) if checkpoint else {}
-                if checkpoint:
-                    items = checkpoint_items(checkpoint)
-                    warnings, sender_paths = saved.get("warnings", []), saved.get("sender_paths", {})
-                else:
+                completion_ledger = CompletionLedger(jm.config_dir, job_id)
+                selection = completion_ledger.selection()
+                if selection is None:
                     items, warnings, sender_paths = build_items(
                         cfg,
                         registry=registry,
@@ -520,22 +529,21 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         libraries=loudness_libraries,
                         label=LABEL,
                     )
+                    if not cancel_check():
+                        completion_ledger.save_selection(items, warnings, sender_paths)
+                else:
+                    items, warnings, sender_paths = selection
+                cfg["retry_sender_paths"] = {**cfg.get("retry_sender_paths", {}), **sender_paths}
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
-                if not checkpoint:
-                    # A path's saved result cannot prove its bytes or Plex metadata
-                    # survived a restart. Native checks rebuild this attempt safely.
-                    jm._delete_file_results(job_id)
-                    jm.set_publishers(job_id, [])
-                    jm.set_job_outcome(job_id, {})
                 logger.info("{}: {} file(s) to check", LABEL, len(items))
                 if not items:
                     _finish(jm, job_id, {}, ["No files to check.", *warnings])
                     if chain_head:
                         _finish_chain(jm, chain_head, cfg, warnings, attempt_id=job_id)
                     return
-                carried = saved.get("carried", {}) if checkpoint else {}
+                carried = {}
                 ctx = LoudnessContext(
                     registry=registry,
                     ffmpeg=getattr(config, "ffmpeg_path", None) or "ffmpeg",
@@ -548,10 +556,51 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         event_times=jm._storage.original_job_times() if jm._storage is not None else {},
                     ),
                 )
+
+                def validate_saved(item: ProcessableItem) -> ItemOutcome | None:
+                    if (
+                        jm.is_pause_requested(job_id)
+                        or get_settings_manager().processing_paused
+                        or not runtime_capacity(JOB_KIND_LOUDNESS)["open"]
+                    ):
+                        if slot["held"]:
+                            get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
+                            slot["held"] = False
+                        if not acquire_slot():
+                            raise InterruptedError("Loudness resume cancelled")
+                    return check_item(item, ctx=ctx)
+
+                items, carried_state = completion_ledger.restore(
+                    items,
+                    check=validate_saved,
+                    cancel_check=cancel_check,
+                    progress=lambda restored, total: jm.update_progress(
+                        job_id,
+                        current_item=f"Validating saved loudness progress… {restored}/{total}",
+                    ),
+                )
+                if cancel_check():
+                    jm.cancel_job(job_id)
+                    return
+                _restore_file_history(jm, job_id, chain_head, cfg, completion_ledger)
+                jm.set_publishers(job_id, list(carried_state["publishers_aggregate"].values()))
+                jm.set_job_outcome(job_id, carried_state["outcome_counts"])
+                restored = carried_state["successful"]
+                total = len(items) + restored
+                progress_callback(restored, total, f"Resuming loudness: {restored}/{total} already completed")
+                if restored:
+                    logger.info("{}: restored {} completed file(s); {} remaining", LABEL, restored, len(items))
+                if not items:
+                    _finish(jm, job_id, carried_state["outcome_counts"], warnings)
+                    if chain_head:
+                        _finish_chain(
+                            jm, chain_head, cfg, warnings, attempt_id=job_id, completion_ledger=completion_ledger
+                        )
+                    return
                 # A sender's files (a webhook, its retries) can reach the disk after the job starts; a listing's won't.
                 retry_missing = bool(cfg.get("file_paths")) and sent_by_a_sender(cfg.get("source"))
-                to_retry: list[str] = saved.get("to_retry", [])
-                retry_previous: dict[str, dict] = saved.get("retry_previous", {})
+                to_retry: list[str] = []
+                retry_previous: dict[str, dict] = {}
                 retry_lock = threading.Lock()
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
@@ -616,8 +665,10 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     },
                     priority=live_priority(),
                     kind=JOB_KIND_LOUDNESS,
-                    handlers=kind_handlers(ctx, active_files_callback=active_files_callback),
-                    **({"carried_state": checkpoint["state"]} if checkpoint else {}),
+                    handlers=kind_handlers(
+                        ctx, active_files_callback=active_files_callback, completion_ledger=completion_ledger
+                    ),
+                    carried_state=carried_state,
                 )
                 current = live_priority()
                 if tracker.priority != current:
@@ -651,6 +702,8 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     park_check=park_check,
                 )
                 result = tracker.get_result()
+                if completion_ledger.error:
+                    raise RuntimeError(completion_ledger.error)
                 outcome = dict(result["outcome"])
                 for key, count in carried.items():
                     outcome[key] = outcome.get(key, 0) + count
@@ -659,18 +712,22 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     jm.cancel_job(job_id)
                     return
                 if chain_head:
-                    _recount_chain(jm, chain_head, cfg, job_id)
+                    _recount_chain(jm, chain_head, cfg, job_id, completion_ledger=completion_ledger)
                 retried = bool(to_retry) and _queue_retry(job, cfg, to_retry, sender_paths, retry_previous)
                 if to_retry and not retried:
                     warnings.append(f"{len(set(to_retry))} file(s) still waiting for Plex or the disk; not tried again")
                 _finish(jm, job_id, outcome, warnings)
                 if chain_head:
                     if not retried:
-                        _finish_chain(jm, chain_head, cfg, warnings, attempt_id=job_id)
+                        _finish_chain(
+                            jm, chain_head, cfg, warnings, attempt_id=job_id, completion_ledger=completion_ledger
+                        )
             finally:
                 clear_failures()
     except JobParked:
         return True
+    except InterruptedError:
+        jm.cancel_job(job_id)
     except Exception as exc:
         detail = redact_secrets(f"{type(exc).__name__}: {exc}")
         logger.error("Loudness job {} failed: {}", job_id, detail)
@@ -682,10 +739,12 @@ def _run_loudness_pass(job_id: str) -> bool | None:
         try:
             jm.complete_job(job_id, error=detail)
             if chain_head:
-                _finish_chain(jm, chain_head, cfg, [detail], attempt_id=job_id)
+                _finish_chain(jm, chain_head, cfg, [detail], attempt_id=job_id, completion_ledger=completion_ledger)
         except Exception as complete_exc:
             logger.warning("Could not mark loudness job {} failed: {}", job_id, complete_exc)
     finally:
+        if completion_ledger is not None:
+            completion_ledger.close()
         if chain_head and job.status is JobStatus.CANCELLED:
             jm.cancel_job(chain_head)
         if slot["held"]:
@@ -827,7 +886,54 @@ def _chain_state(jm, head_id: str, cfg: dict, state: str, **kwargs) -> None:
     )
 
 
-def _recount_chain(jm, head_id: str, cfg: dict | None = None, attempt_id: str | None = None) -> dict[str, int]:
+def _publisher_rows(row: dict) -> list[dict]:
+    return [
+        {
+            "server_id": server["id"],
+            "server_name": server["name"],
+            "server_type": server["type"],
+            "status": server["status"],
+        }
+        for server in row.get("servers", [])
+    ]
+
+
+def _restore_file_history(jm, job_id: str, head_id: str | None, cfg: dict, ledger: CompletionLedger) -> None:
+    """Repair a crash between the durable completion and its display-only callback."""
+    restored = ledger.current_results()
+    if not restored:
+        return
+    for target_id in dict.fromkeys([job_id, *([head_id] if head_id else [])]):
+        existing = {row["file"]: row for row in jm.get_file_results(target_id) if row.get("file")}
+        for row in restored:
+            sender = cfg.get("retry_sender_paths", {}).get(row["file"], row["file"])
+            original = cfg.get("retry_baseline", {}).get("files", {}).get(sender, {})
+            path = original.get("file", sender if head_id else row["file"])
+            previous = existing.get(path)
+            if previous and previous.get("outcome") == row["outcome"]:
+                normalized = chain.previous_result(path, previous["outcome"], previous.get("servers"))
+                if normalized["servers"] == row["servers"]:
+                    continue
+            jm.record_file_result(
+                target_id,
+                path,
+                row["outcome"],
+                row.get("reason", ""),
+                "Resume",
+                servers=_publisher_rows(row),
+                server_messages=True,
+                uncapped=bool(previous) or bool(head_id),
+            )
+
+
+def _recount_chain(
+    jm,
+    head_id: str,
+    cfg: dict | None = None,
+    attempt_id: str | None = None,
+    *,
+    completion_ledger: CompletionLedger | None = None,
+) -> dict[str, int]:
     """Replace attempt counts with every file's latest result on the original job."""
     baseline = (cfg or {}).get("retry_baseline")
     if baseline is None and (cfg or {}).get("retry_baseline_in_input"):
@@ -838,7 +944,9 @@ def _recount_chain(jm, head_id: str, cfg: dict | None = None, attempt_id: str | 
     if baseline is not None and attempt_id:
         outcome, publishers = chain.replace_results(
             baseline,
-            jm.get_file_results(attempt_id, dedup_by_path=True),
+            completion_ledger.current_results()
+            if completion_ledger is not None
+            else jm.get_file_results(attempt_id, dedup_by_path=True),
             cfg.get("retry_sender_paths", {}),
         )
         jm.set_job_outcome(head_id, outcome)
@@ -849,8 +957,20 @@ def _recount_chain(jm, head_id: str, cfg: dict | None = None, attempt_id: str | 
     if any(not row.get("file") for row in rows):
         head = jm.get_job(head_id)
         return dict(head.progress.outcome or {})
+    if completion_ledger is not None:
+        latest = {row["file"]: row for row in rows}
+        sender_paths = (cfg or {}).get("retry_sender_paths", {})
+        for row in completion_ledger.current_results():
+            path = sender_paths.get(row["file"], row["file"])
+            latest[path] = {**row, "file": path}
+        rows = list(latest.values())
     outcome = dict(Counter(row["outcome"] for row in rows))
     jm.set_job_outcome(head_id, outcome)
+    if completion_ledger is not None:
+        publishers = {}
+        for row in rows:
+            fold_publisher_rows_into_aggregate(publishers, _publisher_rows(row))
+        jm.set_publishers(head_id, list(publishers.values()))
     return outcome
 
 
@@ -878,9 +998,17 @@ def _finish(jm, job_id: str, outcome: dict[str, int], warnings: list[str]) -> No
     )
 
 
-def _finish_chain(jm, head_id: str, cfg: dict, warnings: list[str], *, attempt_id: str | None = None) -> None:
+def _finish_chain(
+    jm,
+    head_id: str,
+    cfg: dict,
+    warnings: list[str],
+    *,
+    attempt_id: str | None = None,
+    completion_ledger: CompletionLedger | None = None,
+) -> None:
     """Finish from all files, preserving earlier failures outside this retry attempt."""
-    outcome = _recount_chain(jm, head_id, cfg, attempt_id)
+    outcome = _recount_chain(jm, head_id, cfg, attempt_id, completion_ledger=completion_ledger)
     successes, reason = _completion(outcome, warnings)
     _chain_state(jm, head_id, cfg, "exhausted" if reason else "completed", successes=successes, reason=reason)
 

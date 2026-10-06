@@ -214,7 +214,8 @@ def test_recovery_rejects_unbounded_output_dimensions(bound_bif, monkeypatch):
     resize.assert_not_called()
 
 
-def test_one_failed_seek_switches_remaining_chapters_to_safe_recovery(bound_bif, monkeypatch):
+@pytest.mark.parametrize("decoder_failure", [False, True])
+def test_one_failed_seek_switches_remaining_chapters_to_safe_recovery(bound_bif, monkeypatch, decoder_failure):
     plan, _bif, _output = bound_bif
     plan.target = SimpleNamespace(
         chapters=[
@@ -236,7 +237,16 @@ def test_one_failed_seek_switches_remaining_chapters_to_safe_recovery(bound_bif,
             video_tracks=[SimpleNamespace(duration=6000, transfer_characteristics=None, hdr_format=None)]
         ),
     )
-    runner = MagicMock(return_value=lambda **kw: (-9, 0, "", [chapters.STALL_WATCHDOG_LINE]))
+    diagnostics = (
+        [
+            "[hevc @ 0x123] VPS 0 does not exist",
+            "[hevc @ 0x123] PPS id out of range: 0",
+            "[hevc @ 0x123] Skipping invalid undecodable NALU: 20",
+        ]
+        if decoder_failure
+        else [chapters.STALL_WATCHDOG_LINE]
+    )
+    runner = MagicMock(return_value=lambda **kw: (-9, 0, "", diagnostics))
     monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
     register = MagicMock()
     monkeypatch.setattr("media_preview_generator.servers.plex_chapters.register_chapters", register)
@@ -246,7 +256,8 @@ def test_one_failed_seek_switches_remaining_chapters_to_safe_recovery(bound_bif,
     assert runner.call_args.kwargs["chapter_start_ms"] == 0
     assert runner.call_args.kwargs["active_timeout_s"] == 300
     runner.assert_called_once()
-    assert all(entry["recovery"]["cause"] == "seek_timeout" for entry in chapters._fresh_images(plan).values())
+    expected_cause = "decoder_compatibility" if decoder_failure else "seek_timeout"
+    assert all(entry["recovery"]["cause"] == expected_cause for entry in chapters._fresh_images(plan).values())
 
 
 def test_known_bad_index_without_strong_bif_binding_stops_without_automatic_retry(bound_bif, monkeypatch):

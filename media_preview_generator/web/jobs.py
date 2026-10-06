@@ -133,6 +133,8 @@ SLOT_WAIT_SINCE = "slot_wait_since"
 # How often a waiting job's ``SLOT_WAIT_SINCE`` is refreshed: a write to jobs.db per job per minute at most, and far
 # inside the revival window's 5-minute minimum.
 SLOT_WAIT_HEARTBEAT_S = 60.0
+LAST_ACTIVE_AT = "last_active_at"
+ACTIVITY_HEARTBEAT_S = 60.0
 
 
 def _now() -> datetime:
@@ -830,6 +832,7 @@ class JobManager:
 
         # Background retention timer
         self._retention_timer: threading.Timer | None = None
+        self._activity_timer: threading.Timer | None = None
         self._closed = False
         self._interrupted_jobs: list[Job] = []
         self._restored_capacity_chain_ids: set[str] = set()
@@ -901,6 +904,7 @@ class JobManager:
         needs_resave: list[Job] = []
         retry_interrupted_count = 0
         legacy_retry_ids: list[str] = []
+        boot_time = _now()
         for job in stored_jobs:
             # Legacy ``retry-<sha256(path)[:16]>`` rows are obsolete after
             # the chain rewrite (the chain is now the originating
@@ -915,6 +919,19 @@ class JobManager:
             if job.id.startswith("retry-"):
                 legacy_retry_ids.append(job.id)
                 continue
+
+            if job.status == JobStatus.RUNNING:
+                # Older releases had no heartbeat. Only this job's pre-existing
+                # activity log can extend its age; boot-time database writes cannot.
+                if LAST_ACTIVE_AT not in job.config:
+                    try:
+                        activity = datetime.fromtimestamp(
+                            os.path.getmtime(os.path.join(self._job_logs_dir, f"{job.id}.log")), UTC
+                        )
+                        if activity <= boot_time:
+                            job.config[LAST_ACTIVE_AT] = activity.isoformat()
+                    except OSError:
+                        pass
 
             # Chain Jobs (originating dispatch with is_retry_chain=True)
             # in PENDING/RUNNING get RECOVERED for resume rather than
@@ -1329,8 +1346,40 @@ class JobManager:
             if not self._closed:
                 self._start_retention_timer()
 
+    def _start_activity_timer(self) -> None:
+        """Keep crash recovery alive for long tasks with no per-file progress yet."""
+        if self._activity_timer is not None:
+            self._activity_timer.cancel()
+        timer = threading.Timer(ACTIVITY_HEARTBEAT_S, self._activity_tick)
+        timer.daemon = True
+        self._activity_timer = timer
+        timer.start()
+
+    def _activity_tick(self) -> None:
+        """Persist running-job liveness at most once per minute per job."""
+        with self._lock:
+            if self._closed:
+                return
+            now = _now()
+            for job_id in tuple(self._running_job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or job.status != JobStatus.RUNNING:
+                    continue
+                last = _parse_utc(job.config.get(LAST_ACTIVE_AT))
+                if last is not None and 0 <= (now - last).total_seconds() < ACTIVITY_HEARTBEAT_S:
+                    continue
+                job.config[LAST_ACTIVE_AT] = now.isoformat()
+                self._persist_job(job)
+            if any(
+                self._jobs.get(job_id) and self._jobs[job_id].status == JobStatus.RUNNING
+                for job_id in self._running_job_ids
+            ):
+                self._start_activity_timer()
+            else:
+                self._activity_timer = None
+
     def close(self) -> None:
-        """Stop the hourly retention timer and close jobs.db. Safe to call more than once.
+        """Stop the background timers and close jobs.db. Safe to call more than once.
 
         The timer thread holds this manager, so a manager that's been replaced but never closed stays alive, with
         jobs.db and its WAL and shared-memory files open, for as long as the process runs. After close the manager
@@ -1339,6 +1388,9 @@ class JobManager:
         with self._lock:
             self._closed = True
             self._stop_retention_timer()
+            if self._activity_timer is not None:
+                self._activity_timer.cancel()
+                self._activity_timer = None
             if self._storage is not None:
                 self._storage.close()
                 self._storage = None
@@ -1504,6 +1556,9 @@ class JobManager:
                 # A job waiting for a gate slot is as old as the last time it was seen waiting (the runners refresh it
                 # while they wait), so a job queued behind a long scan is aged by the downtime only.
                 ref_time = max(ref_time, _parse_utc((job.config or {}).get(SLOT_WAIT_SINCE)) or ref_time)
+                activity = _parse_utc((job.config or {}).get(LAST_ACTIVE_AT))
+                if activity is not None and activity <= _now():
+                    ref_time = max(ref_time, activity)
                 held = processing_paused or bool(job_pause_reasons(job))
                 if ref_time < cutoff and not held and not (job.config or {}).get("resource_wait"):
                     logger.debug("Skipping revive of job {} — too old (ref={})", job.id[:8], ref_str)
@@ -1548,7 +1603,16 @@ class JobManager:
             job.error = None
             job.completed_at = None
             self._set_pause_reasons(job, job_pause_reasons(job))
-            if not (job.config or {}).get("parked_checkpoint"):
+            if job.kind == JOB_KIND_LOUDNESS:
+                # Keep committed counters visible while the runner validates the
+                # saved files against current source bytes and native Plex data.
+                job.progress.current_files = []
+                job.progress.current_file = ""
+                job.progress.workers = []
+                job.progress.speed = "0.0x"
+                if job.progress.processed_items:
+                    job.progress.current_item = "Saved loudness progress; native validation pending"
+            elif not (job.config or {}).get("parked_checkpoint"):
                 job.progress = JobProgress()
 
         self.add_log(
@@ -2102,7 +2166,10 @@ class JobManager:
                 job.status = JobStatus.RUNNING
                 self._set_pause_reasons(job, job_pause_reasons(job))
                 job.started_at = job.started_at or datetime.now(UTC).isoformat()
+                job.config[LAST_ACTIVE_AT] = _now().isoformat()
                 self._running_job_ids.add(job_id)
+                if self._activity_timer is None and not self._closed:
+                    self._start_activity_timer()
                 self._persist_job(job)
                 self._emit_event("job_started", job.to_dict())
                 started = True
@@ -3034,7 +3101,13 @@ class JobManager:
         return deduped
 
     def _delete_file_results(self, job_id: str) -> None:
-        """Remove the per-file results JSONL file for a job. Caller must hold _lock."""
+        """Remove file results and durable loudness continuation. Caller must hold _lock."""
+        from ..loudness.resume import delete_ledger
+
+        try:
+            delete_ledger(self.config_dir, job_id)
+        except OSError as exc:
+            logger.warning("Could not remove loudness continuation for {}: {}", job_id, exc)
         path = self._file_results_path(job_id)
         try:
             if os.path.isfile(path):

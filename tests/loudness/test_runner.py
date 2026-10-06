@@ -16,9 +16,10 @@ from media_preview_generator.web.jobs import JobStatus
 
 
 @pytest.fixture
-def run(monkeypatch):
+def run(monkeypatch, tmp_path):
     """run_loudness_job with its collaborators faked; returns what they saw."""
     jm = MagicMock()
+    jm.config_dir = str(tmp_path)
     jm.get_job.return_value = SimpleNamespace(
         id="j1",
         priority=3,

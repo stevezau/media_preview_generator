@@ -1280,8 +1280,10 @@ class TestUpdateJobConfigIfPending:
         if state == "completed":
             jm.complete_job(job.id)
 
+        expected = dict(job.config)
+        assert expected["file_paths"] == ["/a"]
         assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is False
-        assert jm.get_job(job.id).config == {"file_paths": ["/a"]}
+        assert jm.get_job(job.id).config == expected
 
     def test_a_missing_job_is_refused(self, config_dir):
         jm = JobManager(config_dir=config_dir)
@@ -1301,6 +1303,7 @@ class TestMergeJobConfig:
 
         expected = {
             "reconcile": True,
+            "last_active_at": job.config["last_active_at"],
             "paused_by_schedule": True,
             "pause_reasons": ["schedule"],
             "check_servers_listing": {"files": ["/a"]},

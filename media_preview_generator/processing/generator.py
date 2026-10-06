@@ -762,7 +762,7 @@ def _extract_ffmpeg_error_summary(stderr_lines: list[str]) -> str:
     return candidates[-1]
 
 
-def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: list[str]) -> None:
+def _save_ffmpeg_failure_log(video_file: str, returncode: int | None, stderr_lines: list[str]) -> None:
     """Save FFmpeg stderr output to a per-file log for post-mortem debugging.
 
     Files are written to {CONFIG_DIR}/logs/ffmpeg_failures/ with a sanitised
@@ -772,7 +772,7 @@ def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: lis
 
     Args:
         video_file: Path to the media file that failed.
-        returncode: FFmpeg exit code.
+        returncode: FFmpeg exit code, or None while termination is pending.
         stderr_lines: Complete FFmpeg stderr output lines.
 
     """
@@ -788,7 +788,9 @@ def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: lis
     log_path = os.path.join(log_dir, f"{timestamp}_{base}.log")
 
     try:
-        exit_diagnosis = _diagnose_ffmpeg_exit_code(returncode, stderr_lines)
+        exit_diagnosis = (
+            "process_exit_pending" if returncode is None else _diagnose_ffmpeg_exit_code(returncode, stderr_lines)
+        )
         kept_lines = stderr_lines
         omitted = len(stderr_lines) - 2 * _FAILURE_LOG_EDGE_LINES
         if omitted > 0:
@@ -801,7 +803,7 @@ def _save_ffmpeg_failure_log(video_file: str, returncode: int, stderr_lines: lis
             fh.write(f"file: {video_file}\n")
             fh.write(f"exit_code: {returncode}\n")
             fh.write(f"exit_diagnosis: {exit_diagnosis}\n")
-            fh.write(f"signal_killed: {_is_signal_killed(returncode)}\n")
+            fh.write(f"signal_killed: {None if returncode is None else _is_signal_killed(returncode)}\n")
             fh.write(f"lines: {len(stderr_lines)}\n")
             fh.write("-" * 72 + "\n")
             for line in kept_lines:

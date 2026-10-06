@@ -23,6 +23,7 @@ def managed_process(tmp_path, monkeypatch):
         finished_after=80,
         stderr=None,
         output=lambda: "[matroska,webm] Invalid data found when processing input\n",
+        save_log=generator._save_ffmpeg_failure_log,
     )
     process = MagicMock(pid=4242, returncode=None)
 
@@ -233,6 +234,48 @@ def test_chapter_diagnostic_tail_preserves_earlier_fatal_corruption(managed_proc
 
     with pytest.raises(ChapterSourceCorruptionError):
         _check_fatal_extraction(code, stderr, 4000)
+
+
+def test_controller_stop_saves_bounded_hevc_diagnostics_before_temporary_log_is_removed(managed_process, monkeypatch):
+    _clock, state, _process, kwargs = managed_process
+    signature = [
+        "[hevc @ 0x123] VPS 0 does not exist",
+        "[hevc @ 0x123] SPS 0 does not exist.",
+        "[hevc @ 0x456] PPS id out of range: 0",
+        "[hevc @ 0x456] Skipping invalid undecodable NALU: 20",
+    ]
+    state.output = lambda: ("\n".join(signature) + "\n" if state.polls == 1 else "") + "noise\n" * 600
+    save = MagicMock()
+    monkeypatch.setattr(generator, "_save_ffmpeg_failure_log", save)
+    run = ffmpeg_runner.create_ffmpeg_runner(**kwargs, active_timeout_s=2.0)
+
+    code, _elapsed, _speed, stderr = run(use_skip=False)
+
+    assert code == -9
+    assert all(line in stderr for line in signature)
+    assert ffmpeg_runner.ACTIVE_TIMEOUT_LINE in stderr
+    assert len(stderr) <= 268 and max(map(len, stderr)) <= 8192
+    save.assert_called_once_with(kwargs["video_file"], code, stderr)
+
+
+def test_pending_process_exit_still_saves_honest_bounded_failure_log(managed_process, monkeypatch, tmp_path):
+    _clock, state, process, kwargs = managed_process
+    process.kill.side_effect = lambda: None
+    process.wait.side_effect = subprocess.TimeoutExpired("ffmpeg", 5)
+    monkeypatch.setattr(ffmpeg_runner, "threading", SimpleNamespace(get_ident=lambda: 1, Thread=MagicMock()))
+    monkeypatch.setattr(generator, "_save_ffmpeg_failure_log", state.save_log)
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    run = ffmpeg_runner.create_ffmpeg_runner(**kwargs, active_timeout_s=2.0)
+
+    code, _elapsed, _speed, stderr = run(use_skip=False)
+
+    assert code == -signal.SIGKILL and process.returncode is None
+    (saved,) = (tmp_path / "logs" / "ffmpeg_failures").glob("*.log")
+    text = saved.read_text()
+    assert "exit_code: None" in text and "exit_diagnosis: process_exit_pending" in text
+    assert ffmpeg_runner.PROCESS_EXIT_PENDING_LINE in text
+    assert ffmpeg_runner.ACTIVE_TIMEOUT_LINE in text
+    assert saved.stat().st_size < 65536
 
 
 def test_success_with_large_unread_diagnostics_is_not_accepted(managed_process):

@@ -2882,15 +2882,25 @@ class TestDefaultRetryCount:
         ]
 
 
-def test_proven_chapter_corruption_settles_with_warning_without_spawning_retry(app, no_retry_wait):
+@pytest.mark.parametrize("decoder_failure", [False, True])
+def test_proven_chapter_corruption_settles_with_warning_without_spawning_retry(app, no_retry_wait, decoder_failure):
     from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
-    from media_preview_generator.processing.chapters import ChapterSourceCorruptionError, _failure
+    from media_preview_generator.processing.chapters import (
+        ChapterDecoderCompatibilityError,
+        ChapterSourceCorruptionError,
+        _failure,
+    )
     from media_preview_generator.processing.generator import ProcessingResult, _notify_file_result
     from media_preview_generator.web.jobs import JobStatus, get_job_manager
     from media_preview_generator.web.routes.job_runner import _start_job_async
 
     path = "/data/movies/Invalid seek index.mkv"
-    chapter = _failure(ChapterSourceCorruptionError("Matroska seek index points to invalid Cues data"), 8, 36)
+    failure = (
+        ChapterDecoderCompatibilityError("HEVC video parameters could not be initialized by FFmpeg")
+        if decoder_failure
+        else ChapterSourceCorruptionError("Matroska seek index points to invalid Cues data")
+    )
+    chapter = _failure(failure, 8, 36)
     row = {
         "server_id": "plex-1",
         "server_name": "Plex Main",
