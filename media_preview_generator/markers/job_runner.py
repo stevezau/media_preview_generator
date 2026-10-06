@@ -16,7 +16,7 @@ from ..config import load_config
 from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..jobs.checkpoints import checkpoint_items, read_checkpoint
 from ..jobs.dispatcher import get_or_create_dispatcher
-from ..jobs.group_runtime import refresh_worker_groups, runtime_capacity, wait_for_capacity
+from ..jobs.group_runtime import admission_options, refresh_worker_groups, runtime_capacity, wait_for_capacity
 from ..jobs.orchestrator import _build_multi_server_registry
 from ..jobs.parking import JobParked, park_if_unavailable
 from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
@@ -1581,7 +1581,7 @@ def wait_releasing_slot_while_paused(
             park_check()
         paused = jm.is_pause_requested(job_id)
         if paused and slot["held"]:
-            gate.release(slot["priority"])
+            gate.release(slot["priority"], **({"kind": slot["kind"]} if slot.get("kind") else {}))
             slot["held"] = False
             jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
         elif not paused and not slot["held"]:
@@ -1591,6 +1591,7 @@ def wait_releasing_slot_while_paused(
                 priority=priority,
                 cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id) or tracker.done_event.is_set(),
                 on_wait=on_wait,
+                **admission_options(jm, job_id, slot.get("kind")),
             ):
                 slot["priority"] = priority
                 slot["held"] = True
@@ -1650,7 +1651,7 @@ def _cancel_check_releasing_slot_while_paused(
         while not cancel_check():
             paused = jm.is_pause_requested(job_id)
             if paused and slot["held"]:
-                gate.release(slot["priority"])
+                gate.release(slot["priority"], **({"kind": slot["kind"]} if slot.get("kind") else {}))
                 slot["held"] = False
                 jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
             elif not paused and not slot["held"]:
@@ -1659,6 +1660,7 @@ def _cancel_check_releasing_slot_while_paused(
                     priority=priority,
                     cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id),
                     on_wait=on_wait,
+                    **admission_options(jm, job_id, slot.get("kind")),
                 ):
                     slot["priority"] = priority
                     slot["held"] = True
@@ -1749,7 +1751,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
     )
     # "priority" is the value the slot was admitted at: the user can re-prioritise the job, and release() must
     # settle at the admitted value.
-    slot = {"held": False, "priority": job.priority}
+    slot = {"held": False, "priority": job.priority, "kind": JOB_KIND_INTRO_CREDITS}
     cfg = dict(job.config or {})
     dispatcher = None
     # Set once the job completes: the fingerprint cache sweep starts after the slot is given back, with the servers'
@@ -1813,7 +1815,10 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     slot["priority"] = live_priority()
                     jm.note_slot_wait(job_id)
                     if not get_job_gate().acquire(
-                        priority=slot["priority"], cancel_check=cancel_check, on_wait=on_wait
+                        priority=slot["priority"],
+                        cancel_check=cancel_check,
+                        on_wait=on_wait,
+                        **admission_options(jm, job_id, JOB_KIND_INTRO_CREDITS),
                     ):
                         jm.cancel_job(job_id)
                         return
@@ -1824,7 +1829,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         and not get_settings_manager().processing_paused
                     ):
                         break
-                    get_job_gate().release(slot["priority"])
+                    get_job_gate().release(slot["priority"], kind=JOB_KIND_INTRO_CREDITS)
                     slot["held"] = False
                 # The job's own start line (start_line) follows once its files are listed.
                 with logger.contextualize(**{JOB_LOG_SKIP: True}):
@@ -2204,7 +2209,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         # waiter admits quickly, then per-job flags, then worker cards once nothing else is running.
         if slot["held"]:
             try:
-                get_job_gate().release(slot["priority"])
+                get_job_gate().release(slot["priority"], kind=JOB_KIND_INTRO_CREDITS)
             except Exception as exc:
                 logger.debug("Could not release job gate for {}: {}", job_id, exc)
             slot["held"] = False

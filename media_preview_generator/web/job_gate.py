@@ -46,6 +46,8 @@ import itertools
 import threading
 from collections.abc import Callable
 
+from loguru import logger
+
 from .jobs import PRIORITY_HIGH, PRIORITY_NORMAL
 
 #: Slots held back for priority-1 jobs when the cap allows it (see the
@@ -98,8 +100,15 @@ class JobGate:
     _CAP_DEFAULT = 3
     _POLL_SECONDS = 1.0  # How often a waiter re-checks cancel_check.
 
-    def __init__(self, cap_provider: Callable[[], int]) -> None:
+    def __init__(
+        self, cap_provider: Callable[[], int], kind_capacity_provider: Callable[[str], int | None] | None = None
+    ) -> None:
         self._cap_provider = cap_provider
+        self._kind_capacity_provider = kind_capacity_provider
+        self._kind_limits: dict[str, int | None] = {}
+        self._kind_active: dict[tuple[str, int], int] = {}
+        self._waiter_kinds: dict[object, str | None] = {}
+        self._capacity_errors: set[str] = set()
         self._cond = threading.Condition()
         self._active = 0
         # Slots held by priority-1 jobs. Tracked separately so a running
@@ -148,86 +157,122 @@ class JobGate:
             return True
         return (self._active - self._active_high) < self.effective_cap(priority, cap)
 
+    def _kind_limit(self, kind: str | None) -> int | None:
+        """Read live policy outside the gate lock; unavailable policy admits no work."""
+        if kind is None or self._kind_capacity_provider is None:
+            return None
+        try:
+            value = self._kind_capacity_provider(kind)
+            limit = None if value is None else max(0, int(value))
+        except Exception:
+            if kind not in self._capacity_errors:
+                logger.warning("Could not read {} worker capacity; keeping its jobs queued", kind)
+                self._capacity_errors.add(kind)
+            return 0
+        self._capacity_errors.discard(kind)
+        return limit
+
+    def _kind_can_admit(self, kind: str | None, priority: int) -> bool:
+        if kind is None:
+            return True
+        limit = self._kind_limits.get(kind, 0)
+        if limit is None:
+            return True
+        if priority > PRIORITY_HIGH:
+            ordinary = sum(
+                n
+                for (held_kind, held_priority), n in self._kind_active.items()
+                if held_kind == kind and held_priority > PRIORITY_HIGH
+            )
+            # Preserve ordinary room for another kind. A strictly higher
+            # priority may escape this ceiling: at the default cap of three,
+            # a normal webhook must still reach a low-priority scan's worker.
+            ceiling = max(1, self.effective_cap(priority) - 1)
+            higher_priority_escape = ordinary and not any(
+                n and held_kind == kind and PRIORITY_HIGH < held_priority <= priority
+                for (held_kind, held_priority), n in self._kind_active.items()
+            )
+            if ordinary >= ceiling and not higher_priority_escape:
+                return False
+        # Higher-priority work must still reach the dispatcher's item-level
+        # priority queue while a long lower-priority scan holds admission.
+        active = sum(
+            n
+            for (held_kind, held_priority), n in self._kind_active.items()
+            if held_kind == kind and held_priority <= priority
+        )
+        return active < limit
+
+    def _next_eligible(self, cap: int) -> object | None:
+        eligible = (
+            entry
+            for entry in self._heap
+            if self._can_admit(entry[0], cap) and self._kind_can_admit(self._waiter_kinds[entry[2]], entry[0])
+        )
+        return min(eligible, default=(0, 0, None))[2]
+
     def acquire(
         self,
         priority: int,
         cancel_check: Callable[[], bool],
         on_wait: Callable[[int, int, int], None] | None = None,
+        *,
+        kind: str | None = None,
+        on_resource_wait: Callable[[], None] | None = None,
     ) -> bool:
-        """Block until admitted or cancelled.
+        """Admit by priority/FIFO among jobs with compatible worker capacity.
 
-        Args:
-            priority: Lower int = higher precedence (1=high, 2=normal,
-                3=low). Matches ``job.priority``.
-            cancel_check: Called on every poll tick. Returning True
-                makes this acquire return False without consuming a
-                slot and wakes peers so the next eligible waiter can
-                reconsider.
-            on_wait: Optional ``(active_count, cap, effective_cap)``
-                callback fired before each ``Condition.wait`` (including
-                the very first one) while the waiter is queued, with the
-                gate lock released. Used by ``job_runner`` to update the
-                job's ``current_item`` so the dashboard shows a live
-                "Queued — X of Y busy" message. ``effective_cap`` is below
-                ``cap`` when the high-priority reservation is what's
-                blocking this waiter, letting the message say so. Fires at
-                most once per wake tick.
+        Kind limits count equal-or-higher-priority admissions. This bounds
+        same-priority contention without preventing urgent work from reaching
+        the shared dispatcher. Global limits and the HIGH reservation still
+        apply. Release with the same captured priority and kind.
 
-        Returns:
-            True if admitted (caller must eventually call ``release``
-            with this same priority), False if cancelled (no slot
-            consumed, no release needed).
+        Capacity reads and wait callbacks run outside the condition lock.
+        Unknown legacy capacity is unlimited; zero or unreadable capacity waits.
+        A cancelled wait removes its queued entry without consuming a slot.
         """
         token = object()
         with self._cond:
             heapq.heappush(self._heap, (priority, next(self._seq), token))
+            self._waiter_kinds[token] = kind
+        try:
             while True:
-                cap = self._cap()
-                # Admission: we're at the head of the priority heap AND
-                # a slot is available to our priority. Pop under the
-                # lock so a concurrent acquire/release can't race us
-                # onto the wrong side of the _active counter.
-                if self._heap and self._heap[0][2] is token and self._can_admit(priority, cap):
-                    heapq.heappop(self._heap)
-                    self._active += 1
-                    if priority <= PRIORITY_HIGH:
-                        self._active_high += 1
-                    return True
-                if cancel_check():
-                    # Remove our token from the heap so peers don't
-                    # spin waking up trying to admit a no-longer-
-                    # present waiter. O(n) but n is bounded by the
-                    # number of queued jobs (<100 realistically).
-                    self._heap = [entry for entry in self._heap if entry[2] is not token]
-                    heapq.heapify(self._heap)
-                    self._cond.notify_all()
-                    return False
-                if on_wait is not None:
-                    # Fires BEFORE every wait (including the first) so
-                    # the dashboard flips to "Queued — …" the moment a
-                    # waiter realises it can't admit, instead of after
-                    # the first 1s poll tick. It runs with _cond
-                    # released: it writes the job's queued state (a
-                    # database upsert and a SocketIO emit), and every
-                    # other acquire and release would otherwise wait
-                    # behind that I/O.
+                limit = self._kind_limit(kind)
+                with self._cond:
+                    if kind is not None:
+                        self._kind_limits[kind] = limit
+                    cap = self._cap()
+                    if self._next_eligible(cap) is token:
+                        self._heap = [entry for entry in self._heap if entry[2] is not token]
+                        heapq.heapify(self._heap)
+                        self._active += 1
+                        if priority <= PRIORITY_HIGH:
+                            self._active_high += 1
+                        if kind is not None:
+                            key = (kind, priority)
+                            self._kind_active[key] = self._kind_active.get(key, 0) + 1
+                        return True
+                    if cancel_check():
+                        return False
+                    resource_blocked = not self._kind_can_admit(kind, priority)
                     active, effective_cap = self._active, self.effective_cap(priority, cap)
-                    self._cond.release()
-                    try:
-                        on_wait(active, cap, effective_cap)
-                    finally:
-                        self._cond.acquire()
-                    # A release while the lock was down notified no one
-                    # (we weren't waiting yet): look again before
-                    # sleeping, so a freed slot isn't left for a poll.
-                    if self._heap and self._heap[0][2] is token and self._can_admit(priority, self._cap()):
+                if resource_blocked and on_resource_wait is not None:
+                    on_resource_wait()
+                elif on_wait is not None:
+                    on_wait(active, cap, effective_cap)
+                with self._cond:
+                    # A release during a callback must not cost an extra poll.
+                    if self._next_eligible(self._cap()) is token:
                         continue
-                # The 1s poll is our cancel-responsiveness budget.
-                # notify_all from release() wakes us sooner — this is
-                # the belt-and-braces path.
-                self._cond.wait(timeout=self._POLL_SECONDS)
+                    self._cond.wait(timeout=self._POLL_SECONDS)
+        finally:
+            with self._cond:
+                self._heap = [entry for entry in self._heap if entry[2] is not token]
+                heapq.heapify(self._heap)
+                self._waiter_kinds.pop(token, None)
+                self._cond.notify_all()
 
-    def release(self, priority: int = PRIORITY_NORMAL) -> None:
+    def release(self, priority: int = PRIORITY_NORMAL, *, kind: str | None = None) -> None:
         """Release a slot and wake every waiter so the priority-heap
         head can admit itself.
 
@@ -246,6 +291,9 @@ class JobGate:
         """
         with self._cond:
             self._active = max(0, self._active - 1)
+            if kind is not None:
+                key = (kind, priority)
+                self._kind_active[key] = max(0, self._kind_active.get(key, 0) - 1)
             if priority <= PRIORITY_HIGH:
                 self._active_high = max(0, self._active_high - 1)
             self._cond.notify_all()
@@ -276,9 +324,12 @@ def get_job_gate() -> JobGate:
     global _gate
     with _gate_lock:
         if _gate is None:
+            from ..jobs.group_runtime import admission_capacity
             from .settings_manager import get_settings_manager
 
-            _gate = JobGate(lambda: get_settings_manager().get("max_concurrent_jobs", 3))
+            _gate = JobGate(
+                lambda: get_settings_manager().get("max_concurrent_jobs", 3), kind_capacity_provider=admission_capacity
+            )
         return _gate
 
 

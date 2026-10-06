@@ -536,7 +536,7 @@ def _submit_loudness_follow_up(
     """Queue Plex loudness for eligible files enumerated by a preview run. Never raises:
     a failure here must not cost the files their Intro & Credits follow-up.
 
-    Each bounded job waits for its own preview and all overlapping Intro & Credits first attempts.
+    Each job waits for its own preview and all overlapping Intro & Credits first attempts.
     """
     try:
         from ..loudness.job import create_loudness_job
@@ -588,7 +588,8 @@ def _queue_loudness_paths(
     pin: str | None,
     create_job: Callable[..., Job],
 ) -> None:
-    """Persist bounded follow-ups, deduplicating only this preview's own work under the creation lock."""
+    """Persist follow-ups, deduplicating only this preview's own work under the creation lock."""
+    from ..loudness.inputs import read_file_paths
     from ..loudness.job import MAX_FOLLOW_UP_DEPENDENCIES
 
     queued: set[str] = set()
@@ -596,7 +597,7 @@ def _queue_loudness_paths(
         cfg = earlier.config or {}
         dependencies = [cfg.get("follows_job_id"), *(cfg.get("follows_job_ids") or [])]
         if earlier.kind == JOB_KIND_LOUDNESS and preview_job_id in dependencies and server_pin(cfg) in (None, pin):
-            for path in cfg.get("file_paths") or []:
+            for path in read_file_paths(jm.config_dir, cfg):
                 queued |= _local_candidates(path, configs)
     # Different previews need their own barriers: a prior pending job could start before this preview finishes.
     rest = [path for path in paths if not (_local_candidates(path, configs) & queued)]
@@ -640,7 +641,7 @@ def _queue_loudness_paths(
             # Never drop a barrier to force work through an overloaded queue.
             logger.warning("Too many preceding jobs to queue loudness for preview {}", preview_job_id[:8])
             continue
-        if batch and (len(batch) == MAX_RETRY_FILES or len(dependencies | needed) > MAX_FOLLOW_UP_DEPENDENCIES):
+        if batch and len(dependencies | needed) > MAX_FOLLOW_UP_DEPENDENCIES:
             batches.append((batch, dependencies))
             batch, dependencies = [], set(common)
         batch.append(path)

@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from ..job_kinds import JOB_KIND_PREVIEWS, parse_job_kind
+from ..job_kinds import JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS, parse_job_kind
 from ..utils import redact_secrets
 
 # Message shown in UI when a job's log file was removed by retention policy.
@@ -80,6 +80,10 @@ RETRY_STATE_CONFIG_KEYS: tuple[str, ...] = (
     "retry_basename",
     "retry_delay",
     "retry_attempt",
+    "retry_not_before",
+    "retry_baseline",
+    "retry_baseline_in_input",
+    "retry_sender_paths",
     "retry_max_attempts",
     "retry_reason",
     "last_outcome",
@@ -670,10 +674,36 @@ class JobStorage:
         with self._lock:
             self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
+    def references_file_input(self, reference: str) -> bool:
+        """Keep inputs used by durable records even if an earlier deletion failed."""
+        with self._lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM jobs WHERE json_extract(config_json, '$.file_paths_ref') = ? LIMIT 1",
+                    (reference,),
+                ).fetchone()
+                is not None
+            )
+
     def all_jobs(self) -> list["Job"]:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM jobs ORDER BY created_at ASC").fetchall()
         return [self._row_to_job(r) for r in rows]
+
+    def original_job_times(self) -> dict[str, str]:
+        """Read immutable creation times without loading each job's full config.
+
+        Retry heads change their in-memory creation time for display ordering;
+        upsert deliberately preserves this column. Missing evidence must never
+        turn a missing source into a confirmed deletion.
+        """
+        try:
+            with self._lock:
+                rows = self._conn.execute("SELECT id, created_at FROM jobs").fetchall()
+            return {row["id"]: row["created_at"] for row in rows}
+        except sqlite3.Error:
+            logger.warning("Could not read original job times; missing sources will keep retrying")
+            return {}
 
     def row_count(self) -> int:
         with self._lock:
@@ -1105,12 +1135,23 @@ class JobManager:
                 e,
             )
 
-    def _persist_delete(self, job_id: str) -> None:
+    def _persist_delete(self, job_id: str, *, input_reference: str | None = None) -> None:
         """Delete a single job's row from disk."""
         if self._storage is None:
             return
         try:
             self._storage.delete(job_id)
+            if (
+                input_reference
+                and not any((job.config or {}).get("file_paths_ref") == input_reference for job in self._jobs.values())
+                and not self._storage.references_file_input(input_reference)
+            ):
+                from ..loudness.inputs import delete_file_paths
+
+                try:
+                    delete_file_paths(self.config_dir, input_reference)
+                except (OSError, ValueError):
+                    logger.warning("Could not remove a deleted job's loudness file selection: {}", job_id)
         except sqlite3.Error as e:
             logger.error(
                 "Could not delete job {} from {} ({}: {}).",
@@ -1217,8 +1258,8 @@ class JobManager:
                 self._delete_job_log_file(job_id)
                 self._delete_file_results(job_id)
                 self._job_logs.pop(job_id, None)
-                del self._jobs[job_id]
-                self._persist_delete(job_id)
+                removed = self._jobs.pop(job_id)
+                self._persist_delete(job_id, input_reference=(removed.config or {}).get("file_paths_ref"))
             logger.info("Retention: removed {} job(s) older than {} day(s)", len(expired_ids), days)
             # Reclaim the freelist pages those deletes produced so the
             # .db file shrinks back to live-data size. Cheap with
@@ -1330,6 +1371,10 @@ class JobManager:
             kind: Job kind — previews or intro_credits.
         """
         with self._lock:
+            if parse_job_kind(kind) == JOB_KIND_LOUDNESS:
+                from ..loudness.inputs import store_file_paths
+
+                config = store_file_paths(self.config_dir, config or {})
             job = Job(
                 id=str(uuid.uuid4()),
                 library_id=library_id,
@@ -2510,8 +2555,8 @@ class JobManager:
                 self._delete_job_log_file(jid)
                 self._delete_file_results(jid)
                 self._job_logs.pop(jid, None)
-                del self._jobs[jid]
-                self._persist_delete(jid)
+                removed = self._jobs.pop(jid)
+                self._persist_delete(jid, input_reference=(removed.config or {}).get("file_paths_ref"))
                 deleted_ids.append(jid)
         for jid in deleted_ids:
             self._emit_event("job_deleted", {"job_id": jid})
@@ -2545,8 +2590,8 @@ class JobManager:
                 self._delete_job_log_file(job_id)
                 self._delete_file_results(job_id)
                 self._job_logs.pop(job_id, None)
-                del self._jobs[job_id]
-                self._persist_delete(job_id)
+                removed = self._jobs.pop(job_id)
+                self._persist_delete(job_id, input_reference=(removed.config or {}).get("file_paths_ref"))
             if to_delete:
                 self._emit_event("jobs_cleared", {"count": len(to_delete)})
             return len(to_delete)

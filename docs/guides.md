@@ -98,7 +98,17 @@ In the top bar, **Automation** and **Settings** open their page when clicked, an
 > High job overtakes a running full scan without cancelling or pausing it — the
 > scan simply stops being fed new files until the High job drains. Whenever the
 > concurrent-job cap is above 1, the last slot is reserved for High-priority
-> work so an incoming webhook never has to wait out a multi-hour scan.
+> work so a High-priority webhook can enter while ordinary scans hold their slots.
+
+Admission also accounts for the open workers compatible with each job type. Excess jobs of the same type and priority
+wait without consuming active slots, and eligible work of another type can pass them. Higher-priority work
+can still enter ahead of lower-priority scans, within the overall job limit. These limits control active jobs;
+worker groups control how many files run at once. A retry keeps its saved due time across an app restart
+instead of starting its full delay again.
+
+A full-library schedule keeps one unfinished job for the same selection and settings. Later schedule ticks
+reuse that job while it is queued, running, paused, waiting for workers, or retrying. They do not clear a manual
+pause. A finished job or a changed selection can start a new run.
 
 ### Choosing media for a library scan
 
@@ -176,19 +186,20 @@ Each pick becomes a removable chip; **Start Job** processes the selected targets
 
 **Job details:**
 
-**All jobs** keeps queued, running and finished work in one list. **Job details** expands a job in place.
+**Jobs** opens on **Unfinished** work: pending and running jobs, including manually paused jobs and retry heads.
+Use the **Status** filter to select **All jobs and history**, **Completed**, **Failed** or **Cancelled** when reviewing finished work. **Job details** expands a job in place.
 **Results recorded so far** groups outcomes by server, with file issues, detection sources and CPU fallback
 information when available. A pending or retried job may already have saved results; these counts are not a
 claim that the current queue entry has finished. **Current activity** shows the current item when the job
 provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
 An expanded queue row shows up to five requested paths. **View all** opens the Files tab, where **Requested paths** lists the complete selection with search and pagination, separately from **Recorded outcomes**. Requested paths do not imply completed processing. File Inspector links open the Inspector tool in a new tab.
-The full worker grid remains above the list, grouped by worker group and including idle workers. Queue search and status filters apply across the full history; job statistics remain totals for all visible jobs.
+The full worker grid remains above the list, grouped by worker group and including idle workers. Queue search and status filters apply before pagination; job statistics remain totals for all visible jobs. Retry rows distinguish files **checked** from a completed job. Intro & Credits and loudness companions are indented beneath their originating job when both are on the current page.
 
 **Pause / Resume (global):**
 
 - **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
 - **Resume Processing** — Clears your manual global pause. Quiet hours can still hold processing until their window ends.
-- One global control appears beside **Clear Jobs** in **All jobs**. State is persisted and survives restarts.
+- One global control appears beside **Clear Jobs** in **Jobs**. State is persisted and survives restarts.
 - Each pending or running job has its own **Pause** and **Resume**, including Previews, Intro & Credits and loudness.
   Pausing one job does not pause other jobs. Manual and schedule holds are independent: resuming by hand cannot
   clear a schedule stop, and a schedule start cannot clear a manual pause. Global **Resume Processing** does not
@@ -301,6 +312,9 @@ scrubber previews and from Intro & Credits markers. This feature currently suppo
 with one media version and one part per item. Multiple versions and multipart items report an unsupported result.
 Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
 without that base layer, such as Profile 5, reports unsupported chapters while preserving the scrubber result.
+HDR chapter images are tone-mapped to SDR and converted to full-range JPEG samples. If extraction confirms
+that no frame exists more than one second beyond the source's known duration, the result identifies an invalid
+chapter timestamp rather than repeatedly retrying it. The app preserves the source and Plex's chapter timings.
 
 1. Open **Servers → your Plex → Configure → Processing → Chapter thumbnails**, enable **Generate chapter thumbnails**, and save. It is off by
    default. Enabling it lets this app write chapter images and update their references in Plex's database; it does
@@ -339,9 +353,29 @@ It can appear beside **Scrubber already existed**, but does not identify which p
 The job's retry details show whether another attempt is actually scheduled. Retry eligibility depends on the failure
 and your retry policy. Chapter retries reuse completed output, so they do not need to regenerate a current scrubber
 preview.
-If chapter extraction stops making progress or reports an invalid Matroska container, the app stops the remaining
-chapter attempts for that file and keeps completed images. A stalled attempt can be retried under your retry policy;
-an invalid container needs a repaired or replaced source. Partial chapter sets are not registered with Plex.
+If chapter seeking stalls or a bounded check proves a damaged Matroska seek index, the app first tries to recover
+missing chapter images from its existing scrubber previews. Recovery requires the app's journal to match the
+current source fingerprint. A BIF created by Plex without that journal is not sufficient proof and is not used.
+The selected frame must fall inside the chapter and no more than five seconds after its start. Recovered images
+are lower resolution; the result says so, and the saved chapter manifest records their original dimensions and
+timestamps. The app never repairs, remuxes or rewrites the source video.
+
+Once a stalled or corrupt seek triggers recovery, the remaining chapter work for that source uses recovery rather
+than repeatedly waiting on FFmpeg. A chapter extraction has a five-minute active-time limit; time spent paused does not consume it.
+Completed images are preserved. If no verified recovery frame exists, the file keeps an explicit chapter failure.
+A temporary stall can follow the configured retry policy; proven container corruption does not automatically
+repeat the same failed work. Partial chapter sets are not registered with Plex.
+
+Publication still checks the exact source and chapter snapshot in a database transaction. If only Plex's source
+update timestamp changed, the app can reread once and retry after checking the unchanged source fingerprint.
+Changed chapter references, timings or source identities remain conflicts; the app does not overwrite a concurrent
+publisher's new references. **Ready** also requires Plex's API to expose the expected image references.
+
+The Jobs page reports how many historical jobs ended with chapter issues. **Review chapter warnings** opens those
+saved results even though they are no longer in **Unfinished**. This is a history count, not a claim that those files
+are still broken today. A completed job with warnings can have working scrubber previews and incomplete chapters.
+Its details offer **Re-run job**, which starts a new job with the original full selection and settings, preserving
+the old result; it is not limited to failed files. **Retry now** applies only while an existing retry is pending.
 Plex's normal file checks can rewrite chapter image references even when its own generation is set to **Never**.
 A later Previews job reconciles those references without decoding current images again. This is separate from
 Plex generating and replacing the images itself.

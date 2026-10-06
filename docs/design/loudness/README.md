@@ -4,7 +4,7 @@
 
 Loudness is a separate job kind in the existing dispatcher. It uses the shared
 worker pool, admission limits, priorities, pause/cancel controls, persistence and
-bounded follow-up retries. Audio analysis scans a whole track, so it should not
+follow-up retries with the shared attempt limit. Audio analysis scans a whole track, so it should not
 delay the completion of the short chapter-thumbnail work in a Previews job.
 
 The chapter-thumbnail publisher is the model for safe Plex integration:
@@ -37,10 +37,27 @@ Intro & Credits jobs using the existing first-pass dependency semantics. The sin
 compatible with persisted jobs, while the complete dependency list prevents a joined marker job from letting
 loudness start before its own preview has finished. Chapter thumbnails remain in the Previews job.
 
-Follow-ups are bounded to 500 files and 500 dependency IDs per job. Repeated submission for the same preview
+An automatic follow-up keeps the selected files in one job, like a manual loudness job; the selected-file count
+does not split the initial library scan into visible jobs. Follow-ups split only when their combined predecessor
+list would exceed 500 dependency IDs, preserving every file's barriers. Repeated submission for the same preview
 does not queue the same file again, including after a restart. Separate preview jobs retain their own follow-ups
 so an earlier runnable job cannot bypass a later preview's dependency. Existing native results make a repeated
 loudness check inexpensive.
+
+Selections larger than 500 paths are saved once as immutable, content-addressed inputs under the app's config
+directory. Job updates carry only their reference and count. Restarts and reruns read the exact saved selection;
+a missing or corrupt input fails the job instead of expanding its scope to all libraries. Inputs remain available
+until the last referencing job is deleted, including cloned reruns.
+
+An interrupted job rechecks its selected files against their current source and Plex metadata before counting
+them as finished. Native-complete files skip analysis; previous Files-panel rows alone cannot establish that a
+file is still current. Each resumed attempt rebuilds its file and per-server totals. Deliberately parked jobs
+retain their existing checkpoint accounting and unfinished work.
+
+An absent selected path is retired as `skipped_source_gone` only when a saved Sonarr or Radarr import explicitly
+reported that exact path deleted, after applying the selected server's path mappings. A path that exists now is
+still checked normally. Other missing files retain their existing failure or retry behavior; filenames alone
+cannot establish that a release was replaced.
 
 ## Detection and measurement
 
@@ -84,7 +101,8 @@ Change only the supported loudness fields and stream update timestamp. Mark the
 item complete only after all relevant audio streams have complete measurements
 and its source snapshot still matches. Read back committed data and require the
 Plex API to expose the same values and normalization capability on the exact
-part and stream.
+part and stream. Recheck the local source fingerprint after that API response as well, so a replacement during
+verification cannot be reported as successfully analysed.
 
 The undo journal binds records to the exact database file and target identity.
 Write a durable intent before committing SQLite, then a durable commit receipt.
@@ -115,12 +133,13 @@ with a warning. Permanent failures remain visible when other files recover.
 Cancellation, Retry now and recovery after restart operate on the same chain.
 Hidden attempts do not announce successful completion independently of it.
 
-Each retry stores immutable aggregate counts and the previous outcomes of at
-most 500 selected files. Original sender paths keep that accounting stable when
+Each retry stores immutable aggregate counts and the previous outcomes of all
+its unresolved files. Large selections and their accounting share the immutable input file;
+job updates retain only its reference. Original sender paths keep that accounting stable when
 a missing file later resolves through a different mount. Replaying the latest
 attempt results replaces those previous counts, rather than incrementing totals,
 so restart recovery is idempotent. The initial Files history remains capped;
-only the bounded retry results bypass that cap. Neither aggregate accuracy nor
+retry results bypass that cap. Neither aggregate accuracy nor
 the final per-server status depends on which initial history rows were retained.
 
 Automatic loudness deduplication is scoped to the originating preview job and

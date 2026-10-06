@@ -21,7 +21,14 @@ from ..markers.probe import ProbeError, ProbeStalledError, ProbeTimeoutError, ff
 from ..markers.publishers.base import Capability, PublishError
 from ..output.plex_bundle import PlexBundleAdapter
 from ..output.plex_hash import SourceFileChangedError, SourceFingerprint, calculate_plex_hash, get_source_fingerprint
-from .ffmpeg_runner import STALL_WATCHDOG_LINE, create_ffmpeg_runner
+from .chapter_recovery import inspect_seek_index, recover_bif_frame
+from .ffmpeg_runner import (
+    ACTIVE_TIMEOUT_LINE,
+    DIAGNOSTIC_LIMIT_LINE,
+    STALL_WATCHDOG_LINE,
+    create_ffmpeg_runner,
+    is_matroska_corruption_line,
+)
 from .generator import CancellationError, MediaInfo
 from .hdr_detection import is_dv_no_backward_compat, is_hdr_transfer
 
@@ -49,16 +56,16 @@ class ChapterSourceCorruptionError(RuntimeError):
 
 def _check_fatal_extraction(returncode: int, stderr: list[str], start_ms: int) -> None:
     """Stop a chapter set only for explicit container corruption or a watchdog stop."""
-    if returncode == 0:
-        return
-    if any(
-        "[matroska" in line.lower() and "invalid as first byte of an ebml number" in line.lower() for line in stderr
-    ):
+    if any(is_matroska_corruption_line(line) for line in stderr):
         raise ChapterSourceCorruptionError(
             f"Chapter extraction failed at {start_ms}ms: malformed Matroska container data; "
             "remaining chapter attempts stopped. Completed images are preserved."
         )
-    if STALL_WATCHDOG_LINE in stderr:
+    if DIAGNOSTIC_LIMIT_LINE in stderr:
+        raise ChapterExtractionStalledError(
+            f"Chapter extraction at {start_ms}ms produced excessive diagnostic output; remaining chapter attempts stopped."
+        )
+    if STALL_WATCHDOG_LINE in stderr or ACTIVE_TIMEOUT_LINE in stderr:
         raise ChapterExtractionStalledError(
             f"Chapter extraction stalled at {start_ms}ms and was stopped by the watchdog; "
             "remaining chapter attempts stopped. Completed images are preserved."
@@ -305,6 +312,11 @@ def extract_chapter_frame(
     local_config.thumbnail_quality = _QUALITY
     threads = max(1, int(ffmpeg_threads_override or config.ffmpeg_threads or 2))
     scale = f"scale=w={_WIDTH}:h=-2"
+    if hdr:
+        # Tone mapping produces limited-range SDR; JPEG requires full-range
+        # samples. Convert the levels during resize, rather than just tagging
+        # limited-range pixels as full-range or relaxing MJPEG compliance.
+        scale += ":in_range=tv:out_range=pc,format=yuvj420p"
     # Container color metadata may be absent from decoded frames (notably PQ).
     # Supply only the input properties the source actually declares.
     input_colors = []
@@ -348,6 +360,7 @@ def extract_chapter_frame(
         fps_filter="null",
         hdr10_zscale_chain=tonemap,
         chapter_output=str(output),
+        active_timeout_s=300,
     )
     runner = create_ffmpeg_runner(**runner_options, chapter_start_ms=start_ms)
     rc, _, _, stderr = runner(use_skip=False)
@@ -359,6 +372,29 @@ def extract_chapter_frame(
         duration_ms = float(track.duration)
     except (AttributeError, TypeError, ValueError):
         duration_ms = 0
+    source_duration_ms = duration_ms
+    if not 0 < source_duration_ms < float("inf"):
+        # Some Matroska files declare duration only on the container. It can
+        # establish that a confirmed empty seek is outside the source, but
+        # must not expand the video-only one-second endpoint fallback below.
+        for general in getattr(media_info, "general_tracks", ()):
+            try:
+                candidate = float(general.duration)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if 0 < candidate < float("inf"):
+                source_duration_ms = candidate
+                break
+    if (
+        no_frame
+        and not premature_end
+        and 0 < source_duration_ms < float("inf")
+        and start_ms > source_duration_ms + 1000
+    ):
+        raise ValueError(
+            f"Chapter timestamp {start_ms}ms is outside the current video's duration ({source_duration_ms:.0f}ms); "
+            "no frame exists at that position. Check the source chapter metadata."
+        )
     # Plex can round a final chapter past the last video frame. Seek at most
     # one second before the chapter; container duration can extend past video.
     if no_frame and not premature_end and 1000 <= duration_ms < float("inf") and abs(start_ms - duration_ms) <= 1000:
@@ -373,6 +409,12 @@ def extract_chapter_frame(
     if rc != 0:
         detail = "; source ended prematurely" if premature_end else ""
         raise RuntimeError(f"Chapter extraction failed at {start_ms}ms (FFmpeg exit {rc}){detail}")
+    if not output.exists():
+        detail = "; source ended prematurely" if premature_end else ""
+        raise ValueError(
+            f"No video frame was available for chapter timestamp {start_ms}ms{detail}. "
+            "Check the source chapter metadata and video timeline."
+        )
     _revision(output)
 
 
@@ -416,6 +458,33 @@ def publish_chapters(
             _write_manifest(plan, images)
         errors = []
         media_info = None
+        missing = [chapter.start_ms for chapter in plan.target.chapters if str(chapter.index) not in images]
+        index_defect = (
+            inspect_seek_index(
+                plan.canonical_path,
+                plan.source_fingerprint,
+                missing,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+            )
+            if missing
+            else None
+        )
+        seek_failure = None
+        if index_defect:
+            seek_failure = ChapterSourceCorruptionError(
+                f"{index_defect}; no source-verified scrubber frame is available for recovery. "
+                "Automatic retries stopped for this source; replace or repair the media and retry."
+            )
+        elif any(entry.get("recovery") for entry in images.values()):
+            failure_type = (
+                ChapterSourceCorruptionError
+                if any(entry.get("recovery", {}).get("cause") == "corruption" for entry in images.values())
+                else ChapterExtractionStalledError
+            )
+            seek_failure = failure_type(
+                "Earlier chapter seeking failed on this source; no source-verified scrubber frame is available"
+            )
         for chapter in plan.target.chapters:
             if cancel_check and cancel_check():
                 raise CancellationError("Chapter processing cancelled")
@@ -424,20 +493,32 @@ def publish_chapters(
             report("extracting")
             _check_source(plan)
             try:
-                if media_info is None:
+                if media_info is None and seek_failure is None:
                     media_info = MediaInfo.parse(plan.canonical_path)
                 with tempfile.TemporaryDirectory(prefix=".mpg-chapter-", dir=plan.folder) as temp:
                     staged = Path(temp) / "frame.jpg"
-                    extract_chapter_frame(
-                        plan.canonical_path,
-                        chapter.start_ms,
-                        staged,
-                        config,
-                        cancel_check=cancel_check,
-                        pause_check=pause_check,
-                        ffmpeg_threads_override=ffmpeg_threads_override,
-                        media_info=media_info,
-                    )
+                    recovery = None
+                    try:
+                        if seek_failure is not None:
+                            raise seek_failure
+                        extract_chapter_frame(
+                            plan.canonical_path,
+                            chapter.start_ms,
+                            staged,
+                            config,
+                            cancel_check=cancel_check,
+                            pause_check=pause_check,
+                            ffmpeg_threads_override=ffmpeg_threads_override,
+                            media_info=media_info,
+                        )
+                    except (ChapterSourceCorruptionError, ChapterExtractionStalledError) as exc:
+                        seek_failure = exc
+                        recovery = recover_bif_frame(plan, chapter, staged)
+                        if recovery is None:
+                            raise
+                        recovery["cause"] = (
+                            "corruption" if isinstance(exc, ChapterSourceCorruptionError) else "seek_timeout"
+                        )
                     revision = _revision(staged)
                     _check_source(plan)
                     os.replace(staged, plan.folder / f"chapter{chapter.index}.jpg")
@@ -445,6 +526,7 @@ def publish_chapters(
                         "start_ms": chapter.start_ms,
                         "end_ms": chapter.end_ms,
                         "sha256": revision,
+                        **({"recovery": recovery} if recovery else {}),
                     }
                     _write_manifest(plan, images)
             except CancellationError:
@@ -471,13 +553,20 @@ def publish_chapters(
         if not _registered(plan, images) or not _verified(plan, images):
             report("registering")
             register_chapters(
-                plan.server, plan.target, {int(index): entry["sha256"] for index, entry in images.items()}
+                plan.server,
+                plan.target,
+                {int(index): entry["sha256"] for index, entry in images.items()},
+                verify_source=lambda: _check_source(plan),
             )
             _check_source(plan)
             _write_manifest(plan, images, verified=True)
         _check_source(plan)
         report("complete")
-        return ChapterOutcome("ready", total, total, "Chapter thumbnails ready")
+        recovered = sum(bool(entry.get("recovery")) for entry in images.values())
+        message = "Chapter thumbnails ready"
+        if recovered:
+            message += f"; {recovered} recovered from lower-resolution scrubber previews"
+        return ChapterOutcome("ready", total, total, message)
     except CancellationError:
         raise
     except (PublishError, OSError, ValueError, RuntimeError) as exc:

@@ -49,6 +49,9 @@ def _reset_singletons():
 
 @pytest.fixture()
 def app(tmp_path, monkeypatch):
+    # The synchronous thread shim nests retries before their parent releases its slot.
+    # These tests cover retry results; real worker admission has separate threaded coverage.
+    monkeypatch.setattr("media_preview_generator.jobs.group_runtime.admission_capacity", lambda kind: None)
     from media_preview_generator.web.app import create_app
 
     config_dir = tmp_path / "config"
@@ -147,7 +150,13 @@ class TestStartRecentlyAddedJobAsync:
         released_at: list[int] = []
         gate = MagicMock()
         gate.acquire.side_effect = lambda **kw: acquired_at.append(kw["priority"]) or call_log.append("acquire") or True
-        gate.release.side_effect = lambda priority: released_at.append(priority) or call_log.append("release")
+
+        def release(priority, *, kind):
+            assert kind == "previews"
+            released_at.append(priority)
+            call_log.append("release")
+
+        gate.release.side_effect = release
 
         with (
             patch(SCAN, side_effect=lambda *a, **k: call_log.append("scan") or {}),

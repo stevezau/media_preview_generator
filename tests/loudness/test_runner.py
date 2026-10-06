@@ -84,7 +84,7 @@ def test_completes_releases_the_slot_and_retries_files_plex_hadnt_added(run):
     run["outcomes"] = {"/m/a.mkv": job.WRITTEN, "/m/b.mkv": job.NOT_IN_LIBRARY}
     job.run_loudness_job("j1")
     run["jm"].complete_job.assert_called_once()
-    run["gate"].release.assert_called_once_with(3)
+    run["gate"].release.assert_called_once_with(3, kind="loudness")
     (retry,) = run["retries"]
     assert retry["file_paths"] == ["/m/b.mkv"] and retry["retry_attempt"] == 1
     assert retry["retry_delay_s"] == scaled_backoff_delay(1, 30)
@@ -193,12 +193,12 @@ def test_a_manual_jobs_missing_file_is_not_retried(run):
     assert "failed or missing" in run["jm"].complete_job.call_args.kwargs["error"]
 
 
-def test_a_revived_job_carries_the_files_it_finished_before_the_restart(run):
+def test_a_revived_job_rechecks_files_finished_before_the_restart(run):
     run["jm"].get_file_results.return_value = [{"file": "/m/a.mkv", "outcome": job.WRITTEN}]
-    run["outcomes"] = {"/m/b.mkv": job.WRITTEN}
+    run["outcomes"] = {"/m/a.mkv": job.UP_TO_DATE, "/m/b.mkv": job.WRITTEN}
     job.run_loudness_job("j1")
-    assert [i.canonical_path for i in run["submitted"]] == ["/m/b.mkv"]
-    assert run["jm"].set_job_outcome.call_args.args[1][job.WRITTEN] == 2
+    assert [i.canonical_path for i in run["submitted"]] == ["/m/a.mkv", "/m/b.mkv"]
+    assert run["jm"].set_job_outcome.call_args.args[1] == {job.UP_TO_DATE: 1, job.WRITTEN: 1}
 
 
 # --- the runner's other ways out ----------------------------------------------------------------------------------

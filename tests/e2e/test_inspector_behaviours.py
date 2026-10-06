@@ -1347,3 +1347,36 @@ class TestSeasonExtras:
         expect(publish).to_be_enabled()
         expect(authed_page.locator("#inspJobBanner")).to_be_hidden()
         assert api.season_publishes == [{"path": fx.EPISODE}]
+
+
+@pytest.mark.e2e
+def test_compact_job_creation_refreshes_membership_once_without_per_file_reads(authed_page, app_url):
+    file, item = fx.checked_episode()
+    api = _api_with(file, item)
+    TestJobsSocket._open_with_socket(authed_page, app_url, api)
+    payload = {
+        "id": "large-audio",
+        "kind": "loudness",
+        "status": "pending",
+        "library_name": "Whole library",
+        "config": {"file_paths": [], "file_paths_ref": "input.json", "file_paths_count": 1001},
+    }
+    api.files[fx.EPISODE]["job"] = {
+        "id": "large-audio",
+        "kind": "loudness",
+        "status": "pending",
+        "name": "Whole library",
+        "percent": 0,
+    }
+    with authed_page.expect_response(lambda response: "/api/inspector/file?" in response.url):
+        _emit(authed_page, "job_created", payload)
+    expect(authed_page.locator("#inspJobBanner")).to_contain_text("Whole library")
+    for _ in range(10):
+        _emit(authed_page, "job_updated", payload)
+    _emit(authed_page, "job_started", payload)
+    authed_page.wait_for_timeout(300)
+    assert api.item_requests == [fx.EPISODE, fx.EPISODE]
+    api.files[fx.EPISODE]["job"] = None
+    with authed_page.expect_response(lambda response: "/api/inspector/file?" in response.url):
+        _emit(authed_page, "job_completed", {**payload, "status": "completed"})
+    expect(authed_page.locator("#inspJobBanner")).to_be_hidden()

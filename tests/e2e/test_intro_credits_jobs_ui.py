@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from playwright.sync_api import Page, Route, expect
@@ -164,10 +165,19 @@ def _markers_job(job_id: str = "7c1f09aa-0000-4000-8000-000000000002", **overrid
 
 def _serve_jobs(page: Page, jobs_ref: dict) -> None:
     """GET /api/jobs?... returns ``jobs_ref["jobs"]`` at call time, so a test can change the queue mid-test."""
-    page.route(
-        "**/api/jobs?**",
-        lambda r: _fulfill_json(r, {"jobs": jobs_ref["jobs"], "total": len(jobs_ref["jobs"]), "page": 1, "pages": 1}),
-    )
+
+    def handler(route: Route) -> None:
+        selected = jobs_ref["jobs"]
+        status = parse_qs(urlparse(route.request.url).query).get("status", [""])[0]
+        if status in {"active", "paused"}:
+            selected = [job for job in selected if job["status"] in {"pending", "running"}]
+            if status == "paused":
+                selected = [job for job in selected if job.get("paused")]
+        elif status and status != "all":
+            selected = [job for job in selected if job["status"] == status]
+        _fulfill_json(route, {"jobs": selected, "total": len(selected), "page": 1, "pages": 1})
+
+    page.route("**/api/jobs?**", handler)
 
 
 def _serve_file_lists(page: Page, file_lists: dict, asked: list[str]) -> None:
@@ -204,6 +214,8 @@ def dashboard(authed_page: Page, app_url: str):
         file_lists.update(file_lists_by_id or {})
         authed_page.goto(f"{app_url}/")
         authed_page.wait_for_load_state("domcontentloaded")
+        if any(job["status"] not in {"pending", "running"} for job in jobs_ref["jobs"]):
+            authed_page.locator("#jobStatusFilter").select_option(label="All jobs and history")
         return authed_page
 
     load.jobs_ref = jobs_ref  # type: ignore[attr-defined]
@@ -643,7 +655,7 @@ class TestQueueRows:
         assert _row_ids(page) == [other["id"], preview["id"], follower["id"]]
         row = page.locator(f"#job-row-{follower['id']}")
         expect(row.locator(".job-follow-arrow")).to_be_visible()
-        assert _tooltip(row.locator(".job-follow-arrow")) == "Runs after preview job e64567e1 finishes its first try"
+        assert _tooltip(row.locator(".job-follow-arrow")) == "Companion of job e64567e1"
         expect(row).not_to_contain_text("follows")
         expect(row.locator(".job-kind-badge")).to_have_text("Intro & Credits")
         expect(page.locator(f"#job-row-{preview['id']} .job-kind-badge")).to_have_text("Previews")
@@ -724,7 +736,7 @@ class TestQueueRows:
         expect(gone).to_have_text("Gone from disk × 2")
         expect(gone).to_have_class(re.compile(r"\bjob-result-muted\b"))
         assert gone.get_attribute("title") == (
-            "Replaced by a newer file before this job reached it; the newer file is run on its own."
+            "Confirmed deleted or replaced before this job reached it. Any replacement is processed by its own job."
         )
 
     def test_follow_up_whose_preview_job_is_not_listed_renders_in_place(self, dashboard) -> None:
@@ -854,8 +866,8 @@ class TestQueueRows:
         expect(row.locator('button[aria-label="Retry now"]')).to_have_count(1)
         expect(row.locator(".job-follows")).to_have_count(0)
         arrow = row.locator(".job-follow-arrow")
-        assert _tooltip(arrow) == "Runs after preview job e64567e1 finishes its first try"
-        assert arrow.get_attribute("aria-label") == "Runs after preview job e64567e1 finishes its first try"
+        assert _tooltip(arrow) == "Companion of job e64567e1"
+        assert arrow.get_attribute("aria-label") == "Companion of job e64567e1"
 
     def test_a_follow_up_whose_retries_ended_has_no_retry_chip(self, dashboard) -> None:
         preview = _preview_job()
@@ -1117,9 +1129,7 @@ class TestRowFilesAndLibraries:
         expect(arrow).to_be_visible(timeout=5000)
 
         arrow.hover()
-        expect(page.locator(".tooltip")).to_have_text(
-            "Runs after preview job e64567e1 finishes its first try", timeout=3000
-        )
+        expect(page.locator(".tooltip")).to_have_text("Companion of job e64567e1", timeout=3000)
 
 
 # What markers/source_counts.py stores on a job: files per marker type and source group.

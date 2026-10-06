@@ -647,8 +647,9 @@ def execute_scheduled_job(
                 kwargs["priority"] = priority
             if server_id:
                 kwargs["server_id"] = server_id
-            # Only identical, never-enumerated requests coalesce. A closed
-            # worker group must not create an unbounded copy on every tick.
+            # One unfinished scan owns this exact scheduled scope, including
+            # its pauses, parked checkpoints and retries. A later tick must
+            # not restart the same library beside it or clear a manual pause.
             signature = json.dumps(
                 {"config": cfg, "libraries": sorted(set(library_ids)), "server_id": server_id, "priority": priority},
                 sort_keys=True,
@@ -664,9 +665,7 @@ def execute_scheduled_job(
                         for job in get_job_manager().get_all_jobs()
                         if job.parent_schedule_id == schedule_id
                         and job.kind == "previews"
-                        and job.status is JobStatus.PENDING
-                        and not job.started_at
-                        and not (job.config or {}).get("parked_checkpoint")
+                        and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
                         and (job.config or {}).get("schedule_scope") == signature
                     ),
                     None,

@@ -3235,10 +3235,24 @@
         return (progress.workers || []).some(function (w) { return w && w.current_file === state.path; });
     }
 
-    function onJobEvent(job, ended) {
+    const compactJobRefreshes = new Set();
+
+    function onJobEvent(job, ended, eventName) {
         if (!job || !state.path) return;
         const tracked = state.job && state.job.id === job.id;
-        if (!tracked && !jobTouches(job)) return;
+        if (!tracked && !jobTouches(job)) {
+            // Large selections stay on the server. Refresh membership once when
+            // queued/started and once when ended, never on per-file updates.
+            if (job.config?.file_paths_ref && (ended || eventName === 'job_created' || eventName === 'job_started')) {
+                const key = [state.path, job.id, job.config.file_paths_ref, ended].join('\n');
+                if (compactJobRefreshes.has(key)) return;
+                compactJobRefreshes.add(key);
+                if (compactJobRefreshes.size > 256) compactJobRefreshes.delete(compactJobRefreshes.values().next().value);
+                clearTimeout(reloadTimer);
+                reloadTimer = setTimeout(function () { if (!state.adjust) loadFile(); }, 200);
+            }
+            return;
+        }
         if (ended) {
             const kind = job.kind || (state.job && state.job.kind);
             state.job = null;
@@ -3292,7 +3306,7 @@
         // Polling only, as app.js connects: a websocket pins a gunicorn thread for every open tab.
         jobsSocket = window.io('/jobs', { transports: ['polling'], reconnection: true });
         ['job_created', 'job_started', 'job_updated'].forEach(function (name) {
-            jobsSocket.on(name, function (job) { onJobEvent(job, false); });
+            jobsSocket.on(name, function (job) { onJobEvent(job, false, name); });
         });
         ['job_completed', 'job_failed', 'job_cancelled'].forEach(function (name) {
             jobsSocket.on(name, function (job) { onJobEvent(job, true); });

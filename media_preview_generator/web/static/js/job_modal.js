@@ -216,7 +216,8 @@ function _renderModalContext(job) {
     add('Files', total ? processed.toLocaleString() + ' of ' + total.toLocaleString() + ' processed' : processed.toLocaleString() + ' processed · total not reported');
     add('Priority', ({1: 'High', 2: 'Normal', 3: 'Low'})[job.priority] || 'Not recorded');
     const requested = cfg.webhook_paths || cfg.file_paths;
-    if (Array.isArray(requested) && requested.length) add('Requested paths', requested.length.toLocaleString());
+    const requestedCount = Number(cfg.file_paths_count) || (Array.isArray(requested) ? requested.length : 0);
+    if (requestedCount) add('Requested paths', requestedCount.toLocaleString());
     for (const [field, label] of [['created_at', 'Created'], ['started_at', 'Started'], ['completed_at', 'Finished']]) {
         if (job[field]) add(label, typeof formatDate === 'function' ? formatDate(job[field]) : job[field]);
     }
@@ -305,18 +306,20 @@ function _firstBifPathFromJob(job) {
 // State -> visible buttons:
 //   * Chain pending (back-off countdown active) -> Retry now + Cancel chain + Open BIF
 //   * Chain running                              -> Cancel chain + Open BIF
-//   * Chain completed/failed/cancelled (terminal)-> Open BIF (only if any BIF on disk)
+//   * Terminal job -> Re-run job + Open BIF (only if any BIF on disk)
 //   * Non-chain (single dispatch)                -> Open BIF (only if any BIF on disk)
 function _updateOperatorActions(job) {
     const retryBtn = document.getElementById('opActionRetryNow');
     const cancelBtn = document.getElementById('opActionCancelChain');
     const openBifBtn = document.getElementById('opActionOpenBif');
+    const reprocessBtn = document.getElementById('opActionReprocess');
     if (!retryBtn || !cancelBtn || !openBifBtn) return;
 
     // Start hidden — each branch below opts in.
     retryBtn.classList.add('d-none');
     cancelBtn.classList.add('d-none');
     openBifBtn.classList.add('d-none');
+    if (reprocessBtn) reprocessBtn.classList.add('d-none');
     if (!job) return;
 
     const cfg = job.config || {};
@@ -328,6 +331,9 @@ function _updateOperatorActions(job) {
 
     if (hasPendingRetry) retryBtn.classList.remove('d-none');
     if (isActiveChain) cancelBtn.classList.remove('d-none');
+    if (reprocessBtn && ['completed', 'failed', 'cancelled'].includes(status)) {
+        reprocessBtn.classList.remove('d-none');
+    }
 
     const bif = _firstBifPathFromJob(job);
     const onlyFile = (cfg.webhook_paths || []).length === 1 ? cfg.webhook_paths[0] : '';
@@ -339,6 +345,18 @@ function _updateOperatorActions(job) {
         openBifBtn.classList.remove('d-none');
     } else {
         openBifBtn.removeAttribute('href');
+    }
+}
+
+async function onOperatorReprocess() {
+    const jobId = _logsModalJobId;
+    const btn = document.getElementById('opActionReprocess');
+    if (!jobId || btn?.disabled) return;
+    if (btn) btn.disabled = true;
+    try {
+        await reprocessJob(jobId);
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -1593,12 +1611,13 @@ function _requestedJobPaths() {
 
 function _configureFileView() {
     const paths = _requestedJobPaths();
+    const count = Number(_modalJob()?.config?.file_paths_count) || paths.length;
     const select = document.getElementById('fileResultsView');
     if (!select) return;
-    if (!paths.length) _fileView = 'results';
-    select.hidden = !paths.length;
+    if (!count) _fileView = 'results';
+    select.hidden = !count;
     select.value = _fileView;
-    select.options[1].textContent = 'Requested paths (' + paths.length.toLocaleString() + ')';
+    select.options[1].textContent = 'Requested paths (' + count.toLocaleString() + ')';
     const requested = _fileView === 'requested';
     document.getElementById('fileOutcomeFilter').hidden = requested;
     document.getElementById('requestedPathsNote').hidden = !requested;
@@ -1621,19 +1640,20 @@ function onFileViewChanged(select) {
     refreshFileResults();
 }
 
-function _renderRequestedPaths() {
+function _renderRequestedPaths(data) {
     const paths = _requestedJobPaths();
     const query = document.getElementById('fileResultsSearch').value.trim().toLowerCase();
     const matches = query ? paths.filter(path => path.toLowerCase().includes(query)) : paths;
-    _fileTotal = paths.length;
-    _fileFilteredCount = matches.length;
-    _fileTotalPages = Math.max(1, Math.ceil(matches.length / _filePerPage));
+    _fileTotal = data ? data.total : paths.length;
+    _fileFilteredCount = data ? data.filtered_count : matches.length;
+    _fileTotalPages = data ? data.total_pages : Math.max(1, Math.ceil(matches.length / _filePerPage));
+    if (data) _filePage = data.page;
     _filePage = Math.min(_filePage, _fileTotalPages);
     _fileListTruncated = false;
     _fileProcessedTotal = 0;
     _fileResultsLoaded = true;
     const offset = (_filePage - 1) * _filePerPage;
-    const page = matches.slice(offset, offset + _filePerPage);
+    const page = data ? data.files.map(file => file.file) : matches.slice(offset, offset + _filePerPage);
     document.getElementById('fileResultsBody').innerHTML = page.length ? page.map(path => {
         const name = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
         return '<tr><td colspan="5" class="job-file-name"><div class="job-file-heading"><small class="text-truncate" title="'
@@ -1641,8 +1661,8 @@ function _renderRequestedPaths() {
             + escapeHtmlText(path) + '</code></details></td></tr>';
     }).join('') : '<tr><td colspan="5" class="text-body-secondary text-center">No matching requested paths</td></tr>';
     document.getElementById('fileResultsCount').textContent = page.length
-        ? 'Showing ' + (offset + 1).toLocaleString() + '–' + (offset + page.length).toLocaleString() + ' of ' + matches.length.toLocaleString() + ' requested paths'
-        : '0 of ' + paths.length.toLocaleString() + ' requested paths match';
+        ? 'Showing ' + (offset + 1).toLocaleString() + '–' + (offset + page.length).toLocaleString() + ' of ' + _fileFilteredCount.toLocaleString() + ' requested paths'
+        : '0 of ' + _fileTotal.toLocaleString() + ' requested paths match';
     renderFilePagination();
 }
 
@@ -1691,15 +1711,18 @@ async function refreshFileResults() {
     var targetId = _logsModalJobId;
     if (!targetId) return;
     var requestSequence = ++_fileRequestSequence;
-    if (_fileView === 'requested') { _renderRequestedPaths(); return; }
+    const requested = _fileView === 'requested';
+    if (requested && !_modalJob()?.config?.file_paths_ref) { _renderRequestedPaths(); return; }
     try {
         var params = 'page=' + _filePage + '&per_page=' + _filePerPage;
-        if (_fileResultsActiveFilter) params += '&outcome=' + encodeURIComponent(_fileResultsActiveFilter);
+        if (requested) params += '&view=requested';
+        else if (_fileResultsActiveFilter) params += '&outcome=' + encodeURIComponent(_fileResultsActiveFilter);
         var search = (document.getElementById('fileResultsSearch').value || '').trim();
         if (search) params += '&search=' + encodeURIComponent(search);
 
         var data = await apiGet('/api/jobs/' + targetId + '/files?' + params);
         if (requestSequence !== _fileRequestSequence || targetId !== _logsModalJobId) return;
+        if (requested) { _renderRequestedPaths(data); return; }
         _fileResultsLoaded = true;
         _filePage = data.page || 1;
         _fileTotalPages = data.total_pages || 1;
@@ -1715,7 +1738,7 @@ async function refreshFileResults() {
         document.getElementById('fileResultsCount').textContent = '';
         document.getElementById('filePaginationFooter').classList.add('d-none');
         document.getElementById('fileResultsBody').innerHTML =
-            '<tr><td colspan="5" class="text-body-secondary text-center">Could not load file results. '
+            '<tr><td colspan="5" class="text-body-secondary text-center">Could not load ' + (requested ? 'requested paths' : 'file results') + '. '
             + '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="refreshFileResults()">Try again</button></td></tr>';
     }
 }

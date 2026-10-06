@@ -189,7 +189,7 @@
     <div class="col-12">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-list-task me-2"></i>All jobs <small class="dashboard-list-scope">Queue and history</small></span>
+                <span><i class="bi bi-list-task me-2"></i>Jobs <small class="dashboard-list-scope" id="jobListScope">Unfinished work</small></span>
                 <div class="d-flex align-items-center gap-2">
                     <!-- Pending-webhooks chip — at-a-glance "N waiting"
                          counter, click to scroll to the first row. Per-row
@@ -238,9 +238,15 @@
                     <div class="queue-filter queue-filter-server"><label for="jobServerFilter">Server</label><select id="jobServerFilter" class="form-select form-select-sm" onchange="changeJobServer(this.value)" title="Matches the originating server or a library associated with the job; it does not indicate publication success."><option value="">All servers</option></select></div>
                     <div class="queue-filter queue-filter-library"><label for="jobLibraryFilter">Library</label><select id="jobLibraryFilter" class="form-select form-select-sm" onchange="changeJobLibrary(this.value)"><option value="">All libraries</option></select></div>
                     <div class="queue-filter"><label for="jobKindFilter">Job type</label><select id="jobKindFilter" class="form-select form-select-sm" onchange="changeJobKind(this.value)"><option value="">All job types</option><option value="previews">Previews</option><option value="intro_credits">Intro &amp; Credits</option><option value="loudness">Plex loudness</option></select></div>
-                    <div class="queue-filter-status"><label for="jobStatusFilter">Status</label><select id="jobStatusFilter" class="form-select form-select-sm" onchange="changeJobStatus(this.value)"><option value="">All statuses</option><option value="running">Running</option><option value="pending">Pending</option><option value="paused">Job paused</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
+                    <div class="queue-filter-status"><label for="jobStatusFilter">Status</label><select id="jobStatusFilter" class="form-select form-select-sm" onchange="changeJobStatus(this.value)"><option value="active" selected>Unfinished</option><option value="chapter_warnings">Chapter warnings</option><option value="">All jobs and history</option><option value="running">Running</option><option value="pending">Pending</option><option value="paused">Job paused</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
                     <button type="button" class="btn btn-link btn-sm queue-clear-filters" id="clearJobFilters" onclick="clearJobFilters()" hidden>Clear filters</button>
                     <span class="queue-filter-count" id="jobFilterCount" role="status" aria-live="polite" hidden></span>
+                </div>
+                <div class="alert alert-warning rounded-0 border-0 mb-0 d-none" id="chapterWarningsNotice" role="status">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                        <span id="chapterWarningsText"></span>
+                        <button type="button" class="btn btn-sm btn-warning" onclick="clearJobFilters('chapter_warnings')">Review chapter warnings</button>
+                    </div>
                 </div>
                 <div class="queue-table-wrap">
                     <table class="table table-hover align-middle mb-0 jobs-table">

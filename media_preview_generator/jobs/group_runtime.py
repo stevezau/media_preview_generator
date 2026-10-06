@@ -69,6 +69,32 @@ def runtime_capacity(kind: str, *, now: datetime | None = None) -> dict:
     return capacity_for_groups(groups, selected, kind, now=now)
 
 
+def admission_capacity(kind: str) -> int | None:
+    """Bound same-priority admitted jobs by configured open compatible workers."""
+    if current_groups() is None:
+        return None
+    return runtime_capacity(kind)["open"]
+
+
+def mark_admission_wait(manager, job_id: str, kind: str) -> None:
+    """Explain worker-capacity admission separately from the global job limit."""
+    label = {"loudness": "loudness", "intro_credits": "Intro & Credits", "previews": "preview"}.get(kind, kind)
+    message = f"Queued — waiting for {label} worker capacity"
+    manager.update_progress(job_id, current_item=message)
+    manager.note_slot_wait(job_id)
+    job = manager.get_job(job_id)
+    parent_id = (job.config or {}).get("parent_job_id") if job else None
+    if parent_id:
+        manager.update_progress(parent_id, current_item=message)
+
+
+def admission_options(manager, job_id: str, kind: str | None) -> dict:
+    """Carry a runner's kind and visible resource wait through pause re-admission."""
+    if kind is None:
+        return {}
+    return {"kind": kind, "on_resource_wait": lambda: mark_admission_wait(manager, job_id, kind)}
+
+
 def refresh_worker_groups(pool, config=None, selected_gpus: list | None = None, *, force: bool = False) -> bool:
     """Reconcile current policy and time; periodic calls do no hardware discovery.
 

@@ -133,7 +133,8 @@ def test_registered_fresh_images_need_no_work_but_cleared_refs_do(plan, config, 
 def test_committed_refs_without_api_visibility_fail_verification_and_can_retry(plan, config, extraction):
     run, register = extraction
 
-    def committed_but_unverified(_server, _target, revisions):
+    def committed_but_unverified(_server, _target, revisions, *, verify_source):
+        verify_source()
         plan.target = replace(
             plan.target,
             chapters=tuple(
@@ -257,7 +258,11 @@ def test_timestamp_runner_uses_correct_color_path_and_bounded_threads(tmp_path, 
     assert kwargs["chapter_output"] == str(output)
     assert kwargs["ffmpeg_threads_override"] == 2
     assert kwargs["gpu"] is None
-    assert kwargs["base_scale"] == "scale=w=1280:h=-2"
+    expected_scale = "scale=w=1280:h=-2"
+    if kind != "sdr":
+        expected_scale += ":in_range=tv:out_range=pc,format=yuvj420p"
+        assert kwargs["hdr10_zscale_chain"].endswith("zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+    assert kwargs["base_scale"] == expected_scale
     assert kwargs["path_kind"] == ("sdr" if kind == "sdr" else "hdr10_zscale")
     assert runner.call_args.kwargs == {"use_skip": False}
 
@@ -468,8 +473,14 @@ def test_chapter_update_provenance_distinguishes_registration_from_reused_output
     if already_registered:
         register.assert_not_called()
     else:
+        verify_source = register.call_args.kwargs["verify_source"]
+        assert callable(verify_source)
+        verify_source()
         register.assert_called_once_with(
-            plan.server, plan.target, {int(index): entry["sha256"] for index, entry in images.items()}
+            plan.server,
+            plan.target,
+            {int(index): entry["sha256"] for index, entry in images.items()},
+            verify_source=verify_source,
         )
 
 

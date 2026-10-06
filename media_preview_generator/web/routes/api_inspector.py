@@ -195,6 +195,7 @@ def active_job_for(path: str) -> dict | None:
         ``id``, ``kind``, ``status``, ``name`` (the job's title) and ``percent``, running jobs first; None when no job
         has it.
     """
+    from ..job_details import job_file_paths
     from ..jobs import get_job_manager
 
     found = []
@@ -203,7 +204,7 @@ def active_job_for(path: str) -> dict | None:
         if status not in _ACTIVE_STATUSES:
             continue
         cfg = job.config or {}
-        listed = path in (cfg.get("file_paths") or []) or path in (cfg.get("webhook_paths") or [])
+        listed = path in job_file_paths(job) or path in (cfg.get("webhook_paths") or [])
         if listed or path in _worker_files(job):
             found.append((status != "running", job))
     if not found:

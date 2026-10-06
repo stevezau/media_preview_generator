@@ -21,7 +21,7 @@ from ..config import load_config
 from ..job_kinds import JOB_KIND_LOUDNESS, ItemOutcome, KindHandlers
 from ..jobs.checkpoints import checkpoint_items, read_checkpoint
 from ..jobs.dispatcher import get_or_create_dispatcher
-from ..jobs.group_runtime import runtime_capacity, wait_for_capacity
+from ..jobs.group_runtime import admission_options, runtime_capacity, wait_for_capacity
 from ..jobs.orchestrator import _build_multi_server_registry
 from ..jobs.parking import JobParked, park_if_unavailable
 from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
@@ -53,7 +53,9 @@ from ..web.routes._helpers import _ensure_gpu_cache
 from ..web.routes.job_runner import _build_selected_gpus, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
 from . import analyze, chain
+from .deleted_sources import confirmed_deleted_paths
 from .guard import GuardedLoudnessDb, create_loudness_db
+from .inputs import load_file_input
 from .plex_db import (
     AudioStream,
     SourceChangedError,
@@ -75,18 +77,15 @@ NOT_IN_LIBRARY = "loudness_not_in_library"
 # Plex's database couldn't be written just then (Plex restarting, its lock busy): tried again later, like NOT_IN_LIBRARY.
 WAITING = "loudness_waiting"
 FILE_NOT_FOUND = FileOutcome.FILE_NOT_FOUND.value
+SOURCE_GONE = FileOutcome.SOURCE_GONE.value
 FAILED = FileOutcome.FAILED.value
-OUTCOME_KEYS = (WRITTEN, UP_TO_DATE, NO_OWNERS, NOT_IN_LIBRARY, WAITING, FILE_NOT_FOUND, FAILED)
+OUTCOME_KEYS = (WRITTEN, UP_TO_DATE, NO_OWNERS, NOT_IN_LIBRARY, WAITING, FILE_NOT_FOUND, SOURCE_GONE, FAILED)
 # A file's outcome from its per-server rows: the first of these any server has.
 _PRECEDENCE = (FAILED, WAITING, NOT_IN_LIBRARY, WRITTEN, UP_TO_DATE)
-# What a revived job carries over from before a restart instead of checking again.
-_SETTLED = frozenset({WRITTEN, UP_TO_DATE, NO_OWNERS})
 # Read-only lookups share the dispatcher's checking threads with preview checks: half of them at most.
 CHECK_SHARE = 0.5
 # A database that wasn't writable (Plex restarting, its lock busy) is checked again after this long.
 RECHECK_S = 60.0
-# Bound each retry batch like Intro & Credits; retries use the shared count and backoff settings.
-MAX_RETRY_FILES = 500
 
 
 @dataclass
@@ -98,6 +97,7 @@ class LoudnessContext:
     freeze_check: Callable[[], bool] | None = None
     # The job's pin (``job_runner.server_pin``): only this server; None = every server with loudness on.
     server_id: str | None = None
+    deleted_paths: frozenset[str] = frozenset()
     _dbs: dict[str, LocalPlexDb] = field(default_factory=dict)
     # server id → (why it can't be written, "" when it can; when that was found)
     _ready: dict[str, tuple[str, float]] = field(default_factory=dict)
@@ -173,6 +173,7 @@ def _lookup(
         needed = [s for s in streams if needs_analysis(s)]
         if streams and not needed and all(s.item_marked for s in streams) and isinstance(db, GuardedLoudnessDb):
             db.verify_streams(streams)
+            source.verify()
     except (DatabaseBusyError, SourceChangedError, OSError) as exc:
         return _row(cfg, WAITING, str(exc)), [], []
     except PublishError as exc:
@@ -189,6 +190,8 @@ def check_item(item: ProcessableItem, *, ctx: LoudnessContext) -> ItemOutcome | 
     """Check stage: settle a file with nothing to analyse; None sends it to a worker."""
     path = item.canonical_path
     if not os.path.isfile(path):
+        if os.path.normpath(path) in ctx.deleted_paths:
+            return ItemOutcome(SOURCE_GONE, "Skipped: import webhook confirmed this absent source was deleted")
         return ItemOutcome(FILE_NOT_FOUND, "Not on disk")
     servers = owners(path, ctx.registry, ctx.server_id)
     if not servers:
@@ -314,6 +317,7 @@ def process_item(
                 if {s.identity() for s in current} != {s.identity() for s in streams}:
                     raise SourceChangedError("Plex's audio sources changed before playback verification")
                 db.verify_streams(current)
+                source.verify()
             except (DatabaseBusyError, SourceChangedError) as exc:
                 waiting.append(str(exc))
             except PublishError as exc:
@@ -391,7 +395,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
         filter=lambda record: not record["extra"].get(JOB_LOG_SKIP) and is_job_thread_for(record["thread"].id, job_id),
         enqueue=True,
     )
-    slot = {"held": False, "priority": job.priority}
+    slot = {"held": False, "priority": job.priority, "kind": JOB_KIND_LOUDNESS}
     cfg = dict(job.config or {})
     chain_head = cfg.get("parent_job_id")
     jm.update_progress(job_id, current_files=[])
@@ -443,6 +447,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
     try:
         with failure_scope(job_id):
             try:
+                cfg = load_file_input(jm.config_dir, cfg)
                 dependencies = dict.fromkeys([cfg.get("follows_job_id"), *(cfg.get("follows_job_ids") or [])])
                 for dependency in dependencies:
                     if not wait_for_preceding_job(job_id, dependency, cancel_check):
@@ -468,7 +473,10 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     slot["priority"] = live_priority()
                     jm.note_slot_wait(job_id)
                     if not get_job_gate().acquire(
-                        priority=slot["priority"], cancel_check=cancel_check, on_wait=on_wait
+                        priority=slot["priority"],
+                        cancel_check=cancel_check,
+                        on_wait=on_wait,
+                        **admission_options(jm, job_id, JOB_KIND_LOUDNESS),
                     ):
                         jm.cancel_job(job_id)
                         return
@@ -479,7 +487,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         and not get_settings_manager().processing_paused
                     ):
                         break
-                    get_job_gate().release(slot["priority"])
+                    get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
                     slot["held"] = False
                 with logger.contextualize(**{JOB_LOG_SKIP: True}):
                     if cfg.get("parked_checkpoint") or job.config.get("resource_wait"):
@@ -512,27 +520,33 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         libraries=loudness_libraries,
                         label=LABEL,
                     )
-                if chain_head:
-                    cfg["retry_sender_paths"] = {**cfg.get("retry_sender_paths", {}), **sender_paths}
-                    jm.merge_job_config(job_id, {"retry_sender_paths": cfg["retry_sender_paths"]})
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
+                if not checkpoint:
+                    # A path's saved result cannot prove its bytes or Plex metadata
+                    # survived a restart. Native checks rebuild this attempt safely.
+                    jm._delete_file_results(job_id)
+                    jm.set_publishers(job_id, [])
+                    jm.set_job_outcome(job_id, {})
                 logger.info("{}: {} file(s) to check", LABEL, len(items))
                 if not items:
                     _finish(jm, job_id, {}, ["No files to check.", *warnings])
                     if chain_head:
                         _finish_chain(jm, chain_head, cfg, warnings, attempt_id=job_id)
                     return
-                if checkpoint:
-                    carried = saved.get("carried", {})
-                else:
-                    items, carried = _carry_finished(jm, job_id, items)
+                carried = saved.get("carried", {}) if checkpoint else {}
                 ctx = LoudnessContext(
                     registry=registry,
                     ffmpeg=getattr(config, "ffmpeg_path", None) or "ffmpeg",
                     freeze_check=job_freeze_check(jm, job_id),
                     server_id=server_pin(cfg),
+                    deleted_paths=confirmed_deleted_paths(
+                        jm.get_all_jobs(),
+                        registry,
+                        server_pin(cfg),
+                        event_times=jm._storage.original_job_times() if jm._storage is not None else {},
+                    ),
                 )
                 # A sender's files (a webhook, its retries) can reach the disk after the job starts; a listing's won't.
                 retry_missing = bool(cfg.get("file_paths")) and sent_by_a_sender(cfg.get("source"))
@@ -557,8 +571,6 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                             retry_previous[sender_key] = chain.previous_result(
                                 original.get("file", file_path), outcome, servers
                             )
-                            if len(retry_previous) > MAX_RETRY_FILES:
-                                del retry_previous[max(retry_previous)]
                     jm.record_file_result(
                         chain_head or job_id,
                         original.get("file", file_path),
@@ -572,7 +584,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     if chain_head:
                         jm.record_file_result(
                             job_id,
-                            file_path,
+                            original.get("file", file_path),
                             outcome,
                             reason,
                             worker,
@@ -678,7 +690,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
             jm.cancel_job(chain_head)
         if slot["held"]:
             try:
-                get_job_gate().release(slot["priority"])
+                get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
             except Exception as exc:
                 logger.debug("Could not release job gate for {}: {}", job_id, exc)
             slot["held"] = False
@@ -764,7 +776,7 @@ def create_loudness_job(
         retry_delay_s: For a retry: seconds to wait before it takes a slot.
         parent_job_id: Original job whose row represents this hidden retry.
         max_retries: Global retry limit in force when this retry was queued.
-        retry_baseline: Immutable aggregate and bounded previous-file counts for this attempt.
+        retry_baseline: Immutable aggregate and previous-file counts for this attempt.
 
     Returns:
         The created job.
@@ -800,34 +812,6 @@ def create_loudness_job(
     return job
 
 
-def _carry_finished(jm, job_id: str, items: list[ProcessableItem]) -> tuple[list[ProcessableItem], dict[str, int]]:
-    """Drop the files a job settled before a restart revived it (its own Files-panel rows; only a revived job has any),
-    so they aren't listed twice, and return their outcome counts to carry into the job's."""
-    try:
-        rows = jm.get_file_results(job_id)
-    except Exception as exc:
-        logger.warning("Couldn't read the files this job already finished ({}); checking every file", exc)
-        return items, {}
-    settled = {
-        row["file"]: row["outcome"]
-        for row in (rows if isinstance(rows, list) else [])
-        if isinstance(row, dict) and row.get("file") and row.get("outcome") in _SETTLED
-    }
-    carried: dict[str, int] = {}
-    remaining = []
-    for item in items:
-        outcome = settled.get(item.canonical_path)
-        if outcome is None:
-            remaining.append(item)
-        else:
-            carried[outcome] = carried.get(outcome, 0) + 1
-    if carried:
-        logger.info(
-            "Resuming after a restart: {} file(s) finished before it are not checked again", sum(carried.values())
-        )
-    return remaining, carried
-
-
 def _chain_state(jm, head_id: str, cfg: dict, state: str, **kwargs) -> None:
     """Use the shared retry lifecycle: one visible original job, hidden attempt jobs."""
     kwargs.setdefault("next_run_at", None)
@@ -846,6 +830,11 @@ def _chain_state(jm, head_id: str, cfg: dict, state: str, **kwargs) -> None:
 def _recount_chain(jm, head_id: str, cfg: dict | None = None, attempt_id: str | None = None) -> dict[str, int]:
     """Replace attempt counts with every file's latest result on the original job."""
     baseline = (cfg or {}).get("retry_baseline")
+    if baseline is None and (cfg or {}).get("retry_baseline_in_input"):
+        # Input validation failed before dispatch; a partial Files panel cannot
+        # reconstruct the immutable accounting that was stored with that input.
+        head = jm.get_job(head_id)
+        return dict(head.progress.outcome or {})
     if baseline is not None and attempt_id:
         outcome, publishers = chain.replace_results(
             baseline,
@@ -890,7 +879,7 @@ def _finish(jm, job_id: str, outcome: dict[str, int], warnings: list[str]) -> No
 
 
 def _finish_chain(jm, head_id: str, cfg: dict, warnings: list[str], *, attempt_id: str | None = None) -> None:
-    """Finish from all files, preserving earlier failures and files outside a bounded retry batch."""
+    """Finish from all files, preserving earlier failures outside this retry attempt."""
     outcome = _recount_chain(jm, head_id, cfg, attempt_id)
     successes, reason = _completion(outcome, warnings)
     _chain_state(jm, head_id, cfg, "exhausted" if reason else "completed", successes=successes, reason=reason)
@@ -905,7 +894,7 @@ def _queue_retry(
         attempt = int(cfg.get("retry_attempt") or 0) + 1
         if not paths or attempt > count:
             return []
-        paths = sorted({sender_paths.get(path, path) for path in paths})[:MAX_RETRY_FILES]
+        paths = sorted({sender_paths.get(path, path) for path in paths})
         delay = scaled_backoff_delay(attempt, delay_setting)
         head_id = cfg.get("parent_job_id") or job.id
         jm = get_job_manager()
