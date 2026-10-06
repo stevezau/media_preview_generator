@@ -52,7 +52,10 @@
                         <label class="visually-hidden" for="manualFilePaths">Container paths</label>
                         <textarea class="form-control font-monospace mt-2" id="manualFilePaths" rows="3"
                             placeholder="/data/media/tv/Show Name (2024)&#10;/data/media/movies/Movie (2024)/Movie (2024).mkv"></textarea>
-                        <div class="form-text">One absolute container path per line. Directories expand to the media inside. Select at least one path; an empty selection never means all libraries.</div>
+                        <div class="form-text">One absolute container path per line.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Directories expand to the media inside." data-explain-title="Paste paths manually" data-explain-template="infoManualPathsTpl"><i class="bi bi-info-circle"></i></button></div>
+<template id="infoManualPathsTpl">
+    <p>One absolute container path per line. Directories expand to the media inside. Select at least one path; an empty selection never means all libraries.</p>
+</template>
                     </details>
                     <p class="small text-danger-emphasis" id="manualPathValidation" role="status"></p>
                     <div class="mb-3" id="manualPublishServerGroup">

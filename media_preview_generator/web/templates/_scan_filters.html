@@ -37,7 +37,10 @@
                         <input id="{{ filter_prefix }}AddedTo" class="form-control" type="date" data-filter="added_to">
                     </div>
                 </div>
-                <div class="form-text">Uses the date recorded by your media server, not the release date. Date ranges include both days in the app timezone.</div>
+                <div class="form-text">Filters by the date added to your media server.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Uses the date added to your media server, not the release date." data-explain-title="Date added filter" data-explain-template="{{ filter_prefix }}InfoAddedTpl"><i class="bi bi-info-circle"></i></button></div>
+<template id="{{ filter_prefix }}InfoAddedTpl">
+    <p>Uses the date recorded by your media server, not the release date. Date ranges include both days in the app timezone.</p>
+</template>
             </div>
             <fieldset class="mb-3" data-filter-type="tv">
                 <legend class="fs-6 fw-semibold">TV shows</legend>
@@ -49,7 +52,10 @@
                 <div class="mt-2" data-filter-section="seasons" hidden>
                     <label for="{{ filter_prefix }}LatestSeasons" class="form-label">Number of seasons per show</label>
                     <input id="{{ filter_prefix }}LatestSeasons" class="form-control" type="number" min="1" step="1" value="1" data-filter="latest_seasons">
-                    <div class="form-text">Highest numbered seasons in the library; excludes specials. Applies only to TV shows, including ended shows.</div>
+                    <div class="form-text">Highest-numbered seasons per show.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Excludes specials; applies only to TV shows." data-explain-title="Seasons per show" data-explain-template="{{ filter_prefix }}InfoSeasonsTpl"><i class="bi bi-info-circle"></i></button></div>
+<template id="{{ filter_prefix }}InfoSeasonsTpl">
+    <p>Highest numbered seasons in the library; excludes specials. Applies only to TV shows, including ended shows.</p>
+</template>
                 </div>
             </fieldset>
             <fieldset class="mb-0" data-filter-type="movie">
@@ -68,10 +74,16 @@
                         <label for="{{ filter_prefix }}MovieYearTo" class="form-label">Through year</label>
                         <input id="{{ filter_prefix }}MovieYearTo" class="form-control" type="number" min="1" max="9999" step="1" placeholder="Any" data-filter="movie_year_to">
                     </div>
-                    <div class="col-12 form-text">Inclusive release years, for movies only. Enter at least one year; leave the other blank for no limit.</div>
+                    <div class="col-12 form-text">Inclusive release years, for movies only.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Release year range." data-explain-title="Release year range" data-explain-template="{{ filter_prefix }}InfoYearsTpl"><i class="bi bi-info-circle"></i></button></div>
+<template id="{{ filter_prefix }}InfoYearsTpl">
+    <p>Inclusive release years, for movies only. Enter at least one year; leave the other blank for no limit.</p>
+</template>
                 </div>
             </fieldset>
         </fieldset>
-        <p class="small text-muted mt-3 mb-0">Media missing a date, season or year needed by an active filter is excluded. Existing previews are checked after selection.</p>
+        <p class="small text-muted mt-3 mb-0">Media missing a value an active filter needs is excluded.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Filters and existing previews." data-explain-title="Filter matching" data-explain-template="{{ filter_prefix }}InfoExcludedTpl"><i class="bi bi-info-circle"></i></button></p>
+<template id="{{ filter_prefix }}InfoExcludedTpl">
+    <p>Media missing a date, season or year needed by an active filter is excluded. Existing previews are checked after selection.</p>
+</template>
     </div>
 </details>

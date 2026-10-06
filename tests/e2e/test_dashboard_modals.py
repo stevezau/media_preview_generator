@@ -49,7 +49,7 @@ def dashboard_page(authed_page: Page, app_url: str) -> Page:
 @pytest.mark.e2e
 class TestNewJobModal:
     def test_new_job_modal_opens(self, dashboard_page: Page) -> None:
-        dashboard_page.locator('button:has-text("Start New Job")').click()
+        dashboard_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(dashboard_page.locator("#newJobForm")).to_be_visible(timeout=2000)
 
     def test_new_job_modal_submits_to_jobs_endpoint(self, dashboard_page: Page) -> None:
@@ -67,7 +67,7 @@ class TestNewJobModal:
 
         dashboard_page.route("**/api/jobs", handler)
 
-        dashboard_page.locator('button:has-text("Start New Job")').click()
+        dashboard_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(dashboard_page.locator("#newJobForm")).to_be_visible(timeout=2000)
         # Wait for libraries to load + tick Movies.
         dashboard_page.wait_for_timeout(500)
@@ -249,7 +249,7 @@ class TestNewJobModalNonPlex:
 
         authed_page.route("**/api/jobs", handler)
 
-        authed_page.locator('button:has-text("Start New Job")').click()
+        authed_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(authed_page.locator("#newJobForm")).to_be_visible(timeout=2000)
         authed_page.wait_for_timeout(400)
 
@@ -321,7 +321,7 @@ class TestNewJobModalNonPlex:
 
         jellyfin_dashboard_page.route("**/api/jobs", handler)
 
-        jellyfin_dashboard_page.locator('button:has-text("Start New Job")').click()
+        jellyfin_dashboard_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(jellyfin_dashboard_page.locator("#newJobForm")).to_be_visible(timeout=2000)
         jellyfin_dashboard_page.wait_for_timeout(400)
 
@@ -403,7 +403,7 @@ class TestServerDropdownVendorBadges:
         )
         authed_page.goto(f"{app_url}/")
         authed_page.wait_for_load_state("domcontentloaded")
-        authed_page.locator('button:has-text("Start New Job")').click()
+        authed_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(authed_page.locator("#jobLibraryList")).to_be_visible(timeout=2000)
         authed_page.wait_for_timeout(500)
 
