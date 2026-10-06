@@ -4,10 +4,11 @@
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation_schedules.css') }}">
 {% endblock %}
 
 {% block content %}
-<div class="row">
+<div class="row automation-page">
     <!-- Sidebar -->
     <div class="col-lg-3 col-xl-2 d-none d-lg-block">
         <nav id="automation-sidebar" class="automation-sidebar sticky-top">
@@ -56,6 +57,8 @@
                 <p class="page-subtitle mb-0" id="automationSubtitle">Instant updates when new media appears.</p>
             </div>
             <div class="page-actions">
+                <span class="pill ok header-pill" id="automationWebhookPill"><i class="bi bi-check-circle-fill"></i> Webhooks on</span>
+                <span class="pill header-pill" id="automationSchedulePill"><i class="bi bi-calendar-check"></i> Schedules</span>
                 <span id="saveStatusIndicator" class="autosave-indicator"></span>
             </div>
         </header>
