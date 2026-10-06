@@ -370,6 +370,17 @@ def expect_modal_shown(page: Page, modal_id: str, timeout: int = 5000) -> None:
     expect(page.locator(f'#{modal_id}[data-e2e-shown="1"]')).to_be_attached(timeout=timeout)
 
 
+def touch_edit_form(page: Page) -> None:
+    """Mark the open Edit Server dialog as edited without changing a value.
+
+    Save stays disabled until the form is edited, so a test that saves exactly what was loaded first re-enters one
+    field the way a user retyping it would (an ``input`` event on the display name). Works from any tab.
+    """
+    page.evaluate(
+        "() => document.getElementById('editServerDisplayName').dispatchEvent(new Event('input', { bubbles: true }))"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Browser config
 # ---------------------------------------------------------------------------

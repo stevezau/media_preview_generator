@@ -33,7 +33,11 @@ def _server(server_id: str, name: str, *, enabled: bool = True, libraries: int =
 
 class TestServersCards:
     def test_cards_share_row_offsets_when_issue_row_differs(self, authed_page: Page, app_url: str) -> None:
-        mock_servers_list(authed_page, servers=[_server("a", "Alpha"), _server("b", "Beta", enabled=False)])
+        # Three servers: the card grid (one or two servers get rows instead).
+        mock_servers_list(
+            authed_page,
+            servers=[_server("a", "Alpha"), _server("b", "Beta", enabled=False), _server("c", "Gamma")],
+        )
         mock_server_connection_probe(authed_page, ok=True)
         mock_server_previews_readiness(authed_page, critical_count=2)
         authed_page.goto(f"{app_url}/servers")
@@ -46,8 +50,8 @@ class TestServersCards:
                     sel => Math.round(card.querySelector(sel).getBoundingClientRect().top - top));
             })"""
         )
-        assert len(offsets) == 2
-        assert offsets[0] == offsets[1]
+        assert len(offsets) == 3
+        assert offsets[0] == offsets[1] == offsets[2]
 
     def test_status_dot_carries_connection_error_when_probe_fails(self, authed_page: Page, app_url: str) -> None:
         mock_servers_list(authed_page, servers=[_server("a", "Alpha")])

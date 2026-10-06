@@ -116,7 +116,7 @@ def _open(page: Page, native_server):
 def test_native_schedule_is_visible_without_recommending_a_change(page: Page, native_server, mode, description):
     native_server.mode = mode
     body = _open(page, native_server)
-    row = body.locator(".d-flex.align-items-start", has_text="Plex's own loudness schedule").first
+    row = body.locator(".rd-row", has_text="Plex's own loudness schedule").first
     expect(row).to_contain_text(description)
     expect(row).not_to_contain_text("Recommended")
     expect(row).not_to_contain_text("override")

@@ -118,6 +118,18 @@
         };
     }
 
+    // The same section switch as the rail and the phone strip (servers.js exports it); the direct call is the
+    // fallback for a page that loaded this file without servers.js.
+    function showLibrariesTab() {
+        const shared = window.MPGShared && window.MPGShared.activateSection;
+        if (shared) {
+            shared('edit-tab-libraries');
+            return;
+        }
+        const trigger = $('#editServerModal [data-bs-target="#edit-tab-libraries"]');
+        if (trigger && window.bootstrap && window.bootstrap.Tab) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+    }
+
     function wire() {
         const toggle = $('#loudnessEnabled');
         if (toggle) toggle.addEventListener('change', () => { syncSwitch(); syncLibraryColumn(); });
@@ -135,8 +147,7 @@
             pointer.addEventListener('click', (event) => {
                 if (!event.target.closest('.loudness-libraries-link')) return;
                 event.preventDefault();
-                const trigger = $('#editServerModal [data-bs-target="#edit-tab-libraries"]');
-                if (trigger && window.bootstrap && window.bootstrap.Tab) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+                showLibrariesTab();
             });
         }
         const tabButton = $('#editServerModal [data-bs-target="#edit-tab-processing"]');

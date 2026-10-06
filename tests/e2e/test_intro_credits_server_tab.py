@@ -18,7 +18,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 
 from ._mocks import mock_server_connection_probe, mock_server_previews_readiness, mock_servers_refresh_libraries
-from .conftest import expect_modal_shown, watch_modal_shown
+from .conftest import expect_modal_shown, touch_edit_form, watch_modal_shown
 
 CONFIRMED_AT = "2026-09-01T10:00:00+00:00"
 PLEX_DB = "/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
@@ -215,6 +215,7 @@ def _wait_for_status(page: Page) -> None:
 
 def _save_and_read_put(page: Page, server_id: str) -> dict:
     """Click Save and return the body of the PUT the page sent, read off its answered request."""
+    touch_edit_form(page)
     with page.expect_response(
         lambda r: r.url.endswith(f"/api/servers/{server_id}") and r.request.method == "PUT"
     ) as answered:
@@ -238,6 +239,7 @@ def _plex_confirmation_open(page: Page):
 
 
 def _save_and_get_put(page: Page, captured: dict) -> dict:
+    touch_edit_form(page)
     page.locator("#editServerSave").click()
     expect(page.locator("#editServerModal")).to_be_hidden(timeout=10000)
     assert len(captured["puts"]) == 1, f"expected exactly one PUT, got {len(captured['puts'])}"
@@ -491,6 +493,7 @@ class TestPlexTab:
         _open_tab(authed_page, app_url, server)
         # Ticked without a change event (e.g. the modal was dismissed some other way): Save must still ask.
         authed_page.evaluate("document.getElementById('markersEnabled').checked = true")
+        touch_edit_form(authed_page)
         watch_modal_shown(authed_page, "markersPlexConfirmModal")
         authed_page.locator("#editServerSave").click()
         _plex_confirmation_open(authed_page)
@@ -769,6 +772,7 @@ class TestPlexTab:
             "() => bootstrap.Modal.getInstance(document.getElementById('editServerModal'))._isTransitioning"
         ), "the click must land while the dialog is still opening"
 
+        touch_edit_form(authed_page)
         authed_page.locator("#editServerSave").click(force=True)
         expect(authed_page.locator("#editServerModal")).to_be_hidden(timeout=6000)
         assert len(captured["puts"]) == 1
@@ -815,6 +819,7 @@ class TestPlexTab:
         edit_btn.click()
         modal = authed_page.locator("#editServerModal")
         expect(modal).to_be_visible(timeout=5000)
+        touch_edit_form(authed_page)
         authed_page.locator("#editServerSave").click()
         authed_page.wait_for_function("() => document.querySelector('#editServerSave').disabled")
         assert len(held) == 1
@@ -827,6 +832,9 @@ class TestPlexTab:
         authed_page.wait_for_function(
             "() => !bootstrap.Modal.getInstance(document.getElementById('editServerModal'))._isTransitioning"
         )
+        # The reopened dialog is clean, so its Save starts disabled; an edit enables it once the old save's answer
+        # (still held) releases the in-flight state.
+        touch_edit_form(authed_page)
         held[0].fulfill(status=200, content_type="application/json", body=json.dumps(server))
         authed_page.wait_for_function("() => !document.querySelector('#editServerSave').disabled")
         authed_page.wait_for_timeout(800)
