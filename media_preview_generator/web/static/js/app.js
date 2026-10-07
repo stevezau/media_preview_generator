@@ -427,6 +427,13 @@ function initDashboard() {
             updateJobQueue();
         }
     });
+    // ...and when the pointer leaves the queue, so an update deferred while it was over a row isn't stuck until the
+    // next poll.
+    document.addEventListener('mouseover', function (event) {
+        if (_jobQueueUpdatePending && !event.target.closest('#jobQueue')) {
+            updateJobQueue();
+        }
+    });
 }
 
 // SocketIO Connection
@@ -1202,7 +1209,7 @@ async function fireWebhookNow(jobId) {
     try {
         await apiPost('/api/jobs/' + encodeURIComponent(jobId) + '/fire-webhook-now', {});
         showToast('Webhook Fired', 'Skipped the initial wait — dispatching now.', 'success');
-        await Promise.all([loadJobs(), loadPendingWebhooks()]);
+        await Promise.all([loadJobs({force: true}), loadPendingWebhooks()]);
     } catch (error) {
         showToast('Error', 'Could not fire webhook: ' + (error && error.message || error), 'danger');
     }
@@ -1217,7 +1224,7 @@ async function retryNowFromRow(jobId) {
     try {
         await apiPost('/api/jobs/' + encodeURIComponent(jobId) + '/retry-now', {});
         showToast('Retry Fired', 'Skipped the backoff — attempting now.', 'success');
-        await loadJobs();
+        await loadJobs({force: true});
     } catch (error) {
         showToast('Error', 'Could not fire retry: ' + (error && error.message || error), 'danger');
     }

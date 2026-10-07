@@ -295,7 +295,7 @@ def test_loudness_retry_row_explains_automatic_retry_without_preview_instruction
     modal_chip = page.locator("#attemptsHint")
     expect(modal_chip.locator("[data-explain-template]")).to_have_count(0)
     if status == "pending":
-        expect(modal_chip).to_contain_text("attempt 1/3")
+        expect(modal_chip).to_contain_text("retry 1 of 3")
     elif not active:
         expect(modal_chip).not_to_contain_text("Next attempt")
 

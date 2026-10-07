@@ -518,6 +518,29 @@ class TestRetryNowEndpoint:
             f"force_fire_now must be set so the backoff loop bails; got config={refreshed.config!r}"
         )
 
+    def test_stops_the_head_countdown_at_once(self, client):
+        """The queue shows the chain head, so its countdown must clear on the click, not when the child's wait loop next polls."""
+        from media_preview_generator.web.jobs import JobStatus, get_job_manager
+
+        jm = get_job_manager()
+        chain_id, attempt_ids = _seed_chain_with_attempts(
+            jm,
+            canonical_path="/data/Beast (2026)/Beast2.mkv",
+            basename="Beast (2026)",
+            num_attempts=1,
+        )
+        child = jm.get_job(attempt_ids[0])
+        child.status = JobStatus.PENDING
+        child.completed_at = None
+        jm.update_progress(chain_id, retry_eta="2099-01-01T00:00:00+00:00", retry_wait_total=3600)
+
+        resp = client.post(f"/api/jobs/{chain_id}/retry-now", headers=_headers())
+
+        assert resp.status_code == 200
+        head = jm.get_job(chain_id)
+        assert head.progress.retry_eta is None
+        assert head.progress.current_item == "Retrying now"
+
     def test_returns_400_for_non_chain_job(self, client):
         from media_preview_generator.web.jobs import get_job_manager
 

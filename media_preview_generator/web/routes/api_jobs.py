@@ -1244,6 +1244,10 @@ def retry_now(job_id):
     new_cfg["force_fire_now"] = True
     job_manager.update_job_config(pending_child.id, new_cfg)
 
+    # The child's wait loop only reacts on its next poll, and the chain head (the row the queue shows) keeps its
+    # countdown until then, so stop the countdown on the head now.
+    job_manager.update_progress(job_id, current_item="Retrying now", retry_eta=None)
+
     job_manager.add_log(job_id, "INFO - Retry forced by operator (Retry now)")
     return jsonify({"fired": True, "job_id": job_id, "retry_job_id": pending_child.id})
 
