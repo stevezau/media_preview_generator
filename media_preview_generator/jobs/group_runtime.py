@@ -34,10 +34,10 @@ def current_groups(config=None) -> list[dict] | None:
 
 def capacity_for_groups(groups: list[dict], selected_gpus: list, kind: str, *, now: datetime | None = None) -> dict:
     """Distinguish policy, hardware and hours from ordinary busy worker slots."""
-    from ..worker_groups import group_is_available, next_group_opening, supports_job
+    from ..worker_groups import group_is_available, member_policies, next_group_opening, supports_job
 
     devices = {device for _, device, _ in selected_gpus}
-    compatible = [g for g in groups if g["enabled"] and supports_job(g, kind)]
+    compatible = [g for g in member_policies(groups) if g["enabled"] and supports_job(g, kind)]
     detected = [g for g in compatible if g["resource"] == "cpu" or g.get("device") in devices]
     opened = [g for g in detected if group_is_available(g, now=now)]
     future = [next_group_opening(g, now=now) for g in detected]
@@ -64,8 +64,9 @@ def runtime_capacity(kind: str, *, now: datetime | None = None) -> dict:
         # embedded callers without a SettingsManager retain their prior path.
         return {"configured": 1, "open": 1, "available": 0, "busy": 0, "reason": "ready", "next_opening": None}
     from ..web.routes.job_runner import _build_selected_gpus
+    from ..worker_groups import member_policies
 
-    selected = _build_selected_gpus(settings) if any(g["resource"] == "gpu" for g in groups) else []
+    selected = _build_selected_gpus(settings) if any(p["resource"] == "gpu" for p in member_policies(groups)) else []
     return capacity_for_groups(groups, selected, kind, now=now)
 
 
@@ -111,10 +112,10 @@ def refresh_worker_groups(pool, config=None, selected_gpus: list | None = None, 
     once per second. Returns False for a legacy, ungrouped harness.
     """
     now = time.monotonic()
-    if not force and config is None and selected_gpus is None and pool._groups is None:
+    if not force and config is None and selected_gpus is None and pool._policies is None:
         return False
     if not force and selected_gpus is None and now - getattr(pool, "_group_refresh_at", -10.0) < 1:
-        return pool._groups is not None
+        return pool._policies is not None
     groups, revision = current_group_policy(config)
     if groups is None:
         return False

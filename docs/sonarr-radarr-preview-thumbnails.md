@@ -37,7 +37,7 @@ Field-by-field steps: [Configure Radarr](guides.md#configure-radarr) and [Config
 
 1. **Batching.** Files are queued per source. A batch runs once the delay (default 60 seconds, range 10–300) passes with no new files from that source. Each new file restarts the timer. A season pack becomes one job. See [Batching and the delay](guides.md#batching-and-the-delay).
 2. **Finding the servers.** Each path is mapped to the container's view. Then every configured server whose enabled libraries contain the file is found. A path outside every enabled library is skipped, not retried.
-3. **One decode.** FFmpeg runs once per file on a worker from a group allowed to run previews: a GPU group, or a CPU group if you have no GPU.
+3. **One decode.** FFmpeg runs once per file on a worker for a device allowed to run previews: a GPU, or the CPU if you have no GPU.
 4. **Publishing.** Each server that owns the file gets its own format:
    - Plex: a BIF in its config folder.
    - Emby: a BIF next to the video.

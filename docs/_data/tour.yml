@@ -25,10 +25,10 @@
     FFmpeg decodes the video on the GPU, jumps between key frames when the file allows it, and
     tone-maps HDR. If the GPU can't decode a file, the same worker tries again on the CPU.
   image: tour-extract.webp
-  alt: "The Dashboard Workers panel with three worker groups: three busy GPU workers on an NVIDIA card, one idle worker on an Intel GPU and four idle CPU workers"
+  alt: "The Dashboard Workers panel with a GPU workers group holding an NVIDIA TITAN RTX device (three busy workers) and an Intel UHD Graphics 770 device (one idle worker), beside a CPU workers group with four idle workers"
   path: /
   width: 1232
-  height: 602
+  height: 765
 - title: Each server gets its own format
   body: >-
     A BIF in Plex's data folder, a BIF next to the video for Emby, trickplay tiles for Jellyfin. Then

@@ -1,4 +1,9 @@
-"""Validated worker policy and weekly availability, independent of live workers."""
+"""Validated worker policy and weekly availability, independent of live workers.
+
+A saved group is ``id``, ``name``, ``enabled``, ``availability`` and ``members``; each member is one device
+(``resource``/``device``) with a worker ``count`` and its own ``job_types``. The runtime works on the flat
+``member_policies`` view, where every member looks like a legacy single-device group plus ``group_id``/``member_id``.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,8 @@ from .job_kinds import JOB_KIND_LOUDNESS, JOB_KINDS
 MAX_CPU_WORKERS = 32
 MAX_GPU_WORKERS = 32
 MAX_GROUPS = 64
+MAX_MEMBERS = 8
+LEGACY_MEMBER_ID = "m1"
 WEEK_MINUTES = 7 * 24 * 60
 _ALL_WEEK = (1 << WEEK_MINUTES) - 1
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}\Z")
@@ -50,18 +57,91 @@ def local_now(now: datetime | None = None) -> datetime:
     return now if now.tzinfo is not None else now.replace(tzinfo=application_timezone())
 
 
-def group_resource_key(group: dict) -> str:
-    """Identify the shared capacity budget, separately from individual groups."""
-    return "cpu" if group["resource"] == "cpu" else f"gpu:{group['device']}"
+def group_resource_key(policy: dict) -> str:
+    """Identify the shared capacity budget, separately from individual groups.
+
+    Args:
+        policy: A member policy (or a legacy flat group, or a group with exactly one member).
+
+    Raises:
+        ValueError: A group with several members has no single resource key.
+    """
+    if "members" in policy:
+        policy = _single_policy(policy)
+    return "cpu" if policy["resource"] == "cpu" else f"gpu:{policy['device']}"
 
 
-def supports_job(group: dict, kind: str) -> bool:
-    """Apply intrinsic hardware capability before the owner's job permissions."""
+def _single_policy(group: dict) -> dict:
+    policies = member_policies([group])
+    if len(policies) != 1:
+        raise ValueError("A group with several devices has no single resource; use member_policies")
+    return policies[0]
+
+
+def supports_job(policy: dict, kind: str) -> bool:
+    """Apply intrinsic hardware capability before the owner's job permissions.
+
+    Args:
+        policy: A member policy; a saved group with members is supported when any member supports the kind.
+    """
+    if "members" in policy:
+        return any(supports_job(member, kind) for member in member_policies([policy]))
     return (
         kind in JOB_KINDS
-        and kind in group.get("job_types", [])
-        and (kind != JOB_KIND_LOUDNESS or group.get("resource") == "cpu")
+        and kind in policy.get("job_types", [])
+        and (kind != JOB_KIND_LOUDNESS or policy.get("resource") == "cpu")
     )
+
+
+def member_policies(groups: list[dict]) -> list[dict]:
+    """One flat policy per member, shaped like a v21 group plus its owners.
+
+    Accepts validated groups; a legacy flat group (no ``members``) counts as one member ``m1`` so a stale
+    snapshot or a hand-edited file cannot crash the runtime. Already-flat policies pass through unchanged.
+    Pure: no settings, locks or I/O.
+
+    Returns:
+        Dicts with ``id`` (``"<group_id>:<member_id>"``), ``group_id``, ``member_id``, ``name`` (the group's),
+        ``enabled``, ``availability`` (the group's), ``resource``, ``device``, ``count``, ``job_types``.
+    """
+    policies: list[dict] = []
+    for group in groups:
+        if "member_id" in group and "members" not in group:
+            policies.append(dict(group))
+            continue
+        members = group.get("members")
+        if members is None:
+            members = [{**group, "id": LEGACY_MEMBER_ID}]
+        for member in members:
+            policies.append(
+                {
+                    "id": f"{group['id']}:{member['id']}",
+                    "group_id": group["id"],
+                    "member_id": member["id"],
+                    "name": group.get("name", group["id"]),
+                    "enabled": group.get("enabled", True),
+                    "availability": group.get("availability", {"mode": "always", "windows": []}),
+                    "resource": member["resource"],
+                    "device": member.get("device"),
+                    "count": member["count"],
+                    "job_types": list(member.get("job_types", [])),
+                }
+            )
+    return policies
+
+
+def legacy_group_view(group: dict) -> dict:
+    """Deprecated flat echo (resource, device, count, job_types) for a single-member group; ``{}`` otherwise."""
+    members = group.get("members") or []
+    if len(members) != 1:
+        return {}
+    member = members[0]
+    return {
+        "resource": member["resource"],
+        "device": member.get("device"),
+        "count": member["count"],
+        "job_types": list(member.get("job_types", [])),
+    }
 
 
 def _minute(value: str) -> int:
@@ -125,9 +205,9 @@ def next_group_opening(group: dict, now: datetime | None = None) -> datetime | N
     return next_mask_opening(group_weekly_mask(group), now)
 
 
-def _peak(groups: list[dict]) -> int:
+def _peak(policies: list[dict]) -> int:
     changes: dict[int, int] = {}
-    for group in groups:
+    for group in policies:
         mask = group_weekly_mask(group)
         while mask:
             start = (mask & -mask).bit_length() - 1
@@ -146,17 +226,121 @@ def _peak(groups: list[dict]) -> int:
 
 def configured_group_totals(groups: list[dict]) -> tuple[int, int]:
     """Return peak (GPU, CPU) capacity, retaining the existing family limits."""
-    return tuple(_peak([g for g in groups if g["resource"] == resource]) for resource in ("gpu", "cpu"))
+    policies = member_policies(groups)
+    return tuple(_peak([p for p in policies if p["resource"] == resource]) for resource in ("gpu", "cpu"))
+
+
+def _clean_member(raw: object, name: str, seen_ids: set[str], seen_devices: set[str], legacy: bool) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{name}: each device must be an object")
+    member_id = LEGACY_MEMBER_ID if legacy else raw.get("id")
+    if not isinstance(member_id, str) or not _ID.fullmatch(member_id) or member_id in seen_ids:
+        raise ValueError(f"{name}: each device needs a unique valid ID")
+    seen_ids.add(member_id)
+    resource = raw.get("resource")
+    if resource not in ("cpu", "gpu"):
+        raise ValueError(f"{name}: choose CPU or GPU for each device")
+    device = raw.get("device")
+    if resource == "gpu" and (
+        not isinstance(device, str) or not device.strip() or len(device) > 256 or device != device.strip()
+    ):
+        raise ValueError(f"{name}: choose a GPU device")
+    if resource == "cpu" and device not in (None, ""):
+        raise ValueError(f"{name}: a CPU member cannot select a GPU device")
+    label = "CPU" if resource == "cpu" else device
+    key = "cpu" if resource == "cpu" else f"gpu:{device}"
+    if key in seen_devices:
+        raise ValueError(f"{name}: {label} appears twice; use one row per device")
+    seen_devices.add(key)
+    count = raw.get("count")
+    limit = MAX_CPU_WORKERS if resource == "cpu" else MAX_GPU_WORKERS
+    if type(count) is not int or not 1 <= count <= limit:
+        raise ValueError(f"{name} ({label}): worker count must be between 1 and {limit}; remove the device to use zero")
+    kinds = raw.get("job_types")
+    if not isinstance(kinds, list) or not kinds or any(k not in JOB_KINDS for k in kinds):
+        raise ValueError(f"{name} ({label}): select at least one supported job type")
+    if resource == "gpu" and JOB_KIND_LOUDNESS in kinds:
+        raise ValueError(f"{name} ({label}): Plex loudness requires CPU workers")
+    return {
+        "id": member_id,
+        "resource": resource,
+        "device": device if resource == "gpu" else None,
+        "count": count,
+        "job_types": [kind for kind in JOB_KINDS if kind in kinds],
+    }
+
+
+def _reject_conflicting_flat_fields(raw: dict, members: list, name: str) -> None:
+    """Refuse a flat resource/device/count/job_types that disagrees with the group's only member.
+
+    The flat fields are a deprecated echo of a single member, so an equal echo is accepted (GET then PUT) while a
+    different value would be silently dropped. Multi-member groups have no flat echo and ignore stray fields.
+    """
+    if len(members) != 1 or not isinstance(members[0], dict):
+        return
+    member = members[0]
+    for key in ("resource", "device", "count", "job_types"):
+        if key not in raw:
+            continue
+        flat, own = raw[key], member.get(key)
+        if key == "device":
+            flat, own = flat or None, own or None
+        if flat != own:
+            raise ValueError(f"{name}: edit members[0] instead of the group's top-level {key}")
+
+
+def _clean_members(raw: dict, name: str) -> list[dict]:
+    if "members" not in raw:
+        # Legacy flat group: the group's own device fields are its single member.
+        if "resource" not in raw:
+            raise ValueError(f"{name}: add at least one device")
+        return [_clean_member(raw, name, set(), set(), legacy=True)]
+    members = raw["members"]
+    if not isinstance(members, list) or not members:
+        raise ValueError(f"{name}: add at least one device")
+    _reject_conflicting_flat_fields(raw, members, name)
+    if len(members) > MAX_MEMBERS:
+        raise ValueError(f"{name}: use at most {MAX_MEMBERS} devices")
+    seen_ids: set[str] = set()
+    seen_devices: set[str] = set()
+    return [_clean_member(member, name, seen_ids, seen_devices, legacy=False) for member in members]
+
+
+def _clean_availability(raw: dict, name: str) -> dict:
+    availability = raw.get("availability", {"mode": "always", "windows": []})
+    if not isinstance(availability, dict) or availability.get("mode") not in ("always", "scheduled"):
+        raise ValueError(f"{name}: availability must be always or scheduled")
+    windows = availability.get("windows", [])
+    if not isinstance(windows, list) or len(windows) > 32:
+        raise ValueError(f"{name}: use at most 32 availability windows")
+    if availability["mode"] == "scheduled" and not windows:
+        raise ValueError(f"{name}: add an availability window")
+    clean_windows = []
+    for window in windows:
+        if not isinstance(window, dict):
+            raise ValueError(f"{name}: each window must be an object")
+        days = window.get("days")
+        if not isinstance(days, list) or not days or any(type(d) is not int or not 0 <= d <= 6 for d in days):
+            raise ValueError(f"{name}: select valid start days for each window")
+        start, end = window.get("start"), window.get("end")
+        if any(not isinstance(t, str) or not _TIME.fullmatch(t) for t in (start, end)) or start == end:
+            raise ValueError(f"{name}: use different start and end times in HH:MM format")
+        clean_windows.append({"days": sorted(set(days)), "start": start, "end": end})
+    return {"mode": availability["mode"], "windows": clean_windows}
 
 
 def validate_worker_groups(value: object) -> list[dict[str, Any]]:
     """Normalize worker groups, rejecting malformed or overcommitted policies.
 
+    Accepts the member shape and the legacy flat shape (one device per group, converted to one member ``m1``).
+    When ``members`` is present, top-level ``resource``/``device``/``count``/``job_types`` must match the only member
+    or be absent.
+
     Args:
         value: Complete proposed group list; an empty list intentionally disables capacity.
 
     Returns:
-        An independent normalized list safe to persist.
+        An independent normalized list in the member shape, safe to persist.
 
     Raises:
         ValueError: A field is invalid, or overlapping groups exceed capacity limits.
@@ -178,52 +362,14 @@ def validate_worker_groups(value: object) -> list[dict[str, Any]]:
         enabled = raw.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError(f"{name}: enabled must be true or false")
-        resource = raw.get("resource")
-        if resource not in ("cpu", "gpu"):
-            raise ValueError(f"{name}: choose CPU or GPU")
-        device = raw.get("device")
-        if resource == "gpu" and (not isinstance(device, str) or not device.strip() or len(device) > 256):
-            raise ValueError(f"{name}: choose a GPU device")
-        if resource == "cpu" and device not in (None, ""):
-            raise ValueError(f"{name}: a CPU group cannot select a GPU device")
-        count = raw.get("count")
-        limit = MAX_CPU_WORKERS if resource == "cpu" else MAX_GPU_WORKERS
-        if type(count) is not int or not 1 <= count <= limit:
-            raise ValueError(f"{name}: worker count must be between 1 and {limit}; disable the group to use zero")
-        kinds = raw.get("job_types")
-        if not isinstance(kinds, list) or not kinds or any(k not in JOB_KINDS for k in kinds):
-            raise ValueError(f"{name}: select at least one supported job type")
-        if resource == "gpu" and JOB_KIND_LOUDNESS in kinds:
-            raise ValueError(f"{name}: Plex loudness requires CPU workers")
-        availability = raw.get("availability", {"mode": "always", "windows": []})
-        if not isinstance(availability, dict) or availability.get("mode") not in ("always", "scheduled"):
-            raise ValueError(f"{name}: availability must be always or scheduled")
-        windows = availability.get("windows", [])
-        if not isinstance(windows, list) or len(windows) > 32:
-            raise ValueError(f"{name}: use at most 32 availability windows")
-        if availability["mode"] == "scheduled" and not windows:
-            raise ValueError(f"{name}: add an availability window")
-        clean_windows = []
-        for window in windows:
-            if not isinstance(window, dict):
-                raise ValueError(f"{name}: each window must be an object")
-            days = window.get("days")
-            if not isinstance(days, list) or not days or any(type(d) is not int or not 0 <= d <= 6 for d in days):
-                raise ValueError(f"{name}: select valid start days for each window")
-            start, end = window.get("start"), window.get("end")
-            if any(not isinstance(t, str) or not _TIME.fullmatch(t) for t in (start, end)) or start == end:
-                raise ValueError(f"{name}: use different start and end times in HH:MM format")
-            clean_windows.append({"days": sorted(set(days)), "start": start, "end": end})
+        members = _clean_members(raw, name)
         groups.append(
             {
                 "id": group_id,
                 "name": name.strip(),
                 "enabled": enabled,
-                "resource": resource,
-                "device": device if resource == "gpu" else None,
-                "count": count,
-                "job_types": [kind for kind in JOB_KINDS if kind in kinds],
-                "availability": {"mode": availability["mode"], "windows": clean_windows},
+                "availability": _clean_availability(raw, name),
+                "members": members,
             }
         )
     gpu, cpu = configured_group_totals(groups)
@@ -245,11 +391,16 @@ def groups_from_legacy(settings: dict) -> list[dict]:
                 "id": group_id,
                 "name": name,
                 "enabled": enabled and count > 0,
-                "resource": resource,
-                "device": device,
-                "count": max(1, count),
-                "job_types": [kind for kind in JOB_KINDS if resource == "cpu" or kind != JOB_KIND_LOUDNESS],
                 "availability": {"mode": "always", "windows": []},
+                "members": [
+                    {
+                        "id": LEGACY_MEMBER_ID,
+                        "resource": resource,
+                        "device": device,
+                        "count": max(1, count),
+                        "job_types": [kind for kind in JOB_KINDS if resource == "cpu" or kind != JOB_KIND_LOUDNESS],
+                    }
+                ],
             }
         )
 
@@ -285,4 +436,8 @@ def future_capacity(groups: list[dict], quiet_hours: object, kind: str) -> int:
     from .quiet_hours import quiet_hours_weekly_mask
 
     blocked = quiet_hours_weekly_mask(quiet_hours)
-    return sum(group["count"] for group in groups if supports_job(group, kind) and group_weekly_mask(group) & ~blocked)
+    return sum(
+        policy["count"]
+        for policy in member_policies(groups)
+        if supports_job(policy, kind) and group_weekly_mask(policy) & ~blocked
+    )

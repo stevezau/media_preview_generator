@@ -386,11 +386,11 @@ Apple Silicon Macs do still benefit from the native ARM64 image — the containe
 
 A **worker** is a parallel slot that processes one file at a time. More workers means more files at once, but higher CPU/GPU load.
 
-Workers are set up in **worker groups** under **Settings → Workers**. Each group has a name, a resource (CPU or a specific GPU), a worker count from 1 to 32, the job types it runs (previews, intro & credits, and loudness on CPU groups only), and when it is available (always, or on a weekly schedule). For CPU-only mode, create CPU groups only.
+Workers are set up in **worker groups** under **Settings → Workers**. Each group has a name, when it is available (always, or on a weekly schedule) and up to 8 devices. Each device is the CPU or a specific GPU, with a worker count from 1 to 32 and the job types it runs (previews, intro & credits, and loudness on the CPU only). For CPU-only mode, use CPU devices only.
 
 **Settings → Processing options → GPU device tuning** sets **FFmpeg threads per worker** for each GPU: how many CPU threads each GPU worker may use. The default is 2, and 0 means no cap.
 
-Start with a few workers and increase gradually while you watch system load. The Dashboard's Workers panel shows each group's activity. **Manage groups** opens the group settings.
+Start with a few workers and increase gradually while you watch system load. The Dashboard's Workers panel shows each group's and device's activity. **Manage groups** opens the group settings.
 
 ---
 

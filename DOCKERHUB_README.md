@@ -47,7 +47,7 @@ a marker in the Inspector.
 
 | One GPU pass per file |
 | --- |
-| ![Dashboard Workers panel with three worker groups: three busy GPU workers on an NVIDIA card, one idle worker on an Intel GPU and four idle CPU workers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
+| ![Dashboard Workers panel with a GPU workers group (NVIDIA TITAN RTX with three busy workers, Intel UHD Graphics 770 with one idle) beside a CPU workers group with four idle workers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
 
 | Each server gets its own format |
 | --- |
@@ -63,7 +63,7 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 
 **GPU first, CPU when needed**
 - **Every GPU you pass in.** NVIDIA, Intel and AMD on Linux; NVIDIA on Windows through WSL2. Choose worker groups for the GPUs passed to the container.
-- **Named worker groups.** Choose each group's job types, worker count and weekly hours. Dashboard +/− changes are saved; reducing capacity lets current files finish. [Worker guide](https://mediapreviewgenerator.dev/guides/#worker-groups-and-availability).
+- **Named worker groups.** Choose each group's devices, their job types and worker counts, and weekly hours. Dashboard +/− changes are saved; reducing capacity lets current files finish. [Worker guide](https://mediapreviewgenerator.dev/guides/#worker-groups-and-availability).
 - **CPU fallback built in.** A file the GPU can't decode is retried on the CPU by the same worker.
 - **Key-frame skipping.** Jumps between key frames when a file's key-frame spacing allows it.
 

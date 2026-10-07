@@ -90,22 +90,32 @@ class TestDashboardWorkerGroups:
         expect(dashboard_page.locator("#workerGroupDashboard")).to_contain_text("GPU 0")
         expect(dashboard_page.locator("#gpuWorkerConfig, #cpuWorkers")).to_have_count(0)
 
-    def test_system_stepper_scales_that_group_only_when_plus_is_clicked(self, authed_page: Page, app_url: str) -> None:
+    def test_system_card_lists_one_read_only_line_per_group_and_scaling_lives_in_workers_panel(
+        self, authed_page: Page, app_url: str
+    ) -> None:
         mock_dashboard_defaults(authed_page)
         groups = mock_worker_groups(authed_page)
         legacy = capture_settings_save(authed_page)
         authed_page.goto(app_url + "/")
-        row = authed_page.locator('[data-system-group="cpu"]')
-        expect(row.locator("output")).to_have_text("1")
-        # One worker is the floor: zero is reached by disabling the group in its editor.
-        expect(row.get_by_role("button", name="Remove one worker from CPU workers")).to_be_disabled()
-        row.get_by_role("button", name="Add one worker to CPU workers").click()
-        expect(row.locator("output")).to_have_text("2")
+        cpu_line = authed_page.locator('[data-system-group="cpu"]')
+        gpu_line = authed_page.locator('[data-system-group="gpu"]')
+        expect(authed_page.locator("[data-system-group]")).to_have_count(2)
+        expect(cpu_line).to_contain_text("CPU workers")
+        expect(cpu_line).to_contain_text("1 CPU")
+        expect(gpu_line).to_contain_text("GPU video")
+        expect(gpu_line).to_contain_text("1 GPU")
+        for line in (cpu_line, gpu_line):
+            expect(line.locator("button, input, output, [data-member-scale]")).to_have_count(0)
+        # Scaling happens on the member stepper in the Workers panel, one member at a time.
+        member = authed_page.locator("[data-member-block='cpu:m1']")
+        expect(member.locator("output")).to_have_text("1")
+        member.locator("[data-member-scale='1']").click()
+        expect(member.locator("output")).to_have_text("2")
         assert [(w["method"], w["url"].rsplit("/api/", 1)[1], w["body"]) for w in groups["writes"]] == [
-            ("POST", "worker-groups/cpu/scale", {"delta": 1})
+            ("POST", "worker-groups/cpu/members/m1/scale", {"delta": 1})
         ]
         assert not legacy
-        expect(authed_page.locator('[data-system-group="gpu"] output')).to_have_text("1")
+        expect(authed_page.locator("[data-member-block='gpu:m1'] output")).to_have_text("1")
 
     def test_group_header_shows_capacity_chip_and_capability_icons(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)

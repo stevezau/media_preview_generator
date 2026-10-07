@@ -1263,12 +1263,12 @@ def _configured_cpu_workers() -> int:
 
         settings = peek_settings_manager()
         if settings is not None and isinstance(settings.get("worker_groups"), list):
-            from ...worker_groups import group_is_available, supports_job
+            from ...worker_groups import group_is_available, member_policies, supports_job
 
             return sum(
-                group["count"]
-                for group in settings.worker_groups
-                if group["resource"] == "cpu" and supports_job(group, "intro_credits") and group_is_available(group)
+                policy["count"]
+                for policy in member_policies(settings.worker_groups)
+                if policy["resource"] == "cpu" and supports_job(policy, "intro_credits") and group_is_available(policy)
             )
         return 1 if settings is None else max(0, int(settings.cpu_threads))
     except Exception as exc:  # noqa: BLE001 - a helper count must never fail a request

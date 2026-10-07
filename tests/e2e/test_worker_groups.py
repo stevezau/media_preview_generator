@@ -33,20 +33,22 @@ def group_api(authed_page: Page) -> dict:
                 "id": "cpu-night",
                 "name": "Overnight loudness",
                 "enabled": True,
-                "resource": "cpu",
-                "device": None,
-                "count": 2,
-                "job_types": ["loudness"],
+                "members": [{"id": "m-cpu", "resource": "cpu", "device": None, "count": 2, "job_types": ["loudness"]}],
                 "availability": {"mode": "scheduled", "windows": [{"days": [0], "start": "23:00", "end": "07:00"}]},
             },
             {
                 "id": "gpu-video",
                 "name": 'Video <img src=x onerror="window.injected=1">',
                 "enabled": True,
-                "resource": "gpu",
-                "device": "nvidia0",
-                "count": 2,
-                "job_types": ["previews", "intro_credits"],
+                "members": [
+                    {
+                        "id": "m-gpu",
+                        "resource": "gpu",
+                        "device": "nvidia0",
+                        "count": 2,
+                        "job_types": ["previews", "intro_credits"],
+                    }
+                ],
                 "availability": {"mode": "always", "windows": []},
             },
         ],
@@ -64,6 +66,9 @@ def group_api(authed_page: Page) -> dict:
                     "finishing": 0,
                     "state": "busy",
                     "next_available_at": None,
+                    "members": [
+                        {"id": "m-cpu", "resource": "cpu", "device": None, "desired": 2, "available": 0, "busy": 2}
+                    ],
                 },
                 {
                     "id": "gpu-video",
@@ -73,12 +78,15 @@ def group_api(authed_page: Page) -> dict:
                     "finishing": 0,
                     "state": "available",
                     "next_available_at": None,
+                    "members": [
+                        {"id": "m-gpu", "resource": "gpu", "device": "nvidia0", "desired": 2, "available": 1, "busy": 1}
+                    ],
                 },
             ]
         },
         "warnings": [],
     }
-    control = {"state": state, "writes": [], "conflict": False}
+    control = {"state": state, "writes": [], "conflict": False, "error": None}
 
     def route(request):
         method = request.request.method
@@ -87,30 +95,24 @@ def group_api(authed_page: Page) -> dict:
             return
         body = request.request.post_data_json
         control["writes"].append((method, request.request.url, body))
+        if control["error"]:
+            request.fulfill(status=400, json={"error": control["error"]})
+            return
         if control["conflict"] or method == "PUT" and body["revision"] != state["revision"]:
             request.fulfill(status=409, json={"error": "Groups changed elsewhere"})
             return
         if method == "PUT":
             state["groups"] = copy.deepcopy(body["groups"])
+        elif "/members/" in request.request.url:
+            tail = request.request.url.split("/api/worker-groups/")[1]
+            group_id, _, rest = tail.partition("/members/")
+            group = next(g for g in state["groups"] if g["id"] == group_id)
+            member = next(m for m in group["members"] if m["id"] == rest.split("/")[0])
+            member["count"] += body["delta"]
         else:
             group_id = request.request.url.split("/")[-2]
             group = next(g for g in state["groups"] if g["id"] == group_id)
-            runtime = next(g for g in state["capacity"]["groups"] if g["id"] == group_id)
-            if "enabled" in body:
-                group["enabled"] = body["enabled"]
-            else:
-                desired = (group["count"] if group["enabled"] else 0) + body["delta"]
-                if desired <= 0:
-                    group["enabled"] = False
-                else:
-                    group["count"] = desired
-                    group["enabled"] = True
-            runtime.update(
-                desired=group["count"] if group["enabled"] else 0,
-                busy=min(2, group["count"]) if group["enabled"] else 0,
-                finishing=max(0, 2 - group["count"]) if group["enabled"] else 2,
-                state="busy" if group["enabled"] else "disabled",
-            )
+            group["enabled"] = body["enabled"]
         state["revision"] += 1
         request.fulfill(json=state)
 
@@ -136,7 +138,7 @@ def test_settings_draft_apply_payload_and_no_legacy_counts(authed_page: Page, ap
     expect(page.locator("#cpuThreads, .gpu-workers, .gpu-enable-toggle")).to_have_count(0)
     page.locator('[data-edit="cpu-night"]').click()
     page.locator("#workerGroupName").fill("CPU audio")
-    page.locator("#workerGroupCount").fill("3")
+    page.locator('[data-member="m-cpu"] [data-count]').fill("3")
     page.locator('[data-day="1"]').check()
     assert group_api["writes"] == []
     expect(page.locator("#workerGroupEditorApply")).to_be_enabled()
@@ -146,9 +148,11 @@ def test_settings_draft_apply_payload_and_no_legacy_counts(authed_page: Page, ap
     method, _, payload = group_api["writes"][0]
     assert method == "PUT"
     assert payload["revision"] == 7
-    assert payload["groups"][0]["count"] == 3
+    member = payload["groups"][0]["members"][0]
+    assert member == {"id": "m-cpu", "resource": "cpu", "device": None, "count": 3, "job_types": ["loudness"]}
     assert payload["groups"][0]["name"] == "CPU audio"
-    assert payload["groups"][0]["job_types"] == ["loudness"]
+    assert not {"resource", "device", "count", "job_types"} & set(payload["groups"][0])
+    assert payload["groups"][1]["members"][0]["id"] == "m-gpu"
     assert payload["groups"][0]["availability"]["windows"][0] == {"days": [0, 1], "start": "23:00", "end": "07:00"}
     expect(page.locator("#workerGroupEditor")).to_be_hidden()
     page.evaluate("saveAllSettings()")
@@ -161,18 +165,23 @@ def test_invalid_inputs_and_gpu_capability_never_write(authed_page: Page, app_ur
     settings_page(authed_page, app_url)
     page = authed_page
     page.locator('[data-edit="cpu-night"]').click()
-    page.locator("#workerGroupCount").fill("0")
+    page.locator('[data-member="m-cpu"] [data-count]').fill("0")
     page.locator("#workerGroupApply").click()
-    expect(page.locator("#workerGroupMessage")).to_contain_text("Disable a group")
-    page.locator("#workerGroupCount").fill("2")
+    expect(page.locator("#workerGroupMessage")).to_have_text("CPU: enter 1–32 workers. Remove the device to use zero.")
+    expect(page.locator("#workerGroupEditorError")).to_have_text(
+        "CPU: enter 1–32 workers. Remove the device to use zero."
+    )
+    page.locator('[data-member="m-cpu"] [data-count]').fill("2")
     page.locator("#wgEnd0").fill("23:00")
     page.locator("#workerGroupApply").click()
     expect(page.locator("#workerGroupMessage")).to_contain_text("different valid")
-    page.locator("#workerGroupResource").select_option("nvidia0")
-    expect(page.locator('[data-kind="loudness"]')).to_be_disabled()
-    expect(page.locator('[data-kind="loudness"]')).not_to_be_checked()
+    page.locator('[data-member="m-cpu"] [data-pick]').select_option("nvidia0")
+    loudness = page.locator('[data-member="m-cpu"] [data-kind="loudness"]')
+    expect(loudness).to_be_disabled()
+    expect(loudness).to_have_attribute("aria-pressed", "false")
+    expect(page.locator('[data-member="m-cpu"]')).to_contain_text("Loudness removed — it runs on CPU only.")
     page.locator("#workerGroupApply").click()
-    expect(page.locator("#workerGroupMessage")).to_contain_text("at least one job")
+    expect(page.locator("#workerGroupMessage")).to_have_text("NVIDIA card: choose at least one job type.")
     assert not group_api["writes"]
 
 
@@ -184,7 +193,7 @@ def test_revision_conflict_preserves_draft_and_discard_reloads(
     page.locator('[data-edit="cpu-night"]').click()
     page.locator("#workerGroupName").fill("My draft")
     group_api["state"]["revision"] = 8
-    group_api["state"]["groups"][0]["count"] = 5
+    group_api["state"]["groups"][0]["members"][0]["count"] = 5
     page.evaluate("WorkerGroups.load()")
     page.locator("#workerGroupApply").click()
     expect(page.locator("#workerGroupMessage")).to_contain_text("draft is preserved")
@@ -279,6 +288,7 @@ def test_group_refresh_preserves_worker_nodes_and_per_job_pause_occupancy(
         "worker_type": "CPU",
         "worker_name": "CPU Worker 1",
         "group_id": "cpu-night",
+        "member_id": "m-cpu",
         "group_name": "Overnight loudness",
         "status": "processing",
         "job_id": "paused-job",
@@ -296,10 +306,10 @@ def test_group_refresh_preserves_worker_nodes_and_per_job_pause_occupancy(
         "aria-label", "2 of 2 configured workers busy. Worker counts set simultaneous tasks, not CPU cores."
     )
     expect(row).to_contain_text("1 paused")
-    host = page.locator('[data-group-workers="cpu-night"]')
+    host = page.locator('[data-group-workers="cpu-night:m-cpu"]')
     expect(host.locator("[data-worker-key]")).to_have_count(1)
     page.evaluate(
-        "window.savedWorkerNode = document.querySelector('[data-group-workers=\"cpu-night\"] [data-worker-key]')"
+        "window.savedWorkerNode = document.querySelector('[data-group-workers=\"cpu-night:m-cpu\"] [data-worker-key]')"
     )
     group_api["state"]["processing_paused"] = True
     page.evaluate("WorkerGroups.load()")
@@ -308,7 +318,7 @@ def test_group_refresh_preserves_worker_nodes_and_per_job_pause_occupancy(
     page.evaluate("WorkerGroups.load()")
     expect(row).to_contain_text("1 paused")
     assert page.evaluate(
-        "window.savedWorkerNode === document.querySelector('[data-group-workers=\"cpu-night\"] [data-worker-key]')"
+        "window.savedWorkerNode === document.querySelector('[data-group-workers=\"cpu-night:m-cpu\"] [data-worker-key]')"
     )
     assert group_api["state"]["capacity"]["groups"][0]["available"] == 0
 
@@ -474,6 +484,7 @@ def test_worker_card_names_group_and_retiring_phase(authed_page: Page, app_url: 
         "worker_name": "CPU Worker 1",
         "group_name": "Overnight loudness",
         "group_id": "cpu-night",
+        "member_id": "m-cpu",
         "retiring": True,
         "status": "processing",
         "current_title": "Movie",
@@ -560,13 +571,22 @@ def test_worker_group_editor_and_dashboard_fit_supported_sizes(
     group_api["state"]["groups"][1]["name"] = "NVIDIA TITAN RTX"
     group_api["state"]["hardware"][0]["name"] = "NVIDIA TITAN RTX"
     intel = copy.deepcopy(group_api["state"]["groups"][1])
-    intel.update(
-        id="intel-video", name="Intel Corporation Raptor Lake-S GT1 [UHD Graphics 770] (rev 04)", device="intel0"
-    )
+    intel.update(id="intel-video", name="Intel Corporation Raptor Lake-S GT1 [UHD Graphics 770] (rev 04)")
+    intel["members"][0]["device"] = "intel0"
     group_api["state"]["groups"].append(intel)
     group_api["state"]["hardware"].append({"device": "intel0", "name": intel["name"], "status": "ok"})
     group_api["state"]["capacity"]["groups"].append(
-        {"id": "intel-video", "desired": 2, "available": 2, "busy": 0, "finishing": 0, "state": "active"}
+        {
+            "id": "intel-video",
+            "desired": 2,
+            "available": 2,
+            "busy": 0,
+            "finishing": 0,
+            "state": "active",
+            "members": [
+                {"id": "m-gpu", "resource": "gpu", "device": "intel0", "desired": 2, "available": 2, "busy": 0}
+            ],
+        }
     )
     screenshots = os.environ.get("WORKER_GROUP_SCREENSHOTS")
     errors = []
@@ -632,22 +652,20 @@ def test_paused_idle_groups_show_one_hold_and_no_redundant_zero_activity(
     expect(authed_page.locator("#workerGroupDashboard .worker-group-counts")).to_have_count(0)
     expect(authed_page.locator("#workerGroupDashboard")).not_to_contain_text("Globally paused")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
-    assert gpu.locator(".worker-group-description").inner_text().count("NVIDIA card") == 1
+    expect(gpu.locator("xpath=..").locator(".devname .nm")).to_have_text("NVIDIA card")
     expect(gpu.locator('[data-group-indicator="configured"]')).to_have_attribute(
         "aria-label", "0 of 2 configured workers busy. Worker counts set simultaneous tasks, not CPU cores."
     )
     expect(gpu.get_by_role("button", name="Edit NVIDIA card", exact=True)).to_have_count(0)
 
 
-def test_named_gpu_shows_full_hardware_name_as_the_group_subtitle(
-    authed_page: Page, app_url: str, group_api: dict
-) -> None:
+def test_named_gpu_shows_full_hardware_name_on_its_member_row(authed_page: Page, app_url: str, group_api: dict) -> None:
     mock_dashboard_defaults(authed_page)
     group_api["state"]["groups"][1]["name"] = "Video work"
     authed_page.goto(app_url + "/")
     gpu = authed_page.locator('[data-group-id="gpu-video"]')
-    expect(gpu.locator(".hw")).to_have_text("NVIDIA card")
-    expect(authed_page.locator('[data-system-group="gpu-video"] small')).to_have_text("NVIDIA card")
+    expect(gpu.locator("xpath=..").locator(".devname .nm")).to_have_text("NVIDIA card")
+    expect(authed_page.locator('[data-system-group="gpu-video"] small')).to_have_text("2 GPU")
 
 
 @pytest.mark.parametrize("group_id", ["cpu-night", "gpu-video", "deleted-group"])
@@ -709,3 +727,146 @@ def test_live_loudness_worker_shows_audio_activity_without_fabricated_progress(
     idle_bar = authed_page.locator('[data-worker-key="CPU_CPU-audio"] [role="progressbar"]')
     expect(idle_bar).to_have_count(1)
     expect(idle_bar).not_to_be_visible()
+
+
+def _add_gpu_member(group_api: dict) -> None:
+    group_api["state"]["groups"][0]["members"].append(
+        {"id": "m-gpu2", "resource": "gpu", "device": "nvidia0", "count": 1, "job_types": ["previews"]}
+    )
+
+
+def test_settings_row_shows_one_chip_per_member(authed_page: Page, app_url: str, group_api: dict) -> None:
+    _add_gpu_member(group_api)
+    settings_page(authed_page, app_url)
+    row = authed_page.locator('#workerGroupRows [data-group-id="cpu-night"]')
+    expect(row.locator(".mchip")).to_have_count(2)
+    expect(row.locator(".mchip").nth(0)).to_contain_text("CPU")
+    expect(row.locator(".mchip").nth(0)).to_contain_text("×2")
+    expect(row.locator(".mchip").nth(1)).to_contain_text("NVIDIA card")
+    expect(row.locator(".worker-group-count")).to_have_text("3")
+
+
+def test_device_picker_disables_devices_used_by_other_rows(authed_page: Page, app_url: str, group_api: dict) -> None:
+    _add_gpu_member(group_api)
+    settings_page(authed_page, app_url)
+    authed_page.locator('[data-edit="cpu-night"]').click()
+    cpu_row = authed_page.locator('[data-member="m-cpu"] [data-pick]')
+    expect(cpu_row.locator('option[value="nvidia0"]')).to_be_disabled()
+    expect(cpu_row.locator('option[value="nvidia0"]')).to_have_text("NVIDIA card (already in this group)")
+    gpu_row = authed_page.locator('[data-member="m-gpu2"] [data-pick]')
+    expect(gpu_row.locator('option[value="cpu"]')).to_be_disabled()
+    expect(authed_page.locator("#workerGroupAddDevice")).to_be_disabled()
+    expect(authed_page.locator("#workerGroupAddDeviceInfo")).to_be_visible()
+
+
+def test_add_device_picks_next_unused_and_apply_sends_member_payload(
+    authed_page: Page, app_url: str, group_api: dict
+) -> None:
+    settings_page(authed_page, app_url)
+    page = authed_page
+    page.locator('[data-edit="cpu-night"]').click()
+    page.locator("#workerGroupAddDevice").click()
+    expect(page.locator("#workerGroupMembers .mrow")).to_have_count(2)
+    expect(page.locator("#workerGroupAddDevice")).to_be_disabled()
+    page.locator("#workerGroupEditorApply").click()
+    expect(page.locator("#workerGroupMessage")).to_contain_text("saved")
+    members = group_api["writes"][-1][2]["groups"][0]["members"]
+    assert members[0] == {"id": "m-cpu", "resource": "cpu", "device": None, "count": 2, "job_types": ["loudness"]}
+    added = members[1]
+    assert added["id"] and added["id"] != "m-cpu"
+    assert (added["resource"], added["device"], added["count"]) == ("gpu", "nvidia0", 1)
+    assert added["job_types"] == ["previews", "intro_credits"]
+
+
+def test_gpu_row_loudness_chip_is_disabled_with_explanation(authed_page: Page, app_url: str, group_api: dict) -> None:
+    settings_page(authed_page, app_url)
+    authed_page.locator('[data-edit="gpu-video"]').click()
+    chip = authed_page.locator('[data-member="m-gpu"] [data-kind="loudness"]')
+    expect(chip).to_be_disabled()
+    expect(chip).to_have_attribute("aria-pressed", "false")
+    info = authed_page.locator('[data-member="m-gpu"] .chipwrap .info-icon')
+    expect(info).to_have_attribute("data-bs-original-title", "Plex loudness runs on CPU workers only")
+    # The CPU chip stays toggleable.
+    authed_page.locator('[data-edit="cpu-night"]').click()
+    cpu_chip = authed_page.locator('[data-member="m-cpu"] [data-kind="loudness"]')
+    expect(cpu_chip).to_be_enabled()
+    expect(cpu_chip).to_have_attribute("aria-pressed", "true")
+
+
+def test_remove_device_and_last_device_is_refused(authed_page: Page, app_url: str, group_api: dict) -> None:
+    _add_gpu_member(group_api)
+    settings_page(authed_page, app_url)
+    page = authed_page
+    page.locator('[data-edit="cpu-night"]').click()
+    page.locator('[data-member="m-gpu2"] [data-remove-member]').click()
+    expect(page.locator("#workerGroupMembers .mrow")).to_have_count(1)
+    expect(page.locator("#workerGroupAddDevice")).to_be_enabled()
+    page.locator('[data-member="m-cpu"] [data-remove-member]').click()
+    expect(page.locator("#workerGroupMembers .mrow")).to_have_count(1)
+    expect(page.locator("#workerGroupLastDevice")).to_have_text(
+        "A group needs at least one device. Remove the group instead."
+    )
+    assert group_api["writes"] == []
+
+
+def test_stepper_buttons_bound_the_count_at_one(authed_page: Page, app_url: str, group_api: dict) -> None:
+    settings_page(authed_page, app_url)
+    authed_page.locator('[data-edit="cpu-night"]').click()
+    row = authed_page.locator('[data-member="m-cpu"]')
+    row.locator('[data-step="-1"]').click()
+    expect(row.locator("[data-count]")).to_have_value("1")
+    expect(row.locator('[data-step="-1"]')).to_be_disabled()
+    expect(row.locator('[data-step="-1"]')).to_have_attribute("title", "Remove the device to use zero")
+    row.locator('[data-step="1"]').click()
+    expect(row.locator("[data-count]")).to_have_value("2")
+
+
+def test_server_peak_error_is_shown_in_the_editor_foot(authed_page: Page, app_url: str, group_api: dict) -> None:
+    settings_page(authed_page, app_url)
+    page = authed_page
+    page.locator('[data-edit="cpu-night"]').click()
+    page.locator('[data-member="m-cpu"] [data-count]').fill("30")
+    message = "Overlapping groups exceed capacity: peak CPU 30/32, GPU 35/32. Reduce counts or use different hours."
+    group_api["error"] = message
+    page.locator("#workerGroupEditorApply").click()
+    expect(page.locator("#workerGroupEditorError")).to_have_text(message)
+    expect(page.locator("#workerGroupEditor")).to_be_visible()
+
+
+def test_week_graph_has_one_lane_per_member_coloured_by_device(
+    authed_page: Page, app_url: str, group_api: dict
+) -> None:
+    _add_gpu_member(group_api)
+    settings_page(authed_page, app_url)
+    graph = authed_page.locator("#workerWeekGraph")
+    cpu = graph.locator('.wkg-seg[title^="Overnight loudness · CPU ×2 · Mon"]').first
+    gpu = graph.locator('.wkg-seg[title^="Overnight loudness · NVIDIA card ×1 · Mon"]').first
+    expect(cpu).to_have_attribute("style", re.compile(r"--c:var\(--ok\)"))
+    expect(gpu).to_have_attribute("style", re.compile(r"--c:var\(--run\)"))
+    # The other group's NVIDIA lane shares the colour: same device, same colour everywhere.
+    other = graph.locator('.wkg-seg[title^="Video <img"]').first
+    expect(other).to_have_attribute("style", re.compile(r"--c:var\(--run\)"))
+    legend = authed_page.locator("#workerWeekLegend")
+    expect(legend).to_contain_text("CPU")
+    expect(legend).to_contain_text("NVIDIA card")
+    expect(legend).to_contain_text("Global pause")
+
+
+def test_editor_at_390px_has_no_horizontal_scroll_and_44px_targets(
+    authed_page: Page, app_url: str, group_api: dict
+) -> None:
+    _add_gpu_member(group_api)
+    page = authed_page
+    page.set_viewport_size({"width": 390, "height": 900})
+    settings_page(page, app_url)
+    page.locator('[data-edit="cpu-night"]').click()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    small = page.evaluate(
+        """() => [...document.querySelectorAll(
+            '#workerGroupMembers button, #workerGroupMembers select, #workerGroupMembers input, #workerGroupAddDevice')]
+            .filter(el => el.offsetParent !== null)
+            .map(el => [el.getAttribute('aria-label') || el.id || el.className, el.getBoundingClientRect()])
+            .filter(([, box]) => box.height < 43.5 || box.width < 43.5)
+            .map(([name]) => name)"""
+    )
+    assert small == []

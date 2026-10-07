@@ -24,7 +24,7 @@ Emby's built-in video preview thumbnail extraction has no GPU option. Emby staff
 ## How Media Preview Generator makes Emby BIFs
 
 1. A trigger arrives: a webhook, a schedule, a "Recently Added" poll, or a manual pick.
-2. FFmpeg decodes the file on a worker from a GPU group, and downscales and tone-maps HDR there. If the GPU can't decode a file, the same worker redoes it on the CPU.
+2. FFmpeg decodes the file on a GPU worker, and downscales and tone-maps HDR there. If the GPU can't decode a file, the same worker redoes it on the CPU.
 3. The frames are packed into a BIF named `<video name>-<width>-<interval>.bif` and saved next to the video. Width defaults to 320, and the interval is your frame interval (default 10 seconds).
 4. The app tells Emby the file changed so Emby picks it up.
 

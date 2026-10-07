@@ -6,6 +6,9 @@
     const DAY_MINUTES = 1440;
     const WEEK_MINUTES = DAY_MINUTES * 7;
     const LANE_COLORS = ['var(--run)', 'var(--accent)', 'var(--t-intro)', 'var(--t-loud)', 'var(--ok)'];
+    // GPUs take these in detected-hardware order so a device keeps its colour in every group, strip and legend.
+    const GPU_COLORS = ['var(--run)', 'var(--t-intro)', 'var(--t-loud)', 'var(--accent)'];
+    const CPU_COLOR = 'var(--ok)';
     const LANE_HEIGHT = 6;
     const escape = value => String(value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     const clock = minutes => String(Math.floor(minutes / 60)).padStart(2, '0') + ':' + String(minutes % 60).padStart(2, '0');
@@ -37,6 +40,12 @@
 
     function groupSegments(group) {
         return group.availability.mode === 'always' ? allWeek() : segments(group.availability.windows);
+    }
+
+    function deviceColor(member, hardware) {
+        if (member.resource === 'cpu') return CPU_COLOR;
+        const index = (hardware || []).findIndex(gpu => gpu.device === member.device);
+        return GPU_COLORS[(index < 0 ? (hardware || []).length : index) % GPU_COLORS.length];
     }
 
     function pauseWindows() {
@@ -93,7 +102,7 @@
         const barHeight = height || Math.max(lanes.length, 1) * (laneHeight + 1) - 1;
         const rows = DAYS.map((name, day) => {
             const lane = lanes.map((item, index) => item.segments.filter(segment => segment.day === day).map(segment =>
-                `<i class="wkg-seg" style="--c:${item.color};left:${percent(segment.from)};width:${percent(segment.to - segment.from)};top:${height ? 0 : index * (laneHeight + 1)}px;height:${height || laneHeight}px" title="${escape(`${item.label} ${name} ${clock(segment.from)}–${clock(segment.to)}`)}"></i>`).join('')).join('');
+                `<i class="wkg-seg" style="--c:${item.color};left:${percent(segment.from)};width:${percent(segment.to - segment.from)};top:${height ? 0 : index * (laneHeight + 1)}px;height:${height || laneHeight}px" title="${escape(`${item.label} · ${name} ${clock(segment.from)}–${clock(segment.to)}`)}"></i>`).join('')).join('');
             const paused = pause.filter(segment => segment.day === day).map(segment =>
                 `<i class="wkg-seg wkg-pause" style="left:${percent(segment.from)};width:${percent(segment.to - segment.from)}" title="${escape(`Paused ${name} ${clock(segment.from)}–${clock(segment.to)}`)}"></i>`).join('');
             const marker = day === current.day ? `<i class="wkg-now" style="left:${percent(current.minute)}"></i>` : '';
@@ -103,5 +112,5 @@
         return `<div class="wkg" aria-hidden="true">${rows}<div class="wkg-axis"><i></i><div>${axis}</div></div></div>`;
     }
 
-    window.WeekGraph = { DAYS, DAY_KEYS, LANE_COLORS, render, groupSegments, pauseSegments, nextStart, pausedNow, now, clock };
+    window.WeekGraph = { DAYS, DAY_KEYS, LANE_COLORS, deviceColor, render, groupSegments, pauseSegments, nextStart, pausedNow, now, clock };
 })();

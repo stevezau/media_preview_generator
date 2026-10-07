@@ -11,10 +11,13 @@ from ...job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS, JOB_KIND_PRE
 from ...worker_groups import (
     MAX_CPU_WORKERS,
     MAX_GPU_WORKERS,
+    MAX_MEMBERS,
     application_timezone,
     configured_group_totals,
     future_capacity,
     group_is_available,
+    legacy_group_view,
+    member_policies,
     next_group_opening,
 )
 from ..auth import setup_or_auth_required
@@ -52,6 +55,87 @@ def reconcile_group_settings(settings) -> str | None:
     return error
 
 
+def live_member_rows(pool) -> dict[tuple[str, str], dict]:
+    """Index the pool's per-member snapshots by ``(group_id, member_id)``; empty when no pool is running."""
+    if pool is None or not hasattr(pool, "member_snapshots"):
+        return {}
+    return {(row["group_id"], row["member_id"]): row for row in pool.member_snapshots()}
+
+
+def _member_state(enabled: bool, detected: bool, opened: bool) -> str:
+    if not enabled:
+        return "disabled"
+    if not detected:
+        return "hardware_unavailable"
+    return "active" if opened else "off_hours"
+
+
+def _member_row(policy: dict, status: dict | None, devices: set, paused: bool) -> dict:
+    """Capacity row for one saved member, preferring the pool's live numbers over the saved-policy fallback."""
+    detected = policy["resource"] == "cpu" or policy["device"] in devices
+    opened = group_is_available(policy)
+    next_opening = next_group_opening(policy) if detected and not opened else None
+    fallback_target = policy["count"] if policy["enabled"] and detected and opened else 0
+    status = status or {}
+    return {
+        "id": policy["member_id"],
+        "resource": policy["resource"],
+        "device": policy["device"],
+        "desired": policy["count"] if policy["enabled"] else 0,
+        "target": status.get("target", fallback_target),
+        "available": 0 if paused else status.get("available", fallback_target),
+        "busy": max(0, status.get("running", 0) - status.get("finishing", 0)),
+        "finishing": status.get("finishing", 0),
+        "state": status.get("state") or _member_state(policy["enabled"], detected, opened),
+        "next_available_at": status.get("next_opening") or (next_opening.isoformat() if next_opening else None),
+    }
+
+
+def _draining_member_row(row: dict) -> dict:
+    return {
+        "id": row["member_id"],
+        "resource": row.get("resource"),
+        "device": row.get("device"),
+        "desired": 0,
+        "target": row.get("target", 0),
+        "available": 0,
+        "busy": 0,
+        "finishing": max(row.get("finishing", 0), row.get("running", 0)),
+        "state": "draining",
+        "next_available_at": None,
+    }
+
+
+def _group_row(group_id: str, name: str, enabled: bool, members: list[dict]) -> dict:
+    """Aggregate member rows: counts are sums; the state follows the design's precedence."""
+    states = [member["state"] for member in members]
+    finishing = sum(member["finishing"] for member in members)
+    target = sum(member["target"] for member in members)
+    if not enabled:
+        state = "disabled"
+    elif finishing and not target:
+        state = "draining"
+    elif "active" in states:
+        state = "active"
+    elif states and all(value == "hardware_unavailable" for value in states):
+        state = "hardware_unavailable"
+    else:
+        state = "off_hours"
+    openings = sorted(member["next_available_at"] for member in members if member["next_available_at"])
+    return {
+        "id": group_id,
+        "name": name,
+        "desired": sum(member["desired"] for member in members),
+        "target": target,
+        "available": sum(member["available"] for member in members),
+        "busy": sum(member["busy"] for member in members),
+        "finishing": finishing,
+        "state": state,
+        "next_available_at": openings[0] if openings and state == "off_hours" else None,
+        "members": members,
+    }
+
+
 def worker_group_payload(settings=None) -> dict:
     """Read current policy and activity without exposing private configuration."""
     from ._helpers import _ensure_gpu_cache
@@ -67,63 +151,40 @@ def worker_group_payload(settings=None) -> dict:
         if isinstance(entry, dict)
     ]
     devices = {entry["device"] for entry in hardware if entry.get("status") != "failed"}
-    pool = _get_shared_worker_pool()
-    live = pool.group_snapshots() if pool is not None and hasattr(pool, "group_snapshots") else []
-    live_by_id = {row["id"]: row for row in live}
+    live = live_member_rows(_get_shared_worker_pool())
+    paused = settings.processing_paused
     rows = []
     warnings = []
     for group in groups:
-        row = live_by_id.pop(group["id"], None)
-        detected = group["resource"] == "cpu" or group["device"] in devices
-        opened = group_is_available(group)
-        state = (
-            "disabled"
-            if not group["enabled"]
-            else "hardware_unavailable"
-            if not detected
-            else "active"
-            if opened
-            else "off_hours"
-        )
-        next_opening = next_group_opening(group) if detected and not opened else None
-        fallback_target = group["count"] if detected and opened else 0
-        status = row or {}
-        rows.append(
-            {
-                "id": group["id"],
-                "name": group["name"],
-                "resource": group["resource"],
-                "device": group["device"],
-                "desired": group["count"] if group["enabled"] else 0,
-                "target": status.get("target", fallback_target),
-                "available": 0 if settings.processing_paused else status.get("available", fallback_target),
-                "busy": max(0, status.get("running", 0) - status.get("finishing", 0)),
-                "finishing": status.get("finishing", 0),
-                "state": status.get("state", state),
-                "next_available_at": status.get("next_opening") or (next_opening.isoformat() if next_opening else None),
-            }
-        )
-        if group["enabled"] and not detected:
-            warnings.append(
-                {
-                    "code": "hardware_unavailable",
-                    "group_id": group["id"],
-                    "message": f"{group['name']}: GPU unavailable. Check its device.",
-                }
-            )
-    for row in live_by_id.values():
+        member_rows = []
+        for policy in member_policies([group]):
+            key = (policy["group_id"], policy["member_id"])
+            row = _member_row(policy, live.pop(key, None), devices, paused)
+            member_rows.append(row)
+            if group["enabled"] and row["state"] == "hardware_unavailable":
+                warnings.append(
+                    {
+                        "code": "hardware_unavailable",
+                        "group_id": group["id"],
+                        "member_id": policy["member_id"],
+                        "message": f"{group['name']}: GPU {policy['device']} not detected. "
+                        "Its jobs wait; other devices keep working.",
+                    }
+                )
+        for key in [key for key in live if key[0] == group["id"]]:
+            if live[key].get("finishing") or live[key].get("running"):
+                member_rows.append(_draining_member_row(live[key]))
+            del live[key]
+        rows.append(_group_row(group["id"], group["name"], group["enabled"], member_rows))
+    removed: dict[str, list[dict]] = {}
+    names: dict[str, str] = {}
+    for (group_id, _member_id), row in live.items():
         if row.get("finishing") or row.get("running"):
-            rows.append(
-                {
-                    **row,
-                    "desired": 0,
-                    "available": 0,
-                    "busy": 0,
-                    "finishing": max(row.get("finishing", 0), row.get("running", 0)),
-                    "state": "draining",
-                    "next_available_at": None,
-                }
-            )
+            removed.setdefault(group_id, []).append(_draining_member_row(row))
+            names[group_id] = row.get("name") or group_id
+    for group_id, member_rows in removed.items():
+        rows.append(_group_row(group_id, names[group_id], False, member_rows))
+        rows[-1]["state"] = "draining"
     enabled_kinds = {JOB_KIND_PREVIEWS}
     for server in settings.get("media_servers", []) or []:
         if not isinstance(server, dict) or not server.get("enabled", True):
@@ -153,23 +214,24 @@ def worker_group_payload(settings=None) -> dict:
     if timezone_name == "Local time":
         offset = datetime.now(timezone).strftime("%z")
         timezone_label = f"Local time (UTC{offset[:3]}:{offset[3:]})"
+    members_by_resource = [member for row in rows for member in row["members"]]
     return {
-        "groups": groups,
+        "groups": [{**group, **legacy_group_view(group)} for group in groups],
         "revision": revision,
         "timezone": timezone_name,
         "timezone_label": timezone_label,
-        "limits": {"cpu": MAX_CPU_WORKERS, "gpu": MAX_GPU_WORKERS},
+        "limits": {"cpu": MAX_CPU_WORKERS, "gpu": MAX_GPU_WORKERS, "members": MAX_MEMBERS},
         "hardware": hardware,
         "capacity": {
             "groups": rows,
             "current": {
-                resource: sum(row.get("target", 0) for row in rows if row.get("resource") == resource)
+                resource: sum(member["target"] for member in members_by_resource if member["resource"] == resource)
                 for resource in ("cpu", "gpu")
             },
             "peak": {"cpu": cpu_peak, "gpu": gpu_peak},
         },
         "warnings": warnings,
-        "processing_paused": settings.processing_paused,
+        "processing_paused": paused,
         "pause_reasons": settings.processing_pause_reasons,
     }
 
@@ -195,16 +257,57 @@ def save_worker_groups():
         return jsonify({"error": str(exc), "revision": settings.worker_groups_revision}), 409
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    error = reconcile_group_settings(settings)
-    result = worker_group_payload(settings)
-    result["success"] = True
-    if error:
-        result["warning"] = error
-    return jsonify(result)
+    return jsonify(_scaled_response(settings))
 
 
-def scale_saved_group(group_id: str, *, delta: int | None = None, enabled: bool | None = None) -> None:
-    """Change one saved group under the same lock and validation as a full edit."""
+class ScaleRefused(Exception):
+    """A quick-scale request that cannot be applied; carries the HTTP status and any extra response fields."""
+
+    def __init__(self, message: str, status: int, **extra) -> None:
+        super().__init__(message)
+        self.status = status
+        self.extra = extra
+
+
+def _scale_saved_member(group_id: str, member_id: str, delta: int) -> None:
+    """Change one member's count by ``delta`` under the same lock and validation as a full edit.
+
+    Raises:
+        ScaleRefused: Unknown group or member (404), disabled group (409) or a count outside 1-32 (400).
+        ValueError: The aggregate policy was refused (for example the weekly peak).
+    """
+    settings = get_settings_manager()
+    with settings.locked():
+        groups = settings.worker_groups
+        group = next((entry for entry in groups if entry["id"] == group_id), None)
+        if group is None:
+            raise ScaleRefused("Worker group no longer exists", 404)
+        member = next((entry for entry in group["members"] if entry["id"] == member_id), None)
+        if member is None:
+            raise ScaleRefused("That device is no longer in this group", 404)
+        if not group["enabled"]:
+            raise ScaleRefused("Enable the group first", 409)
+        count = member["count"] + delta
+        limit = MAX_CPU_WORKERS if member["resource"] == "cpu" else MAX_GPU_WORKERS
+        if not 1 <= count <= limit:
+            raise ScaleRefused(f"A device needs 1\u2013{limit} workers. Remove it in Settings to use zero.", 400)
+        member["count"] = count
+        settings.update_worker_groups(groups)
+
+
+def scale_saved_group(
+    group_id: str, *, delta: int | None = None, enabled: bool | None = None, member_id: str | None = None
+) -> None:
+    """Change one saved group under the same lock and validation as a full edit.
+
+    A ``delta`` on a single-member group keeps the old meaning (at zero the group is disabled). On a
+    multi-member group it needs ``member_id`` and then follows the strict member rules.
+
+    Raises:
+        KeyError: The group does not exist.
+        ScaleRefused: A multi-member group without ``member_id`` (409) or a refused member change.
+        ValueError: The aggregate policy was refused.
+    """
     settings = get_settings_manager()
     with settings.locked():
         groups = settings.worker_groups
@@ -214,13 +317,32 @@ def scale_saved_group(group_id: str, *, delta: int | None = None, enabled: bool 
         if enabled is not None:
             group["enabled"] = enabled
         elif delta is not None:
-            target = (group["count"] if group["enabled"] else 0) + delta
+            if len(group["members"]) > 1 or member_id is not None:
+                if member_id is None:
+                    raise ScaleRefused(
+                        "Choose a device to scale",
+                        409,
+                        members=[member["id"] for member in group["members"]],
+                    )
+                _scale_saved_member(group_id, member_id, delta)
+                return
+            member = group["members"][0]
+            target = (member["count"] if group["enabled"] else 0) + delta
             if target <= 0:
                 group["enabled"] = False
             else:
-                group["count"] = target
+                member["count"] = target
                 group["enabled"] = True
         settings.update_worker_groups(groups)
+
+
+def _scaled_response(settings) -> dict:
+    error = reconcile_group_settings(settings)
+    result = worker_group_payload(settings)
+    result["success"] = True
+    if error:
+        result["warning"] = error
+    return result
 
 
 @api.route("/worker-groups/<group_id>/scale", methods=["POST"])
@@ -240,12 +362,26 @@ def scale_worker_group(group_id: str):
         scale_saved_group(group_id, **changes)
     except KeyError:
         return jsonify({"error": "Worker group no longer exists"}), 404
+    except ScaleRefused as exc:
+        return jsonify({"error": str(exc), **exc.extra}), exc.status
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    settings = get_settings_manager()
-    error = reconcile_group_settings(settings)
-    result = worker_group_payload(settings)
-    result["success"] = True
-    if error:
-        result["warning"] = error
-    return jsonify(result)
+    return jsonify(_scaled_response(get_settings_manager()))
+
+
+@api.route("/worker-groups/<group_id>/members/<member_id>/scale", methods=["POST"])
+@setup_or_auth_required
+def scale_worker_group_member(group_id: str, member_id: str):
+    """Add or remove one worker on one device of a group."""
+    data = request.get_json(silent=True)
+    if not (
+        isinstance(data, dict) and set(data) == {"delta"} and type(data["delta"]) is int and data["delta"] in (-1, 1)
+    ):
+        return jsonify({"error": "Provide delta +1 or -1"}), 400
+    try:
+        _scale_saved_member(group_id, member_id, data["delta"])
+    except ScaleRefused as exc:
+        return jsonify({"error": str(exc), **exc.extra}), exc.status
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(_scaled_response(get_settings_manager()))

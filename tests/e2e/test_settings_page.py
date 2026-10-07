@@ -68,7 +68,7 @@ class TestSettingsLayout:
 class TestSettingsSteppers:
     def test_cpu_group_count_is_staged_until_apply(self, settings_page: Page) -> None:
         settings_page.locator('[data-edit="cpu"]').click()
-        count = settings_page.locator("#workerGroupCount")
+        count = settings_page.locator("#workerGroupMembers [data-member] [data-count]")
         expect(count).to_have_value("1")
         count.fill("2")
         expect(settings_page.locator("#workerGroupApplyRow")).to_be_visible()

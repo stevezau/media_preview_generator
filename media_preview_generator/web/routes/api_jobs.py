@@ -1448,43 +1448,61 @@ def _change_saved_cpu_worker_count(worker_pool, delta: int) -> tuple[dict, int, 
 
 
 def _scale_group_for_legacy_request(data: dict, worker_type: str, delta: int):
-    """Keep old scaling endpoints useful when their resource identifies one group."""
+    """Keep old scaling endpoints useful when their resource identifies one group member."""
     from ..settings_manager import get_settings_manager
-    from .api_worker_groups import reconcile_group_settings, scale_saved_group
+    from .api_worker_groups import ScaleRefused, live_member_rows, reconcile_group_settings, scale_saved_group
 
     settings = get_settings_manager()
     if not isinstance(settings.get("worker_groups"), list):
         return None
 
-    def finishing(group_id: str) -> int:
-        pool = _get_shared_worker_pool()
-        return sum(
-            row.get("finishing", 0)
-            for row in (pool.group_snapshots() if pool is not None else [])
-            if row["id"] == group_id
-        )
+    def finishing(group_id: str, member_id: str) -> int:
+        row = live_member_rows(_get_shared_worker_pool()).get((group_id, member_id))
+        return (row or {}).get("finishing", 0)
 
     with settings.locked():
-        groups = [group for group in settings.worker_groups if group["resource"] == worker_type.lower()]
-        requested_id = data.get("group_id")
-        if requested_id:
-            groups = [group for group in groups if group["id"] == requested_id]
-        if len(groups) != 1:
+        candidates = [
+            (group, member)
+            for group in settings.worker_groups
+            for member in group["members"]
+            if member["resource"] == worker_type.lower()
+        ]
+        requested_group = data.get("group_id")
+        requested_member = data.get("member_id")
+        if requested_group:
+            candidates = [(g, m) for g, m in candidates if g["id"] == requested_group]
+        if requested_member:
+            candidates = [(g, m) for g, m in candidates if m["id"] == requested_member]
+        if len(candidates) != 1:
             return jsonify(
-                {"error": "Choose a named worker group to scale under Workers", "groups": [g["id"] for g in groups]}
+                {
+                    "error": "Choose a named worker group to scale under Workers",
+                    "groups": sorted({g["id"] for g, _ in candidates}),
+                    "members": [{"group_id": g["id"], "member_id": m["id"]} for g, m in candidates],
+                }
             ), 409
-        before = groups[0]["count"] if groups[0]["enabled"] else 0
-        prior_finishing = finishing(groups[0]["id"])
+        group, member = candidates[0]
+        group_id, member_id = group["id"], member["id"]
+        before = member["count"] if group["enabled"] else 0
+        prior_finishing = finishing(group_id, member_id)
         try:
-            scale_saved_group(groups[0]["id"], delta=delta)
+            scale_saved_group(group_id, delta=delta, member_id=member_id if len(group["members"]) > 1 else None)
+        except ScaleRefused as exc:
+            return jsonify({"error": str(exc), **exc.extra}), exc.status
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
     warning = reconcile_group_settings(settings)
-    response = {"success": True, "group_id": groups[0]["id"], "worker_type": worker_type, "requested": abs(delta)}
+    response = {
+        "success": True,
+        "group_id": group_id,
+        "member_id": member_id,
+        "worker_type": worker_type,
+        "requested": abs(delta),
+    }
     if delta > 0:
         response["added"] = delta
     else:
-        scheduled = min(before, -delta, max(0, finishing(groups[0]["id"]) - prior_finishing))
+        scheduled = min(before, -delta, max(0, finishing(group_id, member_id) - prior_finishing))
         response.update(
             {
                 "removed": min(before, -delta) - scheduled,
@@ -2002,23 +2020,26 @@ def _build_idle_workers_from_config():
     cpu_seq = 0
 
     if isinstance(settings.get("worker_groups"), list):
-        from ...worker_groups import group_is_available
+        from ...worker_groups import group_is_available, member_policies
 
         devices = {info.get("device") for info in gpu_infos if info.get("status") != "failed"}
-        for group in settings.worker_groups:
-            if not group_is_available(group) or (group["resource"] == "gpu" and group["device"] not in devices):
+        for policy in member_policies(settings.worker_groups):
+            if not policy["enabled"] or not group_is_available(policy):
                 continue
-            for index in range(group["count"]):
+            if policy["resource"] == "gpu" and policy["device"] not in devices:
+                continue
+            for index in range(policy["count"]):
                 worker_id += 1
                 statuses.append(
                     {
                         **idle_entry,
                         "worker_id": worker_id,
-                        "worker_type": group["resource"].upper(),
-                        "worker_name": f"{group['name']} {index + 1}",
-                        "group_id": group["id"],
-                        "group_name": group["name"],
-                        "group_resource": group["resource"],
+                        "worker_type": policy["resource"].upper(),
+                        "worker_name": f"{policy['name']} {index + 1}",
+                        "group_id": policy["group_id"],
+                        "member_id": policy["member_id"],
+                        "group_name": policy["name"],
+                        "group_resource": policy["resource"],
                         "retiring": False,
                     }
                 )

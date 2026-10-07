@@ -1699,6 +1699,7 @@ def worker_cards(jm) -> Callable[[list], None]:
                     worker_type=w["worker_type"],
                     worker_name=w["worker_name"],
                     group_id=w.get("group_id"),
+                    member_id=w.get("member_id"),
                     group_name=w.get("group_name"),
                     group_resource=w.get("group_resource"),
                     retiring=bool(w.get("retiring", False)),

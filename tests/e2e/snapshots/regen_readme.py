@@ -263,22 +263,25 @@ def _fake_worker_statuses() -> list[dict]:
     workers = []
     worker_id = 0
     busy_index = 0
-    for group in FAKE_WORKER_GROUPS:
-        for index in range(group["count"]):
+    members = [(group, member) for group in FAKE_WORKER_GROUPS for member in group["members"]]
+    for group, member in members:
+        device_name = next((gpu["name"] for gpu in FAKE_GPUS if gpu["device"] == member["device"]), "CPU")
+        for index in range(member["count"]):
             worker_id += 1
             entry = dict(idle_entry)
-            if group["resource"] == "gpu" and busy_index < len(BUSY_WORKER_SPECS):
+            if member["id"] == "gpu-nvidia" and busy_index < len(BUSY_WORKER_SPECS):
                 spec = BUSY_WORKER_SPECS[busy_index]
                 busy_index += 1
                 entry.update(status="processing", ffmpeg_started=True, **spec)
             workers.append(
                 {
                     "worker_id": worker_id,
-                    "worker_type": group["resource"].upper(),
-                    "worker_name": f"{group['name']} {index + 1}",
+                    "worker_type": member["resource"].upper(),
+                    "worker_name": f"{device_name} {index + 1}",
                     "group_id": group["id"],
+                    "member_id": member["id"],
                     "group_name": group["name"],
-                    "group_resource": group["resource"],
+                    "group_resource": member["resource"],
                     "retiring": False,
                     **entry,
                 }
@@ -422,10 +425,18 @@ def _install_api_stubs(ctx: BrowserContext, current_version: str) -> None:
         data = response.json()
         data["hardware"] = [{k: gpu[k] for k in ("device", "name", "type", "status")} for gpu in FAKE_GPUS]
         data["warnings"] = []
-        busy_by_group = {FAKE_WORKER_GROUPS[0]["id"]: len(BUSY_WORKER_SPECS)}
-        for row in data["capacity"]["groups"]:
-            row.update(
-                state="active", target=row["desired"], available=row["desired"], busy=busy_by_group.get(row["id"], 0)
+        busy_by_member = {"gpu-nvidia": len(BUSY_WORKER_SPECS)}
+        for group_row in data["capacity"]["groups"]:
+            group_busy = 0
+            for row in group_row.get("members", []):
+                busy = busy_by_member.get(row["id"], 0)
+                row.update(state="active", target=row["desired"], available=row["desired"] - busy, busy=busy)
+                group_busy += busy
+            group_row.update(
+                state="active",
+                target=group_row["desired"],
+                available=group_row["desired"] - group_busy,
+                busy=group_busy,
             )
         route.fulfill(response=response, json=data)
 

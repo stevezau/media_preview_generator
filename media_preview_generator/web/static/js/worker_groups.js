@@ -17,22 +17,39 @@
     let loading = null;
     let requestedEditor = new URLSearchParams(window.location.search).get('worker_group');
     const dashboardGroups = new Map();
+    // One block per group member; workers, the row cap and idle line live here.
+    const dashboardMembers = new Map();
     let pausedByGroup = {};
     let occupiedWorkerGroups = new Set();
     let groupSearch = '';
     let occupiedOnly = false;
     let showAllGroups = false;
-    // Groups with this many workers or more switch the Workers panel to the dense table.
+    // A member with this many workers or more switches the Workers panel to the dense table.
     const DENSE_TABLE_MIN_WORKERS = 5;
-    // Rows shown per group before the "Show N more" expander; problem rows are always shown.
+    // Rows shown per member before the "Show N more" expander; problem rows are always shown.
     const DENSE_TABLE_ROW_CAP = 8;
     const EXPANDED_KEY = 'workerGroupsExpanded';
-    let idleByGroup = new Map();
+    let idleByMember = new Map();
+    const memberNotes = new Map();
     let denseMode = false;
     let denseQueued = false;
     let groupSeq = 0;
     const settings = () => document.getElementById('workerGroupSettings');
     const dashboard = () => document.getElementById('workerGroupDashboard');
+
+    const memberKey = (groupId, memberId) => `${groupId}:${memberId || 'unassigned'}`;
+    const newId = prefix => window.crypto?.randomUUID?.().slice(0, 8) || prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+    // Older servers and API-token tools may send the flat one-device shape; the UI only ever holds members.
+    function normalize(data) {
+        for (const group of data.groups || []) {
+            if (!Array.isArray(group.members)) {
+                group.members = [{ id: 'm1', resource: group.resource, device: group.device ?? null, count: group.count, job_types: group.job_types || [] }];
+            }
+            for (const key of ['resource', 'device', 'count', 'job_types']) delete group[key];
+        }
+        return data;
+    }
 
     async function request(method, path = '', body) {
         const response = await fetch('/api/worker-groups' + path, {
@@ -45,7 +62,7 @@
             error.conflict = response.status === 409;
             throw error;
         }
-        return data;
+        return data.groups ? normalize(data) : data;
     }
 
     function message(text, error = false) {
@@ -57,11 +74,40 @@
         }
     }
 
-    function resourceName(group) {
-        if (group.resource === 'cpu') return 'CPU';
-        const gpu = (snapshot.hardware || []).find(item => item.device === group.device);
-        return gpu?.name || group.device || 'Unavailable GPU';
+    const hardwareFor = member => (snapshot.hardware || []).find(item => item.device === member.device);
+    const deviceMissing = member => member.resource === 'gpu' && !hardwareFor(member);
+    const deviceIcon = member => (member.resource === 'cpu' ? 'cpu' : 'gpu-card');
+    // The dashboard page does not load week_graph.js, so it keeps the same palette (CPU green, GPUs in detected order).
+    const FALLBACK_GPU_COLORS = ['var(--run)', 'var(--t-intro)', 'var(--t-loud)', 'var(--accent)'];
+    function deviceColor(member) {
+        if (window.WeekGraph) return window.WeekGraph.deviceColor(member, snapshot.hardware);
+        if (member.resource === 'cpu') return 'var(--ok)';
+        const index = (snapshot.hardware || []).findIndex(item => item.device === member.device);
+        return FALLBACK_GPU_COLORS[(index < 0 ? (snapshot.hardware || []).length : index) % FALLBACK_GPU_COLORS.length];
     }
+    const totalWorkers = group => group.members.reduce((sum, member) => sum + member.count, 0);
+    const groupJobTypes = group => [...new Set(group.members.flatMap(member => member.job_types))];
+
+    function deviceName(member) {
+        if (member.resource === 'cpu') return 'CPU';
+        return hardwareFor(member)?.name || member.device || 'Unavailable GPU';
+    }
+
+    // "NVIDIA GeForce RTX 4090" -> "RTX 4090"; chips are narrow and the vendor adds nothing next to a model number.
+    function shortDeviceName(member) {
+        const name = deviceName(member);
+        const model = name.replace(/^(NVIDIA( GeForce)?|Intel( Corporation)?|AMD( Radeon)?)\s+/i, '');
+        return /\d/.test(model) ? model : name;
+    }
+
+    function memberStatus(group, member) {
+        const groupRow = (snapshot.capacity?.groups || []).find(item => item.id === group.id) || {};
+        const row = (groupRow.members || []).find(item => item.id === member.id) || {};
+        return { ...row, busy: row.busy ?? 0, finishing: row.finishing ?? 0, available: row.available ?? 0 };
+    }
+
+    // "3 GPU + 10 CPU": the System card's one-line summary of a group.
+    const memberSummary = group => group.members.map(member => `${member.count} ${member.resource === 'cpu' ? 'CPU' : 'GPU'}`).join(' + ');
 
     function hours(group) {
         if (group.availability.mode === 'always') return 'Always available';
@@ -125,7 +171,16 @@
         'Globally paused': 'warn', 'Global pause schedule active': 'warn', 'Hardware unavailable': 'bad',
     };
     const PRESETS = { all: [0, 1, 2, 3, 4, 5, 6], weekdays: [0, 1, 2, 3, 4], weekends: [5, 6] };
-    const laneColor = (groups, group) => (window.WeekGraph?.LANE_COLORS || ['var(--run)'])[Math.max(0, groups.indexOf(group)) % (window.WeekGraph?.LANE_COLORS.length || 1)];
+    // Same device, same colour in every group, strip and legend (week_graph.js owns the palette).
+    const memberLabel = (group, member) => `${group.name} · ${shortDeviceName(member)} ×${member.count}`;
+    const memberLanes = group => group.members.map(member => ({
+        color: deviceColor(member), label: memberLabel(group, member), segments: window.WeekGraph.groupSegments(group),
+    }));
+
+    function memberChip(member) {
+        const missing = deviceMissing(member);
+        return `<span class="mchip${missing ? ' is-missing' : ''}" style="--c:${deviceColor(member)}" title="${escape(deviceName(member) + (missing ? ' (not detected)' : ''))}"><i class="dot" aria-hidden="true"></i><i class="bi bi-${deviceIcon(member)}" aria-hidden="true"></i><span class="mchip-name">${escape(shortDeviceName(member))}</span><span class="mchip-x">×${member.count}</span>${capabilityIcons(member.job_types)}</span>`;
+    }
 
     function settingsGroupMeta(group) {
         const state = status(group);
@@ -133,25 +188,24 @@
         // "Within group hours" on an always-on group says nothing the hours line below does not.
         const redundant = group.availability.mode === 'always' && ['Within group hours', 'Available'].includes(state.label);
         const chip = redundant ? '' : `<span class="wg-state ${STATE_TONES[state.label] || ''}">${escape(state.label)}</span>`;
-        return `${capabilityIcons(group)}${chip}${notes.map(note => `<span>${escape(note)}</span>`).join('')}<span class="wg-hours"><i class="bi bi-clock" aria-hidden="true"></i> ${escape(hours(group))}</span>`;
+        return `${chip}${notes.map(note => `<span>${escape(note)}</span>`).join('')}<span class="wg-hours"><i class="bi bi-clock" aria-hidden="true"></i> ${escape(hours(group))}</span>`;
     }
 
     // The group's own week bar, only for groups with weekly hours; a global pause is overlaid when one is set.
-    function settingsGroupStrip(groups, group) {
+    function settingsGroupStrip(group) {
         if (group.availability.mode !== 'scheduled' || !window.WeekGraph) return '';
-        const lane = { color: laneColor(groups, group), label: group.name, segments: window.WeekGraph.groupSegments(group) };
-        return `<div class="wg-strip">${window.WeekGraph.render([lane], window.WeekGraph.pauseSegments(), { height: 6, timeZone: snapshot.timezone })}</div>`;
+        return `<div class="wg-strip">${window.WeekGraph.render(memberLanes(group), window.WeekGraph.pauseSegments(), { timeZone: snapshot.timezone })}</div>`;
     }
 
     function renderRows(container) {
         const groups = draft || snapshot.groups;
         const markup = groups.map(group => `<div class="wg-item${editing === group.id ? ' open' : ''}${group.enabled ? '' : ' is-off'}">
             <div class="worker-group-row" data-group-id="${escape(group.id)}">
-            <span class="wg-ico" aria-hidden="true"><i class="bi bi-${group.resource === 'cpu' ? 'cpu' : 'gpu-card'}"></i></span>
-            <div class="worker-group-description"><strong class="wg-name">${escape(group.name)}</strong><div class="wg-hw">${escape(hardwareLabel(group))}</div><div class="wg-meta">${settingsGroupMeta(group)}</div></div>
-            <div class="worker-group-actions"><div class="worker-group-capacity"><span class="worker-group-control-label">Workers</span><span class="worker-group-count" aria-label="Configured workers">${group.count}</span></div><button type="button" class="btn btn-sm btn-outline-secondary worker-group-edit" data-edit="${escape(group.id)}" aria-label="Edit ${escape(group.name)}" aria-expanded="${editing === group.id}" aria-controls="workerGroupEditor" ${saving ? 'disabled' : ''}><i class="bi bi-pencil" aria-hidden="true"></i> Edit <i class="bi bi-chevron-down wg-chevron" aria-hidden="true"></i></button><label class="form-check form-switch mb-0" title="Enabled"><input class="form-check-input" type="checkbox" role="switch" data-enable="${escape(group.id)}" aria-label="Enable ${escape(group.name)}" ${group.enabled ? 'checked' : ''} ${saving ? 'disabled' : ''}></label></div>
-            ${settingsGroupStrip(groups, group)}
-        </div></div>`).join('') || '<div class="wg-empty">No worker groups configured. Jobs wait until a compatible group is available.</div>';
+            <span class="wg-ico" aria-hidden="true"><i class="bi bi-${group.members.length > 1 ? 'stack' : group.members[0] ? deviceIcon(group.members[0]) : 'collection'}"></i></span>
+            <div class="worker-group-description"><strong class="wg-name">${escape(group.name)}</strong><div class="mchips">${group.members.map(memberChip).join('')}</div><div class="wg-meta">${settingsGroupMeta(group)}</div></div>
+            <div class="worker-group-actions"><div class="worker-group-capacity"><span class="worker-group-control-label">Workers</span><span class="worker-group-count" aria-label="Configured workers">${totalWorkers(group)}</span></div><button type="button" class="btn btn-sm btn-outline-secondary worker-group-edit" data-edit="${escape(group.id)}" aria-label="Edit ${escape(group.name)}" aria-expanded="${editing === group.id}" aria-controls="workerGroupEditor" ${saving ? 'disabled' : ''}><i class="bi bi-pencil" aria-hidden="true"></i> Edit <i class="bi bi-chevron-down wg-chevron" aria-hidden="true"></i></button><label class="form-check form-switch mb-0 wg-switch" title="Enabled"><input class="form-check-input" type="checkbox" role="switch" data-enable="${escape(group.id)}" aria-label="Enable ${escape(group.name)}" ${group.enabled ? 'checked' : ''} ${saving ? 'disabled' : ''}></label></div>
+            ${settingsGroupStrip(group)}
+        </div></div>`).join('') || `<div class="wg-empty"><i class="bi bi-stack" aria-hidden="true"></i><strong>No worker groups yet</strong><span>Jobs wait until a group can run them.</span><span class="wg-empty-acts"><button type="button" class="btn btn-sm btn-primary" data-empty-add ${saving ? 'disabled' : ''}><i class="bi bi-plus-lg" aria-hidden="true"></i> Add group</button>${needsLoudnessGroup() ? '<button type="button" class="btn btn-sm btn-outline-secondary" data-empty-add-cpu><i class="bi bi-soundwave" aria-hidden="true"></i> Add CPU group for loudness</button>' : ''}</span></div>`;
         if (container._groupMarkup === markup) return;
         container._groupMarkup = markup;
         const editor = document.getElementById('workerGroupEditor');
@@ -173,15 +227,18 @@
         }
     }
 
-    // One lane per enabled group, so overlapping hours and gaps are visible at a glance.
+    // One lane per member of each enabled group, so overlapping hours and gaps are visible at a glance.
     function renderWeekOverview(groups) {
         const graph = document.getElementById('workerWeekGraph');
         const legend = document.getElementById('workerWeekLegend');
         if (!graph || !window.WeekGraph) return;
-        const lanes = groups.filter(group => group.enabled).map(group => ({ color: laneColor(groups, group), label: group.name, segments: window.WeekGraph.groupSegments(group) }));
+        const enabled = groups.filter(group => group.enabled);
+        const lanes = enabled.flatMap(memberLanes);
         graph.innerHTML = lanes.length ? window.WeekGraph.render(lanes, window.WeekGraph.pauseSegments(), { timeZone: snapshot.timezone })
             : '<div class="wkg-empty">No enabled groups. Jobs wait until a compatible group is available.</div>';
-        legend.innerHTML = groups.map(group => `<span class="${group.enabled ? '' : 'is-off'}"><i class="swatch" style="--c:${laneColor(groups, group)}"></i>${escape(group.name)}</span>`).join('')
+        const devices = new Map();
+        for (const member of enabled.flatMap(group => group.members)) devices.set(member.resource === 'cpu' ? 'cpu' : member.device, member);
+        legend.innerHTML = [...devices.values()].map(member => `<span><i class="swatch" style="--c:${deviceColor(member)}"></i>${escape(deviceName(member))}</span>`).join('')
             + '<span><i class="swatch swatch-pause"></i>Global pause</span><span><i class="swatch swatch-now"></i>Now</span>';
         document.querySelectorAll('#workerWeekTz, [data-week-tz]').forEach(node => { node.innerHTML = `<i class="bi bi-globe2" aria-hidden="true"></i> ${escape(timezoneLabel())}`; });
     }
@@ -190,8 +247,9 @@
         const preview = document.getElementById('workerGroupPreview');
         const group = (draft || snapshot.groups).find(item => item.id === editing);
         if (!preview || !group || !window.WeekGraph) return;
-        const lane = { color: laneColor(draft || snapshot.groups, group), label: group.name, segments: window.WeekGraph.groupSegments(group) };
-        preview.innerHTML = window.WeekGraph.render([lane], [], { height: 8, timeZone: snapshot.timezone });
+        preview.innerHTML = group.members.length
+            ? window.WeekGraph.render(memberLanes(group), [], { timeZone: snapshot.timezone })
+            : '<p class="wkg-empty">No devices yet.</p>';
     }
 
     function positionEditor() {
@@ -259,7 +317,7 @@
     // Busy workers first, rows beyond the cap folded behind an in-place expander; fallback/odd-state rows stay visible.
     function applyDenseRows() {
         const expanded = expandedIds;
-        for (const [id, entry] of dashboardGroups) {
+        for (const [id, entry] of dashboardMembers) {
             const slots = [...entry.host.querySelectorAll(':scope > .worker-slot')];
             const rows = slots.filter(slot => !slot.querySelector('.wk.idle') || isProblemSlot(slot));
             const sorted = denseMode ? rows.map((slot, index) => ({ slot, index }))
@@ -289,10 +347,10 @@
         }
     }
 
-    // One muted line per group for workers with nothing to do; they are never listed as full rows.
+    // One muted line per member for workers with nothing to do; they are never listed as full rows.
     function renderIdleRows() {
-        for (const [id, entry] of dashboardGroups) {
-            const ids = idleByGroup.get(id) || [];
+        for (const [id, entry] of dashboardMembers) {
+            const ids = idleByMember.get(id) || [];
             entry.idle.hidden = !ids.length;
             const markup = ids.length
                 ? `<i class="bi bi-moon-stars" aria-hidden="true"></i><span class="wg-idle-label">${ids.length} ${ids.length === 1 ? 'worker' : 'workers'} idle</span><span class="wg-idle-chips">${ids.map(n => `<span class="wg-idle-n">#${escape(n)}</span>`).join('')}</span>` : '';
@@ -310,6 +368,29 @@
             section.dataset.workerGroupShell = key;
             const header = document.createElement('div');
             header.className = 'worker-group-dashboard-header';
+            const members = document.createElement('div');
+            members.className = 'wg-members';
+            const footer = document.createElement('div');
+            footer.className = 'wg-group-foot';
+            section.append(header, members, footer);
+            rows.append(section);
+            dashboardGroups.set(key, { section, header, members, footer, name });
+            header.innerHTML = `<div class="worker-group-description"><strong>${escape(name || 'Workers without group details')}</strong><span class="small text-body-secondary">Group details unavailable</span></div>`;
+            renderGroupVisibility();
+        }
+        return dashboardGroups.get(key);
+    }
+
+    function dashboardMember(groupId, groupName, memberId) {
+        const group = dashboardGroup(groupId, groupName);
+        if (!group) return null;
+        const key = memberKey(String(groupId || 'unassigned'), memberId);
+        if (!dashboardMembers.has(key)) {
+            const block = document.createElement('div');
+            block.className = 'wg-mem';
+            block.dataset.memberBlock = key;
+            const head = document.createElement('div');
+            head.className = 'wg-mem-head';
             const host = document.createElement('div');
             host.className = 'worker-group-workers';
             host.dataset.groupWorkers = key;
@@ -325,23 +406,21 @@
             idle.className = 'wg-idle-row';
             idle.dataset.groupIdle = key;
             idle.hidden = true;
-            section.append(header, host, more, idle);
-            rows.append(section);
-            dashboardGroups.set(key, { section, header, host, name, more, idle });
-            header.innerHTML = `<div class="worker-group-description"><strong>${escape(name || 'Workers without group details')}</strong><span class="small text-body-secondary">Group details unavailable</span></div>`;
-            renderGroupVisibility();
+            block.append(head, host, more, idle);
+            group.members.append(block);
+            dashboardMembers.set(key, { groupKey: String(groupId || 'unassigned'), block, head, host, more, idle });
         }
-        return dashboardGroups.get(key);
+        return dashboardMembers.get(key);
     }
 
     function setWorkerActivity(workers) {
         const next = {};
         occupiedWorkerGroups = new Set((workers || []).filter(worker => worker.status !== 'idle').map(worker => String(worker.group_id || 'unassigned')));
-        idleByGroup = new Map();
+        idleByMember = new Map();
         for (const worker of workers || []) {
             if (worker.status === 'processing' || worker.fallback_active) continue;
-            const key = String(worker.group_id || 'unassigned');
-            idleByGroup.set(key, [...(idleByGroup.get(key) || []), worker.worker_id]);
+            const key = memberKey(String(worker.group_id || 'unassigned'), worker.member_id);
+            idleByMember.set(key, [...(idleByMember.get(key) || []), worker.worker_id]);
         }
         renderIdleRows();
         for (const worker of workers || []) {
@@ -355,8 +434,8 @@
         renderDashboard();
     }
 
-    function getDashboardWorkerHost(id, name) {
-        const entry = dashboardGroup(id, name);
+    function getDashboardWorkerHost(groupId, groupName, memberId) {
+        const entry = dashboardMember(groupId, groupName, memberId);
         if (entry) document.getElementById('workerGroupEmpty').hidden = true;
         return entry?.host || null;
     }
@@ -423,41 +502,29 @@
         ['loudness', 'soundwave', 'Plex loudness', 'loud'],
     ];
 
-    // One tile per job type: type colour when the group may run it, dim grey when not.
-    function capabilityIcons(group) {
+    // One tile per job type: type colour when it may run, dim grey when not.
+    function capabilityIcons(jobTypes) {
         return '<span class="caps">' + CAPABILITIES.map(([kind, icon, label, tone]) => {
-            const allowed = group.job_types.includes(kind);
+            const allowed = jobTypes.includes(kind);
             const text = allowed ? label : `${label} (not allowed)`;
             return `<span class="cap${allowed ? ' ' + tone : ''}" role="img" aria-label="${escape(text)}" data-bs-toggle="tooltip" data-bs-title="${escape(text)}"><i class="bi bi-${icon}" aria-hidden="true"></i></span>`;
         }).join('') + '</span>';
     }
 
-    // The hardware subtitle: the GPU's name, or the generic word when the group is already named after it.
-    function hardwareLabel(group) {
-        if (group.resource === 'cpu') return 'CPU';
-        const hardware = resourceName(group);
-        return group.name === hardware ? 'GPU' : hardware;
-    }
-
+    // The System card is read-only: one line per group, with Enable for a disabled one. Steppers live on the Workers panel.
     function renderSystemGroups() {
         const mount = document.getElementById('systemWorkerGroups');
         if (!mount || !snapshot) return;
         const section = document.getElementById('systemWorkerGroupsSection');
-        const limits = snapshot.limits || {};
         const markup = snapshot.groups.map(group => {
-            const limit = limits[group.resource] || 32;
-            const locked = saving;
-            const stepper = group.enabled
-                ? `<span class="stepper" role="group" aria-label="Workers in ${escape(group.name)}">
-                    <button type="button" data-group-scale="-1" ${locked || group.count <= 1 ? 'disabled' : ''} aria-label="Remove one worker from ${escape(group.name)}" title="${group.count <= 1 ? 'Disable the group in Settings to use zero workers.' : 'Remove one worker'}"><i class="bi bi-dash" aria-hidden="true"></i></button>
-                    <output aria-live="polite" aria-label="Workers in ${escape(group.name)}">${group.count}</output>
-                    <button type="button" data-group-scale="1" ${locked || group.count >= limit ? 'disabled' : ''} aria-label="Add one worker to ${escape(group.name)}" title="${group.count >= limit ? 'At the worker limit' : 'Add one worker'}"><i class="bi bi-plus" aria-hidden="true"></i></button>
-                </span>`
-                : `<button type="button" class="btn dash-btn-sm" data-group-enable ${locked ? 'disabled' : ''} aria-label="Enable ${escape(group.name)}" title="Enable with its saved count of ${group.count}"><i class="bi bi-power" aria-hidden="true"></i>Enable</button>`;
+            const state = status(group);
+            const action = group.enabled
+                ? `<span class="pool-state ${STATE_TONES[state.label] || ''}">${escape(state.label === 'Configured' ? 'On' : state.label)}</span>`
+                : `<button type="button" class="btn dash-btn-sm" data-group-enable ${saving ? 'disabled' : ''} aria-label="Enable ${escape(group.name)}" title="Enable with its saved worker counts"><i class="bi bi-power" aria-hidden="true"></i>Enable</button>`;
             return `<div class="pool-row${group.enabled ? '' : ' is-off'}" data-system-group="${escape(group.id)}">
-                <i class="bi bi-${group.resource === 'cpu' ? 'cpu' : 'gpu-card'} pool-ico" aria-hidden="true"></i>
-                <span class="pool-lbl"><span class="pool-name" title="${escape(group.name)}">${escape(group.name)}</span><small title="${escape(hardwareLabel(group))}">${escape(hardwareLabel(group))}</small></span>
-                ${capabilityIcons(group)}${stepper}</div>`;
+                <i class="bi bi-${group.members.length > 1 ? 'stack' : group.members[0] ? deviceIcon(group.members[0]) : 'collection'} pool-ico" aria-hidden="true"></i>
+                <span class="pool-lbl"><span class="pool-name" title="${escape(group.name)}">${escape(group.name)}</span><small title="${escape(memberSummary(group))}">${escape(memberSummary(group))}</small></span>
+                ${action}</div>`;
         }).join('');
         if (section) section.hidden = !snapshot.groups.length;
         if (mount._markup === markup) return;
@@ -467,12 +534,12 @@
         window._initBootstrapTooltips?.(mount);
     }
 
-    async function scaleGroup(id, changes) {
+    async function postScale(path, changes) {
         if (saving) return;
         saving = true;
-        renderSystemGroups();
+        renderDashboard();
         try {
-            const data = await request('POST', `/${encodeURIComponent(id)}/scale`, changes);
+            const data = await request('POST', path, changes);
             if (!snapshot || data.revision >= snapshot.revision) snapshot = data;
             message(data.warning || '', !!data.warning);
         } catch (error) {
@@ -483,6 +550,53 @@
             saving = false;
             renderDashboard();
         }
+    }
+
+    const scaleGroup = (id, changes) => postScale(`/${encodeURIComponent(id)}/scale`, changes);
+    const scaleMember = (groupId, memberId, delta) =>
+        postScale(`/${encodeURIComponent(groupId)}/members/${encodeURIComponent(memberId)}/scale`, { delta });
+
+    function memberStepper(group, member, current) {
+        const limit = snapshot.limits?.[member.resource] || 32;
+        const name = deviceName(member);
+        return `<span class="stepper sm" role="group" aria-label="Workers on ${escape(name)}">
+            <button type="button" data-member-scale="-1" ${saving || current <= 1 ? 'disabled' : ''} aria-label="Remove one worker from ${escape(name)}" title="${current <= 1 ? 'Remove the device in Settings to use zero.' : 'Remove one worker'}"><i class="bi bi-dash" aria-hidden="true"></i></button>
+            <output aria-live="polite" aria-label="Workers on ${escape(name)}">${current}</output>
+            <button type="button" data-member-scale="1" ${saving || current >= limit ? 'disabled' : ''} aria-label="Add one worker to ${escape(name)}" title="${current >= limit ? 'At the worker limit' : 'Add one worker'}"><i class="bi bi-plus" aria-hidden="true"></i></button>
+        </span>`;
+    }
+
+    function memberHead(group, member) {
+        const state = memberStatus(group, member);
+        const missing = deviceMissing(member) || ['hardware_unavailable', 'unavailable'].includes(state.state);
+        const name = deviceName(member);
+        const occupancy = `${state.busy} of ${member.count} configured ${member.count === 1 ? 'worker' : 'workers'} busy on ${name}.`;
+        const chip = missing
+            ? `<span class="chip warn" tabindex="0" role="img" aria-label="${escape(name)} not detected" data-bs-toggle="tooltip" data-bs-title="Its jobs wait; the other devices keep working."><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>Not detected</span>`
+            : `<span class="occ-chip" data-member-indicator role="img" aria-label="${escape(occupancy)}" data-bs-toggle="tooltip" data-bs-title="${escape(occupancy)}">${state.busy}<small>/ ${member.count}</small></span>`;
+        const stepper = group.enabled ? memberStepper(group, member, member.count) : '';
+        return `<div class="mem-h${missing ? ' miss' : ''}"><span class="devname"><i class="bi bi-${deviceIcon(member)}" aria-hidden="true"></i><span class="nm" title="${escape(name)}">${escape(name)}</span></span>${missing ? '' : capabilityIcons(member.job_types)}${chip}${stepper}</div>${missing ? `<p class="msg warn"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i><span>${escape(name)}: GPU not detected. Its jobs wait; other devices keep working.</span></p>` : ''}`;
+    }
+
+    // A member that is no longer configured keeps its row while its last files finish.
+    function orphanHead(key) {
+        const [groupId, memberId] = key.split(':');
+        const groupRow = (snapshot.capacity?.groups || []).find(item => item.id === groupId) || {};
+        const row = (groupRow.members || []).find(item => item.id === memberId);
+        if (!row) return '<div class="mem-h"><span class="devname"><i class="bi bi-question-circle" aria-hidden="true"></i><span class="nm">Device details unavailable</span></span></div>';
+        return `<div class="mem-h gone"><span class="devname"><i class="bi bi-${row.resource === 'cpu' ? 'cpu' : 'gpu-card'}" aria-hidden="true"></i><span class="nm">Removed device</span></span><span class="chip warn">${row.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''}</span></div>`;
+    }
+
+    function replaceMarkup(node, markup) {
+        if (node._markup === markup) return;
+        const focused = node.contains(document.activeElement) ? document.activeElement : null;
+        const focusKey = focused?.dataset?.memberScale;
+        if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(node);
+        node.innerHTML = markup;
+        node._markup = markup;
+        window._initBootstrapTooltips?.(node);
+        // A stepper press re-renders its own button; keep keyboard focus on the same control.
+        if (focusKey) node.querySelector(`[data-member-scale="${focusKey}"]:not(:disabled)`)?.focus({ preventScroll: true });
     }
 
     function renderDashboard() {
@@ -496,6 +610,7 @@
             : 'Resume processing to use available groups.';
         hold.textContent = 'Processing paused' + (owners.length ? ': ' + owners.join(' and ') : '') + '. ' + resumeHint;
         const present = new Set();
+        const presentMembers = new Set();
         for (const group of snapshot.groups) {
             present.add(group.id);
             const entry = dashboardGroup(group.id, group.name);
@@ -503,20 +618,41 @@
             delete entry.header.dataset.retiredGroup;
             const state = status(group);
             const counts = activity(state);
+            const total = totalWorkers(group);
             entry.occupied = state.busy > 0 || state.finishing > 0;
-            entry.searchText = [group.name, group.resource, resourceName(group), ...group.job_types.map(kind => JOBS[kind] || kind), hours(group)].join(' ');
+            entry.searchText = [group.name, ...group.members.flatMap(member => [member.resource, deviceName(member)]), ...groupJobTypes(group).map(kind => JOBS[kind] || kind), hours(group)].join(' ');
             const exceptions = [];
             for (const count of counts) {
                 if (!/^\d+ (running|available)$/.test(count)) exceptions.push(`<span>${escape(count)}</span>`);
             }
             const stateLabel = ['Within group hours', 'Available', 'Workers busy', 'Configured'].includes(state.label) ? '' :
                 `<span class="worker-group-state">${escape(state.label)}${state.next_available_at ? ' · Next ' + escape(nextTime(state.next_available_at)) : ''}</span>`;
-            const occupancy = `${state.busy} of ${group.count} configured ${group.count === 1 ? 'worker' : 'workers'} busy. Worker counts set simultaneous tasks, not CPU cores.`;
+            const occupancy = `${state.busy} of ${total} configured ${total === 1 ? 'worker' : 'workers'} busy. Worker counts set simultaneous tasks, not CPU cores.`;
             const clock = group.availability.mode === 'always' ? '' :
                 `<span class="cap-static" role="img" aria-label="${escape(hours(group))}" data-bs-toggle="tooltip" data-bs-title="${escape(hours(group) + ' · ' + timezoneLabel())}"><i class="bi bi-clock" aria-hidden="true"></i></span>`;
-            const markup = `<div class="g-h"><div class="worker-group-description ttl"><strong class="g-name">${escape(group.name)}</strong><div class="hw"><i class="bi bi-${group.resource === 'cpu' ? 'cpu' : 'gpu-card'}" aria-hidden="true"></i><span title="${escape(hardwareLabel(group))}">${escape(hardwareLabel(group))}</span></div></div>
-                <div class="g-tools">${clock}${capabilityIcons(group)}<span class="occ-chip" data-group-indicator="configured" role="img" aria-label="${escape(occupancy)}" data-bs-toggle="tooltip" data-bs-title="${escape(occupancy)}">${state.busy}<small>/ ${group.count}</small></span></div></div>${exceptions.length ? `<div class="worker-group-counts small">${exceptions.join('')}</div>` : ''}${stateLabel ? `<div class="worker-group-availability small">${stateLabel}</div>` : ''}`;
+            const markup = `<div class="g-h"><div class="worker-group-description ttl"><strong class="g-name">${escape(group.name)}</strong></div>
+                <div class="g-tools">${clock}${capabilityIcons(groupJobTypes(group))}<span class="occ-chip" data-group-indicator="configured" role="img" aria-label="${escape(occupancy)}" data-bs-toggle="tooltip" data-bs-title="${escape(occupancy)}">${state.busy}<small>/ ${total}</small></span></div></div>${exceptions.length ? `<div class="worker-group-counts small">${exceptions.join('')}</div>` : ''}${stateLabel ? `<div class="worker-group-availability small">${stateLabel}</div>` : ''}`;
             replaceDashboardHeader(entry, markup);
+            for (const member of group.members) {
+                const key = memberKey(group.id, member.id);
+                presentMembers.add(key);
+                const block = dashboardMember(group.id, group.name, member.id);
+                block.block.dataset.memberGroup = group.id;
+                block.block.dataset.memberId = member.id;
+                block.block.style.setProperty('--c', deviceColor(member));
+                block.block.classList.remove('gone');
+                replaceMarkup(block.head, memberHead(group, member));
+            }
+            const capRow = (snapshot.capacity?.groups || []).find(item => item.id === group.id) || {};
+            for (const row of capRow.members || []) {
+                if (group.members.some(member => member.id === row.id) || !(row.finishing || row.busy)) continue;
+                const key = memberKey(group.id, row.id);
+                presentMembers.add(key);
+                const block = dashboardMember(group.id, group.name, row.id);
+                block.block.classList.add('gone');
+                replaceMarkup(block.head, orphanHead(key));
+            }
+            replaceMarkup(entry.footer, group.enabled ? '' : `<button type="button" class="btn dash-btn-sm" data-group-enable="${escape(group.id)}" ${saving ? 'disabled' : ''} aria-label="Enable ${escape(group.name)}" title="Enable with its saved worker counts"><i class="bi bi-power" aria-hidden="true"></i>Enable</button>`);
         }
         for (const state of snapshot.capacity?.groups || []) {
             if (present.has(state.id) || !state.finishing) continue;
@@ -525,13 +661,34 @@
             delete entry.header.dataset.groupId;
             entry.header.dataset.retiredGroup = state.id;
             entry.occupied = true;
-            entry.searchText = [state.name, state.resource, state.device].filter(Boolean).join(' ');
-            replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(state.name || 'Removed group')}</strong><span class="small text-body-secondary">Removed · ${state.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''} · ${escape(state.resource === 'cpu' ? 'CPU' : state.device || 'GPU')}</span></div>`);
+            entry.searchText = [state.name, ...(state.members || []).flatMap(member => [member.resource, member.device])].filter(Boolean).join(' ');
+            const devices = (state.members || []).map(member => member.resource === 'cpu' ? 'CPU' : member.device || 'GPU').join(' + ');
+            replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(state.name || 'Removed group')}</strong><span class="small text-body-secondary">Removed · ${state.finishing} finishing${snapshot.processing_paused ? ' after resume' : ''}${devices ? ' · ' + escape(devices) : ''}</span></div>`);
+            for (const row of state.members || []) {
+                if (!(row.finishing || row.busy)) continue;
+                const key = memberKey(state.id, row.id);
+                presentMembers.add(key);
+                const block = dashboardMember(state.id, state.name, row.id);
+                block.block.classList.add('gone');
+                replaceMarkup(block.head, orphanHead(key));
+            }
+        }
+        for (const [key, entry] of dashboardMembers) {
+            if (presentMembers.has(key)) continue;
+            if (!entry.host.childElementCount) {
+                if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(entry.block);
+                entry.block.remove(); dashboardMembers.delete(key);
+            } else {
+                entry.block.classList.add('gone');
+                replaceMarkup(entry.head, orphanHead(key));
+            }
         }
         for (const [id, entry] of dashboardGroups) {
             if (present.has(id)) continue;
-            if (!entry.host.childElementCount) {
+            const hasWorkers = [...dashboardMembers.values()].some(member => member.groupKey === id && member.host.childElementCount);
+            if (!hasWorkers) {
                 if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(entry.header);
+                for (const [key, member] of dashboardMembers) if (member.groupKey === id) dashboardMembers.delete(key);
                 entry.section.remove(); dashboardGroups.delete(id);
             } else {
                 entry.occupied = occupiedWorkerGroups.has(id);
@@ -539,7 +696,7 @@
                 replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(entry.name || 'Workers without group details')}</strong><span class="small text-body-secondary">Live worker activity remains visible while group details refresh.</span></div>`);
             }
         }
-        denseMode = snapshot.groups.some(group => group.enabled && group.count >= DENSE_TABLE_MIN_WORKERS);
+        denseMode = snapshot.groups.some(group => group.enabled && group.members.some(member => member.count >= DENSE_TABLE_MIN_WORKERS));
         const liveRows = document.getElementById('workerGroupLiveRows');
         liveRows.classList.toggle('wg-dense', denseMode);
         document.getElementById('workerGroupCols').hidden = !denseMode;
@@ -558,13 +715,13 @@
         if (!document.getElementById('workerGroupRows')) {
             mount.innerHTML = `
             <div class="wg-toolbar"><div id="workerGroupCapacity" class="wg-capacity"></div><div class="wg-toolbar-actions"><button type="button" class="btn btn-sm btn-outline-secondary" id="workerGroupAddCpu"><i class="bi bi-soundwave" aria-hidden="true"></i> <span class="lbl-long">Add CPU group for loudness</span><span class="lbl-short">CPU</span></button><button type="button" class="btn btn-sm btn-primary" id="workerGroupAdd"><i class="bi bi-plus-lg" aria-hidden="true"></i> Add group</button></div></div>
-            <div class="week-card"><div class="week-head"><strong>Week at a glance</strong><button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="One lane per enabled group, coloured while it may start new files. Hatched red is a global pause. Updates as you edit." aria-label="About week at a glance"><i class="bi bi-info-circle"></i></button><span class="week-tz" id="workerWeekTz"></span></div><div id="workerWeekGraph"></div><div class="week-legend" id="workerWeekLegend"></div></div>
-            <h3 class="settings-subheading"><i class="bi bi-collection" aria-hidden="true"></i>Worker groups</h3>
+            <div class="week-card"><div class="week-head"><strong>Week at a glance</strong><button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="One lane per device in each enabled group, coloured while it may start new files. Same device, same colour. Hatched red is a global pause. Updates as you edit." aria-label="About week at a glance"><i class="bi bi-info-circle"></i></button><span class="week-tz" id="workerWeekTz"></span></div><div id="workerWeekGraph"></div><div class="week-legend" id="workerWeekLegend"></div></div>
+            <h3 class="settings-subheading"><i class="bi bi-collection" aria-hidden="true"></i>Worker groups<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="A group is a name, an on/off switch and hours. It holds devices; each device has its own workers and jobs." aria-label="About worker groups"><i class="bi bi-info-circle"></i></button></h3>
             <div id="workerGroupRows" class="wg-list"></div><div id="workerGroupWarnings" class="alert alert-warning py-2 mt-3" hidden></div>
             <div id="workerGroupEditor" class="worker-group-editor" hidden></div>
             <div class="apply-bar" id="workerGroupApplyRow" hidden><button type="button" class="btn btn-primary btn-sm" id="workerGroupApply">Apply group changes</button><button type="button" class="btn btn-outline-secondary btn-sm" id="workerGroupCancel">Discard changes</button><span class="apply-note"><span class="dot"></span> Unsaved group changes</span></div>
             <div id="workerGroupMessage" role="status" aria-live="polite"></div>
-            <div class="hint-line"><i class="bi bi-info-circle" aria-hidden="true"></i><span>Current files finish when a group closes or is reduced.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How group changes apply" data-explain-title="How group changes apply" data-explain-html="Current files finish when a group closes or is reduced. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies. Groups on the same resource add their worker counts." aria-label="About this note"><i class="bi bi-info-circle"></i></button></span></div>`;
+            <div class="hint-line"><i class="bi bi-info-circle" aria-hidden="true"></i><span>Current files finish when a group closes or is reduced.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How group changes apply" data-explain-title="How group changes apply" data-explain-html="Current files finish when a group closes or is reduced. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies. Devices shared by several groups add their worker counts. The weekly peak is limited to 32 CPU and 32 GPU workers." aria-label="About this note"><i class="bi bi-info-circle"></i></button></span></div>`;
             window._initBootstrapTooltips?.(mount);
         }
         const capacity = snapshot.capacity || {};
@@ -604,10 +761,10 @@
         ensureDraft(); editing = id; renderSettings(); renderDashboard(); renderEditor(); focusEditor(id);
     }
 
-    // Offered only when a server has loudness switched on and no enabled CPU group takes loudness jobs.
+    // Offered only when a server has loudness switched on and no enabled group has a CPU device taking loudness jobs.
     function needsLoudnessGroup() {
         const wanted = (snapshot.warnings || []).some(warning => warning && warning.job_type === 'loudness');
-        const covered = (draft || snapshot.groups || []).some(group => group.enabled && group.resource === 'cpu' && group.job_types.includes('loudness'));
+        const covered = (draft || snapshot.groups || []).some(group => group.enabled && group.members.some(member => member.resource === 'cpu' && member.job_types.includes('loudness')));
         return wanted && !covered;
     }
 
@@ -615,8 +772,8 @@
         ensureDraft();
         dirty = true;
         const id = window.crypto?.randomUUID?.() || 'group-' + Date.now().toString(36) + Math.random().toString(36).slice(2);
-        draft.push({ id, name: loudness ? 'CPU loudness' : 'New worker group', enabled: true, resource: 'cpu', device: null, count: 1,
-            job_types: loudness ? ['loudness'] : ['previews', 'intro_credits', 'loudness'], availability: { mode: 'always', windows: [] } });
+        draft.push({ id, name: loudness ? 'CPU loudness' : 'New worker group', enabled: true, availability: { mode: 'always', windows: [] },
+            members: [{ id: newId('m'), resource: 'cpu', device: null, count: 1, job_types: loudness ? ['loudness'] : ['previews', 'intro_credits', 'loudness'] }] });
         edit(id);
     }
 
@@ -627,35 +784,124 @@
         if (saving && editor) editor.querySelectorAll('input,select,button').forEach(control => { control.disabled = true; });
     }
 
-    function editorDevices(group) {
-        const devices = (snapshot.hardware || []).filter(gpu => gpu.device);
-        if (group.device && !devices.some(gpu => gpu.device === group.device)) devices.push({ device: group.device, name: group.device + ' (unavailable)' });
-        return devices;
+    const infoIcon = (label, tip) => `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${escape(tip)}" aria-label="About ${escape(label)}"><i class="bi bi-info-circle"></i></button>`;
+    const deviceKeyOf = member => (member.resource === 'cpu' ? 'cpu' : member.device);
+    const memberLimit = member => snapshot.limits?.[member.resource] || 32;
+    const maxMembers = () => snapshot.limits?.members || 8;
+
+    // The first unused GPU, else CPU; null when every detected device is already in the group.
+    function nextDevice(group) {
+        const used = new Set(group.members.map(deviceKeyOf));
+        const gpu = (snapshot.hardware || []).find(item => item.device && item.status !== 'failed' && !used.has(item.device));
+        if (gpu) return { resource: 'gpu', device: gpu.device, job_types: ['previews', 'intro_credits'] };
+        return used.has('cpu') ? null : { resource: 'cpu', device: null, job_types: ['previews', 'intro_credits', 'loudness'] };
     }
 
-    function resourceOptions(group, devices) {
-        return `<option value="cpu">CPU</option>${devices.map(gpu => `<option value="${escape(gpu.device)}" ${group.resource === 'gpu' && group.device === gpu.device ? 'selected' : ''}>${escape(gpu.name || gpu.device)}${gpu.status === 'failed' ? ' (unavailable)' : ''}</option>`).join('')}`;
+    function deviceOptions(group, member) {
+        const used = new Set(group.members.filter(other => other !== member).map(deviceKeyOf));
+        const gpus = (snapshot.hardware || []).filter(item => item.device);
+        const options = [{ value: 'cpu', label: 'CPU' }, ...gpus.map(gpu => ({ value: gpu.device, label: (gpu.name || gpu.device) + (gpu.status === 'failed' ? ' (unavailable)' : '') }))];
+        if (member.resource === 'gpu' && !gpus.some(gpu => gpu.device === member.device)) options.push({ value: member.device, label: `${member.device} — not detected` });
+        const selected = deviceKeyOf(member);
+        return options.map(option => `<option value="${escape(option.value)}" ${option.value === selected ? 'selected' : ''} ${used.has(option.value) ? 'disabled' : ''}>${escape(option.label)}${used.has(option.value) ? ' (already in this group)' : ''}</option>`).join('');
     }
 
-    function jobTiles(group) {
+    function jobChips(member) {
         return CAPABILITIES.map(([kind, icon, , tone]) => {
-            const blocked = kind === 'loudness' && group.resource !== 'cpu';
-            return `<label class="job-tile ${tone}${blocked ? ' is-disabled' : ''}"><input type="checkbox" data-kind="${kind}" ${group.job_types.includes(kind) ? 'checked' : ''} ${blocked ? 'disabled' : ''}><span class="cap ${tone}" aria-hidden="true"><i class="bi bi-${icon}"></i></span><span>${escape(JOBS[kind])}</span></label>`;
+            const blocked = kind === 'loudness' && member.resource !== 'cpu';
+            const chip = `<button type="button" class="jchip ${tone}" data-kind="${kind}" aria-pressed="${member.job_types.includes(kind)}" ${blocked ? 'disabled aria-disabled="true"' : ''}><i class="bi bi-${icon}" aria-hidden="true"></i>${escape(JOBS[kind])}</button>`;
+            return blocked ? `<span class="chipwrap">${chip}${infoIcon('why loudness is unavailable on a GPU', 'Plex loudness runs on CPU workers only')}</span>` : chip;
         }).join('');
     }
 
-    function editorMarkupSettings(group, devices) {
-        const limit = snapshot.limits?.[group.resource] || 32;
-        const info = (label, tip) => `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${escape(tip)}" aria-label="About ${escape(label)}"><i class="bi bi-info-circle"></i></button>`;
+    // Row-level problems, shown live under the row; the same wording is used when Apply is refused.
+    function memberIssues(group, member) {
+        const name = shortDeviceName(member);
+        const issues = [];
+        if (!Number.isInteger(member.count) || member.count < 1 || member.count > memberLimit(member)) issues.push(['err', `${name}: enter 1–${memberLimit(member)} workers. Remove the device to use zero.`]);
+        if (!member.job_types.length) issues.push(['err', `${name}: choose at least one job type.`]);
+        if (group.members.findIndex(other => deviceKeyOf(other) === deviceKeyOf(member)) !== group.members.indexOf(member)) issues.push(['err', `${name} is already in this group.`]);
+        if (member.resource === 'gpu' && member.job_types.includes('loudness')) issues.push(['err', `${name}: loudness runs on CPU only.`]);
+        if (deviceMissing(member)) issues.push(['warn', 'Not detected — its jobs wait; the other devices keep working.']);
+        if (memberNotes.has(member.id)) issues.push(['note', memberNotes.get(member.id)]);
+        return issues;
+    }
+
+    const messageMarkup = issues => issues.map(([tone, text]) => `<p class="msg ${tone}"><i class="bi bi-${tone === 'err' ? 'exclamation-circle' : tone === 'warn' ? 'exclamation-triangle' : 'info-circle'}" aria-hidden="true"></i><span>${escape(text)}</span></p>`).join('');
+
+    function memberRow(group, member) {
+        const limit = memberLimit(member);
+        const issues = memberIssues(group, member);
+        const label = shortDeviceName(member);
+        return `<div class="mrow${issues.some(i => i[0] === 'err') ? ' has-err' : issues.some(i => i[0] === 'warn') ? ' has-warn' : ''}" data-member="${escape(member.id)}" style="--c:${deviceColor(member)}">
+            <div class="mrow-top">
+                <div class="fld-dev"><label class="lbl" for="wgDevice-${escape(member.id)}">Device</label><select class="form-select" id="wgDevice-${escape(member.id)}" data-pick>${deviceOptions(group, member)}</select></div>
+                <div><span class="lbl">Workers${infoIcon('workers', 'Simultaneous tasks on this device, not CPU cores.')}</span><div class="wg-stepper" role="group" aria-label="Workers on ${escape(label)}">
+                    <button type="button" data-step="-1" aria-label="One fewer worker" ${member.count <= 1 ? 'disabled title="Remove the device to use zero"' : ''}><i class="bi bi-dash" aria-hidden="true"></i></button>
+                    <input class="val" type="number" min="1" max="${limit}" value="${Number.isFinite(member.count) ? member.count : ''}" inputmode="numeric" data-count aria-label="Worker count for ${escape(label)}">
+                    <button type="button" data-step="1" aria-label="One more worker" ${member.count >= limit ? 'disabled' : ''}><i class="bi bi-plus" aria-hidden="true"></i></button></div></div>
+                <button type="button" class="rm" data-remove-member aria-label="Remove ${escape(label)} from this group" title="Remove device"><i class="bi bi-trash" aria-hidden="true"></i></button>
+            </div>
+            <div class="mrow-jobs"><span class="lbl">Jobs${infoIcon('jobs', 'Task types this device may run. A type that no device allows waits in the queue.')}</span>${jobChips(member)}</div>
+            <div class="msgs" data-msgs>${messageMarkup(issues)}</div>
+        </div>`;
+    }
+
+    function groupIssues(group) {
+        return [
+            ...(group.name.trim() ? [] : [['err', 'Every group needs a name.']]),
+            ...(group.members.length ? [] : [['err', 'Add at least one device.']]),
+        ];
+    }
+
+    function editorMarkupSettings(group) {
+        const addLimit = group.members.length >= maxMembers();
+        const free = !addLimit && nextDevice(group);
         return `
             <div class="ed-head"><i class="bi bi-pencil" aria-hidden="true"></i><h4>Edit group</h4><span class="ed-name" id="workerGroupEditorName">· ${escape(group.name)}</span><span class="flex-fill"></span><button type="button" class="btn btn-sm btn-icon" id="workerGroupClose" aria-label="Close editor" title="Close editor"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div>
+            <div class="err-foot" id="workerGroupEditorError" role="alert" hidden></div>
             <div class="setting-row"><div class="sr-label"><label class="sr-title" for="workerGroupName">Name</label></div><div class="sr-control"><input id="workerGroupName" class="form-control" maxlength="100" value="${escape(group.name)}"></div></div>
-            <div class="setting-row"><div class="sr-label"><label class="sr-title" for="workerGroupResource">Resource</label>${info('Resource', 'Which detected device this group uses. A group runs on one device; add a second group for a second GPU.')}</div><div class="sr-control"><select id="workerGroupResource" class="form-select">${resourceOptions(group, devices)}</select></div></div>
-            <div class="setting-row"><div class="sr-label"><label class="sr-title" for="workerGroupCount">Workers</label><div class="sr-hint">Simultaneous tasks, not CPU cores. Disable the group to use zero.</div></div><div class="sr-control"><input id="workerGroupCount" type="number" min="1" max="${limit}" value="${group.count}" class="form-control"></div></div>
-            <fieldset id="workerGroupJobTypes" class="job-fieldset"><legend class="sr-title">Jobs allowed on this group${info('jobs allowed', 'Task types this group may run. A type that no group allows waits in the queue.')}</legend><div class="job-tiles">${jobTiles(group)}</div>${group.resource !== 'cpu' ? '<p class="sr-hint mb-0 mt-2">Plex loudness requires CPU workers.</p>' : ''}</fieldset>
-            <div class="setting-row"><div class="sr-label"><label class="sr-title" for="workerGroupAvailability">Availability</label>${info('Availability', 'Group hours only stop new files from starting; current work finishes. A global pause stops everything.')}<div class="sr-hint">When this group may start new files.</div></div><div class="sr-control"><select class="form-select" id="workerGroupAvailability"><option value="always">Always available</option><option value="scheduled" ${group.availability.mode === 'scheduled' ? 'selected' : ''}>Weekly hours</option></select></div></div>
+            <div class="ed-sec" id="workerGroupDevices"><h5 class="sr-title">Devices in this group${infoIcon('devices in this group', 'Each device has its own worker count and job types. Use one row per device.')}</h5>
+                <p class="sr-hint">One row per device. Hours and the on/off switch apply to the whole group.</p>
+                <div id="workerGroupMembers">${group.members.map(member => memberRow(group, member)).join('') || '<div class="wg-empty-devices">Add a device to give this group workers.</div>'}</div>
+                <div id="workerGroupGroupMsgs">${messageMarkup(groupIssues(group).filter(issue => issue[1] !== 'Every group needs a name.'))}</div>
+                <p class="msg err" id="workerGroupLastDevice" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span>A group needs at least one device. Remove the group instead.</span></p>
+                <div class="add-device"><button type="button" class="btn btn-sm btn-outline-secondary" id="workerGroupAddDevice" ${free ? '' : 'disabled'}><i class="bi bi-plus-lg" aria-hidden="true"></i> Add device</button><span id="workerGroupAddDeviceInfo" ${free ? 'hidden' : ''}>${infoIcon('why Add device is unavailable', addLimit ? `A group holds up to ${maxMembers()} devices` : 'Every detected device is already in this group')}</span></div>
+            </div>
+            <div class="setting-row"><div class="sr-label"><label class="sr-title" for="workerGroupAvailability">Availability</label>${infoIcon('Availability', 'Group hours only stop new files from starting; current work finishes. A global pause stops everything.')}<div class="sr-hint">When this group may start new files.</div></div><div class="sr-control"><select class="form-select" id="workerGroupAvailability"><option value="always">Always available</option><option value="scheduled" ${group.availability.mode === 'scheduled' ? 'selected' : ''}>Weekly hours</option></select></div></div>
             <div id="workerGroupWindows" ${group.availability.mode === 'always' ? 'hidden' : ''}>${group.availability.windows.map((window, index) => windowEditorSettings(window, index)).join('')}<button type="button" id="workerGroupAddWindow" class="btn btn-sm btn-outline-secondary mt-2"><i class="bi bi-plus-lg" aria-hidden="true"></i> Add time window</button><p class="form-text tz-note"><i class="bi bi-globe2" aria-hidden="true"></i><span>${escape(timezoneLabel())}. Days select when the window starts.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Overnight windows belong to the day they start." data-explain-title="Time windows" data-explain-html="Days select when the window starts: Mon 23:00–07:00 ends Tuesday. Overlapping windows in this group count once." aria-label="About time windows"><i class="bi bi-info-circle"></i></button></span></p><div class="week-card week-card-inline"><div class="week-head"><strong>This group’s week</strong></div><div id="workerGroupPreview"></div></div></div>
             <div class="ed-actions"><button type="button" class="btn btn-primary btn-sm" id="workerGroupEditorApply" ${saving || !dirty ? 'disabled' : ''}>Apply group changes</button><span class="ed-note">Saves all group edits. Closing keeps your draft.</span><span class="flex-fill"></span><button type="button" class="btn btn-sm btn-outline-secondary" id="workerGroupDuplicate"><i class="bi bi-copy" aria-hidden="true"></i> Duplicate group</button><button type="button" class="btn btn-sm btn-outline-danger" id="workerGroupRemove"><i class="bi bi-trash" aria-hidden="true"></i> Remove group</button></div>`;
+    }
+
+    function showEditorError(text) {
+        const box = document.getElementById('workerGroupEditorError');
+        if (!box) return;
+        box.textContent = text || '';
+        box.hidden = !text;
+    }
+
+    // Update row messages, stepper limits and the Add device state in place so typing is never interrupted.
+    function refreshMembers(container, group) {
+        for (const row of container.querySelectorAll('[data-member]')) {
+            const member = group.members.find(item => item.id === row.dataset.member);
+            if (!member) continue;
+            const issues = memberIssues(group, member);
+            row.classList.toggle('has-err', issues.some(issue => issue[0] === 'err'));
+            row.classList.toggle('has-warn', !issues.some(issue => issue[0] === 'err') && issues.some(issue => issue[0] === 'warn'));
+            const markup = messageMarkup(issues);
+            const box = row.querySelector('[data-msgs]');
+            if (box._markup !== markup) { box._markup = markup; box.innerHTML = markup; }
+            const [minus, plus] = row.querySelectorAll('[data-step]');
+            minus.disabled = !(member.count > 1);
+            if (minus.disabled) minus.title = 'Remove the device to use zero'; else minus.removeAttribute('title');
+            plus.disabled = member.count >= memberLimit(member);
+        }
+        const addLimit = group.members.length >= maxMembers();
+        const free = !addLimit && nextDevice(group);
+        container.querySelector('#workerGroupAddDevice').disabled = !free || saving;
+        container.querySelector('#workerGroupAddDeviceInfo').hidden = !!free;
+        container.querySelector('#workerGroupLastDevice').hidden = true;
+        paintEditorPreview();
     }
 
     function renderEditor() {
@@ -664,16 +910,18 @@
         const group = draft?.find(item => item.id === editing);
         container.hidden = !group;
         if (!group) return;
-        const devices = editorDevices(group);
         if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(container);
-        container.innerHTML = editorMarkupSettings(group, devices);
+        container.innerHTML = editorMarkupSettings(group);
         window._initBootstrapTooltips?.(container);
         paintEditorPreview();
         const changed = () => {
             dirty = true;
+            showEditorError('');
             renderSettings();
             message('Group changes are not saved until you apply them.');
         };
+        const memberOf = node => group.members.find(item => item.id === node.closest('[data-member]').dataset.member);
+        const refocus = id => { renderEditor(); document.getElementById(id)?.focus({ preventScroll: true }); };
         document.getElementById('workerGroupEditorApply').onclick = () => save().catch(() => {});
         document.getElementById('workerGroupName').oninput = event => {
             group.name = event.target.value;
@@ -681,15 +929,50 @@
             if (label) label.textContent = '· ' + group.name;
             changed();
         };
-        document.getElementById('workerGroupCount').oninput = event => { group.count = Number(event.target.value); changed(); };
-        document.getElementById('workerGroupResource').onchange = event => {
-            group.resource = event.target.value === 'cpu' ? 'cpu' : 'gpu'; group.device = group.resource === 'cpu' ? null : event.target.value;
-            if (group.resource === 'gpu') group.job_types = group.job_types.filter(kind => kind !== 'loudness');
-            changed(); renderEditor();
-        };
-        container.querySelectorAll('[data-kind]').forEach(input => input.onchange = () => {
-            group.job_types = [...container.querySelectorAll('[data-kind]:checked')].map(input => input.dataset.kind); changed();
+        container.querySelectorAll('[data-count]').forEach(input => input.oninput = event => {
+            memberOf(input).count = event.target.value === '' ? NaN : Number(event.target.value);
+            changed(); refreshMembers(container, group);
         });
+        container.querySelectorAll('[data-step]').forEach(button => button.onclick = () => {
+            const member = memberOf(button);
+            member.count = Math.min(memberLimit(member), Math.max(1, (Number(member.count) || 1) + Number(button.dataset.step)));
+            button.closest('.wg-stepper').querySelector('[data-count]').value = member.count;
+            changed(); refreshMembers(container, group);
+        });
+        container.querySelectorAll('[data-pick]').forEach(select => select.onchange = () => {
+            const member = memberOf(select);
+            member.resource = select.value === 'cpu' ? 'cpu' : 'gpu';
+            member.device = member.resource === 'cpu' ? null : select.value;
+            memberNotes.delete(member.id);
+            if (member.resource === 'gpu' && member.job_types.includes('loudness')) {
+                member.job_types = member.job_types.filter(kind => kind !== 'loudness');
+                memberNotes.set(member.id, 'Loudness removed — it runs on CPU only.');
+            }
+            changed(); refocus(select.id);
+        });
+        container.querySelectorAll('[data-member] [data-kind]').forEach(chip => chip.onclick = () => {
+            const member = memberOf(chip);
+            const on = !member.job_types.includes(chip.dataset.kind);
+            member.job_types = CAPABILITIES.map(item => item[0]).filter(kind => kind === chip.dataset.kind ? on : member.job_types.includes(kind));
+            chip.setAttribute('aria-pressed', String(on));
+            memberNotes.delete(member.id);
+            changed(); refreshMembers(container, group);
+        });
+        container.querySelectorAll('[data-remove-member]').forEach(button => button.onclick = () => {
+            if (group.members.length <= 1) { document.getElementById('workerGroupLastDevice').hidden = false; return; }
+            const member = memberOf(button);
+            group.members.splice(group.members.indexOf(member), 1);
+            memberNotes.delete(member.id);
+            changed(); refocus('workerGroupAddDevice');
+        });
+        document.getElementById('workerGroupAddDevice').onclick = () => {
+            const next = nextDevice(group);
+            if (!next || group.members.length >= maxMembers()) return;
+            const member = { id: newId('m'), count: 1, ...next };
+            group.members.push(member);
+            changed(); renderEditor();
+            document.getElementById('wgDevice-' + member.id)?.focus({ preventScroll: true });
+        };
         document.getElementById('workerGroupAvailability').onchange = event => {
             group.availability.mode = event.target.value;
             if (event.target.value === 'scheduled' && !group.availability.windows.length) group.availability.windows.push(defaultWindow());
@@ -722,10 +1005,8 @@
 
     function validate() {
         for (const group of draft) {
-            if (!group.name.trim()) return ('Every group needs a name.');
-            if (!Number.isInteger(group.count) || group.count < 1 || group.count > (snapshot.limits?.[group.resource] || 32)) return (`${group.name}: enter a whole worker count between 1 and ${snapshot.limits?.[group.resource] || 32}. Disable a group to use zero workers.`);
-            if (!group.job_types.length) return (`${group.name}: select at least one job type.`);
-            if (group.resource === 'gpu' && group.job_types.includes('loudness')) return (`${group.name}: loudness requires CPU workers.`);
+            const [problem] = [...groupIssues(group), ...group.members.flatMap(member => memberIssues(group, member).filter(issue => issue[0] === 'err'))];
+            if (problem) return problem[1];
             if (group.availability.mode === 'scheduled') {
                 if (!group.availability.windows.length) return (`${group.name}: add a time window or choose Always available.`);
                 for (const window of group.availability.windows) {
@@ -741,17 +1022,23 @@
         if (!draft || !dirty) return;
         if (saving) throw new Error('Worker groups are still saving.');
         const error = validate();
-        if (error) { message(error, true); throw new Error(error); }
+        if (error) { message(error, true); showEditorError(error); throw new Error(error); }
         saving = true; renderSettings(); syncEditorState(); renderSystemGroups();
+        let failure = '';
         try {
             snapshot = await request('PUT', '', { groups: draft, revision: snapshot.revision });
             draft = null; dirty = false; editing = null; renderSettings(); renderEditor(); renderDashboard();
             message(snapshot.warning || 'Worker groups saved. Current files finish; new assignments use these settings.', !!snapshot.warning);
         } catch (error) {
-            message(error.conflict ? 'Worker groups changed elsewhere. Your draft is preserved. Discard it and reload the latest groups before editing again.' : error.message, true);
+            const text = error.conflict ? 'Worker groups changed elsewhere. Your draft is preserved. Discard it and reload the latest groups before editing again.' : error.message;
+            message(text, true);
             if (error.conflict) { await load(true); }
+            failure = text;
             throw error;
-        } finally { saving = false; renderSettings(); renderEditor(); renderDashboard(); }
+        } finally {
+            saving = false; renderSettings(); renderEditor(); renderDashboard();
+            if (failure) showEditorError(failure);
+        }
     }
 
     async function load(force = false) {
@@ -795,10 +1082,20 @@
         setInterval(() => { if (!document.hidden && !saving) load(); }, dashboard() ? 5000 : 10000);
     });
     document.addEventListener('click', event => {
-        const row = event.target.closest('[data-system-group]');
-        if (!row) return;
-        const scale = event.target.closest('[data-group-scale]');
-        if (scale) scaleGroup(row.dataset.systemGroup, { delta: Number(scale.dataset.groupScale) });
-        if (event.target.closest('[data-group-enable]')) scaleGroup(row.dataset.systemGroup, { enabled: true });
+        const scale = event.target.closest('[data-member-scale]');
+        if (scale) {
+            const block = scale.closest('[data-member-id]');
+            if (block) scaleMember(block.dataset.memberGroup, block.dataset.memberId, Number(scale.dataset.memberScale));
+            return;
+        }
+        const enable = event.target.closest('[data-group-enable]');
+        if (!enable) return;
+        const id = enable.dataset.groupEnable || enable.closest('[data-system-group]')?.dataset.systemGroup;
+        if (id) scaleGroup(id, { enabled: true });
+    });
+    // Empty-state buttons live inside the re-rendered list, so they are delegated.
+    document.addEventListener('click', event => {
+        if (event.target.closest('[data-empty-add]')) add(false);
+        if (event.target.closest('[data-empty-add-cpu]')) add(true);
     });
 })();

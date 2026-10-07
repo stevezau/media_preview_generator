@@ -2358,9 +2358,8 @@ function _renderRetryChip(job) {
     const max = typeof cfg.max_retries === 'number' ? cfg.max_retries : 0;
     if (max <= 0) return '';
     const status = (job.status || '').toLowerCase();
-    const eta = job.progress && job.progress.retry_eta;
-    const activelyRetrying = status === 'running'
-        || (status === 'pending' && !!eta);
+    // A pending chain row always has a retry coming, with or without a countdown (Retry now clears it).
+    const activelyRetrying = status === 'running' || status === 'pending';
     if (!activelyRetrying) return '';
     const attempt = typeof cfg.retry_attempt === 'number' ? cfg.retry_attempt : 0;
     // An Intro & Credits chain retries files a server hadn't added to its library yet; the info templates below
@@ -3140,7 +3139,7 @@ function updateWorkerStatuses(workers, options = {}) {
     for (const worker of workers) {
         const key = `${worker.worker_type}_${worker.worker_id}`;
         seenKeys.add(key);
-        const host = window.WorkerGroups?.getDashboardWorkerHost(worker.group_id, worker.group_name) || fallback;
+        const host = window.WorkerGroups?.getDashboardWorkerHost(worker.group_id, worker.group_name, worker.member_id) || fallback;
         let col = container.querySelector(`[data-worker-key="${CSS.escape(key)}"]`);
         if (!col) {
             // First sighting of this slot — stamp the static DOM shape

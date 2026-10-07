@@ -146,11 +146,9 @@ class TestLongHardwareNames:
         groups["state"]["hardware"][0]["name"] = LONG_DEVICE
         authed_page.set_viewport_size({"width": 1440, "height": 900})
         authed_page.goto(app_url + "/")
-        subtitles = [
-            authed_page.locator('[data-group-id="gpu"] .hw > span'),
-            authed_page.locator('[data-system-group="gpu"] .pool-lbl small'),
-        ]
-        for subtitle in subtitles:
+        # The System card line is read-only and summarises counts only, so the device name lives on the member row.
+        expect(authed_page.locator('[data-system-group="gpu"] .pool-lbl small')).to_have_text("1 GPU")
+        for subtitle in [authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')]:
             expect(subtitle).to_have_text(LONG_DEVICE)
             expect(subtitle).to_have_attribute("title", LONG_DEVICE)
             line_height = subtitle.evaluate("e => parseFloat(getComputedStyle(e).lineHeight) || e.scrollHeight")
@@ -166,7 +164,7 @@ class TestLongHardwareNames:
         groups["state"]["hardware"][0]["name"] = LONG_DEVICE
         authed_page.set_viewport_size({"width": 390, "height": 844})
         authed_page.goto(app_url + "/")
-        expect(authed_page.locator('[data-group-id="gpu"] .hw > span')).to_have_text(LONG_DEVICE)
+        expect(authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')).to_have_text(LONG_DEVICE)
         assert authed_page.evaluate("document.documentElement.scrollWidth") <= 390
 
 
@@ -184,17 +182,14 @@ class TestWorkerGroupHeaderStaysInItsColumn:
             {
                 "id": "cpu-loud",
                 "name": "CPU loudness",
-                "resource": "cpu",
-                "device": None,
-                "count": 2,
                 "enabled": True,
-                "job_types": ["loudness"],
+                "members": [{"id": "m1", "resource": "cpu", "device": None, "count": 2, "job_types": ["loudness"]}],
                 "availability": {"mode": "always", "windows": []},
             }
         )
         authed_page.set_viewport_size({"width": width, "height": 900})
         authed_page.goto(app_url + "/")
-        expect(authed_page.locator('[data-group-id="gpu"] .hw > span')).to_have_text(LONG_DEVICE)
+        expect(authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')).to_have_text(LONG_DEVICE)
         boxes = authed_page.evaluate(
             """() => [...document.querySelectorAll('#workerGroupLiveRows > .worker-group-section')].map(section => {
                 const rect = e => { const r = e.getBoundingClientRect(); return {l: r.left, r: r.right, t: r.top, b: r.bottom}; };
@@ -226,7 +221,7 @@ class TestWorkerGroupHeaderStaysInItsColumn:
         groups["state"]["groups"].append({**groups["state"]["groups"][0], "id": "cpu-loud", "name": "CPU loudness"})
         authed_page.set_viewport_size({"width": 1280, "height": 900})
         authed_page.goto(app_url + "/")
-        hardware = authed_page.locator('[data-group-id="gpu"] .hw > span')
+        hardware = authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')
         expect(hardware).to_have_attribute("title", LONG_DEVICE)
         assert hardware.evaluate("e => getComputedStyle(e).textOverflow") == "ellipsis"
         assert hardware.evaluate("e => e.scrollWidth > e.clientWidth")

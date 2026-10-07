@@ -110,38 +110,45 @@ FAKE_GPUS: list[dict[str, Any]] = [
 FAKE_GPU_WORKERS = [3, 1]
 FAKE_CPU_THREADS = 4
 
-# Worker groups, one per device plus a CPU group, in the order the dashboard lists them. Counts come from the two
-# constants above so the Workers panel and the settings agree.
+# Worker groups in the order the dashboard lists them: one group holding both GPUs as members, plus a CPU group.
+# Counts come from the two constants above so the Workers panel and the settings agree.
 FAKE_WORKER_GROUPS: list[dict[str, Any]] = [
     {
-        "id": "gpu-nvidia",
-        "name": FAKE_GPUS[0]["name"],
+        "id": "gpu-group",
+        "name": "GPU workers",
         "enabled": True,
-        "resource": "gpu",
-        "device": FAKE_GPUS[0]["device"],
-        "count": FAKE_GPU_WORKERS[0],
-        "job_types": ["previews", "intro_credits"],
         "availability": {"mode": "always", "windows": []},
+        "members": [
+            {
+                "id": "gpu-nvidia",
+                "resource": "gpu",
+                "device": FAKE_GPUS[0]["device"],
+                "count": FAKE_GPU_WORKERS[0],
+                "job_types": ["previews", "intro_credits"],
+            },
+            {
+                "id": "gpu-intel",
+                "resource": "gpu",
+                "device": FAKE_GPUS[1]["device"],
+                "count": FAKE_GPU_WORKERS[1],
+                "job_types": ["previews"],
+            },
+        ],
     },
     {
-        "id": "gpu-intel",
-        "name": FAKE_GPUS[1]["name"],
-        "enabled": True,
-        "resource": "gpu",
-        "device": FAKE_GPUS[1]["device"],
-        "count": FAKE_GPU_WORKERS[1],
-        "job_types": ["previews"],
-        "availability": {"mode": "always", "windows": []},
-    },
-    {
-        "id": "cpu",
+        "id": "cpu-group",
         "name": "CPU workers",
         "enabled": True,
-        "resource": "cpu",
-        "device": None,
-        "count": FAKE_CPU_THREADS,
-        "job_types": ["previews", "intro_credits", "loudness"],
         "availability": {"mode": "always", "windows": []},
+        "members": [
+            {
+                "id": "cpu",
+                "resource": "cpu",
+                "device": None,
+                "count": FAKE_CPU_THREADS,
+                "job_types": ["previews", "intro_credits", "loudness"],
+            },
+        ],
     },
 ]
 

@@ -344,6 +344,7 @@ class WorkerStatus:
     worker_type: str = "CPU"  # "GPU" or "CPU"
     worker_name: str = "CPU Worker"
     group_id: str | None = None
+    member_id: str | None = None
     group_name: str | None = None
     group_resource: str | None = None
     retiring: bool = False

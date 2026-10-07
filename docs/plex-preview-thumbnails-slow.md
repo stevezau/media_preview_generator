@@ -35,7 +35,7 @@ If that is fast enough, stop here. The built-in needs no extra software.
 [Media Preview Generator](comparison.md) is a free, MIT-licensed Docker app. It makes the same BIF files Plex would, using FFmpeg with GPU decoding (NVIDIA, Intel or AMD). It then writes them into Plex's data folder, where Plex serves them to its apps. A full scan can run for hours while new imports, set to **High** priority, jump ahead of it. It differs from the built-in in several ways:
 
 - **It uses the GPU.** Decoding and downscaling happen on the GPU. If a file won't decode there, the same worker redoes it on the CPU ([CPU fallback](guides.md#automatic-gpu--cpu-fallback)).
-- **It works on several files at once.** You set up worker groups: each GPU or the CPU gets a group with its own worker count, allowed jobs and hours.
+- **It works on several files at once.** You set up worker groups: a group holds the GPUs and CPU you choose, each with its own worker count and allowed jobs, and the group has its hours.
 - **It works per file, when the file arrives.** Triggers include Sonarr and Radarr webhooks, Plex's own webhook (Plex Pass), a "Recently Added" poll (no Plex Pass), schedules, or a manual pick. See [Previews as soon as Sonarr or Radarr imports a file](sonarr-radarr-preview-thumbnails.md).
 - **It can run on another machine.** It needs network access to Plex, and the Plex data folder mounted read-write.
 

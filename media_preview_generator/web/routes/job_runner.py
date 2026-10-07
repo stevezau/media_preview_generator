@@ -448,9 +448,10 @@ def _build_selected_gpus(settings, detected: list[dict] | None = None) -> list:
     selected = []
     groups = settings.get("worker_groups")
     if isinstance(groups, list):
-        from ...worker_groups import configured_group_totals
+        from ...worker_groups import configured_group_totals, member_policies
 
-        grouped_devices = {group["device"] for group in groups if group["resource"] == "gpu" and group["enabled"]}
+        policies = member_policies(groups)
+        grouped_devices = {p["device"] for p in policies if p["resource"] == "gpu" and p["enabled"]}
         for g in cached_gpus:
             device = g.get("device", "")
             if device not in grouped_devices or g.get("status") == "failed":
@@ -458,7 +459,7 @@ def _build_selected_gpus(settings, detected: list[dict] | None = None) -> list:
             entry = config_by_device.get(device, {})
             info = dict(g)
             info["ffmpeg_threads"] = entry.get("ffmpeg_threads", 2)
-            info["workers"] = configured_group_totals([group for group in groups if group.get("device") == device])[0]
+            info["workers"] = configured_group_totals([p for p in policies if p.get("device") == device])[0]
             selected.append((g["type"], device, info))
         return selected
     for g in cached_gpus:
@@ -979,6 +980,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         fallback_reason=worker_data.get("fallback_reason"),
                         fallback_title=worker_data.get("fallback_title", "") or "",
                         group_id=worker_data.get("group_id"),
+                        member_id=worker_data.get("member_id"),
                         group_name=worker_data.get("group_name"),
                         group_resource=worker_data.get("group_resource"),
                         retiring=bool(worker_data.get("retiring", False)),

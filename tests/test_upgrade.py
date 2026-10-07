@@ -2965,7 +2965,7 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 21
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [
             _USER_FACING_NOTES[16],
@@ -3004,7 +3004,7 @@ class TestMigrateToV17:
 
         settings_manager.apply_changes(updates={"_schema_version": start})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 21
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[21]]
 
@@ -3037,7 +3037,7 @@ class TestMigrateToV18:
 
         settings_manager.apply_changes(updates={"_schema_version": 17})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 21
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[21]]
         settings_manager.delete(DECIDE_AGAIN_KEY)
@@ -3094,7 +3094,7 @@ class TestMigrateToV20:
 
         settings_manager.apply_changes(updates={"_schema_version": 19, "media_servers": [self.PLEX_WITH_MARKERS_ON]})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 21
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert settings_manager.get("_pending_migration_notice")["notes"] == [
             _USER_FACING_NOTES[20],
@@ -3220,7 +3220,7 @@ class TestMigrateToV19:
             }
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 21
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
         assert settings_manager.processing_auto_paused is False
         assert settings_manager.processing_pause_reasons == ["manual"]
 
@@ -3282,4 +3282,8 @@ class TestUpgradedAutoPauseResumes:
             assert get_settings_manager().processing_paused is False
         drain.assert_not_called()
         assert get_settings_manager().cpu_threads == 2
-        assert any(g["resource"] == "cpu" and g["count"] == 2 for g in get_settings_manager().worker_groups)
+        assert any(
+            m["resource"] == "cpu" and m["count"] == 2
+            for g in get_settings_manager().worker_groups
+            for m in g["members"]
+        )

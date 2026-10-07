@@ -20,7 +20,7 @@ def restart(tmp_path, monkeypatch, before, enabled, global_hold):
     (tmp_path / "settings.json").write_text(
         json.dumps(
             {
-                "schema_version": 21,
+                "schema_version": 22,
                 "setup_complete": True,
                 "auto_requeue_on_restart": enabled,
                 "requeue_max_age_minutes": 5,

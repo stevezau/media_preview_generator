@@ -233,7 +233,7 @@ def test_resource_capacity_counts_draining_only_once():
     pool.workers[0].is_busy = False
     pool._apply_deferred_removals()
     assert pool.capacity_for("loudness")["available"] == 1
-    assert next(g for g in pool.group_snapshots() if g["id"] == "new")["available"] == 1
+    assert next(g for g in pool.member_snapshots() if g["group_id"] == "new")["available"] == 1
 
 
 def test_current_settings_override_stale_group_config(monkeypatch):
@@ -578,3 +578,91 @@ def test_preview_continuation_preserves_follow_up_scope_with_two_owners(tmp_path
         assert result["outcome"]["skipped_file_not_found"] == 1
     finally:
         reset_dispatcher()
+
+
+def member_group(gid="g", *, gpu=3, cpu=2, enabled=True, availability=None):
+    members = []
+    if gpu:
+        members.append({"id": "gpu1", "resource": "gpu", "device": "cuda:0", "count": gpu, "job_types": ["previews"]})
+    if cpu:
+        members.append({"id": "cpu1", "resource": "cpu", "device": None, "count": cpu, "job_types": ["loudness"]})
+    return {
+        "id": gid,
+        "name": gid,
+        "enabled": enabled,
+        "availability": availability or {"mode": "always", "windows": []},
+        "members": members,
+    }
+
+
+def test_members_own_their_slots_and_job_types():
+    pool = WorkerPool(0, 0, GPU)
+    pool.reconcile_groups([member_group()], GPU)
+    owners = {(w.group_id, w.member_id, w.policy_id, w.allowed_job_types) for w in pool.workers}
+    assert owners == {
+        ("g", "gpu1", "g:gpu1", frozenset(["previews"])),
+        ("g", "cpu1", "g:cpu1", frozenset(["loudness"])),
+    }
+    assert sum(w.member_id == "gpu1" for w in pool.workers) == 3
+    assert sum(w.member_id == "cpu1" for w in pool.workers) == 2
+    assert pool.capacity_for("loudness")["open"] == 2
+    assert pool.capacity_for("previews")["open"] == 3
+
+
+def test_member_reduction_retires_idle_and_keeps_busy_until_finished():
+    pool = WorkerPool(0, 0, GPU)
+    pool.reconcile_groups([member_group()], GPU)
+    busy = next(w for w in pool.workers if w.member_id == "cpu1")
+    busy.is_busy = True
+    summary = pool.reconcile_groups([member_group(cpu=1)], GPU)
+    assert summary["removed"] == 1 and not busy._pending_removal
+    assert sum(w.member_id == "cpu1" for w in pool.workers) == 1
+    pool.reconcile_groups([member_group(cpu=0)], GPU)
+    assert busy in pool.workers and busy._pending_removal
+    assert sum(w.member_id == "gpu1" and not w._pending_removal for w in pool.workers) == 3
+
+
+def test_removed_member_with_busy_worker_finishes_under_its_owner():
+    pool = WorkerPool(0, 0, GPU)
+    pool.reconcile_groups([member_group()], GPU)
+    busy = next(w for w in pool.workers if w.member_id == "gpu1")
+    busy.is_busy = True
+    pool.reconcile_groups([member_group(gpu=0)], GPU)
+    assert busy in pool.workers and busy._pending_removal
+    assert (busy.group_id, busy.member_id) == ("g", "gpu1")
+    assert sum(w.member_id == "gpu1" for w in pool.workers) == 1
+    row = next(r for r in pool.member_snapshots() if r["member_id"] == "gpu1")
+    assert (row["group_id"], row["state"], row["finishing"], row["count"]) == ("g", "draining", 1, 0)
+    assert pool.capacity_for("previews")["open"] == 0
+
+
+def test_unchanged_member_groups_retire_nothing():
+    pool = WorkerPool(0, 0, GPU)
+    pool.reconcile_groups([member_group()], GPU)
+    before = list(pool.workers)
+    summary = pool.reconcile_groups([member_group()], GPU)
+    assert (summary["added"], summary["removed"], summary["retiring"]) == (0, 0, 0)
+    assert pool.workers == before
+
+
+def test_missing_gpu_zeroes_only_that_member_and_closed_group_zeroes_all():
+    pool = WorkerPool(0, 0, [])
+    pool.reconcile_groups([member_group()], [])
+    assert {w.member_id for w in pool.workers} == {"cpu1"}
+    rows = {r["member_id"]: r for r in pool.member_snapshots()}
+    assert rows["gpu1"]["state"] == "hardware_unavailable" and rows["gpu1"]["target"] == 0
+    assert rows["cpu1"]["state"] == "active" and rows["cpu1"]["target"] == 2
+    assert rows["cpu1"]["group_id"] == "g" and rows["cpu1"]["id"] == "g:cpu1"
+    pool.reconcile_groups([member_group(enabled=False)], [])
+    assert pool.capacity_for("loudness")["open"] == 0
+
+
+def test_two_groups_share_one_gpu_budget_during_handover():
+    pool = WorkerPool(0, 0, GPU)
+    pool.reconcile_groups([member_group("a", gpu=2, cpu=0)], GPU)
+    busy = list(pool.workers)
+    for worker in busy:
+        worker.is_busy = True
+    pool.reconcile_groups([member_group("b", gpu=2, cpu=0)], GPU)
+    assert all(w._pending_removal for w in busy)
+    assert pool._find_available_worker(kind="previews", claim=True) is None

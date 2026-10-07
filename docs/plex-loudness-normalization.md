@@ -33,7 +33,7 @@ unlock the playback feature. See Plex's [Audio Track Enhancements for Video](htt
 2. Under **Servers → Edit → Processing → Loudness**, switch on **Analyse loudness for this server**.
 3. On the **Libraries** tab, choose movie and TV libraries in the **Loudness** column. Both start on; music and other
    non-video libraries cannot be selected.
-4. In **Settings → Workers**, enable a CPU group that allows **Plex loudness**, with hours outside the **Global pause schedule**.
+4. In **Settings → Workers**, enable a group with a CPU device that allows **Plex loudness**, with hours outside the **Global pause schedule**.
    One worker allows one simultaneous audio analysis. GPU-only setups must add CPU capacity explicitly.
 
 Loudness has its own opt-in; **Intro & Credits** can stay off, and its database-write confirmation is not required.
@@ -75,7 +75,7 @@ enabled is valid: Plex can serve music and video libraries this app does not cov
 depends on each library's **Enable Loudness Analysis** setting; a server-wide schedule alone does not mean both
 applications are analysing the same videos.
 
-When this app has eligible video libraries selected, its writer is ready, and a CPU group has usable loudness hours, **Set to Never** is an optional,
+When this app has eligible video libraries selected, its writer is ready, and a CPU device has usable loudness hours, **Set to Never** is an optional,
 separately confirmed action. It changes Plex's server-wide schedule, including music and unselected video libraries;
 it does not enable this app, extend its library selection or erase existing measurements. Keep native analysis on
 if those other libraries need it. The app checks its selection, writer readiness and configured CPU eligibility again when the action runs. Busy

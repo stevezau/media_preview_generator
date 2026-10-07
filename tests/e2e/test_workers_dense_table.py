@@ -1,4 +1,4 @@
-"""E2E tests for the dense Workers table (any enabled group with 5+ workers) and its per-group row cap."""
+"""E2E tests for the dense Workers table (any enabled member with 5+ workers) and its per-member row cap."""
 
 from __future__ import annotations
 
@@ -20,25 +20,38 @@ def _complete_setup(complete_setup) -> None:
     return complete_setup
 
 
-def _group(group_id: str, name: str, count: int, resource: str = "cpu", types: tuple[str, ...] = ("previews",)) -> dict:
+def _member(member_id: str, count: int, resource: str = "cpu", types: tuple[str, ...] = ("previews",)) -> dict:
     return {
-        "id": group_id,
-        "name": name,
+        "id": member_id,
         "resource": resource,
         "device": None if resource == "cpu" else "/dev/dri/renderD128",
         "count": count,
-        "enabled": True,
         "job_types": list(types),
+    }
+
+
+def _multi_group(group_id: str, name: str, members: list[dict]) -> dict:
+    return {
+        "id": group_id,
+        "name": name,
+        "enabled": True,
+        "members": members,
         "availability": {"mode": "always", "windows": []},
     }
 
 
-def _worker(group: dict, number: int, *, busy: bool, kind: str = "previews", **extra) -> dict:
+def _group(group_id: str, name: str, count: int, resource: str = "cpu", types: tuple[str, ...] = ("previews",)) -> dict:
+    return _multi_group(group_id, name, [_member("m1", count, resource, types)])
+
+
+def _worker(group: dict, number: int, *, busy: bool, kind: str = "previews", member: int = 0, **extra) -> dict:
+    member_row = group["members"][member]
     return {
         "worker_id": number,
-        "worker_type": "CPU" if group["resource"] == "cpu" else "GPU",
+        "worker_type": "CPU" if member_row["resource"] == "cpu" else "GPU",
         "worker_name": f"{group['name']} {number}",
         "group_id": group["id"],
+        "member_id": member_row["id"],
         "group_name": group["name"],
         "status": "processing" if busy else "idle",
         "progress_percent": 10 + number if busy else 0,
@@ -60,7 +73,7 @@ def _open(page: Page, app_url: str, groups: list[dict], workers: list[dict], wid
         "groups": groups,
         "revision": 1,
         "timezone": "UTC",
-        "limits": {"cpu": 32, "gpu": 32},
+        "limits": {"cpu": 32, "gpu": 32, "members": 8},
         "hardware": [{"device": "/dev/dri/renderD128", "name": LONG_DEVICE, "type": "intel", "status": "ok"}],
         "capacity": {
             "groups": [
@@ -68,6 +81,22 @@ def _open(page: Page, app_url: str, groups: list[dict], workers: list[dict], wid
                     "id": g["id"],
                     "state": "busy",
                     "busy": sum(1 for w in workers if w["group_id"] == g["id"] and w["status"] == "processing"),
+                    "members": [
+                        {
+                            "id": m["id"],
+                            "resource": m["resource"],
+                            "device": m["device"],
+                            "state": "busy",
+                            "busy": sum(
+                                1
+                                for w in workers
+                                if w["group_id"] == g["id"]
+                                and w["member_id"] == m["id"]
+                                and w["status"] == "processing"
+                            ),
+                        }
+                        for m in g["members"]
+                    ],
                 }
                 for g in groups
             ]
@@ -98,7 +127,7 @@ def _loudness_example() -> tuple[list[dict], list[dict]]:
 
 @pytest.mark.e2e
 class TestLayoutSwitch:
-    def test_cards_layout_is_kept_when_every_group_has_four_or_fewer_workers(
+    def test_cards_layout_is_kept_when_every_member_has_four_or_fewer_workers(
         self, authed_page: Page, app_url: str
     ) -> None:
         cpu = _group("cpu", "CPU workers", 4)
@@ -114,7 +143,7 @@ class TestLayoutSwitch:
         expect(idle_card).to_have_class("card workers-panel-card wk idle")
 
     @pytest.mark.parametrize("count", [5, 7, 20])
-    def test_table_layout_is_used_when_a_group_has_five_or_more_workers(
+    def test_table_layout_is_used_when_a_member_has_five_or_more_workers(
         self, authed_page: Page, app_url: str, count: int
     ) -> None:
         cpu = _group("cpu", "CPU workers", count)
@@ -133,21 +162,36 @@ class TestLayoutSwitch:
             expect(row.locator("[data-progress-wrap]")).to_be_visible()
             expect(row.locator("[data-worker-job]")).to_have_text(JOB.format(n)[:8])
             expect(row.locator("[data-worker-logs]")).to_be_visible()
-        idle = authed_page.locator("[data-group-idle='cpu']")
+        idle = authed_page.locator("[data-group-idle='cpu:m1']")
         expect(idle).to_have_text(re.compile(rf"{count - busy} workers idle"))
         for n in range(busy + 1, count + 1):
             expect(idle.locator(".wg-idle-n", has_text=f"#{n}")).to_have_count(1)
         expect(authed_page.locator("[data-group-id='cpu'] .occ-chip")).to_contain_text(f"{busy}/ {count}")
 
+    def test_three_plus_three_group_stays_cards_and_a_five_worker_member_turns_the_table_on(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        group = _multi_group("g", "Mixed", [_member("m-gpu", 3, "gpu"), _member("m-cpu", 3)])
+        workers = [_worker(group, n, busy=True, member=0) for n in (1, 2, 3)]
+        workers += [_worker(group, n, busy=True, member=1) for n in (4, 5, 6)]
+        _open(authed_page, app_url, [group], workers)
+        expect(authed_page.locator("#workerGroupLiveRows.wg-dense")).to_have_count(0)
+        expect(authed_page.locator("#workerGroupLiveRows .wg-mem")).to_have_count(2)
+        group["members"][1]["count"] = 5
+        workers += [_worker(group, n, busy=False, member=1) for n in (7, 8)]
+        _open(authed_page, app_url, [group], workers)
+        expect(authed_page.locator("#workerGroupLiveRows.wg-dense")).to_have_count(1)
+
     def test_panel_is_compact_for_the_seven_worker_loudness_example(self, authed_page: Page, app_url: str) -> None:
         groups, workers = _loudness_example()
         _open(authed_page, app_url, groups, workers)
         height = authed_page.locator("#workerStatusContainer").evaluate("e => e.getBoundingClientRect().height")
-        assert height < 600, height
+        # 600 before member rows existed; each of the three groups now carries one ~38 px device row.
+        assert height < 700, height
         expect(authed_page.locator(ROWS)).to_have_count(7)
-        expect(authed_page.locator("[data-group-idle='nv']")).to_contain_text("2 workers idle")
-        expect(authed_page.locator("[data-group-idle='intel']")).to_contain_text("2 workers idle")
-        expect(authed_page.locator("[data-group-idle='cpu']")).to_be_hidden()
+        expect(authed_page.locator("[data-group-idle='nv:m1']")).to_contain_text("2 workers idle")
+        expect(authed_page.locator("[data-group-idle='intel:m1']")).to_contain_text("2 workers idle")
+        expect(authed_page.locator("[data-group-idle='cpu:m1']")).to_be_hidden()
 
 
 @pytest.mark.e2e
@@ -158,7 +202,6 @@ class TestNoOverflow:
     ) -> None:
         groups, workers = _loudness_example()
         groups[1]["name"] = LONG_DEVICE
-        groups[1]["resource"] = "gpu"
         _open(authed_page, app_url, groups, workers, width)
         problems = authed_page.evaluate(
             """() => {
@@ -244,6 +287,27 @@ class TestRowCap:
         expect(authed_page.locator('[data-worker-key="CPU_12"]')).to_be_visible()
         expect(authed_page.locator(ROWS)).to_have_count(ROW_CAP)
         expect(authed_page.locator(".wg-more").first).to_have_text("Show 4 more · 4 running")
+
+    def test_cap_and_show_more_are_per_member_and_expansion_is_remembered_per_group_and_member(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        group = _multi_group("g", "Mixed", [_member("m-gpu", 10, "gpu"), _member("m-cpu", 12)])
+        workers = [_worker(group, n, busy=True, member=0) for n in range(1, 11)]
+        workers += [_worker(group, n, busy=True, member=1) for n in range(11, 23)]
+        _open(authed_page, app_url, [group], workers)
+        gpu_more = authed_page.locator("[data-member-block='g:m-gpu'] .wg-more")
+        cpu_more = authed_page.locator("[data-member-block='g:m-cpu'] .wg-more")
+        expect(gpu_more).to_have_text("Show 2 more · 2 running")
+        expect(cpu_more).to_have_text("Show 4 more · 4 running")
+        expect(authed_page.locator("[data-group-workers='g:m-gpu'] .worker-slot:visible")).to_have_count(ROW_CAP)
+        cpu_more.click()
+        expect(authed_page.locator("[data-group-workers='g:m-cpu'] .worker-slot:visible")).to_have_count(12)
+        expect(authed_page.locator("[data-group-workers='g:m-gpu'] .worker-slot:visible")).to_have_count(ROW_CAP)
+        assert authed_page.evaluate("JSON.parse(localStorage.getItem('workerGroupsExpanded'))") == ["g:m-cpu"]
+        authed_page.reload()
+        authed_page.wait_for_selector("#workerGroupLiveRows [data-group-id]")
+        expect(authed_page.locator("[data-group-workers='g:m-cpu'] .worker-slot:visible")).to_have_count(12)
+        expect(authed_page.locator("[data-group-workers='g:m-gpu'] .worker-slot:visible")).to_have_count(ROW_CAP)
 
     def test_expanding_is_in_place_labelled_show_less_and_persists_across_reload(
         self, authed_page: Page, app_url: str
@@ -332,7 +396,7 @@ class TestInteractions:
         workers[0] = _worker(cpu, 1, busy=False)
         authed_page.evaluate("w => window.updateWorkerStatuses(w)", workers)
         expect(authed_page.locator(ROWS)).to_have_count(1)
-        expect(authed_page.locator("[data-group-idle='cpu']")).to_contain_text("4 workers idle")
+        expect(authed_page.locator("[data-group-idle='cpu:m1']")).to_contain_text("4 workers idle")
 
 
 @pytest.mark.e2e
@@ -362,7 +426,7 @@ class TestContrast:
                 };
                 const out = [];
                 const sel = '.worker-slot [data-title], .worker-slot [data-library], .worker-slot [data-percent], .worker-slot [data-kind-chip],'
-                    + ' .worker-slot [data-worker-job], .worker-slot [data-worker-logs], .worker-slot [data-worker-id], .g-name, .hw span, .wg-idle-row';
+                    + ' .worker-slot [data-worker-job], .worker-slot [data-worker-logs], .worker-slot [data-worker-id], .g-name, .devname .nm, .wg-idle-row';
                 for (const el of document.querySelectorAll(sel)) {
                     if (!el.getClientRects().length || !el.textContent.trim()) continue;
                     const fg = parse(getComputedStyle(el).color).slice(0, 3);

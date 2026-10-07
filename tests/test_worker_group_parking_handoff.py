@@ -17,7 +17,7 @@ def handoff(tmp_path, monkeypatch):
     job = manager.create_job(kind="loudness")
     manager.start_job(job.id)
     dispatcher = MagicMock()
-    dispatcher.worker_pool._groups = {}
+    dispatcher.worker_pool._policies = {}
     dispatcher.worker_pool.capacity_for.return_value = {"open": 0, "reason": "configuration", "next_opening": None}
     snapshot = {
         "kind": "loudness",
@@ -109,3 +109,42 @@ def test_cancel_after_commit_is_terminal_and_never_restarts_checkpoint(handoff, 
     assert "parked_checkpoint" not in job.config
     dispatcher.detach_parked.assert_not_called()
     dispatcher.cancel_job.assert_called_once_with(job.id)
+
+
+def _loudness_group(gid, *, enabled=True):
+    return {
+        "id": gid,
+        "name": gid,
+        "enabled": enabled,
+        "availability": {"mode": "always", "windows": []},
+        "members": [{"id": "m1", "resource": "cpu", "device": None, "count": 1, "job_types": ["loudness"]}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("second_group_enabled", "parks"),
+    [(True, False), (False, True)],
+    ids=["second group's open member keeps the job running", "no open member in any group parks it"],
+)
+def test_job_parks_only_when_no_group_has_an_open_member_for_its_kind(monkeypatch, second_group_enabled, parks):
+    from media_preview_generator.jobs.worker import WorkerPool
+
+    pool = WorkerPool(0, 0, [])
+    pool.reconcile_groups(
+        [_loudness_group("closed", enabled=False), _loudness_group("open", enabled=second_group_enabled)], []
+    )
+    dispatcher = MagicMock()
+    dispatcher.worker_pool = pool
+    dispatcher.park_snapshot.return_value = None
+    monkeypatch.setattr(parking, "refresh_worker_groups", lambda pool: True)
+    manager = MagicMock()
+
+    parking.park_if_unavailable(
+        dispatcher, SimpleNamespace(park_requested=False), manager, "job-1", "loudness", lambda: {}
+    )
+
+    if parks:
+        dispatcher.request_park.assert_called_once_with("job-1")
+    else:
+        dispatcher.request_park.assert_not_called()
+        dispatcher.park_snapshot.assert_not_called()

@@ -75,13 +75,13 @@ The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **T
 
 ### Dashboard Features
 
-- **System** — each media server (Plex, Emby, Jellyfin) with its connection state, the worker groups with a **−** / **+** stepper for each group's worker count, and the app version. With no server set up, a card links to the **Servers** page.
+- **System** — each media server (Plex, Emby, Jellyfin) with its connection state, one line per worker group group's worker count, and the app version. With no server set up, a card links to the **Servers** page.
 - **Quick actions** — **Start new job**, **Process a file or folder**, **Run next schedule now**, and links to the Inspector, Webhook activity and Logs.
 - **Job statistics** — Pending, Running, Completed, Failed, Cancelled and Total tiles, an outcome bar and the next schedule.
-- **Workers** — one card per worker group, with **Pause** / **Resume** and **Manage groups** in the header.
+- **Workers** — one card per worker group, with a row and **−** / **+** stepper for each device, and **Pause** / **Resume** and **Manage groups** in the header.
 - **Jobs** — the job queue, with status tabs, search, filters and per-job controls.
 
-**Dense worker table.** When an enabled group has 5 or more workers, the Workers panel switches to a compact table. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A group with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
+**Dense worker table.** When an enabled device in a group has 5 or more workers, the Workers panel switches to a compact table. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A device with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
 
 > [!NOTE]
 > Jobs queue with priority (1 = high, 2 = normal, 3 = low). The dispatcher runs
@@ -101,7 +101,10 @@ Jobs held by a pause, an unfinished dependency, or a retry timer let other eligi
 Changing a waiting job's priority updates its admission order; it does not interrupt files already processing.
 Change a job's priority from the **Priority** menu in its queue row.
 
-Admission also accounts for the open workers compatible with each job type. Excess jobs of the same type and priority
+Admission also accounts for the open workers compatible with each job type. Every kind of job (previews, Intro &
+Credits, loudness) that has work waiting and open workers gets a slot before any kind takes a second one, so a queue
+of one kind cannot starve another. The exceptions: when only the slot reserved for High priority is free, and when
+the cap is 1. Once each kind holds a slot, priority and creation time decide. Excess jobs of the same type and priority
 wait without consuming active slots, and eligible work of another type can pass them. Higher-priority work
 can still enter ahead of lower-priority scans, within the overall job limit. These limits control active jobs;
 worker groups control how many files run at once. A retry keeps its saved due time across an app restart
@@ -254,26 +257,27 @@ Most Settings controls and the Automation page's **Triggers** settings **save au
 Open **Settings → Workers** (or **Manage groups** in the Dashboard's Workers header) to choose which jobs can use your hardware. A group has:
 
 - **Name**
-- **Resource** — CPU or one detected GPU. A group runs on one device; add another group for a second GPU.
-- **Workers** — 1 to 32. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
-- **Jobs allowed on this group** — **Video previews**, **Intro & Credits**, **Plex loudness**.
-- **Availability** — **Always available**, or **Weekly hours** with one or more time windows.
+- **Devices** — up to 8, each CPU or one detected GPU, once per group. Each device has its own:
+  - **Workers** — 1 to 32. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
+  - **Jobs allowed** — **Video previews**, **Intro & Credits**, **Plex loudness**.
+- **Availability** — **Always available**, or **Weekly hours** with one or more time windows. It applies to every device in the group.
 
-Start with one group per resource; add groups when different jobs need different counts or hours. **Add group**, **Add CPU group for loudness**, the enable switch, **Edit**, **Duplicate group** and **Remove group** manage them. **Edit** opens the editor inline under the group. For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph that updates as you change the windows. **Apply group changes** saves all edits at once; **Discard changes** drops them. If another Settings session changed the groups first, applying shows a conflict instead of overwriting; discard and reload before editing again.
+Add a device with **Add device**; remove it to use zero workers on it. Start with one group; add groups when devices need different hours. **Add group**, **Add CPU group for loudness**, the enable switch, **Edit**, **Duplicate group** and **Remove group** manage them. **Edit** opens the editor inline under the group. For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph with one lane per device that updates as you change the windows. **Apply group changes** saves all edits at once; **Discard changes** drops them. If another Settings session changed the groups first, applying shows a conflict instead of overwriting; discard and reload before editing again.
 
-CPU groups can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU groups can run previews and
+The CPU device can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU devices can run previews and
 Intro & Credits; loudness requires CPU workers. Chapters stay part of Previews. These permissions select jobs:
 a GPU video job can still use CPU stages or CPU fallback. FFmpeg threads per GPU worker are set under **Processing options → GPU device tuning**.
 
-For example, keep four GPU workers for video jobs and add one CPU worker allowing only loudness. That permits one
-audio analysis at a time without assigning video jobs to that CPU group. The normal concurrent-job limit still
-applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU group.
+For example, an **Off-hours** group open daily 01:00–07:00 can hold 3 NVIDIA workers for previews and Intro & Credits plus
+10 CPU workers for loudness only. Outside those hours the group is idle. To keep loudness to one analysis at a time, give
+its CPU device 1 worker and allow only loudness; no video jobs run there. The normal concurrent-job limit still
+applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU device.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
-On the Dashboard, each group's **−** / **+** stepper in the **System** card changes its worker count and saves straight away. A disabled group shows **Enable** instead. A decrease retires workers after their current files finish; an increase can restore workers that were about to retire. The stepper never goes below 1; disable the group to use zero workers. Disabling a group remembers its saved count for when you enable it again.
+On the Dashboard, each device row in the **Workers** panel has a **−** / **+** stepper that changes its worker count and saves straight away. A disabled group shows **Enable** instead. A decrease retires workers after their current files finish; an increase can restore workers that were about to retire. The stepper never goes below 1; remove the device in Settings, or disable the group, to use zero workers. Disabling a group remembers its saved counts for when you enable it again.
 
 - A group's card shows its state: **Available**, **Workers busy**, **Outside hours**, **Finishing current files** or **Globally paused**. No open workers means waiting for capacity, not a global pause: current files can still finish.
-- Counts from different open groups add, including groups on the same device. Overlapping windows within one group
+- Counts from different open groups add, including groups that use the same device. Overlapping windows within one group
   do not multiply its workers. Finishing files still use the shared resource budget, so a newly opened group may
   wait for them. The weekly peak is limited to 32 CPU and 32 GPU workers across groups; the editor shows the current and peak totals.
 
@@ -1701,7 +1705,7 @@ Use this table to diagnose common failures quickly.
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
-| Job waits for workers | No compatible enabled group, outside group hours, unavailable GPU, or compatible workers busy | Read the waiting reason. In **Settings → Workers**, check job permissions, hours and hardware. Loudness needs a CPU group. Outside hours normally resolves at the next opening; busy workers finish their current files. |
+| Job waits for workers | No compatible enabled group, outside group hours, unavailable GPU, or compatible workers busy | Read the waiting reason. In **Settings → Workers**, check job permissions, hours and hardware. Loudness needs a CPU device. Outside hours normally resolves at the next opening; busy workers finish their current files. |
 | Job waits for a job slot | The concurrent-job gate is full | Check **Settings → Processing options → Max concurrent jobs**; a job at High priority can use the slot kept for it. Available workers do not bypass that limit. Check global and per-job pause holds too. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and check **Enable webhook processing** is on (Automation → Triggers → Settings). |

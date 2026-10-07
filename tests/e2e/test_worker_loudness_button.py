@@ -26,7 +26,7 @@ LOUDNESS_WARNING = {"code": "no_eligible_workers", "job_type": "loudness", "mess
 
 def _open_settings(page: Page, app_url: str, *, cpu_job_types: list[str], warnings: list[dict]) -> None:
     api = mock_worker_groups(page)
-    api["state"]["groups"][0]["job_types"] = cpu_job_types
+    api["state"]["groups"][0]["members"][0]["job_types"] = cpu_job_types
     api["state"]["warnings"] = warnings
     mock_settings_get(page)
     mock_setup_status(page, complete=True)

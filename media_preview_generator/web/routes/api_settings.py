@@ -11,6 +11,7 @@ from ...config import MAX_CPU_THREADS, validate_processing_thread_totals
 from ...markers.settings import mask_global
 from ...processing.retry_queue import DEFAULT_RETRY_COUNT
 from ...utils import is_docker_environment
+from ...worker_groups import legacy_group_view
 from ..auth import api_token_required, setup_or_auth_required
 from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_HIGH, PRIORITY_LABELS, parse_priority
 from . import api
@@ -366,7 +367,7 @@ def get_settings():
             "gpu_config": settings.gpu_config,
             "gpu_threads": settings.gpu_threads,
             "cpu_threads": settings.cpu_threads,
-            "worker_groups": settings.worker_groups,
+            "worker_groups": [{**group, **legacy_group_view(group)} for group in settings.worker_groups],
             "worker_groups_revision": settings.worker_groups_revision,
             # Library-scanning concurrency for full scans. 0 = Auto. Clamped
             # to [0, 256] so a manually-edited settings.json can't surface an
@@ -762,12 +763,11 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
             response_fields["warning"] = error
     if grouped and "cpu_threads" in incoming_field_keys:
         from .api_jobs import _get_shared_worker_pool
+        from .api_worker_groups import live_member_rows
 
         pool = _get_shared_worker_pool()
         response_fields["cpu_workers_retiring"] = sum(
-            row.get("finishing", 0)
-            for row in (pool.group_snapshots() if pool is not None else [])
-            if row.get("resource") == "cpu"
+            row.get("finishing", 0) for row in live_member_rows(pool).values() if row.get("resource") == "cpu"
         )
     if not grouped and "gpu_config" in updates:
         _reconcile_live_gpu_workers(settings)
@@ -859,7 +859,12 @@ def _translate_legacy_worker_updates(settings, updates: dict) -> dict:
 
     def change_count(resource: str, count: int | None, device: str | None = None, enabled: bool | None = None) -> None:
         nonlocal changed
-        matches = [g for g in groups if g["resource"] == resource and (device is None or g["device"] == device)]
+        matches = [
+            (g, m)
+            for g in groups
+            for m in g["members"]
+            if m["resource"] == resource and (device is None or m["device"] == device)
+        ]
         if len(matches) > 1:
             raise ValueError("Several worker groups use this resource. Adjust the named group under Workers.")
         if not matches:
@@ -869,29 +874,40 @@ def _translate_legacy_worker_updates(settings, updates: dict) -> dict:
                 raise ValueError("Choose a GPU device in a worker group before setting its count")
             import uuid
 
+            member = {
+                "id": "m1",
+                "resource": resource,
+                "device": device,
+                "count": max(1, count or 1),
+                "job_types": [kind for kind in JOB_KINDS if resource == "cpu" or kind != "loudness"],
+            }
             group = {
                 "id": str(uuid.uuid4()),
                 "name": "CPU workers" if resource == "cpu" else "GPU workers",
-                "resource": resource,
-                "device": device,
                 "enabled": True,
-                "count": max(1, count or 1),
-                "job_types": [kind for kind in JOB_KINDS if resource == "cpu" or kind != "loudness"],
                 "availability": {"mode": "always", "windows": []},
+                "members": [member],
             }
             groups.append(group)
         else:
-            group = matches[0]
+            group, member = matches[0]
+        shared = len(group["members"]) > 1
         if count is not None:
             if type(count) is not int or count < 0:
                 raise ValueError("Worker counts must be nonnegative integers")
-            group["enabled"] = count > 0
+            if shared and (count == 0 or not group["enabled"]):
+                raise ValueError("This device shares a group with others. Remove it under Workers to use zero.")
+            if not shared:
+                group["enabled"] = count > 0
             if count > 0:
-                group["count"] = count
+                member["count"] = count
         if enabled is not None:
             if not isinstance(enabled, bool):
                 raise ValueError("Worker enabled must be true or false")
-            group["enabled"] = enabled and count != 0
+            if shared and enabled != group["enabled"]:
+                raise ValueError("This device shares a group with others. Change the group under Workers.")
+            if not shared:
+                group["enabled"] = enabled and count != 0
         changed = True
 
     if "cpu_threads" in updates:

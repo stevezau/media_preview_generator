@@ -853,33 +853,43 @@ def mock_media_servers_status(page: Page, servers: list[dict] | None = None) -> 
 
 
 def mock_worker_groups(page: Page, *, cpu_count: int = 1) -> dict:
-    """Stateful group settings/scaling API, with writes exposed for assertions."""
+    """Stateful group settings/scaling API (v22 members shape), with writes exposed for assertions."""
     state = {
         "groups": [
             {
                 "id": "cpu",
                 "name": "CPU workers",
-                "resource": "cpu",
-                "device": None,
-                "count": max(1, cpu_count),
                 "enabled": cpu_count > 0,
-                "job_types": ["previews", "intro_credits", "loudness"],
                 "availability": {"mode": "always", "windows": []},
+                "members": [
+                    {
+                        "id": "m1",
+                        "resource": "cpu",
+                        "device": None,
+                        "count": max(1, cpu_count),
+                        "job_types": ["previews", "intro_credits", "loudness"],
+                    }
+                ],
             },
             {
                 "id": "gpu",
                 "name": "GPU video",
-                "resource": "gpu",
-                "device": "/dev/nvidia0",
-                "count": 1,
                 "enabled": True,
-                "job_types": ["previews", "intro_credits"],
                 "availability": {"mode": "always", "windows": []},
+                "members": [
+                    {
+                        "id": "m1",
+                        "resource": "gpu",
+                        "device": "/dev/nvidia0",
+                        "count": 1,
+                        "job_types": ["previews", "intro_credits"],
+                    }
+                ],
             },
         ],
         "revision": 1,
         "timezone": "Australia/Sydney",
-        "limits": {"cpu": 32, "gpu": 32},
+        "limits": {"cpu": 32, "gpu": 32, "members": 8},
         "hardware": [{"device": "/dev/nvidia0", "name": "GPU 0", "type": "nvidia", "status": "ok"}],
         "capacity": {"groups": []},
         "warnings": [],
@@ -900,16 +910,18 @@ def mock_worker_groups(page: Page, *, cpu_count: int = 1) -> dict:
                 route.fulfill(status=409, json={"error": "Worker groups changed"})
                 return
             state["groups"] = body["groups"]
+        elif "/members/" in route.request.url:
+            _, _, tail = route.request.url.partition("/api/worker-groups/")
+            group_id, _, rest = tail.partition("/members/")
+            member_id = rest.split("/")[0]
+            group = next(group for group in state["groups"] if group["id"] == group_id)
+            member = next(member for member in group["members"] if member["id"] == member_id)
+            member["count"] = min(32, max(1, member["count"] + body["delta"]))
         else:
             group_id = route.request.url.split("/")[-2]
             group = next(group for group in state["groups"] if group["id"] == group_id)
             if "enabled" in body:
                 group["enabled"] = body["enabled"]
-            else:
-                count = (group["count"] if group["enabled"] else 0) + body["delta"]
-                group["enabled"] = count > 0
-                if count > 0:
-                    group["count"] = min(32, count)
         state["revision"] += 1
         _fulfill_json(route, state)
 

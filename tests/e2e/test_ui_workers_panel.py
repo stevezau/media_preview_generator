@@ -21,9 +21,9 @@ new ones are appended. The contract this file pins:
 from __future__ import annotations
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
-from ._mocks import mock_dashboard_defaults
+from ._mocks import mock_dashboard_defaults, mock_worker_groups
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -435,3 +435,116 @@ class TestChapterWorkerProgress:
         assert result["videoPercent"] == "12.5%"
         assert result["videoAnimated"] is False
         assert result["videoSpeedVisible"] is True
+
+
+@pytest.mark.e2e
+class TestMemberRows:
+    """One card per group; each member is a sub-row with its own busy/count and stepper."""
+
+    @staticmethod
+    def _open(page: Page, app_url: str, *, extra_members: list[dict] | None = None) -> dict:
+        mock_dashboard_defaults(page)
+        api = mock_worker_groups(page, cpu_count=2)
+        state = api["state"]
+        group = state["groups"][0]
+        group["members"] += extra_members or []
+        state["capacity"]["groups"] = [
+            {
+                "id": "cpu",
+                "state": "active",
+                "busy": 1,
+                "available": 1,
+                "finishing": 0,
+                "members": [
+                    {"id": "m1", "resource": "cpu", "device": None, "state": "active", "busy": 1},
+                    *[
+                        {"id": m["id"], "resource": m["resource"], "device": m["device"], "state": "active", "busy": 0}
+                        for m in (extra_members or [])
+                    ],
+                ],
+            }
+        ]
+        page.goto(f"{app_url}/")
+        page.wait_for_selector("#workerGroupLiveRows [data-group-id]")
+        return api
+
+    def test_members_render_under_one_group_card(self, authed_page: Page, app_url: str) -> None:
+        gpu = {"id": "m-gpu", "resource": "gpu", "device": "/dev/nvidia0", "count": 3, "job_types": ["previews"]}
+        self._open(authed_page, app_url, extra_members=[gpu])
+        section = authed_page.locator("[data-worker-group-shell='cpu']")
+        expect(authed_page.locator("[data-worker-group-shell='cpu']")).to_have_count(1)
+        expect(section.locator(".wg-mem")).to_have_count(2)
+        expect(section.locator("[data-group-indicator='configured']")).to_contain_text("1/ 5")
+        expect(section.locator("[data-member-block='cpu:m-gpu'] .devname .nm")).to_have_text("GPU 0")
+        expect(section.locator("[data-member-block='cpu:m-gpu'] [data-member-indicator]")).to_contain_text("0/ 3")
+
+    def test_member_stepper_posts_to_the_member_scale_route(self, authed_page: Page, app_url: str) -> None:
+        api = self._open(authed_page, app_url)
+        block = authed_page.locator("[data-member-block='cpu:m1']")
+        block.locator("[data-member-scale='1']").click()
+        expect(block.locator("output")).to_have_text("3")
+        write = api["writes"][-1]
+        assert write["url"] == f"{app_url}/api/worker-groups/cpu/members/m1/scale"
+        assert write["method"] == "POST"
+        assert write["body"] == {"delta": 1}
+        block.locator("[data-member-scale='-1']").click()
+        assert api["writes"][-1]["body"] == {"delta": -1}
+        assert api["state"]["groups"][0]["members"][0]["count"] == 2
+
+    def test_stepper_minus_is_disabled_at_one_worker(self, authed_page: Page, app_url: str) -> None:
+        mock_dashboard_defaults(authed_page)
+        mock_worker_groups(authed_page, cpu_count=1)
+        authed_page.goto(f"{app_url}/")
+        minus = authed_page.locator("[data-member-block='cpu:m1'] [data-member-scale='-1']")
+        expect(minus).to_be_disabled()
+
+    def test_missing_gpu_member_shows_not_detected_chip_and_group_keeps_working(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        gone = {"id": "m-gone", "resource": "gpu", "device": "/dev/nvidia9", "count": 1, "job_types": ["previews"]}
+        self._open(authed_page, app_url, extra_members=[gone])
+        block = authed_page.locator("[data-member-block='cpu:m-gone']")
+        expect(block.locator(".chip.warn")).to_contain_text("Not detected")
+        expect(block).to_contain_text("Its jobs wait; other devices keep working.")
+        expect(authed_page.locator("[data-member-block='cpu:m1'] .chip")).to_have_count(0)
+
+    def test_removed_member_still_finishing_shows_row_without_stepper(self, authed_page: Page, app_url: str) -> None:
+        mock_dashboard_defaults(authed_page)
+        api = mock_worker_groups(authed_page, cpu_count=2)
+        api["state"]["capacity"]["groups"] = [
+            {
+                "id": "cpu",
+                "state": "active",
+                "busy": 1,
+                "finishing": 1,
+                "members": [
+                    {"id": "m1", "resource": "cpu", "device": None, "state": "active", "busy": 0},
+                    {"id": "m-old", "resource": "gpu", "device": "/dev/nvidia0", "state": "draining", "finishing": 1},
+                ],
+            }
+        ]
+        authed_page.goto(f"{app_url}/")
+        block = authed_page.locator("[data-member-block='cpu:m-old']")
+        expect(block).to_contain_text("Removed device")
+        expect(block).to_contain_text("1 finishing")
+        expect(block.locator("button:visible")).to_have_count(0)
+
+    def test_disabled_group_shows_one_enable_button_and_no_member_steppers(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        mock_dashboard_defaults(authed_page)
+        api = mock_worker_groups(authed_page, cpu_count=0)
+        authed_page.goto(f"{app_url}/")
+        section = authed_page.locator("[data-worker-group-shell='cpu']")
+        expect(section.locator("[data-member-scale]")).to_have_count(0)
+        section.locator("[data-group-enable]").click()
+        assert api["writes"][-1]["url"] == f"{app_url}/api/worker-groups/cpu/scale"
+        assert api["writes"][-1]["body"] == {"enabled": True}
+
+    def test_system_card_is_read_only_with_one_line_per_group(self, authed_page: Page, app_url: str) -> None:
+        mock_dashboard_defaults(authed_page)
+        mock_worker_groups(authed_page, cpu_count=4)
+        authed_page.goto(f"{app_url}/")
+        line = authed_page.locator("[data-system-group='cpu']")
+        expect(line.locator("small")).to_have_text("4 CPU")
+        expect(authed_page.locator("#systemWorkerGroups .stepper")).to_have_count(0)

@@ -44,7 +44,7 @@ class TestSettingsSaveAndReloadPersists:
         # Change three different settings to NEW values.
         backend_real_page.locator("#thumbnailInterval").fill("7")
         backend_real_page.locator("#workerGroupAdd").click()
-        backend_real_page.locator("#workerGroupCount").fill("3")
+        backend_real_page.locator("#workerGroupMembers [data-member] [data-count]").fill("3")
         backend_real_page.locator("#workerGroupApply").click()
         expect(backend_real_page.locator("#workerGroupMessage")).to_contain_text("saved")
         backend_real_page.locator("#tonemapAlgorithm").select_option("mobius")
@@ -68,7 +68,7 @@ class TestSettingsSaveAndReloadPersists:
                 if (
                     on_disk.get("thumbnail_interval") == 7
                     and any(
-                        g.get("count") == 3 and g.get("name") == "New worker group"
+                        g.get("name") == "New worker group" and [m.get("count") for m in g.get("members", [])] == [3]
                         for g in on_disk.get("worker_groups", [])
                     )
                     and on_disk.get("tonemap_algorithm") == "mobius"
@@ -89,7 +89,11 @@ class TestSettingsSaveAndReloadPersists:
         backend_real_page.wait_for_load_state("domcontentloaded")
 
         expect(backend_real_page.locator("#thumbnailInterval")).to_have_value("7", timeout=5000)
-        saved_group = next(g for g in on_disk["worker_groups"] if g["count"] == 3 and g["name"] == "New worker group")
+        saved_group = next(
+            g
+            for g in on_disk["worker_groups"]
+            if g["name"] == "New worker group" and [m["count"] for m in g["members"]] == [3]
+        )
         row = backend_real_page.locator(f'[data-group-id="{saved_group["id"]}"]')
         expect(row.locator(".worker-group-control-label")).to_have_text("Workers")
         expect(row.locator('[aria-label="Configured workers"]')).to_have_text("3")

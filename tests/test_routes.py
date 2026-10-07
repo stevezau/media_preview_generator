@@ -30,12 +30,19 @@ def _save_test_worker_group(resource="cpu", count=1):
     group = {
         "id": "test-group",
         "name": "Test workers",
-        "resource": resource,
-        "device": "cuda:0" if resource == "gpu" else None,
         "enabled": True,
-        "count": count,
-        "job_types": ["previews", "intro_credits"] if resource == "gpu" else ["previews", "intro_credits", "loudness"],
         "availability": {"mode": "always"},
+        "members": [
+            {
+                "id": "m1",
+                "resource": resource,
+                "device": "cuda:0" if resource == "gpu" else None,
+                "count": count,
+                "job_types": (
+                    ["previews", "intro_credits"] if resource == "gpu" else ["previews", "intro_credits", "loudness"]
+                ),
+            }
+        ],
     }
     get_settings_manager().update_worker_groups([group])
     return group
@@ -1606,7 +1613,7 @@ class TestJobsAPI:
                 )
                 assert response.status_code == 200
                 assert response.get_json()["group_id"] == group["id"]
-                assert get_settings_manager().worker_groups[0]["count"] == expected
+                assert get_settings_manager().worker_groups[0]["members"][0]["count"] == expected
             assert reconcile.call_count == 2
             assert all(call.args == (get_settings_manager(),) for call in reconcile.call_args_list)
 
@@ -1619,9 +1626,9 @@ class TestJobsAPI:
         job = get_job_manager().create_job(library_name="x")
         get_job_manager().start_job(job.id)
         pool = MagicMock()
-        pool.group_snapshots.side_effect = [
-            [{"id": group["id"], "finishing": 0}],
-            [{"id": group["id"], "finishing": 2}],
+        pool.member_snapshots.side_effect = [
+            [{"group_id": group["id"], "member_id": "m1", "finishing": 0}],
+            [{"group_id": group["id"], "member_id": "m1", "finishing": 2}],
         ]
         with (
             patch("media_preview_generator.web.routes.api_jobs._get_shared_worker_pool", return_value=pool),
@@ -1636,7 +1643,7 @@ class TestJobsAPI:
         data = response.get_json()
         assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (0, 2, 0)
         assert get_settings_manager().worker_groups[0]["enabled"] is False
-        assert get_settings_manager().worker_groups[0]["count"] == 2
+        assert get_settings_manager().worker_groups[0]["members"][0]["count"] == 2
 
     def test_scale_workers_remove_returns_unavailable_when_fewer_workers_exist(self, client):
         """Remove endpoint returns unavailable when requesting more than existing workers."""
@@ -1679,7 +1686,7 @@ class TestJobsAPI:
 
         group = get_settings_manager().worker_groups[0]
         assert group["enabled"] is True
-        assert group["count"] == 2
+        assert group["members"][0]["count"] == 2
 
     def test_workers_remove_global_no_pool_updates_saved_group(self, client):
         """POST /api/workers/remove persists the group even before a pool exists."""
@@ -1693,7 +1700,7 @@ class TestJobsAPI:
 
         group = get_settings_manager().worker_groups[0]
         assert group["enabled"] is False
-        assert group["count"] == 1
+        assert group["members"][0]["count"] == 1
 
     def test_workers_add_global_success(self, client):
         """GPU scaling persists the chosen group and applies it to the shared pool."""
@@ -1707,7 +1714,7 @@ class TestJobsAPI:
         assert response.status_code == 200
         assert response.get_json()["added"] == 2
         assert response.get_json()["group_id"] == group["id"]
-        assert get_settings_manager().worker_groups[0]["count"] == 3
+        assert get_settings_manager().worker_groups[0]["members"][0]["count"] == 3
         reconcile.assert_called_once_with(get_settings_manager())
 
     def test_workers_remove_global_success(self, client):
@@ -1724,7 +1731,7 @@ class TestJobsAPI:
         assert response.status_code == 200
         assert response.get_json()["removed"] == 1
         assert response.get_json()["group_id"] == group["id"]
-        assert get_settings_manager().worker_groups[0]["count"] == 2
+        assert get_settings_manager().worker_groups[0]["members"][0]["count"] == 2
         assert get_settings_manager().cpu_threads == 2
         reconcile.assert_called_once_with(get_settings_manager())
 
@@ -3930,7 +3937,7 @@ class TestWorkerScalingValidation:
 
         group = get_settings_manager().worker_groups[0]
         assert group["enabled"] is True
-        assert group["count"] == 2
+        assert group["members"][0]["count"] == 2
 
     def test_remove_workers_zero_count_rejected(self, client):
         with patch("media_preview_generator.web.routes.api_jobs._start_job_async"):
@@ -7085,3 +7092,265 @@ class TestQueueDiscoveryContracts:
         row = next(row for row in idle if row["worker_id"] == 2)
         assert row["job_id"] is None and row["job_kind"] is None and not row["paused"]
         assert row["current_file"] == ""
+
+
+def _member(id, resource="cpu", device=None, count=2):
+    return {
+        "id": id,
+        "resource": resource,
+        "device": device,
+        "count": count,
+        "job_types": ["previews", "intro_credits"] if resource == "gpu" else ["previews", "loudness"],
+    }
+
+
+def _save_groups(*groups):
+    """Save groups given as ``(id, [members])`` using the validated v22 shape."""
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    get_settings_manager().update_worker_groups(
+        [
+            {"id": gid, "name": gid.title(), "enabled": True, "availability": {"mode": "always"}, "members": members}
+            for gid, members in groups
+        ]
+    )
+
+
+def _saved_counts():
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    return {(g["id"], m["id"]): m["count"] for g in get_settings_manager().worker_groups for m in g["members"]}
+
+
+class TestLegacyWorkerScalingWithMembers:
+    """``/api/workers/add|remove`` pick the one member with that resource, or refuse with the candidates."""
+
+    def test_unique_member_in_multi_member_group_is_scaled_and_reported(self, client):
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("c1", count=10)]))
+        with patch("media_preview_generator.web.routes.api_worker_groups.reconcile_group_settings", return_value=None):
+            response = client.post("/api/workers/add", headers=_api_headers(), json={"worker_type": "CPU", "count": 1})
+        assert response.status_code == 200
+        body = response.get_json()
+        assert (body["group_id"], body["member_id"], body["added"]) == ("off", "c1", 1)
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "c1"): 11}
+
+    def test_several_matching_members_are_409_listing_group_and_member(self, client):
+        _save_groups(("a", [_member("c1")]), ("b", [_member("c9", count=4)]))
+        response = client.post("/api/workers/add", headers=_api_headers(), json={"worker_type": "CPU", "count": 1})
+        assert response.status_code == 409
+        body = response.get_json()
+        assert body["members"] == [{"group_id": "a", "member_id": "c1"}, {"group_id": "b", "member_id": "c9"}]
+        assert body["groups"] == ["a", "b"]
+        assert _saved_counts() == {("a", "c1"): 2, ("b", "c9"): 4}
+
+    def test_member_id_picks_one_of_several(self, client):
+        _save_groups(("a", [_member("c1")]), ("b", [_member("c9", count=4)]))
+        with patch("media_preview_generator.web.routes.api_worker_groups.reconcile_group_settings", return_value=None):
+            response = client.post(
+                "/api/workers/add",
+                headers=_api_headers(),
+                json={"worker_type": "CPU", "count": 1, "group_id": "b", "member_id": "c9"},
+            )
+        assert response.status_code == 200
+        assert response.get_json()["member_id"] == "c9"
+        assert _saved_counts() == {("a", "c1"): 2, ("b", "c9"): 5}
+
+    def test_remove_below_one_in_multi_member_group_is_400(self, client):
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("c1", count=1)]))
+        response = client.post("/api/workers/remove", headers=_api_headers(), json={"worker_type": "CPU", "count": 1})
+        assert response.status_code == 400
+        assert _saved_counts()[("off", "c1")] == 1
+
+    def test_remove_at_one_in_single_member_group_disables_it(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        _save_groups(("solo", [_member("m1", count=1)]))
+        with patch("media_preview_generator.web.routes.api_worker_groups.reconcile_group_settings", return_value=None):
+            response = client.post(
+                "/api/workers/remove", headers=_api_headers(), json={"worker_type": "CPU", "count": 1}
+            )
+        assert response.status_code == 200
+        assert get_settings_manager().worker_groups[0]["enabled"] is False
+
+    def test_remove_reports_scheduled_from_the_members_own_snapshot_row(self, client):
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("c1", count=4)]))
+        pool = MagicMock()
+        pool.member_snapshots.side_effect = [
+            [
+                {"group_id": "off", "member_id": "c1", "finishing": 0},
+                {"group_id": "off", "member_id": "g1", "finishing": 5},
+            ],
+            [
+                {"group_id": "off", "member_id": "c1", "finishing": 1},
+                {"group_id": "off", "member_id": "g1", "finishing": 5},
+            ],
+        ]
+        with (
+            patch("media_preview_generator.web.routes.api_jobs._get_shared_worker_pool", return_value=pool),
+            patch("media_preview_generator.web.routes.api_worker_groups.reconcile_group_settings", return_value=None),
+        ):
+            response = client.post(
+                "/api/workers/remove", headers=_api_headers(), json={"worker_type": "CPU", "count": 1}
+            )
+        body = response.get_json()
+        assert (body["removed"], body["scheduled_removal"], body["unavailable"]) == (0, 1, 0)
+        assert _saved_counts()[("off", "c1")] == 3
+
+
+class TestLegacySettingsCountsWithMembers:
+    """``POST /api/settings`` legacy counts map to the unique matching member."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_reconcile(self):
+        with patch("media_preview_generator.web.routes.api_worker_groups.reconcile_group_settings", return_value=None):
+            yield
+
+    def test_cpu_threads_sets_the_cpu_member_only(self, client):
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("c1", count=10)]))
+        assert client.post("/api/settings", headers=_api_headers(), json={"cpu_threads": 6}).status_code == 200
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "c1"): 6}
+
+    def test_gpu_config_workers_sets_the_member_on_that_device(self, client):
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("g2", "gpu", "cuda:1", 2)]))
+        response = client.post(
+            "/api/settings", headers=_api_headers(), json={"gpu_config": [{"device": "cuda:1", "workers": 5}]}
+        )
+        assert response.status_code == 200
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "g2"): 5}
+
+    def test_gpu_config_disabled_disables_the_single_member_group(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        _save_groups(("solo", [_member("g1", "gpu", "cuda:0", 3)]))
+        response = client.post(
+            "/api/settings", headers=_api_headers(), json={"gpu_config": [{"device": "cuda:0", "enabled": False}]}
+        )
+        assert response.status_code == 200
+        saved = get_settings_manager().worker_groups[0]
+        assert saved["enabled"] is False
+        assert saved["members"][0]["count"] == 3
+
+    def test_no_matching_member_creates_a_one_member_group(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        _save_groups(("gpus", [_member("g1", "gpu", "cuda:0", 3)]))
+        assert client.post("/api/settings", headers=_api_headers(), json={"cpu_threads": 4}).status_code == 200
+        created = get_settings_manager().worker_groups[-1]
+        assert (created["name"], created["enabled"]) == ("CPU workers", True)
+        assert created["members"] == [
+            {
+                "id": "m1",
+                "resource": "cpu",
+                "device": None,
+                "count": 4,
+                "job_types": ["previews", "intro_credits", "loudness"],
+            }
+        ]
+
+    def test_several_matching_members_are_refused_unchanged(self, client):
+        _save_groups(("a", [_member("c1")]), ("b", [_member("c9", count=4)]))
+        response = client.post("/api/settings", headers=_api_headers(), json={"cpu_threads": 1})
+        assert response.status_code == 400
+        assert "Several worker groups use this resource" in response.get_json()["error"]
+        assert _saved_counts() == {("a", "c1"): 2, ("b", "c9"): 4}
+
+    def test_zero_on_a_shared_group_member_is_refused(self, client):
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("c1", count=10)]))
+        response = client.post("/api/settings", headers=_api_headers(), json={"cpu_threads": 0})
+        assert response.status_code == 400
+        assert _saved_counts()[("off", "c1")] == 10
+
+
+class TestLegacySettingsOnSharedGroups:
+    """A group with several members is only changed under Workers; the legacy keys refuse and change nothing."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_reconcile(self):
+        with patch("media_preview_generator.web.routes.api_worker_groups.reconcile_group_settings", return_value=None):
+            yield
+
+    def _save_shared(self, enabled=True):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 3), _member("c1", count=10)]))
+        if not enabled:
+            groups = get_settings_manager().worker_groups
+            groups[0]["enabled"] = False
+            get_settings_manager().update_worker_groups(groups)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_flipping_enabled_on_a_shared_group_is_refused_unchanged(self, client, enabled):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        self._save_shared(enabled=enabled)
+        response = client.post(
+            "/api/settings", headers=_api_headers(), json={"gpu_config": [{"device": "cuda:0", "enabled": not enabled}]}
+        )
+        assert response.status_code == 400
+        assert get_settings_manager().worker_groups[0]["enabled"] is enabled
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "c1"): 10}
+
+    def test_count_on_a_disabled_shared_group_does_not_enable_it(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        self._save_shared(enabled=False)
+        response = client.post("/api/settings", headers=_api_headers(), json={"cpu_threads": 4})
+        assert response.status_code == 400
+        assert get_settings_manager().worker_groups[0]["enabled"] is False
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "c1"): 10}
+
+    def test_count_on_an_enabled_shared_group_changes_that_member_and_keeps_it_enabled(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        self._save_shared()
+        assert client.post("/api/settings", headers=_api_headers(), json={"cpu_threads": 4}).status_code == 200
+        assert get_settings_manager().worker_groups[0]["enabled"] is True
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "c1"): 4}
+
+    def test_unchanged_enabled_echo_on_a_shared_group_is_accepted(self, client):
+        self._save_shared()
+        response = client.post(
+            "/api/settings",
+            headers=_api_headers(),
+            json={"gpu_config": [{"device": "cuda:0", "enabled": True, "workers": 3}]},
+        )
+        assert response.status_code == 200
+        assert _saved_counts() == {("off", "g1"): 3, ("off", "c1"): 10}
+
+
+class TestGetSettingsWorkerGroupsEcho:
+    def test_single_member_groups_carry_the_flat_echo_and_shared_groups_do_not(self, client):
+        _save_groups(
+            ("solo", [_member("m1", "gpu", "cuda:0", 4)]),
+            ("shared", [_member("c1", count=2), _member("g9", "gpu", "cuda:1", 1)]),
+        )
+
+        rows = {g["id"]: g for g in client.get("/api/settings", headers=_api_headers()).get_json()["worker_groups"]}
+
+        assert (rows["solo"]["resource"], rows["solo"]["device"], rows["solo"]["count"]) == ("gpu", "cuda:0", 4)
+        assert not {"resource", "device", "count", "job_types"} & rows["shared"].keys()
+
+
+class TestIdleWorkerRowsPerMember:
+    def test_synthesised_rows_carry_group_and_member_ids_per_member(self):
+        from media_preview_generator.web.routes.api_jobs import _build_idle_workers_from_config
+
+        _save_groups(("off", [_member("g1", "gpu", "cuda:0", 2), _member("c1", count=1)]))
+        gpus = [{"device": "cuda:0", "name": "RTX", "type": "nvidia", "status": "ok"}]
+        with patch("media_preview_generator.web.routes.api_jobs._ensure_gpu_cache", return_value=gpus):
+            rows = _build_idle_workers_from_config()
+        keys = [(r["group_id"], r["member_id"], r["worker_type"], r["worker_name"]) for r in rows]
+        assert keys == [
+            ("off", "g1", "GPU", "Off 1"),
+            ("off", "g1", "GPU", "Off 2"),
+            ("off", "c1", "CPU", "Off 1"),
+        ]
+        assert all(r["group_resource"] == ("gpu" if r["worker_type"] == "GPU" else "cpu") for r in rows)
+
+    def test_member_with_missing_gpu_gets_no_rows_but_cpu_member_does(self):
+        from media_preview_generator.web.routes.api_jobs import _build_idle_workers_from_config
+
+        _save_groups(("off", [_member("g1", "gpu", "cuda:1", 2), _member("c1", count=1)]))
+        with patch("media_preview_generator.web.routes.api_jobs._ensure_gpu_cache", return_value=[]):
+            rows = _build_idle_workers_from_config()
+        assert [(r["member_id"], r["worker_type"]) for r in rows] == [("c1", "CPU")]

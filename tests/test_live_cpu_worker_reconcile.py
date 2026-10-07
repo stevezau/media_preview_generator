@@ -63,11 +63,16 @@ def _groups(cpu: int, gpu: int = 0) -> list[dict]:
             "id": "cpu",
             "name": "CPU",
             "enabled": cpu > 0,
-            "resource": "cpu",
-            "device": None,
-            "count": max(1, cpu),
-            "job_types": ["previews", "intro_credits", "loudness"],
             "availability": {"mode": "always", "windows": []},
+            "members": [
+                {
+                    "id": "m1",
+                    "resource": "cpu",
+                    "device": None,
+                    "count": max(1, cpu),
+                    "job_types": ["previews", "intro_credits", "loudness"],
+                }
+            ],
         }
     ]
     if gpu:
@@ -77,11 +82,16 @@ def _groups(cpu: int, gpu: int = 0) -> list[dict]:
                 "id": "gpu",
                 "name": "GPU",
                 "enabled": True,
-                "resource": "gpu",
-                "device": GPU_DEVICE,
-                "count": gpu,
-                "job_types": ["previews", "intro_credits"],
                 "availability": {"mode": "always", "windows": []},
+                "members": [
+                    {
+                        "id": "m1",
+                        "resource": "gpu",
+                        "device": GPU_DEVICE,
+                        "count": gpu,
+                        "job_types": ["previews", "intro_credits"],
+                    }
+                ],
             },
         )
     return groups
@@ -93,7 +103,10 @@ def _retiring(pool: WorkerPool, resource="CPU") -> int:
 
 def _group_count(value, resource="cpu") -> int | None:
     return (
-        next((g["count"] if g["enabled"] else 0 for g in value if g["resource"] == resource), None)
+        next(
+            (m["count"] if g["enabled"] else 0 for g in value for m in g["members"] if m["resource"] == resource),
+            None,
+        )
         if isinstance(value, list)
         else None
     )

@@ -144,21 +144,34 @@ Named groups are the only worker allocation. Edit them in **Settings → Workers
 **Manage groups** button opens the same page. See the [worker guide](guides.md#worker-groups-and-availability)
 for scheduling and scaling behavior.
 
-| Field | Rules |
+A group is a name, an on/off switch and weekly hours, holding up to 8 devices. Each device is a member with its own
+worker count and allowed jobs.
+
+| Group field | Rules |
 |---|---|
 | `id` | Unique. Letters, digits, `_` and `-`; up to 80 characters; starts with a letter or digit. |
 | `name` | 1–80 characters. |
-| `enabled` | Boolean. A disabled group keeps its saved `count` but provides no capacity. |
-| `resource` | `cpu` or `gpu`. |
-| `device` | GPU device identifier for a GPU group. `null` for CPU. |
-| `count` | Integer 1–32. |
-| `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU groups cannot take `loudness`. |
+| `enabled` | Boolean. A disabled group keeps its saved counts but provides no capacity. |
 | `availability` | `{"mode":"always","windows":[]}` or `{"mode":"scheduled","windows":[...]}`. A scheduled group needs at least one window. |
 | `availability.windows[]` | `days` (0 = Monday through 6 = Sunday, the day the window starts), `start` and `end` (`HH:MM`, different from each other). Up to 32 windows per group. Times use the app timezone. Overnight windows are allowed. |
+| `members` | 1–8 devices. One member per device: one CPU member and one per GPU. |
+
+| Member field | Rules |
+|---|---|
+| `id` | Unique within the group. Same character rules as the group `id`. |
+| `resource` | `cpu` or `gpu`. |
+| `device` | GPU device identifier for a GPU member. `null` for CPU. |
+| `count` | Integer 1–32. Remove the member to use zero. |
+| `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU members cannot take `loudness`. |
+
+On a group with exactly one member, `GET` also echoes that member's `resource`, `device`, `count` and `job_types` at the
+group level (read-only, kept for older clients). `PUT` accepts a group without `members` that carries those four
+fields and treats it as one member. When `members` is present, a group-level field that disagrees with the only member
+is rejected with `400`.
 
 Up to 64 groups. An empty list is valid and means no workers. Overlapping windows in one group form a union;
-different groups add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU workers.
-These are worker slots, not CPU cores.
+different groups and devices add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU
+workers. These are worker slots, not CPU cores.
 
 ### Per-GPU tuning (gpu_config)
 
@@ -1253,7 +1266,7 @@ Update settings. Send only the fields to change. Returns `{"success": true}` (pl
 
 Use the dedicated [worker-groups API](#worker-group-endpoints) for allocation. Once groups exist, posting legacy
 `cpu_threads` or GPU `enabled`/`workers` allocation fields returns `409` with guidance instead of overwriting groups.
-GPU tuning-only entries merge into stored device settings. `GET /api/settings` also returns `worker_groups` and
+GPU tuning-only entries merge into stored device settings. `GET /api/settings` also returns `worker_groups` (with the single-member echo above) and
 `worker_groups_revision`. Zero workers cause resource waiting, not a global pause. Saving capacity never clears a
 manual or schedule hold.
 
@@ -1327,25 +1340,26 @@ All endpoints use the normal session/API authentication and are also available d
 |---|---|---|
 | GET | `/api/worker-groups` | Saved groups, optimistic `revision`, app `timezone`, `limits`, detected `hardware`, current `capacity`, `warnings` and global pause state |
 | PUT | `/api/worker-groups` | Replace the complete group list with `{"groups":[...],"revision":N}`. `400` rejects invalid configuration; `409` means another change advanced the revision. Reload and reconcile before resubmitting. |
-| POST | `/api/worker-groups/{id}/scale` | Atomic saved adjustment: exactly `{"delta":1}`, `{"delta":-1}` or `{"enabled":true/false}`. `404` for an unknown group, `400` for an invalid action or capacity limit. |
+| POST | `/api/worker-groups/{id}/scale` | Atomic saved adjustment: exactly `{"delta":1}`, `{"delta":-1}` or `{"enabled":true/false}`. `delta` works on single-member groups; on a group with several members it returns `409` (use the member route). `404` for an unknown group, `400` for an invalid action or capacity limit. |
+| POST | `/api/worker-groups/{id}/members/{member_id}/scale` | Add or remove one worker on one device: exactly `{"delta":1}` or `{"delta":-1}`. `404` for an unknown group or member, `409` when the group is disabled, `400` outside 1–32 workers or past a capacity limit. |
 
-For example, after loading revision 3, replace the configuration with one CPU loudness group:
+For example, after loading revision 3, replace the configuration with one group that runs previews on a GPU and loudness on the CPU overnight:
 
 ```json
 {
   "revision": 3,
   "groups": [{
-    "id": "cpu-loudness",
-    "name": "Overnight audio",
+    "id": "off-hours",
+    "name": "Off-hours",
     "enabled": true,
-    "resource": "cpu",
-    "device": null,
-    "count": 1,
-    "job_types": ["loudness"],
     "availability": {
       "mode": "scheduled",
-      "windows": [{"days": [0,1,2,3,4,5,6], "start": "23:00", "end": "07:00"}]
-    }
+      "windows": [{"days": [0,1,2,3,4,5,6], "start": "01:00", "end": "07:00"}]
+    },
+    "members": [
+      {"id": "gpu", "resource": "gpu", "device": "cuda:0", "count": 3, "job_types": ["previews", "intro_credits"]},
+      {"id": "cpu", "resource": "cpu", "device": null, "count": 10, "job_types": ["loudness"]}
+    ]
   }]
 }
 ```
@@ -1355,8 +1369,8 @@ Enabled change. A decrease to zero disables the group while retaining its saved 
 restores that count. Successful mutations return the updated GET snapshot plus `success: true`. An optional
 `warning` means settings were saved but live reconciliation failed; inspect logs rather than assuming the save failed.
 
-`capacity.groups` includes `id`, `name`, `resource`, `device`, `desired`, `target`, `available`, `busy`, `finishing`,
-`state` and `next_available_at` (ISO timestamp or null). Desired is the enabled saved count; target reflects current
+`capacity.groups` includes `id`, `name`, `desired`, `target`, `available`, `busy`, `finishing`,
+`state`, `next_available_at` (ISO timestamp or null) and `members`, one row per device with `id`, `resource`, `device` and the same counts and `state`. Desired is the enabled saved count; target reflects current
 hours and hardware. Busy excludes retiring work, which is counted as finishing. Available is zero during global
 pause. States include `active`, `disabled`, `off_hours`, `hardware_unavailable` and `draining`. Removed groups may
 remain in this snapshot while files finish. `capacity.current` sums current targets by CPU/GPU and `capacity.peak`

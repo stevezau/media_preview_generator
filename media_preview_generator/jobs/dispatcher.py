@@ -1423,6 +1423,7 @@ class JobDispatcher:
                 ffmpeg_started = bool(getattr(worker, "ffmpeg_started", False)) if has_task else False
                 current_phase = (getattr(worker, "current_phase", "") or "") if has_task else ""
                 group_id, group_name, group_resource = worker.group_id, worker.group_name, worker.group_resource
+                member_id = worker.member_id
                 retiring = worker._pending_removal
 
             idx = worker_type_index[worker.worker_id]
@@ -1448,6 +1449,7 @@ class JobDispatcher:
                     "worker_id": worker.worker_id,
                     "worker_type": worker.worker_type,
                     "group_id": group_id,
+                    "member_id": member_id,
                     "group_name": group_name,
                     "group_resource": group_resource,
                     "retiring": retiring,

@@ -492,11 +492,11 @@ Apple Silicon Macs do still benefit from the native ARM64 image — the containe
 
 A **worker** is a parallel slot that processes one file at a time. More workers means more files at once, but higher CPU/GPU load.
 
-Workers are set up in **worker groups** under **Settings → Workers**. Each group has a name, a resource (CPU or a specific GPU), a worker count from 1 to 32, the job types it runs (previews, intro & credits, and loudness on CPU groups only), and when it is available (always, or on a weekly schedule). For CPU-only mode, create CPU groups only.
+Workers are set up in **worker groups** under **Settings → Workers**. Each group has a name, when it is available (always, or on a weekly schedule) and up to 8 devices. Each device is the CPU or a specific GPU, with a worker count from 1 to 32 and the job types it runs (previews, intro & credits, and loudness on the CPU only). For CPU-only mode, use CPU devices only.
 
 **Settings → Processing options → GPU device tuning** sets **FFmpeg threads per worker** for each GPU: how many CPU threads each GPU worker may use. The default is 2, and 0 means no cap.
 
-Start with a few workers and increase gradually while you watch system load. The Dashboard's Workers panel shows each group's activity. **Manage groups** opens the group settings.
+Start with a few workers and increase gradually while you watch system load. The Dashboard's Workers panel shows each group's and device's activity. **Manage groups** opens the group settings.
 
 ---
 
@@ -947,7 +947,7 @@ If that is fast enough, stop here. The built-in needs no extra software.
 [Media Preview Generator](https://mediapreviewgenerator.dev/comparison/) is a free, MIT-licensed Docker app. It makes the same BIF files Plex would, using FFmpeg with GPU decoding (NVIDIA, Intel or AMD). It then writes them into Plex's data folder, where Plex serves them to its apps. A full scan can run for hours while new imports, set to **High** priority, jump ahead of it. It differs from the built-in in several ways:
 
 - **It uses the GPU.** Decoding and downscaling happen on the GPU. If a file won't decode there, the same worker redoes it on the CPU ([CPU fallback](https://mediapreviewgenerator.dev/guides/#automatic-gpu--cpu-fallback)).
-- **It works on several files at once.** You set up worker groups: each GPU or the CPU gets a group with its own worker count, allowed jobs and hours.
+- **It works on several files at once.** You set up worker groups: a group holds the GPUs and CPU you choose, each with its own worker count and allowed jobs, and the group has its hours.
 - **It works per file, when the file arrives.** Triggers include Sonarr and Radarr webhooks, Plex's own webhook (Plex Pass), a "Recently Added" poll (no Plex Pass), schedules, or a manual pick. See [Previews as soon as Sonarr or Radarr imports a file](https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/).
 - **It can run on another machine.** It needs network access to Plex, and the Plex data folder mounted read-write.
 
@@ -993,7 +993,7 @@ It decodes each video with FFmpeg on the GPU and writes the BIF file into Plex's
 - **Windows (Docker Desktop, WSL2 backend):** NVIDIA only. AMD and Intel GPUs can't be reached from Docker's Linux VM, so those setups run on CPU.
 - **macOS:** no GPU acceleration under Docker. It runs on CPU, using the native ARM64 image on Apple Silicon.
 - **No GPU:** add a CPU worker group in **Settings → Workers**.
-- **Several GPUs:** make a worker group per GPU in **Settings → Workers**. Each group has a name, a device, a worker count (1–32), the jobs it may run and its hours. **Settings → Processing options → GPU device tuning** lists each detected GPU with its **FFmpeg threads per worker**.
+- **Several GPUs:** add each GPU as a device in a worker group in **Settings → Workers**. A group has a name and hours, and each device in it has a worker count (1–32) and the jobs it may run. **Settings → Processing options → GPU device tuning** lists each detected GPU with its **FFmpeg threads per worker**.
 
 Details and caveats are in [Getting Started — GPU Acceleration](https://mediapreviewgenerator.dev/getting-started/#gpu-acceleration).
 
@@ -1211,7 +1211,7 @@ Emby's built-in video preview thumbnail extraction has no GPU option. Emby staff
 ## How Media Preview Generator makes Emby BIFs
 
 1. A trigger arrives: a webhook, a schedule, a "Recently Added" poll, or a manual pick.
-2. FFmpeg decodes the file on a worker from a GPU group, and downscales and tone-maps HDR there. If the GPU can't decode a file, the same worker redoes it on the CPU.
+2. FFmpeg decodes the file on a GPU worker, and downscales and tone-maps HDR there. If the GPU can't decode a file, the same worker redoes it on the CPU.
 3. The frames are packed into a BIF named `<video name>-<width>-<interval>.bif` and saved next to the video. Width defaults to 320, and the interval is your frame interval (default 10 seconds).
 4. The app tells Emby the file changed so Emby picks it up.
 
@@ -1289,7 +1289,7 @@ Field-by-field steps: [Configure Radarr](https://mediapreviewgenerator.dev/guide
 
 1. **Batching.** Files are queued per source. A batch runs once the delay (default 60 seconds, range 10–300) passes with no new files from that source. Each new file restarts the timer. A season pack becomes one job. See [Batching and the delay](https://mediapreviewgenerator.dev/guides/#batching-and-the-delay).
 2. **Finding the servers.** Each path is mapped to the container's view. Then every configured server whose enabled libraries contain the file is found. A path outside every enabled library is skipped, not retried.
-3. **One decode.** FFmpeg runs once per file on a worker from a group allowed to run previews: a GPU group, or a CPU group if you have no GPU.
+3. **One decode.** FFmpeg runs once per file on a worker for a device allowed to run previews: a GPU, or the CPU if you have no GPU.
 4. **Publishing.** Each server that owns the file gets its own format:
    - Plex: a BIF in its config folder.
    - Emby: a BIF next to the video.
@@ -1494,7 +1494,7 @@ unlock the playback feature. See Plex's [Audio Track Enhancements for Video](htt
 2. Under **Servers → Edit → Processing → Loudness**, switch on **Analyse loudness for this server**.
 3. On the **Libraries** tab, choose movie and TV libraries in the **Loudness** column. Both start on; music and other
    non-video libraries cannot be selected.
-4. In **Settings → Workers**, enable a CPU group that allows **Plex loudness**, with hours outside the **Global pause schedule**.
+4. In **Settings → Workers**, enable a group with a CPU device that allows **Plex loudness**, with hours outside the **Global pause schedule**.
    One worker allows one simultaneous audio analysis. GPU-only setups must add CPU capacity explicitly.
 
 Loudness has its own opt-in; **Intro & Credits** can stay off, and its database-write confirmation is not required.
@@ -1536,7 +1536,7 @@ enabled is valid: Plex can serve music and video libraries this app does not cov
 depends on each library's **Enable Loudness Analysis** setting; a server-wide schedule alone does not mean both
 applications are analysing the same videos.
 
-When this app has eligible video libraries selected, its writer is ready, and a CPU group has usable loudness hours, **Set to Never** is an optional,
+When this app has eligible video libraries selected, its writer is ready, and a CPU device has usable loudness hours, **Set to Never** is an optional,
 separately confirmed action. It changes Plex's server-wide schedule, including music and unselected video libraries;
 it does not enable this app, extend its library selection or erase existing measurements. Keep native analysis on
 if those other libraries need it. The app checks its selection, writer readiness and configured CPU eligibility again when the action runs. Busy
@@ -1676,13 +1676,13 @@ The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **T
 
 ### Dashboard Features
 
-- **System** — each media server (Plex, Emby, Jellyfin) with its connection state, the worker groups with a **−** / **+** stepper for each group's worker count, and the app version. With no server set up, a card links to the **Servers** page.
+- **System** — each media server (Plex, Emby, Jellyfin) with its connection state, one line per worker group group's worker count, and the app version. With no server set up, a card links to the **Servers** page.
 - **Quick actions** — **Start new job**, **Process a file or folder**, **Run next schedule now**, and links to the Inspector, Webhook activity and Logs.
 - **Job statistics** — Pending, Running, Completed, Failed, Cancelled and Total tiles, an outcome bar and the next schedule.
-- **Workers** — one card per worker group, with **Pause** / **Resume** and **Manage groups** in the header.
+- **Workers** — one card per worker group, with a row and **−** / **+** stepper for each device, and **Pause** / **Resume** and **Manage groups** in the header.
 - **Jobs** — the job queue, with status tabs, search, filters and per-job controls.
 
-**Dense worker table.** When an enabled group has 5 or more workers, the Workers panel switches to a compact table. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A group with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
+**Dense worker table.** When an enabled device in a group has 5 or more workers, the Workers panel switches to a compact table. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A device with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
 
 > [!NOTE]
 > Jobs queue with priority (1 = high, 2 = normal, 3 = low). The dispatcher runs
@@ -1702,7 +1702,10 @@ Jobs held by a pause, an unfinished dependency, or a retry timer let other eligi
 Changing a waiting job's priority updates its admission order; it does not interrupt files already processing.
 Change a job's priority from the **Priority** menu in its queue row.
 
-Admission also accounts for the open workers compatible with each job type. Excess jobs of the same type and priority
+Admission also accounts for the open workers compatible with each job type. Every kind of job (previews, Intro &
+Credits, loudness) that has work waiting and open workers gets a slot before any kind takes a second one, so a queue
+of one kind cannot starve another. The exceptions: when only the slot reserved for High priority is free, and when
+the cap is 1. Once each kind holds a slot, priority and creation time decide. Excess jobs of the same type and priority
 wait without consuming active slots, and eligible work of another type can pass them. Higher-priority work
 can still enter ahead of lower-priority scans, within the overall job limit. These limits control active jobs;
 worker groups control how many files run at once. A retry keeps its saved due time across an app restart
@@ -1855,26 +1858,27 @@ Most Settings controls and the Automation page's **Triggers** settings **save au
 Open **Settings → Workers** (or **Manage groups** in the Dashboard's Workers header) to choose which jobs can use your hardware. A group has:
 
 - **Name**
-- **Resource** — CPU or one detected GPU. A group runs on one device; add another group for a second GPU.
-- **Workers** — 1 to 32. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
-- **Jobs allowed on this group** — **Video previews**, **Intro & Credits**, **Plex loudness**.
-- **Availability** — **Always available**, or **Weekly hours** with one or more time windows.
+- **Devices** — up to 8, each CPU or one detected GPU, once per group. Each device has its own:
+  - **Workers** — 1 to 32. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
+  - **Jobs allowed** — **Video previews**, **Intro & Credits**, **Plex loudness**.
+- **Availability** — **Always available**, or **Weekly hours** with one or more time windows. It applies to every device in the group.
 
-Start with one group per resource; add groups when different jobs need different counts or hours. **Add group**, **Add CPU group for loudness**, the enable switch, **Edit**, **Duplicate group** and **Remove group** manage them. **Edit** opens the editor inline under the group. For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph that updates as you change the windows. **Apply group changes** saves all edits at once; **Discard changes** drops them. If another Settings session changed the groups first, applying shows a conflict instead of overwriting; discard and reload before editing again.
+Add a device with **Add device**; remove it to use zero workers on it. Start with one group; add groups when devices need different hours. **Add group**, **Add CPU group for loudness**, the enable switch, **Edit**, **Duplicate group** and **Remove group** manage them. **Edit** opens the editor inline under the group. For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph with one lane per device that updates as you change the windows. **Apply group changes** saves all edits at once; **Discard changes** drops them. If another Settings session changed the groups first, applying shows a conflict instead of overwriting; discard and reload before editing again.
 
-CPU groups can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU groups can run previews and
+The CPU device can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU devices can run previews and
 Intro & Credits; loudness requires CPU workers. Chapters stay part of Previews. These permissions select jobs:
 a GPU video job can still use CPU stages or CPU fallback. FFmpeg threads per GPU worker are set under **Processing options → GPU device tuning**.
 
-For example, keep four GPU workers for video jobs and add one CPU worker allowing only loudness. That permits one
-audio analysis at a time without assigning video jobs to that CPU group. The normal concurrent-job limit still
-applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU group.
+For example, an **Off-hours** group open daily 01:00–07:00 can hold 3 NVIDIA workers for previews and Intro & Credits plus
+10 CPU workers for loudness only. Outside those hours the group is idle. To keep loudness to one analysis at a time, give
+its CPU device 1 worker and allow only loudness; no video jobs run there. The normal concurrent-job limit still
+applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU device.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
-On the Dashboard, each group's **−** / **+** stepper in the **System** card changes its worker count and saves straight away. A disabled group shows **Enable** instead. A decrease retires workers after their current files finish; an increase can restore workers that were about to retire. The stepper never goes below 1; disable the group to use zero workers. Disabling a group remembers its saved count for when you enable it again.
+On the Dashboard, each device row in the **Workers** panel has a **−** / **+** stepper that changes its worker count and saves straight away. A disabled group shows **Enable** instead. A decrease retires workers after their current files finish; an increase can restore workers that were about to retire. The stepper never goes below 1; remove the device in Settings, or disable the group, to use zero workers. Disabling a group remembers its saved counts for when you enable it again.
 
 - A group's card shows its state: **Available**, **Workers busy**, **Outside hours**, **Finishing current files** or **Globally paused**. No open workers means waiting for capacity, not a global pause: current files can still finish.
-- Counts from different open groups add, including groups on the same device. Overlapping windows within one group
+- Counts from different open groups add, including groups that use the same device. Overlapping windows within one group
   do not multiply its workers. Finishing files still use the shared resource budget, so a newly opened group may
   wait for them. The weekly peak is limited to 32 CPU and 32 GPU workers across groups; the editor shows the current and peak totals.
 
@@ -3302,7 +3306,7 @@ Use this table to diagnose common failures quickly.
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
-| Job waits for workers | No compatible enabled group, outside group hours, unavailable GPU, or compatible workers busy | Read the waiting reason. In **Settings → Workers**, check job permissions, hours and hardware. Loudness needs a CPU group. Outside hours normally resolves at the next opening; busy workers finish their current files. |
+| Job waits for workers | No compatible enabled group, outside group hours, unavailable GPU, or compatible workers busy | Read the waiting reason. In **Settings → Workers**, check job permissions, hours and hardware. Loudness needs a CPU device. Outside hours normally resolves at the next opening; busy workers finish their current files. |
 | Job waits for a job slot | The concurrent-job gate is full | Check **Settings → Processing options → Max concurrent jobs**; a job at High priority can use the slot kept for it. Available workers do not bypass that limit. Check global and per-job pause holds too. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and check **Enable webhook processing** is on (Automation → Triggers → Settings). |
@@ -4503,21 +4507,34 @@ Named groups are the only worker allocation. Edit them in **Settings → Workers
 **Manage groups** button opens the same page. See the [worker guide](https://mediapreviewgenerator.dev/guides/#worker-groups-and-availability)
 for scheduling and scaling behavior.
 
-| Field | Rules |
+A group is a name, an on/off switch and weekly hours, holding up to 8 devices. Each device is a member with its own
+worker count and allowed jobs.
+
+| Group field | Rules |
 |---|---|
 | `id` | Unique. Letters, digits, `_` and `-`; up to 80 characters; starts with a letter or digit. |
 | `name` | 1–80 characters. |
-| `enabled` | Boolean. A disabled group keeps its saved `count` but provides no capacity. |
-| `resource` | `cpu` or `gpu`. |
-| `device` | GPU device identifier for a GPU group. `null` for CPU. |
-| `count` | Integer 1–32. |
-| `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU groups cannot take `loudness`. |
+| `enabled` | Boolean. A disabled group keeps its saved counts but provides no capacity. |
 | `availability` | `{"mode":"always","windows":[]}` or `{"mode":"scheduled","windows":[...]}`. A scheduled group needs at least one window. |
 | `availability.windows[]` | `days` (0 = Monday through 6 = Sunday, the day the window starts), `start` and `end` (`HH:MM`, different from each other). Up to 32 windows per group. Times use the app timezone. Overnight windows are allowed. |
+| `members` | 1–8 devices. One member per device: one CPU member and one per GPU. |
+
+| Member field | Rules |
+|---|---|
+| `id` | Unique within the group. Same character rules as the group `id`. |
+| `resource` | `cpu` or `gpu`. |
+| `device` | GPU device identifier for a GPU member. `null` for CPU. |
+| `count` | Integer 1–32. Remove the member to use zero. |
+| `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU members cannot take `loudness`. |
+
+On a group with exactly one member, `GET` also echoes that member's `resource`, `device`, `count` and `job_types` at the
+group level (read-only, kept for older clients). `PUT` accepts a group without `members` that carries those four
+fields and treats it as one member. When `members` is present, a group-level field that disagrees with the only member
+is rejected with `400`.
 
 Up to 64 groups. An empty list is valid and means no workers. Overlapping windows in one group form a union;
-different groups add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU workers.
-These are worker slots, not CPU cores.
+different groups and devices add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU
+workers. These are worker slots, not CPU cores.
 
 ### Per-GPU tuning (gpu_config)
 
@@ -5612,7 +5629,7 @@ Update settings. Send only the fields to change. Returns `{"success": true}` (pl
 
 Use the dedicated [worker-groups API](https://mediapreviewgenerator.dev/reference/#worker-group-endpoints) for allocation. Once groups exist, posting legacy
 `cpu_threads` or GPU `enabled`/`workers` allocation fields returns `409` with guidance instead of overwriting groups.
-GPU tuning-only entries merge into stored device settings. `GET /api/settings` also returns `worker_groups` and
+GPU tuning-only entries merge into stored device settings. `GET /api/settings` also returns `worker_groups` (with the single-member echo above) and
 `worker_groups_revision`. Zero workers cause resource waiting, not a global pause. Saving capacity never clears a
 manual or schedule hold.
 
@@ -5686,25 +5703,26 @@ All endpoints use the normal session/API authentication and are also available d
 |---|---|---|
 | GET | `/api/worker-groups` | Saved groups, optimistic `revision`, app `timezone`, `limits`, detected `hardware`, current `capacity`, `warnings` and global pause state |
 | PUT | `/api/worker-groups` | Replace the complete group list with `{"groups":[...],"revision":N}`. `400` rejects invalid configuration; `409` means another change advanced the revision. Reload and reconcile before resubmitting. |
-| POST | `/api/worker-groups/{id}/scale` | Atomic saved adjustment: exactly `{"delta":1}`, `{"delta":-1}` or `{"enabled":true/false}`. `404` for an unknown group, `400` for an invalid action or capacity limit. |
+| POST | `/api/worker-groups/{id}/scale` | Atomic saved adjustment: exactly `{"delta":1}`, `{"delta":-1}` or `{"enabled":true/false}`. `delta` works on single-member groups; on a group with several members it returns `409` (use the member route). `404` for an unknown group, `400` for an invalid action or capacity limit. |
+| POST | `/api/worker-groups/{id}/members/{member_id}/scale` | Add or remove one worker on one device: exactly `{"delta":1}` or `{"delta":-1}`. `404` for an unknown group or member, `409` when the group is disabled, `400` outside 1–32 workers or past a capacity limit. |
 
-For example, after loading revision 3, replace the configuration with one CPU loudness group:
+For example, after loading revision 3, replace the configuration with one group that runs previews on a GPU and loudness on the CPU overnight:
 
 ```json
 {
   "revision": 3,
   "groups": [{
-    "id": "cpu-loudness",
-    "name": "Overnight audio",
+    "id": "off-hours",
+    "name": "Off-hours",
     "enabled": true,
-    "resource": "cpu",
-    "device": null,
-    "count": 1,
-    "job_types": ["loudness"],
     "availability": {
       "mode": "scheduled",
-      "windows": [{"days": [0,1,2,3,4,5,6], "start": "23:00", "end": "07:00"}]
-    }
+      "windows": [{"days": [0,1,2,3,4,5,6], "start": "01:00", "end": "07:00"}]
+    },
+    "members": [
+      {"id": "gpu", "resource": "gpu", "device": "cuda:0", "count": 3, "job_types": ["previews", "intro_credits"]},
+      {"id": "cpu", "resource": "cpu", "device": null, "count": 10, "job_types": ["loudness"]}
+    ]
   }]
 }
 ```
@@ -5714,8 +5732,8 @@ Enabled change. A decrease to zero disables the group while retaining its saved 
 restores that count. Successful mutations return the updated GET snapshot plus `success: true`. An optional
 `warning` means settings were saved but live reconciliation failed; inspect logs rather than assuming the save failed.
 
-`capacity.groups` includes `id`, `name`, `resource`, `device`, `desired`, `target`, `available`, `busy`, `finishing`,
-`state` and `next_available_at` (ISO timestamp or null). Desired is the enabled saved count; target reflects current
+`capacity.groups` includes `id`, `name`, `desired`, `target`, `available`, `busy`, `finishing`,
+`state`, `next_available_at` (ISO timestamp or null) and `members`, one row per device with `id`, `resource`, `device` and the same counts and `state`. Desired is the enabled saved count; target reflects current
 hours and hardware. Busy excludes retiring work, which is counted as finishing. Available is zero during global
 pause. States include `active`, `disabled`, `off_hours`, `hardware_unavailable` and `draining`. Removed groups may
 remain in this snapshot while files finish. `capacity.current` sums current targets by CPU/GPU and `capacity.peak`
@@ -6604,7 +6622,7 @@ Yes, optionally for Plex Media Server **1.43.4.x**. Chapter generation is off by
 
 ### Do I need a GPU to use Media Preview Generator?
 
-No. Under **Settings → Workers**, use a CPU worker group and set its worker count (for example `4` or `8`). Remove or switch off any GPU groups.
+No. Under **Settings → Workers**, use a worker group with only a CPU device and set its worker count (for example `4` or `8`). Remove GPU devices or switch off groups that use them.
 
 ### Is there a Windows .exe, or do I need Docker?
 
@@ -6671,7 +6689,7 @@ Open **Settings → Processing options → GPU device tuning**. It lists each de
 
 ### Can it use more than one GPU?
 
-Yes. In **Settings → Workers**, make a worker group for each GPU and set its worker count. Each group can run on its own hours. **FFmpeg threads per worker** for each GPU is under **Settings → Processing options → GPU device tuning**.
+Yes. In **Settings → Workers**, add each GPU as a device in a worker group and set its worker count. Each group can run on its own hours. **FFmpeg threads per worker** for each GPU is under **Settings → Processing options → GPU device tuning**.
 
 ### Which GPU is best for preview thumbnails?
 
@@ -6694,7 +6712,7 @@ Yes. It tone-maps HDR10, HLG and HDR10+ so thumbnails don't come out grey, and u
 
 ### How many workers and threads should I set?
 
-Set each group's worker count in **Settings → Workers** (1 to 32). Start low and raise it while watching system load. See the [Worker Configuration](https://mediapreviewgenerator.dev/getting-started/#worker-configuration) table in Getting Started for concrete starting points across hardware tiers.
+Set each device's worker count in **Settings → Workers** (1 to 32). Start low and raise it while watching system load. See the [Worker Configuration](https://mediapreviewgenerator.dev/getting-started/#worker-configuration) table in Getting Started for concrete starting points across hardware tiers.
 
 ### Why is CPU usage high when I have a GPU configured?
 

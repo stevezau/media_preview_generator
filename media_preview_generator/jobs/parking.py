@@ -29,7 +29,7 @@ def park_if_unavailable(dispatcher, tracker, manager, job_id: str, kind: str, bo
     A failed checkpoint keeps the tracker registered and admission held. A cancel
     is authoritative and never becomes a parked job.
     """
-    if not isinstance(getattr(dispatcher.worker_pool, "_groups", None), dict):
+    if not isinstance(getattr(dispatcher.worker_pool, "_policies", None), dict):
         return
     refresh_worker_groups(dispatcher.worker_pool)
     capacity = dispatcher.worker_pool.capacity_for(kind)

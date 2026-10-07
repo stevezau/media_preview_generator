@@ -85,7 +85,7 @@ Yes, optionally for Plex Media Server **1.43.4.x**. Chapter generation is off by
 
 ### Do I need a GPU to use Media Preview Generator?<a id="can-i-use-this-without-a-gpu"></a>
 
-No. Under **Settings → Workers**, use a CPU worker group and set its worker count (for example `4` or `8`). Remove or switch off any GPU groups.
+No. Under **Settings → Workers**, use a worker group with only a CPU device and set its worker count (for example `4` or `8`). Remove GPU devices or switch off groups that use them.
 
 ### Is there a Windows .exe, or do I need Docker?<a id="is-docker-required-is-there-a-standalone-exe"></a>
 
@@ -152,7 +152,7 @@ Open **Settings → Processing options → GPU device tuning**. It lists each de
 
 ### Can it use more than one GPU?<a id="can-i-use-multiple-gpus"></a>
 
-Yes. In **Settings → Workers**, make a worker group for each GPU and set its worker count. Each group can run on its own hours. **FFmpeg threads per worker** for each GPU is under **Settings → Processing options → GPU device tuning**.
+Yes. In **Settings → Workers**, add each GPU as a device in a worker group and set its worker count. Each group can run on its own hours. **FFmpeg threads per worker** for each GPU is under **Settings → Processing options → GPU device tuning**.
 
 ### Which GPU is best for preview thumbnails?<a id="which-gpu-should-i-use"></a>
 
@@ -175,7 +175,7 @@ Yes. It tone-maps HDR10, HLG and HDR10+ so thumbnails don't come out grey, and u
 
 ### How many workers and threads should I set?<a id="how-many-threads-should-i-use"></a>
 
-Set each group's worker count in **Settings → Workers** (1 to 32). Start low and raise it while watching system load. See the [Worker Configuration](getting-started.md#worker-configuration) table in Getting Started for concrete starting points across hardware tiers.
+Set each device's worker count in **Settings → Workers** (1 to 32). Start low and raise it while watching system load. See the [Worker Configuration](getting-started.md#worker-configuration) table in Getting Started for concrete starting points across hardware tiers.
 
 ### Why is CPU usage high when I have a GPU configured?
 

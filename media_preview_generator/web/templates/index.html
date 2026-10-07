@@ -39,7 +39,7 @@
 </div>
 
 <div class="dashboard-summary-row">
-    <!-- System card: servers, worker-group steppers and the build version. The header pill is the one status. -->
+    <!-- System card: servers, a read-only line per worker group and the build version. The header pill is the one status. -->
     <section class="card dash-card dashboard-system-card" aria-labelledby="systemCardTitle">
         <div class="card-header dashboard-system-header">
             <span class="dashboard-system-heading"><span id="systemCardTitle" role="heading" aria-level="2"><i class="bi bi-pc-display me-2" aria-hidden="true"></i>System</span><span id="systemConnectionSummary" class="system-connection-summary">Checking connections</span></span>
@@ -168,7 +168,7 @@
                 <button type="button" class="info-icon ms-2" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
                         title="How worker groups behave" aria-label="How worker groups behave"
                         data-explain-title="How worker groups behave"
-                        data-explain-html="&lt;p&gt;Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.&lt;/p&gt;">
+                        data-explain-html="&lt;p&gt;A group holds one or more devices, each with its own worker count; use the + and − on a device row to change it. Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.&lt;/p&gt;">
                     <i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
             <span class="flex-fill"></span>
             <span class="dash-occupancy" title="Workers busy right now">
