@@ -210,6 +210,32 @@ def check_item(item: ProcessableItem, *, ctx: LoudnessContext) -> ItemOutcome | 
     return _settle(rows)
 
 
+def _stream_progress_reporter(
+    progress_callback: Callable[[float, float, float, str | None, float | None], None] | None,
+    *,
+    n: int,
+    streams: int,
+    durations_s: list[float],
+) -> Callable[[float, float | None], None] | None:
+    """The ``analyze.run`` progress hook for stream ``n`` (1-based) of ``streams``, in the worker callback's terms.
+
+    The percent spans the whole file: finished streams plus this one's fraction, each stream counting equally. The ETA
+    is this stream's remainder plus the later streams' full lengths, at the current speed.
+    """
+    if progress_callback is None:
+        return None
+    total_s = durations_s[n - 1]
+    later_s = sum(durations_s[n:])
+
+    def report(processed_s: float, speed_x: float | None) -> None:
+        fraction = min(1.0, processed_s / total_s) if total_s > 0 else 0.0
+        percent = max(0.0, min(100.0, (n - 1 + fraction) / streams * 100))
+        remaining = (max(0.0, total_s - processed_s) + later_s) / speed_x if speed_x and total_s > 0 else None
+        progress_callback(percent, processed_s, total_s, f"{speed_x:.1f}x" if speed_x else None, remaining)
+
+    return report
+
+
 def process_item(
     item: ProcessableItem,
     *,
@@ -217,6 +243,7 @@ def process_item(
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
     phase_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[float, float, float, str | None, float | None], None] | None = None,
     **_ignored,
 ) -> ItemOutcome:
     """Worker stage: analyse each stream Plex lacks loudness for and write it. A GPU worker runs it on the CPU too."""
@@ -254,6 +281,7 @@ def process_item(
         except PublishError as exc:
             rows.append(_row(cfg, WAITING if exc.state is Capability.UNREACHABLE else FAILED, str(exc)))
             continue
+        durations_s = [(same[0].duration_ms or 0) / 1000 for _index, same in sorted(todo.items())]
         for n, (index, same) in enumerate(sorted(todo.items()), 1):
             if cancel_check and cancel_check():
                 errors.append(f"cancelled before stream {index}")
@@ -269,6 +297,9 @@ def process_item(
                     codec=same[0].codec,
                     cancel_check=cancel_check,
                     pause_check=ctx.freeze_check or pause_check,
+                    on_progress=_stream_progress_reporter(
+                        progress_callback, n=n, streams=len(todo), durations_s=durations_s
+                    ),
                 )
                 with cancellable_waits(cancel_check):
                     for stream in same:
@@ -281,6 +312,11 @@ def process_item(
                             source=source,
                             cancel_check=cancel_check,
                         )
+                if progress_callback:
+                    try:
+                        progress_callback(n / len(todo) * 100, durations_s[n - 1], durations_s[n - 1], None, 0.0)
+                    except Exception as exc:  # a display error must not lose a finished measurement
+                        logger.warning("Loudness progress callback failed: {}", exc)
             except (DatabaseBusyError, SourceChangedError) as exc:
                 waiting.append(f"stream {index} ({same[0].codec}): {exc}")
                 break

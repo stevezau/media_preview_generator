@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 from dataclasses import dataclass, field
@@ -109,7 +110,9 @@ class Lifecycle:
         }
         return SimpleNamespace(
             returncode=1 if target in self.corrupt else 0,
-            communicate=lambda **kw: (None, json.dumps(report).encode()),
+            stdout=io.BytesIO(b""),
+            stderr=io.BytesIO(json.dumps(report).encode()),
+            wait=lambda **kw: 0,
         )
 
     def start(self, paths: list[str]) -> Job:

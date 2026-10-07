@@ -20,14 +20,14 @@ def test_one_cpu_loudness_lane_does_not_fill_four_ordinary_job_slots(lifecycle: 
 
     def blocked_analysis(command, **kwargs):
         process = original(command, **kwargs)
-        communicate = process.communicate
+        wait_for_exit = process.wait
 
         def wait(**options):
             started.set()
             assert finish.wait(10), "test did not release simulated FFmpeg"
-            return communicate(**options)
+            return wait_for_exit(**options)
 
-        process.communicate = wait
+        process.wait = wait
         return process
 
     monkeypatch.setattr(job.analyze.subprocess, "Popen", blocked_analysis)

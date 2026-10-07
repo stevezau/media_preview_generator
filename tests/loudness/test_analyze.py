@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import subprocess
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -37,7 +39,7 @@ PLEX_FIELDS = {
 
 def test_command_is_plexs_own_on_the_cpu():
     assert analyze.command("ffmpeg", "/m/a.mkv", 3) == [
-        "ffmpeg", "-hide_banner", "-nostats", "-i", "/m/a.mkv", "-map", "0:3",
+        "ffmpeg", "-hide_banner", "-nostats", "-progress", "pipe:1", "-i", "/m/a.mkv", "-map", "0:3",
         "-af", "loudnorm=I=-16:TP=-1:LRA=9:print_format=json", "-f", "null", "-",
     ]  # fmt: skip
 
@@ -45,7 +47,7 @@ def test_command_is_plexs_own_on_the_cpu():
 @pytest.mark.parametrize(("codec", "no_drc"), [("eac3", True), ("ac3", False), ("aac", False)])
 def test_eac3_is_decoded_without_drc_as_plexs_dolby_decoder_does(codec, no_drc):
     cmd = analyze.command("ffmpeg", "/m/a.mkv", 1, codec)
-    assert (cmd[3:5] == ["-drc_scale", "0"]) is no_drc
+    assert (cmd[5:7] == ["-drc_scale", "0"]) is no_drc
     assert cmd[-9:] == ["-i", "/m/a.mkv", "-map", "0:1", "-af", analyze.LOUDNORM_FILTER, "-f", "null", "-"]
 
 
@@ -180,13 +182,14 @@ def test_already_cancelled_unpaused_job_never_launches_ffmpeg(monkeypatch):
 def test_fast_completion_does_not_return_measurements_after_cancellation(monkeypatch):
     cancelled = False
 
-    def communicate(**kwargs):
+    def wait(**kwargs):
         nonlocal cancelled
         cancelled = True
-        return None, REPORT.encode()
 
     proc = MagicMock(returncode=0)
-    proc.communicate.side_effect = communicate
+    proc.stdout = io.BytesIO(b"")
+    proc.stderr = io.BytesIO(REPORT.encode())
+    proc.wait.side_effect = wait
     monkeypatch.setattr(analyze.subprocess, "Popen", MagicMock(return_value=proc))
     with pytest.raises(analyze.LoudnessError, match="cancelled"):
         analyze.run("ffmpeg", "/m/a.mkv", 1, duration_ms=1000, cancel_check=lambda: cancelled)
@@ -196,3 +199,80 @@ def test_missing_ffmpeg_is_an_item_analysis_error(monkeypatch):
     monkeypatch.setattr(analyze.subprocess, "Popen", MagicMock(side_effect=FileNotFoundError(2, "No such file")))
     with pytest.raises(analyze.LoudnessError, match="Could not start ffmpeg"):
         analyze.run("missing-ffmpeg", "/m/a.mkv", 1, duration_ms=1000)
+
+
+def test_progress_is_requested_on_stdout():
+    cmd = analyze.command("ffmpeg", "/m/a.mkv", 1)
+    assert cmd[cmd.index("-progress") + 1] == "pipe:1"
+
+
+def test_progress_blocks_report_seconds_and_speed_and_na_speed_is_none():
+    seen = []
+    stream = io.BytesIO(
+        b"out_time_us=2000000\nspeed=1.4x\nprogress=continue\n"
+        b"out_time_ms=5500000\nspeed=N/A\nprogress=continue\n"
+        b"out_time_us=N/A\nspeed=2.0x\nprogress=continue\n"
+        b"out_time_us=9000000\nspeed= 3.0x\nprogress=end\n"
+    )
+    analyze.read_progress(stream, lambda seconds, speed: seen.append((seconds, speed)))
+    assert seen == [(2.0, 1.4), (5.5, None), (9.0, 3.0)]  # the N/A time block reports nothing
+
+
+def test_a_failing_progress_callback_does_not_stop_the_drain():
+    def boom(seconds, speed):
+        raise RuntimeError("x")
+
+    stream = io.BytesIO(b"out_time_us=1\nprogress=continue\nout_time_us=2\nprogress=end\n")
+    analyze.read_progress(stream, boom)
+    assert stream.read() == b""
+
+
+def test_run_reports_progress_and_drains_stdout_more_than_a_pipe_holds(tmp_path):
+    # ~1 MB on stdout, well past a 64 KB pipe: ffmpeg would block if nobody read it.
+    body = (
+        "i=0; while [ $i -lt 20000 ]; do echo 'frame=0 pad_pad_pad_pad_pad_pad_pad_pad_pad'; i=$((i+1)); done\n"
+        "printf 'out_time_us=3000000\\nspeed=2.5x\\nprogress=end\\n'\n"
+        "cat >&2 <<'EOT'\n" + REPORT + "\nEOT"
+    )
+    seen = []
+    ffmpeg = _fake_ffmpeg(tmp_path, body)
+    fields = analyze.run(ffmpeg, "/m/a.mkv", 1, duration_ms=6000, on_progress=lambda s, x: seen.append((s, x)))
+    assert fields == PLEX_FIELDS
+    assert seen == [(3.0, 2.5)]
+
+
+def test_a_cancel_still_stops_a_chatty_ffmpeg(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyze, "_POLL_S", 0.05)
+    chatty = _fake_ffmpeg(tmp_path, "while true; do echo out_time_us=1; echo progress=continue; sleep 0.01; done")
+    calls = []
+    with pytest.raises(analyze.LoudnessError, match="cancelled"):
+        analyze.run(
+            chatty,
+            "/m/a.mkv",
+            1,
+            duration_ms=None,
+            cancel_check=lambda: len(calls) > 3 or calls.append(1),
+            on_progress=lambda s, x: None,
+        )
+
+
+def test_a_pause_window_holds_ffmpeg_then_the_fields_return(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyze, "_POLL_S", 0.05)
+    resume_at = time.monotonic() + 0.3
+    ffmpeg = _fake_ffmpeg(tmp_path, "cat >&2 <<'EOT'\n" + REPORT + "\nEOT")
+    started = time.monotonic()
+    fields = analyze.run(ffmpeg, "/m/a.mkv", 1, duration_ms=1000, pause_check=lambda: time.monotonic() < resume_at)
+    assert fields == PLEX_FIELDS
+    assert time.monotonic() - started >= 0.25
+
+
+def test_a_kill_is_time_bound_when_a_child_keeps_the_pipes_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyze, "_POLL_S", 0.05)
+    monkeypatch.setattr(analyze, "KILL_WAIT_S", 0.3)
+    # The background sleep inherits both pipes and outlives the killed shell, as a stalled mount's child would.
+    ffmpeg = _fake_ffmpeg(tmp_path, "sleep 3 &\nexec sleep 30")
+    calls = []
+    started = time.monotonic()
+    with pytest.raises(analyze.LoudnessError, match="cancelled"):
+        analyze.run(ffmpeg, "/m/a.mkv", 1, duration_ms=None, cancel_check=lambda: len(calls) > 2 or calls.append(1))
+    assert time.monotonic() - started < 2.0

@@ -50,14 +50,14 @@ def test_priority_api_updates_waiting_runner_and_release_uses_granted_priority(
 
     def blocked_analysis(command, **kwargs):
         process = original(command, **kwargs)
-        communicate = process.communicate
+        wait_for_exit = process.wait
 
         def wait(**options):
             started.set()
             assert finish.wait(5), "test did not release simulated FFmpeg"
-            return communicate(**options)
+            return wait_for_exit(**options)
 
-        process.communicate = wait
+        process.wait = wait
         return process
 
     monkeypatch.setattr(job.analyze.subprocess, "Popen", blocked_analysis)

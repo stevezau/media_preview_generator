@@ -2258,11 +2258,13 @@ class WorkerPool:
                         "[GPU {}]: {} - {}% (speed={})",
                         worker.gpu_index,
                         worker.media_title,
-                        progress_percent,
+                        round(progress_percent, 1),
                         worker.speed,
                     )
                 else:
-                    logger.info("[CPU]: {} - {}% (speed={})", worker.media_title, progress_percent, worker.speed)
+                    logger.info(
+                        "[CPU]: {} - {}% (speed={})", worker.media_title, round(progress_percent, 1), worker.speed
+                    )
 
     def shutdown(self) -> None:
         """Shutdown all workers gracefully."""

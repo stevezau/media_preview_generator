@@ -84,7 +84,7 @@ def test_real_worker_paths_drive_live_inspector(
 
     def popen(command: list[str], **kwargs):
         process = original_popen(command, **kwargs)
-        communicate = process.communicate
+        wait_for_exit = process.wait
         with lock:
             starts.append(command[command.index("-i") + 1])
             if len(starts) == 2:
@@ -92,9 +92,9 @@ def test_real_worker_paths_drive_live_inspector(
 
         def wait(**kwargs):
             assert release.wait(15), "test did not release simulated FFmpeg"
-            return communicate(**kwargs)
+            return wait_for_exit(**kwargs)
 
-        process.communicate = wait
+        process.wait = wait
         return process
 
     monkeypatch.setattr(job.analyze.subprocess, "Popen", popen)

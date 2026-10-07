@@ -693,7 +693,7 @@ def test_dashboard_edit_target_survives_reload_and_handles_deleted_group(
         assert group_api["writes"] == []
 
 
-def test_live_loudness_worker_shows_audio_activity_without_fabricated_progress(
+def test_live_loudness_worker_shows_audio_activity_until_ffmpeg_reports_real_progress(
     authed_page: Page, app_url: str, group_api: dict
 ) -> None:
     mock_dashboard_defaults(authed_page)
@@ -722,6 +722,12 @@ def test_live_loudness_worker_shows_audio_activity_without_fabricated_progress(
     worker["current_phase"] = "Loudness 2/2"
     authed_page.evaluate("loadWorkerStatuses()")
     expect(authed_page.locator("[data-percent]")).to_have_text("Analyzing audio · stream 2/2")
+    worker.update(ffmpeg_started=True, progress_percent=62.5, total_duration=7200, speed="1.4x", eta="3m 20s")
+    authed_page.evaluate("loadWorkerStatuses()")
+    expect(authed_page.locator("[data-percent]")).to_have_text("62.5%")
+    expect(authed_page.locator("[data-speed]")).to_have_text("1.4x")
+    expect(authed_page.locator("[data-eta]")).to_have_text("3m 20s")
+    assert bar.get_attribute("aria-valuenow") == "62.5"
     worker.update(status="idle", current_phase="")
     authed_page.evaluate("loadWorkerStatuses()")
     idle_bar = authed_page.locator('[data-worker-key="CPU_CPU-audio"] [role="progressbar"]')

@@ -98,6 +98,41 @@ def test_worker_analyses_each_stream_once_and_writes_it(ctx, db, media):  # noqa
     assert job.check_item(_item(media), ctx=ctx).outcome_key == job.UP_TO_DATE
 
 
+def test_worker_reports_percent_scaled_across_streams_in_the_previews_callback_shape(ctx, media):
+    calls = []
+
+    def run(ffmpeg, path, index, *, on_progress, **kwargs):
+        on_progress(212.0, 2.0)  # half of the 424 s stream
+        return FIELDS
+
+    with patch.object(job.analyze, "run", side_effect=run):
+        job.process_item(_item(media), ctx=ctx, progress_callback=lambda *a: calls.append(a))
+    # half of stream 1, stream 1 done, half of stream 2, stream 2 done
+    assert calls == [
+        (25.0, 212.0, 424.0, "2.0x", (212.0 + 424.0) / 2.0),
+        (50.0, 424.0, 424.0, None, 0.0),
+        (75.0, 212.0, 424.0, "2.0x", 106.0),
+        (100.0, 424.0, 424.0, None, 0.0),
+    ]
+
+
+def test_progress_reporter_scales_clamps_and_estimates_remaining():
+    calls = []
+    report = job._stream_progress_reporter(lambda *a: calls.append(a), n=2, streams=2, durations_s=[100.0, 50.0])
+    report(25.0, 2.0)
+    report(80.0, None)  # past the end of a stream shorter than reported; unknown speed
+    assert calls == [(75.0, 25.0, 50.0, "2.0x", 12.5), (100.0, 80.0, 50.0, None, None)]
+    first = []
+    job._stream_progress_reporter(lambda *a: first.append(a), n=1, streams=2, durations_s=[100.0, 50.0])(50.0, 2.0)
+    assert first == [(25.0, 50.0, 100.0, "2.0x", 50.0)]  # (50 left + 50 for the next stream) at 2x
+
+
+def test_progress_with_unknown_duration_reports_speed_only():
+    calls = []
+    job._stream_progress_reporter(lambda *a: calls.append(a), n=1, streams=1, durations_s=[0.0])(7.0, 1.5)
+    assert calls == [(0.0, 7.0, 0.0, "1.5x", None)]
+
+
 def test_a_failed_stream_fails_the_file_but_keeps_the_others(ctx, db, media):  # noqa: F811
     def run(ffmpeg, path, index, **kwargs):
         if index == 2:

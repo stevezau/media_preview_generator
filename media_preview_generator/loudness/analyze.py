@@ -6,10 +6,14 @@ import json
 import math
 import os
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 
+from loguru import logger
+
 from ..markers.freeze import Freeze
-from ..markers.probe import kill_and_collect
+from ..markers.probe import _count_stuck, kill_and_collect
 
 # The filter Plex Media Server 1.43 runs for each audio stream (``Plex Transcoder -i FILE -map 0:N -af ... -f null -``).
 LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1:LRA=9:print_format=json"
@@ -59,6 +63,9 @@ def command(ffmpeg: str, path: str, index: int, codec: str = "") -> list[str]:
         ffmpeg,
         "-hide_banner",
         "-nostats",
+        # Machine-readable progress on stdout; the loudnorm report stays on stderr.
+        "-progress",
+        "pipe:1",
         *(["-drc_scale", "0"] if codec in NO_DRC_CODECS else []),
         "-i",
         path,
@@ -136,6 +143,82 @@ def valid_measurements(fields: dict[str, str]) -> bool:
     )
 
 
+def _parse_progress_seconds(value: str) -> float | None:
+    """ffmpeg's ``out_time_us``/``out_time_ms`` (both microseconds) as seconds; None for ``N/A`` or junk."""
+    try:
+        seconds = int(value) / 1_000_000
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _parse_progress_speed(value: str) -> float | None:
+    """ffmpeg's ``speed=1.4x`` as 1.4; None for ``N/A`` or junk."""
+    try:
+        speed = float(value.strip().removesuffix("x"))
+    except ValueError:
+        return None
+    return speed if math.isfinite(speed) and speed > 0 else None
+
+
+def read_progress(stream, on_progress: Callable[[float, float | None], None] | None) -> None:
+    """Drain ffmpeg's ``-progress`` output to its end, reporting each block (``progress=`` line) once.
+
+    Reading to the end matters even with no callback: an undrained pipe would block ffmpeg.
+
+    Args:
+        stream: ffmpeg's stdout (binary).
+        on_progress: Called with (seconds of audio processed, speed as a multiple of real time or None).
+    """
+    seconds: float | None = None
+    speed: float | None = None
+    warned = False
+    for raw in stream:
+        key, _, value = raw.decode("utf-8", errors="replace").strip().partition("=")
+        if key in ("out_time_us", "out_time_ms"):
+            seconds = _parse_progress_seconds(value)
+        elif key == "speed":
+            speed = _parse_progress_speed(value)
+        elif key == "progress" and on_progress is not None and seconds is not None:
+            try:
+                on_progress(seconds, speed)
+            except Exception as exc:
+                if not warned:
+                    warned = True
+                    logger.warning("Loudness progress callback failed (further failures this run not logged): {}", exc)
+
+
+def _read_all(stream, sink: list[bytes]) -> None:
+    sink.append(stream.read())
+
+
+def _join_readers(readers: list[threading.Thread]) -> bool:
+    """Join the started readers within one shared ``KILL_WAIT_S``; True when none is still running."""
+    stop = time.monotonic() + KILL_WAIT_S
+    for reader in readers:
+        if reader.is_alive():
+            reader.join(timeout=max(0.0, stop - time.monotonic()))
+    return not any(reader.is_alive() for reader in readers)
+
+
+def _reap_without_reading(proc: subprocess.Popen, what: str) -> None:
+    """Collect a killed process in the background with ``wait()``: the readers already own its pipes."""
+    logger.warning("{} still holds its output after being stopped; leaving it to finish on its own", what)
+    _count_stuck(REAPER, 1)
+
+    def reap() -> None:
+        try:
+            proc.wait()
+        finally:
+            _count_stuck(REAPER, -1)
+
+    try:
+        threading.Thread(target=reap, daemon=True, name=REAPER).start()
+    except RuntimeError as exc:
+        _count_stuck(REAPER, -1)
+        logger.warning("Couldn't start a thread to collect {}: {}", what, exc)
+
+
 def run(
     ffmpeg: str,
     path: str,
@@ -145,6 +228,7 @@ def run(
     codec: str = "",
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | Freeze | None = None,
+    on_progress: Callable[[float, float | None], None] | None = None,
 ) -> dict[str, str]:
     """Analyse one stream and return its ``ln:*`` fields.
 
@@ -156,6 +240,8 @@ def run(
         codec: The stream's codec (see ``command``).
         cancel_check: True once the job is cancelled; ffmpeg is killed.
         pause_check: True while everything is paused: ffmpeg is stopped where it is and the time limit moves out.
+        on_progress: Called from a reader thread with (seconds processed, speed as a multiple of real time or None)
+            as ffmpeg reports them.
 
     Raises:
         LoudnessError: ffmpeg failed, timed out, was cancelled, or its report was unusable.
@@ -172,17 +258,24 @@ def run(
     try:
         proc = subprocess.Popen(
             command(ffmpeg, path, index, codec),
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
     except OSError as exc:
         raise LoudnessError(f"Could not start ffmpeg analysing {name}: {exc.strerror or type(exc).__name__}") from exc
+    stderr_chunks: list[bytes] = []
+    readers = [
+        threading.Thread(target=read_progress, args=(proc.stdout, on_progress), daemon=True, name="loudness-progress"),
+        threading.Thread(target=_read_all, args=(proc.stderr, stderr_chunks), daemon=True, name="loudness-stderr"),
+    ]
     deadline = freeze.clock() + timeout_s
     try:
+        for reader in readers:
+            reader.start()
         while True:
             try:
-                _out, err = proc.communicate(timeout=_POLL_S)
+                proc.wait(timeout=_POLL_S)
                 break
             except subprocess.TimeoutExpired:
                 freeze.hold(proc, cancel_check=cancel_check, name=name)
@@ -191,11 +284,22 @@ def run(
                     why = "cancelled" if cancelled else f"timed out after {timeout_s:.0f} s"
                     raise LoudnessError(f"Loudness analysis of {name} {why}") from None
     except BaseException:
-        kill_and_collect(proc, what=f"ffmpeg analysing loudness of {name}", reaper_name=REAPER, wait_s=KILL_WAIT_S)
+        proc.kill()
+        what = f"ffmpeg analysing loudness of {name}"
+        if _join_readers(readers):
+            kill_and_collect(proc, what=what, reaper_name=REAPER, wait_s=KILL_WAIT_S)
+        else:
+            # A reader still owns each pipe, so communicate() would read the same pipe from two threads.
+            _reap_without_reading(proc, what)
         raise
+    if not _join_readers(readers):
+        # Only a process the kill never reached (ffmpeg's own children) can hold the pipe after ffmpeg exited.
+        raise LoudnessError(f"Loudness analysis of {name} could not read ffmpeg's report: its output stayed open")
+    for stream in (proc.stdout, proc.stderr):
+        stream.close()
     if cancel_check and cancel_check():
         raise LoudnessError(f"Loudness analysis of {name} cancelled")
-    text = (err or b"").decode("utf-8", errors="replace")
+    text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     if proc.returncode != 0:
         raise LoudnessError(f"ffmpeg exited {proc.returncode} analysing {name} stream {index}: {text.strip()[-200:]}")
     return ln_fields(parse(text))
