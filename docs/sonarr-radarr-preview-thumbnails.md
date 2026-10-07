@@ -15,7 +15,7 @@ In Sonarr or Radarr, add a **Webhook** connection that points at Media Preview G
    - **Radarr:** On Import and On Upgrade.
    - **Sonarr:** On File Import and On File Upgrade.
 4. **Authentication:** leave **Username** empty and put your API token or webhook secret in **Password**. If the form has a Headers section, you can use an `X-Auth-Token` header instead.
-5. Click **Test**, then **Save**. The test shows up in the app's webhook activity log.
+5. Click **Test**, then **Save**. The test shows up under **Tools → Webhook Activity**.
 
 Field-by-field steps: [Configure Radarr](guides.md#configure-radarr) and [Configure Sonarr](guides.md#configure-sonarr). To use a separate secret for webhooks, see [Webhook Secret](guides.md#webhook-secret).
 
@@ -37,12 +37,12 @@ Field-by-field steps: [Configure Radarr](guides.md#configure-radarr) and [Config
 
 1. **Batching.** Files are queued per source. A batch runs once the delay (default 60 seconds, range 10–300) passes with no new files from that source. Each new file restarts the timer. A season pack becomes one job. See [Batching and the delay](guides.md#batching-and-the-delay).
 2. **Finding the servers.** Each path is mapped to the container's view. Then every configured server whose enabled libraries contain the file is found. A path outside every enabled library is skipped, not retried.
-3. **One decode.** FFmpeg runs once per file on a GPU worker, or on a CPU worker if you have no GPU.
+3. **One decode.** FFmpeg runs once per file on a worker from a group allowed to run previews: a GPU group, or a CPU group if you have no GPU.
 4. **Publishing.** Each server that owns the file gets its own format:
-   - Plex: a BIF in its data folder.
+   - Plex: a BIF in its config folder.
    - Emby: a BIF next to the video.
-   - Jellyfin: trickplay tiles.
-5. **Queue priority.** New imports run at **High** priority by default. They overtake a running full-library scan file by file, without cancelling it ([details](guides.md#letting-new-imports-jump-the-queue)).
+   - Jellyfin: trickplay tiles, next to the video or in Jellyfin's data folder if you chose off-media storage.
+5. **Queue priority.** New imports run at **High** priority by default (**Settings → Processing options → Incoming job priority**). They overtake a running full-library scan file by file, without cancelling it ([details](guides.md#letting-new-imports-jump-the-queue)).
 
 ## Retries for files the server hasn't indexed yet
 
@@ -69,8 +69,8 @@ The Plex direct webhook and the Recently Added poll only see new library items, 
 
 - **401 from the webhook:** the token is wrong or missing. Leave Username empty and put the token in Password.
 - **Radarr or Sonarr can't reach the URL:** use the host's IP or a Docker hostname they can resolve, not `localhost`.
-- **The test works but imports do nothing:** check that the import events are ticked, and that webhooks are enabled on the Automation page.
-- **The job sits in Pending:** check that **Incoming job priority** is **High**, and that processing is not paused (the Workers header shows **Resume** while it is).
+- **The test works but imports do nothing:** check that the import events are ticked, and that **Enable webhook processing** is on under **Automation → Triggers**.
+- **The job sits in Pending:** check that **Incoming job priority** is **High**, that processing is not paused (the Workers header shows **Resume** while it is), and that a worker group allowed to run previews is available (not outside its hours).
 
 More in the [troubleshooting table](guides.md#troubleshooting).
 

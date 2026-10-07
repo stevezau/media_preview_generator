@@ -1991,6 +1991,7 @@ class TestRetryReasonPersistedOnSpawn:
             "published_pending_registration",
             "skipped_not_indexed",
             "skipped_not_in_library",
+            "published_pending_chapters",
         ],
     )
     def test_publisher_pending_persists_pending_by_server(self, app, tmp_path, publisher_status):
@@ -2108,6 +2109,9 @@ class TestRetryReasonPersistedOnSpawn:
         assert reason["pending_by_server"] == {"JellyTest": 1}, (
             f"pending_by_server must name the actual blocker; got {reason['pending_by_server']!r}"
         )
+        # Only the chapter status is a chapter wait; the rest are "server hasn't indexed the file yet".
+        expected_chapter_waits = {"JellyTest": 1} if publisher_status == "published_pending_chapters" else {}
+        assert reason["chapter_waits_by_server"] == expected_chapter_waits
         assert reason["unresolved"] == 0, (
             f"Publisher-pending case must report 0 unresolved; got {reason['unresolved']!r}"
         )
@@ -2203,6 +2207,7 @@ class TestRetryReasonPersistedOnSpawn:
             "unresolved": 0,
             "stale_paths": 1,
             "pending_by_server": {},
+            "chapter_waits_by_server": {},
         }, f"Stale-path case must produce exactly one stale path with no other categories; got {reason!r}"
 
 
@@ -2388,6 +2393,7 @@ def test_chapter_retry_scan_uses_eligibility_and_dispatches_only_the_affected_pa
             "unresolved": 0,
             "stale_paths": 0,
             "pending_by_server": {"Plex Main": 1},
+            "chapter_waits_by_server": {"Plex Main": 1},
         }
     else:
         assert len(calls) == 1
@@ -2484,7 +2490,12 @@ class TestRetryRunsOnlyTheUnresolvedFiles:
         assert run_calls == [list(raw.values()), [raw["missing"]]]
         assert [r.library_name for r in retries] == ["Retry: 1 file"]
         assert retries[0].config["path_count"] == 1
-        assert retries[0].config["retry_reason"] == {"unresolved": 0, "stale_paths": 1, "pending_by_server": {}}
+        assert retries[0].config["retry_reason"] == {
+            "unresolved": 0,
+            "stale_paths": 1,
+            "pending_by_server": {},
+            "chapter_waits_by_server": {},
+        }
         assert any(line.endswith("1 file(s) weren't found on disk. 1 path(s) sent for retry") for line in head_logs), (
             head_logs
         )
@@ -2536,7 +2547,7 @@ class TestRetryRunsOnlyTheUnresolvedFiles:
 
         assert run_calls == [[], [late]]
         assert [r.config["retry_reason"] for r in retries] == [
-            {"unresolved": 0, "stale_paths": 0, "pending_by_server": {"Plex Main": 1}}
+            {"unresolved": 0, "stale_paths": 0, "pending_by_server": {"Plex Main": 1}, "chapter_waits_by_server": {}}
         ]
         assert any(
             line.endswith("Plex Main needs another attempt × 1, retry scheduled in 60s (retry 1 of 3)")

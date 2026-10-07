@@ -35,7 +35,7 @@
     5 needs a GPU with a hardware Vulkan driver in the container. [More](/hdr-dolby-vision-thumbnails/)
 - q: Do I need a GPU to use Media Preview Generator?
   a: >-
-    No. Without one it runs on CPU workers; set how many in Settings, Processing Options. With a GPU,
+    No. Without one it runs on CPU workers; set how many in Settings, Workers. With a GPU,
     decoding moves off the CPU, and a file the GPU can't decode is retried on the CPU by the same worker.
 - q: Does it run on Windows or Unraid?
   a: >-

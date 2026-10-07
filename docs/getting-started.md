@@ -80,9 +80,9 @@ Generate preview thumbnails for **Plex, Emby, Jellyfin**, or any combination of 
 ## Prerequisites
 
 1. **At least one media server** reachable from this container — any of:
-   - **Plex Media Server** — sign in with your Plex account in the Setup Wizard, or paste a server URL + token if you'd rather skip the sign-in
-   - **Emby Server** — server URL + API key
-   - **Jellyfin Server** — use **Quick Connect** in the Setup Wizard (a friendlier sign-in code, no token to copy), or paste a server URL + API key
+   - **Plex Media Server** — sign in with your Plex account in the Setup Wizard, or enter a server URL + token if you can't reach plex.tv
+   - **Emby Server** — server URL + username and password, or an API key
+   - **Jellyfin Server** — use **Quick Connect** (a code you enter in Jellyfin, no password to type), or a username and password, or an API key
 2. Docker installed on your server
 
 You can configure several servers — even a mix of vendors — and a single FFmpeg pass will publish to every server that owns the file.
@@ -114,7 +114,7 @@ Replace `/path/to/media`, `/path/to/plex/config`, and `/path/to/app/config` with
 > This command is for Plex, which only writes into `/plex`, so the media can stay `:ro`. **Using Emby, or Jellyfin?** Change the media mount to `:rw`, because those previews are written next to each video. (Jellyfin's off-media mode is the exception.) See [Volume Mounts](#volume-mounts).
 
 > [!NOTE]
-> No environment variables are required for first-time setup. Server connections (Plex / Emby / Jellyfin), libraries, GPU/CPU threads, and path mappings are all configured in the Setup Wizard and **Settings**. Environment variables are optional overrides (see [Reference](reference.md)).
+> No environment variables are required for first-time setup. Server connections (Plex / Emby / Jellyfin), libraries, workers, and path mappings are all configured in the Setup Wizard, **Servers** and **Settings**. Environment variables are optional overrides (see [Reference](reference.md)).
 
 > [!TIP]
 > **Timezone:** The `/etc/localtime` mount ensures log timestamps and scheduled jobs use your local time. If your host doesn't have this file (e.g. some NAS devices), use `-e TZ=America/New_York` instead (replace with your [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)).
@@ -127,17 +127,18 @@ Find your token using the [Authentication Token](#authentication-token) section 
 
 1. Open `http://YOUR_SERVER_IP:8080`
 2. Enter the authentication token
-3. Follow the wizard:
-   - **Step 1 — Pick your first server**: Plex, Emby, or Jellyfin. The vendor card expands to its friendliest sign-in flow:
-     - **Plex** → **Sign in with Plex** OAuth (or paste a URL + token). If your Plex account has access to multiple servers, the wizard lists them all — tick one to configure in detail, or tick several to batch-add with shared defaults.
-     - **Emby** → enter the server URL + username/password (or API key).
-     - **Jellyfin** → enter the server URL + **Quick Connect** code (shown inside Jellyfin's web UI — no password leaves your browser), or paste a URL + API key.
-   - **Step 2 — Libraries** *(Plex single-server flow)*: pick which Plex libraries to enable. Emby and Jellyfin flows skip this step; libraries are managed later from the Servers page alongside their per-server path mappings.
-   - **Step 3 — Path Configuration** *(Plex single-server flow)*: confirm the Plex application data folder (where Plex stores its preview bundles — usually mounted as `/plex` on this container) and any media path mappings.
-   - **Step 4 — Processing Options**: GPU/CPU workers, FFmpeg threads, thumbnail interval, quality — these are global (shared across every configured server).
-   - **Step 5 — Security**: view or replace your access token (optional).
+3. Follow the wizard. Its steps are **Server type**, **Connect**, **Paths**, **Options** and **Security**:
+   - **Step 1 — Choose your media server**: click **Plex**, **Emby** or **Jellyfin**.
+     - **Plex** → **Sign in with Plex**, then **Next**. If plex.tv is blocked, open **Can't reach plex.tv? Enter server details manually**, enter the URL and token, and click **Verify connection**.
+     - **Emby** → enter the server URL, then choose **Username + Password** or **API Key**. Click **Test connection**, then **Save server**.
+     - **Jellyfin** → enter the server URL, then choose **Quick Connect**, **Username + Password** or **API Key**. With Quick Connect, click **Start Quick Connect** and enter the code it shows in your Jellyfin profile menu. Then click **Test connection** and **Save server**.
+     - **Skip for now** ends the wizard and takes you to **Servers**, where you can add servers later.
+   - **Step 2 — Connect your server** *(Plex only)*: pick the Plex server, then tick the libraries to monitor. Tick none to monitor all. Emby and Jellyfin skip this step. Their libraries come in when you save the server, and you manage them later in **Servers → Edit → Libraries**.
+   - **Step 3 — Where are your files?**: for Plex, confirm the **Plex Media Server data folder** (usually `/plex` in this container). Use **Check a real file** to confirm this container can read a media file at the path your server reports. Under **Advanced**, add path mappings and exclude paths if you need them.
+   - **Step 4 — Processing options**: **GPU device tuning** lists detected GPUs (**Re-scan GPUs** re-detects them). Below it, set up your worker groups, then the **Thumbnails** interval and quality. These are shared by every configured server.
+   - **Step 5 — Set your access token**: choose a new token (at least 8 characters, different from the current one), then click **Complete Setup**. If `WEB_AUTH_TOKEN` is set, the token is fixed and this step says so.
 
-You can add more servers — any vendor, any number of each — at any time from **Servers** in the top nav. A file present on multiple servers is generated once and published to each in its native format.
+You can add more servers — any vendor, any number of each — at any time with **Servers → Add Server**. A file present on multiple servers is generated once and published to each in its native format. To go through the wizard again, use **Tools → Run setup again**.
 
 ---
 
@@ -172,13 +173,13 @@ tool isn't competing with a redundant CPU job:
     lets Jellyfin pick up the tiles on its next library scan. Off means new
     previews wait for Jellyfin's daily trickplay task (3 AM by default).
 
-The Setup Health tab (Servers → Edit) checks all of
+The **Setup Health** tab (**Servers → Edit**) checks all of
 these and can toggle them for you.
 
 > [!TIP]
 > **After setup, you probably want one or both of:**
 > - [Radarr/Sonarr webhooks](guides.md#webhook-integration) — auto-process new imports.
-> - A daily cron schedule (`0 2 * * *`) in the web UI under **Schedules** — catches anything the webhooks miss.
+> - A daily cron schedule (`0 2 * * *`) on the **Automation** page — catches anything the webhooks miss.
 
 ---
 
@@ -247,7 +248,7 @@ Copy the file, uncomment the section for your hardware, and adjust volume paths.
 
 ## GPU Acceleration
 
-Hardware-accelerated video processing for faster thumbnail generation. To check what's detected on your system, open the web UI (`http://YOUR_IP:8080`) and go to **Settings** or **Setup** — detected GPUs are listed there with device IDs, names, and types.
+Hardware-accelerated video processing for faster thumbnail generation. To check what's detected on your system, open the web UI (`http://YOUR_IP:8080`) and go to **Settings → Processing options → GPU device tuning**. Detected GPUs are listed there with device IDs, names, and types. The setup wizard shows the same list in step 4.
 
 ### Supported GPUs
 
@@ -264,7 +265,7 @@ Hardware-accelerated video processing for faster thumbnail generation. To check 
 > **NVIDIA on Windows works under Docker.** The NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so Docker Desktop using the WSL2 backend accelerates much like Linux does. Follow the [NVIDIA GPU](#nvidia-gpu) steps below — you do not need to install anything inside WSL. Treat it as best-effort: GPU detection under WSL2 is less reliable than on a native Linux host.
 
 > [!NOTE]
-> **AMD/Intel on Windows and all GPUs on macOS cannot be accelerated under Docker.** Docker Desktop runs a Linux VM, and D3D11VA (Windows AMD/Intel) and VideoToolbox (macOS) are host-OS frameworks that the VM cannot reach. Those setups process on CPU — raise **CPU Workers** in Settings to compensate. If you need GPU acceleration, run the container on a Linux host. Apple Silicon users still benefit from the native ARM64 image (no Rosetta overhead).
+> **AMD/Intel on Windows and all GPUs on macOS cannot be accelerated under Docker.** Docker Desktop runs a Linux VM, and D3D11VA (Windows AMD/Intel) and VideoToolbox (macOS) are host-OS frameworks that the VM cannot reach. Those setups process on CPU — add CPU workers in **Settings → Workers** to compensate. If you need GPU acceleration, run the container on a Linux host. Apple Silicon users still benefit from the native ARM64 image (no Rosetta overhead).
 
 ### Intel iGPU (QuickSync)
 
@@ -326,7 +327,7 @@ docker run -d \
 > **Why `NVIDIA_DRIVER_CAPABILITIES=all`?** Dolby Vision Profile 5 videos need the NVIDIA Vulkan driver to be tone-mapped; the `all` value is what makes that driver available inside the container. Without it, the app skips tone mapping for those files and their thumbnails come out with a green and purple tint. (The older `compute,video,utility` setting is fine for everything except Dolby Vision Profile 5.)
 
 > [!TIP]
-> **Multi-GPU?** Hosts with two or more NVIDIA cards are detected automatically — each card appears as a separate row in **Settings → Processing Options → GPU Configuration** with its own enable toggle, worker count, and FFmpeg thread setting. Work spreads across cards.
+> **Multi-GPU?** Hosts with two or more NVIDIA cards are detected automatically — each card appears as a separate row in **Settings → Processing options → GPU device tuning** with its own **FFmpeg threads per worker** setting. You choose which card each worker group uses in **Settings → Workers**.
 
 Docker Compose:
 
@@ -368,35 +369,28 @@ Then use the same `docker run` command as Linux, including `--gpus all`; see [NV
 
 Omit `--device /dev/dri:/dev/dri` on Windows. Under WSL2 that node is a WSLg/d3d12 stub rather than a real GPU, and passing it through can register a phantom device or muddy vendor detection.
 
-Verify by opening the web UI and checking **Settings** → **Processing Options** → **GPU Configuration**; your card should be listed with CUDA acceleration.
+Verify by opening the web UI and checking **Settings → Processing options → GPU device tuning**; your card should be listed with CUDA acceleration.
 
 > [!NOTE]
 > Treat WSL2 as best-effort. GPU vendor detection via `lspci` is unreliable inside WSL2, so the app leans on `nvidia-smi` instead and logs a note saying so. If GPU jobs misbehave, run the container on a Linux host.
 
-**AMD and Intel:** not accelerated under Docker. These rely on D3D11VA, a Windows-only framework that Docker Desktop's Linux VM cannot reach, so processing falls back to CPU. Raise **CPU Workers** in Settings to compensate, or run the container on a Linux host to use VAAPI/QuickSync.
+**AMD and Intel:** not accelerated under Docker. These rely on D3D11VA, a Windows-only framework that Docker Desktop's Linux VM cannot reach, so processing falls back to CPU. Add CPU workers in **Settings → Workers** to compensate, or run the container on a Linux host to use VAAPI/QuickSync.
 
 ### macOS
 
-Not accelerated under Docker, on either Apple Silicon or Intel. VideoToolbox is a macOS framework and Docker Desktop's Linux VM has no access to it, so processing uses CPU. Raise **CPU Workers** in Settings to compensate, or run the container on a Linux host for GPU acceleration.
+Not accelerated under Docker, on either Apple Silicon or Intel. VideoToolbox is a macOS framework and Docker Desktop's Linux VM has no access to it, so processing uses CPU. Add CPU workers in **Settings → Workers** to compensate, or run the container on a Linux host for GPU acceleration.
 
 Apple Silicon Macs do still benefit from the native ARM64 image — the container runs without Rosetta emulation overhead, which makes CPU processing meaningfully faster than an emulated x86 image.
 
 ### Worker Configuration
 
-A **worker** is a parallel slot that processes one file at a time — more workers means more files processed simultaneously, but higher CPU/GPU load.
+A **worker** is a parallel slot that processes one file at a time. More workers means more files at once, but higher CPU/GPU load.
 
-In **Settings** → **Processing Options**, the GPU panel lists all detected GPUs. Enable or disable each GPU independently and set **workers** and **FFmpeg threads** per GPU. For CPU-only mode, disable every GPU (or set workers to 0) and set **CPU Workers** to your desired value (e.g. `8`).
+Workers are set up in **worker groups** under **Settings → Workers**. Each group has a name, a resource (CPU or a specific GPU), a worker count from 1 to 32, the job types it runs (previews, intro & credits, and loudness on CPU groups only), and when it is available (always, or on a weekly schedule). For CPU-only mode, create CPU groups only.
 
-### Performance Tuning
+**Settings → Processing options → GPU device tuning** sets **FFmpeg threads per worker** for each GPU: how many CPU threads each GPU worker may use. The default is 2, and 0 means no cap.
 
-| Workers | Recommendation |
-|--------|----------------|
-| 1 GPU × 1 worker, CPU: 1 | Default (safe for all hardware) |
-| 1 GPU × 4 workers, CPU: 2 | Balanced (mid-range systems) |
-| 1 GPU × 8 workers, CPU: 4 | High-end systems |
-| 0 GPU, CPU: 8 | CPU-only |
-
-Configure worker counts, allowed jobs and hours in **Settings → Workers**; per-device FFmpeg tuning remains in **Processing Options**. Start with the defaults and increase gradually; monitor system load to find the best balance.
+Start with a few workers and increase gradually while you watch system load. The Dashboard's Workers panel shows each group's activity. **Manage groups** opens the group settings.
 
 ---
 
@@ -411,10 +405,10 @@ Two install paths: the Community Applications template (easiest) or a manual `do
 1. Run the container (CA template or `docker run` below).
 2. Open the Web UI at `http://YOUR_UNRAID_IP:8080`.
 3. Sign in with the token from `auth.json` in the app's config folder (`/mnt/user/appdata/media-preview-generator` in the example below), or set `WEB_AUTH_TOKEN` on the container.
-4. Complete the Setup Wizard — sign in with Plex, configure settings.
+4. Complete the Setup Wizard — connect a server and review the options.
 
 > [!TIP]
-> The setup wizard guides you through Plex OAuth, Emby URL + API key, or Jellyfin Quick Connect — no need to copy tokens by hand for any of the supported vendors.
+> The setup wizard guides you through Plex sign-in, Emby login or API key, or Jellyfin Quick Connect — no need to copy tokens by hand for any of the supported vendors.
 
 ### Manual Docker Run — Intel iGPU (Most Common)
 
@@ -509,7 +503,7 @@ docker run -d \
 
 **Emby or Jellyfin on Unraid** — the commands above are for Plex. For Emby, or Jellyfin in its default layout, change `/data/plex:ro` to `/data/plex:rw`, because those previews are written next to each video. See [Volume Mounts](#volume-mounts).
 
-**Network Considerations** — When completing the Setup Wizard, make sure each media server you pick is reachable from the container (not `localhost` from Unraid's perspective). Plex appears as a dropdown after OAuth sign-in; Emby and Jellyfin are connected by URL.
+**Network Considerations** — When completing the Setup Wizard, make sure each media server you pick is reachable from the container (not `localhost` from Unraid's perspective). Plex servers appear in a dropdown after sign-in; Emby and Jellyfin are connected by URL.
 
 **Check Intel GPU Exists:**
 
@@ -536,12 +530,10 @@ Plex:           /mnt/user/data/plex → /data/plex
 This container: /mnt/user/data/plex → /media      ← Different path
 ```
 
-Add path mapping:
+Add the mapping in the wizard (step 3, **Advanced**) or later in **Servers → Edit → Path mappings**:
 
-```bash
--e PLEX_VIDEOS_PATH_MAPPING=/data/plex \
--e PLEX_LOCAL_VIDEOS_PATH_MAPPING=/media \
-```
+- **Path on the server**: `/data/plex`
+- **Path in this app**: `/media`
 
 See [Path Mappings](reference.md#path-mappings) for more examples.
 
@@ -594,7 +586,7 @@ Where is the media server?
 The same logic applies whether the target is Plex (port 32400), Emby (port
 8096), or Jellyfin (port 8096). If you run more than one server, check each
 is reachable from the container independently — the Servers page shows a red
-connection pill for any server the app can't reach.
+status dot on any server card the app can't reach.
 
 ### Custom Network Example (Unraid)
 
@@ -639,7 +631,7 @@ docker rm media-preview-generator
 # Re-run your docker run command
 ```
 
-Your `/config/settings.json` persists between upgrades, so Plex auth, GPU config, and schedules come back automatically after re-running the container.
+Your `/config/settings.json` persists between upgrades, so server connections, worker groups, and schedules come back automatically after re-running the container.
 
 ### Image Tags
 

@@ -583,6 +583,7 @@
         document.getElementById('workerGroupCancel').disabled = saving;
         document.getElementById('workerGroupAdd').disabled = saving;
         document.getElementById('workerGroupAddCpu').disabled = saving;
+        document.getElementById('workerGroupAddCpu').hidden = !needsLoudnessGroup();
         if (saving) document.getElementById('workerGroupEditor').querySelectorAll('input,select,button').forEach(control => { control.disabled = true; });
         document.getElementById('workerGroupAdd').onclick = () => add(false);
         document.getElementById('workerGroupAddCpu').onclick = () => add(true);
@@ -601,6 +602,13 @@
     }
     function edit(id) {
         ensureDraft(); editing = id; renderSettings(); renderDashboard(); renderEditor(); focusEditor(id);
+    }
+
+    // Offered only when a server has loudness switched on and no enabled CPU group takes loudness jobs.
+    function needsLoudnessGroup() {
+        const wanted = (snapshot.warnings || []).some(warning => warning && warning.job_type === 'loudness');
+        const covered = (draft || snapshot.groups || []).some(group => group.enabled && group.resource === 'cpu' && group.job_types.includes('loudness'));
+        return wanted && !covered;
     }
 
     function add(loudness) {

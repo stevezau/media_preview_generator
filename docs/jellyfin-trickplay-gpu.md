@@ -12,7 +12,7 @@ Jellyfin (10.9+) makes trickplay images itself. The quickest wins are in its own
 - Try hardware decoding.
 - For HDR, turn on tone mapping in the transcoding settings.
 
-If a backlog is still too slow, you can move the work off Jellyfin. You might want it on another machine, or you might run Plex or Emby too. Media Preview Generator can write Jellyfin's native trickplay tiles from a GPU in its own Docker container. That needs Jellyfin 10.10 or newer.
+If a backlog is still too slow, you can move the work off Jellyfin. You might want it on another machine, or you might run Plex or Emby too. Media Preview Generator can write Jellyfin's native trickplay tiles from a GPU in its own Docker container. That needs Jellyfin 10.10 or newer. The tiles go next to each video, or into Jellyfin's own data folder if you want the media kept read-only.
 
 ![Jellyfin's web player mid-scrub, showing a preview thumbnail this app made](images/player-jellyfin.webp)
 
@@ -44,7 +44,7 @@ If none of these apply, the built-in is simpler. See the [comparison](comparison
 
 ## How Media Preview Generator writes trickplay
 
-It writes Jellyfin's own "saved with media" layout, next to each video:
+By default it writes Jellyfin's own "saved with media" layout, next to each video:
 
 ```text
 Movie (2010).trickplay/
@@ -53,12 +53,12 @@ Movie (2010).trickplay/
         1.jpg
 ```
 
-Tiles are written to a staging folder first, then moved into place, so Jellyfin never reads half a set. Jellyfin adopts these tiles as its own and doesn't run FFmpeg on them again. Details are in [Per-vendor output formats](multi-server.md#per-vendor-output-formats).
+Tiles are written to a staging folder first, then moved into place, so Jellyfin never reads half a set. Jellyfin adopts these tiles as its own and doesn't run FFmpeg on them again. With **Store trickplay off the media drive** on (**Servers → Edit** for the server), the same tiles go to `<Jellyfin config>/data/trickplay/<id[:2]>/<id>/320 - 10x10/` instead. Details are in [Per-vendor output formats](multi-server.md#per-vendor-output-formats).
 
 What that needs:
 
 - **Jellyfin 10.10 or newer** ([why](guides/previews-readiness.md#version)).
-- **The media folder mounted read-write** in the container, because the tiles are written beside the video. Match `PUID`/`PGID` to the media's owner.
+- **The media folder mounted read-write** in the container for the default layout, because the tiles are written beside the video. Match `PUID`/`PGID` to the media's owner. Off-media mode needs the Jellyfin config folder mounted read-write instead.
 - **Library settings:**
   - Trickplay extraction (`EnableTrickplayImageExtraction`) on.
   - "Save trickplay with media" (`SaveTrickplayWithMedia`) on.
@@ -68,7 +68,7 @@ What that needs:
 > [!WARNING]
 > Don't turn trickplay extraction off on a library. When `EnableTrickplayImageExtraction` is off, Jellyfin deletes the `.trickplay` folders on its next refresh, including ones this app wrote. The app asks you to type a confirmation before it will flip that setting.
 
-The **Setup Health** tab (Servers → Configure for the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](guides/previews-readiness.md).
+The **Setup Health** tab (**Servers → Edit** for the Jellyfin server) checks all of these and can fix them in one click. See [Setup Health](guides/previews-readiness.md).
 
 ## When you need the Media Preview Bridge plugin
 
@@ -77,9 +77,9 @@ The plugin tells Jellyfin about tiles that something else wrote ([plugin README]
 - **Tiles next to the media (the default): optional.**
   - With the plugin, new trickplay appears as soon as the tiles are written. Turn scan-time extraction off.
   - Without it, keep "Extract trickplay images during library scan" on. Jellyfin then picks the tiles up on its next library scan, or at the latest with its daily trickplay task (3 AM by default).
-- **Tiles off the media drive: required.** In this mode the app writes into Jellyfin's data folder (`<config>/data/trickplay/…`), not next to the video. It needs the plugin, Jellyfin's config folder mounted read-write in this container, and `SaveTrickplayWithMedia` off. The media itself can then stay read-only. See [off-media mode](guides/previews-readiness.md#jellyfin-config-folder).
+- **Tiles off the media drive: required.** In this mode the app writes into Jellyfin's data folder (`<config>/data/trickplay/…`), not next to the video. It needs the plugin, the **Jellyfin config folder** set to where that folder is mounted read-write in this container, and `SaveTrickplayWithMedia` off. The media itself can then stay read-only. See [off-media mode](guides/previews-readiness.md#jellyfin-config-folder).
 
-Install it with one click from the Servers page. Or add this repository in Jellyfin → **Dashboard → Plugins → Repositories**, then install **Media Preview Bridge**:
+Install it from the server's **Setup Health** tab. Or add this repository in Jellyfin → **Dashboard → Plugins → Repositories**, then install **Media Preview Bridge**:
 
 ```text
 https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
@@ -87,14 +87,14 @@ https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 
 ## Verify one file before a full library
 
-After [installing the container](getting-started.md), open **Servers → Configure → Setup Health**
-for Jellyfin. Fix the checks for the output mode you chose, then use **Manual Generation** to process
-one movie or episode. In **All jobs → Job details**, check Jellyfin's result; **Open logs and files**
+After [installing the container](getting-started.md), open **Servers → Edit → Setup Health**
+for Jellyfin. Fix the checks for the output mode you chose, then use **Process a file or folder** on the
+Dashboard to process one movie or episode. In the job's **Job details**, check Jellyfin's result; **Open logs and files**
 shows the per-file reason if it is waiting or failed. Finally, scrub the video in Jellyfin's player.
 
 If the tiles exist but the player does not show them, check plugin status, library scan timing and
 tile geometry before regenerating the whole library. These affect adoption of existing tiles;
-changing worker counts will not fix them. For remote processing, follow the
+changing worker group settings will not fix them. For remote processing, follow the
 [shared-media and output-mount checklist](multi-server.md#offload-preview-generation-to-another-machine).
 
 ## Triggering from Jellyfin

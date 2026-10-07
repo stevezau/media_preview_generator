@@ -590,15 +590,17 @@ def get_chain_attempts(chain_id):
             children.append(j)
     children.sort(key=lambda j: (j.config.get("retry_attempt", 0), j.created_at or ""))
 
-    def _duration_sec(j) -> float | None:
+    def _duration_sec(j, end_iso: str | None = None) -> float | None:
         # Wall-clock time from job creation to terminal state. Used
         # in the dropdown option label so the user can see at a glance
         # which attempt was a 30s nope vs a 5min real publish.
-        if not j.completed_at or not j.created_at:
+        # ``end_iso`` overrides completed_at: Run 1 ended when retry 1 was spawned, not when the chain finished.
+        end_value = end_iso or j.completed_at
+        if not end_value or not j.created_at:
             return None
         try:
             start = datetime.fromisoformat(j.created_at)
-            end = datetime.fromisoformat(j.completed_at)
+            end = datetime.fromisoformat(end_value)
             return max(0.0, (end - start).total_seconds())
         except (TypeError, ValueError):
             return None
@@ -670,11 +672,11 @@ def get_chain_attempts(chain_id):
             "id": chain.id,
             "retry_attempt": 0,
             "status": chain.status.value if hasattr(chain.status, "value") else str(chain.status),
-            "created_at": chain.config.get("retry_started_at") or chain.created_at,
+            "created_at": chain.created_at,
             "started_at": chain.started_at,
             "completed_at": chain.completed_at,
             "error": chain.error,
-            "duration_sec": _duration_sec(chain),
+            "duration_sec": _duration_sec(chain, end_iso=(chain.config or {}).get("retry_started_at")),
             "is_originating": True,
             "pending_servers": [],
         }

@@ -634,7 +634,6 @@ class TestLanding:
         assert panels == [
             "tour-panel tour-panel--tall" if step["height"] > 0.6 * step["width"] else "tour-panel" for step in tour
         ]
-        assert "tour-panel tour-panel--tall" in panels  # the webhook page today; the branch is live
 
     def test_quick_start_compose_is_one_service_matching_docker_run(self, site: Path) -> None:
         # docker-compose.example.yml holds three alternative services with one container name and

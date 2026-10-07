@@ -28,12 +28,12 @@ unlock the playback feature. See Plex's [Audio Track Enhancements for Video](htt
 
 ## Turning it on
 
-1. Run this app on the same machine as Plex and mount Plex's config folder locally. Plex must be running. This release
-   supports Plex **1.43.4.x** and does not support loudness through the Plex helper or a network-mounted database.
-2. On the server's **Processing → Loudness** section, switch on **Analyse loudness for this server**.
+1. Run this app on the same machine as Plex and mount Plex's config folder locally. Plex must be running. Loudness
+   supports Plex **1.43.4.x**. It does not work through the Plex helper or a network-mounted database.
+2. Under **Servers → Edit → Processing → Loudness**, switch on **Analyse loudness for this server**.
 3. On the **Libraries** tab, choose movie and TV libraries in the **Loudness** column. Both start on; music and other
    non-video libraries cannot be selected.
-4. In **Settings → Workers**, enable a CPU group that allows **Plex loudness**, with hours outside global quiet hours.
+4. In **Settings → Workers**, enable a CPU group that allows **Plex loudness**, with hours outside the **Global pause schedule**.
    One worker allows one simultaneous audio analysis. GPU-only setups must add CPU capacity explicitly.
 
 Loudness has its own opt-in; **Intro & Credits** can stay off, and its database-write confirmation is not required.
@@ -47,12 +47,12 @@ webhooks, manual library runs and scheduled preview scans. Recently Added proces
 Chapter thumbnails remain part of the Previews job; Intro & Credits and loudness are separate jobs. Follow-ups can
 appear in the queue together while waiting for the preceding jobs' first passes; they do not wait through every
 retry of those jobs. For a loudness-only backfill,
-start a **Plex loudness** job from the dashboard (**New job**), for chosen libraries or all of them. To process specific files or folders, choose **Process a file or folder**, select **Plex loudness**, and select or paste the targets. A file Plex
+start a **Plex loudness** job from the dashboard (**Start new job**), for chosen libraries or all of them. To process specific files or folders, choose **Process a file or folder**, select **Plex loudness**, and select or paste the targets. A file Plex
 hasn't added to its library yet, or met while Plex was restarting or its database busy, is checked again according to
 your retry settings. The same job row shows the countdown and attempt count; **Retry now** skips the wait.
 After retries end, unresolved files leave a failure or a completion warning when other files succeeded. The Files
 panel gives the reason. These retries are automatic and do not require review or approval.
-Jobs use eligible CPU workers and the shared priorities, job limit, pause and cancel controls. Without eligible CPU
+Jobs use eligible CPU workers and the shared priorities, job limit, pause and cancel controls. Loudness jobs default to Low priority. Without eligible CPU
 capacity a job waits, keeping its identity and work; it does not run audio analysis in a GPU worker slot. See
 [Worker groups and availability](guides.md#worker-groups-and-availability).
 
@@ -132,7 +132,7 @@ docker exec -it media-preview-generator python -m media_preview_generator.loudne
 `--db` is Plex's database as the container sees it. Add `--dry-run` to count what would be restored first.
 
 Use the original database at the same mounted location: undo refuses a copied, replaced or different database. Logs
-from older builds without database identity are refused. Records for other servers and changed audio sources are
+without database identity are refused. Records for other servers and changed audio sources are
 left alone.
 
 A track or item still holding exactly what the app wrote gets its old data back. One Plex changed since keeps

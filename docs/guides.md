@@ -47,9 +47,9 @@ When you first access the web interface, you'll be guided through a **Setup Wiza
    - **Plex** — sign in via Plex OAuth (no manual token copying), or paste a URL + token if you prefer.
    - **Emby** — enter the server URL and an API key.
    - **Jellyfin** — enter the URL and run a **Quick Connect** ceremony (or paste an API key).
-2. **Server & libraries** — finish the selected server's connection. Plex includes server and library selection; Emby/Jellyfin manage libraries later from **Servers → Configure → Libraries**.
+2. **Connect** — finish the selected server's connection. Plex includes server and library selection; Emby/Jellyfin manage libraries later from **Servers → Edit → Libraries**.
 3. **Paths** — confirm the server's output location and media path mappings. Plex needs a writable data folder for BIFs; Emby and Jellyfin's default layout need writable media. Jellyfin off-media output has its own config-mount and plugin requirements.
-4. **Processing Options** — named CPU/GPU worker groups, allowed jobs and availability, per-device FFmpeg tuning, thumbnail interval, and quality.
+4. **Options** — named CPU/GPU worker groups with allowed jobs and availability, per-device FFmpeg threads, thumbnail interval, and quality.
 5. **Security** — view or replace your access token (optional).
 
 After setup completes, you'll land on the dashboard. You can add additional servers (any vendor, any number) at any time from **Servers → Add Server** without re-running the wizard.
@@ -69,27 +69,23 @@ which server library owns the file. Use **Setup Health** and a one-file job to v
 3. Get your authentication token using [Authentication Token](getting-started.md#authentication-token)
 4. Enter the token to log in
 
-The version you're running shows under the app's name in the top bar, on every page. An orange dot beside it means a newer version is out; click the version for the release notes.
+The version you're running shows under the app's name in the top bar, on every page. A dot beside it means a newer version is out; click the version for the release notes.
 
-In the top bar, **Automation** and **Settings** open their page when clicked, and **Tools** opens the Inspector. Hover over any of them to see what's inside and jump straight there (or focus it and press the Down arrow). On a phone, tap one in the menu to list what's inside.
+The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **Tools**. Hover over **Automation**, **Settings** or **Tools** to see what's inside and jump straight there (or focus it and press the Down arrow). **Automation** and **Settings** open their page when clicked; **Tools** opens the Inspector and also holds **Logs**, **Webhook Activity** and **Run setup again**. On a phone, tap one in the menu to list what's inside.
 
 ### Dashboard Features
 
-**Connection Status** — shows every configured server (Plex, Emby, Jellyfin):
+- **System** — each media server (Plex, Emby, Jellyfin) with its connection state, the worker groups with a **−** / **+** stepper for each group's worker count, and the app version. With no server set up, a card links to the **Servers** page.
+- **Quick actions** — **Start new job**, **Process a file or folder**, **Run next schedule now**, and links to the Inspector, Webhook activity and Logs.
+- **Job statistics** — Pending, Running, Completed, Failed, Cancelled and Total tiles, an outcome bar and the next schedule.
+- **Workers** — one card per worker group, with **Pause** / **Resume** and **Manage groups** in the header.
+- **Jobs** — the job queue, with status tabs, search, filters and per-job controls.
 
-- **Connected** — server name, vendor, and available GPUs displayed
-- **Not configured** — link to the setup wizard or **Servers** page to add one
-
-**Job Management:**
-
-- **Start new jobs** — process all libraries or specific ones
-- **View progress** — real-time progress with WebSocket updates
-- **Cancel jobs** — stop running jobs
-- **Job history** — view completed/failed jobs
+**Dense worker table.** When an enabled group has 5 or more workers, the Workers panel switches to a compact table. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A group with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
 
 > [!NOTE]
 > Jobs queue with priority (1 = high, 2 = normal, 3 = low). The dispatcher runs
-> up to the configured concurrent-job cap; extra jobs sit in **Pending** and the
+> up to the configured concurrent-job cap (**Settings → Processing options → Max concurrent jobs**); extra jobs sit in **Pending** and the
 > gate releases them in priority order as slots free up. Manual, webhook, and
 > scheduled jobs all share the same gate. To hard-stop everything, use
 > **Pause** (in the Workers header) — the global pause is persisted and survives restarts.
@@ -103,6 +99,7 @@ In the top bar, **Automation** and **Settings** open their page when clicked, an
 Among eligible pending jobs, admission follows priority, then creation time, including after a restart.
 Jobs held by a pause, an unfinished dependency, or a retry timer let other eligible jobs pass.
 Changing a waiting job's priority updates its admission order; it does not interrupt files already processing.
+Change a job's priority from the **Priority** menu in its queue row.
 
 Admission also accounts for the open workers compatible with each job type. Excess jobs of the same type and priority
 wait without consuming active slots, and eligible work of another type can pass them. Higher-priority work
@@ -116,7 +113,7 @@ pause. A finished job or a changed selection can start a new run.
 
 ### Choosing media for a library scan
 
-In **Start New Job**, select your libraries and open **Filter media**. The
+In **Start new job**, select your libraries and open **Filter media**. The
 controls follow your library selection:
 
 - **Added to library** applies to all selected media. Choose any time, the last
@@ -137,7 +134,7 @@ previews in older seasons do not make those older seasons eligible.
 
 The summary shows active restrictions. **Clear** restores all selected
 media; changing to movie-only or TV-only libraries clears restrictions for the
-other type. **Generate missing previews** remains the default processing mode.
+other type. **Missing only** remains the default **Processing Mode**.
 
 Use **Processing Order** to decide the queue order independently of these
 filters. Newest/oldest refer to the library-added date and apply within each
@@ -151,27 +148,21 @@ continue to use their own selection rules.
 
 ### Letting new imports jump the queue
 
-A full-library regeneration can run for hours. **Settings → Processing Options →
-Incoming job priority** controls the priority stamped on the jobs this app
+A full-library regeneration can run for hours. **Settings → Processing options →
+Job execution → Incoming job priority** controls the priority stamped on the jobs this app
 creates for itself when new media lands — webhook deliveries from
 Sonarr/Radarr/Plex/Emby/Jellyfin, and **Recently Added** sweeps. It defaults to
 **High**, so a freshly imported episode is processed within one file of arriving
 even while a full scan is running.
 
-Manual and scheduled full scans keep whatever priority you gave them (Normal by
-default), which is what leaves room for the High jobs to overtake.
+Manual and scheduled full scans keep whatever priority you gave them. A new
+**Previews** job starts at **Normal**; **Intro & Credits** and **Plex loudness**
+jobs start at **Low**. That leaves room for the High jobs to overtake.
 
-A schedule only follows this setting while its own **Job Priority** is
+A schedule only follows the incoming setting while its own **Job Priority** is
 **Default (from Settings)** — the value new schedules start on. Pick High,
 Normal, or Low there to pin that schedule instead, and the global setting stops
 applying to it.
-
-Recently Added schedules created before this option existed are switched to
-**Default (from Settings)** automatically on first start after upgrading. Those
-carried an explicit *Normal* only because the old dialog had no way to say "no
-pin", so there was no choice to preserve. Schedules you had deliberately set to
-High or Low keep their setting, and so does any schedule you pin after
-upgrading — the migration runs once.
 
 Set the global setting to **Normal** to go back to strict
 first-come-first-served ordering. The reserved slot is independent of this
@@ -186,23 +177,25 @@ The **Process a file or folder** button runs **Previews**, **Intro & Credits**, 
 - **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.
 - **Or paste paths manually** — the collapsible box still accepts one absolute container path per line, for power users or scripts.
 
-Each pick becomes a removable chip; **Start Job** processes the selected targets and any pasted paths. Empty selections cannot start a job. For previews, **Publish to which server?** scopes both search and publishing. For Intro & Credits and loudness, **Search on** only limits search results: processing uses the enabled owning servers. Loudness requires an eligible Plex server and CPU worker group. Regeneration applies to previews; Intro & Credits can re-check completed work. Loudness has no force-regeneration option.
+Each pick becomes a removable chip; the start button processes the selected targets and any pasted paths. Empty selections cannot start a job. For previews, **Publish to** scopes both search and publishing. For Intro & Credits and loudness, **Search on** only limits search results: processing uses the enabled owning servers. Loudness requires an eligible Plex server and CPU worker group. Regeneration applies to previews; Intro & Credits can re-check completed work. Loudness has no force-regeneration option.
 
 **Job details:**
 
 **Jobs** opens on **Unfinished** work: pending and running jobs, including manually paused jobs and retry heads.
-Use the status tabs to select **All** (all jobs and history), **Completed**, **Failed** or **Cancelled** when reviewing finished work. **Job details** expands a job in place.
-**Results recorded so far** groups outcomes by server, with file issues, detection sources and CPU fallback
+The status tabs are **Unfinished**, **Running**, **Pending**, **Completed**, **Failed**, **Cancelled**, **Chapter warnings** (only when a job has them) and **All** (all jobs and history). Each shows a count where one applies. The search box finds jobs by title or ID; **Filters** adds server, library and job type. Search and filters apply before pagination; job statistics stay totals for all visible jobs. The trash menu clears finished jobs by status.
+
+Row buttons: **View logs**, **Pause** / **Resume**, **Retry now** (skips a retry wait; see [Retries and attempts](#retries-and-attempts)), **Fire now** (skips a webhook batch's wait), **Cancel**. Finished jobs offer **View logs**, **Re-run** and **Delete**. Retry rows distinguish files **checked** from a completed job. Intro & Credits and loudness companions are indented beneath their originating job when both are on the current page.
+
+**View logs** opens **Job Details** with **Logs** and **Files** tabs. **Results by server** groups outcomes by server, with file issues, detection sources and CPU fallback
 information when available. A pending or retried job may already have saved results; these counts are not a
 claim that the current queue entry has finished. **Current activity** shows the current item when the job
-provides it. **Open logs and files** opens the existing detailed record for per-file results and saved reasons.
-An expanded queue row shows up to five requested paths. **View all** opens the Files tab, where **Requested paths** lists the complete selection with search and pagination, separately from **Recorded outcomes**. Requested paths do not imply completed processing. File Inspector links open the Inspector tool in a new tab.
-The full worker grid remains above the list, grouped by worker group and including idle workers. Each group has its own **−** and **+** stepper for its worker count; the change is saved straight away, and lowering it lets current files finish first. The status tabs above the list (**Unfinished**, **Running**, **Pending**, **Completed**, **Failed**, **Cancelled**, and **Chapter warnings** when any job has them) each show a count where one applies; pick one to filter the list. **All** shows all jobs and history. Queue search and status filters apply before pagination; job statistics remain totals for all visible jobs. Retry rows distinguish files **checked** from a completed job. Intro & Credits and loudness companions are indented beneath their originating job when both are on the current page.
+provides it. The **Files** tab lists **Recorded outcomes** and **Requested paths** (the complete selection, with search and pagination). Requested paths do not imply completed processing. File Inspector links open the Inspector tool in a new tab.
+An expanded queue row shows up to five requested paths; **View all** opens the Files tab.
 
 **Pause / Resume (global):**
 
 - **Pause** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process stop where they are and carry on from there when you resume (nothing is killed or lost). Use this to cap bandwidth or pause overnight.
-- **Resume** — Clears your manual global pause. Quiet hours can still hold processing until their window ends.
+- **Resume** — Clears your manual global pause. A [global pause schedule](#global-pause-schedule) window can still hold processing until it ends.
 - One global control sits in the **Workers** header, beside **Manage groups**. **Pause** shows while there is work to hold; **Resume** shows whenever processing is paused. State is persisted and survives restarts.
 - Each pending or running job has its own **Pause** and **Resume**, including Previews, Intro & Credits and loudness.
   Pausing one job does not pause other jobs. Manual and schedule holds are independent: resuming by hand cannot
@@ -211,14 +204,15 @@ The full worker grid remains above the list, grouped by worker group and includi
 
 **Scheduling:**
 
-The Dashboard shows a compact "Schedules" teaser with the next upcoming run and a total count. Full schedule management lives on the **Automation** page, under the **Schedules** tab (`/automation#schedules`, also linked from the top nav):
+The Dashboard shows the next scheduled run in **Job statistics**, and **Run next schedule now** in **Quick actions**. Full schedule management lives on the **Automation** page, under **Schedules** (`/automation#schedules`, also linked from the top nav). **Add Schedule** asks for:
 
-- **Cron schedules** — set up recurring processing
-- **Interval-based** — run every X minutes
-- **Per-library** — schedule specific libraries
-- **Scan mode** — each schedule is either a *Full library scan* (default) or a *Recently added only* scan (see [Auto-trigger from Plex](#auto-trigger-from-plex-no-sonarrradarr))
+- **What to run** — **Full library scan**, **Recently added only** (see [Auto-trigger from Plex](#auto-trigger-from-plex-no-sonarrradarr)) or **Intro & Credits**
+- **Schedule type** — **Specific Time**, **Interval** or **Cron Expression**
+- **Server and libraries** — one server or all, and specific libraries
+- **Stop time** (optional) — pauses the schedule's running job at that time of day
+- **Job Priority** and **Processing Order**, plus the same media filters as **Start new job**
 
-> **Legacy URL note:** `/schedules` and `/webhooks` still work — they 302-redirect to `/automation#schedules` and `/automation#webhooks` respectively, so existing bookmarks and shared links keep working.
+> **Legacy URL note:** `/schedules` and `/webhooks` still work: they redirect to the Schedules and Triggers tabs of `/automation`, so bookmarks and shared links keep working.
 
 ### Logs and webhook activity
 
@@ -237,50 +231,51 @@ means history could not be fetched. Neither proves that no webhook was sent.
 
 ### Settings Page
 
-Access settings at `/settings` to manage. On a wide screen a side menu (**Run**, **System**, **Info**) jumps to each section and highlights the one in view; on a phone the same sections are in a picker at the top.
+Open **Settings** (`/settings`). On a wide screen a side menu groups the sections (**Run**, **System**, **Info**) and highlights the one in view; on a phone the same sections are in a picker at the top.
 
-
-- **Plex Connection** — re-authenticate, test connection
-- **Libraries** — select which libraries to process
-- **Path Mappings** — media path, Plex videos path, local videos path
 - **Workers** — named groups, job permissions, counts and availability
-- **Global pause** — optional quiet hours that pause all processing
-- **Processing Options** — per-device FFmpeg tuning, job limits, thumbnail interval and quality
+- **Global pause schedule** — weekly windows when all processing pauses
+- **Processing options** — max concurrent jobs, incoming job priority, retry policy, restart recovery, GPU device tuning, library scanning, thumbnails and HDR tone mapping, smart caching across servers
+- **Intro & Credits** — detection settings shared by every server
+- **Logging** — log level, log file rotation, job history
+- **Authentication**, **Backups** and **About**
+
+A server's connection, libraries and path mappings are on the **Servers** page (**Configure**).
 
 > For per-server settings audits (Plex FSEvent flags, Jellyfin trickplay flags,
 > Media Preview Bridge plugin presence, Plex config folder writability, path
-> mappings), open **Servers → Configure → Setup Health**. Full per-check reference:
+> mappings), open **Servers → Edit → Setup Health**. Full per-check reference:
 > [Setup Health guide](guides/previews-readiness.md).
 
-Most Settings controls and the Automation page's **Triggers** tab **save automatically as you edit**. Worker group edits use **Apply changes**, and global quiet hours have their own **Save** button. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` / `Saved at HH:MM` so you can tell the change landed. If a save fails (e.g. the backend is down), the indicator shows an error and you can click it to retry.
+Most Settings controls and the Automation page's **Triggers** settings **save automatically as you edit**. Worker group edits use **Apply group changes**, and the Global pause schedule has its own **Save**. Toggles, sliders, and dropdowns commit immediately; text fields commit on blur (or ~1 s after you stop typing). A small status indicator in the page header shows `Saving…` and then `Saved`.
 
 ### Worker groups and availability
 
-Open **Settings → Workers** to choose which jobs can use your hardware. A group has a name, a CPU or detected GPU,
-its number of workers, allowed job types, and either **Always** or weekly availability. Start with one group per
-resource; add groups when different jobs need different counts or hours. Use **Edit** for the details, then
-**Apply changes** to save the whole group configuration. The editor opens directly below the selected group (inline, not in a dialog). For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph that updates as you change the windows. An edit in another Settings session
-causes a conflict instead of silently overwriting the newer settings; discard and reload before applying again.
+Open **Settings → Workers** (or **Manage groups** in the Dashboard's Workers header) to choose which jobs can use your hardware. A group has:
+
+- **Name**
+- **Resource** — CPU or one detected GPU. A group runs on one device; add another group for a second GPU.
+- **Workers** — 1 to 32. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
+- **Jobs allowed on this group** — **Video previews**, **Intro & Credits**, **Plex loudness**.
+- **Availability** — **Always available**, or **Weekly hours** with one or more time windows.
+
+Start with one group per resource; add groups when different jobs need different counts or hours. **Add group**, **Add CPU group for loudness**, the enable switch, **Edit**, **Duplicate group** and **Remove group** manage them. **Edit** opens the editor inline under the group. For a group with weekly hours, **This group's week** draws its active hours as a 7-day graph that updates as you change the windows. **Apply group changes** saves all edits at once; **Discard changes** drops them. If another Settings session changed the groups first, applying shows a conflict instead of overwriting; discard and reload before editing again.
 
 CPU groups can run **Video previews**, **Intro & Credits** and **Plex loudness**. GPU groups can run previews and
 Intro & Credits; loudness requires CPU workers. Chapters stay part of Previews. These permissions select jobs:
-a GPU video job can still use CPU stages or CPU fallback. Per-device FFmpeg tuning stays in Processing Options.
-A worker is a simultaneous file operation, not a CPU core or a fixed percentage of CPU usage.
+a GPU video job can still use CPU stages or CPU fallback. FFmpeg threads per GPU worker are set under **Processing options → GPU device tuning**.
 
 For example, keep four GPU workers for video jobs and add one CPU worker allowing only loudness. That permits one
 audio analysis at a time without assigning video jobs to that CPU group. The normal concurrent-job limit still
 applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU group.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
-The dashboard shows group activity and has +/- steppers for each group's worker count. Use **Manage groups** in the Workers header to open the group controls in Settings; groups are edited only there:
+On the Dashboard, each group's **−** / **+** stepper in the **System** card changes its worker count and saves straight away. A disabled group shows **Enable** instead. A decrease retires workers after their current files finish; an increase can restore workers that were about to retire. The stepper never goes below 1; disable the group to use zero workers. Disabling a group remembers its saved count for when you enable it again.
 
-- Change the group's worker count or Enabled setting, then **Apply changes**. A decrease retires workers from that group after their current files finish; an increase can restore compatible workers that were about to retire. Disabling a group remembers its saved count for when you enable it again.
-- **Desired** is the enabled group's saved count. **Available**, **Busy** and **Finishing** show its current
-  activity; they can differ while hours close or capacity shrinks. Disabled and outside-hours groups are distinct.
-  No workers means waiting for capacity, not a global pause: current files can still finish.
+- A group's card shows its state: **Available**, **Workers busy**, **Outside hours**, **Finishing current files** or **Globally paused**. No open workers means waiting for capacity, not a global pause: current files can still finish.
 - Counts from different open groups add, including groups on the same device. Overlapping windows within one group
   do not multiply its workers. Finishing files still use the shared resource budget, so a newly opened group may
-  wait for them. The weekly peak is limited to 32 CPU and 32 GPU workers across groups.
+  wait for them. The weekly peak is limited to 32 CPU and 32 GPU workers across groups; the editor shows the current and peak totals.
 
 There are three separate timing controls:
 
@@ -289,26 +284,27 @@ There are three separate timing controls:
 2. **Worker availability**, on **Settings → Workers**, controls new file starts. Closing a window lets current
    files finish; it does not create jobs or promise silence at the closing time. Select the days a window starts:
    Monday 23:00–07:00 means Monday night through Tuesday morning, in the displayed app timezone.
-3. **Global quiet hours**, on **Settings → Global pause**, pause all processing, including active files. Scheduled
-   ticks during global pause are skipped, with no catch-up promise; manual and webhook requests can queue.
-   Opening a worker window or ending quiet hours never clears a manual **Pause all**.
+3. The **Global pause schedule**, on **Settings → Global pause schedule**, pauses all processing, including active files.
+   Opening a worker window or ending a pause window never clears a manual **Pause**.
 
 A job distinguishes no compatible configured workers, workers outside their hours, busy workers, and a full job
-limit. Resource waiting does not spend retries. A waiting job keeps its ID and saved remaining work; when capacity
-returns it rechecks unfinished files and continues with its settled counts and force settings. These intentional
-capacity waits survive restart even when automatic requeue after a crash is off; manual and schedule holds remain
-in place. The automatic requeue setting still controls ordinary work interrupted while running. Recovery can
-recheck a file whose final result was not saved; it does not promise byte-level FFmpeg continuation.
-Repeated schedule ticks can share an unstarted pending request for the same scope; Recently Added also widens its
-lookback when needed. A started or parked pass is not silently expanded. Manual runs remain separate, and webhook
-batching keeps its existing rules.
+limit, and its queue row says which. A waiting job keeps its ID and its unfinished files, and continues when capacity
+returns.
 
-**Upgrading:** existing CPU/GPU allocations become Always groups, preserving an explicit CPU count of zero. Newly
-detected GPUs are offered for selection; they do not silently add capacity. An explicitly empty group list stays
-empty. The old automatic pause for zero workers is replaced by resource waiting. A known automatic hold is cleared;
-a saved pause of uncertain origin is kept as manual. Existing overnight quiet hours are split where necessary to
-preserve their previous effective weekdays; new windows use start days. Review the migrated groups and quiet hours
-in Settings. No Plex preference or job schedule is enabled by this migration.
+### Global pause schedule
+
+**Settings → Global pause schedule** pauses all processing, including files already running, during weekly windows. Turn it on with the toggle (labelled **Enable quiet hours**), then **Add window**. Each window has **Start days** (every day, weekdays, weekends or chosen days), **Pause at** and **Resume at**, in the app's timezone. Days select when a window starts: Monday 23:00–07:00 ends Tuesday morning. **Pause windows this week** draws the windows as a week graph. The section has its own **Save**, and windows are saved but not applied while the toggle is off.
+
+While a window is active, the Dashboard shows **Paused**. Scheduled runs that come due are skipped and not caught up later; manual and webhook jobs can queue. A manual **Pause** stays until you **Resume**, even after a window ends.
+
+### Retries and attempts
+
+**Settings → Processing options → Retry policy** has two controls:
+
+- **Retry count** — 0 to 10, default 5. **0** turns retries off.
+- **Initial retry delay** — 10 to 300 seconds, default 30. At 30 s the waits are 1 min, 2 min, 5 min, 15 min, then 1 h each; other values scale those waits.
+
+A file is retried when the media server hasn't indexed it yet or a per-file failure is recoverable. A job and its retries stay one row in the queue (a retry chain). While it retries, the row shows a **Retry N/M** chip and **Waiting to retry** with a countdown. **Retry now** (on the row, or in **Job Details**) skips the wait. In **Job Details**, **Attempts** lists each run, such as "1 original + 2 retries", so a retry count of 5 allows up to 6 runs. Pick an attempt to read its log; **Files** combines the results of all runs. When the retries run out, the job reports the files that were still missing, and the next scheduled scan picks them up.
 
 ### Plex chapter thumbnails
 
@@ -321,7 +317,7 @@ HDR chapter images are tone-mapped to SDR and converted to full-range JPEG sampl
 that no frame exists more than one second beyond the source's known duration, the result identifies an invalid
 chapter timestamp rather than repeatedly retrying it. The app preserves the source and Plex's chapter timings.
 
-1. Open **Servers → your Plex → Configure → Processing → Chapter thumbnails**, enable **Generate chapter thumbnails**, and save. It is off by
+1. Open **Servers → your Plex → Edit → Processing → Chapter thumbnails**, enable **Generate chapter thumbnails**, and save. It is off by
    default. Enabling it lets this app write chapter images and update their references in Plex's database; it does
    not change your videos, create chapters, or change chapter times.
 2. Open **Setup Health**. The app needs a supported, positively identified Plex database on the same machine, or a
@@ -337,7 +333,7 @@ chapter timestamp rather than repeatedly retrying it. The app preserves the sour
 Worker cards show the chapter count and percentage as images are checked or attempted, followed by
 **Registering with Plex**. The percentage measures image work; **Ready** confirms registration succeeded.
 Chapter extraction runs on CPU even when the assigned slot is named GPU Worker. Failed image attempts count toward
-progress and are shown separately. Older running workers without chapter counts show an activity indicator instead.
+progress and are shown separately.
 
 The job's **Files** panel reports scrubber and chapter results separately:
 
@@ -345,16 +341,12 @@ The job's **Files** panel reports scrubber and chapter results separately:
 - **Waiting for Plex**: Plex has not indexed the file or analyzed its chapters yet. The detail names what is missing.
 - **Failed**: chapter extraction or registration failed. The detail gives the error, even when a retry is allowed.
 - **No chapters**: there are no chapter images to generate.
-- **Incomplete**: an older job recorded unfinished chapter work without distinguishing waiting from failure. Read its
-  saved detail for the reason.
 
 Server summaries count scrubber and chapter results separately. **Scrubber already existed** can appear beside
 **Chapters updated** when a run creates chapter images or repairs their Plex references while reusing the scrubber.
 **Chapters already existed** means those images and references were already current. Counts are files, not individual images.
-**Chapters waiting for Plex** and **Chapters failed** name the remaining work. Older results can show **Chapters ready**
-without update history, or **Chapters incomplete** without a precise waiting/failure classification; open **Files** for details.
-For older job summaries without chapter counts, **Previews updated** reports how many files completed publication.
-It can appear beside **Scrubber already existed**, but does not identify which preview output changed.
+**Chapters waiting for Plex** and **Chapters failed** name the remaining work.
+Open **Files** for per-file details.
 The job's retry details show whether another attempt is actually scheduled. Retry eligibility depends on the failure
 and your retry policy. Chapter retries reuse completed output, so they do not need to regenerate a current scrubber
 preview.
@@ -419,7 +411,7 @@ once that GPU finishes a file on its own again. A finished job's summary
 says how many of its files ran on the CPU because the GPU failed.
 
 The worker is busy on CPU while the retry runs.  If you have a lot of
-content that never decodes on the GPU, set **CPU Workers > 0** so that
+content that never decodes on the GPU, add a CPU worker group (**Settings → Workers**) so that
 content routes directly to dedicated CPU workers from the main queue
 instead of blocking a GPU worker each time.
 
@@ -446,21 +438,23 @@ Settings are saved to `/config/settings.json` and persist across restarts.
 
 ### Automation Page
 
-The **Automation** page (`/automation`) hosts two tabs:
+The **Automation** page (`/automation`) hosts two tabs, switched from its side menu:
 
-- **Triggers** — incoming webhooks from Radarr, Sonarr, Tdarr / custom scripts, and Plex Direct. Also houses the Recently Added Scanner shortcut. This is where you wire the app up to whatever puts media into Plex.
-- **Schedules** — recurring job starts and optional stops (cron / interval / specific time). Worker hours and global quiet hours live in Settings; see [Worker groups and availability](#worker-groups-and-availability).
+- **Triggers** — incoming webhooks from Radarr, Sonarr and Sportarr, Tdarr / FileFlows / custom scripts, and how to hook up Plex, Emby and Jellyfin. This is where you wire the app up to whatever puts media into your servers.
+- **Schedules** — recurring job starts and optional stops (cron / interval / specific time). A link jumps to the [global pause schedule](#global-pause-schedule); worker hours live in Settings, see [Worker groups and availability](#worker-groups-and-availability).
 
 The Triggers tab includes:
 
-- **Enable/Disable** — master toggle for webhook processing
-- **Webhook URLs** — copy-ready URLs for Radarr, Sonarr, and the generic Custom webhook
-- **Delay** — seconds to wait after import (gives Plex time to index)
-- **Webhook Secret** — optional dedicated authentication token
+- **Publish to which server?** — scope the copy-ready *arr and custom webhook URLs to one server
+- **Enable webhook processing** — master toggle for webhook processing
+- **Delay before processing** — seconds to wait after import (gives the server time to index)
+- **Webhook Secret** — optional dedicated authentication token (**Generate**)
 - **Setup instructions** — step-by-step guides for each source
-- **Activity Log** — recent webhook events with status badges
+- **View webhook activity** — a link to **Tools → Webhook Activity**
 
-The legacy `/webhooks` and `/schedules` URLs still work — they 302-redirect to the Triggers and Schedules tabs on the new page.
+The Plex direct webhook and the Recently Added scanner for a Plex server are set up under **Servers → Edit → Webhook & Scanner**.
+
+The legacy `/webhooks` and `/schedules` URLs still work — they redirect to the Triggers and Schedules tabs.
 
 ### Inspector
 
@@ -627,7 +621,7 @@ The source-specific URLs batch imports as described below. The universal `/incom
 1. Radarr/Sonarr imports a file (or an external tool sends a custom webhook) and a POST is sent to this app.
 2. The app **queues** the file and starts (or resets) a timer. Imports from the same source (Radarr, Sonarr, or Custom) and server selection are batched together.
 3. Each accepted new file resets the timer using the URL's `delay` parameter, or the global delay if omitted. A batch becomes ready when that wait expires or it reaches its maximum age, whichever comes first. The maximum age is **10 minutes**, extended to the longest delay accepted into the batch if that exceeds 10 minutes, measured from its first file. Files arriving once that limit is reached start the next batch. Processing also waits for an available worker and honors the global pause.
-4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m → 15 m → 60 m by default; **Settings → Retry policy** sets how many retries run and scales the waits), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
+4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m → 15 m → 60 m by default; **Settings → Processing options → Retry policy** sets how many retries run and scales the waits), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
 6. A file that a newer file has already replaced when its job runs isn't retried: Sonarr or Radarr imported the same episode or movie again under a new name, and the new file is in the same folder, or in that folder on another disk of the same library. The Files panel shows it as **Gone from disk**, in preview and Intro & Credits jobs alike, and the newer file is processed on its own. Any other missing file is retried as usual.
 
@@ -685,7 +679,7 @@ http://your-server:8080/api/webhooks/radarr?server_id=plex-main&delay=30
 
 Omitting `delay` uses the current global setting on **every ingestion URL**: `/radarr`, `/sonarr`, `/sportarr`, `/custom`, `/plex`, `/incoming`, and `/server/<server_id>` under `/api/webhooks`. For example, a Plex, Emby, or Jellyfin URL can use `/api/webhooks/incoming?token=YOUR_TOKEN&delay=30`.
 
-**Existing universal URL users:** `/incoming` and `/server/<server_id>` previously started jobs immediately. They now use **Delay before processing** by default. No URL change is required; append `delay=1` for the shortest supported wait. These routes keep one job per resolved file version, each with its own deadline. The wait starts when the job is queued; any media-server lookup needed to resolve the incoming item happens first. Later notifications do not extend another job's wait, and ignored duplicates do not create a new job.
+`/incoming` and `/server/<server_id>` use **Delay before processing** by default; append `delay=1` for the shortest supported wait. These routes keep one job per resolved file version, each with its own deadline. The wait starts when the job is queued; any media-server lookup needed to resolve the incoming item happens first. Later notifications do not extend another job's wait, and ignored duplicates do not create a new job.
 
 On the source-specific `/radarr`, `/sonarr`, `/sportarr`, `/custom`, and legacy `/plex` URLs, the latest accepted new file sets the wait for its whole source/server batch, subject to the batch's maximum age. That age limit is the greater of 10 minutes and the longest delay accepted into the batch, measured from its first file. Thus `delay=3600` allows a full hour for a new batch without letting later imports postpone it forever. Files joining near the age limit can receive less than the full delay. If requests in one batch use different delays, the latest request's value sets the timer; keep the URL consistent for predictable batching. Duplicate notifications ignored by deduplication do not reset the timer.
 
@@ -782,23 +776,22 @@ curl -X POST "http://your-server:8080/api/webhooks/custom" \
 ```
 
 ### Configuration
-All settings are configurable from the **Automation** page → **Triggers** tab in the web UI.
+These settings are on the **Automation** page → **Triggers** tab in the web UI, under **Settings**. They save as you edit.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Enable Webhooks** | On | Master toggle |
+| **Enable webhook processing** | On | Master toggle |
 | **Delay before processing** | 60s | Default initial wait for every webhook URL (slider: 10–300 s); override per request with `delay=1` through `delay=3600`. Universal/per-server routes wait per job. Source-specific routes reset their batch timer on new files, with a maximum age of the greater of 10 minutes and the longest accepted delay. |
 | **Webhook Secret** | *(empty)* | Dedicated authentication token for webhooks |
 
-Webhook processing uses your Settings library selection. If a webhook path belongs to an unchecked library, it is skipped.
+Webhook processing uses each server's library selection (**Servers → Edit → Libraries**). If a webhook path belongs to a library that isn't selected, it is skipped.
 
 ### Webhook Secret
 
 By default, webhooks authenticate using your main API token. You can optionally configure a **dedicated webhook secret** for better security isolation:
 
-1. On the Automation page (Triggers tab), click **Generate** next to the secret field
-2. Click **Save Changes**
-3. Use the generated secret as the token: in Radarr/Sonarr, either put it in **Password** (leave Username empty) or in the **X-Auth-Token** header if your form has a Headers section.
+1. On the Automation page (Triggers tab), click **Generate** next to the secret field (it saves automatically)
+2. Use the generated secret as the token: in Radarr/Sonarr, either put it in **Password** (leave Username empty) or in the **X-Auth-Token** header if your form has a Headers section.
 
 ### Batching and the delay
 
@@ -808,13 +801,13 @@ On the source-specific URLs, when multiple files are imported in quick successio
 
 **Example (long import):** With the default 60s delay, Sonarr imports 300 episodes one every 10 seconds (50 minutes in all). The batch runs 10 minutes after its first episode with the ~60 episodes it has by then, and the next episode opens a new batch. A file that joined a batch just before its 10 minutes were up gets less than the full delay; if the server hasn't indexed it yet, it's retried automatically.
 
-**Viewing files in a batch:** On the **Dashboard**, jobs from webhooks show a label like "Sonarr: 3 files". Click the **+** (chevron) next to the label to expand and see the list of files. On the **Automation** page (Triggers tab), **Activity Log** rows for triggered batches include a chevron; click it to expand and see the files in that batch.
+**Viewing files in a batch:** In the **Jobs** queue, a webhook job shows a label like "Sonarr: 3 files"; **Show files** expands the list. **Tools → Webhook Activity** lists each delivery and its outcome.
 
 ---
 
 ## Auto-trigger from Plex (no Sonarr/Radarr)
 
-For media you add to Plex **manually** — copying files into a watched folder, importing through Plex itself, or using any tool other than Sonarr/Radarr/Tdarr — there are two built-in ways to auto-trigger preview generation. Both live on the **Automation** page's **Triggers** tab as dedicated sections (**Plex Direct** and **Recently Added Scanner** in the sidebar), and both feed into the same job pipeline as the existing webhooks.
+For media you add to Plex **manually** — copying files into a watched folder, importing through Plex itself, or using any tool other than Sonarr/Radarr/Tdarr — there are two built-in ways to auto-trigger preview generation. Both live under **Servers → your Plex → Edit → Webhook & Scanner** (**Plex Direct Webhook** and **Recently Added Scanner**), and both feed into the same job pipeline as the existing webhooks.
 
 > [!IMPORTANT]
 > **Both options trigger only on _new_ library items.** When Sonarr or Radarr **upgrades** an existing file in place, Plex keeps the same library item, so neither option will see it. Use the existing Sonarr/Radarr webhooks (which fire on `On Upgrade`) for that case.
@@ -830,15 +823,14 @@ This uses Plex's built-in webhook feature. The app calls Plex's account API to r
 
 **Setup:**
 
-1. Open the web UI → **Automation** → **Triggers** tab and scroll to (or click) the **Plex Direct** sidebar link.
-2. The URL field is pre-filled with the URL you're currently accessing the app at (typically correct for same-host setups). If your Plex Media Server is on a different host or behind a different network/proxy, override it with a URL Plex can reach.
-3. Click **Test reachability** to verify the URL is routable. The app self-POSTs a synthetic ping; success means Plex should also be able to deliver.
-4. Click **Register with Plex**. If you're missing Plex Pass, the UI will tell you and disable the button.
-5. (Optional) Confirm by checking Plex Web → Settings → Webhooks — your URL should appear there.
+1. Open **Servers → your Plex → Edit → Webhook & Scanner**.
+2. The URL field is pre-filled with the URL you're currently accessing the app at (typically correct for same-host setups). If your Plex Media Server is on a different host or behind a different network/proxy, override it with a URL Plex can reach. It must be reachable from your Plex Media Server, not just your browser.
+3. Click **Register with Plex**. If your account has no Plex Pass, the page says so.
+4. (Optional) Confirm by checking Plex Web → Settings → Webhooks — your URL should appear there. **Remove from Plex** unregisters it.
 
 **How it works at runtime:** Plex POSTs a `library.new` event to `/api/webhooks/plex` whenever a new item is added. The app filters out everything else (`media.play`, `media.rate`, etc.), pulls the file paths from `Metadata.Media[].Part[].file` if present, otherwise looks the item up by `ratingKey`, and feeds the paths into the same debounce → batch → process pipeline as Radarr/Sonarr.
 
-**How auth works:** Plex's webhook UI doesn't allow custom headers or HTTP Basic credentials, so there's no way to put an `X-Auth-Token` header on the requests Plex sends. Instead, the **Register with Plex** button appends your webhook secret (or API token) to the URL Plex stores as a `?token=…` query parameter. When Plex POSTs to that URL, the endpoint validates the query token the same way it validates header tokens from Radarr/Sonarr. **If you rotate the webhook secret**, click **Re-register with Plex** (or just save settings — the app auto-re-registers on secret change) so Plex picks up the new value.
+**How auth works:** Plex's webhook UI doesn't allow custom headers or HTTP Basic credentials, so there's no way to put an `X-Auth-Token` header on the requests Plex sends. Instead, the **Register with Plex** button appends your webhook secret (or API token) to the URL Plex stores as a `?token=…` query parameter. When Plex POSTs to that URL, the endpoint validates the query token the same way it validates header tokens from Radarr/Sonarr. **If you rotate the webhook secret**, click **Re-register with Plex** (or just save the new secret — the app auto-re-registers on secret change) so Plex picks up the new value.
 
 ### Option B — Recently Added scanner (universal)
 
@@ -846,23 +838,16 @@ A scheduled poll for items where Plex's `addedAt` falls within a configured look
 
 **The scanner is a first-class schedule type.**  You create, edit, enable, disable, and delete Recently Added scanners through the same Schedules UI as any other scheduled job — and you can create **multiple scanners** with different libraries, intervals, or lookback windows.  For example: scan Movies every 15 minutes with a 1-hour lookback, and your 4K library every 6 hours with a 24-hour lookback.
 
-**Quick start (one click):**
+**Set one up:**
 
-1. Open the web UI → **Automation** → **Triggers** tab → **Recently Added Scanner** (sidebar link).
-2. Click **Create default scanner**.  A schedule is created with sensible defaults: runs every **15 minutes**, lookback window **1 hour**, all libraries.
-3. That's it.  You can stop here, or continue to customize it.
-
-**Customize or add more scanners:**
-
-1. Click **Manage in Schedules tab** on the scanner card, or switch to the **Schedules** tab directly.
-2. Click **Add Schedule** (or **Edit** on an existing scanner).
-3. In the modal, choose **Scan mode → Recently added only**.  The Schedule Type field defaults to Interval; pick your frequency.
-4. Choose a **Lookback window** — 15 min / 30 min / 1 hour (default) / 2 hours / 6 hours / 24 hours / 3 days / 7 days.
-5. Pick a **Library** (or leave as "All Libraries") and click **Create** / **Save**.
+1. Open **Automation → Schedules** and click **Add Schedule** (or **Edit** on an existing scanner). The **Recently Added Scanner** card under **Servers → Edit → Webhook & Scanner** has **Configure on Schedules page** and **Scan all now**.
+2. Under **What to run**, choose **Recently added only**. Pick your **Schedule type** (an interval suits a scanner) and frequency.
+3. Choose a **Lookback window**: 15 minutes, 30 minutes, 1 hour (default), 2 hours, 6 hours, 24 hours, 3 days or 7 days.
+4. Pick a server and libraries (or leave all) and save.
 
 **Choosing a lookback window:** items that already have BIF previews are skipped automatically by the job runner, so a larger lookback is cheap — it just re-queries Plex for a wider window. Pick something a few times larger than your scan interval so transient outages (e.g. a 30-minute Plex hiccup) don't cause missed items. The default **1 hour** gives a 4× safety buffer over a 15-min interval, which is plenty for the happy path while staying light on Plex.
 
-**Scheduled scanners are marked with a blue "Recently Added" badge** next to the schedule name in the Schedules table, so you can tell them apart from full-library scans at a glance.
+Scanners carry a **Recently Added** badge next to the schedule name in the Schedules table.
 
 **Why stateless?** The scanner doesn't track a "last seen" timestamp. Every tick it asks Plex for items added within the lookback window and submits them to the job pipeline; the job runner's existing BIF-existence check skips anything that's already done. This avoids cursor migrations, restart races, and clock-skew bugs.
 
@@ -892,7 +877,7 @@ wrong one isn't, so a marker only ships when the evidence clears the bar below.
 ### Turning it on
 
 Detection settings are shared by every server: **Settings → Intro & Credits**. What each server actually *receives*
-is controlled per server: **Servers → (server) → Configure → Processing → Intro & Credits → "Send intro & credits markers to this
+is controlled per server: **Servers → (server) → Edit → Processing → Intro & Credits → "Send intro & credits markers to this
 server"**. A server is off by default even after you turn the shared settings on.
 
 Once the switch is on, the same server's **Libraries** tab gets an **Intro & Credits** column beside **Previews**:
@@ -951,10 +936,7 @@ other isn't found:
 - **Sending.** Each server gets the decided markers. With **Keep Plex's** or **Keep Emby's** on, that server's own
   marker of a type stays unless it's impossible for the file (outside it, or under 3 s).
 
-There is no stricter mode. An earlier "Publish when: High" setting (always two agreeing sources) left most of a library
-undecided and was removed; upgrading queues one Low-priority Intro & Credits job that decides those files again. Like
-any job it reuses what was already found and only asks or reads again what is due. Until that job completes, each
-start of the app queues it again.
+There is no stricter mode: a marker publishes only when the evidence clears the bar above.
 
 Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
 and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
@@ -1206,7 +1188,7 @@ first time you turn it on for a Plex server:
   run asks again.
 - **Don't turn off a library's own *Intro markers* / *Credits markers* setting** (Edit library → Advanced). While
   it is off, Plex hides every skip marker of that type in the library, ours included, so nobody sees a skip button
-  there. **Servers → Configure → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
+  there. **Servers → Edit → Setup Health** shows such a library under **Must fix** with a **Turn on** button. To stop
   Plex detecting on its own, set its server-wide *Generate intro video markers* / *Generate credits video markers*
   (Settings → Library) to **Never** instead: Setup Health offers **Set server-wide to Never** for that. With **Keep
   Plex's** it doesn't suggest it. See [Setup Health](guides/previews-readiness.md#intro-credits).
@@ -1233,7 +1215,7 @@ don't run it.
 
 1. Run the agent as its [README](https://github.com/stevezau/media_preview_generator/blob/dev/plex-marker-agent/README.md) says: the compose file, the settings (`AGENT_TOKEN`,
    `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
-2. In the app: **Servers → your Plex → Configure → Connection → Plex helper**. Switch it on, enter its **Address**
+2. In the app: **Servers → your Plex → Edit → Connection → Plex helper**. Switch it on, enter its **Address**
    (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
    once saved. The one-time database-write confirmation applies when enabling Intro & Credits. Chapter thumbnails
    have their own opt-in under General and can use this connection while Intro & Credits is off.
@@ -1252,7 +1234,7 @@ Credits run sends them. Setup Health shows a row for it (see
 ### Jellyfin: the Media Preview Bridge plugin
 
 Jellyfin also has no core API for markers. This app's existing **Media Preview Bridge** plugin (the same one used for
-trickplay tiles) gets a markers feature. The Edit tab's status block shows whether it's installed, its version, and
+trickplay tiles) gets a markers feature. The Processing tab's status block shows whether it's installed, its version, and
 an **Install** / **Update** button that uses the same plugin-install flow as trickplay. Markers show as Skip Intro /
 Skip Credits / Skip Recap / Skip Preview depending on what was decided.
 
@@ -1264,7 +1246,7 @@ back when a "Replace all metadata" or "Search for missing metadata" refresh dele
 file is replaced by a different file until this app sends markers for the new one, and forgets them when the item is
 removed from Emby.
 
-The Edit tab shows whether the plugin is installed and its version. When Emby's plugin catalog lists the plugin,
+The Processing tab shows whether the plugin is installed and its version. When Emby's plugin catalog lists the plugin,
 **Install** installs it and restarts Emby. Otherwise the tab offers **Install by hand**: download the DLL for your
 Emby version (`MediaPreviewBridge.Emby-4.10.dll` for Emby 4.10, `MediaPreviewBridge.Emby-4.9.dll` for Emby 4.9)
 from the plugin's GitHub release (tags `emby-plugin-v…`), rename it to `MediaPreviewBridge.Emby.dll`, copy it into
@@ -1316,7 +1298,7 @@ markers included); **Up to date** means the server already showed exactly this.
 After a webhook job (or its retry) publishes to a file that was replaced (same path, new file), servers often rescan
 it shortly after. The job therefore queues one **Verify: …** job for those files, which waits three times the first
 retry delay (at least 10 minutes; its queue row reads **"Checking again in 10 min"**) and then checks them again the
-same way. It follows **Settings → Retry policy** (none when the retry count is 0) and holds at most 500 files (the job
+same way. It follows **Settings → Processing options → Retry policy** (none when the retry count is 0) and holds at most 500 files (the job
 log says how many more wait for the next run). A verify job, and any retry it queues, never queues another verify;
 its retries count on from the retries already used, and a file gone from disk by then isn't retried. Library runs
 and files you picked yourself don't queue one: their replaced files may have changed long ago.
@@ -1414,7 +1396,7 @@ ahead on a stale setting.
 A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files, and so
 does each **Recently Added** scan for the files it finds. A restart while a webhook batch is still waiting to run
 doesn't lose it: the revived preview job queues its Intro & Credits job when it starts. An Intro & Credits job
-waiting for its preview job stays with it across a restart, revived with it or held with it by **Pause Processing**,
+waiting for its preview job stays with it across a restart, revived with it or held with it by **Pause**,
 however long ago it was queued. The job sends markers where the
 preview job sends previews: a webhook pinned to one server (`/api/webhooks/server/<id>`, or `?server_id=`), an Emby or
 Jellyfin webhook, a file a Recently Added scan found on Emby or Jellyfin, or a Recently Added schedule pinned to one
@@ -1422,7 +1404,7 @@ server, publishes to that server only; anything else goes to every server with I
 runs at Normal priority, or at Low when the preview job itself runs at Low, and it starts after that preview job's
 first try (it doesn't wait out the preview job's retries; episodes that join it later, see below, don't wait for their
 own preview jobs). If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer
-its Plex Pass check, it's retried the way preview jobs are, with the same backoff — **Settings → Retry policy → Retry
+its Plex Pass check, it's retried the way preview jobs are, with the same backoff — **Settings → Processing options → Retry policy → Retry
 count / Initial retry delay**. The job stays one row in the queue: **Pending**, with a **Retry 1/5** chip (5 retries
 by default) and "Retry starting in …", then **Running** while the retry checks the files still waiting. Files that were already
 done keep their results. The row turns **Completed** once every file is in, or **Failed** when the retries run out
@@ -1581,13 +1563,13 @@ table covers every state the check can report, using its exact wording:
 | *(Plex)* "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any item, then try again." | Markers reuse a database row Plex creates itself the first time it ever writes a marker | Run Plex's own intro or credits analysis once on any item, then recheck |
 | *(Jellyfin)* Amber "Update needed" badge, "— installed 1.0.0.0" (the version the plugin reports; "installed version unknown" when it doesn't say) + **Update** button; the job's rows say "Update Media Preview Bridge (installed …) to get markers support" | An older plugin build predates the markers feature | Click **Update** |
 | *(Plex)* "Plex \[…\] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
-| *(Plex)* "Plex's database was busy (held by another program) for N s; trying again on the next run" (or "Plex is busy writing its database; trying again on the next run (database is locked)", or "Another Intro & Credits task is still using this Plex database; trying again on the next run", or "Another Intro & Credits task is still checking this Plex server; trying again on the next run") | Another program kept Plex's database locked for longer than a job waits (2 minutes, or 10 seconds for a file on a GPU or CPU worker when the job retries it): Plex itself during a big scan or database optimize, or a tool that writes to Plex's database (Kometa and the like) | Nothing, usually. In a job the file's row says "this job tries again in a few minutes" instead, and the job does, on the usual retry schedule (**Settings → Retry policy**). Only a file still refused after the last retry stays **Failed**, for Check servers' next day. Cancelling the job stops its wait within a second when this app opens Plex's database itself; through the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) the agent's own wait (up to 2 minutes) runs out first. If it keeps happening, schedule that tool outside your Intro & Credits runs |
+| *(Plex)* "Plex's database was busy (held by another program) for N s; trying again on the next run" (or "Plex is busy writing its database; trying again on the next run (database is locked)", or "Another Intro & Credits task is still using this Plex database; trying again on the next run", or "Another Intro & Credits task is still checking this Plex server; trying again on the next run") | Another program kept Plex's database locked for longer than a job waits (2 minutes, or 10 seconds for a file on a GPU or CPU worker when the job retries it): Plex itself during a big scan or database optimize, or a tool that writes to Plex's database (Kometa and the like) | Nothing, usually. In a job the file's row says "this job tries again in a few minutes" instead, and the job does, on the usual retry schedule (**Settings → Processing options → Retry policy**). Only a file still refused after the last retry stays **Failed**, for Check servers' next day. Cancelling the job stops its wait within a second when this app opens Plex's database itself; through the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) the agent's own wait (up to 2 minutes) runs out first. If it keeps happening, schedule that tool outside your Intro & Credits runs |
 | *(Jellyfin)* "Can't reach this Jellyfin server" / "Can't reach the Media Preview Bridge markers endpoint on this Jellyfin server" | A transient connection problem | Confirm the server is up and reachable; recheck |
 | *(Jellyfin)* "Jellyfin rejected this server's credentials; reconnect it" | The stored token/login no longer works | Reconnect the server from the Servers page |
 | *(Jellyfin)* "Jellyfin refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
 | *(Plex)* "This app (user N) can't write …. Run it with the user that owns Plex's database (user M)." | A `PUID`/`PGID` mismatch between the two containers | Set this container's `PUID`/`PGID` to the user that owns Plex's files |
 | *(Plex)* "Disk full: Plex's database can't take any writes (…)." | The disk holding Plex's database is full | Free up space on that disk |
-| Status block fails to load: "Couldn't check this server's Intro & Credits status" (Edit tab) or "Couldn't read this server's Intro & Credits state (…)" (Inspector row) | An unexpected error while checking (e.g. `markers.db` unreadable) — one server's failure never blocks the rest of the page | Reload; check the logs for the exception type named in the message |
+| Status block fails to load: "Couldn't check this server's Intro & Credits status" (Processing tab) or "Couldn't read this server's Intro & Credits state (…)" (Inspector row) | An unexpected error while checking (e.g. `markers.db` unreadable) — one server's failure never blocks the rest of the page | Reload; check the logs for the exception type named in the message |
 
 A file's row for one server (the job's Files panel, the Inspector) can also say:
 
@@ -1665,7 +1647,7 @@ or weren't checked, aren't counted. See
 
 **What:** the formula used to compress HDR's brightness range into SDR. **Default works for almost everyone.** Change only if your HDR thumbnails look too dark or oddly tinted.
 
-Non-DV HDR content (HDR10, HLG, HDR10+) uses a configurable algorithm, set in **Settings → Thumbnail Settings → HDR Tone Mapping** or via the `TONEMAP_ALGORITHM` env var. Options: `hable` (default), `reinhard`, `mobius`, `clip`, `gamma`, `linear`. If HDR thumbnails look too dark, try `reinhard`.
+Non-DV HDR content (HDR10, HLG, HDR10+) uses a configurable algorithm, set in **Settings → Processing options → Thumbnails → HDR tone mapping** or via the `TONEMAP_ALGORITHM` env var. Options: `hable` (default), `reinhard`, `mobius`, `clip`, `gamma`, `linear`. If HDR thumbnails look too dark, try `reinhard`.
 
 ### Dolby Vision Profile 5
 
@@ -1720,11 +1702,11 @@ Use this table to diagnose common failures quickly.
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
 | Job waits for workers | No compatible enabled group, outside group hours, unavailable GPU, or compatible workers busy | Read the waiting reason. In **Settings → Workers**, check job permissions, hours and hardware. Loudness needs a CPU group. Outside hours normally resolves at the next opening; busy workers finish their current files. |
-| Job waits for a job slot | The concurrent-job gate is full | Check **Settings → Processing Options → Incoming job priority** and the concurrent-job limit. Available workers do not bypass that limit. Check global and per-job pause holds too. |
+| Job waits for a job slot | The concurrent-job gate is full | Check **Settings → Processing options → Max concurrent jobs**; a job at High priority can use the slot kept for it. Available workers do not bypass that limit. Check global and per-job pause holds too. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
-| Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and verify `webhook_enabled=true`. |
+| Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and check **Enable webhook processing** is on (Automation → Triggers → Settings). |
 | Log warns `Webhook from sonarr: ignored '…' — the payload didn't carry a file path` | The sender's payload has no file path anywhere: no `episodeFile`, no `episodeFiles[]`, no `filePath` (Sonarr's own "On Import Complete" event lists its files, so it never causes this) | Check the sender posts Sonarr's standard webhook body; a custom template or a proxy that rewrites the body must keep `episodeFile.path` (or `series.path` + `episodeFile.relativePath`). |
-| New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |
+| New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and check the file's library is selected on the server (**Servers → Edit → Libraries**) and its path mapping. |
 | Job warning: "N file(s) still weren't indexed by the media server after N retries, so no more retries are queued. The next scheduled scan will pick them up." | The media server hadn't added the file to its library by the last retry | Nothing, if you have a scheduled scan: it picks the file up once the server has it. Otherwise raise **Retry count** or **Initial retry delay** (Settings → Retry policy), or check the file is under a library folder the server scans. |
 | Radarr/Sonarr cannot reach webhook URL | Network routing or hostname issue | Use host IP or reachable Docker hostname (not `localhost`), then verify firewall and port `8080`. |
 | New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause** in the **Workers** header. Global pause is persisted and pauses in-flight processing. Group reductions and closing worker hours instead let current files finish. |
@@ -1740,7 +1722,7 @@ Expected directories include `Cache`, `Media`, and `Metadata`.
 
 ### Debug Logging
 
-Enable detailed logs when diagnosing persistent issues. In **Settings** → **Processing Options**, set **Log Level** to `DEBUG`. Alternatively, set `LOG_LEVEL=DEBUG` as an environment variable (one-time seed on first start).
+Enable detailed logs when diagnosing persistent issues. In **Settings → Logging**, set **Log level** to `DEBUG` and click **Apply Log Level Now**. Alternatively, set `LOG_LEVEL=DEBUG` as an environment variable (one-time seed on first start).
 
 ---
 
@@ -1779,7 +1761,7 @@ Schema downgrades are **not automated**. If you need to revert from a release th
 > This only stops the surprise scan; it doesn't restore markers already written to Plex or Jellyfin, and the older
 > binary can't write or read them either way.
 >
-> **`markers.db` from this version (schema 3) is refused by older versions.** It gained one column (files missing from disk). A version from before it logs "markers.db was created by a newer version" and its Intro & Credits can't open the database; your settings and previews are unaffected. Before upgrading it, this version copies it once to `markers.db.pre-v3.bak` next to it (in `/config`). To roll back, stop the container and put that copy back as `markers.db`; what Intro & Credits stored since the upgrade is lost with it.
+> **A `markers.db` at schema 3 is refused by older versions.** A version from before it logs "markers.db was created by a newer version" and its Intro & Credits can't open the database; your settings and previews are unaffected. Before migrating it, the app copies it once to `markers.db.pre-v3.bak` next to it (in `/config`). To roll back, stop the container and put that copy back as `markers.db`; what Intro & Credits stored since the migration is lost with it.
 >
 > **Intro & Credits schedules are worse: the older binary runs each one as a full preview scan on every tick.** While
 > the new version is still running, open **Automation → Schedules** and **delete** (or **disable**) every schedule
@@ -1789,7 +1771,7 @@ Schema downgrades are **not automated**. If you need to revert from a release th
 > `schedules.json`: in step 2, don't restore a `schedules.json` backup from before that change, or the schedules
 > come back.
 
-> **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard (introduced in this release) intentionally refuses to start the older binary against a newer `settings.json` — its log message says where the backups are.
+> **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard intentionally refuses to start the older binary against a newer `settings.json` — its log message says where the backups are.
 
 > **Why it refuses to "just work".** Silent acceptance would drop unknown fields on the next save — exactly the failure mode that wiped a user's job history during a tag-drift incident on the multi-server branch. Refusing to boot is loud and recoverable; silent truncation is quiet and final.
 

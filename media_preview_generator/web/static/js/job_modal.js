@@ -163,15 +163,15 @@ function _renderModalHeader(job) {
             + '<i class="bi bi-clock" aria-hidden="true"></i>' + escapeHtmlText(dur) + '</span>');
     }
     if (isChain) {
-        // ``retry_attempt`` counts retries — 0 means "originating dispatch
-        // only", 1 means "original + 1 retry", etc. Total runs is N+1.
-        const ra = cfg.retry_attempt || 0;
+        // While the next retry is waiting, ``retry_attempt`` is that retry's number, so it has not run yet.
+        const ra = _chainRetriesStarted(job, cfg);
         const rmax = cfg.retry_max_attempts || 5;
         const totalRuns = ra + 1;
-        const runsLabel = ra
+        let runsLabel = ra
             ? totalRuns + ' run' + (totalRuns === 1 ? '' : 's')
                 + ' · 1 original + ' + ra + ' retr' + (ra === 1 ? 'y' : 'ies')
             : '1 run · original only';
+        if (_chainRetryIsWaiting(job, cfg)) runsLabel += ' · retry ' + (cfg.retry_attempt || 0) + ' scheduled';
         chips.push('<span class="ov-tag">'
             + '<i class="bi bi-arrow-clockwise" aria-hidden="true"></i>' + escapeHtmlText(runsLabel)
             + ' <span class="ov-faint">/ ' + (rmax + 1) + ' max</span></span>');
@@ -199,6 +199,46 @@ function _renderModalHeader(job) {
             : '');
 }
 
+// True while the chain head is waiting for its next retry (counting down, or queued for a slot).
+function _chainRetryIsWaiting(job, cfg) {
+    return job.status === 'pending' && (cfg.last_outcome === 'scheduled' || cfg.last_outcome === 'queued_for_slot');
+}
+
+// Retries that have actually started: the head's counter names the NEXT retry while one is waiting.
+function _chainRetriesStarted(job, cfg) {
+    const ra = cfg.retry_attempt || 0;
+    return _chainRetryIsWaiting(job, cfg) ? Math.max(0, ra - 1) : ra;
+}
+
+// Outcomes that explain why "processed" is not "generated"; clean outcomes (generated, already existed) add nothing.
+const _FILES_BREAKDOWN_OUTCOMES = [
+    ['skipped_not_indexed', 'not indexed yet'],
+    ['skipped_file_not_found', 'not found'],
+    ['skipped_source_gone', 'gone from disk'],
+    ['skipped_excluded', 'excluded'],
+    ['skipped_invalid_hash', 'invalid hash'],
+    ['no_media_parts', 'no media parts'],
+    ['failed', 'failed'],
+];
+
+// " · 1 gone from disk · 2 still waiting on Plex chapters", or '' when everything finished cleanly.
+function _filesBreakdownSuffix(job) {
+    const outcome = (job.progress && job.progress.outcome) || {};
+    const parts = [];
+    for (const [key, label] of _FILES_BREAKDOWN_OUTCOMES) {
+        const n = Number(outcome[key]) || 0;
+        if (n > 0) parts.push(n.toLocaleString() + ' ' + label);
+    }
+    let chapterWaits = 0;
+    for (const publisher of job.publishers || []) {
+        const retryable = (publisher.retryable_counts || {}).published_pending_chapters;
+        const counted = retryable !== undefined ? retryable : (publisher.counts || {}).published_pending_chapters;
+        chapterWaits += Number(counted) || 0;
+    }
+    if (chapterWaits > 0) parts.push(chapterWaits.toLocaleString() + ' still waiting on Plex chapters');
+    return parts.length ? ' · ' + parts.join(' · ') : '';
+}
+
 function _renderModalContext(job) {
     const context = document.getElementById('jobDetailsContext');
     const body = document.getElementById('jobDetailsContextBody');
@@ -218,7 +258,8 @@ function _renderModalContext(job) {
     const add = (label, value) => rows.push('<div><dt>' + label + '</dt><dd>' + escapeHtmlText(String(value)) + '</dd></div>');
     const processed = Number(progress.processed_items) || 0;
     const total = Number(progress.total_items) || 0;
-    add('Files', total ? processed.toLocaleString() + ' of ' + total.toLocaleString() + ' processed' : processed.toLocaleString() + ' processed · total not reported');
+    const filesText = total ? processed.toLocaleString() + ' of ' + total.toLocaleString() + ' processed' : processed.toLocaleString() + ' processed · total not reported';
+    add('Files', filesText + _filesBreakdownSuffix(job));
     add('Priority', ({1: 'High', 2: 'Normal', 3: 'Low'})[job.priority] || 'Not recorded');
     const requested = cfg.webhook_paths || cfg.file_paths;
     const requestedCount = Number(cfg.file_paths_count) || (Array.isArray(requested) ? requested.length : 0);
@@ -1095,6 +1136,11 @@ function _renderAttemptOption(a, max) {
             + ' title="Run 1 (original dispatch) is no longer available — likely cleaned by retention policy">'
             + '<i class="bi bi-slash-circle me-1"></i>Run 1 (deleted)</button>';
     }
+    if (a.placeholder) {
+        return '<button type="button" class="btn btn-sm btn-outline-secondary disabled" disabled'
+            + ' title="Cleared from history">'
+            + '<i class="bi bi-slash-circle me-1"></i>Run ' + runOrdinal + ' (deleted)</button>';
+    }
     const pendingChips = _renderPendingServerChips(a.pending_servers);
     const pendingTip = _pendingServerTooltipSuffix(a.pending_servers);
     let label;
@@ -1204,7 +1250,7 @@ function _renderChainStateChip(chainId) {
         const tick = () => {
             const remaining = Math.max(0, Math.ceil((new Date(retryEta).getTime() - Date.now()) / 1000));
             const label = _formatRetryRemaining(remaining);
-            const ofMax = (attempt && max) ? ` (attempt ${isLoudness ? attempt : attempt + 1}/${max})` : '';
+            const ofMax = (attempt && max) ? ` (retry ${attempt} of ${max})` : '';
             _setChainChipHtml(chip, `<i class="bi bi-hourglass-split me-1"></i>Next attempt in ${label}${ofMax}${_infoIcon}`);
             if (remaining === 0) {
                 clearInterval(_chainStateTickInterval);
@@ -1246,6 +1292,28 @@ function _formatRetryRemaining(seconds) {
 // back to the newest-selectable.
 let _pendingAttemptSelection = null;
 
+// Retry rows cleared from history leave holes in the run numbers; fill them with disabled placeholders.
+function _withClearedPlaceholders(attempts) {
+    const present = new Set(attempts.filter(a => !a.is_originating).map(a => a.retry_attempt));
+    const head = _modalJob();
+    const started = head && head.config ? _chainRetriesStarted(head, head.config) : 0;
+    const highest = Math.max(0, started, ...present);
+    const out = [];
+    let nextRetry = 1;
+    for (const a of attempts) {
+        if (a.is_originating) { out.push(a); continue; }
+        for (; nextRetry < a.retry_attempt; nextRetry++) {
+            if (!present.has(nextRetry)) out.push({placeholder: true, retry_attempt: nextRetry});
+        }
+        out.push(a);
+        nextRetry = Math.max(nextRetry, a.retry_attempt + 1);
+    }
+    for (; nextRetry <= started; nextRetry++) {
+        if (!present.has(nextRetry)) out.push({placeholder: true, retry_attempt: nextRetry});
+    }
+    return highest ? out : attempts;
+}
+
 async function _loadAttemptsDropdown(chainId) {
     const wrap = document.getElementById('attemptsDropdown');
     if (!wrap) return;
@@ -1262,8 +1330,8 @@ async function _loadAttemptsDropdown(chainId) {
         }
         const max = data.max_attempts || attempts[attempts.length - 1].retry_attempt || 0;
         let html = '';
-        for (let i = 0; i < attempts.length; i++) {
-            html += _renderAttemptOption(attempts[i], max);
+        for (const a of _withClearedPlaceholders(attempts)) {
+            html += _renderAttemptOption(a, max);
         }
         wrap.innerHTML = html;
         // Default-select the LATEST selectable pill (skip the deleted
@@ -1345,6 +1413,7 @@ function _renderRetryReasonSubtitle(attempts) {
     // retry_reason set) — the legacy children would be invisible to
     // the banner aggregator.
     const pendingCounts = new Map();  // server_name -> attempts-blocked count
+    const chapterWaitCounts = new Map();  // server_name -> attempts that waited on chapter thumbnails
     let unresolvedAttempts = 0;
     let staleAttempts = 0;
     for (const a of children) {
@@ -1352,9 +1421,15 @@ function _renderRetryReasonSubtitle(attempts) {
         if (r && typeof r === 'object') {
             if ((r.unresolved | 0) > 0) unresolvedAttempts += 1;
             if ((r.stale_paths | 0) > 0) staleAttempts += 1;
+            const chapterWaits = r.chapter_waits_by_server || {};
+            for (const name of Object.keys(chapterWaits)) {
+                if (name) chapterWaitCounts.set(name, (chapterWaitCounts.get(name) || 0) + 1);
+            }
             const pbs = r.pending_by_server || {};
             for (const name of Object.keys(pbs)) {
                 if (!name) continue;
+                // A server counted as waiting on chapters is not also "still indexing".
+                if ((chapterWaits[name] | 0) >= (pbs[name] | 0)) continue;
                 pendingCounts.set(name, (pendingCounts.get(name) || 0) + 1);
             }
         } else {
@@ -1386,6 +1461,13 @@ function _renderRetryReasonSubtitle(attempts) {
         const verb = blockers.length === 1 ? 'was' : 'were';
         phrases.push(namesText + ' ' + verb + ' still indexing');
     }
+    if (chapterWaitCounts.size > 0) {
+        const names = [...chapterWaitCounts.keys()];
+        const namesText = names.length === 1
+            ? names[0]
+            : names.slice(0, -1).join(', ') + ' + ' + names[names.length - 1];
+        phrases.push(namesText + " hadn't made chapter thumbnails yet");
+    }
     if (unresolvedAttempts > 0) {
         phrases.push("path(s) couldn't be resolved by any server");
     }
@@ -1402,7 +1484,11 @@ function _renderRetryReasonSubtitle(attempts) {
     // Plain text — no HTML — escapeHtml not required. Server names
     // come straight from the API which sources them from settings (no
     // user-controlled HTML enters this path).
-    el.textContent = 'Retried ' + children.length + '× because ' + reasonText;
+    // Count retries that started (the head's counter), not the child rows that survived "Clear job history".
+    const head = _modalJob();
+    const started = head && head.config ? _chainRetriesStarted(head, head.config) : children.length;
+    if (started === 0) return hide();
+    el.textContent = 'Retried ' + started + '× because ' + reasonText;
 }
 
 async function _refreshAttemptsDropdown(chainId) {
@@ -1419,8 +1505,8 @@ async function _refreshAttemptsDropdown(chainId) {
         const max = data.max_attempts || attempts[attempts.length - 1].retry_attempt || 0;
         const previouslySelected = _logsModalAttemptId;
         let html = '';
-        for (let i = 0; i < attempts.length; i++) {
-            html += _renderAttemptOption(attempts[i], max);
+        for (const a of _withClearedPlaceholders(attempts)) {
+            html += _renderAttemptOption(a, max);
         }
         wrap.innerHTML = html;
         // Restore previous selection, otherwise pick newest selectable.

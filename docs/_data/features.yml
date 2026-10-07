@@ -29,8 +29,8 @@
 - title: Skip Intro and Skip Credits
   body: >-
     Finds intros and end credits from the file's chapters, online skip databases, the season's theme
-    song or the credit roll itself, then sends the markers to every server. When it isn't sure, the
-    file waits for your review instead of getting a guess.
+    song or the credit roll itself, then sends the markers to every server. When it isn't sure, it
+    sends nothing instead of a guess.
   url: /skip-intro-credits/
   link: What each server needs
   icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4v16l9-8zM17 4v16"/></svg>

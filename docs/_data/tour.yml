@@ -7,43 +7,43 @@
     Sonarr, Radarr, Tdarr or the media server itself sends a webhook when a file lands, to the URL the
     Automation page gives it. Scheduled scans and a hand-picked list work too.
   image: tour-trigger.webp
-  alt: The Automation page showing the webhook URL and the steps to add it in Sonarr and Radarr
+  alt: "The Automation page's *arr apps card with Sonarr, Radarr and Sportarr tabs, a Publish to which server? choice and the Sonarr webhook URL"
   path: /automation
-  width: 830
-  height: 737
+  width: 1023
+  height: 554
 - title: It finds every server with that file
   body: >-
     The path Sonarr reports is mapped to the path the container sees. Then every Plex, Emby and
     Jellyfin library that holds the file is found.
   image: tour-resolve.webp
-  alt: The Servers page with one card each for Plex, Jellyfin and Emby
+  alt: "The Servers page with one card each for Home Plex, Home Jellyfin and Home Emby, each showing its address and enabled libraries"
   path: /servers
-  width: 1132
-  height: 216
+  width: 1232
+  height: 481
 - title: One GPU pass per file
   body: >-
     FFmpeg decodes the video on the GPU, jumps between key frames when the file allows it, and
     tone-maps HDR. If the GPU can't decode a file, the same worker tries again on the CPU.
   image: tour-extract.webp
-  alt: GPU workers on the dashboard, each making previews for a different film
+  alt: "The Dashboard Workers panel with three worker groups: three busy GPU workers on an NVIDIA card, one idle worker on an Intel GPU and four idle CPU workers"
   path: /
-  width: 1254
-  height: 509
+  width: 1232
+  height: 602
 - title: Each server gets its own format
   body: >-
     A BIF in Plex's data folder, a BIF next to the video for Emby, trickplay tiles for Jellyfin. Then
     each server is told to pick them up.
   image: tour-publish.webp
-  alt: One film's job, showing previews published to Plex, Jellyfin and Emby
+  alt: "A job's Files tab with one file marked Generated and Home Plex, Home Jellyfin and Home Emby listed as its servers"
   path: /
-  width: 1090
-  height: 217
+  width: 1078
+  height: 237
 - title: It waits for slow servers
   body: >-
     A server that hasn't indexed the new file yet gets another try after 1, 2, 5, 15 and 60
     minutes by default. Next time, files whose previews are current are skipped.
   image: tour-retry.webp
-  alt: A Jellyfin job waiting to retry while the server indexes a new film
+  alt: "A Jobs queue row for Sintel (2010) showing Retry 0/5 and Retry starting in 2 min"
   path: /
-  width: 1254
-  height: 233
+  width: 1230
+  height: 105

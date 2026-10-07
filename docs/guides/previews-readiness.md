@@ -7,16 +7,17 @@ description: What each Setup Health check means and how to fix it, so Plex, Emby
 
 > [Back to Guides](../guides.md) · [Configuration & API Reference](../reference.md) · [Multi-Media-Server Guide](../multi-server.md)
 
-The **Setup Health** tab on the Edit Server modal is the single
+The **Setup Health** tab of **Servers → Edit** is the single
 place to verify — and adjust — every server-side setting that affects
 whether this app's previews show up in Plex / Emby / Jellyfin.
 
-Each row lives in one of three sections:
+The checks are grouped by what needs your attention:
 
-1. **Server status** — connection, version, plugin presence.
-2. **Library settings** — per-library (or server-wide for Plex) flags.
-3. **Advanced** — server trickplay geometry, vendor extraction, path
-   mappings, Plex config folder writability.
+1. **Must fix** — a critical check is failing.
+2. **Recommended** — the server works, but a setting could be better. **Apply recommended** changes it; a row that the app can't change shows a **Manual** chip.
+3. **All good** — checks that pass.
+
+**Fix critical** and **Fix all** apply several fixes at once, after a preview of the changes. Each check covers one of these areas: connection and version, plugin presence, per-library (or server-wide for Plex) flags, server trickplay geometry, vendor extraction, path mappings and Plex config folder writability.
 
 A server with **Intro & Credits** switched on also gets an
 [Intro & Credits section](#intro-credits) (Plex) or plugin rows (Jellyfin, Emby).
@@ -49,9 +50,9 @@ row here almost always means the URL is wrong, the credential
 expired, or the container can't see the server.
 
 **Enable / disable:** read-only check — fix the URL or credential in
-Server settings.
+the server's **Configure** dialog.
 
-**Verify:** re-open the Edit Server modal and click the refresh icon
+**Verify:** re-open **Configure** and click the refresh icon
 next to the badge.
 
 ---
@@ -370,7 +371,7 @@ inside this folder. A :ro Docker mount, a wrong path, or a PUID/PGID
 mismatch silently blocks every publish.
 
 **Enable / disable:** read-only status row. Fix the mount or the
-path in Server settings.
+path in the server's **Configure** dialog.
 
 ---
 
@@ -383,8 +384,7 @@ container.
 effectively no-ops — scan-nudges go out with unmapped paths and
 publishing fails silently.
 
-**Enable / disable:** read-only status row. Fix under Server settings
-→ Path mappings.
+**Enable / disable:** read-only status row. Fix under **Servers → Edit → Path mappings**.
 
 ---
 
@@ -392,8 +392,8 @@ publishing fails silently.
 
 These rows appear only for a server that has **Send intro & credits markers to this server** switched on (Servers →
 Configure → Processing → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
-good", and nothing about markers is checked or contacted. The rows are read from the same check the Intro & Credits
-tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
+good", and nothing about markers is checked or contacted. The rows are read from the same check the **Processing → Intro & Credits**
+section runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
 another machine says nothing about Plex Pass until that is fixed.
 
 Only Plex's library-settings and detection rows have buttons (**Turn on**, **Set server-wide to Never**). Every

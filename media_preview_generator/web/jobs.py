@@ -308,6 +308,16 @@ def is_user_visible_job(job: "Job") -> bool:
     return True
 
 
+def _retry_parent_id_of(job: "Job") -> str | None:
+    """Chain head ID a retry child points at, or None for non-retry rows (either flag family)."""
+    cfg = job.config or {}
+    if cfg.get("is_retry"):
+        return cfg.get("parent_job_id")
+    if cfg.get("is_retry_attempt"):
+        return cfg.get("parent_chain_id")
+    return None
+
+
 def _retry_child_ids_of(parent_id: str, jobs: "dict[str, Job]") -> list[str]:
     """IDs of every retry child belonging to ``parent_id``.
 
@@ -693,11 +703,13 @@ class JobStorage:
         return [self._row_to_job(r) for r in rows]
 
     def original_job_times(self) -> dict[str, str]:
-        """Read immutable creation times without loading each job's full config.
+        """Read each job's creation time without loading its full config.
 
-        Retry heads change their in-memory creation time for display ordering;
-        upsert deliberately preserves this column. Missing evidence must never
-        turn a missing source into a confirmed deletion.
+        ``created_at`` never changes after a job is created. The loudness job
+        (``loudness/job.py``) needs only these times to decide which missing
+        sources are confirmed deletions, so reading ``id, created_at`` straight
+        from storage avoids deserialising every job's config. On a read error
+        this returns ``{}`` so missing evidence never becomes a confirmed deletion.
         """
         try:
             with self._lock:
@@ -2043,21 +2055,6 @@ class JobManager:
                 if publishers is not None:
                     job.publishers = list(publishers)
 
-            # Bump created_at so the row sorts to top of the
-            # newest-first Jobs list on each chain state change.
-            # Preserves the original dispatch start in
-            # ``config["retry_started_at"]`` for chain-age display.
-            #
-            # Exception: ``queued_for_slot`` fires from the JobGate's
-            # on_wait callback every poll tick (~1s) while a retry
-            # waits for a slot. Bumping created_at every second would
-            # thrash the sort-by-recency order and starve older chains
-            # of their top-of-list position. Hold the existing
-            # created_at instead — the chain's identity hasn't changed,
-            # only its wait counter has.
-            if outcome != "queued_for_slot":
-                job.created_at = now_iso
-
             self._persist_job(job)
             self._emit_event("job_updated", job.to_dict())
         return job
@@ -2652,7 +2649,29 @@ class JobManager:
             target = valid_terminal
 
         with self._lock:
-            to_delete = [job_id for job_id, job in self._jobs.items() if job.status in target]
+            children_by_parent: dict[str, list[str]] = {}
+            for job_id, job in self._jobs.items():
+                parent_id = _retry_parent_id_of(job)
+                if parent_id:
+                    children_by_parent.setdefault(parent_id, []).append(job_id)
+
+            to_delete: list[str] = []
+            queued: set[str] = set()
+            for job_id, job in self._jobs.items():
+                if job.status not in target:
+                    continue
+                head = self._jobs.get(_retry_parent_id_of(job) or "")
+                # Finished retry rows are the history of a chain that is still going; keep them.
+                if head is not None and head.status not in valid_terminal:
+                    continue
+                to_delete.append(job_id)
+                queued.add(job_id)
+            # A cleared chain head takes its finished retry rows with it, as delete_job does.
+            for job_id in list(to_delete):
+                for child_id in children_by_parent.get(job_id, []):
+                    if child_id not in queued and self._jobs[child_id].status in valid_terminal:
+                        to_delete.append(child_id)
+                        queued.add(child_id)
             for job_id in to_delete:
                 self._delete_job_log_file(job_id)
                 self._delete_file_results(job_id)
@@ -2661,6 +2680,7 @@ class JobManager:
                 self._persist_delete(job_id, input_reference=(removed.config or {}).get("file_paths_ref"))
             if to_delete:
                 self._emit_event("jobs_cleared", {"count": len(to_delete)})
+                logger.info("Cleared {} job(s)", len(to_delete))
             return len(to_delete)
 
     def get_stats(self) -> dict:

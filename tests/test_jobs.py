@@ -277,6 +277,122 @@ class TestLogFileCleanup:
         assert not os.path.isfile(log_path)
 
 
+class TestClearCompletedJobsRetryChains:
+    """ "Clear job history" must not strip the finished retry rows of a chain that is still going."""
+
+    @staticmethod
+    def _chain(jm, head_status):
+        head = jm.create_job(library_name="Head", config={"is_retry_chain": True})
+        child = jm.create_job(library_name="Child", config={"is_retry": True, "parent_job_id": head.id})
+        legacy = jm.create_job(library_name="Legacy", config={"is_retry_attempt": True, "parent_chain_id": head.id})
+        for job in (child, legacy):
+            jm.start_job(job.id)
+            jm.complete_job(job.id)
+        if head_status == "completed":
+            jm.start_job(head.id)
+            jm.complete_job(head.id)
+        return head, child, legacy
+
+    def test_keeps_finished_children_when_head_pending(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        head, child, legacy = self._chain(jm, "pending")
+
+        assert jm.clear_completed_jobs() == 0
+
+        assert jm.get_job(head.id) is not None
+        assert jm.get_job(child.id) is not None
+        assert jm.get_job(legacy.id) is not None
+
+    def test_clears_children_with_finished_head(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        head, child, legacy = self._chain(jm, "completed")
+
+        assert jm.clear_completed_jobs() == 3
+
+        for job in (head, child, legacy):
+            assert jm.get_job(job.id) is None
+
+    def test_clears_head_and_children_when_only_head_status_targeted(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        head, child, legacy = self._chain(jm, "completed")
+
+        assert jm.clear_completed_jobs(["completed"]) == 3
+
+        assert jm.get_all_jobs() == []
+
+    def test_clears_children_of_unrelated_finished_chain_but_keeps_pending_chain(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        pending_head, pending_child, _ = self._chain(jm, "pending")
+        done_head, done_child, _ = self._chain(jm, "completed")
+
+        assert jm.clear_completed_jobs() == 3
+
+        assert jm.get_job(pending_head.id) is not None
+        assert jm.get_job(pending_child.id) is not None
+        assert jm.get_job(done_head.id) is None
+        assert jm.get_job(done_child.id) is None
+
+    def test_clears_orphaned_child_whose_head_is_gone(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        orphan = jm.create_job(library_name="Orphan", config={"is_retry": True, "parent_job_id": "missing"})
+        jm.start_job(orphan.id)
+        jm.complete_job(orphan.id)
+
+        assert jm.clear_completed_jobs() == 1
+
+    def test_failed_head_with_completed_child_clears_both_when_failed_targeted(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        head = jm.create_job(library_name="Head", config={"is_retry_chain": True})
+        child = jm.create_job(library_name="Child", config={"is_retry": True, "parent_job_id": head.id})
+        jm.start_job(child.id)
+        jm.complete_job(child.id)
+        jm.start_job(head.id)
+        jm.complete_job(head.id, error="boom")
+
+        assert jm.clear_completed_jobs(["failed"]) == 2
+
+        assert jm.get_all_jobs() == []
+
+    def test_finished_head_outside_requested_statuses_keeps_chain(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        head, child, legacy = self._chain(jm, "completed")
+
+        assert jm.clear_completed_jobs(["failed"]) == 0
+
+        assert {j.id for j in jm.get_all_jobs()} == {head.id, child.id, legacy.id}
+
+    def test_finished_head_leaves_running_child(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        head = jm.create_job(library_name="Head", config={"is_retry_chain": True})
+        done = jm.create_job(library_name="Done", config={"is_retry": True, "parent_job_id": head.id})
+        running = jm.create_job(library_name="Running", config={"is_retry": True, "parent_job_id": head.id})
+        jm.start_job(done.id)
+        jm.complete_job(done.id)
+        jm.start_job(running.id)
+        jm.start_job(head.id)
+        jm.complete_job(head.id)
+
+        assert jm.clear_completed_jobs() == 2
+
+        assert {j.id for j in jm.get_all_jobs()} == {running.id}
+
+    def test_clear_scales_linearly_with_many_chains(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        for _ in range(1000):
+            head = jm.create_job(library_name="Head", config={"is_retry_chain": True})
+            child = jm.create_job(library_name="Child", config={"is_retry": True, "parent_job_id": head.id})
+            for job in (child, head):
+                jm.start_job(job.id)
+                jm.complete_job(job.id)
+
+        started = time.monotonic()
+        cleared = jm.clear_completed_jobs()
+        elapsed = time.monotonic() - started
+
+        assert cleared == 2000
+        assert elapsed < 2.0
+
+
 class TestRetentionTimer:
     """Background retention timer starts and can be stopped."""
 

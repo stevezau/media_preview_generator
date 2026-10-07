@@ -77,7 +77,7 @@ Disabling each vendor's built-in generation avoids duplicate work and prevents t
 
 ### Does it run on Windows or Unraid?<a id="does-this-work-on-windows"></a>
 
-Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you have an **NVIDIA** GPU it is accelerated: the NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so `--gpus all` works much as it does on Linux (best-effort — WSL2 GPU detection is less reliable than native Linux). **AMD and Intel** GPUs are not accelerated under Docker (D3D11VA can't be reached from Docker's Linux VM), so those setups process on CPU — raise **CPU Workers** in Settings, or run the container on a Linux host. There's no separate Windows native build. See [Getting Started — Windows](getting-started.md#windows). There is an Unraid Community Applications template: see [Unraid](getting-started.md#unraid).
+Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you have an **NVIDIA** GPU it is accelerated: the NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so `--gpus all` works much as it does on Linux (best-effort — WSL2 GPU detection is less reliable than native Linux). **AMD and Intel** GPUs are not accelerated under Docker (D3D11VA can't be reached from Docker's Linux VM), so those setups process on CPU — add CPU workers under **Settings → Workers**, or run the container on a Linux host. There's no separate Windows native build. See [Getting Started — Windows](getting-started.md#windows). There is an Unraid Community Applications template: see [Unraid](getting-started.md#unraid).
 
 ### Does it make chapter thumbnails too?<a id="does-this-generate-chapter-thumbnails"></a>
 
@@ -85,7 +85,7 @@ Yes, optionally for Plex Media Server **1.43.4.x**. Chapter generation is off by
 
 ### Do I need a GPU to use Media Preview Generator?<a id="can-i-use-this-without-a-gpu"></a>
 
-No. In **Settings** → **Processing Options**, disable all GPUs (or set workers to 0) and set **CPU Workers** to your desired value (e.g. `4` or `8`).
+No. Under **Settings → Workers**, use a CPU worker group and set its worker count (for example `4` or `8`). Remove or switch off any GPU groups.
 
 ### Is there a Windows .exe, or do I need Docker?<a id="is-docker-required-is-there-a-standalone-exe"></a>
 
@@ -118,7 +118,7 @@ visible. See [Networking](getting-started.md#networking) for setup details.
 
 ### Does it work with Jellyfin and Emby, not just Plex?<a id="does-this-work-with-jellyfin-or-emby"></a>
 
-Yes. The app supports Plex, Emby, and Jellyfin — alone or in any combination. Each server is added under **Settings → Media Servers**. When two or more servers contain the same file, FFmpeg runs only once and the result is written in each server's expected format (Plex stores it as a BIF bundle, Emby reads a BIF sidecar file next to the video, Jellyfin reads a folder of JPG tiles called trickplay). See the [Multi-Server guide](multi-server.md) for setup, webhook routing, and per-server library/exclude rules.
+Yes. The app supports Plex, Emby, and Jellyfin — alone or in any combination. Each server is added on the **Servers** page. When two or more servers contain the same file, FFmpeg runs only once and the result is written in each server's expected format (Plex stores it as a BIF bundle, Emby reads a BIF sidecar file next to the video, Jellyfin reads a folder of JPG tiles called trickplay). See the [Multi-Server guide](multi-server.md) for setup, webhook routing, and per-server library/exclude rules.
 
 ---
 
@@ -148,11 +148,11 @@ Only with **Use ours**, which is the default. Choose **Keep Plex's** or **Keep E
 
 ### How do I check which GPUs it found?<a id="how-do-i-know-which-gpus-are-detected"></a>
 
-Open **Settings** → **Processing Options**. The GPU panel lists all detected GPUs with their device IDs, names, and types.
+Open **Settings → Processing options → GPU device tuning**. It lists each detected GPU with its name and device. **Re-scan GPUs** checks again. The Workers panel on the Dashboard shows which groups use them.
 
 ### Can it use more than one GPU?<a id="can-i-use-multiple-gpus"></a>
 
-Yes. In **Settings** → **Processing Options**, enable individual GPUs and set workers and FFmpeg threads per GPU. Each GPU can be enabled/disabled independently.
+Yes. In **Settings → Workers**, make a worker group for each GPU and set its worker count. Each group can run on its own hours. **FFmpeg threads per worker** for each GPU is under **Settings → Processing options → GPU device tuning**.
 
 ### Which GPU is best for preview thumbnails?<a id="which-gpu-should-i-use"></a>
 
@@ -175,7 +175,7 @@ Yes. It tone-maps HDR10, HLG and HDR10+ so thumbnails don't come out grey, and u
 
 ### How many workers and threads should I set?<a id="how-many-threads-should-i-use"></a>
 
-Start with the defaults and increase gradually while monitoring system load. See the [Performance Tuning](getting-started.md#performance-tuning) table in Getting Started for concrete starting points across hardware tiers.
+Set each group's worker count in **Settings → Workers** (1 to 32). Start low and raise it while watching system load. See the [Worker Configuration](getting-started.md#worker-configuration) table in Getting Started for concrete starting points across hardware tiers.
 
 ### Why is CPU usage high when I have a GPU configured?
 
@@ -188,7 +188,7 @@ Dolby Vision Profile 5 (no HDR10 fallback layer) needs the most from your setup:
 - **AMD** (Radeon): decoded on the GPU and tone-mapped through Vulkan, as for NVIDIA. Not yet tested on AMD hardware.
 - **Apple / CPU-only**: no hardware Vulkan, so Profile 5 thumbnails come out with a green and purple tint ([Limits](hdr-dolby-vision-thumbnails.md#limits)).
 
-The **FFmpeg Threads** setting per GPU controls how many CPU cores each worker can use. If you're running multiple GPU workers and seeing CPU contention, lower this value.
+**FFmpeg threads per worker** (**Settings → Processing options → GPU device tuning**, one value per GPU) caps the CPU threads each GPU worker may use. The default is 2 and 0 means no cap. If several GPU workers fight over the CPU, lower it.
 
 ### How much RAM does each worker use?
 
@@ -199,8 +199,6 @@ Typical per-worker RSS with hardware decode:
 | SDR 1080p | ~90–200 MB |
 | 4K HDR10 / DV P7+8 | ~250–300 MB |
 | 4K DV Profile 5 (libplacebo) | ~350–500 MB |
-
-Earlier builds used ~1 GB per worker on 4K HDR content because frames were downloaded from the GPU at full source resolution. A recent fix moved the downscale onto the GPU itself, so only the small thumbnail-sized frame moves back to system RAM. An 8 GB container now comfortably supports 12+ GPU workers.
 
 ### What does thumbnail quality 1-10 change?<a id="whats-thumbnail-quality-1-10"></a>
 
@@ -216,7 +214,7 @@ qscale to a minimum of 2, so setting 1 produces byte-identical output to 2 —
 
 ### Why is generation slow on my Unraid or mergerfs array?<a id="generation-feels-disk-bound-on-my-multi-disk-setup-unraidmergerfsjbod--how-do-i-speed-it-up"></a>
 
-On setups where one share is backed by multiple physical disks (unraid's `shfs`, mergerfs, JBOD), parallel workers processing files in alphabetical order tend to pile onto one disk at a time. Open the **New Job** modal (or edit a full-library schedule) and set **Processing Order** to **Random**. Workers will pull items from different disks in parallel, so disk read throughput — not GPU — sets the ceiling. Webhook jobs and Recently Added scans don't expose this setting because they only touch a handful of files where ordering doesn't matter. See [Issue #219](https://github.com/stevezau/media_preview_generator/issues/219) for background.
+On setups where one share is backed by multiple physical disks (unraid's `shfs`, mergerfs, JBOD), parallel workers processing files in alphabetical order tend to pile onto one disk at a time. Open **Start new job** (or edit a full-library schedule) and set **Processing Order** to **Random**. Workers will pull items from different disks in parallel, so disk read throughput — not GPU — sets the ceiling. Webhook jobs and Recently Added scans don't expose this setting because they only touch a handful of files where ordering doesn't matter. See [Issue #219](https://github.com/stevezau/media_preview_generator/issues/219) for background.
 
 ---
 
@@ -240,17 +238,17 @@ Use [Authentication Token](getting-started.md#authentication-token).
 
 ### Can I make previews for some libraries only?<a id="can-i-process-specific-libraries-only"></a>
 
-Yes. In **Settings** → **Libraries**, select which libraries to process.
+Yes. On the **Servers** page, edit a server and use its **Libraries** tab to choose which libraries get previews.
 
 ### How do I redo previews that already exist?<a id="how-do-i-regenerate-existing-thumbnails"></a>
 
-When starting a job, use the **Regenerate** option to force regeneration of existing thumbnails.
+When you start a job, choose **Regenerate all** instead of **Missing only**.
 
 ### Why does it skip some files?<a id="why-is-it-skipping-some-files"></a>
 
 Possible causes:
 
-- Thumbnails already exist (use the **Regenerate** option when starting a job to force)
+- Thumbnails already exist (choose **Regenerate all** when starting a job to force)
 - File not found (check [path mappings](reference.md#path-mappings))
 - Gone from disk: a newer file replaced it before its job ran (the newer file is processed on its own)
 - Invalid file format

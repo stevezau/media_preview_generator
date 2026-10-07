@@ -8,7 +8,7 @@ After the chain rewrite (PLAN at
   initial FFmpeg + Plex/Emby publish) IS the chain Job. Its UUID is
   the chain identity.
 - ``upsert_retry_chain_job`` adds/updates retry-chain state on that
-  Job — flips status, sets retry chip aliases, bumps created_at,
+  Job — flips status, sets retry chip aliases,
   etc. It does NOT create a new row.
 
 Matrix coverage per .claude/rules/testing.md:
@@ -583,39 +583,25 @@ class TestStateMachine:
         assert job.publishers == seed, f"scheduled outcome must preserve publishers; got {job.publishers!r}"
 
 
-class TestSortToTop:
-    def test_created_at_bumps_on_each_update(self, jm):
-        """Each mutation refreshes created_at so the row pops to top
-        of newest-first list. retry_started_at preserved in config
-        for chain-age display."""
-        import time
-
+class TestCreatedAtStable:
+    def test_created_at_unchanged_by_chain_updates(self, jm):
+        """created_at is the chain's creation time; chain steps must not rewrite it (the SQLite upsert
+        never persisted it, so a rewrite made the value flip on restart)."""
         original = _seed_originating_job(jm)
-        jm.upsert_retry_chain_job(
-            canonical_path="/x.mkv",
-            basename="x",
-            attempt=1,
-            max_attempts=5,
-            next_run_at=None,
-            wait_seconds=30,
-            outcome="scheduled",
-            originating_job_id=original.id,
-        )
         first_created = jm.get_job(original.id).created_at
-        time.sleep(0.01)
-        v2 = jm.upsert_retry_chain_job(
-            canonical_path="/x.mkv",
-            basename="x",
-            attempt=2,
-            max_attempts=5,
-            next_run_at=None,
-            wait_seconds=120,
-            outcome="scheduled",
-            originating_job_id=original.id,
-        )
-        assert v2.created_at > first_created
-        # retry_started_at stamped on first mutation, preserved after
-        assert v2.config["retry_started_at"] is not None
+        for attempt, outcome in ((1, "scheduled"), (1, "queued_for_slot"), (2, "scheduled")):
+            job = jm.upsert_retry_chain_job(
+                canonical_path="/x.mkv",
+                basename="x",
+                attempt=attempt,
+                max_attempts=5,
+                next_run_at=None,
+                wait_seconds=30,
+                outcome=outcome,
+                originating_job_id=original.id,
+            )
+            assert job.created_at == first_created
+        assert job.config["retry_started_at"] is not None
 
 
 class TestServerAttribution:

@@ -16,10 +16,10 @@ Plex and Emby can have markers of their own. With **Use ours**, the default, the
 
 ## Set up and check the first result
 
-1. [Install Media Preview Generator](getting-started.md) and connect your server. In **Servers → Configure → Processing → Intro & Credits**, enable **Send intro & credits markers to this server**. Complete that server's database-write confirmation or plugin setup before starting work.
-2. Choose the libraries in the same server's **Libraries** section. The **Intro & Credits** and **Previews** selections are independent. Use **Setup Health** to check the server's requirements.
+1. [Install Media Preview Generator](getting-started.md) and connect your server. In **Servers**, edit the server, then open **Processing → Intro & Credits** and turn on **Send intro & credits markers to this server**. Complete that server's database-write confirmation or plugin setup before starting work.
+2. Choose the libraries in the same server's **Libraries** tab. The **Intro & Credits** and **Previews** selections are independent. Use **Setup Health** to check the server's requirements.
 3. Review detection sources under **Settings → Intro & Credits**, then start an Intro & Credits job for the libraries you chose. [The full guide](guides.md#intro--credits) explains source choices and publishing rules.
-4. Open **Tools → Intro & Credits** and inspect a known episode or movie. Compare the detected positions with the video and each server's published result. Adjust or lock a marker when needed; an uncertain result may intentionally have no skip button.
+4. Open **Tools → Inspector** and inspect a known episode or movie. Compare the detected positions with the video and each server's published result. Adjust or lock a marker when needed; an uncertain result may intentionally have no skip button.
 
 To process away from Plex, the [Plex marker agent](guides.md#plex-on-another-machine-the-plex-marker-agent)
 must run beside Plex. This is different from [Plex loudness](plex-loudness-normalization.md), which
@@ -40,7 +40,7 @@ If it can't confirm an intro or credits from the file itself, it writes nothing,
 
 - **On import.** When Sonarr or Radarr imports a file, the app makes the previews first, then detects the intro and credits.
 - **Across a library.** Start an Intro & Credits job for the libraries you choose, or put one on a schedule.
-- **On the workers you already have.** It uses the same GPU and CPU workers, queue and priorities as previews, and adds none of its own.
+- **On your worker groups.** It runs on any [worker group](guides.md#worker-groups-and-availability) that allows Intro & Credits, in the same job queue and with the same priorities as previews.
 - **Only where you [turn it on](guides.md#turning-it-on).** Each server has its own **Send intro & credits markers to this server** switch, off by default, and an **Intro & Credits** column on its Libraries tab.
 
 ## Limits

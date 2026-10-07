@@ -20,8 +20,8 @@ It decodes each video with FFmpeg on the GPU and writes the BIF file into Plex's
 - **Linux:** NVIDIA (CUDA), Intel (VAAPI, the QuickSync hardware) and AMD (VAAPI).
 - **Windows (Docker Desktop, WSL2 backend):** NVIDIA only. AMD and Intel GPUs can't be reached from Docker's Linux VM, so those setups run on CPU.
 - **macOS:** no GPU acceleration under Docker. It runs on CPU, using the native ARM64 image on Apple Silicon.
-- **No GPU:** set CPU workers in **Settings → Processing Options**.
-- **Several GPUs:** each detected GPU gets its own row in **Settings → Processing Options**. Each row has an on/off switch, a worker count and an FFmpeg thread count.
+- **No GPU:** add a CPU worker group in **Settings → Workers**.
+- **Several GPUs:** make a worker group per GPU in **Settings → Workers**. Each group has a name, a device, a worker count (1–32), the jobs it may run and its hours. **Settings → Processing options → GPU device tuning** lists each detected GPU with its **FFmpeg threads per worker**.
 
 Details and caveats are in [Getting Started — GPU Acceleration](getting-started.md#gpu-acceleration).
 
@@ -61,7 +61,7 @@ For Docker Compose, Unraid and permission problems with `/dev/dri`, see:
 
 ## What Plex needs
 
-- **Plex's data folder, mounted read-write** at `/plex`. This is the folder that contains `Cache`, `Media` and `Metadata`. BIFs are written inside it, at `Media/localhost/<hash>/…/Indexes/index-sd.bif`. A read-only mount blocks every write. The **Plex config folder** check in [Setup Health](guides/previews-readiness.md#plex-config-folder) tells you if it's wrong.
+- **Plex's data folder, mounted read-write** at `/plex`. This is the folder that contains `Cache`, `Media` and `Metadata`. BIFs are written inside it, at `Media/localhost/<h>/<hash>.bundle/Contents/Indexes/index-sd.bif`. A read-only mount blocks every write. The **Plex config folder** check in [Setup Health](guides/previews-readiness.md#plex-config-folder) tells you if it's wrong.
 - **The media, visible to the container.** Read-only is fine for Plex, because nothing is written next to the video.
 - **Path mappings** if Plex and the container see the media at different paths. See [Path Mappings](reference.md#path-mappings).
 - **Plex's own generation off.** Set **Settings → Library → Generate video preview thumbnails** to **Never**, so Plex doesn't redo the work.
@@ -70,17 +70,14 @@ Then open `http://YOUR_IP:8080`, log in with the token saved in `auth.json` in y
 
 ## Check the GPU is being used
 
-1. **Settings → Processing Options** lists every GPU the container found, with its name and type. If yours isn't there, the container can't see it. Check the `--device` or `--gpus` flag, then the [troubleshooting table](guides.md#troubleshooting).
-2. Start a job and watch the dashboard. Each worker has its own card. A yellow **CPU fallback** badge means that file failed on the GPU and was redone on the CPU. The job log says why ([CPU fallback](guides.md#automatic-gpu--cpu-fallback)).
+1. **Settings → Workers** offers every GPU the container found, and **GPU device tuning** lists them with name and type. If yours isn't there, the container can't see it. Check the `--device` or `--gpus` flag, then the [troubleshooting table](guides.md#troubleshooting).
+2. Start a job and watch the **Workers** panel on the dashboard. Each worker group has its own card. A yellow **CPU fallback** badge means that file failed on the GPU and was redone on the CPU by the same worker. The job log says why ([CPU fallback](guides.md#automatic-gpu--cpu-fallback)). If several files in a row fall back, the bell menu flags the GPU.
 3. On the host, while a job runs, look for FFmpeg processes. On NVIDIA, `nvidia-smi` lists processes using the GPU. On Intel, `intel_gpu_top` (from `intel-gpu-tools`) shows video engine load.
-
-If many of your files always fall back, add an enabled CPU group allowing previews in **Settings → Workers**. Those files then go straight to CPU workers instead of tying up a GPU worker first.
 
 ## Verify one file before a full library
 
-Use **Manual Generation** to choose one movie or episode, or **Process a file or folder** on the
-Dashboard. Watch **Active work** and the worker cards, then open the job's **Job details** in
-**All jobs**. The server results distinguish generated or reused scrubber previews from chapter work.
+Use **Process a file or folder** on the Dashboard to choose one movie or episode. Watch the
+**Workers** panel, then open the job's **Job details** from the jobs list. The server results distinguish generated or reused scrubber previews from chapter work.
 Open **Open logs and files** for the file's saved result or error, and scrub the same video in Plex to check
 the preview appears. A completed extraction is not the same as successful publication to every server.
 
@@ -89,10 +86,10 @@ For a separate GPU machine, first check the shared-media and output mounts in
 
 ## Tuning
 
-- Start with one worker per GPU, then raise it while watching load. See [Performance Tuning](getting-started.md#performance-tuning).
-- **FFmpeg threads** per GPU caps how many CPU cores each worker may use. Lower it if CPU is the bottleneck.
-- The frame interval defaults to 10 seconds (1–60). Plex's own documented default is 2 seconds. Fewer frames means less work.
-- On unRAID, mergerfs or JBOD shares, set **Processing Order → Random** for full scans. Workers then read from different disks ([FAQ](faq.md#why-is-generation-slow-on-my-unraid-or-mergerfs-array)).
+- Start with one worker in the GPU's group, then raise it while watching load. See [Worker Configuration](getting-started.md#worker-configuration).
+- **FFmpeg threads per worker** (default 2, 0 = no cap) caps the CPU threads each worker on that GPU may use. Lower it if CPU is the bottleneck.
+- **Settings → Processing options → Thumbnail interval** defaults to 10 seconds (1–60). Plex's own documented default is 2 seconds. Fewer frames means less work.
+- On unRAID, mergerfs or JBOD shares, set **Processing Order → Random** when you start a full scan or create a schedule. Workers then read from different disks ([FAQ](faq.md#why-is-generation-slow-on-my-unraid-or-mergerfs-array)).
 
 ## Limits
 

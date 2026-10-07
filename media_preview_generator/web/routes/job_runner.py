@@ -1475,7 +1475,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
                     # Chapters distinguish the attempt's outcome from retry eligibility. Older publisher rows
                     # retain their status-based policy through the same helper used by the attempts API.
-                    from media_preview_generator.processing.retry_queue import publisher_needs_retry
+                    from media_preview_generator.processing.retry_queue import (
+                        CHAPTER_PUBLISHER_STATUSES,
+                        publisher_needs_retry,
+                    )
 
                     # Retry children write their per-file outcomes to the
                     # PARENT's JSONL (see _file_result_cb redirect above).
@@ -1495,6 +1498,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # frontend can derive the chain-summary subtitle from
                     # the /attempts response that mirrors this data.
                     pending_by_server: dict[str, int] = {}
+                    # Subset of pending_by_server waiting on chapters rather than on the server indexing the file.
+                    chapter_waits_by_server: dict[str, int] = {}
                     # Each file's latest result across the chain, for how the chain head's row ends.
                     chain_successes = 0
                     chain_failed = 0
@@ -1510,11 +1515,14 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             not_found_on_disk.append(file_path)
                         else:
                             servers = fr.get("servers") or []
-                            pending_server_names = [s.get("name") or "?" for s in servers if publisher_needs_retry(s)]
-                            if pending_server_names:
+                            pending_servers = [s for s in servers if publisher_needs_retry(s)]
+                            if pending_servers:
                                 pending_registration_paths.append(file_path)
-                                for _name in pending_server_names:
+                                for _server in pending_servers:
+                                    _name = _server.get("name") or "?"
                                     pending_by_server[_name] = pending_by_server.get(_name, 0) + 1
+                                    if _server.get("status") in CHAPTER_PUBLISHER_STATUSES:
+                                        chapter_waits_by_server[_name] = chapter_waits_by_server.get(_name, 0) + 1
 
                     # Combine paths that need a Plex rescan: unresolved
                     # (Plex doesn't know the file) + not-found-on-disk (Plex
@@ -1778,6 +1786,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             "unresolved": len(unresolved_paths),
                             "stale_paths": len(stale_inputs),
                             "pending_by_server": dict(pending_by_server),
+                            "chapter_waits_by_server": dict(chapter_waits_by_server),
                         }
 
                         if is_retry and retry_attempt < effective_max:

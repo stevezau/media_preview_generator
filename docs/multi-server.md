@@ -13,10 +13,10 @@ server that owns it, in the format that server expects.
 ## Connect and check your servers
 
 1. [Install the container](getting-started.md) where you want the processing to run. Its media paths and output mounts must reach the same files your servers use.
-2. Open **Servers → Add Server**, choose Plex, Emby or Jellyfin, and complete the connection flow. Repeat for each server. The **Connection** section holds authentication and Plex helper settings.
-3. Open **Configure → Libraries** to select preview output for each server. Use **Processing** for that server's chapter thumbnails, Intro & Credits and, on a supported local Plex server, loudness.
-4. Check **Path mappings** when the server and container use different paths. Run **Setup Health** for each server and resolve the relevant output and library checks.
-5. Process one shared movie or episode with **Manual Generation**. Expand **All jobs → Job details** to check results for each server, then inspect the output in its player. **Open logs and files** preserves the per-file result when one server is waiting or failed.
+2. Open **Servers → Add Server**, choose Plex, Emby or Jellyfin, and complete the connection flow. Click **Test connection**, then **Save server**. Repeat for each server. The **Connection** tab of **Edit** holds authentication and Plex helper settings.
+3. Click **Edit** on a server card, then open **Libraries** to choose which libraries get previews. Use the **Processing** tab for that server's chapter thumbnails, Intro & Credits and, on a supported local Plex server, loudness.
+4. Check the **Path mappings** tab when the server and container use different paths. Open **Setup Health** for each server and resolve the relevant output and library checks.
+5. Process one shared movie or episode with **Process a file or folder** on the Dashboard. Expand **All jobs → Job details** to check results for each server, then inspect the output in its player. **Open logs and files** preserves the per-file result when one server is waiting or failed.
 
 Connection, library choice and output health are separate checks: a reachable server may still need
 a writable output mount or a plugin before it can use the result.
@@ -36,13 +36,13 @@ each server's API. Map the server's media paths to the paths inside this contain
 Start with one file and watch both the worker's activity and each server's saved result. A network
 share, slow disk or server indexing delay can be the limit even when the GPU has spare capacity.
 
-![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/tour-resolve.webp)
+![Servers page with one card each for Plex, Jellyfin and Emby. Each card shows a status dot, an on/off switch, the server URL, how many libraries are enabled, and Edit, Refresh libraries and Delete buttons. An Add server tile sits below.](images/tour-resolve.webp)
 
 > [!NOTE]
 > The universal webhook URL is configured on the **Automation** page
 > (top nav, between Servers and Settings) under **Webhooks** — not on the
 > Servers page. The per-server Plex Direct webhook lives under
-> **Servers → Configure → Webhook & Scanner** for the Plex server.
+> **Servers → Edit → Webhook & Scanner** for the Plex server.
 
 Output details and advanced integration:
 
@@ -130,11 +130,7 @@ The API examples below are for scripted integrations. All three terminate at
 
 ### Plex
 
-Use the existing **Setup Wizard** at `/setup`. Plex OAuth via plex.tv
-issues a token; nothing changes from the single-Plex flow. The migration
-to `media_servers[]` happens automatically when the server first boots
-the new code (the legacy `plex_*` keys are auto-translated by schema
-migration).
+In **Servers → Add Server**, choose Plex and click **Sign in with Plex**. Pick a server from **Discovered Plex servers**, set its config folder, then click **Test connection** and **Save server**. You can also enter a token by hand.
 
 ### Emby
 
@@ -161,9 +157,8 @@ API-key paste is also supported — skip step 1 and put `{"method": "api_key", "
 ### Jellyfin (Quick Connect — recommended)
 
 Quick Connect lets the user authorise this tool from inside their Jellyfin
-web UI without ever giving us a password. **Note:** Quick Connect must be
-enabled by the Jellyfin admin under *Server → Quick Connect*; it's off by
-default.
+web UI without ever giving us a password. Quick Connect must be
+enabled by the Jellyfin admin under *Server → Quick Connect*.
 
 ```
 1. POST /api/servers/auth/jellyfin/quick-connect/initiate
@@ -209,9 +204,9 @@ Because Emby and default-layout Jellyfin write next to the media file, this cont
 
 **Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [Setup Health → off-media](guides/previews-readiness.md#jellyfin-config-folder).
 
-**Required Jellyfin library settings.** Three per-library settings need to be set so Jellyfin reads the trickplay folders this app writes — most importantly **Save trickplay images to media folders** = on. The Servers page in this app has a one-click **"Disable on this server"** button that flips all three correctly. See the in-app help for what each setting does.
+**Required Jellyfin library settings.** Three per-library settings need to be set so Jellyfin reads the trickplay folders this app writes — most importantly **Save trickplay images to media folders** = on. The **Setup Health** tab has a one-click **Disable on this server** button that flips all three correctly. See the in-app help for what each setting does.
 
-**Optional Jellyfin plugin (recommended).** Installing the **Media Preview Bridge** plugin (one-click install from the Servers page) makes trickplay register *instantly* the moment this app finishes writing the tiles. Without the plugin, keep Jellyfin's **Extract trickplay images during library scan** on: Jellyfin then picks the tiles up on its next library scan. With that flag off and no plugin, new tiles wait for Jellyfin's daily trickplay task (3 AM by default). See [Jellyfin Plugin](https://github.com/stevezau/media_preview_generator/blob/dev/jellyfin-plugin/README.md) for details.
+**Optional Jellyfin plugin (recommended).** Installing the **Media Preview Bridge** plugin (one-click install from the **Setup Health** tab) makes trickplay register *instantly* the moment this app finishes writing the tiles. Without the plugin, keep Jellyfin's **Extract trickplay images during library scan** on: Jellyfin then picks the tiles up on its next library scan. With that flag off and no plugin, new tiles wait for Jellyfin's daily trickplay task (3 AM by default). See [Jellyfin Plugin](https://github.com/stevezau/media_preview_generator/blob/dev/jellyfin-plugin/README.md) for details.
 
 To install the plugin by hand instead, add this repository URL in Jellyfin → **Dashboard → Plugins → Repositories**, then install **Media Preview Bridge** from the Catalogue and restart Jellyfin. Updates then arrive through Jellyfin's normal plugin updates.
 
@@ -275,8 +270,7 @@ For example, append `&delay=30` to the token-bearing URL above, or use
 `/api/webhooks/server/<server_id>?delay=30`. Omitting it uses the global
 **Delay before processing** setting (60 seconds by default).
 
-**Changed behavior:** universal and per-server URLs previously started immediately;
-they now apply this initial wait to each resolved file version, without merging
+Universal and per-server URLs apply this initial wait to each resolved file version, without merging
 separate jobs. Use `delay=1` for the shortest wait. Source-specific URLs such as
 `/api/webhooks/radarr?delay=30` and `/api/webhooks/sonarr?delay=300` instead batch
 new files from the same source/server and reset the batch timer. See
@@ -341,9 +335,7 @@ Two layers prevent the same file being processed twice:
 
    When the source file *does* change (a Sonarr quality upgrade swaps the file in place), the comparison fails and FFmpeg re-runs automatically. To force regeneration manually (e.g. you changed the thumbnail quality), tick **Regenerate** when starting a job — that bypasses both layers.
 
-Outputs created before this dedup system shipped don't have the sidecar — those get treated as fresh on the first post-upgrade webhook (no regeneration storm), then stamped on the next publish.
-
-Older tracking files retain their existing freshness behavior, but they are not
+Outputs without a tracking file are treated as fresh on the next webhook, then stamped on the next publish. Older tracking files are not
 used to copy frames into another server's missing output unless their source
 identity can be verified. BIF files are staged beside the destination and
 atomically replaced only after packing finishes; a failed write leaves the
@@ -366,15 +358,15 @@ Emby/Jellyfin publishes still waiting for the server to register the item.
 
 - **Retry count** (default 5, max 10) sets how many retries run. The
   default runs the whole schedule, about 83 minutes in total. Retries
-  after the fifth wait 60 m each. The default used to be 3 (1 m → 2 m →
-  5 m); an install that already saved its settings keeps the count it
-  stored.
-- **Initial retry delay** (default 30) scales the whole schedule by
+  after the fifth wait 60 m each.
+- **Initial retry delay** (default 30 s, range 10–300 s) scales the whole schedule by
   *value ÷ 30*. The default leaves it unchanged, and 60 doubles every wait.
   Values of 15 or less all halve it (30 s → 1 m → 2.5 m …).
 
 **One job per attempt:** each retry runs as its own "Retry: …" job that
-covers only the files still pending, not the whole original batch.
+covers only the files still pending, not the whole original batch. On the
+Dashboard's Jobs queue, a waiting retry shows a **Retry n/N** badge and a
+countdown such as "Retry starting in 2 min".
 
 **Reuses the dedup machinery:** retries call back into the same
 dispatch code path, so the journal short-circuit, frame cache, and
@@ -382,7 +374,7 @@ per-publisher skip-if-exists all apply on retry. Retries are cheap
 when the publish has already succeeded through some other path
 (e.g. Plex's own webhook firing after its scan completes).
 
-![A Jellyfin job waiting to retry while the server indexes a new file](images/tour-retry.webp)
+![A Jobs queue row for Sintel (2010), a Previews job. Its status reads Running with a Retry 0/5 badge, its priority is Normal, and its progress column reads Retry starting in 2 min.](images/tour-retry.webp)
 
 ---
 
@@ -453,21 +445,14 @@ preview_path, preview_kind, preview_exists}`. `preview_kind` is
 
 ## Plex multi-server auto-discovery
 
-After Plex OAuth completes (one PIN sign-in via plex.tv), the wizard
-calls `/api/v2/resources` and lists every server the account can
-access. Tick **multiple** servers in the discovered list to add them
-all in one go — each gets its own `media_servers[]` entry with the
-same shared OAuth token but a distinct `server_identity` (Plex's
-`clientIdentifier`) so the webhook router can disambiguate them.
+After you click **Sign in with Plex** (one PIN sign-in via plex.tv),
+the **Discovered Plex servers** list shows every server the account can
+access. Pick one to fill in its URL and name, then click **Test connection**
+and **Save server**.
 
-The single-pick path still works for users who want to customise one
-server before adding (set the config folder, adjust libraries). Tick
-exactly one server to populate the wizard fields; tick multiple to
-batch-add with shared defaults (you can edit each one from the
-Servers page afterwards).
-
-This reverses the older "single Plex only" limitation tracked in
-issue #215.
+To add another server from the same account, sign in again after saving the
+first. Each server gets its own entry with a distinct `server_identity`
+(Plex's `clientIdentifier`), so the webhook router can tell them apart.
 
 ---
 

@@ -1554,10 +1554,9 @@ def _process_canonical_path_previews(
     breadcrumb_level = "DEBUG" if check_only else "INFO"
     logger.log(
         breadcrumb_level,
-        "Dispatch: path={} regenerate={} retry_attempt={}",
+        "Dispatch: path={} regenerate={}",
         canonical_path,
         regenerate,
-        retry_attempt,
     )
 
     publishers = _resolve_publishers(

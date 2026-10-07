@@ -191,7 +191,7 @@ def test_preview_retry_creation_time_is_not_a_new_import(lifecycle):
 
 
 @pytest.mark.parametrize("head_notice", ["delete", "import"])
-def test_retry_head_display_bump_preserves_original_event_order(lifecycle, head_notice):
+def test_retry_head_chain_update_keeps_original_event_order(lifecycle, head_notice):
     path = lifecycle.add_file("reimported-head.mkv")
     Path(path).unlink()
     removed = deletion(lifecycle, [path])
@@ -212,7 +212,7 @@ def test_retry_head_display_bump_preserves_original_event_order(lifecycle, head_
         outcome="completed",
         originating_job_id=head.id,
     )
-    assert head.created_at != original
+    assert head.created_at == original
     assert lifecycle.manager._storage.original_job_times()[head.id] == original
     assert head.config["is_retry"] and head.config["is_retry_chain"]
     parent = start_sender(lifecycle, path)

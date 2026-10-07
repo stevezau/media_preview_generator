@@ -48,9 +48,9 @@ Complete reference for all configuration options and REST API endpoints.
 
 ## Media Servers
 
-Every server the app talks to — any number of Plex, Emby, and Jellyfin entries
-— is stored as an array under `media_servers` in `settings.json`. Managed from
-the **Servers** page (or via the REST API below). Each entry has the shape:
+Every server the app talks to (any number of Plex, Emby and Jellyfin entries)
+is stored as an array under `media_servers` in `settings.json`. Manage it from
+the **Servers** page or the REST API below. Each entry looks like this:
 
 ```json
 {
@@ -63,49 +63,76 @@ the **Servers** page (or via the REST API below). Each entry has the shape:
     "method": "token",
     "token": "..."
   },
+  "verify_ssl": true,
+  "timeout": 30,
   "libraries": [
-    {"id": "1", "name": "Movies", "enabled": true},
-    {"id": "2", "name": "TV Shows", "enabled": true}
+    {"id": "1", "name": "Movies", "remote_paths": ["/data/movies"], "enabled": true, "kind": "movie"},
+    {"id": "2", "name": "TV Shows", "remote_paths": ["/data/tv"], "enabled": true, "kind": "show"}
   ],
   "path_mappings": [
     {"remote_prefix": "/data", "local_prefix": "/media", "webhook_prefixes": []}
   ],
-  "plex_config_folder": "/plex"
+  "exclude_paths": [],
+  "output": {"plex_config_folder": "/plex"},
+  "server_identity": "…",
+  "markers": {"enabled": false, "library_ids": null},
+  "loudness": {"enabled": false, "library_ids": null}
 }
 ```
+
+| Key | Notes |
+|---|---|
+| `type` | `plex`, `emby` or `jellyfin`. |
+| `verify_ssl` | Default `true`. |
+| `timeout` | Request timeout in seconds. Default `30`. |
+| `libraries[].enabled` | The **Previews** switch for that library on the Libraries tab. |
+| `exclude_paths` | Per-server rules, each `{"value": "...", "type": "path"\|"regex"}`. See [Exclude Paths](#exclude-paths). |
+| `server_identity` | Plex `machineIdentifier` or Emby/Jellyfin `ServerId`, saved when a connection test succeeds. Used to route webhooks when you have several servers of one type. |
+| `markers` | Intro & Credits block. See [Per-server settings](#per-server-settings-media_serversmarkers). |
+| `loudness` | Plex loudness block. See [Plex loudness](#plex-loudness). Plex only. |
+| `health_dismissals` | Setup Health check ids you dismissed. Managed through the `previews-readiness/dismiss` routes, not the server PUT. |
+
+`output` holds where and how previews are written:
+
+| Key | Servers | Default | Notes |
+|---|---|---|---|
+| `plex_config_folder` | Plex | none | Plex config folder as this container sees it. Must be an absolute path that exists, or the save is refused. |
+| `chapter_thumbnails` | Plex | `false` | See below. |
+| `frame_interval` | all | the global `thumbnail_interval` | Kept in step with the global setting when it changes. |
+| `width` | Emby, Jellyfin | `320` | Preview image width in pixels. |
+| `adapter` | all | by server type | `plex_bundle`, `emby_sidecar` or `jellyfin_trickplay`. |
+| `save_with_media` | Jellyfin | `true` | `false` writes trickplay into Jellyfin's config folder instead of next to the video. |
+| `jellyfin_config_folder` | Jellyfin | none | Jellyfin's config folder as this container sees it. Used when `save_with_media` is `false`. |
+| `webhook_public_url` | Plex | none | URL Plex posts to for the direct Plex webhook. Set by the register call. |
 
 Per-vendor notes:
 
 | Vendor | `auth.method` values | Extra fields |
 |---|---|---|
-| Plex | `token` (OAuth is the *acquisition* flow — the result is stored as `auth.token`) | `plex_config_folder` (where BIF bundles are written), `server_identity` (Plex's `clientIdentifier`, used to disambiguate webhooks) |
+| Plex | `token` (OAuth is how you get it; the result is stored as `auth.token`) | `output.plex_config_folder` (where BIF bundles are written) |
 | Emby | `password`, `api_key` | `auth.user_id`, `auth.access_token` |
 | Jellyfin | `password`, `quick_connect`, `api_key` | `auth.user_id`, `auth.access_token` |
 
-Plex's optional `media_servers[].output.chapter_thumbnails` setting is a JSON boolean, default `false`.
-The API rejects strings such as `"false"` and numeric values. The **Generate chapter thumbnails** switch in
-**Servers → Configure → Processing → Chapter thumbnails** controls it. It adds chapter images to existing Previews jobs and updates existing
+Plex's `output.chapter_thumbnails` setting is a JSON boolean, default `false`.
+The API rejects strings such as `"false"` and numeric values. The **Chapter thumbnails** section in
+**Servers → Edit → Processing** controls it. It adds chapter images to existing Previews jobs and updates existing
 chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
 Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
 See the [chapter thumbnail guide](guides.md#plex-chapter-thumbnails) for setup and retry behavior.
 
-> **Runtime state, not persisted.** Jellyfin's Media Preview Bridge plugin
-> presence is probed live via `JellyfinServer.check_plugin_installed()` and
-> surfaced in the `/previews-readiness` payload — it isn't stored on the
+> **Runtime state, not persisted.** Whether Jellyfin's Media Preview Bridge plugin is installed
+> is checked live and returned in the `/previews-readiness` payload. It isn't stored on the
 > server entry.
 
-**Legacy flat keys.** Older single-Plex installs had top-level `plex_url`,
-`plex_token`, `plex_config_folder`, and `selected_libraries`. These are
-migrated into the first enabled Plex entry of `media_servers[]` on first
-boot. Reads still work via a compatibility shim, so existing scripts that
-query `GET /api/settings` and look at `plex_url` keep working — but new
-writes should use `media_servers[]` via `/api/servers`.
+**Legacy flat keys.** Top-level `plex_url`, `plex_token`, `plex_config_folder`, `selected_libraries`,
+`path_mappings` and `exclude_paths` in `settings.json` are moved into the first Plex entry of
+`media_servers[]` on first start. `GET /api/settings` still returns them, projected from that entry.
+Write server settings through `/api/servers`.
 
 > [!TIP]
-> Use the Setup Wizard to sign in. Plex OAuth, Jellyfin Quick Connect, and
-> Emby username/password exchange all happen through the wizard without you
-> pasting tokens by hand. Exactly one "first server" is configured via the
-> wizard; add more from the Servers page.
+> Use the Setup Wizard to sign in. Plex OAuth, Jellyfin Quick Connect and
+> Emby username/password exchange all happen there without pasting tokens by hand.
+> The wizard configures one server. Add more from the Servers page.
 
 ---
 
@@ -113,55 +140,73 @@ writes should use `media_servers[]` via `/api/servers`.
 
 ### Worker groups (`worker_groups`)
 
-Named groups are the authoritative worker allocation, edited in **Settings → Workers** and the setup wizard.
-The dashboard shows group activity; its **Manage groups** button opens the group settings. See the [worker guide](guides.md#worker-groups-and-availability)
-for scheduling, scaling and migration behavior.
+Named groups are the only worker allocation. Edit them in **Settings → Workers** or the setup wizard. The dashboard's
+**Manage groups** button opens the same page. See the [worker guide](guides.md#worker-groups-and-availability)
+for scheduling and scaling behavior.
 
-Each group contains `id` (unique stable identifier), `name` (1–80 characters), `enabled`, `resource` (`cpu` or `gpu`),
-`device` (GPU device identifier, `null` for CPU), a positive `count` (1–32), `job_types`, and `availability`.
-Job types are `previews`, `intro_credits` and `loudness`; GPU groups cannot allow `loudness`. At least one job type is
-required. Availability is `{"mode":"always","windows":[]}` or `{"mode":"scheduled","windows":[...]}`. Each window
-has `days` (0 = Monday through 6 = Sunday), `start` and `end` (`HH:MM`, different times). Days identify the start of
-a window, including overnight intervals, in the app timezone. Scheduled groups need at least one window.
+| Field | Rules |
+|---|---|
+| `id` | Unique. Letters, digits, `_` and `-`; up to 80 characters; starts with a letter or digit. |
+| `name` | 1–80 characters. |
+| `enabled` | Boolean. A disabled group keeps its saved `count` but provides no capacity. |
+| `resource` | `cpu` or `gpu`. |
+| `device` | GPU device identifier for a GPU group. `null` for CPU. |
+| `count` | Integer 1–32. |
+| `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU groups cannot take `loudness`. |
+| `availability` | `{"mode":"always","windows":[]}` or `{"mode":"scheduled","windows":[...]}`. A scheduled group needs at least one window. |
+| `availability.windows[]` | `days` (0 = Monday through 6 = Sunday, the day the window starts), `start` and `end` (`HH:MM`, different from each other). Up to 32 windows per group. Times use the app timezone. Overnight windows are allowed. |
 
-Up to 64 groups and 32 windows per group are supported. Disabled groups retain their positive saved count but
-provide no capacity. An empty group list is valid. Overlapping windows in one group form a union; different groups
-add their counts. Validation rejects weekly peaks above 32 CPU or 32 GPU workers across the corresponding family,
-including when an existing disabled group is re-enabled. These are worker-slot limits, not limits on CPU cores.
+Up to 64 groups. An empty list is valid and means no workers. Overlapping windows in one group form a union;
+different groups add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU workers.
+These are worker slots, not CPU cores.
 
-Settings schema 21 migrates legacy allocations only when `worker_groups` is absent. Existing groups, including an
-empty list, remain authoritative. CPU zero remains zero, so loudness waits until a CPU group is explicitly added.
-Old allocations become Always groups; device tuning is retained. Known automatic zero-worker pauses are cleared
-in favor of resource waiting, while ambiguous saved pauses remain manual. Quiet-hours migration preserves old
-weekly wall times by splitting overnight intervals; new intervals use start days.
+### Per-GPU tuning (gpu_config)
 
-### Per-GPU Configuration (gpu_config)
-
-Device tuning remains in **Settings → Processing Options**. Worker allocation belongs to groups. Each entry in `gpu_config` has:
+**Settings → Processing → GPU device tuning** sets **FFmpeg threads per worker** for each detected GPU. Worker
+counts belong to groups. Each entry in `gpu_config` has:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `device` | string | GPU device identifier (e.g. `/dev/dri/renderD128`) |
 | `name` | string | Display name (e.g. "Intel UHD Graphics 630") |
 | `type` | string | `nvidia`, `intel`, `amd`, `apple` |
-| `enabled` | boolean | Legacy compatibility value; groups control allocation |
-| `workers` | int | Legacy compatibility count; edit groups to change allocation |
-| `ffmpeg_threads` | int | CPU threads per FFmpeg job on this GPU (0–32, 0 = no limit). Recommended: 2 |
+| `ffmpeg_threads` | int | CPU threads each GPU worker's FFmpeg may use (0–32, `0` = no cap). Default `2`. |
+| `enabled`, `workers` | | Legacy fields kept for compatibility. Groups control allocation. |
 
 ### Other Processing Settings
 
-| Setting | Web UI | Default | Description |
-|---------|--------|---------|-------------|
-| `cpu_threads` | Legacy | `1` | Compatibility count derived from configured CPU groups; use the worker-groups API to change allocation |
-| `scan_workers` | Yes | `0` (Auto) | Full-scan only: how many files are checked **in parallel** for an existing preview, independent of the FFmpeg-generation cap (GPU + CPU workers). Checking is light disk I/O and does NOT add FFmpeg/GPU load. `0` = Auto (`max(32, generators)`); an explicit value is bounded to 1–256. Raise it to speed the "skip already-done files" sweep on large libraries; lower it on a single spinning HDD. |
-| `thumbnail_quality` | Yes | `4` | Preview quality 1-10, lower = better quality (2 = highest) |
-| `thumbnail_interval` | Yes | `10` | Interval between preview images (1–60 s). Matches Plex/BIF community convention (see sidecar `-{width}-10.bif` files). |
-| `selected_libraries` | Yes | All | Library IDs to process |
-| `sort_by` (per-run) | Yes | `newest` | Full-scan queue order: `newest`/`oldest` use the date added to the library, within each library, on Plex, Emby, and Jellyfin. `default` preserves server order; `random` shuffles the combined selected libraries and servers. Parallel checks and workers may start or finish out of order. Set per manual run or schedule. The UI sends `default` explicitly; the configuration fallback remains `newest`. Existing schedules without an override continue to inherit the configured order. |
+These are the top-level keys `POST /api/settings` accepts, besides `frame_reuse`, `markers` and the webhook keys described below. Other keys are ignored. The legacy Plex fields (`plex_url`, `plex_token`, `plex_name`, `plex_verify_ssl`, `plex_config_folder`, `media_path`, `plex_videos_path_mapping`, `plex_local_videos_path_mapping`, `path_mappings`) are written into the first Plex server instead.
+
+| Setting | Settings page | Default | Description |
+|---------|---------------|---------|-------------|
+| `cpu_threads` | none | `1` | Legacy CPU count. Once groups exist, posting it returns `409`; use the worker-groups API. |
+| `max_concurrent_jobs` | Processing → Job execution → Max concurrent jobs | `3` | Jobs that run at the same time. 1–10. Others wait in the queue. |
+| `incoming_job_priority` | Processing → Job execution → Incoming job priority | `high` | Priority of jobs the app creates itself from webhooks and Recently Added scans. `high`, `normal`, `low` (or `1`, `2`, `3`). |
+| `webhook_retry_count` | Processing → Retry policy → Retry count | `5` | Attempts for files a server hasn't indexed yet. The page allows 0–10; `0` turns retries off. |
+| `webhook_retry_delay` | Processing → Retry policy → Initial retry delay | `30` | Base delay in seconds (the page allows 10–300). At 30, retries wait 1 min, 2 min, 5 min, 15 min, then 1 h. |
+| `auto_requeue_on_restart` | Processing → Restart recovery | `true` | Re-queue jobs a restart interrupted. |
+| `requeue_max_age_minutes` | Processing → Restart recovery → Max requeue age | `720` | Interrupted jobs older than this are marked failed instead. The page allows 5–1440. |
+| `scan_workers` | Processing → Library scanning → Files checked at once | `0` (Auto) | Full scans only: how many files are checked in parallel for an existing preview. Checking is light disk I/O and adds no FFmpeg or GPU load. `0` = Auto (`max(32, workers)`). Otherwise 1–256. Lower it on a single spinning disk. |
+| `thumbnail_interval` | Processing → Thumbnails | `10` | Seconds between preview images. The page allows 1–60. |
+| `thumbnail_quality` | Processing → Thumbnails | `4` | Preview quality 1–10, lower = better quality (2 = highest) |
+| `tonemap_algorithm` | Processing → Thumbnails → HDR tone mapping | `hable` | `hable`, `reinhard`, `mobius`, `clip`, `gamma` or `linear`. |
+| `selected_libraries` | Servers → Edit → Libraries | all | Legacy Plex library IDs. The per-server `libraries[].enabled` switches are the source of truth. |
+| `log_level` | Logging | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
+| `log_rotation_size` | Logging → Rotation size | `10 MB` | Size at which the log file rotates. |
+| `log_retention_count` | Logging → Retention | `5` | Rotated log files kept. |
+| `job_history_days` | Logging → Job history → Keep history for | `30` | Days finished jobs are kept. |
+| `config_backup_keep` | Backups → Keep last N backups per file | `10` | Snapshots kept per config file. 1–100. |
+| `config_backup_max_age_days` | Backups → Drop backups older than | `0` | Drop snapshots older than this many days. `0` turns age pruning off. 0–365. |
+| `exclude_paths` | Servers → Edit → Exclude paths | none | See [Exclude Paths](#exclude-paths). |
+
+`sort_by` is set per run, not globally: **Start new job** and schedules choose it. `newest` and `oldest` order by the date
+added to the library (on Plex, Emby and Jellyfin). `default` keeps server order. `random` shuffles the combined selected
+libraries and servers. Parallel checks and workers can start or finish out of order. A job or schedule with no value
+uses `newest`.
 
 ### Per-job media filters
 
-**Start New Job → Filter media** and scheduled **Full library scans** can limit
+**Start new job → Filter media** and scheduled **Full library scans** can limit
 the media selected for a run. All filters are optional and default to unrestricted.
 They are stored in the job or schedule's `config`, not in global settings.
 
@@ -199,25 +244,24 @@ for each execution; a saved date range stays fixed.
 
 ### Frame Reuse Cache (frame_reuse)
 
-When the same canonical file fires multiple webhooks within the cache TTL (e.g. Sonarr fires immediately, Plex's library.new follows 30 min later), this cache reuses the FFmpeg-extracted frames across siblings instead of re-running FFmpeg. Tuned per-server under **Settings → Performance**:
+When the same canonical file fires multiple webhooks within the cache TTL (e.g. Sonarr fires immediately, Plex's library.new follows 30 min later), this cache reuses the FFmpeg-extracted frames across siblings instead of re-running FFmpeg. The global `frame_reuse` setting controls it, under **Settings → Processing → Smart caching across servers**:
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Master toggle for cross-server frame reuse |
-| `ttl_minutes` | `60` | How long to keep extracted frames in the cache |
-| `max_cache_disk_mb` | `2048` | Disk cap for the cache (oldest entries evicted first) |
+| `ttl_minutes` | `60` | How long to keep extracted frames in the cache. Minimum 1. |
+| `max_cache_disk_mb` | `2048` | Disk cap for the cache in MB (oldest entries evicted first). Minimum 64. |
 
 Frames are reused only when they were extracted with the current thumbnail interval, quality and HDR tone-mapping settings. After you change one, the next job extracts fresh frames. Previews already on disk still need **Regenerate**.
 
 > [!TIP]
-> **Multi-disk libraries (unraid shfs, mergerfs, JBOD):** pick **Random** as the Processing Order on the New Job modal or on a scheduled full-library scan. With alphabetical order, parallel workers tend to read sequential files from the same physical disk; shuffling spreads reads across disks so disk I/O stops being the bottleneck. Webhook jobs and Recently Added scans are unaffected — they touch too few files for ordering to matter.
+> **Multi-disk libraries (unraid shfs, mergerfs, JBOD):** pick **Random** as the Processing Order in **Start new job** or on a scheduled full-library scan. With alphabetical order, parallel workers tend to read sequential files from the same physical disk; shuffling spreads reads across disks so disk I/O stops being the bottleneck. Webhook jobs and Recently Added scans are unaffected — they touch too few files for ordering to matter.
 
 > [!NOTE]
 > When a GPU worker can't process a file (unsupported codec,
 > hardware-accelerator error, driver crash), the same worker retries
 > on CPU in-place and the UI shows a warning badge with the reason.
-> No separate fallback pool is needed — increase `cpu_threads` if you
-> want more dedicated CPU concurrency for files that never hit the GPU.
+> There is no separate fallback pool.
 
 ---
 
@@ -235,15 +279,17 @@ These are not migrated to settings.json and remain in effect:
 | `PGID` | `1000` | Group ID (Unraid: `100`) |
 | `TZ` | Host | Timezone (e.g. `America/New_York`) |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
-| `HTTPS` | `false` | Enable HTTPS for cookies |
-| `DEV_RELOAD` | `false` | Enable Flask auto-reload (development) |
+| `HTTPS` | `false` | Mark session cookies secure. Set to `true` when the app is served over HTTPS. |
+| `DEV_RELOAD` | `false` | Start gunicorn with live reload (development) |
 | `WEB_AUTH_TOKEN` | Auto-generated | Fixed authentication token (overrides wizard-set token) |
 | `AUTH_METHOD` | `internal` | Set to `external` to disable built-in auth when using a reverse proxy or VPN (see below) |
 | `FLASK_SECRET_KEY` | Auto-generated | Override the Flask session signing key. Auto-generated and persisted to `/config/flask_secret.key` if not set. Set this only when you need a fixed key across rebuilds. |
 | `LOG_FORMAT` | `pretty` | Log output format. Set to `json` to emit one JSON object per log line — useful when shipping logs to Loki / Datadog / similar aggregators. |
-| `PLEX_DATA_ROOT` | `/` | Restricts where Plex data paths can be validated to. Defaults to the whole filesystem; tighten to e.g. `/plex` if you want the path validator to refuse anything outside that root. |
-| `MEDIA_ROOT` | `/` | Same as `PLEX_DATA_ROOT` but for media paths. |
-| `RATELIMIT_STORAGE_URL` | `memory://` | Backend for rate-limit counters. The default in-memory store is fine for a single-container deploy; set to `redis://host:port/0` if you run behind a load balancer with multiple replicas. |
+| `PLEX_DATA_ROOT` | `/` | Restricts where Plex config folders can be validated. Defaults to the whole filesystem; set it to e.g. `/plex` to refuse anything outside that root. |
+| `MEDIA_ROOT` | `/` | Same as `PLEX_DATA_ROOT` but for media paths (manual jobs, the inspector, the file picker). |
+| `RATELIMIT_STORAGE_URL` | `memory://` | Backend for rate-limit counters. The default in-memory store is fine for a single container. |
+| `CONFIG_BACKUP_KEEP` | `10` | Snapshots kept per config file. Used only until you set it in **Settings → Backups**. 1–100. |
+| `CONFIG_BACKUP_MAX_AGE_DAYS` | `0` | Drop snapshots older than this many days (`0` = off). Used only until you set it in **Settings → Backups**. 0–365. |
 
 ### Developer / harness-only
 
@@ -278,26 +324,27 @@ When set to `external`:
 
 ### Deprecated (no longer used)
 
-These env vars are deprecated and silently ignored at startup with a warning logged. Configure via **Settings** instead:
+These variables log a warning at startup and are not used as settings. Configure them in the web UI instead:
 
 | Variable | Replacement |
 |----------|--------------|
-| `GPU_SELECTION` | Per-GPU enable/disable in Settings → Processing Options |
-| `GPU_THREADS` | Initial legacy GPU allocation, migrated into groups; does not override saved groups |
-| `FFMPEG_THREADS` | Per-GPU `ffmpeg_threads` in `gpu_config` |
-| `PLEX_LIBRARIES` | Per-server library toggles (Settings → Media Servers → Libraries) |
-| `REGENERATE_THUMBNAILS` | Tick "Regenerate" when starting a job from the UI |
-| `SORT_BY` | Pick sort order when starting a job |
-| `NICE_LEVEL` | Removed — process priority is no longer configurable |
-| `FALLBACK_CPU_THREADS` | Removed in v3.x — CPU retry now happens in-place inside the GPU worker |
+| `GPU_SELECTION` | Worker groups (**Settings → Workers**). On first start it seeds the saved GPU list only. |
+| `GPU_THREADS` | Worker groups. On first start it seeds the initial allocation only; it never overrides saved groups. |
+| `FFMPEG_THREADS` | Per-GPU `ffmpeg_threads` in **Settings → Processing → GPU device tuning**. On first start it seeds the saved value only. |
+| `PLEX_LIBRARIES` | Per-server library switches (**Servers → Edit → Libraries**). On first start it seeds the selection only. |
+| `REGENERATE_THUMBNAILS` | Tick **Regenerate** when starting a job. |
+| `SORT_BY` | Pick **Processing Order** when starting a job. |
+| `NICE_LEVEL` | Removed. Process priority is not configurable. |
+| `FALLBACK_CPU_THREADS` | Removed. A GPU worker retries on the CPU in place. |
 
 ### One-time seed values (migrated on first start)
 
-On first run, these env vars are migrated into settings.json. After that, settings.json is the source of truth:
+On first run, these variables are copied into settings.json. After that, settings.json is the source of truth:
 
 - `PLEX_URL`, `PLEX_TOKEN`, `PLEX_CONFIG_FOLDER`, `PLEX_VERIFY_SSL`, `PLEX_TIMEOUT`
-- `PLEX_BIF_FRAME_INTERVAL` / `THUMBNAIL_INTERVAL` (alias), `THUMBNAIL_QUALITY`, `TONEMAP_ALGORITHM`, `CPU_THREADS`, `SCAN_WORKERS`
+- `PLEX_BIF_FRAME_INTERVAL` / `THUMBNAIL_INTERVAL` (alias), `THUMBNAIL_QUALITY`, `TONEMAP_ALGORITHM`, `CPU_THREADS`
 - `MEDIA_PATH`, `TMP_FOLDER`, `LOG_LEVEL`
+- `PLEX_VIDEOS_PATH_MAPPING`, `PLEX_LOCAL_VIDEOS_PATH_MAPPING` (see [Path Mappings](#path-mappings))
 
 ---
 
@@ -309,19 +356,21 @@ The web UI is served by [gunicorn](https://gunicorn.org/) (a Python web server) 
 
 ## Webhook Settings
 
-Settings for automatic preview generation when media is imported via Radarr or Sonarr.
+Settings for automatic preview generation when media is imported or added. Manage them on the **Automation** page (Triggers tab).
 
 | Setting | Default | Web UI | Description |
 |---------|---------|--------|-------------|
 | `webhook_enabled` | `true` | Yes | Master enable/disable for webhook processing |
 | `webhook_delay` | `60` | Yes | Default initial delay for all webhook ingestion URLs (UI slider: 10–300; runtime bounds: 1–3600). Universal/per-server routes wait per job; source-specific routes reset their batch timer on new files, capped by a maximum batch age of the greater of 10 minutes and its longest accepted delay. An optional `delay` URL parameter overrides this value for that request; see [Webhook delay parameter](#webhook-delay-parameter). |
 | `webhook_secret` | *(empty)* | Yes | Dedicated secret for webhook auth (falls back to API token) |
-| `plex_webhook_enabled` | `false` | Yes | Enable the Plex direct webhook (`/api/webhooks/plex`). Requires Plex Pass on the server-owner account. |
-| `plex_webhook_public_url` | *(empty)* | Yes | URL Plex Media Server should POST to. Defaults to the URL you registered through. Override for reverse-proxy / split-network setups. |
+| `webhook_retry_count` | `5` | Processing → Retry policy | Retry attempts for files a server hasn't indexed yet. See [Other Processing Settings](#other-processing-settings). |
+| `webhook_retry_delay` | `30` | Processing → Retry policy | Base retry delay in seconds. |
 
-Webhook processing respects `selected_libraries`; paths outside unchecked libraries are ignored.
+The Plex direct webhook (`/api/webhooks/plex`, needs Plex Pass on the server-owner account) is set up per Plex server. Its public URL is stored in that server's `output.webhook_public_url` and is set by `POST /api/settings/plex_webhook/register`.
 
-The **Recently Added Scanner** is not configured via settings keys any more — it's a first-class schedule type (see [Schedules Endpoints](#schedules-endpoints) below). Create one through the Automation page (Triggers tab) "Create default scanner" shortcut, or through the Schedules tab modal with **Scan mode → Recently added only**.
+Webhook processing respects each server's enabled libraries. Paths outside them are ignored.
+
+The **Recently Added scanner** is a schedule type, not a settings key (see [Schedules Endpoints](#schedules-endpoints)). Create one on the Automation page (Schedules tab) with **Scan mode → Recently added only**.
 
 > [!IMPORTANT]
 > The Plex direct webhook and Recently Added schedules trigger only on **new** library items (new `ratingKey`s). They do **not** detect in-place file upgrades — Plex keeps the same item when Sonarr/Radarr replaces a file. Use the existing Sonarr/Radarr webhooks (which fire on `On Upgrade`) for that case.
@@ -335,7 +384,7 @@ The **Recently Added Scanner** is not configured via settings keys any more — 
 
 Skip Intro / Skip Credits markers for Plex, Jellyfin and Emby. See the
 [Intro & Credits guide](guides.md#intro--credits) for setup and troubleshooting; this section is the settings/API
-reference. Schema version 15 (`upgrade.py`) added this feature, off everywhere by default.
+reference. The feature is off everywhere by default.
 
 ### Global settings (`settings.json["markers"]`)
 
@@ -374,12 +423,8 @@ independent sources agree on something different; any other source needs an inde
 on-screen credit text (credits) and season audio (intros) may decide alone. IntroDB, TheIntroDB, SkipDB, the
 previous-season hint (`season_audio_previous`) and markers already on servers never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
 pair on its own. An agreeing server marker doesn't hold season audio back (it decides as if alone, credited to
-`season_audio` only); the hint with only a server's marker decides nothing. The removed
-`publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
-version 16 deletes it and has the next start queue one job (Low priority, source `decide_again`), an ordinary Intro &
-Credits job over every file it left undecided, listed when it runs. The request (settings key
-`_markers_decide_again`) is cleared when that job completes; until then every start queues it again (or finds it
-queued), and with Intro & Credits off on every server it waits. An intro season audio decided alone keeps asking the
+`season_audio` only); the hint with only a server's marker decides nothing. An old `publish_when` key in a saved or posted block is ignored.
+An intro season audio decided alone keeps asking the
 online sources on their schedule.
 
 After an update that raises a detector's or reader's version (credit text, season audio and its end-picture check,
@@ -402,7 +447,7 @@ every server a batch takes nothing.
 
 ### Per-server settings (`media_servers[].markers`)
 
-Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Configure → Processing → Intro &
+Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Edit → Processing → Intro &
 Credits tab**; `library_ids` from the **Libraries tab's Intro & Credits column** (shown while `enabled` is on), which
 is separate from the Previews column's `libraries[].enabled`.
 
@@ -426,10 +471,10 @@ An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of
 | `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
 | `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
 | `emby` | object | *(Emby servers only)* | Absent on Plex/Jellyfin entries. |
-| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Configure → Processing → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
+| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Processing → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
-| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Configure → Processing → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
-| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Configure → Connection → Plex helper: a [Plex marker agent](#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Processing → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. A type whose every Plex marker can't be right for the file (it starts or ends after the file does, or has no length) is never kept: the file is read for that type and ours are written. A type whose Plex markers were made for an earlier file at the path (no `pv:` record of them on the file Plex has now, and older than its `media_parts.updated_at`) doesn't stop the file being read and isn't a second opinion; ours replaces it when the file gives an answer (row message e.g. "Replaced Plex's intro: it was detected for an earlier file"), and it is kept when it gives none. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
+| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Edit → Connection → Plex helper: a [Plex marker agent](#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
 | `plex.agent.enabled` | bool | `false` | `true` needs `url` and `token` set (400 otherwise: "Set the Plex marker agent's address and shared key before turning it on"). The database-write confirmation (`plex.db_write_confirmed_at`) still applies. |
 | `plex.agent.url` | string | `""` | `http` or `https` address, e.g. `http://plex-host.lan:9494`. A trailing `/` is dropped. 400 for a query string, fragment, or a username/password in it. |
 | `plex.agent.token` | string | `""` | The key both sides share (the agent's `AGENT_TOKEN`). Printable ASCII, no spaces. `GET`/`POST` return a set key as `****`; posting `****` (or leaving `token` out) keeps the stored key. Never logged. |
@@ -520,7 +565,7 @@ follow-up (renamed "Intro & Credits · N files") while it stays within 500 files
 episode doesn't wait for its own preview job: markers don't need previews.
 
 **Check servers** (`reconcile: true`, `source: "reconcile"`, named "Intro & Credits · Check servers") is created by
-`POST /api/markers/reconcile`, the Dashboard's Start New Job dialog, or a schedule with `config.reconcile` (see
+`POST /api/markers/reconcile`, the Dashboard's **Start new job** dialog, or a schedule with `config.reconcile` (see
 [Schedules](#post-apischedules)); nothing schedules it by default. LOW priority unless the request or schedule sets one.
 Only one is queued or running at a time: asking again (a **Re-run** of a finished one included) returns that job. It
 reads back every item this app published (`item_publish_state` with status `written`) on each enabled server with
@@ -858,7 +903,7 @@ or low"}`. `503` when the config directory isn't writable (checked before the bo
 
 ## Plex loudness
 
-Audio loudness analysis on this app's eligible CPU worker groups ([Plex loudness](plex-loudness-normalization.md)). Plex servers only;
+Audio loudness analysis on this app's eligible CPU worker groups ([Plex loudness](plex-loudness-normalization.md)). Plex servers only; set up in **Servers → Edit → Processing → Loudness**;
 off until turned on per server.
 
 ### Per-server settings (`media_servers[].loudness`)
@@ -912,20 +957,20 @@ Without mapping, the app can't find the files and jobs report them as not found.
 
 ### Configuration (Web UI)
 
-Open **Servers → Configure** on the server that needs mapping, and add rows in the
-Path Mappings section. Each row has:
+Open **Servers**, click **Edit** on the server that needs mapping, and add rows on the
+**Path mappings** tab. Each row has:
 
-- **Path on server** — The folder path the media server reports for the file
+- **Path on media server** — The folder path the media server reports for the file
   (e.g. `/data`). Called `remote_prefix` in the API.
-- **Path in this app** — The folder path this app uses for the same files
+- **Local path on this app** — The folder path this app uses for the same files
   (e.g. `/mnt/data`). Called `local_prefix` in the API.
-- **Webhook path (if different)** — Only needed when Sonarr, Radarr, Tdarr,
+- **Path on Apps (Sonarr, Radarr, Webhooks)** — Only needed when Sonarr, Radarr, Tdarr,
   etc. use a different path than the media server (e.g. they use `/data`
   while Plex uses `/data_disk1`). Leave blank if they match. Called
   `webhook_prefixes` in the API.
 
 Add as many rows as you need (e.g. one per disk when the server has multiple
-roots). Each server manages its own list independently.
+roots). Each server manages its own list independently. **Apply to all servers** copies one server's list to the others.
 
 ### Legacy env (semicolon pair)
 
@@ -943,13 +988,13 @@ enabled Plex entry at migration time.
 If a server has several roots (e.g. `/data_disk1`, `/data_disk2`) but
 Sonarr/Radarr see one path (`/data`):
 
-- Add one row per server root, each with the same **Path in this app** (e.g. `/data`).
-- In **Webhook path**, enter `/data` on one of the rows so imports from
+- Add one row per server root, each with the same **Local path on this app** (e.g. `/data`).
+- In **Path on Apps**, enter `/data` on one of the rows so imports from
   Sonarr/Radarr still match.
 
 ### Examples
 
-| Situation | Path on server | Path in this app | Webhook path |
+| Situation | Path on media server | Local path on this app | Path on Apps |
 |-----------|----------------|------------------|--------------|
 | Different paths in Docker | `/data` | `/mnt/data` | *(blank)* |
 | Multiple disks, Sonarr sees one path | `/data_disk1` | `/data` | `/data` |
@@ -968,7 +1013,7 @@ If both Plex and this container see files at the same path (e.g., both use `/med
 
 ### Exclude Paths
 
-Under the same **Media path mapping** settings you can add **Exclude paths**: paths or folders to skip for preview generation. These are applied to the **local** path (as this app sees the file after path mapping).
+In **Servers → Edit → Exclude paths** you can add paths or folders to skip for preview generation. Each server has its own list (`exclude_paths`). Rules are applied to the **local** path (as this app sees the file after path mapping).
 
 - **Path prefix** — Any file under this folder is skipped (e.g. `/mnt/media/archive` skips everything under that path).
 - **Regex** — The full local path is matched against the pattern (e.g. `.*\.iso$` to skip ISO files).
@@ -979,7 +1024,7 @@ Add one row per path or pattern. Excluded items are not queued for full-library 
 
 ## REST API
 
-All API endpoints (except `/api/health` and `/api/setup/status`) require authentication.
+All API endpoints require authentication except `/api/health` and `/api/setup/status`. Until the setup wizard is finished, the setup, settings, Plex-OAuth, server and worker-group routes also answer without a token.
 
 ### Authentication
 
@@ -1143,35 +1188,60 @@ Returns `{"success": true}` on success, or `{"success": false, "error": "..."}` 
 
 #### GET /api/settings
 
-Get current settings.
+Get current settings. Secrets are masked as `"****"`.
 
 ```json
 {
   "plex_url": "http://192.168.1.100:32400",
   "plex_token": "****",
   "plex_name": "My Server",
+  "plex_verify_ssl": true,
   "plex_config_folder": "/plex",
   "selected_libraries": ["1", "2"],
   "media_path": "/media",
-  "plex_videos_path_mapping": "",
-  "plex_local_videos_path_mapping": "",
   "path_mappings": [
     {"remote_prefix": "/data", "local_prefix": "/mnt/data", "webhook_prefixes": []}
   ],
+  "exclude_paths": [],
   "gpu_config": [
     {"device": "/dev/dri/renderD128", "name": "Intel UHD 630", "type": "intel", "enabled": true, "workers": 4, "ffmpeg_threads": 2}
   ],
   "cpu_threads": 2,
+  "worker_groups": [],
+  "worker_groups_revision": 0,
+  "scan_workers": 0,
   "thumbnail_interval": 10,
-  "thumbnail_quality": 4
+  "thumbnail_quality": 4,
+  "tonemap_algorithm": "hable",
+  "log_level": "INFO",
+  "log_rotation_size": "10 MB",
+  "log_retention_count": 5,
+  "job_history_days": 30,
+  "webhook_enabled": true,
+  "webhook_delay": 60,
+  "webhook_retry_count": 5,
+  "webhook_retry_delay": 30,
+  "webhook_secret": "****",
+  "auto_requeue_on_restart": true,
+  "requeue_max_age_minutes": 720,
+  "max_concurrent_jobs": 3,
+  "incoming_job_priority": 1,
+  "config_backup_keep": 10,
+  "config_backup_max_age_days": 0,
+  "frame_reuse": {"enabled": true, "ttl_minutes": 60, "max_cache_disk_mb": 2048},
+  "markers": {"detect": {"intro": true, "credits": true, "recap": false}}
 }
 ```
 
-> **path_mappings keys**: `remote_prefix` is the canonical key as of the multi-server refactor (works for Plex, Emby, and Jellyfin). The legacy `plex_prefix` is still accepted as an alias on read; new writes should use `remote_prefix`.
+The Plex fields and `path_mappings` / `exclude_paths` are projected from the first Plex server. The response also includes
+`plex_videos_path_mapping`, `plex_local_videos_path_mapping`, `gpu_threads` and `ffmpeg_threads` (legacy values).
+`incoming_job_priority` is `1` (high), `2` (normal) or `3` (low).
+
+> **path_mappings keys**: `remote_prefix` is the canonical key (works for Plex, Emby and Jellyfin). The old `plex_prefix` is still accepted as an alias on read.
 
 #### POST /api/settings
 
-Update settings. Send only the fields to change.
+Update settings. Send only the fields to change. Returns `{"success": true}` (plus a `warning` when no workers are configured). A bad value returns `400` with `error` and saves nothing.
 
 ```json
 {
@@ -1184,8 +1254,8 @@ Update settings. Send only the fields to change.
 Use the dedicated [worker-groups API](#worker-group-endpoints) for allocation. Once groups exist, posting legacy
 `cpu_threads` or GPU `enabled`/`workers` allocation fields returns `409` with guidance instead of overwriting groups.
 GPU tuning-only entries merge into stored device settings. `GET /api/settings` also returns `worker_groups` and
-`worker_groups_revision`. Zero workers cause resource waiting, not a global pause; saving capacity never clears a
-manual or quiet-hours hold.
+`worker_groups_revision`. Zero workers cause resource waiting, not a global pause. Saving capacity never clears a
+manual or schedule hold.
 
 `markers` (the Intro & Credits block) may be partial: posted keys merge over the stored block — `detect` key by key,
 `sources` by `id` (a list naming every source sets their order; a shorter one updates those sources where they are;
@@ -1223,8 +1293,10 @@ Get list of user's Plex servers.
       "host": "192.168.1.100",
       "port": 32400,
       "ssl": false,
+      "uri": "http://192.168.1.100:32400",
       "owned": true,
-      "local": true
+      "local": true,
+      "connections": [{"uri": "http://192.168.1.100:32400", "address": "192.168.1.100", "port": 32400, "protocol": "http", "ssl": false, "local": true, "relay": false}]
     }
   ]
 }
@@ -1232,7 +1304,7 @@ Get list of user's Plex servers.
 
 #### GET /api/plex/libraries
 
-Get libraries from connected Plex server. Optional query parameters: `url`, `token`.
+Get libraries from a Plex server. Optional query parameters: `url`, `token`, `verify_ssl`. They default to the saved Plex values. `400` when no URL or token is available.
 
 ```json
 {
@@ -1245,7 +1317,7 @@ Get libraries from connected Plex server. Optional query parameters: `url`, `tok
 
 #### POST /api/plex/test
 
-Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"success": true, "server_name": "...", "version": "..."}`.
+Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"success": true, "server_name": "...", "error": null}`, or `{"success": false, "error": "..."}`.
 
 ### Worker group endpoints
 
@@ -1289,7 +1361,8 @@ hours and hardware. Busy excludes retiring work, which is counted as finishing. 
 pause. States include `active`, `disabled`, `off_hours`, `hardware_unavailable` and `draining`. Removed groups may
 remain in this snapshot while files finish. `capacity.current` sums current targets by CPU/GPU and `capacity.peak`
 gives the configured weekly peaks; neither is a CPU utilization percentage. Warnings identify unavailable hardware
-or job types with no compatible hours outside global quiet hours. `processing_paused` and `pause_reasons` describe
+(`code: "hardware_unavailable"`) or job types with no compatible hours outside the global pause schedule
+(`code: "no_eligible_workers"`). `processing_paused` and `pause_reasons` describe
 the separate master hold.
 
 Persisted pending capacity waits and their saved checkpoints are restored independently of
@@ -1302,69 +1375,113 @@ schedule or global holds. Ordinary interrupted running jobs continue to follow t
 |--------|----------|-------------|
 | GET | `/api/processing/state` | Get global processing pause state |
 | POST | `/api/processing/pause` | Add the manual global hold; pause active processing and new starts |
-| POST | `/api/processing/resume` | Clear only the manual global hold; quiet hours can still hold processing |
+| POST | `/api/processing/resume` | Clear only the manual global hold; the pause schedule can still hold processing |
 
 **GET /api/processing/state** — Response includes `paused` and `reasons`, for example
 `{"paused":true,"reasons":["manual","quiet_hours"]}`. Manual holds survive restarts.
 
 **POST /api/processing/pause** returns `{"paused":true}`. **POST /api/processing/resume** returns the effective
-`paused` state and its `reasons`; a successful resume can return `paused: true` while quiet hours remain active.
+`paused` state and its `reasons`; a successful resume can return `paused: true` while the pause schedule is active.
 Worker availability never clears these holds.
 
 ### Jobs Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/jobs` | List all jobs |
-| POST | `/api/jobs` | Create new job |
+| GET | `/api/jobs` | List jobs (filtered, paged) |
+| POST | `/api/jobs` | Create a library job |
 | GET | `/api/jobs/{id}` | Get job details |
+| GET | `/api/jobs/{id}/attempts` | Retry chain history for a chain-head job |
 | GET | `/api/jobs/{id}/file-list` | The job's first files for its row on the Jobs page (`?limit=`, default 10, max 50): `{"files": [{"title", "name", "path"}], "total": N}`, the files it was given first, then the files it has run. `404` for an unknown id. |
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
 | POST | `/api/jobs/{id}/pause` | Add a manual hold to this pending or running job, for all job kinds. Returns the job; `409` for a terminal job, `404` for an unknown ID. Does not change global pause. |
 | POST | `/api/jobs/{id}/resume` | Remove this job's manual hold. Returns the job plus `processing_paused`; a schedule hold can keep `paused` true. `409` for a terminal job, `404` for an unknown ID. |
-| DELETE | `/api/jobs/{id}` | Delete job |
+| POST | `/api/jobs/{id}/priority` | Change a job's priority. Body `{"priority": "high"\|"normal"\|"low"}` or `1`\|`2`\|`3`. Returns the job. An unrecognised value becomes Normal. |
+| POST | `/api/jobs/{id}/retry-now` | Skip the countdown to the next retry attempt of a retry-chain job |
+| DELETE | `/api/jobs/{id}` | Delete a finished job. `404` for an unknown or running job. |
+
+Priority `1` is high, `2` normal, `3` low. Jobs wait in the queue by priority, then by creation time. A job's
+`priority` field holds the number.
 
 #### GET /api/jobs
 
-Optional query parameters: `page` (default 1; 0 returns all), `per_page` (default 50, maximum 200), `q` (case-insensitive job, library, source or server label search), and `status` (`active`, `running`, `pending`, `completed`, `failed`, `cancelled`, `paused`, or `chapter_warnings`). Omit `status` or use `all` for every status. `active` selects unfinished pending or running jobs, including paused jobs and retry heads. The dashboard initially requests this filter; the API default remains all statuses. `paused` selects pending or running jobs with their own pause hold, independently of global pause. `chapter_warnings` selects visible terminal preview jobs whose saved publisher summaries report failed, waiting or incomplete chapters. An invalid status returns `400`.
+Optional query parameters:
 
-Search and status filters apply before pagination. The response includes `total`, `page`, `per_page` and `pages` for the filtered list; dashboard statistics remain unfiltered. Retry attempts are hidden by default; `include_retry_attempts=1` includes them.
+| Parameter | Meaning |
+|---|---|
+| `page` | Default `1`. `0` returns all jobs. |
+| `per_page` | Default `50`, maximum `200`. |
+| `status` | `active`, `running`, `pending`, `completed`, `failed`, `cancelled`, `paused` or `chapter_warnings`. Omit or use `all` for every status. `active` is unfinished pending or running jobs, including paused jobs and retry heads (the dashboard starts here). `paused` is pending or running jobs with their own pause hold, whatever global pause says. `chapter_warnings` is visible finished preview jobs whose saved publisher summaries report failed, waiting or incomplete chapters. Anything else returns `400`. |
+| `q` | Case-insensitive search of job, library, source and server labels. |
+| `kind` | `previews`, `intro_credits` or `loudness`. Anything else returns `400`. |
+| `server_id` | Jobs that started on, publish to, or touch libraries of that server. |
+| `library_server_id` and `library_id` | An exact server and library pair. Send both or neither. |
+| `include_retry_attempts` | `1` includes the hidden per-attempt retry jobs. |
 
-`chapter_warning_count` is the number of visible terminal preview jobs with saved chapter issues, independent of
-the current page, search, status, server, library and kind filters. It excludes hidden retry attempts even when
-they are requested. Typed chapter counts take precedence over legacy publication counts. This describes job
-history rather than the current state of every media file; a later successful run does not rewrite an older job.
+Filters apply before paging. Running jobs come first, then pending jobs by priority and creation time, then finished
+jobs, newest first. Retry attempts are hidden by default: a retry chain shows as one row.
+
+The response has `jobs`, `total`, `page`, `per_page` and `pages` for the filtered list, `filter_options` (the `servers`
+and `libraries` you can filter by) and `chapter_warning_count`. `chapter_warning_count` is the number of visible finished
+preview jobs with saved chapter issues, regardless of the page, search, status, server, library and kind filters. It
+describes job history, not the current state of every file. Each job in the list also carries `library_names` (the libraries
+it covers, empty when it names none) and `library_scope`.
+
+Every job object has these fields:
 
 ```json
 {
-  "jobs": [
-    {
-      "id": "job-123",
-      "status": "running",
-      "library_id": "1",
-      "library_name": "Movies",
-      "progress": 45,
-      "total_items": 100,
-      "completed_items": 45,
-      "created_at": "2024-01-15T10:30:00Z",
-      "started_at": "2024-01-15T10:30:05Z",
-      "library_names": ["Movies"]
-    }
-  ]
+  "id": "job-123",
+  "kind": "previews",
+  "status": "running",
+  "priority": 2,
+  "paused": false,
+  "created_at": "2026-01-15T10:30:00+00:00",
+  "started_at": "2026-01-15T10:30:05+00:00",
+  "completed_at": null,
+  "library_id": "1",
+  "library_name": "Movies",
+  "server_id": "plex-household",
+  "server_name": "Household Plex",
+  "server_type": "plex",
+  "parent_schedule_id": "",
+  "publishers": [],
+  "progress": {
+    "percent": 45.0,
+    "current_item": "Movie Title",
+    "total_items": 100,
+    "processed_items": 45,
+    "current_file": "/media/movies/Movie Title.mkv",
+    "current_files": ["/media/movies/Movie Title.mkv"],
+    "workers": [],
+    "outcome": {"generated": 40, "skipped_bif_exists": 5},
+    "retry_eta": null,
+    "retry_wait_total": null,
+    "marker_sources": null,
+    "cpu_fallback_files": 0
+  },
+  "error": null,
+  "config": {}
 }
 ```
 
-`library_names` is only in this list: the libraries a job covers, from the libraries it was started on or else the
-libraries holding the files it lists (empty when it names neither).
+`status` is `pending`, `running`, `completed`, `failed` or `cancelled`. `publishers` has one row per server the job
+published to (`server_id`, `server_name`, `server_type`, `adapter_name`, `status`, `message`, `canonical_path`).
+`progress.workers` holds the per-worker status rows while the job runs.
 
 #### POST /api/jobs
 
 **Request:** `{"library_id": "1", "library_name": "Movies"}`
 
-An optional `config` object may set `force_generate`, `regenerate_thumbnails`, `sort_by`, `selected_libraries` and
-`selected_library_ids`. Other keys are dropped with a WARNING and aren't saved with the job.
+Other accepted fields: `library_ids` (list, for several libraries), `library_names` (list), `server_id`, and `priority`
+(`high`, `normal`, `low` or `1`–`3`; default normal). Without `server_id`, the app infers the server when every chosen
+library belongs to one server, and the job publishes only there.
 
-**Response:** `{"id": "job-123", "status": "pending", "message": "Job created successfully"}`
+An optional `config` object may set `force_generate`, `regenerate_thumbnails`, `sort_by`, `selected_libraries` and
+`selected_library_ids`, plus the [media filters](#per-job-media-filters). Other keys are dropped with a WARNING and aren't
+saved with the job.
+
+**Response:** `201` with the created job object (same shape as `GET /api/jobs/{id}`). `503` when the config folder isn't writable.
 
 Optional [media filters](#per-job-media-filters) go in `config`. For example,
 process movies added in the last 30 days and released in 2020 or later:
@@ -1395,40 +1512,38 @@ Fields belonging to an inactive added-date mode are cleared during normalization
 
 #### GET /api/jobs/{id}
 
-```json
-{
-  "id": "job-123",
-  "status": "running",
-  "library_id": "1",
-  "library_name": "Movies",
-  "progress": 45,
-  "total_items": 100,
-  "completed_items": 45,
-  "failed_items": 0,
-  "created_at": "2024-01-15T10:30:00Z",
-  "started_at": "2024-01-15T10:30:05Z",
-  "workers": [
-    {
-      "id": 0,
-      "type": "gpu",
-      "status": "working",
-      "current_item": "Movie Title"
-    }
-  ]
-}
-```
+Returns the job object shown above. `404` for an unknown id.
+
+#### GET /api/jobs/{id}/attempts
+
+For the head job of a retry chain. Returns
+`{"chain_id", "attempts": [...], "max_attempts"}`. The first attempt is the original job (`retry_attempt: 0`,
+`is_originating: true`), followed by each retry job in order. `404` when the job has no retry chain.
+
+#### POST /api/jobs/{id}/retry-now
+
+Skips the countdown to the next retry attempt. Returns `{"fired": true, "job_id", "retry_job_id"}`. `404` for an unknown
+job, `400` when the job isn't a retry-chain head, `409` when no retry is waiting.
 
 ### Schedules Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List schedules |
-| POST | `/api/schedules` | Create schedule |
+| GET | `/api/schedules` | List schedules: `{"schedules": [...], "load_status": {...}}` |
+| GET | `/api/schedules/{id}` | One schedule. `404` for an unknown id. |
+| POST | `/api/schedules` | Create schedule (`201`) |
 | PUT | `/api/schedules/{id}` | Update schedule |
 | DELETE | `/api/schedules/{id}` | Delete schedule |
-| POST | `/api/schedules/{id}/run` | Run now |
+| POST | `/api/schedules/{id}/run` | Run now. Returns `{"success": true}`. |
+| POST | `/api/schedules/{id}/enable` · `/api/schedules/{id}/disable` | Turn a schedule on or off without deleting it. Returns the schedule. |
+| POST | `/api/schedules/recover_from_backup` | Restore `schedules.json` from its newest backup after it failed to load. `200` with `{"status": "ok"}`, otherwise `409` with a `status` such as `no_backup`. |
 
 #### POST /api/schedules
+
+Fields: `name` (required), one of `cron_expression` or `interval_minutes` (required), `library_id` or `library_ids`,
+`library_name`, `server_id` (pin the schedule to one server), `enabled` (default `true`), `priority`, `stop_time` (`HH:MM`,
+container-local time; pauses the schedule's job at that time and resumes it at the next start) and `config`. `400` for an
+invalid value. `503` with `config_health` when the config folder isn't writable.
 
 **Cron request — full library scan (default):**
 
@@ -1492,9 +1607,9 @@ and does not change a schedule's start/stop times.
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/api/health` | No | Health check |
-| GET | `/api/system/status` | Yes | System status (GPUs, workers, job counts) |
+| GET | `/api/system/status` | Yes | `gpus`, `gpu_stats`, `running_job` and `pending_jobs` |
 | GET | `/api/system/config` | Yes | Current configuration |
-| GET | `/api/libraries` | Yes | Aggregated library list across every configured server |
+| GET | `/api/libraries` | Yes | Libraries across every enabled server, each tagged with `server_id`, `server_name` and `server_type`. `?server_id=` limits it to one server. `?url=&token=` lists a Plex server that isn't saved yet (setup wizard). |
 
 ### Multi-Media-Server Endpoints
 
@@ -1516,15 +1631,16 @@ For full design and per-vendor details see [Multi-Media-Server](multi-server.md)
 | POST | `/api/servers/auth/jellyfin/quick-connect/initiate` | Begin Quick Connect ceremony |
 | POST | `/api/servers/auth/jellyfin/quick-connect/poll` | Poll for approval |
 | POST | `/api/servers/auth/jellyfin/quick-connect/exchange` | Exchange approved secret for token |
-| GET | `/api/servers/<id>/health-check` | Per-server settings audit. Returns `{vendor, issues, issue_count, fixable_count}`; `issues[]` carries `{flag, label, severity, current, recommended, rationale, library_id, library_name, fixable}`. Works for Plex (server-wide prefs via `/:/prefs`), Emby and Jellyfin (per-library `LibraryOptions`). Replaces the older Jellyfin-only `/jellyfin/trickplay-status` route. |
+| GET | `/api/servers/<id>/health-check` | Per-server settings audit. Returns `{vendor, issues, issue_count, fixable_count}`; `issues[]` carries `{flag, label, severity, current, recommended, rationale, library_id, library_name, fixable}`. Works for Plex (server-wide prefs via `/:/prefs`), Emby and Jellyfin (per-library `LibraryOptions`). |
 | POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Setup Health card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
 | GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Setup Health card on the Edit Server modal. See the [Setup Health guide](guides/previews-readiness.md). |
 | POST | `/api/servers/<id>/install-plugin` | Jellyfin and Emby (400 for Plex). Jellyfin: adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. Emby: installs Media Preview Bridge for Emby from Emby's own plugin catalog and restarts Emby; when the catalog doesn't list it, answers `ok: false, manual: true` (install the DLL by hand). Returns `{ok, steps, error, manual}`. |
 | POST | `/api/servers/<id>/plex-library-markers` | Plex only. Setup Health's **Turn on** for a library whose own *Intro markers* / *Credits markers* setting is off (Plex then hides every skip marker of that type there, ours included). Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them on with `PUT /library/sections/{id}/prefs` for that library only. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's **Set server-wide to Never**. Body `{"types": ["intro", "credits"]}` (one or both); sends `PUT /:/prefs?GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never` for the types given, which stops Plex's own detection without hiding any marker. 400 for any other type, a non-Plex server, or a server with Intro & Credits off. Returns `{ok, types}` or `{ok: false, error}`. |
-| POST | `/api/servers/<id>/plex-loudness-analysis` | Plex only. Optional **Set to Never** action, with a confirmation dialog in Setup Health. Body `{}`; sends `PUT /:/prefs?LoudnessAnalysisBehavior=never`. Requires app loudness opt-in, eligible selected video libraries, configured CPU loudness hours outside global quiet hours and a fresh successful writer-readiness check. Returns 409 if the server is disabled, selection is empty, eligible CPU hours are absent or the writer is unavailable; 400 for a non-Plex server or loudness opt-in off; 404 for an unknown server. Response is `{ok, error}`; inspect `ok` even for HTTP 200 because Plex can refuse the preference update. Affects native analysis in every library, including music; existing measurements are retained. |
-| POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
-| GET | `/api/bif/servers/<id>/search?q=<query>` | One server's preview search; returns `preview_kind` (`bif` or `trickplay`) per result. The Inspector searches every server through `GET /api/media/search` instead |
+| POST | `/api/servers/<id>/plex-loudness-analysis` | Plex only. Optional **Set to Never** action, with a confirmation dialog in Setup Health. Body `{}`; sends `PUT /:/prefs?LoudnessAnalysisBehavior=never`. Requires app loudness opt-in, eligible selected video libraries, configured CPU loudness hours outside the global pause schedule and a fresh successful writer-readiness check. Returns 409 if the server is disabled, selection is empty, eligible CPU hours are absent or the writer is unavailable; 400 for a non-Plex server or loudness opt-in off; 404 for an unknown server. Response is `{ok, error}`; inspect `ok` even for HTTP 200 because Plex can refuse the preference update. Affects native analysis in every library, including music; existing measurements are retained. |
+| POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only (400 otherwise). Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
+| POST | `/api/servers/<id>/previews-readiness/dismiss` · `/undismiss` | Hide or show again one recommended Setup Health check. Body `{"check_id": "..."}`. Stored in the server's `health_dismissals`. |
+| GET | `/api/bif/servers/<id>/search?q=<query>` | One server's preview search; returns `preview_kind` (`bif` or `trickplay`) per result. Limited to 10 per minute. The Inspector searches every server through `GET /api/media/search` instead |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + report sheet metadata |
 | GET | `/api/bif/trickplay/frame?server_id=...&sheets_dir=...&index=N&tile_width=10&tile_height=10` | Slice and serve a single thumbnail JPEG from a trickplay tile sheet |
 
@@ -1635,10 +1751,10 @@ know; `502` when ffmpeg can't read the frames; `503` when both reads were busy f
 
 ### Webhook Endpoints
 
-Inbound webhook endpoints for Radarr/Sonarr/Custom integration. Webhook endpoints accept `X-Auth-Token`, `Authorization: Bearer`, or a configured `webhook_secret`.
+Inbound webhook endpoints for Radarr, Sonarr, Plex, Emby, Jellyfin and custom integrations. Each call must carry the API token or the `webhook_secret`, sent as an `X-Auth-Token` header, an `Authorization: Bearer` header, the password of HTTP Basic auth, or a `?token=` query parameter (for senders that can't set headers). They never need a CSRF token.
 
 > [!TIP]
-> The new **universal webhook URL** at `POST /api/webhooks/incoming` auto-detects the vendor (Plex / Emby / Jellyfin / Sonarr / Radarr / templated path) so you only need one URL across every server. Falls back to per-server URLs at `POST /api/webhooks/server/<server_id>` for ambiguous setups (rare). See [Multi-Media-Server — Webhook configuration](multi-server.md#webhook-configuration-per-vendor) for details.
+> The **universal webhook URL** at `POST /api/webhooks/incoming` auto-detects the vendor (Plex / Emby / Jellyfin / Sonarr / Radarr / templated path) so you only need one URL across every server. Falls back to per-server URLs at `POST /api/webhooks/server/<server_id>` for ambiguous setups (rare). See [Multi-Media-Server — Webhook configuration](multi-server.md#webhook-configuration-per-vendor) for details.
 
 #### Webhook delay parameter
 
@@ -1648,7 +1764,7 @@ Examples: `/api/webhooks/radarr?delay=30`, `/api/webhooks/sonarr?delay=300`, `/a
 
 On `/radarr`, `/sonarr`, `/sportarr`, `/custom`, and legacy `/plex`, each accepted new file resets its source/server batch deadline using that request's effective delay. The latest request sets the timer if values differ within one batch, subject to a maximum batch age equal to the greater of 600 seconds and the longest delay accepted into that batch. The age is measured from its first file, so late arrivals can receive less than the full delay; arrivals after the limit open a new batch. Ignored duplicates do not reset the deadline. The batch age limit is persisted with the job.
 
-On `/incoming` and `/server/<server_id>`, each resolved file version keeps its own job and initial deadline. The wait starts when that job is queued, after any vendor API lookup needed to resolve the payload. Jobs retain their vendor item IDs, publisher pin, and optional `regenerate` flag. Later arrivals do not reset other jobs' deadlines; existing duplicate suppression still applies. **Behavior change:** these two routes previously started immediately; they now use the global delay when omitted. Use `delay=1` for the shortest supported wait.
+On `/incoming` and `/server/<server_id>`, each resolved file version keeps its own job and initial deadline. The wait starts when that job is queued, after any vendor API lookup needed to resolve the payload. Jobs retain their vendor item IDs, publisher pin, and optional `regenerate` flag. Later arrivals do not reset other jobs' deadlines; existing duplicate suppression still applies. When `delay` is omitted they use the global `webhook_delay`. Use `delay=1` for the shortest supported wait.
 
 All pending webhook deadlines are persisted and restored by automatic restart recovery. Processing still honors pause and worker availability. **Fire now** skips the remaining initial wait; automatic retries use their separate retry backoff, and manual **Reprocess** starts without the original batching delay.
 
@@ -1739,7 +1855,7 @@ Receive a custom webhook payload from any external tool (Tdarr, scripts, etc.). 
 
 Receive a native Plex webhook (Plex Pass feature). Plex POSTs `multipart/form-data` with a `payload` part containing the JSON event body. Only `library.new` events trigger work; other events (`media.play`, `media.rate`, `library.on.deck`, etc.) are acknowledged with 200 and ignored.
 
-The endpoint also accepts a synthetic `test.ping` event used by the **Test reachability** button on the Automation page (Triggers tab).
+The endpoint also accepts a synthetic `test.ping` event, which it records in the history and otherwise ignores.
 
 **`library.new` payload (excerpt):**
 
@@ -1758,56 +1874,63 @@ The endpoint also accepts a synthetic `test.ping` event used by the **Test reach
 
 When `Media[].Part[].file` is missing from the payload (Plex doesn't always include it), the app fetches the item by `ratingKey` via the Plex API to recover the file paths.
 
-**Authentication:** same as the other webhook endpoints — `X-Auth-Token` header, `Authorization: Bearer`, or HTTP Basic password.
+**Authentication:** same as the other webhook endpoints. Plex can only send a `?token=` query parameter, so the registered URL carries the webhook secret (or the API token when no secret is set).
 
 > [!IMPORTANT]
 > Plex's `library.new` webhook is wired through the same code path as mobile push notifications. If push notifications are disabled on your Plex server, library events are silently dropped — enable them under Plex Web → Settings → General (toggle *Enable mobile push notifications*). See the [Auto-trigger from Plex guide](guides.md#auto-trigger-from-plex-no-sonarrradarr) for full details.
 
 #### POST /api/settings/plex_webhook/register
 
-Register the Plex direct webhook (`/api/webhooks/plex`) with the user's plex.tv account, using the configured Plex token.
+Register the Plex direct webhook with the plex.tv account of a Plex server, using that server's token. The registered URL
+points at `/api/webhooks/server/{server_id}` and carries the webhook secret.
 
 **Request body:**
 
 ```json
-{ "public_url": "http://your-host:8080/api/webhooks/plex" }
+{ "server_id": "plex-household", "public_url": "http://your-host:8080" }
 ```
 
-`public_url` is optional — when omitted the server uses `<request scheme>://<host>/api/webhooks/plex`.
+Both fields are optional. `server_id` defaults to the first Plex server. `public_url` defaults to the URL saved on the
+server (`output.webhook_public_url`), or else the address of this request. Only its scheme and host are kept. It is saved
+on the server entry.
 
-**Response (200):** `{"success": true, "registered_in_plex": true, "public_url": "..."}`
+**Response (200):** `{"success": true, "server_id": "...", "registered_in_plex": true, "public_url": "..."}`
 
 **Errors:**
 
-- `400` — token missing
-- `403` — Plex Pass required (`reason: "plex_pass_required"`)
-- `502` — registration call to plex.tv failed
+- `400` with `reason` `missing_token`, `missing_url` or `missing_auth_token`
+- `403` with `reason: "plex_pass_required"`
+- `404` with `reason: "server_not_found"`
+- `502` when the call to plex.tv failed
 
 #### POST /api/settings/plex_webhook/unregister
 
-Remove the Plex direct webhook from the user's plex.tv account and turn off the local toggle. Returns `{"success": true, "registered_in_plex": false}`.
+Remove the Plex direct webhook from the server's plex.tv account. Optional `server_id` as above. Returns
+`{"success": true, "server_id": "...", "registered_in_plex": false}`.
 
 #### GET /api/settings/plex_webhook/status
 
-Probe live state. Returns the configured public URL, whether it is currently registered with Plex, and Plex Pass detection.
+Probe the live state. Optional `?server_id=`. Returns the saved public URL, whether it is registered with Plex, and Plex Pass detection.
 
 ```json
 {
-  "enabled_in_settings": true,
+  "server_id": "plex-household",
+  "server_name": "Household Plex",
   "registered_in_plex": true,
-  "public_url": "http://your-host:8080/api/webhooks/plex",
-  "default_url": "http://your-host:8080/api/webhooks/plex",
+  "public_url": "http://your-host:8080/api/webhooks/server/plex-household",
+  "default_url": "http://your-host:8080/api/webhooks/server/plex-household",
   "has_plex_pass": true,
   "error": null,
-  "error_reason": null
+  "error_reason": null,
+  "warning": null
 }
 ```
 
-#### POST /api/settings/plex_webhook/test
+#### GET /api/settings/emby_webhook/info · GET /api/settings/jellyfin_webhook/info
 
-Self-POST a synthetic `test.ping` payload to the configured public URL to verify reachability. The receiving endpoint records a "test" history entry. Returns `{"success": true, "status_code": 200, ...}` on success.
+The URL and auth details to put into Emby's webhook setup or Jellyfin's Webhook plugin. Requires `?server_id=` (`400` without it, `404` for an unknown server, `400` for a server of the other type).
 
-To run a Recently Added scan immediately, call `POST /api/schedules/<id>/run` on the scanner schedule — it's a standard user schedule now, not a dedicated settings endpoint.
+To run a Recently Added scan immediately, call `POST /api/schedules/<id>/run` on the scanner schedule.
 
 #### GET /api/webhooks/history
 
@@ -1836,27 +1959,27 @@ Clear all webhook history. Returns `{"success": true}`.
 
 ### Error Responses
 
-All errors follow this format:
+Errors return a JSON object with an `error` message. Some add fields such as `reason`, `hint` or `success: false`.
 
 ```json
-{
-  "error": "Error message",
-  "code": "ERROR_CODE"
-}
+{"error": "Error message"}
 ```
 
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `UNAUTHORIZED` | 401 | Missing or invalid authentication token |
-| `NOT_FOUND` | 404 | Resource not found |
-| `VALIDATION_ERROR` | 400 | Invalid request data |
-| `SERVER_ERROR` | 500 | Internal server error |
+| HTTP status | Meaning |
+|-------------|---------|
+| `400` | Invalid request data, or a missing or stale CSRF token on a browser request |
+| `401` | Missing or invalid token: `{"error": "Authentication required"}` |
+| `404` | Unknown job, schedule, server or other resource |
+| `409` | The request conflicts with the current state (for example a stale worker-group `revision`) |
+| `429` | Rate limit hit (see [Rate Limiting](#rate-limiting)) |
+| `500` | Internal error. The app log has the details. |
+| `503` | The config folder isn't writable |
 
 ---
 
 ## WebSocket Events
 
-The dashboard uses Flask-SocketIO with WebSocket for real-time updates. The client connects to the `/jobs` namespace.
+The dashboard uses Flask-SocketIO for live updates. The client connects to the `/jobs` namespace and must be signed in.
 
 ```javascript
 const socket = io('/jobs', {
@@ -1865,37 +1988,43 @@ const socket = io('/jobs', {
 });
 ```
 
-| Event | Description |
-|-------|-------------|
-| `job_progress` | Job progress update |
-| `job_complete` | Job finished |
-| `job_error` | Job failed |
-| `worker_update` | Worker status change |
+Events on `/jobs` (the payload is the object itself):
 
-Example payload:
+| Event | Payload |
+|-------|---------|
+| `job_created`, `job_started`, `job_updated`, `job_completed`, `job_failed`, `job_cancelled` | The job object |
+| `job_progress` | `{job_id, kind, progress, publishers}` |
+| `job_paused`, `job_resumed` | `{job_id, paused}` |
+| `job_deleted` | `{job_id}` |
+| `jobs_cleared` | `{count}` |
+| `worker_update` | `{workers: [...]}`, the worker status rows |
+
+Send `subscribe` or `unsubscribe` with `{"job_id": "..."}` to join or leave a job's room.
+
+Example `job_progress` payload:
 
 ```json
 {
-  "event": "job_progress",
-  "data": {
-    "job_id": "job-123",
-    "kind": "loudness",
-    "progress": {
-      "percent": 50.0,
-      "processed_items": 50,
-      "total_items": 100,
-      "current_item": "Checking Plex loudness…",
-      "current_files": ["/media/movies/Film.mkv"]
-    },
-    "publishers": []
-  }
+  "job_id": "job-123",
+  "kind": "loudness",
+  "progress": {
+    "percent": 50.0,
+    "processed_items": 50,
+    "total_items": 100,
+    "current_item": "Checking Plex loudness…",
+    "current_files": ["/media/movies/Film.mkv"]
+  },
+  "publishers": []
 }
 ```
 
-Progress events also identify the job's `kind`. Loudness jobs expose `progress.current_files` in events and full job
+Loudness jobs expose `progress.current_files` in events and full job
 snapshots: canonical local paths currently being checked or processed. This list is bounded by active execution
-slots, not library size; a path can occur twice while two slots are using it. Inspector uses these paths to track
+slots, not library size; a path can occur twice while two slots are using it. The Inspector uses these paths to track
 library jobs and webhook jobs whose sender paths differ from local paths, then refreshes results when the job ends.
+
+The `/logs` namespace streams log lines: `log_message` events, filtered by level. Send `set_level` with `{"level": "INFO"}`
+(`DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`) to change the minimum level. New connections start at the configured `log_level`.
 
 ---
 
@@ -1921,26 +2050,23 @@ unless noted.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/jobs/manual` | Submit one or more absolute paths — `{"file_paths": ["/a.mkv", "/tv/Show"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Directories are expanded to the video files inside; bypasses library scan. |
+| POST | `/api/jobs/manual` | **Process a file or folder.** `{"file_paths": ["/a.mkv", "/tv/Show"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Directories are expanded to the video files inside; bypasses library scan. Paths must be inside `MEDIA_ROOT`. `201` with the job. |
 | GET | `/api/media/search` | Backs the Manual Generation typeahead. `?q=` (min 2 chars), optional `?server_id=` to scope to one server. Fans across enabled servers and returns `{results: [{kind: "show"\|"movie"\|"episode", title, year, paths: [local container paths], child_count, servers: [{id, name, type}]}]}`. Shows resolve to their folder(s); the same item reported by several servers is merged into one row (union of paths + servers). |
-| POST | `/api/jobs/{id}/priority` | Change a pending/running job's priority (`{"priority": 1\|2\|3}`; 1 = high) |
-| POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config: `201` with the new job (an Intro & Credits job keeps its schedule), `409` while it's pending or running. A Check servers job is queued like `POST /api/markers/reconcile` and answers the same way (`202` `{"job_id", "already_queued"}`, reusing one already queued or running). A Re-run clears the manual global hold; quiet hours still apply. |
-| POST | `/api/jobs/{id}/retry-now` | Skip the retry back-off on a chain-head job whose next attempt is currently in the back-off countdown. Returns 200 + `{"fired": true, ...}` on success, 409 when no retry is pending, 400 if the job isn't a chain head. |
+| POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config: `201` with the new job (an Intro & Credits job keeps its schedule), `409` while it's pending or running. A Check servers job is queued like `POST /api/markers/reconcile` and answers the same way (`202` `{"job_id", "already_queued"}`, reusing one already queued or running). A Re-run clears the manual global hold; the pause schedule still applies. |
 | POST | `/api/jobs/{id}/fire-webhook-now` | Skip the initial wait on a pending webhook job, including source-specific batches and universal/per-server jobs. Returns 202 when dispatched, or 404 when no pending webhook timer exists for the job. Automatic restart recovery restores pending timers from saved job deadlines. |
-| GET | `/api/jobs/{id}/logs` | Paginated log stream — `?offset=&limit=` (limit capped at 5000); or legacy `?last=N` for the tail |
+| GET | `/api/jobs/{id}/logs` | Paginated log stream: `?offset=&limit=` (limit capped at 5000), or `?last=N` for the tail |
 | GET | `/api/jobs/{id}/files` | Per-file outcomes — paginated `?page=&per_page=` (per_page capped at 500), plus optional `?outcome=` and `?search=` filters. Use `?view=requested` to list the complete selected paths, with search and pagination, instead of recorded outcomes; requested paths do not imply completed processing. The underlying outcome JSONL is soft-capped at 5000 rows; past that, a `truncated` marker row appears and aggregate counts remain in `progress.outcome`. |
-| POST | `/api/jobs/clear` | Delete completed/failed jobs from the queue |
-| GET | `/api/jobs/stats` | Totals grouped by status |
+| POST | `/api/jobs/clear` | Delete finished jobs. Optional body `{"statuses": ["completed", "failed", "cancelled"]}` (default: all three). Returns `{"success": true, "cleared": N}`. |
+| GET | `/api/jobs/stats` | Counts of visible jobs: `total`, `pending`, `running`, `completed`, `failed`, `cancelled` (retry attempts are not counted separately) |
 | GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`). Busy workers include their actual `job_id` and `current_file`; `job_kind` and `paused` reflect that job's current state. Idle workers have no current job or file. Global processing pause is separate. |
-| POST | `/api/workers/add` · `/api/workers/remove` | Compatibility scaling: `{"worker_type":"CPU"\|"GPU","count":N,"group_id":"..."}`. Changes a saved group; omit `group_id` only when exactly one group matches the resource. Ambiguous selection returns `409`. Busy removed workers finish their current file. |
-| POST | `/api/jobs/{id}/workers/add` · `/api/jobs/{id}/workers/remove` | Compatibility aliases for a running job; select the group as above. Changes the shared saved group, not a temporary allocation exclusive to that job. |
+| POST | `/api/workers/add` · `/api/workers/remove` | Scaling by type: `{"worker_type":"CPU"\|"GPU","count":N,"group_id":"..."}`. Changes a saved group; omit `group_id` only when exactly one group matches the resource. Ambiguous selection returns `409`. Busy removed workers finish their current file. |
+| POST | `/api/jobs/{id}/workers/add` · `/api/jobs/{id}/workers/remove` | Aliases of the above for a running job; select the group as above. Changes the shared saved group, not a temporary allocation exclusive to that job. |
 
-### Schedules
+### Pause schedule
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/schedules/{id}/enable` · `/api/schedules/{id}/disable` | Toggle a schedule without deleting it |
-| GET · POST | `/api/quiet-hours` | Read/write the global quiet-hours policy, now edited under Settings → Global pause. `day_basis: "start"` identifies start-day windows: Monday 23:00–07:00 ends Tuesday morning. Existing legacy windows are split during migration to retain their previous effective weekdays. |
+| GET · POST | `/api/quiet-hours` | Read or write the **Global pause schedule** (Settings → Pause schedule). Body: `{"enabled": bool, "windows": [{"start": "HH:MM", "end": "HH:MM", "days": ["mon","tue",...]}]}`. Days are the day a window starts (`mon`…`sun`; omit for every day), so Monday 23:00–07:00 ends Tuesday morning. The response adds `day_basis: "start"` and `currently_in_quiet_window`. |
 
 ### Settings & setup
 
@@ -1948,9 +2074,10 @@ unless noted.
 |---|---|---|
 | PUT | `/api/settings/log-level` | Change runtime log verbosity (`{"level": "DEBUG"\|"INFO"\|...}`) |
 | POST | `/api/settings/validate-local-path` | Pre-flight a mount/volume path before saving (exists + readable) |
-| POST | `/api/settings/validate-plex-config-folder` | Pre-flight a Plex config folder (looks for `Cache/Media/Metadata`) |
+| POST | `/api/settings/validate-plex-config-folder` | Pre-flight a Plex config folder (looks for `Cache/Media/Metadata`). Body `{"path": "..."}` |
+| POST | `/api/settings/validate-jellyfin-config-folder` | Pre-flight a Jellyfin config folder. Body `{"path": "..."}` |
 | GET | `/api/settings/backups` | List the backups of each config file (`settings.json`, `schedules.json`, `webhook_history.json`, `setup_state.json`) |
-| POST | `/api/settings/backups/restore` | Restore a prior settings.json snapshot |
+| POST | `/api/settings/backups/restore` | Restore a backup of one config file. Body `{"file": "settings.json", "backup": "<filename from the list>"}`; without `backup` the newest is restored. The current file is backed up first. |
 | POST | `/api/setup/skip` | Skip the setup wizard (advanced — saves `setup_complete=true` with minimal state) |
 | POST | `/api/setup/validate-paths` | Pre-flight wizard path fields in bulk |
 | POST | `/api/setup/preview-file-path` | Resolve one real file against draft mappings and report container file/read-access status; does not save or start processing |
@@ -1960,11 +2087,22 @@ unless noted.
 | Method | Endpoint | Description |
 |---|---|---|
 | POST | `/api/servers/{id}/test-connection` | Re-test a saved server's live connection |
-| PATCH | `/api/servers/{id}/enabled` | Enable/disable a server entry without deleting (`{"enabled": true\|false}`) |
-| POST | `/api/servers/{id}/vendor-extraction` | Toggle vendor-side preview generation (Plex `enableBIFGeneration`, Emby/Jellyfin trickplay extraction) |
+| PATCH | `/api/servers/{id}/enabled` | Enable or disable a server without deleting it. Body `{"enabled": true\|false}`. Returns `{"server_id", "enabled"}`. |
+| POST | `/api/servers/{id}/vendor-extraction` | Turn the server's own scan-time preview generation off or on. Body `{"scan_extraction": true\|false}`. |
+| POST | `/api/servers/{id}/scheduled-trickplay` | Emby and Jellyfin. Turn the scheduled trickplay task off or on. Body `{"enabled": true\|false}`. |
 | GET | `/api/servers/{id}/vendor-extraction/status` | Current aggregate state (e.g. "stopped on 3/5 libraries") |
-| GET | `/api/servers/{id}/trickplay-readiness` | *(Jellyfin)* Legacy audit endpoint — kept for scripts. New integrations should use [`/previews-readiness`](#multi-media-server-endpoints). |
-| POST | `/api/servers/{id}/trickplay-fix-all` | *(Jellyfin)* Apply all recommended trickplay flags |
+| GET | `/api/servers/{id}/trickplay-readiness` | Jellyfin only. Kept for scripts; [`/previews-readiness`](#multi-media-server-endpoints) covers every vendor. |
+| POST | `/api/servers/{id}/trickplay-fix-all` | Jellyfin only. Apply all recommended trickplay settings. Body `{"install_plugin": true\|false}` (default `true`). Returns `{ok, steps, error}`. |
+
+### Preview files (BIF viewer)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/bif/search?q=` | Search Plex for media and report which items have a BIF. Min 2 characters. Limited to 10 per minute. |
+| GET | `/api/bif/info?path=` | Header metadata of a `.bif` file (frame count, interval) |
+| GET | `/api/bif/frame?path=&index=` | One JPEG frame (zero-based `index`) from a `.bif` file |
+
+The `path` must end in `.bif` and sit in the Plex config folder or a server's library folders. Anything else returns `400`.
 
 ### Webhooks (beyond the basics in [Webhook Endpoints](#webhook-endpoints))
 
@@ -1982,6 +2120,8 @@ unless noted.
 | GET | `/api/system/media-servers` | Multi-server aggregate health (per-vendor connection + library counts) |
 | GET | `/api/system/vulkan` | Vulkan ICD probe result (device, driver version, ICD files loaded) |
 | GET | `/api/system/vulkan/debug` | Plain-text diagnostic bundle for attaching to GitHub issues (DV Profile 5 troubleshooting) |
+| GET | `/api/system/config-health` | Whether the config folder is writable, plus advisories and unhealthy media mounts (used by the dashboard banner) |
+| POST | `/api/system/config-health/dismiss` | Permanently dismiss one non-fatal config-health advisory |
 | POST | `/api/system/rescan-gpus` | Re-probe all GPUs (refreshes `gpu_config` candidate list) |
 | GET | `/api/system/version` | App version + commit SHA + build date |
 | GET | `/api/system/browse` | Folder picker: lists sub-directories of `?path=` (default `/`). `?include_files=1` also returns video files (each entry has `is_dir`); `?show_hidden=1` includes dot-entries. System dirs (`/proc`, `/sys`, …) are denied. |
@@ -1991,12 +2131,13 @@ unless noted.
 | POST | `/api/system/notifications/reset-dismissed` | Clear all permanent dismissals |
 | GET | `/api/system/whats-new` | Release-notes viewer payload (version + changes since last-seen) |
 | POST | `/api/system/whats-new/dismiss` | Mark the current version's notes as seen |
-| GET | `/api/system/browse` | Safe filesystem browser, scoped to `MEDIA_ROOT` / `PLEX_DATA_ROOT` (used by path pickers) |
 | GET | `/api/logs/history` | Persisted log history — `?limit=` (default 500, max 2000), `?level=` (minimum level filter), `?before=` (ISO-8601 timestamp cursor for older-than paging) |
 
 ---
 
 ## Rate Limiting
+
+Only these endpoints are limited, per client address:
 
 | Endpoint | Limit |
 |----------|-------|
@@ -2004,13 +2145,10 @@ unless noted.
 | `POST /api/auth/login` | 10 per minute |
 | `POST /api/inspector/status`, `GET /api/inspector/frames` | 120 per minute |
 | `POST /api/inspector/show` | 60 per minute |
-| Default | 200 per day, 50 per hour |
+| `GET /api/media/search` | 20 per minute |
+| `GET /api/bif/search`, `GET /api/bif/servers/{id}/search` | 10 per minute |
 
-Rate limit headers are included in responses:
-
-- `X-RateLimit-Limit`
-- `X-RateLimit-Remaining`
-- `X-RateLimit-Reset`
+Dashboard polling endpoints have no limit. A request over the limit gets `429`.
 
 ---
 

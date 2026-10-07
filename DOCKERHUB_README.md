@@ -43,19 +43,19 @@ a marker in the Inspector.
 
 | It finds every server with that file |
 | --- |
-| ![Servers page with one card each for Plex, Jellyfin and Emby](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-resolve.webp) |
+| ![Servers page with one card each for Home Plex, Home Jellyfin and Home Emby, each showing its address and enabled libraries](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-resolve.webp) |
 
 | One GPU pass per file |
 | --- |
-| ![Dashboard with GPU workers making previews for three films](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
+| ![Dashboard Workers panel with three worker groups: three busy GPU workers on an NVIDIA card, one idle worker on an Intel GPU and four idle CPU workers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
 
 | Each server gets its own format |
 | --- |
-| ![One film's previews published to Plex, Jellyfin and Emby](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-publish.webp) |
+| ![A job's Files tab: one file marked Generated, with Home Plex, Home Jellyfin and Home Emby listed as its servers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-publish.webp) |
 
 | It waits for slow servers |
 | --- |
-| ![A Jellyfin job waiting to retry while the server indexes a new film](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-retry.webp) |
+| ![A Jobs queue row for Sintel (2010) showing Retry 0/5 and Retry starting in 2 min](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-retry.webp) |
 
 _App screenshots come from a test setup with made-up servers; the job titles are open films._
 
@@ -70,7 +70,7 @@ _App screenshots come from a test setup with made-up servers; the job titles are
 **Starts on its own**
 - **Webhooks.** Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex (Plex Pass), Emby (Premiere) and Jellyfin, or any JSON with a path. Sonarr, Radarr and the three servers can share one URL.
 - **Schedules.** Recently Added polling, plus cron and interval schedules.
-- **Manual Generation.** Search your servers by title (a whole show, a movie or one episode), or browse the media folders, and make previews for just those.
+- **Process a file or folder.** Search your servers by title (a whole show, a movie or one episode), or browse the media folders, and make previews for just those.
 - **Plex without waiting for a scan.** File/folder jobs and path-based webhooks generate from the media itself, even while Plex is offline or has not indexed the file.
 - **Retries and skips.** Retries after 1, 2, 5, 15 and 60 minutes by default while a server indexes a new file, and skips files whose previews are current.
 
@@ -88,7 +88,7 @@ range. Combine filters while keeping existing previews. See the
 
 **Skip Intro and Skip Credits**
 - **Found once, sent to every server.** Finds intros and end credits from the file's chapters, online skip databases (TheIntroDB, IntroDB.app, SkipDB), the season's theme song or the credit roll itself (read on the GPU when that's faster), then sends the markers to every server. When it isn't sure, it sends nothing instead of a guess; you can add or adjust a marker in the Inspector. Off until you [turn it on](https://mediapreviewgenerator.dev/guides/#turning-it-on) for a server.
-- **Yours to correct.** Tools → Intro & Credits adjusts, adds and locks a file's markers by hand, and Setup Health checks each server's Intro & Credits setup.
+- **Yours to correct.** Tools → Inspector adjusts, adds and locks a file's markers by hand, and Setup Health checks each server's Intro & Credits setup.
 - **Plex.** Needs Plex Pass on the server, and for viewers (or their Plex Home). The app runs on the Plex machine, or next to it through the [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent).
 - **Jellyfin.** Jellyfin 10.11 or 12.0, with the Media Preview Bridge plugin (the one trickplay uses).
 - **Emby.** Emby 4.9 or 4.10, with the Media Preview Bridge for Emby plugin. Skip Intro needs Emby Premiere; Skip Credits doesn't.
@@ -183,4 +183,4 @@ It's free and MIT licensed. Helping is optional.
 
 ## License
 
-MIT, see [LICENSE](https://github.com/stevezau/media_preview_generator/blob/main/LICENSE). Recent development is AI-assisted (Claude); every change is reviewed and tested.
+MIT, see [LICENSE](https://github.com/stevezau/media_preview_generator/blob/main/LICENSE). Development is AI-assisted (Claude); every change is reviewed and tested.

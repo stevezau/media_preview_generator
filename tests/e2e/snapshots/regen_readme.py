@@ -71,10 +71,9 @@ from readme_fixture import (  # noqa: E402
     APP_HOST,
     APP_PORT,
     EMBY_HOST,
-    FAKE_CPU_THREADS,
-    FAKE_GPU_WORKERS,
     FAKE_GPUS,
     FAKE_SERVERS,
+    FAKE_WORKER_GROUPS,
     JELLYFIN_HOST,
     PLEX_HOST,
     seed_jobs,
@@ -263,35 +262,27 @@ def _fake_worker_statuses() -> list[dict]:
     }
     workers = []
     worker_id = 0
-    gpu_seq = 0
     busy_index = 0
-    for gpu, worker_count in zip(FAKE_GPUS, FAKE_GPU_WORKERS, strict=True):
-        for _ in range(worker_count):
+    for group in FAKE_WORKER_GROUPS:
+        for index in range(group["count"]):
             worker_id += 1
-            gpu_seq += 1
             entry = dict(idle_entry)
-            if busy_index < len(BUSY_WORKER_SPECS):
+            if group["resource"] == "gpu" and busy_index < len(BUSY_WORKER_SPECS):
                 spec = BUSY_WORKER_SPECS[busy_index]
                 busy_index += 1
                 entry.update(status="processing", ffmpeg_started=True, **spec)
             workers.append(
                 {
                     "worker_id": worker_id,
-                    "worker_type": "GPU",
-                    "worker_name": f"GPU Worker {gpu_seq} ({gpu['name']})",
+                    "worker_type": group["resource"].upper(),
+                    "worker_name": f"{group['name']} {index + 1}",
+                    "group_id": group["id"],
+                    "group_name": group["name"],
+                    "group_resource": group["resource"],
+                    "retiring": False,
                     **entry,
                 }
             )
-    for cpu_seq in range(1, FAKE_CPU_THREADS + 1):
-        worker_id += 1
-        workers.append(
-            {
-                "worker_id": worker_id,
-                "worker_type": "CPU",
-                "worker_name": f"CPU Worker {cpu_seq}",
-                **idle_entry,
-            }
-        )
     return workers
 
 
@@ -422,10 +413,27 @@ def _install_api_stubs(ctx: BrowserContext, current_version: str) -> None:
             body=json.dumps({"workers": _fake_worker_statuses()}),
         )
 
+    def handle_worker_groups(route):
+        """Report the fake GPUs as detected and every group as running at its configured size."""
+        if route.request.method != "GET":
+            route.continue_()
+            return
+        response = route.fetch()
+        data = response.json()
+        data["hardware"] = [{k: gpu[k] for k in ("device", "name", "type", "status")} for gpu in FAKE_GPUS]
+        data["warnings"] = []
+        busy_by_group = {FAKE_WORKER_GROUPS[0]["id"]: len(BUSY_WORKER_SPECS)}
+        for row in data["capacity"]["groups"]:
+            row.update(
+                state="active", target=row["desired"], available=row["desired"], busy=busy_by_group.get(row["id"], 0)
+            )
+        route.fulfill(response=response, json=data)
+
     ctx.route("**/api/system/version", handle_version)
     ctx.route("**/api/system/status", handle_system_status)
     ctx.route("**/api/libraries*", handle_libraries)
     ctx.route("**/api/jobs/workers", handle_jobs_workers)
+    ctx.route("**/api/worker-groups", handle_worker_groups)
 
 
 def _to_webp(png_path: Path, quality: int = 88, method: int = 6) -> Path:
@@ -503,14 +511,14 @@ TOUR_SHOTS = [
     (
         "tour-extract",
         "/",
-        "#workerStatusContainer",
+        ".card:has(#workerStatusContainer)",
         "() => !!document.querySelector('#workerStatusContainer .progress')",
     ),
     (
         "tour-retry",
         "/",
-        "#activeJobsContainer",
-        "() => /Waiting to retry/.test(document.getElementById('activeJobsContainer').innerText)",
+        ".queue-table-wrap",
+        "() => /Retry starting/.test(document.getElementById('jobQueue').innerText)",
     ),
 ]
 
