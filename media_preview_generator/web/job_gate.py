@@ -34,6 +34,12 @@ Design choices:
   (unlike exempting high priority from it, which would reinstate the
   very stampede this gate exists to prevent). The reservation is skipped
   at ``cap == 1``, where it would starve normal-priority jobs completely.
+* **One slot per waiting kind first** — every kind with work and open
+  workers gets a slot first, except when only the high-priority reserved
+  slot is free or cap=1; kind-less waiters are not held back. While a
+  kind holds no slot and has a waiter that could start now, only such
+  waiters are admitted; once each kind has a slot, priority and FIFO
+  decide. Running jobs are never preempted.
 * **Cap read on every wake** via ``cap_provider`` callable — the user
   can change ``max_concurrent_jobs`` in Settings and the new value
   takes effect immediately, no restart.
@@ -320,7 +326,7 @@ class JobGate:
         self._capacity_errors.discard(kind)
         return limit
 
-    def _kind_can_admit(self, kind: str | None, priority: int) -> bool:
+    def _kind_can_admit(self, kind: str | None, priority: int, cap: int) -> bool:
         if kind is None:
             return True
         limit = self._kind_limits.get(kind, 0)
@@ -335,7 +341,7 @@ class JobGate:
             # Preserve ordinary room for another kind. A strictly higher
             # priority may escape this ceiling: at the default cap of three,
             # a normal webhook must still reach a low-priority scan's worker.
-            ceiling = max(1, self.effective_cap(priority) - 1)
+            ceiling = max(1, self.effective_cap(priority, cap) - 1)
             higher_priority_escape = ordinary and not any(
                 n and held_kind == kind and PRIORITY_HIGH < held_priority <= priority
                 for (held_kind, held_priority), n in self._kind_active.items()
@@ -351,15 +357,27 @@ class JobGate:
         )
         return active < limit
 
+    def _slots_by_kind(self) -> dict[str, int]:
+        held: dict[str, int] = {}
+        for (kind, _priority), count in self._kind_active.items():
+            held[kind] = held.get(kind, 0) + count
+        return held
+
     def _next_eligible(self, cap: int) -> object | None:
         readiness = {request.token: request.ready for request in self._requests.values()}
-        eligible = (
+        eligible = [
             entry
             for entry in self._heap
             if readiness.get(entry[2], True)
             and self._can_admit(entry[0], cap)
-            and self._kind_can_admit(self._waiter_kinds[entry[2]], entry[0])
-        )
+            and self._kind_can_admit(self._waiter_kinds[entry[2]], entry[0], cap)
+        ]
+        # A kind holding no slot goes first. Not a guarantee: it cannot help when only the HIGH-reserved slot is
+        # free or at cap=1, and kind-less waiters are not held back.
+        held = self._slots_by_kind()
+        first_slot = [entry for entry in eligible if not held.get(self._waiter_kinds[entry[2]] or "", 0)]
+        if any(self._waiter_kinds[entry[2]] is not None for entry in first_slot):
+            eligible = first_slot
         return min(eligible, default=(0, 0, None))[2]
 
     def acquire(
@@ -378,7 +396,9 @@ class JobGate:
         Kind limits count equal-or-higher-priority admissions. This bounds
         same-priority contention without preventing urgent work from reaching
         the shared dispatcher. Global limits and the HIGH reservation still
-        apply. Release with the same captured priority and kind.
+        apply. Every kind with work and open workers gets a slot first,
+        except when only the high-priority reserved slot is free or cap=1;
+        kind-less waiters are not held back. Release with the same captured priority and kind.
 
         Capacity reads and wait callbacks run outside the condition lock.
         Unknown legacy capacity is unlimited; zero or unreadable capacity waits.
@@ -422,7 +442,7 @@ class JobGate:
                         break
                     if cancel_check():
                         return False
-                    resource_blocked = not self._kind_can_admit(kind, priority)
+                    resource_blocked = not self._kind_can_admit(kind, priority, cap)
                     active, effective_cap = self._active, self.effective_cap(priority, cap)
                 if resource_blocked and on_resource_wait is not None:
                     on_resource_wait()
