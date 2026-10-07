@@ -429,7 +429,7 @@ A full scan first sweeps every file to check whether a fresh preview
 already exists, then only generates the missing ones. Those two jobs have
 independent concurrency:
 
-- **GPU Workers / CPU Workers** cap how many previews *generate* at once
+- **Worker groups** cap how many previews *generate* at once
   (heavy FFmpeg/GPU work) — keep these matched to your hardware.
 - **Library Scanning → Files checked at once** (`scan_workers`) caps how
   many files the *existence check* sweeps in parallel. This is light disk

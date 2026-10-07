@@ -136,8 +136,8 @@
 
                     <p><strong>What the cap does NOT control:</strong></p>
                     <ul>
-                        <li><strong>FFmpeg workers within a job</strong> — per-GPU
-                            worker counts configured separately below. A single
+                        <li><strong>FFmpeg workers within a job</strong> — worker
+                            counts are set per group in Worker groups. A single
                             job can still use all your GPU workers; the cap limits
                             concurrent <em>jobs</em>, not concurrent FFmpegs.</li>
                         <li><strong>Webhook reception</strong> — incoming webhooks
@@ -220,6 +220,7 @@
 
                 <!-- GPU device tuning -->
                 <h3 class="settings-subheading" id="gpu-configuration"><i class="bi bi-gpu-card" aria-hidden="true"></i>GPU device tuning
+                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Per-GPU FFmpeg tuning. Worker counts live in Worker groups."><i class="bi bi-info-circle"></i></button>
                     <button type="button" class="btn btn-sm btn-icon ms-auto" id="gpuRescanBtn" onclick="rescanGPUs()" aria-label="Re-scan GPUs" title="Re-scan GPUs"><i class="bi bi-arrow-clockwise"></i></button>
                 </h3>
                 <div id="gpuConfigContainer">

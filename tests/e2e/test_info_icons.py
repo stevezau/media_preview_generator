@@ -97,5 +97,5 @@ class TestInfoIconRule:
         _open(authed_page, app_url, "/settings")
         panel = authed_page.locator("#gpuConfigList")
         expect(panel.get_by_label("FFmpeg threads per worker").first).to_be_visible()
-        expect(panel).to_contain_text("0 = automatic. Worker counts and jobs are configured in groups.")
+        expect(panel).to_contain_text("CPU threads each GPU worker may use. 0 = no limit.")
         expect(panel.locator(".gpu-workers, .gpu-enable-toggle")).to_have_count(0)
