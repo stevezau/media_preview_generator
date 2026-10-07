@@ -1351,6 +1351,9 @@ def set_job_priority(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
+    from ..job_gate import get_job_gate
+
+    get_job_gate().reprioritize(job_id, priority)
     if job.status == JobStatus.RUNNING:
         try:
             from ...jobs.dispatcher import get_dispatcher
@@ -1397,6 +1400,9 @@ def resume_processing():
 
     sm = get_settings_manager()
     job_manager = get_job_manager()
+    from ...jobs.admission import prepare_admissions
+
+    prepare_admissions(job_manager, job_manager.get_pending_jobs())
     sm.processing_paused = False
     job_manager.emit_processing_paused_changed(sm.processing_paused)
     if not sm.processing_paused:

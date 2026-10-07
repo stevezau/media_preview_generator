@@ -88,11 +88,19 @@ def mark_admission_wait(manager, job_id: str, kind: str) -> None:
         manager.update_progress(parent_id, current_item=message)
 
 
-def admission_options(manager, job_id: str, kind: str | None) -> dict:
+def admission_options(manager, job_id: str, kind: str | None, *, on_admitted=None) -> dict:
     """Carry a runner's kind and visible resource wait through pause re-admission."""
     if kind is None:
         return {}
-    return {"kind": kind, "on_resource_wait": lambda: mark_admission_wait(manager, job_id, kind)}
+    options = {"kind": kind, "on_resource_wait": lambda: mark_admission_wait(manager, job_id, kind)}
+    from ..web.job_gate import get_job_gate
+
+    gate = get_job_gate()
+    if gate.has_request(job_id):
+        gate.complete_preflight(job_id)
+        options["request_id"] = job_id
+        options["on_admitted"] = on_admitted
+    return options
 
 
 def refresh_worker_groups(pool, config=None, selected_gpus: list | None = None, *, force: bool = False) -> bool:

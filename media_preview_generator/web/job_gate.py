@@ -44,7 +44,9 @@ from __future__ import annotations
 import heapq
 import itertools
 import threading
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from loguru import logger
 
@@ -54,6 +56,20 @@ from .jobs import PRIORITY_HIGH, PRIORITY_NORMAL
 #: module docstring). Kept as a constant so the gate, the wait message,
 #: and the tests all agree on the size of the reservation.
 HIGH_PRIORITY_RESERVED_SLOTS = 1
+
+
+@dataclass
+class _Request:
+    token: object
+    order: tuple[str, str]
+    priority: int
+    kind: str
+    policy: Callable[[bool], tuple[int, bool] | None]
+    owner: object | None = None
+    revision: int = 0
+    ready: bool = False
+    preflight_complete: bool = False
+    preflight_waiting: bool = False
 
 
 def format_wait_message(active: int, cap: int, effective_cap: int) -> str:
@@ -115,8 +131,140 @@ class JobGate:
         # high-priority job doesn't eat into the normal-priority budget:
         # at cap=3, one high + two normal jobs is a legal steady state.
         self._active_high = 0
-        self._heap: list[tuple[int, int, object]] = []  # (priority, seq, token)
+        self._heap: list[tuple[int, tuple[str, str], object]] = []
         self._seq = itertools.count()
+        self._requests: dict[str, _Request] = {}
+        self._refresh_lock = threading.Lock()
+        self._refresh_at = 0.0
+        self._policy_epoch = 0
+
+    def register_request(
+        self,
+        job_id: str,
+        *,
+        created_at: str,
+        priority: int,
+        kind: str,
+        policy: Callable[[bool], tuple[int, bool] | None],
+    ) -> None:
+        """Reserve queue order, without reserving capacity or starting a worker."""
+        with self._cond:
+            if job_id in self._requests:
+                return
+            request = _Request(object(), (created_at, job_id), priority, kind, policy)
+            self._requests[job_id] = request
+            self._waiter_kinds[request.token] = kind
+            heapq.heappush(self._heap, (priority, request.order, request.token))
+            self._policy_epoch += 1
+            self._cond.notify_all()
+
+    def claim_request(self, job_id: str) -> object | None:
+        """Give cleanup ownership to the runner that won its in-flight claim."""
+        with self._cond:
+            request = self._requests.get(job_id)
+            if request is None or request.owner is not None:
+                return None
+            request.owner = object()
+            return request.owner
+
+    def finish_request(self, job_id: str, owner: object | None) -> None:
+        """Remove only this runner's request; a duplicate start cannot remove it."""
+        with self._cond:
+            request = self._requests.get(job_id)
+            if request is None or request.owner is not owner:
+                return
+            del self._requests[job_id]
+            self._heap = [entry for entry in self._heap if entry[2] is not request.token]
+            heapq.heapify(self._heap)
+            self._waiter_kinds.pop(request.token, None)
+            self._policy_epoch += 1
+            self._cond.notify_all()
+
+    def has_request(self, job_id: str) -> bool:
+        with self._cond:
+            return job_id in self._requests
+
+    def complete_preflight(self, job_id: str) -> None:
+        """The runner has honored its dependency/deadline, including operator overrides."""
+        with self._cond:
+            request = self._requests.get(job_id)
+            if request is not None:
+                request.preflight_complete = True
+                request.preflight_waiting = False
+                request.revision += 1
+                self._policy_epoch += 1
+            self._cond.notify_all()
+
+    def defer_preflight(self, job_id: str) -> None:
+        """An actual runner wait, including a locally extended deadline, is not ready."""
+        with self._cond:
+            request = self._requests.get(job_id)
+            if request is not None:
+                request.preflight_waiting = True
+                request.ready = False
+                request.revision += 1
+                self._policy_epoch += 1
+            self._cond.notify_all()
+
+    def reprioritize(self, job_id: str, priority: int) -> None:
+        """Wake an existing waiter without changing the priority of a held slot."""
+        with self._cond:
+            request = self._requests.get(job_id)
+            if request is not None:
+                request.priority = priority
+                request.revision += 1
+                request.ready = False
+                self._policy_epoch += 1
+            self._cond.notify_all()
+
+    def _refresh_requests(self) -> None:
+        # All polling threads share one bounded snapshot. No manager/settings
+        # callback runs under the gate condition or once per waiting thread.
+        with self._refresh_lock:
+            self._refresh_requests_once()
+
+    def _refresh_requests_once(self) -> None:
+        with self._cond:
+            epoch = self._policy_epoch
+            if time.monotonic() < self._refresh_at and getattr(self, "_refreshed_epoch", -1) == epoch:
+                return
+            queued = {entry[2] for entry in self._heap}
+            snapshots = [(request, request.revision) for request in self._requests.values() if request.token in queued]
+        limits = {kind: self._kind_limit(kind) for kind in {request.kind for request, _ in snapshots}}
+        updates = []
+        for request, revision in snapshots:
+            try:
+                policy = request.policy(request.preflight_complete)
+                priority, ready = policy if policy is not None else (request.priority, False)
+            except Exception:
+                policy = (request.priority, False)
+                priority, ready = request.priority, False
+            updates.append((request, revision, priority, ready, policy is None))
+        with self._cond:
+            current = {request.token: request for request in self._requests.values()}
+            self._kind_limits.update(limits)
+            retired = set()
+            for request, revision, priority, ready, terminal in updates:
+                if current.get(request.token) is not request:
+                    continue
+                if terminal and request.owner is None and request.revision == revision:
+                    retired.add(request.token)
+                    self._waiter_kinds.pop(request.token, None)
+                    continue
+                if request.revision == revision:
+                    request.priority = priority
+                    request.ready = ready and not request.preflight_waiting
+            self._heap = [
+                (current[token].priority, order, token) if token in current else (priority, order, token)
+                for priority, order, token in self._heap
+                if token not in retired
+            ]
+            self._requests = {
+                job_id: request for job_id, request in self._requests.items() if request.token not in retired
+            }
+            heapq.heapify(self._heap)
+            self._refreshed_epoch = epoch
+            self._refresh_at = time.monotonic() + 0.1
 
     def _cap(self) -> int:
         try:
@@ -204,10 +352,13 @@ class JobGate:
         return active < limit
 
     def _next_eligible(self, cap: int) -> object | None:
+        readiness = {request.token: request.ready for request in self._requests.values()}
         eligible = (
             entry
             for entry in self._heap
-            if self._can_admit(entry[0], cap) and self._kind_can_admit(self._waiter_kinds[entry[2]], entry[0])
+            if readiness.get(entry[2], True)
+            and self._can_admit(entry[0], cap)
+            and self._kind_can_admit(self._waiter_kinds[entry[2]], entry[0])
         )
         return min(eligible, default=(0, 0, None))[2]
 
@@ -219,6 +370,8 @@ class JobGate:
         *,
         kind: str | None = None,
         on_resource_wait: Callable[[], None] | None = None,
+        request_id: str | None = None,
+        on_admitted: Callable[[int], None] | None = None,
     ) -> bool:
         """Admit by priority/FIFO among jobs with compatible worker capacity.
 
@@ -231,15 +384,26 @@ class JobGate:
         Unknown legacy capacity is unlimited; zero or unreadable capacity waits.
         A cancelled wait removes its queued entry without consuming a slot.
         """
-        token = object()
         with self._cond:
-            heapq.heappush(self._heap, (priority, next(self._seq), token))
+            request = self._requests.get(request_id) if request_id is not None else None
+            token = request.token if request is not None else object()
+            order = request.order if request is not None else ("", f"{next(self._seq):020}")
+            if not any(entry[2] is token for entry in self._heap):
+                heapq.heappush(self._heap, (priority, order, token))
+                self._policy_epoch += 1
             self._waiter_kinds[token] = kind
         try:
             while True:
-                limit = self._kind_limit(kind)
+                if request is not None and cancel_check():
+                    return False
+                self._refresh_requests()
+                limit = self._kind_limit(kind) if request is None else None
+                if request is not None and cancel_check():
+                    return False
                 with self._cond:
-                    if kind is not None:
+                    if request is not None:
+                        priority = request.priority
+                    if kind is not None and request is None:
                         self._kind_limits[kind] = limit
                     cap = self._cap()
                     if self._next_eligible(cap) is token:
@@ -251,7 +415,11 @@ class JobGate:
                         if kind is not None:
                             key = (kind, priority)
                             self._kind_active[key] = self._kind_active.get(key, 0) + 1
-                        return True
+                        admitted = True
+                    else:
+                        admitted = False
+                    if admitted:
+                        break
                     if cancel_check():
                         return False
                     resource_blocked = not self._kind_can_admit(kind, priority)
@@ -265,6 +433,9 @@ class JobGate:
                     if self._next_eligible(self._cap()) is token:
                         continue
                     self._cond.wait(timeout=self._POLL_SECONDS)
+            if on_admitted is not None:
+                on_admitted(priority)
+            return True
         finally:
             with self._cond:
                 self._heap = [entry for entry in self._heap if entry[2] is not token]

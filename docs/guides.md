@@ -100,6 +100,10 @@ In the top bar, **Automation** and **Settings** open their page when clicked, an
 > concurrent-job cap is above 1, the last slot is reserved for High-priority
 > work so a High-priority webhook can enter while ordinary scans hold their slots.
 
+Among eligible pending jobs, admission follows priority, then creation time, including after a restart.
+Jobs held by a pause, an unfinished dependency, or a retry timer let other eligible jobs pass.
+Changing a waiting job's priority updates its admission order; it does not interrupt files already processing.
+
 Admission also accounts for the open workers compatible with each job type. Excess jobs of the same type and priority
 wait without consuming active slots, and eligible work of another type can pass them. Higher-priority work
 can still enter ahead of lower-priority scans, within the overall job limit. These limits control active jobs;

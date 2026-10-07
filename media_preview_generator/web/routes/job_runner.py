@@ -534,9 +534,16 @@ def resume_running_and_drain_pending() -> None:
         return
     jm = get_job_manager()
     pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
+    from ...jobs.admission import finish_admission, prepare_admissions
+
+    prepare_admissions(jm, pending)
     for pj in pending:
         if not (pj.config or {}).get("is_retry_chain") and not jm.is_pause_requested(pj.id):
-            _start_job_async(pj.id, pj.config or {})
+            try:
+                _start_job_async(pj.id, pj.config or {})
+            except Exception:
+                finish_admission(pj.id, None)
+                logger.exception("Could not launch queued job {}; keeping the remaining queue available", pj.id)
 
 
 def _start_job_async(job_id: str, config_overrides: dict | None = None):
@@ -593,12 +600,15 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
         # Only the saved config asks for the follow-up (a revival passes a copy of it): the job's own writes below
         # must never put back a request already taken.
         config_overrides = {k: v for k, v in config_overrides.items() if k != INTRO_CREDITS_FOLLOW_UP}
+    admission_job = queued
     with _inflight_lock:
         duplicate = job_id in _inflight_jobs
         terminal = False
         if not duplicate:
             try:
                 current = get_job_manager().get_job(job_id)
+                if current is not None:
+                    admission_job = current
                 terminal = current is None or current.status in (
                     JobStatus.CANCELLED,
                     JobStatus.COMPLETED,
@@ -620,6 +630,16 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
         _queue_intro_credits_follow_up(job_id, config_overrides)
         return
+
+    from ...jobs.admission import claim_admission, finish_admission
+
+    try:
+        admission_owner = claim_admission(get_job_manager(), job_id, job=admission_job)
+    except BaseException:
+        finish_admission(job_id, None)
+        with _inflight_lock:
+            _inflight_jobs.discard(job_id)
+        raise
 
     def run_job_once():
         log_handler_id = None
@@ -975,6 +995,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                 retry_now = datetime.now(UTC)
                 retry_due = _preview_retry_deadline(run_job_config.config, retry_now)
                 delay_sec = max(0, math.ceil((retry_due - retry_now).total_seconds()))
+                if delay_sec:
+                    from ..job_gate import get_job_gate
+
+                    get_job_gate().defer_preflight(job_id)
                 retry_eta = retry_due.isoformat()
                 # Seal legacy deadlines too: restarting during their first wait must not reset it.
                 job_manager.merge_job_config(job_id, {"scheduled_at": retry_eta})
@@ -1077,6 +1101,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     def held_by_pause():
                         return job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused
 
+                    def capture_admission(priority):
+                        nonlocal _slot_priority
+                        _slot_priority = priority
+
                     while True:
                         if not wait_for_capacity(
                             job_manager,
@@ -1092,7 +1120,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             priority=_slot_priority,
                             cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                             on_wait=_on_wait,
-                            **admission_options(job_manager, job_id, JOB_KIND_PREVIEWS),
+                            **admission_options(job_manager, job_id, JOB_KIND_PREVIEWS, on_admitted=capture_admission),
                         )
                         if not admitted:
                             break
@@ -2127,11 +2155,18 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     key: value for key, value in (current.config or {}).items() if key not in _RUNNER_STATE_KEYS
                 }
         finally:
+            finish_admission(job_id, admission_owner)
             with _inflight_lock:
                 _inflight_jobs.discard(job_id)
 
-    thread = threading.Thread(target=run_job, daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=run_job, daemon=True)
+        thread.start()
+    except BaseException:
+        finish_admission(job_id, admission_owner)
+        with _inflight_lock:
+            _inflight_jobs.discard(job_id)
+        raise
     _queue_intro_credits_follow_up(job_id, config_overrides)
 
 

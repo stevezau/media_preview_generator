@@ -3856,7 +3856,9 @@ class TestStartAsync:
     @pytest.fixture(autouse=True)
     def existing_job(self, monkeypatch):
         jm = MagicMock()
-        jm.get_job.return_value = SimpleNamespace(config={})
+        from media_preview_generator.web.jobs import Job
+
+        jm.get_job.side_effect = lambda job_id: Job(id=job_id, kind=JOB_KIND_INTRO_CREDITS)
         monkeypatch.setattr(job_runner, "get_job_manager", lambda: jm)
 
     def test_starts_one_daemon_thread_and_forgets_the_job_when_it_ends(self, monkeypatch):
@@ -3991,11 +3993,11 @@ def test_start_job_async_does_not_start_when_the_job_cant_be_read(lookup, monkey
 
 @pytest.mark.parametrize("current_status", [None, "cancelled", "completed", "failed", "pending"])
 def test_start_job_async_rechecks_terminal_or_deleted_job_before_spawning(current_status, monkeypatch):
-    from media_preview_generator.web.jobs import JobStatus
+    from media_preview_generator.web.jobs import Job, JobStatus
     from media_preview_generator.web.routes import job_runner as preview_runner
 
-    queued = SimpleNamespace(kind=JOB_KIND_PREVIEWS, status=JobStatus.PENDING, config={})
-    current = SimpleNamespace(status=JobStatus(current_status)) if current_status else None
+    queued = Job(id=f"job-reread-{current_status}", kind=JOB_KIND_PREVIEWS, status=JobStatus.PENDING)
+    current = Job(id=queued.id, status=JobStatus(current_status)) if current_status else None
     jm = MagicMock()
     jm.get_job.side_effect = [queued, current]
     monkeypatch.setattr(preview_runner, "get_job_manager", lambda: jm)
@@ -4020,10 +4022,10 @@ def test_start_job_async_rechecks_terminal_or_deleted_job_before_spawning(curren
 
 @pytest.mark.parametrize("known_status", ["pending", "cancelled", "completed", "failed"])
 def test_start_job_async_uses_last_known_status_when_locked_reread_fails(known_status, monkeypatch):
-    from media_preview_generator.web.jobs import JobStatus
+    from media_preview_generator.web.jobs import Job, JobStatus
     from media_preview_generator.web.routes import job_runner as preview_runner
 
-    queued = SimpleNamespace(kind=JOB_KIND_PREVIEWS, status=JobStatus(known_status), config={})
+    queued = Job(id=f"job-reread-failure-{known_status}", kind=JOB_KIND_PREVIEWS, status=JobStatus(known_status))
     jm = MagicMock()
     jm.get_job.side_effect = [queued, RuntimeError("jobs.db locked")]
     monkeypatch.setattr(preview_runner, "get_job_manager", lambda: jm)

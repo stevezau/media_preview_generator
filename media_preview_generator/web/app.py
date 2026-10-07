@@ -544,10 +544,17 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         if not revived:
             return
 
+        from ..jobs.admission import finish_admission, prepare_admissions
         from .routes import _start_job_async
 
+        prepare_admissions(job_manager, revived)
+
         for job in revived:
-            _start_job_async(job.id, job.config)
+            try:
+                _start_job_async(job.id, job.config)
+            except Exception:
+                finish_admission(job.id, None)
+                logger.exception("Could not launch recovered job {}; keeping the remaining queue available", job.id)
 
         if paused:
             logger.info(

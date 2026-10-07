@@ -975,6 +975,7 @@ def wait_for_retry_time(
         due = None
     if due is None or _utcnow() >= due:
         return True
+    get_job_gate().defer_preflight(job_id)
     jm = get_job_manager()
     remaining = int((due - _utcnow()).total_seconds())
 
@@ -1280,10 +1281,9 @@ def wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check
         if cancel_check():
             return False
         preceding = jm.get_job(follows_job_id)
-        if preceding is None or preceding.status in _FINISHED:
-            return True
-        progress = getattr(preceding, "progress", None)
-        if preceding.status is JobStatus.PENDING and progress is not None and progress.retry_eta:
+        from ..jobs.admission import preceding_job_ready
+
+        if preceding_job_ready(preceding):
             return True
         if (
             preceding.status is JobStatus.PENDING
@@ -1586,14 +1586,19 @@ def wait_releasing_slot_while_paused(
             jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
         elif not paused and not slot["held"]:
             priority = live_priority()
+            slot["priority"] = priority
             # In-flight items can finish the job while its slot is handed back; don't queue a finished job.
             if gate.acquire(
                 priority=priority,
                 cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id) or tracker.done_event.is_set(),
                 on_wait=on_wait,
-                **admission_options(jm, job_id, slot.get("kind")),
+                **admission_options(
+                    jm,
+                    job_id,
+                    slot.get("kind"),
+                    on_admitted=lambda admitted: slot.__setitem__("priority", admitted),
+                ),
             ):
-                slot["priority"] = priority
                 slot["held"] = True
 
 
@@ -1656,13 +1661,18 @@ def _cancel_check_releasing_slot_while_paused(
                 jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
             elif not paused and not slot["held"]:
                 priority = live_priority()
+                slot["priority"] = priority
                 if gate.acquire(
                     priority=priority,
                     cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id),
                     on_wait=on_wait,
-                    **admission_options(jm, job_id, slot.get("kind")),
+                    **admission_options(
+                        jm,
+                        job_id,
+                        slot.get("kind"),
+                        on_admitted=lambda admitted: slot.__setitem__("priority", admitted),
+                    ),
                 ):
-                    slot["priority"] = priority
                     slot["held"] = True
                 continue
             elif not paused and not get_settings_manager().processing_paused:
@@ -1818,7 +1828,12 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         priority=slot["priority"],
                         cancel_check=cancel_check,
                         on_wait=on_wait,
-                        **admission_options(jm, job_id, JOB_KIND_INTRO_CREDITS),
+                        **admission_options(
+                            jm,
+                            job_id,
+                            JOB_KIND_INTRO_CREDITS,
+                            on_admitted=lambda priority: slot.__setitem__("priority", priority),
+                        ),
                     ):
                         jm.cancel_job(job_id)
                         return
@@ -2283,11 +2298,28 @@ def start_intro_credits_job_async(job_id: str, config_overrides: dict | None = N
             return
         _inflight_jobs.add(job_id)
 
+    from ..jobs.admission import claim_admission, finish_admission
+
+    try:
+        admission_owner = claim_admission(get_job_manager(), job_id, job=queued)
+    except BaseException:
+        finish_admission(job_id, None)
+        with _inflight_lock:
+            _inflight_jobs.discard(job_id)
+        raise
+
     def _run() -> None:
         try:
             run_intro_credits_job(job_id)
         finally:
+            finish_admission(job_id, admission_owner)
             with _inflight_lock:
                 _inflight_jobs.discard(job_id)
 
-    threading.Thread(target=_run, daemon=True, name=f"run_job_intro_credits_{job_id}").start()
+    try:
+        threading.Thread(target=_run, daemon=True, name=f"run_job_intro_credits_{job_id}").start()
+    except BaseException:
+        finish_admission(job_id, admission_owner)
+        with _inflight_lock:
+            _inflight_jobs.discard(job_id)
+        raise

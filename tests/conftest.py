@@ -579,15 +579,22 @@ def _reset_shared_dispatcher():
     full parallel run, green in isolation). Resetting before and after each
     test keeps the singleton from crossing test boundaries. No-op when no
     dispatcher was created.
+
+    Admission also retains named requests and their manager callbacks; reset
+    its singleton after dispatch has stopped so mocked startup runners cannot
+    leave reservations referring to another test's jobs.
     """
     try:
         from media_preview_generator.jobs.dispatcher import reset_dispatcher
+        from media_preview_generator.web.job_gate import reset_job_gate
     except ImportError:
         yield
         return
     reset_dispatcher()
+    reset_job_gate()
     yield
     reset_dispatcher()
+    reset_job_gate()
 
 
 @pytest.fixture(autouse=True)

@@ -469,7 +469,12 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 priority=slot["priority"],
                 cancel_check=cancel_check,
                 on_wait=on_wait,
-                **admission_options(jm, job_id, JOB_KIND_LOUDNESS),
+                **admission_options(
+                    jm,
+                    job_id,
+                    JOB_KIND_LOUDNESS,
+                    on_admitted=lambda priority: slot.__setitem__("priority", priority),
+                ),
             ):
                 return False
             slot["held"] = True
@@ -793,14 +798,31 @@ def start_loudness_job_async(job_id: str, config_overrides: dict | None = None) 
             return
         _inflight_jobs.add(job_id)
 
+    from ..jobs.admission import claim_admission, finish_admission
+
+    try:
+        admission_owner = claim_admission(get_job_manager(), job_id, job=queued)
+    except BaseException:
+        finish_admission(job_id, None)
+        with _inflight_lock:
+            _inflight_jobs.discard(job_id)
+        raise
+
     def _run() -> None:
         try:
             run_loudness_job(job_id)
         finally:
+            finish_admission(job_id, admission_owner)
             with _inflight_lock:
                 _inflight_jobs.discard(job_id)
 
-    threading.Thread(target=_run, daemon=True, name=f"run_job_loudness_{job_id}").start()
+    try:
+        threading.Thread(target=_run, daemon=True, name=f"run_job_loudness_{job_id}").start()
+    except BaseException:
+        finish_admission(job_id, admission_owner)
+        with _inflight_lock:
+            _inflight_jobs.discard(job_id)
+        raise
 
 
 def create_loudness_job(

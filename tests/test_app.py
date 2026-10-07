@@ -21,6 +21,7 @@ from media_preview_generator.web.app import (
     get_or_create_flask_secret,
     run_scheduled_job,
 )
+from media_preview_generator.web.jobs import Job
 from media_preview_generator.web.settings_manager import reset_settings_manager
 
 
@@ -476,7 +477,7 @@ class TestRequeueInterruptedOnStartup:
             "requeue_max_age_minutes": "45",
         }.get(key, default)
         mock_get_settings_manager.return_value.processing_paused = False
-        requeued_job = type("RequeuedJob", (), {"id": "job-123", "config": {"foo": "bar"}})()
+        requeued_job = Job(id="job-123", config={"foo": "bar"})
         mock_get_job_manager.return_value.requeue_interrupted_jobs.return_value = [requeued_job]
 
         _requeue_interrupted_on_startup("/tmp/config")
@@ -505,7 +506,7 @@ class TestRequeueInterruptedOnStartup:
         }.get(key, default)
         sm.processing_paused = True
 
-        requeued_job = type("RequeuedJob", (), {"id": "job-456", "config": {}})()
+        requeued_job = Job(id="job-456")
         mock_get_job_manager.return_value.requeue_interrupted_jobs.return_value = [requeued_job]
 
         _requeue_interrupted_on_startup("/tmp/config")
@@ -537,7 +538,7 @@ class TestRequeueInterruptedOnStartup:
         }.get(key, default)
         mock_get_settings_manager.return_value.processing_paused = False
         jm = mock_get_job_manager.return_value
-        jm.requeue_interrupted_jobs.return_value = [type("RequeuedJob", (), {"id": "job-123", "config": {"a": 1}})()]
+        jm.requeue_interrupted_jobs.return_value = [Job(id="job-123", config={"a": 1})]
         jm.fail_unrevived_interrupted_jobs.side_effect = OSError("disk I/O error")
 
         try:

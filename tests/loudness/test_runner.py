@@ -12,7 +12,7 @@ from media_preview_generator.loudness import job
 from media_preview_generator.processing.retry_queue import scaled_backoff_delay
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library
-from media_preview_generator.web.jobs import JobStatus
+from media_preview_generator.web.jobs import Job, JobStatus
 
 
 @pytest.fixture
@@ -295,7 +295,7 @@ def test_an_error_marking_the_job_failed_is_only_logged(run, monkeypatch):
 
 def test_start_merges_changed_overrides_runs_once_and_skips_a_job_in_flight(monkeypatch):
     jm = MagicMock()
-    jm.get_job.return_value = SimpleNamespace(config={"priority_hint": 1})
+    jm.get_job.return_value = Job(id="j1", config={"priority_hint": 1}, kind="loudness")
     monkeypatch.setattr(job, "get_job_manager", lambda: jm)
     started = threading.Event()
     monkeypatch.setattr(job, "run_loudness_job", lambda job_id: started.set())
