@@ -1,4 +1,4 @@
-"""E2E tests for the dense Workers table (any enabled member with 5+ workers) and its per-member row cap."""
+"""E2E tests for the dense Workers table (always on, whatever the worker count) and its per-member row cap."""
 
 from __future__ import annotations
 
@@ -127,27 +127,10 @@ def _loudness_example() -> tuple[list[dict], list[dict]]:
 
 @pytest.mark.e2e
 class TestLayoutSwitch:
-    def test_cards_layout_is_kept_when_every_member_has_four_or_fewer_workers(
-        self, authed_page: Page, app_url: str
-    ) -> None:
-        cpu = _group("cpu", "CPU workers", 4)
-        _open(authed_page, app_url, [cpu], [_worker(cpu, n, busy=n < 3) for n in range(1, 5)])
-        expect(authed_page.locator("#workerGroupLiveRows.wg-dense")).to_have_count(0)
-        expect(authed_page.locator("#workerGroupCols")).to_be_hidden()
-        expect(authed_page.locator("#workerGroupLiveRows .worker-slot:visible")).to_have_count(4)
-        expect(authed_page.locator("#workerGroupLiveRows .wg-idle-row:visible")).to_have_count(0)
-        expect(authed_page.locator("#workerGroupLiveRows .wg-more:visible")).to_have_count(0)
-        display = authed_page.locator("#workerGroupLiveRows").evaluate("e => getComputedStyle(e).display")
-        assert display == "grid"
-        idle_card = authed_page.locator('[data-worker-key="CPU_3"] [data-card]')
-        expect(idle_card).to_have_class("card workers-panel-card wk idle")
-
-    @pytest.mark.parametrize("count", [5, 7, 20])
-    def test_table_layout_is_used_when_a_member_has_five_or_more_workers(
-        self, authed_page: Page, app_url: str, count: int
-    ) -> None:
+    @pytest.mark.parametrize("count", [1, 4, 5, 12])
+    def test_table_layout_is_used_whatever_the_worker_count(self, authed_page: Page, app_url: str, count: int) -> None:
         cpu = _group("cpu", "CPU workers", count)
-        busy = 3
+        busy = min(3, count)
         _open(authed_page, app_url, [cpu], [_worker(cpu, n, busy=n <= busy) for n in range(1, count + 1)])
         expect(authed_page.locator("#workerGroupLiveRows.wg-dense")).to_have_count(1)
         rows = authed_page.locator(ROWS)
@@ -162,25 +145,24 @@ class TestLayoutSwitch:
             expect(row.locator("[data-progress-wrap]")).to_be_visible()
             expect(row.locator("[data-worker-job]")).to_have_text(JOB.format(n)[:8])
             expect(row.locator("[data-worker-logs]")).to_be_visible()
+        expect(authed_page.locator("#workerGroupCols")).to_be_visible()
         idle = authed_page.locator("[data-group-idle='cpu:m1']")
-        expect(idle).to_have_text(re.compile(rf"{count - busy} workers idle"))
+        if count == busy:
+            expect(idle).to_be_hidden()
+            expect(authed_page.locator("[data-group-id='cpu'] .occ-chip")).to_contain_text(f"{busy}/ {count}")
+            return
+        expect(idle).to_have_text(re.compile(rf"{count - busy} workers? idle"))
         for n in range(busy + 1, count + 1):
             expect(idle.locator(".wg-idle-n", has_text=f"#{n}")).to_have_count(1)
         expect(authed_page.locator("[data-group-id='cpu'] .occ-chip")).to_contain_text(f"{busy}/ {count}")
 
-    def test_three_plus_three_group_stays_cards_and_a_five_worker_member_turns_the_table_on(
-        self, authed_page: Page, app_url: str
-    ) -> None:
+    def test_three_plus_three_group_uses_the_table(self, authed_page: Page, app_url: str) -> None:
         group = _multi_group("g", "Mixed", [_member("m-gpu", 3, "gpu"), _member("m-cpu", 3)])
         workers = [_worker(group, n, busy=True, member=0) for n in (1, 2, 3)]
         workers += [_worker(group, n, busy=True, member=1) for n in (4, 5, 6)]
         _open(authed_page, app_url, [group], workers)
-        expect(authed_page.locator("#workerGroupLiveRows.wg-dense")).to_have_count(0)
-        expect(authed_page.locator("#workerGroupLiveRows .wg-mem")).to_have_count(2)
-        group["members"][1]["count"] = 5
-        workers += [_worker(group, n, busy=False, member=1) for n in (7, 8)]
-        _open(authed_page, app_url, [group], workers)
         expect(authed_page.locator("#workerGroupLiveRows.wg-dense")).to_have_count(1)
+        expect(authed_page.locator("#workerGroupLiveRows .wg-mem")).to_have_count(2)
 
     def test_panel_is_compact_for_the_seven_worker_loudness_example(self, authed_page: Page, app_url: str) -> None:
         groups, workers = _loudness_example()

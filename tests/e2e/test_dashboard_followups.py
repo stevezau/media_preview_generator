@@ -219,7 +219,7 @@ class TestWorkerGroupHeaderStaysInItsColumn:
         groups = mock_worker_groups(authed_page)
         groups["state"]["hardware"][0]["name"] = LONG_DEVICE
         groups["state"]["groups"].append({**groups["state"]["groups"][0], "id": "cpu-loud", "name": "CPU loudness"})
-        authed_page.set_viewport_size({"width": 1280, "height": 900})
+        authed_page.set_viewport_size({"width": 390, "height": 900})
         authed_page.goto(app_url + "/")
         hardware = authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')
         expect(hardware).to_have_attribute("title", LONG_DEVICE)

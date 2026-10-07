@@ -167,8 +167,8 @@ def test_worker_identity_and_open_file_survive_progress_and_status_updates(
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     workers[0].update(status="idle", paused=False, retiring=False, job_id=None)
     page.evaluate("workers => updateWorkerStatuses(workers)", workers)
-    expect(preview.locator("[data-current-job]")).to_be_hidden()
-    expect(preview.get_by_text("#42", exact=True)).to_be_visible()
+    expect(preview).to_be_hidden()
+    expect(page.locator("[data-group-idle]").get_by_text("#42", exact=True)).to_be_visible()
 
 
 @pytest.mark.e2e

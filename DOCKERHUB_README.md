@@ -47,7 +47,7 @@ a marker in the Inspector.
 
 | One GPU pass per file |
 | --- |
-| ![Dashboard Workers panel: a GPU workers group (NVIDIA TITAN RTX with three workers making previews, Intel UHD Graphics 770 idle) beside a CPU workers group with three workers running Plex loudness analysis with percent, speed and ETA](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
+| ![Workers panel as a table: busy GPU and CPU workers with percent, speed and ETA, idle workers folded into one line](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
 
 | Each server gets its own format |
 | --- |

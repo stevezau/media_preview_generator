@@ -81,7 +81,7 @@ The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **T
 - **Workers** — one card per worker group, with a row and **−** / **+** stepper for each device, and **Pause** / **Resume** and **Manage groups** in the header.
 - **Jobs** — the job queue, with status tabs, search, filters and per-job controls.
 
-**Dense worker table.** When an enabled device in a group has 5 or more workers, the Workers panel switches to a compact table. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A device with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
+**Dense worker table.** The Workers panel always shows a compact table, whatever the worker count. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A device with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
 
 > [!NOTE]
 > Jobs queue with priority (1 = high, 2 = normal, 3 = low). The dispatcher runs

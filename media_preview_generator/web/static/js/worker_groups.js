@@ -24,8 +24,6 @@
     let groupSearch = '';
     let occupiedOnly = false;
     let showAllGroups = false;
-    // A member with this many workers or more switches the Workers panel to the dense table.
-    const DENSE_TABLE_MIN_WORKERS = 5;
     // Rows shown per member before the "Show N more" expander; problem rows are always shown.
     const DENSE_TABLE_ROW_CAP = 8;
     const EXPANDED_KEY = 'workerGroupsExpanded';
@@ -696,7 +694,7 @@
                 replaceDashboardHeader(entry, `<div class="worker-group-description"><strong>${escape(entry.name || 'Workers without group details')}</strong><span class="small text-body-secondary">Live worker activity remains visible while group details refresh.</span></div>`);
             }
         }
-        denseMode = snapshot.groups.some(group => group.enabled && group.members.some(member => member.count >= DENSE_TABLE_MIN_WORKERS));
+        denseMode = snapshot.groups.some(group => group.enabled);
         const liveRows = document.getElementById('workerGroupLiveRows');
         liveRows.classList.toggle('wg-dense', denseMode);
         document.getElementById('workerGroupCols').hidden = !denseMode;

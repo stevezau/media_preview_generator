@@ -31,7 +31,7 @@ only)**. Existing installs migrate 1:1 with no reset. Every current function sta
 | D5 | Migration v22: each v21 group → same `id`, `name`, `enabled`, `availability` + one member `{"id": "m1", resource, device, count, job_types}`. Revision +1. | 1:1, deterministic ids so worker ownership never churns; revision bump forces stale browser tabs to reload instead of overwriting. |
 | D6 | The runtime keeps working on a flat list. `worker_groups.member_policies(groups)` flattens every member into a dict that looks exactly like a v21 group plus `group_id` and `member_id`. | Pool, capacity, peak and gate code keep their proven logic; only the edges (schema, API, UI) learn nesting. |
 | D7 | `PUT /api/worker-groups` still accepts the flat v21 group shape (converted to one member `m1`). `GET` echoes `resource`/`device`/`count`/`job_types` on single-member groups (deprecated, read-only). `POST /worker-groups/<id>/scale {"delta"}` still works on single-member groups. New: `POST /worker-groups/<group>/members/<member>/scale`. | API-token clients and stale tabs keep working through the upgrade. |
-| D8 | Dashboard: a group is one card; each member is a sub-row with its own busy/count and stepper; worker rows sit under their member. Dense table switches on when any enabled **member** has ≥ 5 workers; row cap (8) and "Show N more" are per member. | Owner's request; per-member trigger stops a 3 + 3 group flipping to the table. |
+| D8 | Dashboard: a group is one card; each member is a sub-row with its own busy/count and stepper; worker rows sit under their member. The dense table is always used (no card view, whatever the worker count); row cap (8) and "Show N more" are per member. | Owner's request; one layout means the panel never flips when a count changes. |
 | D9 | Week graph: one lane per member, coloured by device (same device = same colour everywhere). Legend lists devices. | Owner's request. |
 | D10 | Migration notice uses the existing one-shot "Settings migrated" notification card (`upgrade._USER_FACING_NOTES[22]`). | Zero new notice machinery; dismissal already persists. |
 | D11 | Job gate fix (§7): **a job kind that holds no slot goes first.** Ships first, on its own PR, independent of members. | Proven starvation at High priority; the owner wants simple. |
@@ -450,7 +450,7 @@ member, loudness only. **Duplicate group** copies members.
   its member row. A removed member still finishing shows "Removed device · n finishing" and no stepper.
 * Worker cards/rows sit under their member row. Idle workers fold into one muted line per member
   ("7 workers idle #4 #5 …").
-* Dense table: on when any enabled member has ≥ 5 workers (`DENSE_TABLE_MIN_WORKERS`, now per member). Row cap 8 per
+* Dense table: always on (the old `DENSE_TABLE_MIN_WORKERS` threshold is gone). Row cap 8 per
   member, busy first, problem rows always shown, "Show N more · k running" per member, expansion remembered per
   `group_id:member_id` in `localStorage` (`workerGroupsExpanded`; old group-id keys are simply ignored).
 * Filters/search (> 6 groups) unchanged; search text includes member device names.
@@ -779,7 +779,7 @@ kinds held).
 | textdet helper (`tests/test_live_cpu_worker_reconcile.py` or a new small test) | `_configured_cpu_workers` sums CPU members allowing intro that are available; GPU members and loudness-only CPU members excluded. |
 | `tests/test_job_gate_kind_share.py` (new) + `tests/test_job_gate_resources.py` | §7.5. |
 | `tests/e2e/test_worker_groups.py` | editor: add device, device picker disables used devices, GPU row loudness chip disabled with tooltip, CPU→GPU switch removes loudness with note, remove device, last-device refusal, Apply sends exact payload (assert member ids preserved), server 400 peak message shown, 409 conflict flow, 390 px: no horizontal scroll and every control ≥ 44 px. |
-| `tests/e2e/test_workers_dense_table.py` | 3 + 3 group stays cards; a 5-worker member turns the table on; cap 8 + "Show N more · k running" per member; expansion persists per `group:member`. |
+| `tests/e2e/test_workers_dense_table.py` | table at 1, 4, 5 and 12 workers and for a 3 + 3 group; cap 8 + "Show N more · k running" per member; expansion persists per `group:member`. |
 | `tests/e2e/test_ui_workers_panel.py` | member rows render under one card; stepper posts to `/api/worker-groups/<gid>/members/<mid>/scale` with `{"delta": 1}` (assert URL and body); retiring member row; missing-GPU chip. |
 | `tests/e2e/_mocks.py`, `tests/e2e/test_wizard_step4_processing.py`, `tests/e2e/test_dashboard*.py`, `tests/e2e/test_worker_loudness_button.py`, `tests/e2e/snapshots/readme_fixture.py` | payloads to v22; behaviour unchanged. |
 
