@@ -47,15 +47,15 @@ a marker in the Inspector.
 
 | One GPU pass per file |
 | --- |
-| ![Dashboard Workers panel with a GPU workers group (NVIDIA TITAN RTX with three busy workers, Intel UHD Graphics 770 with one idle) beside a CPU workers group with four idle workers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
+| ![Dashboard Workers panel: a GPU workers group (NVIDIA TITAN RTX with three workers making previews, Intel UHD Graphics 770 idle) beside a CPU workers group with three workers running Plex loudness analysis with percent, speed and ETA](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
 
 | Each server gets its own format |
 | --- |
-| ![A job's Files tab: one file marked Generated, with Home Plex, Home Jellyfin and Home Emby listed as its servers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-publish.webp) |
+| ![A completed job's details with the Files tab open: one file marked Generated, with Home Plex, Home Jellyfin and Home Emby listed as its servers](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-publish.webp) |
 
 | It waits for slow servers |
 | --- |
-| ![A Jobs queue row for Sintel (2010) showing Retry 0/5 and Retry starting in 2 min](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-retry.webp) |
+| ![The Jobs queue with four rows: Tears of Steel running at 62%, Sintel pending with Retry 2/5 and Retry starting in 4 min, Big Buck Bunny completed, and Elephants Dream pending](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-retry.webp) |
 
 _App screenshots come from a test setup with made-up servers; the job titles are open films._
 

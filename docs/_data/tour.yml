@@ -9,8 +9,8 @@
   image: tour-trigger.webp
   alt: "The Automation page's *arr apps card with Sonarr, Radarr and Sportarr tabs, a Publish to which server? choice and the Sonarr webhook URL"
   path: /automation
-  width: 1023
-  height: 554
+  width: 1070
+  height: 600
 - title: It finds every server with that file
   body: >-
     The path Sonarr reports is mapped to the path the container sees. Then every Plex, Emby and
@@ -18,32 +18,32 @@
   image: tour-resolve.webp
   alt: "The Servers page with one card each for Home Plex, Home Jellyfin and Home Emby, each showing its address and enabled libraries"
   path: /servers
-  width: 1232
-  height: 481
+  width: 1280
+  height: 528
 - title: One GPU pass per file
   body: >-
     FFmpeg decodes the video on the GPU, jumps between key frames when the file allows it, and
     tone-maps HDR. If the GPU can't decode a file, the same worker tries again on the CPU.
   image: tour-extract.webp
-  alt: "The Dashboard Workers panel with a GPU workers group holding an NVIDIA TITAN RTX device (three busy workers) and an Intel UHD Graphics 770 device (one idle worker), beside a CPU workers group with four idle workers"
+  alt: "The Dashboard Workers panel: a GPU workers group with an NVIDIA TITAN RTX device (three workers making previews) and an idle Intel UHD Graphics 770 device, beside a CPU workers group with three workers running Plex loudness analysis with percent, speed and ETA"
   path: /
-  width: 1232
-  height: 765
+  width: 1280
+  height: 812
 - title: Each server gets its own format
   body: >-
     A BIF in Plex's data folder, a BIF next to the video for Emby, trickplay tiles for Jellyfin. Then
     each server is told to pick them up.
   image: tour-publish.webp
-  alt: "A job's Files tab with one file marked Generated and Home Plex, Home Jellyfin and Home Emby listed as its servers"
+  alt: "A completed job's details with the Files tab open: one file marked Generated, with Home Plex, Home Jellyfin and Home Emby listed as its servers"
   path: /
-  width: 1078
-  height: 237
+  width: 1168
+  height: 552
 - title: It waits for slow servers
   body: >-
     A server that hasn't indexed the new file yet gets another try after 1, 2, 5, 15 and 60
     minutes by default. Next time, files whose previews are current are skipped.
   image: tour-retry.webp
-  alt: "A Jobs queue row for Sintel (2010) showing Retry 0/5 and Retry starting in 2 min"
+  alt: "The Jobs queue with four rows: Tears of Steel running at 62%, Sintel pending with Retry 2/5 and Retry starting in 4 min, Big Buck Bunny completed, and Elephants Dream pending"
   path: /
-  width: 1230
-  height: 105
+  width: 1280
+  height: 585

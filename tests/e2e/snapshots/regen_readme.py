@@ -228,9 +228,53 @@ def _fake_library_rows(server_id: str | None = None) -> list[dict]:
 # for three films") reads as a real job in flight instead of an idle pool.
 # Matches three of ``readme_fixture.seed_jobs``' single-file jobs.
 BUSY_WORKER_SPECS: list[dict] = [
-    {"current_title": "Tears of Steel (2012)", "library_name": "Movies", "progress_percent": 34.0, "speed": "1.4x"},
-    {"current_title": "Sintel (2010)", "library_name": "Movies", "progress_percent": 61.0, "speed": "1.1x"},
-    {"current_title": "Big Buck Bunny (2008)", "library_name": "Movies", "progress_percent": 82.0, "speed": "1.6x"},
+    {
+        "current_title": "Tears of Steel (2012)",
+        "library_name": "Movies",
+        "progress_percent": 34.0,
+        "speed": "1.4x",
+        "eta": "5m 40s",
+    },
+    {
+        "current_title": "Sintel (2010)",
+        "library_name": "Movies",
+        "progress_percent": 61.0,
+        "speed": "1.1x",
+        "eta": "3m 05s",
+    },
+    {
+        "current_title": "Big Buck Bunny (2008)",
+        "library_name": "Movies",
+        "progress_percent": 82.0,
+        "speed": "1.6x",
+        "eta": "1m 10s",
+    },
+]
+
+
+# Two CPU workers are mid-loudness-analysis so the CPU group looks as busy as the GPU one.
+BUSY_CPU_LOUDNESS_SPECS: list[dict] = [
+    {
+        "current_title": "Elephants Dream (2006)",
+        "library_name": "Movies",
+        "progress_percent": 47.0,
+        "speed": "2.3x",
+        "eta": "3m 20s",
+    },
+    {
+        "current_title": "Cosmos Laundromat (2015)",
+        "library_name": "Movies",
+        "progress_percent": 18.0,
+        "speed": "1.9x",
+        "eta": "6m 05s",
+    },
+    {
+        "current_title": "Spring (2019)",
+        "library_name": "Movies",
+        "progress_percent": 71.0,
+        "speed": "2.1x",
+        "eta": "1m 50s",
+    },
 ]
 
 
@@ -263,6 +307,7 @@ def _fake_worker_statuses() -> list[dict]:
     workers = []
     worker_id = 0
     busy_index = 0
+    cpu_busy_index = 0
     members = [(group, member) for group in FAKE_WORKER_GROUPS for member in group["members"]]
     for group, member in members:
         device_name = next((gpu["name"] for gpu in FAKE_GPUS if gpu["device"] == member["device"]), "CPU")
@@ -273,6 +318,10 @@ def _fake_worker_statuses() -> list[dict]:
                 spec = BUSY_WORKER_SPECS[busy_index]
                 busy_index += 1
                 entry.update(status="processing", ffmpeg_started=True, **spec)
+            elif member["id"] == "cpu" and cpu_busy_index < len(BUSY_CPU_LOUDNESS_SPECS):
+                spec = BUSY_CPU_LOUDNESS_SPECS[cpu_busy_index]
+                cpu_busy_index += 1
+                entry.update(status="processing", ffmpeg_started=True, job_kind="loudness", **spec)
             workers.append(
                 {
                     "worker_id": worker_id,
@@ -425,7 +474,7 @@ def _install_api_stubs(ctx: BrowserContext, current_version: str) -> None:
         data = response.json()
         data["hardware"] = [{k: gpu[k] for k in ("device", "name", "type", "status")} for gpu in FAKE_GPUS]
         data["warnings"] = []
-        busy_by_member = {"gpu-nvidia": len(BUSY_WORKER_SPECS)}
+        busy_by_member = {"gpu-nvidia": len(BUSY_WORKER_SPECS), "cpu": len(BUSY_CPU_LOUDNESS_SPECS)}
         for group_row in data["capacity"]["groups"]:
             group_busy = 0
             for row in group_row.get("members", []):
@@ -464,72 +513,161 @@ def _to_webp(png_path: Path, quality: int = 88, method: int = 6) -> Path:
     return webp_path
 
 
-def _install_retry_job_stub(ctx: BrowserContext) -> None:
-    """Add one job waiting out a retry to the dashboard's job list.
+def _install_queue_job_stub(ctx: BrowserContext) -> None:
+    """Replace the dashboard's job list with four realistic queue rows.
 
-    The retry state lasts minutes in real life and can't be seeded (JobManager turns stored RUNNING
-    rows into FAILED at startup), so the real /api/jobs response is fetched and one job appended.
+    A job waiting out a retry lasts minutes in real life and can't be seeded (JobManager turns stored
+    RUNNING rows into FAILED at startup), so the real /api/jobs response is fetched and its rows swapped
+    for: one running, one retrying, one completed, one pending.
     """
+
+    def job(job_id: str, title: str, status: str, server: tuple[str, str, str], minutes_ago: int, **extra) -> dict:
+        now = datetime.now(UTC)
+        started = (now - timedelta(minutes=minutes_ago)).isoformat()
+        progress = {"percent": 0, "total_items": 1, "processed_items": 0, **extra.pop("progress", {})}
+        config = {"trigger": "webhook", "path_count": 1, **extra.pop("config", {})}
+        return {
+            "id": job_id,
+            "status": status,
+            "paused": False,
+            "library_name": title,
+            "server_id": server[0],
+            "server_name": server[1],
+            "server_type": server[2],
+            "created_at": started,
+            "started_at": started if status in ("running", "completed") else None,
+            "completed_at": (now - timedelta(minutes=minutes_ago - 6)).isoformat() if status == "completed" else None,
+            "progress": progress,
+            "config": config,
+            **extra,
+        }
+
+    plex = ("plex-home", "Home Plex", "plex")
+    jellyfin = ("jellyfin-home", "Home Jellyfin", "jellyfin")
+    emby = ("emby-home", "Home Emby", "emby")
 
     def handle(route) -> None:
         response = route.fetch()
         data = response.json()
         now = datetime.now(UTC)
-        data["jobs"].insert(
-            0,
-            {
-                "id": "retry-demo",
-                "status": "running",
-                "paused": False,
-                "library_name": "Sintel (2010)",
-                "server_id": "jellyfin-home",
-                "server_name": "Home Jellyfin",
-                "server_type": "jellyfin",
-                "created_at": (now - timedelta(minutes=2)).isoformat(),
-                "started_at": (now - timedelta(minutes=2)).isoformat(),
-                "progress": {
-                    "percent": 0,
-                    "total_items": 1,
-                    "processed_items": 0,
-                    "retry_eta": (now + timedelta(seconds=100)).isoformat(),
-                    "retry_wait_total": 120,
-                },
-                "config": {"trigger": "webhook", "is_retry_chain": True, "max_retries": 5, "path_count": 1},
-            },
-        )
+        data["jobs"] = [
+            job("3f9a1c7e", "Tears of Steel (2012)", "running", plex, 3, progress={"percent": 62.0}),
+            job(
+                "b84d02e6",
+                "Sintel (2010)",
+                "pending",
+                jellyfin,
+                4,
+                progress={"retry_eta": (now + timedelta(minutes=4)).isoformat(), "retry_wait_total": 300},
+                config={"is_retry_chain": True, "retry_attempt": 2, "max_retries": 5},
+            ),
+            job(
+                "c61e5a0d",
+                "Big Buck Bunny (2008)",
+                "completed",
+                emby,
+                32,
+                progress={"percent": 100.0, "processed_items": 1, "outcome": {"created": 1, "skipped": 0, "failed": 0}},
+            ),
+            job("7d20f9b3", "Elephants Dream (2006)", "pending", plex, 1),
+        ]
+        data["total"] = len(data["jobs"])
         route.fulfill(response=response, json=data)
 
+    def handle_stats(route) -> None:
+        stats = {"total": 4, "pending": 2, "running": 1, "completed": 1, "failed": 0, "cancelled": 0}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(stats))
+
     ctx.route(re.compile(r".*/api/jobs\?page="), handle)
+    ctx.route("**/api/jobs/stats", handle_stats)
+
+
+SHOT_PADDING = 24
+SHOT_WIDTH = 1280
+# Hides the sticky navbar and any floating chrome so a clip never includes them.
+HIDE_CHROME_CSS = """
+nav.navbar, .sticky-top, .toast-container, #updateBanner, #whatsNewModal { display: none !important; }
+html, body { scroll-behavior: auto !important; }
+"""
+
+
+def _clip_padded(page: Page, selector: str, out_path: Path, *, full_width: bool = True) -> None:
+    """Screenshot the page region around ``selector``, padded with the page background.
+
+    The clip is cut from the page (not the element), so the padding is the app's own background
+    instead of a hard element edge. ``full_width`` makes every shot the same 1280px width.
+    """
+    page.add_style_tag(content=HIDE_CHROME_CSS)
+    # Blank everything except the target and the elements around it in the tree, so the padding shows only
+    # the page background rather than slivers of neighbouring cards.
+    page.evaluate(
+        """(sel) => {
+            const target = document.querySelector(sel);
+            document.querySelectorAll('body *').forEach((el) => {
+                if (!el.contains(target) && !target.contains(el)) el.style.visibility = 'hidden';
+            });
+        }""",
+        selector,
+    )
+    page.wait_for_timeout(200)
+    box = page.evaluate(
+        """(sel) => {
+            const r = document.querySelector(sel).getBoundingClientRect();
+            return {x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height};
+        }""",
+        selector,
+    )
+    if full_width:
+        x, width = 0.0, float(SHOT_WIDTH)
+    else:
+        x, width = max(box["x"] - SHOT_PADDING, 0.0), box["w"] + 2 * SHOT_PADDING
+    clip = {"x": x, "y": max(box["y"] - SHOT_PADDING, 0.0), "width": width, "height": box["h"] + 2 * SHOT_PADDING}
+    page.screenshot(path=str(out_path), clip=clip, full_page=True, animations="disabled")
+    print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
 
 
 def _capture_element(
-    page: Page, app_url: str, path: str, selector: str, out_path: Path, *, ready: str | None = None
+    page: Page,
+    app_url: str,
+    path: str,
+    selector: str,
+    out_path: Path,
+    *,
+    ready: str | None = None,
+    full_width: bool = True,
 ) -> None:
-    """Screenshot one element: one idea per shot, no full-page scrolls."""
+    """Screenshot one element with padding: one idea per shot, no full-page scrolls."""
     page.goto(f"{app_url}{path}", wait_until="domcontentloaded", timeout=15_000)
     page.wait_for_selector(selector, state="visible", timeout=15_000)
     if ready:
         page.wait_for_function(ready, timeout=15_000)
     page.wait_for_timeout(1200)
-    page.locator(selector).first.screenshot(path=str(out_path), animations="disabled")
-    print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
+    _clip_padded(page, selector, out_path, full_width=full_width)
 
 
 TOUR_SHOTS = [
-    # (file, app path, element, ready condition)
-    ("tour-trigger", "/automation", "#section-webhooks-sonarr-radarr", None),
-    ("tour-resolve", "/servers", "#serverList", "() => document.querySelectorAll('#serverList .card').length >= 3"),
+    # (file, app path, element, ready condition, full 1280px width)
+    ("tour-trigger", "/automation", "#section-webhooks-sonarr-radarr", None, False),
+    (
+        "tour-resolve",
+        "/servers",
+        "#serverList",
+        "() => document.querySelectorAll('#serverList .card').length >= 3",
+        True,
+    ),
     (
         "tour-extract",
         "/",
         ".card:has(#workerStatusContainer)",
-        "() => !!document.querySelector('#workerStatusContainer .progress')",
+        "() => document.querySelectorAll('#workerStatusContainer .progress').length >= 6",
+        True,
     ),
     (
         "tour-retry",
         "/",
-        ".queue-table-wrap",
+        ".card:has(.queue-table-wrap)",
         "() => /Retry starting/.test(document.getElementById('jobQueue').innerText)",
+        True,
     ),
 ]
 
@@ -540,8 +678,7 @@ def _capture_publish(page: Page, app_url: str, job_id: str, out_path: Path) -> N
     page.click("#filesTab", timeout=15_000)
     page.wait_for_selector("#filesTabPane .badge", state="visible", timeout=15_000)
     page.wait_for_timeout(800)
-    page.locator("#filesTabPane").screenshot(path=str(out_path), animations="disabled")
-    print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
+    _clip_padded(page, "#logsModal .modal-content", out_path, full_width=False)
 
 
 def regenerate(out_dir: Path) -> int:
@@ -579,7 +716,7 @@ def regenerate(out_dir: Path) -> int:
                 ctx.add_cookies([cookie])
                 ctx.add_init_script(INIT_SCRIPT)
                 _install_api_stubs(ctx, current_version)
-                _install_retry_job_stub(ctx)
+                _install_queue_job_stub(ctx)
                 page = ctx.new_page()
 
                 # Prime localStorage by visiting any page once; init
@@ -589,9 +726,9 @@ def regenerate(out_dir: Path) -> int:
                 page.wait_for_timeout(500)
 
                 written_pngs = []
-                for name, path, selector, ready in TOUR_SHOTS:
+                for name, path, selector, ready, full_width in TOUR_SHOTS:
                     png_path = out_dir / f"{name}.png"
-                    _capture_element(page, app_url, path, selector, png_path, ready=ready)
+                    _capture_element(page, app_url, path, selector, png_path, ready=ready, full_width=full_width)
                     written_pngs.append(png_path)
 
                 publish_png = out_dir / "tour-publish.png"
