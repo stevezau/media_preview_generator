@@ -3308,7 +3308,7 @@ function _patchWorkerCard(col, worker) {
     const progressPercent = isChapterWork
         ? (chapterTotal ? chapterProcessed / chapterTotal * 100 : 0)
         : (isProcessing ? (worker.progress_percent || 0) : 0);
-    const indeterminate = isLoudnessWork && (!ffmpegStarted || !(Number(worker.total_duration) > 0)) || isChapterWork && !chapterDeterminate || isProcessing && !ffmpegStarted && !isChapterWork;
+    const indeterminate = isLoudnessWork && (!ffmpegStarted || !(progressPercent > 0)) || isChapterWork && !chapterDeterminate || isProcessing && !ffmpegStarted && !isChapterWork;
     const showProgress = isChapterWork ? chapterDeterminate : isProcessing && ffmpegStarted;
     const desiredWidth = indeterminate ? '35%' : (showProgress ? `${progressPercent.toFixed(1)}%` : '0%');
     if (progress.style.width !== desiredWidth) {

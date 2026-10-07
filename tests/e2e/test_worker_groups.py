@@ -722,7 +722,7 @@ def test_live_loudness_worker_shows_audio_activity_until_ffmpeg_reports_real_pro
     worker["current_phase"] = "Loudness 2/2"
     authed_page.evaluate("loadWorkerStatuses()")
     expect(authed_page.locator("[data-percent]")).to_have_text("Analyzing audio · stream 2/2")
-    worker.update(ffmpeg_started=True, progress_percent=62.5, total_duration=7200, speed="1.4x", eta="3m 20s")
+    worker.update(ffmpeg_started=True, progress_percent=62.5, speed="1.4x", eta="3m 20s")
     authed_page.evaluate("loadWorkerStatuses()")
     expect(authed_page.locator("[data-percent]")).to_have_text("62.5%")
     expect(authed_page.locator("[data-speed]")).to_have_text("1.4x")
