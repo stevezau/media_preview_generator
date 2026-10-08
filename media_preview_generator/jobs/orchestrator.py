@@ -636,6 +636,7 @@ def _dispatch_processable_items(
     progress_callback=None,
     cancel_check=None,
     pause_check=None,
+    freeze_check=None,
     job_id: str | None = None,
     label: str = "scan",
     server_id_filter: str | None = None,
@@ -754,6 +755,7 @@ def _dispatch_processable_items(
             "worker_callback": worker_callback,
             "cancel_check": cancel_check,
             "pause_check": pause_check,
+            "freeze_check": freeze_check,
         },
         priority=priority if priority is not None else PRIORITY_NORMAL,
         carried_state=carried_state,
@@ -930,6 +932,7 @@ def _run_full_scan_multi_server(
     progress_callback=None,
     cancel_check=None,
     pause_check=None,
+    freeze_check=None,
     job_id: str | None = None,
     worker_callback=None,
     on_dispatch_start=None,
@@ -1059,6 +1062,7 @@ def _run_full_scan_multi_server(
         progress_callback=progress_callback,
         cancel_check=cancel_check,
         pause_check=pause_check,
+        freeze_check=freeze_check,
         job_id=job_id,
         label="full scan",
         server_id_filter=server_id_filter,
@@ -1081,6 +1085,7 @@ def _run_recently_added_multi_server(
     progress_callback=None,
     cancel_check=None,
     pause_check=None,
+    freeze_check=None,
     job_id: str | None = None,
     worker_callback=None,
     on_dispatch_start=None,
@@ -1172,6 +1177,7 @@ def _run_recently_added_multi_server(
         progress_callback=progress_callback,
         cancel_check=cancel_check,
         pause_check=pause_check,
+        freeze_check=freeze_check,
         job_id=job_id,
         label="recently-added scan",
         server_id_filter=server_id_filter,
@@ -1594,6 +1600,7 @@ def _run_webhook_paths_phase(
     progress_callback,
     cancel_check,
     pause_check=None,
+    freeze_check=None,
     job_id: str | None,
     totals: dict,
     aggregate_outcome: dict,
@@ -1901,6 +1908,7 @@ def run_processing(
     item_complete_callback=None,
     cancel_check=None,
     pause_check=None,
+    freeze_check=None,
     worker_pool_callback=None,
     job_id=None,
     on_dispatch_start=None,
@@ -1924,6 +1932,8 @@ def run_processing(
             should stop.
         pause_check: Optional callable returning True when processing
             should pause dispatch.
+        freeze_check: Optional callable returning True while running files' ffmpeg must stop where it is.
+            Defaults to ``pause_check``.
         worker_pool_callback: Optional callable receiving WorkerPool on
             create/cleanup.
         job_id: Optional job identifier for multi-job dispatch.
@@ -1955,6 +1965,7 @@ def run_processing(
                 worker_callback=worker_callback,
                 cancel_check=cancel_check,
                 pause_check=pause_check,
+                freeze_check=freeze_check,
                 job_id=job_id,
                 on_dispatch_start=on_dispatch_start,
                 worker_pool_callback=worker_pool_callback,
@@ -1997,6 +2008,7 @@ def run_processing(
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
                 pause_check=pause_check,
+                freeze_check=freeze_check,
                 job_id=job_id,
                 worker_callback=worker_callback,
                 on_dispatch_start=on_dispatch_start,
@@ -2053,6 +2065,7 @@ def run_processing(
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
                 pause_check=pause_check,
+                freeze_check=freeze_check,
                 job_id=job_id,
                 worker_callback=worker_callback,
                 on_dispatch_start=on_dispatch_start,
@@ -2192,6 +2205,7 @@ def run_processing(
                     "on_item_complete": item_complete_callback,
                     "cancel_check": cancel_check,
                     "pause_check": pause_check,
+                    "freeze_check": freeze_check,
                 }
                 from ..web.jobs import PRIORITY_NORMAL
 
@@ -2235,6 +2249,7 @@ def run_processing(
                     on_item_complete=item_complete_callback,
                     cancel_check=cancel_check,
                     pause_check=pause_check,
+                    freeze_check=freeze_check,
                 )
 
         # ``_classify_processing_mode`` here picks between
@@ -2255,6 +2270,7 @@ def run_processing(
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
                 pause_check=pause_check,
+                freeze_check=freeze_check,
                 job_id=job_id,
                 totals=totals,
                 aggregate_outcome=aggregate_outcome,

@@ -204,6 +204,9 @@ An expanded queue row shows up to five requested paths; **View all** opens the F
   Pausing one job does not pause other jobs. Manual and schedule holds are independent: resuming by hand cannot
   clear a schedule stop, and a schedule start cannot clear a manual pause. Global **Resume** does not
   resume a job you paused on its own.
+- A Previews job you pause by hand lets its running files finish, starts no new ones, and gives its active slot
+  back once they are done, so other jobs can run. **Resume** takes a slot again. A schedule stop time or the global
+  pause still stops the running files where they are and keeps the slot.
 
 **Scheduling:**
 

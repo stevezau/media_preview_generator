@@ -144,6 +144,12 @@ class JobTracker:
         self.on_item_complete: Callable | None = cbs.get("on_item_complete")
         self.cancel_check: Callable | None = cbs.get("cancel_check")
         self.pause_check: Callable | None = cbs.get("pause_check")
+        # What freezes a running file's ffmpeg; a job may pause dispatch without freezing (manual pause).
+        self.freeze_check: Callable | None = cbs.get("freeze_check") or self.pause_check
+        # True while the job has handed its gate slot back; read under ``_trackers_lock`` by the pickers so they
+        # never call ``pause_check`` (settings + job-manager locks) there. Set by ``release_when_idle``, cleared
+        # by ``mark_slot_reacquired``.
+        self.slot_released: bool = False
         # Wired by JobDispatcher.submit_items so record_completion can
         # include the same in-flight fraction the periodic emitter uses.
         # Without this, two competing emit paths produced different
@@ -750,6 +756,32 @@ class JobDispatcher:
             tracker.in_progress_fraction_getter = None
             return True
 
+    def release_when_idle(self, tracker: JobTracker, release_fn: Callable[[], None]) -> bool:
+        """Run ``release_fn`` only if the job has nothing in flight, atomically against item pickup.
+
+        Picking an item and counting it in flight happen under ``_trackers_lock``, so a release made here either
+        sees that item or the pick sees the pause ``release_fn`` set. ``release_fn`` must stay cheap and must not
+        take any lock that is held while ``_trackers_lock`` is wanted.
+
+        Args:
+            tracker: The job handing its slot back.
+            release_fn: Flips the job's slot state and releases the gate slot.
+
+        Returns:
+            True when ``release_fn`` ran; False when a file or check is still in flight.
+        """
+        with self._trackers_lock:
+            if tracker.active_processing or tracker.active_checks:
+                return False
+            release_fn()
+            tracker.slot_released = True
+            return True
+
+    def mark_slot_reacquired(self, tracker: JobTracker) -> None:
+        """Let dispatch pick the job's items again once it holds a gate slot after :meth:`release_when_idle`."""
+        with self._trackers_lock:
+            tracker.slot_released = False
+
     def shutdown(self) -> None:
         """Stop the dispatch loop + checking executor and shut down the pool."""
         self._shutdown = True
@@ -842,9 +874,15 @@ class JobDispatcher:
                 self._worker_done.wait(timeout=0.005)
                 self._worker_done.clear()
             else:
-                time.sleep(0.01)
+                time.sleep(0.1 if self._all_slots_released() else 0.01)
 
         logger.info("Dispatcher: dispatch loop exited")
+
+    def _all_slots_released(self) -> bool:
+        """True when every live job has handed its slot back, so nothing can be dispatched until a resume."""
+        with self._trackers_lock:
+            live = [t for t in self._trackers.values() if not t.done_event.is_set()]
+        return bool(live) and all(t.slot_released for t in live)
 
     def _handle_cancellations(self) -> None:
         """Cancel trackers whose cancel_check returns True."""
@@ -978,57 +1016,62 @@ class JobDispatcher:
             candidates = [t for t in candidates if not t.is_paused() and not t.is_cancelled()]
             # Keep compatible selection and reservation atomic with policy
             # edits and parking, revalidating the detached tracker snapshot.
-            with self._trackers_lock, self.worker_pool._workers_lock:
-                eligible = sorted(
-                    (
-                        t
-                        for t in candidates
-                        if self._trackers.get(t.job_id) is t
-                        and not t.done_event.is_set()
-                        and not t.park_requested
-                        and not t.cancelled
-                        and t.item_queue
-                    ),
-                    key=lambda t: (t.priority, t.submission_order),
-                )
-                chosen = None
-                for tracker in eligible:
-                    worker = self.worker_pool._find_available_worker(claim=True, kind=tracker.kind)
-                    if worker is not None:
-                        chosen = (tracker, worker)
-                        break
-                if chosen is None:
-                    return
-                tracker, worker = chosen
-                item = tracker.item_queue.popleft()
-                tracker.active_processing += 1
-                tracker.generation_started = True
-                progress_callback = partial(self.worker_pool._update_worker_progress, worker)
-                try:
-                    worker.assign_task(
-                        item,
-                        tracker.config,
-                        tracker.registry,
-                        progress_callback=progress_callback,
-                        title_max_width=tracker.title_max_width,
-                        job_id=tracker.job_id,
-                        library_name="",
-                        cancel_check=tracker.is_cancelled,
-                        pause_check=tracker.pause_check,
-                        process_fn=tracker.handlers.process_fn if tracker.handlers else None,
-                        outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
-                        pickup_fn=tracker.handlers.pickup_fn if tracker.handlers else None,
+            with self._trackers_lock:
+                # The cheap slot_released flag stands in for a pause re-read here (pause callbacks take other
+                # locks): a slot hand-back (release_when_idle) either sees this item in flight or this pick sees
+                # the flag. The pool lock is taken inside it.
+                with self.worker_pool._workers_lock:
+                    eligible = sorted(
+                        (
+                            t
+                            for t in candidates
+                            if self._trackers.get(t.job_id) is t
+                            and not t.slot_released
+                            and not t.done_event.is_set()
+                            and not t.park_requested
+                            and not t.cancelled
+                            and t.item_queue
+                        ),
+                        key=lambda t: (t.priority, t.submission_order),
                     )
-                except Exception as exc:
-                    tracker.active_processing -= 1
-                    self._fail_unstarted_item(worker, tracker, item, exc)
-                    return
-                logger.debug(
-                    "Dispatch: assigned canonical item {!r} (job {}) to {}",
-                    item.canonical_path,
-                    tracker.job_id[:8],
-                    worker.display_name,
-                )
+                    chosen = None
+                    for tracker in eligible:
+                        worker = self.worker_pool._find_available_worker(claim=True, kind=tracker.kind)
+                        if worker is not None:
+                            chosen = (tracker, worker)
+                            break
+                    if chosen is None:
+                        return
+                    tracker, worker = chosen
+                    item = tracker.item_queue.popleft()
+                    tracker.active_processing += 1
+                    tracker.generation_started = True
+                    progress_callback = partial(self.worker_pool._update_worker_progress, worker)
+                    try:
+                        worker.assign_task(
+                            item,
+                            tracker.config,
+                            tracker.registry,
+                            progress_callback=progress_callback,
+                            title_max_width=tracker.title_max_width,
+                            job_id=tracker.job_id,
+                            library_name="",
+                            cancel_check=tracker.is_cancelled,
+                            pause_check=tracker.freeze_check,
+                            process_fn=tracker.handlers.process_fn if tracker.handlers else None,
+                            outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
+                            pickup_fn=tracker.handlers.pickup_fn if tracker.handlers else None,
+                        )
+                    except Exception as exc:
+                        tracker.active_processing -= 1
+                        self._fail_unstarted_item(worker, tracker, item, exc)
+                        return
+                    logger.debug(
+                        "Dispatch: assigned canonical item {!r} (job {}) to {}",
+                        item.canonical_path,
+                        tracker.job_id[:8],
+                        worker.display_name,
+                    )
 
     def _fail_unstarted_item(self, worker: Worker, tracker: JobTracker, item, exc: Exception) -> None:
         """Count an item its worker couldn't start as failed, with its Files-panel row, and give the worker back.
@@ -1094,6 +1137,7 @@ class JobDispatcher:
                 for t in self._trackers.values()
                 if not t.done_event.is_set()
                 and not t.park_requested
+                and not t.slot_released
                 and not t.is_paused()
                 and not t.is_cancelled()
                 and t.check_queue
