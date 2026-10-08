@@ -539,6 +539,24 @@ jobs:
             exit 1
           fi
 
+      - name: The patched loudness analyser runs and carries its source
+        run: |
+          docker run --rm -i --entrypoint python3 "$CHECK_IMAGE" - <<'PY'
+          from pathlib import Path
+          import subprocess
+          from media_preview_generator.loudness.analyze import resolve_ffmpeg
+
+          root = Path("/opt/ffmpeg-loudness")
+          binary = root / "bin/ffmpeg"
+          for name in ("ffmpeg-8.1.2.tar.xz", "ebur128.patch", "README.md", "configure-args.txt"):
+              assert (root / "share/source" / name).is_file(), name
+              assert (root / "share/source" / name).stat().st_size > 0, name
+          assert resolve_ffmpeg("/usr/lib/jellyfin-ffmpeg/ffmpeg") == str(binary)
+          subprocess.run([str(binary), "-version"], check=True, stdout=subprocess.DEVNULL)
+          filters = subprocess.run([str(binary), "-filters"], check=True, capture_output=True, text=True)
+          assert " loudnorm " in filters.stdout
+          PY
+
       - name: The credit text detector and reader run in the image
         run: >-
           docker run --rm --entrypoint python3 "$CHECK_IMAGE"

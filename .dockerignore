@@ -34,6 +34,7 @@ media_preview_generator/_version.py
 .idea/
 *.md
 !README.md
+!docker/ffmpeg-loudness/README.md
 
 # Environment files
 .env

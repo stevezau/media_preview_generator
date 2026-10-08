@@ -585,9 +585,11 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         _finish_chain(jm, chain_head, cfg, warnings, attempt_id=job_id)
                     return
                 carried = {}
+                loudness_ffmpeg = analyze.resolve_ffmpeg(getattr(config, "ffmpeg_path", None) or "ffmpeg")
+                logger.info("{}: using {}", LABEL, loudness_ffmpeg)
                 ctx = LoudnessContext(
                     registry=registry,
-                    ffmpeg=getattr(config, "ffmpeg_path", None) or "ffmpeg",
+                    ffmpeg=loudness_ffmpeg,
                     freeze_check=job_freeze_check(jm, job_id),
                     server_id=server_pin(cfg),
                     deleted_paths=confirmed_deleted_paths(

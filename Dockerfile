@@ -12,6 +12,20 @@ RUN apt-get update && \
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
+# Build a separate CPU-only analyzer. It carries the optimized loudnorm code
+# while leaving both GPU-capable FFmpeg binaries used for preview generation
+# untouched. The build runs natively for the requested target architecture.
+FROM toolchain AS ffmpeg-loudness-builder
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      make g++ nasm pkg-config xz-utils patch curl ca-certificates \
+      zlib1g-dev libbz2-dev liblzma-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY docker/ffmpeg-loudness/build.sh docker/ffmpeg-loudness/ebur128.patch docker/ffmpeg-loudness/README.md /tmp/ffmpeg-loudness/
+ARG FFMPEG_LOUDNESS_JOBS=4
+RUN chmod +x /tmp/ffmpeg-loudness/build.sh && \
+    FFMPEG_LOUDNESS_JOBS="$FFMPEG_LOUDNESS_JOBS" /tmp/ffmpeg-loudness/build.sh
+
 # Credit text models (Intro & Credits, spec §5.4): PP-OCRv4 detection from the pinned rapidocr_onnxruntime 1.4.4 wheel
 # and PP-OCRv5 Latin recognition from RapidOCR's model repository at a pinned tag, the wheel and both models verified
 # by sha256 (scripts/fetch_textdet_model.py). A stage of its own, so an edit to the fetch script never invalidates the
@@ -118,7 +132,8 @@ ARG DOCKER_IMAGE_NAME=local
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       mediainfo python3 python3-pip gosu pciutils git curl gnupg ca-certificates \
-      mesa-va-drivers mesa-vulkan-drivers libva2 libva-drm2 vainfo && \
+      mesa-va-drivers mesa-vulkan-drivers libva2 libva-drm2 vainfo \
+      zlib1g libbz2-1.0 liblzma5 && \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       # Jellyfin apt repo (Ubuntu Noble) for jellyfin-ffmpeg8.
       # --retry-all-errors so a flaky HTTP 403 from the repo (seen
@@ -153,6 +168,10 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip3 install --no-cache-dir --no-index /tmp/wheels/*.whl \
     --ignore-installed blinker && \
     rm -rf /tmp/wheels
+
+# The dedicated patched binary is used only for Plex loudness analysis.
+COPY --from=ffmpeg-loudness-builder /opt/ffmpeg-loudness /opt/ffmpeg-loudness
+RUN /opt/ffmpeg-loudness/bin/ffmpeg -version >/dev/null
 
 # Loaded only by the credit text detection helper process (markers/credits/textdet_helper.py).
 COPY --from=model /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx

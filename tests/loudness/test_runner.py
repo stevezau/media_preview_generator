@@ -91,6 +91,39 @@ def test_completes_releases_the_slot_and_retries_files_plex_hadnt_added(run):
     assert retry["retry_delay_s"] == scaled_backoff_delay(1, 30)
 
 
+@pytest.mark.parametrize("bundled", [True, False])
+def test_job_selects_loudness_binary_without_changing_preview_config(run, monkeypatch, bundled):
+    config = SimpleNamespace(ffmpeg_path="/usr/lib/jellyfin-ffmpeg/ffmpeg")
+    monkeypatch.setattr(job, "load_config", lambda: config)
+    original_isfile = job.analyze.os.path.isfile
+    original_access = job.analyze.os.access
+    monkeypatch.setattr(
+        job.analyze.os.path,
+        "isfile",
+        lambda path: bundled if path == job.analyze._BUNDLED_FFMPEG else original_isfile(path),
+    )
+    monkeypatch.setattr(
+        job.analyze.os,
+        "access",
+        lambda path, mode: bundled if path == job.analyze._BUNDLED_FFMPEG else original_access(path, mode),
+    )
+    contexts = []
+    original_context = job.LoudnessContext
+
+    def capture_context(**kwargs):
+        ctx = original_context(**kwargs)
+        contexts.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(job, "LoudnessContext", capture_context)
+    job.run_loudness_job("j1")
+    assert [ctx.ffmpeg for ctx in contexts] == [job.analyze._BUNDLED_FFMPEG if bundled else config.ffmpeg_path]
+    assert config.ffmpeg_path == "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+    submitted = run["dispatcher"].submit_items.call_args.kwargs
+    assert submitted["config"] is config
+    assert submitted["kind"] == job.JOB_KIND_LOUDNESS
+
+
 def test_loudness_callback_preserves_shared_preview_chapter_progress(run, tmp_path, monkeypatch):
     from media_preview_generator.jobs.dispatcher import JobDispatcher
     from media_preview_generator.jobs.worker import WorkerPool

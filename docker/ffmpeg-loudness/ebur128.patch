@@ -1,0 +1,391 @@
+--- a/libavfilter/ebur128.c
++++ b/libavfilter/ebur128.c
+@@ -97,6 +97,12 @@
+     unsigned long window;
+     /** Data pointer array for interleaved data */
+     void **data_ptrs;
++    /** Channel-weighted energy of each 100ms slice of audio_data, so that
++     *  gating blocks and short-term windows ending on a slice boundary can be
++     *  summed from slices instead of from every sample. */
++    double *slice_energy;
++    /** Number of 100ms slices in audio_data. */
++    size_t nb_slices;
+ };
+ 
+ static AVOnce histogram_init = AV_ONCE_INIT;
+@@ -281,8 +287,16 @@
+     CHECK_ERROR(!st->d->data_ptrs, 0,
+                 free_short_term_block_energy_histogram);
+ 
++    /* audio_data_frames is a multiple of samples_in_100ms (see above) */
++    st->d->nb_slices = st->d->audio_data_frames / st->d->samples_in_100ms;
++    st->d->slice_energy =
++        av_calloc(st->d->nb_slices, sizeof(*st->d->slice_energy));
++    CHECK_ERROR(!st->d->slice_energy, 0, free_data_ptrs);
++
+     return st;
+ 
++free_data_ptrs:
++    av_free(st->d->data_ptrs);
+ free_short_term_block_energy_histogram:
+     av_free(st->d->short_term_block_energy_histogram);
+ free_block_energy_histogram:
+@@ -309,59 +323,207 @@
+     av_free((*st)->d->channel_map);
+     av_free((*st)->d->sample_peak);
+     av_free((*st)->d->data_ptrs);
++    av_free((*st)->d->slice_energy);
+     av_free((*st)->d);
+     av_free(*st);
+     *st = NULL;
+ }
+ 
++/* Most channels to filter together. Channels are independent, so running
++ * several through the same loop lets the compiler keep all of their filter
++ * states in registers and lets the CPU overlap their dependency chains, which
++ * a channel-at-a-time loop cannot. */
++#define EBUR128_FILTER_LANES 8
++
++/* Apply the BS.1770 filter to nb_lanes channels at once. Each channel does
++ * exactly the arithmetic of the one-channel loop, in the same order, so the
++ * results are identical. nb_lanes is a compile-time constant at every call
++ * site, so the lane loops are unrolled. */
++static av_always_inline void ebur128_filter_lanes(FFEBUR128State *st, const double **srcs,
++                                                  size_t src_index, size_t frames, int stride,
++                                                  double *audio_data,
++                                                  const size_t *lane_channel, const int *lane_state,
++                                                  const int nb_lanes)
++{
++    const double a1 = st->d->a[1], a2 = st->d->a[2];
++    const double a3 = st->d->a[3], a4 = st->d->a[4];
++    const double b0 = st->d->b[0], b1 = st->d->b[1], b2 = st->d->b[2];
++    const double b3 = st->d->b[3], b4 = st->d->b[4];
++    const size_t channels = st->channels;
++    double v1[EBUR128_FILTER_LANES], v2[EBUR128_FILTER_LANES];
++    double v3[EBUR128_FILTER_LANES], v4[EBUR128_FILTER_LANES];
++    size_t i;
++    int k;
++
++    for (k = 0; k < nb_lanes; ++k) {
++        v1[k] = st->d->v[lane_state[k]][1];
++        v2[k] = st->d->v[lane_state[k]][2];
++        v3[k] = st->d->v[lane_state[k]][3];
++        v4[k] = st->d->v[lane_state[k]][4];
++    }
++
++    for (i = 0; i < frames; ++i) {
++        for (k = 0; k < nb_lanes; ++k) {
++            const size_t c = lane_channel[k];
++            const double v0 = srcs[c][src_index + i * stride]
++                            - a1 * v1[k]
++                            - a2 * v2[k]
++                            - a3 * v3[k]
++                            - a4 * v4[k];
++            audio_data[i * channels + c] =
++                              b0 * v0
++                            + b1 * v1[k]
++                            + b2 * v2[k]
++                            + b3 * v3[k]
++                            + b4 * v4[k];
++            v4[k] = v3[k];
++            v3[k] = v2[k];
++            v2[k] = v1[k];
++            v1[k] = v0;
++        }
++    }
++
++    for (k = 0; k < nb_lanes; ++k) {
++        double *v = st->d->v[lane_state[k]];
++        if (frames)
++            v[0] = v1[k];
++        v[4] = fabs(v4[k]) < DBL_MIN ? 0.0 : v4[k];
++        v[3] = fabs(v3[k]) < DBL_MIN ? 0.0 : v3[k];
++        v[2] = fabs(v2[k]) < DBL_MIN ? 0.0 : v2[k];
++        v[1] = fabs(v1[k]) < DBL_MIN ? 0.0 : v1[k];
++    }
++}
++
++static void ebur128_filter_group(FFEBUR128State *st, const double **srcs,
++                                 size_t src_index, size_t frames, int stride,
++                                 double *audio_data,
++                                 const size_t *lane_channel, const int *lane_state,
++                                 int nb_lanes)
++{
++    int j, k;
++
++    /* Two channels sharing one filter state (only possible through a custom
++     * channel map) must run one after the other, as the one-channel loop did. */
++    for (j = 0; j < nb_lanes; ++j) {
++        for (k = j + 1; k < nb_lanes; ++k) {
++            if (lane_state[j] == lane_state[k]) {
++                for (k = 0; k < nb_lanes; ++k)
++                    ebur128_filter_lanes(st, srcs, src_index, frames, stride, audio_data,
++                                         lane_channel + k, lane_state + k, 1);
++                return;
++            }
++        }
++    }
++
++#define FILTER_LANES_CASE(n)                                                            \
++    case n:                                                                             \
++        ebur128_filter_lanes(st, srcs, src_index, frames, stride, audio_data,           \
++                             lane_channel, lane_state, n);                              \
++        break;
++    switch (nb_lanes) {
++    FILTER_LANES_CASE(1)
++    FILTER_LANES_CASE(2)
++    FILTER_LANES_CASE(3)
++    FILTER_LANES_CASE(4)
++    FILTER_LANES_CASE(5)
++    FILTER_LANES_CASE(6)
++    FILTER_LANES_CASE(7)
++    FILTER_LANES_CASE(8)
++    }
++#undef FILTER_LANES_CASE
++}
++
++static void ebur128_filter_channels(FFEBUR128State *st, const double **srcs,
++                                    size_t src_index, size_t frames, int stride,
++                                    double *audio_data)
++{
++    size_t lane_channel[EBUR128_FILTER_LANES];
++    int lane_state[EBUR128_FILTER_LANES];
++    int nb_lanes = 0;
++    size_t c;
++
++    for (c = 0; c < st->channels; ++c) {
++        int ci = st->d->channel_map[c] - 1;
++        if (ci < 0)
++            continue;
++        else if (ci == FF_EBUR128_DUAL_MONO - 1)
++            ci = 0; /* dual mono */
++        lane_channel[nb_lanes] = c;
++        lane_state[nb_lanes]   = ci;
++        if (++nb_lanes == EBUR128_FILTER_LANES) {
++            ebur128_filter_group(st, srcs, src_index, frames, stride, audio_data,
++                                 lane_channel, lane_state, nb_lanes);
++            nb_lanes = 0;
++        }
++    }
++    if (nb_lanes)
++        ebur128_filter_group(st, srcs, src_index, frames, stride, audio_data,
++                             lane_channel, lane_state, nb_lanes);
++}
++
++/* Track the sample peak of nb_lanes consecutive channels starting at first in
++ * one pass over the interleaved frames. fabs(v) > max is the same test and the
++ * same result as the original v > max / -v > max pair, NaN and -0.0 included. */
++static av_always_inline void ebur128_peak_lanes(FFEBUR128State *st, const double **srcs,
++                                                size_t src_index, size_t frames, int stride,
++                                                size_t first, const int nb_lanes)
++{
++    double max[EBUR128_FILTER_LANES];
++    size_t i;
++    int k;
++
++    for (k = 0; k < nb_lanes; ++k)
++        max[k] = 0.0;
++
++    for (i = 0; i < frames; ++i) {
++        for (k = 0; k < nb_lanes; ++k) {
++            const double a = fabs(srcs[first + k][src_index + i * stride]);
++            if (a > max[k])
++                max[k] = a;
++        }
++    }
++
++    for (k = 0; k < nb_lanes; ++k)
++        if (max[k] > st->d->sample_peak[first + k])
++            st->d->sample_peak[first + k] = max[k];
++}
++
++static void ebur128_peak_channels(FFEBUR128State *st, const double **srcs,
++                                  size_t src_index, size_t frames, int stride)
++{
++    size_t first;
++
++    for (first = 0; first < st->channels; first += EBUR128_FILTER_LANES) {
++        const size_t left = st->channels - first;
++
++#define PEAK_LANES_CASE(n)                                                              \
++        case n:                                                                         \
++            ebur128_peak_lanes(st, srcs, src_index, frames, stride, first, n);          \
++            break;
++        switch (left < EBUR128_FILTER_LANES ? left : EBUR128_FILTER_LANES) {
++        PEAK_LANES_CASE(1)
++        PEAK_LANES_CASE(2)
++        PEAK_LANES_CASE(3)
++        PEAK_LANES_CASE(4)
++        PEAK_LANES_CASE(5)
++        PEAK_LANES_CASE(6)
++        PEAK_LANES_CASE(7)
++        PEAK_LANES_CASE(8)
++        }
++#undef PEAK_LANES_CASE
++    }
++}
++
+ #define EBUR128_FILTER(type, scaling_factor)                                       \
+ static void ebur128_filter_##type(FFEBUR128State* st, const type** srcs,           \
+                                   size_t src_index, size_t frames,                 \
+                                   int stride) {                                    \
+     double* audio_data = st->d->audio_data + st->d->audio_data_index;              \
+-    size_t i, c;                                                                   \
+                                                                                    \
+-    if ((st->mode & FF_EBUR128_MODE_SAMPLE_PEAK) == FF_EBUR128_MODE_SAMPLE_PEAK) { \
+-        for (c = 0; c < st->channels; ++c) {                                       \
+-            double max = 0.0;                                                      \
+-            for (i = 0; i < frames; ++i) {                                         \
+-                type v = srcs[c][src_index + i * stride];                          \
+-                if (v > max) {                                                     \
+-                    max =        v;                                                \
+-                } else if (-v > max) {                                             \
+-                    max = -1.0 * v;                                                \
+-                }                                                                  \
+-            }                                                                      \
+-            max /= scaling_factor;                                                 \
+-            if (max > st->d->sample_peak[c]) st->d->sample_peak[c] = max;          \
+-        }                                                                          \
+-    }                                                                              \
+-    for (c = 0; c < st->channels; ++c) {                                           \
+-        int ci = st->d->channel_map[c] - 1;                                        \
+-        if (ci < 0) continue;                                                      \
+-        else if (ci == FF_EBUR128_DUAL_MONO - 1) ci = 0; /*dual mono */            \
+-        for (i = 0; i < frames; ++i) {                                             \
+-            st->d->v[ci][0] = (double) (srcs[c][src_index + i * stride] / scaling_factor) \
+-                         - st->d->a[1] * st->d->v[ci][1]                           \
+-                         - st->d->a[2] * st->d->v[ci][2]                           \
+-                         - st->d->a[3] * st->d->v[ci][3]                           \
+-                         - st->d->a[4] * st->d->v[ci][4];                          \
+-            audio_data[i * st->channels + c] =                                     \
+-                           st->d->b[0] * st->d->v[ci][0]                           \
+-                         + st->d->b[1] * st->d->v[ci][1]                           \
+-                         + st->d->b[2] * st->d->v[ci][2]                           \
+-                         + st->d->b[3] * st->d->v[ci][3]                           \
+-                         + st->d->b[4] * st->d->v[ci][4];                          \
+-            st->d->v[ci][4] = st->d->v[ci][3];                                     \
+-            st->d->v[ci][3] = st->d->v[ci][2];                                     \
+-            st->d->v[ci][2] = st->d->v[ci][1];                                     \
+-            st->d->v[ci][1] = st->d->v[ci][0];                                     \
+-        }                                                                          \
+-        st->d->v[ci][4] = fabs(st->d->v[ci][4]) < DBL_MIN ? 0.0 : st->d->v[ci][4]; \
+-        st->d->v[ci][3] = fabs(st->d->v[ci][3]) < DBL_MIN ? 0.0 : st->d->v[ci][3]; \
+-        st->d->v[ci][2] = fabs(st->d->v[ci][2]) < DBL_MIN ? 0.0 : st->d->v[ci][2]; \
+-        st->d->v[ci][1] = fabs(st->d->v[ci][1]) < DBL_MIN ? 0.0 : st->d->v[ci][1]; \
+-    }                                                                              \
++    /* Only instantiated for double with a scaling factor of 1.0. */             \
++    if ((st->mode & FF_EBUR128_MODE_SAMPLE_PEAK) == FF_EBUR128_MODE_SAMPLE_PEAK)   \
++        ebur128_peak_channels(st, srcs, src_index, frames, stride);               \
++    ebur128_filter_channels(st, srcs, src_index, frames, stride, audio_data);      \
+ }
+ EBUR128_FILTER(double, 1.0)
+ 
+@@ -388,6 +550,45 @@
+     return index_min;
+ }
+ 
++static double ebur128_channel_weight(int channel)
++{
++    if (channel == FF_EBUR128_Mp110 ||
++        channel == FF_EBUR128_Mm110 ||
++        channel == FF_EBUR128_Mp060 ||
++        channel == FF_EBUR128_Mm060 ||
++        channel == FF_EBUR128_Mp090 ||
++        channel == FF_EBUR128_Mm090) {
++        return 1.41;
++    } else if (channel == FF_EBUR128_DUAL_MONO) {
++        return 2.0;
++    }
++    return 1.0;
++}
++
++/* Compute the energy of every 100ms slice that is completed by the frames
++ * between start_frame and end_frame of audio_data. Additions never wrap
++ * around the end of audio_data, which holds a whole number of slices. */
++static void ebur128_update_slice_energy(FFEBUR128State *st,
++                                        size_t start_frame, size_t end_frame)
++{
++    const size_t frames = st->d->samples_in_100ms;
++    size_t slice, i, c;
++
++    for (slice = start_frame / frames; (slice + 1) * frames <= end_frame; ++slice) {
++        const double *data = st->d->audio_data + slice * frames * st->channels;
++        double sum = 0.0;
++        for (c = 0; c < st->channels; ++c) {
++            double channel_sum = 0.0;
++            if (st->d->channel_map[c] == FF_EBUR128_UNUSED)
++                continue;
++            for (i = 0; i < frames; ++i)
++                channel_sum += data[i * st->channels + c] * data[i * st->channels + c];
++            sum += channel_sum * ebur128_channel_weight(st->d->channel_map[c]);
++        }
++        st->d->slice_energy[slice] = sum;
++    }
++}
++
+ static void ebur128_calc_gating_block(FFEBUR128State * st,
+                                       size_t frames_per_block,
+                                       double *optional_output)
+@@ -395,6 +596,21 @@
+     size_t i, c;
+     double sum = 0.0;
+     double channel_sum;
++    const size_t frames_in_slice = st->d->samples_in_100ms;
++    const size_t end_frame = st->d->audio_data_index / st->channels;
++
++    /* A block that ends on a slice boundary and spans whole slices is the sum
++     * of the slice energies, which avoids summing every sample of the block
++     * again. That is the case for every call except after a partial frame. */
++    if (end_frame % frames_in_slice == 0 && frames_per_block % frames_in_slice == 0 &&
++        frames_per_block / frames_in_slice <= st->d->nb_slices) {
++        const size_t nb = frames_per_block / frames_in_slice;
++        const size_t end_slice = end_frame / frames_in_slice;
++        for (i = 0; i < nb; ++i)
++            sum += st->d->slice_energy[(end_slice + 2 * st->d->nb_slices - 1 - i) % st->d->nb_slices];
++        goto done;
++    }
++
+     for (c = 0; c < st->channels; ++c) {
+         if (st->d->channel_map[c] == FF_EBUR128_UNUSED)
+             continue;
+@@ -422,18 +638,9 @@
+                                                              c];
+             }
+         }
+-        if (st->d->channel_map[c] == FF_EBUR128_Mp110 ||
+-            st->d->channel_map[c] == FF_EBUR128_Mm110 ||
+-            st->d->channel_map[c] == FF_EBUR128_Mp060 ||
+-            st->d->channel_map[c] == FF_EBUR128_Mm060 ||
+-            st->d->channel_map[c] == FF_EBUR128_Mp090 ||
+-            st->d->channel_map[c] == FF_EBUR128_Mm090) {
+-            channel_sum *= 1.41;
+-        } else if (st->d->channel_map[c] == FF_EBUR128_DUAL_MONO) {
+-            channel_sum *= 2.0;
+-        }
+-        sum += channel_sum;
++        sum += channel_sum * ebur128_channel_weight(st->d->channel_map[c]);
+     }
++done:
+     sum /= (double) frames_per_block;
+     if (optional_output) {
+         *optional_output = sum;
+@@ -467,6 +674,9 @@
+             src_index += st->d->needed_frames * stride;                                \
+             frames -= st->d->needed_frames;                                            \
+             st->d->audio_data_index += st->d->needed_frames * st->channels;            \
++            ebur128_update_slice_energy(st,                                            \
++                st->d->audio_data_index / st->channels - st->d->needed_frames,         \
++                st->d->audio_data_index / st->channels);                               \
+             /* calculate the new gating block */                                       \
+             if ((st->mode & FF_EBUR128_MODE_I) == FF_EBUR128_MODE_I) {                 \
+                 ebur128_calc_gating_block(st, st->d->samples_in_100ms * 4, NULL);      \
+@@ -492,6 +702,9 @@
+         } else {                                                                       \
+             ebur128_filter_##type(st, srcs, src_index, frames, stride);                \
+             st->d->audio_data_index += frames * st->channels;                          \
++            ebur128_update_slice_energy(st,                                            \
++                st->d->audio_data_index / st->channels - frames,                       \
++                st->d->audio_data_index / st->channels);                               \
+             if ((st->mode & FF_EBUR128_MODE_LRA) == FF_EBUR128_MODE_LRA) {             \
+                 st->d->short_term_frame_counter += frames;                             \
+             }                                                                          \

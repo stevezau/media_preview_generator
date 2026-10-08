@@ -37,6 +37,21 @@ PLEX_FIELDS = {
 }
 
 
+@pytest.mark.parametrize(
+    ("exists", "executable", "use_bundled"),
+    [(True, True, True), (True, False, False), (False, False, False)],
+)
+def test_resolve_ffmpeg_uses_only_an_executable_bundled_analyser(monkeypatch, exists, executable, use_bundled):
+    monkeypatch.setattr(analyze.os.path, "isfile", lambda path: exists and path == analyze._BUNDLED_FFMPEG)
+    monkeypatch.setattr(
+        analyze.os,
+        "access",
+        lambda path, mode: executable and path == analyze._BUNDLED_FFMPEG and mode == analyze.os.X_OK,
+    )
+    fallback = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+    assert analyze.resolve_ffmpeg(fallback) == (analyze._BUNDLED_FFMPEG if use_bundled else fallback)
+
+
 def test_command_is_plexs_own_on_the_cpu():
     assert analyze.command("ffmpeg", "/m/a.mkv", 3) == [
         "ffmpeg", "-hide_banner", "-nostats", "-progress", "pipe:1", "-i", "/m/a.mkv", "-map", "0:3",

@@ -36,6 +36,19 @@ MAX_TIMEOUT_S = 4 * 3600.0
 _POLL_S = 0.5
 KILL_WAIT_S = 5.0
 REAPER = "loudness-reaper"
+# Built with the CPU loudness patch; video previews keep the GPU-capable FFmpeg.
+_BUNDLED_FFMPEG = "/opt/ffmpeg-loudness/bin/ffmpeg"
+
+
+def resolve_ffmpeg(fallback: str) -> str:
+    """Use the bundled loudness analyser, or the configured FFmpeg outside the image.
+
+    The path is fixed by the image build, never supplied by job input. Explicit
+    callers of ``run`` (including the parity harness) retain their chosen binary.
+    """
+    if os.path.isfile(_BUNDLED_FFMPEG) and os.access(_BUNDLED_FFMPEG, os.X_OK):
+        return _BUNDLED_FFMPEG
+    return fallback
 
 
 class LoudnessError(Exception):

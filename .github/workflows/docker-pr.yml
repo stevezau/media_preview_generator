@@ -75,6 +75,26 @@ jobs:
           # branch get a read-only cache token ("refs/heads/dev: read"), so cache-to fails the whole build with
           # "failed to reserve cache" and nothing could ever be written for cache-from to read.
 
+      - name: The patched loudness analyser runs and carries its source
+        env:
+          CHECK_IMAGE: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:pr-${{ github.event.pull_request.number }}
+        run: |
+          docker run --rm -i --entrypoint python3 "$CHECK_IMAGE" - <<'PY'
+          from pathlib import Path
+          import subprocess
+          from media_preview_generator.loudness.analyze import resolve_ffmpeg
+
+          root = Path("/opt/ffmpeg-loudness")
+          binary = root / "bin/ffmpeg"
+          for name in ("ffmpeg-8.1.2.tar.xz", "ebur128.patch", "README.md", "configure-args.txt"):
+              assert (root / "share/source" / name).is_file(), name
+              assert (root / "share/source" / name).stat().st_size > 0, name
+          assert resolve_ffmpeg("/usr/lib/jellyfin-ffmpeg/ffmpeg") == str(binary)
+          subprocess.run([str(binary), "-version"], check=True, stdout=subprocess.DEVNULL)
+          filters = subprocess.run([str(binary), "-filters"], check=True, capture_output=True, text=True)
+          assert " loudnorm " in filters.stdout
+          PY
+
       - name: Post/update sticky PR comment
         uses: marocchino/sticky-pull-request-comment@v2
         with:
