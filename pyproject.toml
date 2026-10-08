@@ -40,7 +40,7 @@ dependencies = [
     "rich>=13.9,<14",
     "pymediainfo==7.0.1",
     "flask>=3.0.0,<4",
-    "werkzeug>=3.0.0,<3.1.7",  # 3.1.7 rejects underscores in Host header, breaks Docker hostnames (#196)
+    "werkzeug>=3.1.9,<3.2",  # 3.1.7 rejected underscores in Host (#196); 3.1.9 accepts them and patches the safe_join CVE
     "flask-wtf>=1.2.0,<2",
     "flask-socketio>=5.3.0,<6",
     "flask-cors>=6.0.0,<7",  # 6.0.0 patches CVE-2024-6866 (case-insensitive path match)
