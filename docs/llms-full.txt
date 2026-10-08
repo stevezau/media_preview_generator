@@ -993,7 +993,7 @@ It decodes each video with FFmpeg on the GPU and writes the BIF file into Plex's
 - **Windows (Docker Desktop, WSL2 backend):** NVIDIA only. AMD and Intel GPUs can't be reached from Docker's Linux VM, so those setups run on CPU.
 - **macOS:** no GPU acceleration under Docker. It runs on CPU, using the native ARM64 image on Apple Silicon.
 - **No GPU:** add a CPU worker group in **Settings → Workers**.
-- **Several GPUs:** add each GPU as a device in a worker group in **Settings → Workers**. A group has a name and hours, and each device in it has a worker count (1–32) and the jobs it may run. **Settings → Processing options → GPU device tuning** lists each detected GPU with its **FFmpeg threads per worker**.
+- **Several GPUs:** add each GPU as a device in a worker group in **Settings → Workers**. A group has a name and hours, and each device in it has a worker count (1–64) and the jobs it may run. **Settings → Processing options → GPU device tuning** lists each detected GPU with its **FFmpeg threads per worker**.
 
 Details and caveats are in [Getting Started — GPU Acceleration](https://mediapreviewgenerator.dev/getting-started/#gpu-acceleration).
 
@@ -1862,7 +1862,7 @@ Open **Settings → Workers** (or **Manage groups** in the Dashboard's Workers h
 
 - **Name**
 - **Devices** — up to 8, each CPU or one detected GPU, once per group. Each device has its own:
-  - **Workers** — 1 to 32. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
+  - **Workers** — 1 to 64. A worker is one simultaneous task, not a CPU core or a share of CPU usage.
   - **Jobs allowed** — **Video previews**, **Intro & Credits**, **Plex loudness**.
 - **Availability** — **Always available**, or **Weekly hours** with one or more time windows. It applies to every device in the group.
 
@@ -1883,7 +1883,7 @@ On the Dashboard, each device row in the **Workers** panel has a **−** / **+**
 - A group's card shows its state: **Available**, **Workers busy**, **Outside hours**, **Finishing current files** or **Globally paused**. No open workers means waiting for capacity, not a global pause: current files can still finish.
 - Counts from different open groups add, including groups that use the same device. Overlapping windows within one group
   do not multiply its workers. Finishing files still use the shared resource budget, so a newly opened group may
-  wait for them. The weekly peak is limited to 32 CPU and 32 GPU workers across groups; the editor shows the current and peak totals.
+  wait for them. The weekly peak is limited to 64 CPU and 64 GPU workers across groups; the editor shows the current and peak totals.
 
 There are three separate timing controls:
 
@@ -4513,7 +4513,7 @@ worker count and allowed jobs.
 | `id` | Unique within the group. Same character rules as the group `id`. |
 | `resource` | `cpu` or `gpu`. |
 | `device` | GPU device identifier for a GPU member. `null` for CPU. |
-| `count` | Integer 1–32. Remove the member to use zero. |
+| `count` | Integer 1–64. Remove the member to use zero. |
 | `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU members cannot take `loudness`. |
 
 On a group with exactly one member, `GET` also echoes that member's `resource`, `device`, `count` and `job_types` at the
@@ -4522,7 +4522,7 @@ fields and treats it as one member. When `members` is present, a group-level fie
 is rejected with `400`.
 
 Up to 64 groups. An empty list is valid and means no workers. Overlapping windows in one group form a union;
-different groups and devices add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU
+different groups and devices add their counts. A save is refused when the weekly peak would exceed 64 CPU or 64 GPU
 workers. These are worker slots, not CPU cores.
 
 ### Per-GPU tuning (gpu_config)
@@ -5677,7 +5677,7 @@ All endpoints use the normal session/API authentication and are also available d
 | GET | `/api/worker-groups` | Saved groups, optimistic `revision`, app `timezone`, `limits`, detected `hardware`, current `capacity`, `warnings` and global pause state |
 | PUT | `/api/worker-groups` | Replace the complete group list with `{"groups":[...],"revision":N}`. `400` rejects invalid configuration; `409` means another change advanced the revision. Reload and reconcile before resubmitting. |
 | POST | `/api/worker-groups/{id}/scale` | Atomic saved adjustment: exactly `{"delta":1}`, `{"delta":-1}` or `{"enabled":true/false}`. `delta` works on single-member groups; on a group with several members it returns `409` (use the member route). `404` for an unknown group, `400` for an invalid action or capacity limit. |
-| POST | `/api/worker-groups/{id}/members/{member_id}/scale` | Add or remove one worker on one device: exactly `{"delta":1}` or `{"delta":-1}`. `404` for an unknown group or member, `409` when the group is disabled, `400` outside 1–32 workers or past a capacity limit. |
+| POST | `/api/worker-groups/{id}/members/{member_id}/scale` | Add or remove one worker on one device: exactly `{"delta":1}` or `{"delta":-1}`. `404` for an unknown group or member, `409` when the group is disabled, `400` outside 1–64 workers or past a capacity limit. |
 
 For example, after loading revision 3, replace the configuration with one group that runs previews on a GPU and loudness on the CPU overnight:
 

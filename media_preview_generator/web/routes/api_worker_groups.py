@@ -273,7 +273,7 @@ def _scale_saved_member(group_id: str, member_id: str, delta: int) -> None:
     """Change one member's count by ``delta`` under the same lock and validation as a full edit.
 
     Raises:
-        ScaleRefused: Unknown group or member (404), disabled group (409) or a count outside 1-32 (400).
+        ScaleRefused: Unknown group or member (404), disabled group (409) or a count outside 1-64 (400).
         ValueError: The aggregate policy was refused (for example the weekly peak).
     """
     settings = get_settings_manager()

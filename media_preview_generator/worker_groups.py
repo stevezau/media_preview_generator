@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .job_kinds import JOB_KIND_LOUDNESS, JOB_KINDS
 
-MAX_CPU_WORKERS = 32
-MAX_GPU_WORKERS = 32
+MAX_CPU_WORKERS = 64
+MAX_GPU_WORKERS = 64
 MAX_GROUPS = 64
 MAX_MEMBERS = 8
 LEGACY_MEMBER_ID = "m1"

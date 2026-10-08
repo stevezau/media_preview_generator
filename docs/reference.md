@@ -161,7 +161,7 @@ worker count and allowed jobs.
 | `id` | Unique within the group. Same character rules as the group `id`. |
 | `resource` | `cpu` or `gpu`. |
 | `device` | GPU device identifier for a GPU member. `null` for CPU. |
-| `count` | Integer 1–32. Remove the member to use zero. |
+| `count` | Integer 1–64. Remove the member to use zero. |
 | `job_types` | At least one of `previews`, `intro_credits`, `loudness`. GPU members cannot take `loudness`. |
 
 On a group with exactly one member, `GET` also echoes that member's `resource`, `device`, `count` and `job_types` at the
@@ -170,7 +170,7 @@ fields and treats it as one member. When `members` is present, a group-level fie
 is rejected with `400`.
 
 Up to 64 groups. An empty list is valid and means no workers. Overlapping windows in one group form a union;
-different groups and devices add their counts. A save is refused when the weekly peak would exceed 32 CPU or 32 GPU
+different groups and devices add their counts. A save is refused when the weekly peak would exceed 64 CPU or 64 GPU
 workers. These are worker slots, not CPU cores.
 
 ### Per-GPU tuning (gpu_config)
@@ -1325,7 +1325,7 @@ All endpoints use the normal session/API authentication and are also available d
 | GET | `/api/worker-groups` | Saved groups, optimistic `revision`, app `timezone`, `limits`, detected `hardware`, current `capacity`, `warnings` and global pause state |
 | PUT | `/api/worker-groups` | Replace the complete group list with `{"groups":[...],"revision":N}`. `400` rejects invalid configuration; `409` means another change advanced the revision. Reload and reconcile before resubmitting. |
 | POST | `/api/worker-groups/{id}/scale` | Atomic saved adjustment: exactly `{"delta":1}`, `{"delta":-1}` or `{"enabled":true/false}`. `delta` works on single-member groups; on a group with several members it returns `409` (use the member route). `404` for an unknown group, `400` for an invalid action or capacity limit. |
-| POST | `/api/worker-groups/{id}/members/{member_id}/scale` | Add or remove one worker on one device: exactly `{"delta":1}` or `{"delta":-1}`. `404` for an unknown group or member, `409` when the group is disabled, `400` outside 1–32 workers or past a capacity limit. |
+| POST | `/api/worker-groups/{id}/members/{member_id}/scale` | Add or remove one worker on one device: exactly `{"delta":1}` or `{"delta":-1}`. `404` for an unknown group or member, `409` when the group is disabled, `400` outside 1–64 workers or past a capacity limit. |
 
 For example, after loading revision 3, replace the configuration with one group that runs previews on a GPU and loudness on the CPU overnight:
 

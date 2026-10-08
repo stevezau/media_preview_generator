@@ -99,11 +99,11 @@ class TestPerGpuPanel:
         wizard_page.locator('[data-edit="cpu"]').click()
         wizard_page.locator("#workerGroupMembers [data-member] [data-count]").fill("0")
         expect(wizard_page.locator("#workerGroupMembers [data-member] [data-msgs]")).to_contain_text(
-            "enter 1–32 workers. Remove the device to use zero."
+            "enter 1–64 workers. Remove the device to use zero."
         )
         wizard_page.locator("#workerGroupEditorApply").click()
-        expect(wizard_page.locator("#workerGroupEditorError")).to_contain_text("enter 1–32 workers")
-        expect(wizard_page.locator("#workerGroupMessage")).to_contain_text("enter 1–32 workers")
+        expect(wizard_page.locator("#workerGroupEditorError")).to_contain_text("enter 1–64 workers")
+        expect(wizard_page.locator("#workerGroupMessage")).to_contain_text("enter 1–64 workers")
 
     def test_disabling_gpu_group_keeps_tuning_editable(self, wizard_page: Page, app_url_wizard: str) -> None:
         mock_plex_libraries(wizard_page)

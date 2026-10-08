@@ -26,8 +26,8 @@ only)**. Existing installs migrate 1:1 with no reset. Every current function sta
 |---|---|---|
 | D1 | A group = `id`, `name`, `enabled`, `availability`, `members[]`. A member = `id`, `resource`, `device`, `count`, `job_types`. | Owner's model. Hours and on/off belong to the group; capability belongs to the device. |
 | D2 | One member per device per group (one CPU member, one member per GPU). | Keeps the editor and the dashboard one-row-per-device; a second split of the same GPU is a second group. |
-| D3 | No per-member enable switch. Member count is 1–32; remove the member to use zero; disable the group to stop all of it. | Same rule as today's group stepper ("never below 1"), no new state. |
-| D4 | 1–8 members per group; up to 64 groups (unchanged). Weekly peak limits stay 32 CPU / 32 GPU across all members of all groups. | Devices per box are few; limits unchanged. |
+| D3 | No per-member enable switch. Member count is 1–64; remove the member to use zero; disable the group to stop all of it. | Same rule as today's group stepper ("never below 1"), no new state. |
+| D4 | 1–8 members per group; up to 64 groups (unchanged). Weekly peak limits are 64 CPU / 64 GPU across all members of all groups (raised from 32). | Devices per box are few; a CPU worker is one ffmpeg process, so the cap is a sanity limit. |
 | D5 | Migration v22: each v21 group → same `id`, `name`, `enabled`, `availability` + one member `{"id": "m1", resource, device, count, job_types}`. Revision +1. | 1:1, deterministic ids so worker ownership never churns; revision bump forces stale browser tabs to reload instead of overwriting. |
 | D6 | The runtime keeps working on a flat list. `worker_groups.member_policies(groups)` flattens every member into a dict that looks exactly like a v21 group plus `group_id` and `member_id`. | Pool, capacity, peak and gate code keep their proven logic; only the edges (schema, API, UI) learn nesting. |
 | D7 | `PUT /api/worker-groups` still accepts the flat v21 group shape (converted to one member `m1`). `GET` echoes `resource`/`device`/`count`/`job_types` on single-member groups (deprecated, read-only). `POST /worker-groups/<id>/scale {"delta"}` still works on single-member groups. New: `POST /worker-groups/<group>/members/<member>/scale`. | API-token clients and stale tabs keep working through the upgrade. |
@@ -167,7 +167,7 @@ Accepts both shapes per group: a dict with `members` is the v22 shape; a dict wi
 | `resource` cpu/gpu | `{name}: choose CPU or GPU for each device` |
 | GPU needs `device` (1–256 chars); CPU has `device` null/"" | `{name}: choose a GPU device` / `{name}: a CPU member cannot select a GPU device` |
 | one member per device (CPU counts as one device) | `{name}: {dev} appears twice; use one row per device` |
-| `count` int 1–32 | `{name} ({dev}): worker count must be between 1 and 32; remove the device to use zero` |
+| `count` int 1–64 | `{name} ({dev}): worker count must be between 1 and 64; remove the device to use zero` |
 | `job_types` non-empty subset of `JOB_KINDS` | `{name} ({dev}): select at least one supported job type` |
 | no `loudness` on GPU | `{name} ({dev}): Plex loudness requires CPU workers` |
 | availability / windows | unchanged |
@@ -263,7 +263,7 @@ def _migrate_to_v22(sm) -> list[str]:
   }],
   "revision": 8,
   "timezone": "Australia/Sydney", "timezone_label": "Australia/Sydney",
-  "limits": {"cpu": 32, "gpu": 32, "members": 8},
+  "limits": {"cpu": 64, "gpu": 64, "members": 8},
   "hardware": [{"device": "cuda:0", "name": "NVIDIA GeForce RTX 4090", "type": "nvidia", "status": "ok"}],
   "capacity": {
     "groups": [{
@@ -301,7 +301,7 @@ Unchanged contract: `{"groups": [...], "revision": N}`; `400` invalid, `409` sta
 
 Body exactly `{"delta": 1}` or `{"delta": -1}`. Under `settings.locked()`: load groups, find group (`404 "Worker group
 no longer exists"`), find member (`404 "That device is no longer in this group"`), group disabled →
-`409 "Enable the group first"`, `count + delta` outside 1–32 → `400 "A device needs 1–32 workers. Remove it in
+`409 "Enable the group first"`, `count + delta` outside 1–64 → `400 "A device needs 1–64 workers. Remove it in
 Settings to use zero."`, then `settings.update_worker_groups(groups)` (revision +1; peak validation may `400`).
 Outside the lock: `reconcile_group_settings(settings)`; respond with `worker_group_payload(settings)` plus
 `success: true` and any `warning`. This is `scale_saved_group` (`api_worker_groups.py:206-223`) applied to a
@@ -413,7 +413,7 @@ Each device row:
 
 * Device picker: `CPU` plus each detected GPU. Devices already used by another row of this group are disabled with
   "(already in this group)". A saved GPU that is not detected shows "… — not detected".
-* **Workers** stepper `−  n  +` (1–32; `−` disabled at 1 with tooltip "Remove the device to use zero"; `+` disabled
+* **Workers** stepper `−  n  +` (1–64; `−` disabled at 1 with tooltip "Remove the device to use zero"; `+` disabled
   at 32). Typing a number is allowed.
 * Job chips: Video previews, Intro & Credits, Plex loudness. On a GPU the loudness chip is disabled with an (i)
   tooltip "Plex loudness runs on CPU workers only". Switching a row from CPU to GPU removes loudness and shows the
@@ -433,7 +433,7 @@ member, loudness only. **Duplicate group** copies members.
 |---|---|
 | Empty name | "Every group needs a name." |
 | No devices | "Add at least one device." |
-| Count outside 1–32 | "{device}: enter 1–32 workers. Remove the device to use zero." |
+| Count outside 1–64 | "{device}: enter 1–64 workers. Remove the device to use zero." |
 | No job type on a row | "{device}: choose at least one job type." |
 | Same device twice | "{device} is already in this group." |
 | Loudness on GPU | Prevented by the disabled chip; if it arrives from an import: "{device}: loudness runs on CPU only." |

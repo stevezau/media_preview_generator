@@ -1749,7 +1749,7 @@ class TestLoadConfig:
             plex_bif_frame_interval=None,
             thumbnail_quality=None,
             regenerate_thumbnails=False,
-            gpu_threads=50,  # Invalid: > 32
+            gpu_threads=70,  # Invalid: > 64
             cpu_threads=None,
             gpu_config=None,
             tmp_folder="/tmp/media_preview_generator",
@@ -2339,3 +2339,25 @@ class TestThumbnailIntervalAlias:
         cfg.thumbnail_interval = "12"  # type: ignore[assignment]
         assert cfg.plex_bif_frame_interval == 12
         assert isinstance(cfg.plex_bif_frame_interval, int)
+
+
+class TestWorkerGroupPeakWithinLoadConfigLimits:
+    """Worker-group peaks become cpu/gpu_threads, so load_config must accept every peak the groups allow."""
+
+    @pytest.mark.parametrize(("cpu", "gpu"), [(64, 0), (0, 64), (64, 64)])
+    def test_accepts_the_group_maximum(self, cpu, gpu):
+        from media_preview_generator.config.validation import _validate_thread_config
+
+        errors: list[str] = []
+        _validate_thread_config(gpu, cpu, 2, errors)
+
+        assert errors == []
+
+    @pytest.mark.parametrize(("cpu", "gpu", "fragment"), [(65, 0, "cpu_threads"), (0, 65, "gpu_threads")])
+    def test_rejects_above_the_group_maximum(self, cpu, gpu, fragment):
+        from media_preview_generator.config.validation import _validate_thread_config
+
+        errors: list[str] = []
+        _validate_thread_config(gpu, cpu, 2, errors)
+
+        assert any(fragment in e and "0-64" in e for e in errors)

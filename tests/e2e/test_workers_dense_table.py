@@ -73,7 +73,7 @@ def _open(page: Page, app_url: str, groups: list[dict], workers: list[dict], wid
         "groups": groups,
         "revision": 1,
         "timezone": "UTC",
-        "limits": {"cpu": 32, "gpu": 32, "members": 8},
+        "limits": {"cpu": 64, "gpu": 64, "members": 8},
         "hardware": [{"device": "/dev/dri/renderD128", "name": LONG_DEVICE, "type": "intel", "status": "ok"}],
         "capacity": {
             "groups": [

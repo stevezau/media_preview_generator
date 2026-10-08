@@ -633,16 +633,16 @@ def _loader_thread_errors(app) -> list[str]:
 
 
 class TestCpuWorkerCountLimit:
-    """The saved CPU count stays within what ``load_config`` accepts (0-32), on every path that saves it."""
+    """The saved CPU count stays within what ``load_config`` accepts (0-64), on every path that saves it."""
 
-    @pytest.mark.parametrize("value", [33, -1], ids=["above-max", "negative"])
+    @pytest.mark.parametrize("value", [65, -1], ids=["above-max", "negative"])
     def test_settings_save_rejects_out_of_range_cpu_threads(self, app, value):
         pool = _live_pool(app, cpu=2)
 
         resp = _save(app, {"cpu_threads": value})
 
         assert resp.status_code == 400
-        assert resp.get_json()["error"] == f"cpu_threads must be between 0 and 32 (got {value})"
+        assert resp.get_json()["error"] == f"cpu_threads must be between 0 and 64 (got {value})"
         assert _saved_cpu_threads(app) == 2
         assert len(_cpu_workers(pool)) == 2
         assert _loader_thread_errors(app) == []
@@ -650,50 +650,50 @@ class TestCpuWorkerCountLimit:
     def test_settings_save_accepts_the_maximum(self, app):
         pool = _live_pool(app, cpu=2)
 
-        resp = _save(app, {"cpu_threads": 32})
+        resp = _save(app, {"cpu_threads": 64})
 
         assert resp.status_code == 200
-        assert _saved_cpu_threads(app) == 32
-        assert len(_cpu_workers(pool)) == 32
+        assert _saved_cpu_threads(app) == 64
+        assert len(_cpu_workers(pool)) == 64
         assert _loader_thread_errors(app) == []
 
     def test_workers_api_add_past_the_maximum_is_rejected(self, app):
-        pool = _live_pool(app, cpu=31)
+        pool = _live_pool(app, cpu=63)
 
         resp = _scale(app, "add", "CPU", 2)
 
         assert resp.status_code == 400
-        assert "32" in resp.get_json()["error"]
-        assert _saved_cpu_threads(app) == 31
-        assert len(_cpu_workers(pool)) == 31
+        assert "64" in resp.get_json()["error"]
+        assert _saved_cpu_threads(app) == 63
+        assert len(_cpu_workers(pool)) == 63
         assert _loader_thread_errors(app) == []
 
     def test_workers_api_add_up_to_the_maximum_is_accepted(self, app):
-        pool = _live_pool(app, cpu=31)
+        pool = _live_pool(app, cpu=63)
 
         resp = _scale(app, "add", "CPU", 1)
 
         assert resp.status_code == 200
-        assert _saved_cpu_threads(app) == 32
-        assert len(_cpu_workers(pool)) == 32
+        assert _saved_cpu_threads(app) == 64
+        assert len(_cpu_workers(pool)) == 64
         assert _loader_thread_errors(app) == []
 
     def test_workers_api_remove_from_above_the_maximum_lands_on_the_maximum(self, app):
         # A count saved before the cap existed: a decrease goes straight to the maximum, as the stepper does.
         # Exercise the supported pre-migration embedded path; saved groups are
-        # validated and cannot contain a 40-worker allocation.
+        # validated and cannot contain an 80-worker allocation.
         with app.app_context():
-            get_settings_manager().update({"worker_groups": None, "cpu_threads": 40})
-        pool = WorkerPool(gpu_workers=0, cpu_workers=40, selected_gpus=[])
+            get_settings_manager().update({"worker_groups": None, "cpu_threads": 80})
+        pool = WorkerPool(gpu_workers=0, cpu_workers=80, selected_gpus=[])
         get_dispatcher(pool)
 
         resp = _scale(app, "remove", "CPU", 1)
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (8, 0, 0)
-        assert _saved_cpu_threads(app) == 32
-        assert len(_cpu_workers(pool)) == 32
+        assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (16, 0, 0)
+        assert _saved_cpu_threads(app) == 64
+        assert len(_cpu_workers(pool)) == 64
         assert _loader_thread_errors(app) == []
 
     def test_system_config_reports_the_maximum_for_the_dashboard_stepper(self, app):
@@ -719,7 +719,7 @@ class TestCpuWorkerCountLimit:
         with patch("media_preview_generator.config.get_cached_config", return_value=loaded):
             with_config = app.test_client().get("/api/system/config", headers={"X-Auth-Token": TOKEN}).get_json()
 
-        assert without_config["cpu_threads_max"] == MAX_CPU_THREADS == 32
+        assert without_config["cpu_threads_max"] == MAX_CPU_THREADS == 64
         assert with_config["cpu_threads_max"] == MAX_CPU_THREADS
 
 

@@ -555,7 +555,7 @@
         postScale(`/${encodeURIComponent(groupId)}/members/${encodeURIComponent(memberId)}/scale`, { delta });
 
     function memberStepper(group, member, current) {
-        const limit = snapshot.limits?.[member.resource] || 32;
+        const limit = snapshot.limits?.[member.resource] || 64;
         const name = deviceName(member);
         return `<span class="stepper sm" role="group" aria-label="Workers on ${escape(name)}">
             <button type="button" data-member-scale="-1" ${saving || current <= 1 ? 'disabled' : ''} aria-label="Remove one worker from ${escape(name)}" title="${current <= 1 ? 'Remove the device in Settings to use zero.' : 'Remove one worker'}"><i class="bi bi-dash" aria-hidden="true"></i></button>
@@ -719,7 +719,7 @@
             <div id="workerGroupEditor" class="worker-group-editor" hidden></div>
             <div class="apply-bar" id="workerGroupApplyRow" hidden><button type="button" class="btn btn-primary btn-sm" id="workerGroupApply">Apply group changes</button><button type="button" class="btn btn-outline-secondary btn-sm" id="workerGroupCancel">Discard changes</button><span class="apply-note"><span class="dot"></span> Unsaved group changes</span></div>
             <div id="workerGroupMessage" role="status" aria-live="polite"></div>
-            <div class="hint-line"><i class="bi bi-info-circle" aria-hidden="true"></i><span>Current files finish when a group closes or is reduced.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How group changes apply" data-explain-title="How group changes apply" data-explain-html="Current files finish when a group closes or is reduced. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies. Devices shared by several groups add their worker counts. The weekly peak is limited to 32 CPU and 32 GPU workers." aria-label="About this note"><i class="bi bi-info-circle"></i></button></span></div>`;
+            <div class="hint-line"><i class="bi bi-info-circle" aria-hidden="true"></i><span>Current files finish when a group closes or is reduced.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How group changes apply" data-explain-title="How group changes apply" data-explain-html="Current files finish when a group closes or is reduced. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies. Devices shared by several groups add their worker counts. The weekly peak is limited to 64 CPU and 64 GPU workers." aria-label="About this note"><i class="bi bi-info-circle"></i></button></span></div>`;
             window._initBootstrapTooltips?.(mount);
         }
         const capacity = snapshot.capacity || {};
@@ -784,7 +784,7 @@
 
     const infoIcon = (label, tip) => `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${escape(tip)}" aria-label="About ${escape(label)}"><i class="bi bi-info-circle"></i></button>`;
     const deviceKeyOf = member => (member.resource === 'cpu' ? 'cpu' : member.device);
-    const memberLimit = member => snapshot.limits?.[member.resource] || 32;
+    const memberLimit = member => snapshot.limits?.[member.resource] || 64;
     const maxMembers = () => snapshot.limits?.members || 8;
 
     // The first unused GPU, else CPU; null when every detected device is already in the group.

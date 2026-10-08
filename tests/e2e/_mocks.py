@@ -889,7 +889,7 @@ def mock_worker_groups(page: Page, *, cpu_count: int = 1) -> dict:
         ],
         "revision": 1,
         "timezone": "Australia/Sydney",
-        "limits": {"cpu": 32, "gpu": 32, "members": 8},
+        "limits": {"cpu": 64, "gpu": 64, "members": 8},
         "hardware": [{"device": "/dev/nvidia0", "name": "GPU 0", "type": "nvidia", "status": "ok"}],
         "capacity": {"groups": []},
         "warnings": [],

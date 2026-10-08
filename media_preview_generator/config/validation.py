@@ -33,7 +33,8 @@ class ConfigValidationError(Exception):
 VALID_TONEMAP_ALGORITHMS = ("reinhard", "mobius", "hable", "clip", "gamma", "linear")
 
 # Highest CPU worker count load_config accepts; the web routes that save cpu_threads enforce the same limit.
-MAX_CPU_THREADS = 32
+MAX_CPU_THREADS = 64
+MAX_GPU_THREADS = 64
 
 
 def _validate_plex_config(
@@ -269,8 +270,8 @@ def _validate_thread_config(
         totals are 0 (caller decides how to handle), ``False`` otherwise.
 
     """
-    if gpu_threads < 0 or gpu_threads > 32:
-        validation_errors.append(f"gpu_threads must be between 0-32 (got: {gpu_threads})")
+    if gpu_threads < 0 or gpu_threads > MAX_GPU_THREADS:
+        validation_errors.append(f"gpu_threads must be between 0-{MAX_GPU_THREADS} (got: {gpu_threads})")
 
     if cpu_threads < 0 or cpu_threads > MAX_CPU_THREADS:
         validation_errors.append(f"cpu_threads must be between 0-{MAX_CPU_THREADS} (got: {cpu_threads})")

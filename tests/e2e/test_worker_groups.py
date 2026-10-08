@@ -54,7 +54,7 @@ def group_api(authed_page: Page) -> dict:
         ],
         "revision": 7,
         "timezone": "Australia/Sydney",
-        "limits": {"cpu": 32, "gpu": 32},
+        "limits": {"cpu": 64, "gpu": 64},
         "hardware": [{"device": "nvidia0", "name": "NVIDIA card", "type": "nvidia", "status": "ok"}],
         "capacity": {
             "groups": [
@@ -167,9 +167,9 @@ def test_invalid_inputs_and_gpu_capability_never_write(authed_page: Page, app_ur
     page.locator('[data-edit="cpu-night"]').click()
     page.locator('[data-member="m-cpu"] [data-count]').fill("0")
     page.locator("#workerGroupApply").click()
-    expect(page.locator("#workerGroupMessage")).to_have_text("CPU: enter 1–32 workers. Remove the device to use zero.")
+    expect(page.locator("#workerGroupMessage")).to_have_text("CPU: enter 1–64 workers. Remove the device to use zero.")
     expect(page.locator("#workerGroupEditorError")).to_have_text(
-        "CPU: enter 1–32 workers. Remove the device to use zero."
+        "CPU: enter 1–64 workers. Remove the device to use zero."
     )
     page.locator('[data-member="m-cpu"] [data-count]').fill("2")
     page.locator("#wgEnd0").fill("23:00")

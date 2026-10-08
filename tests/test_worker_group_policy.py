@@ -60,9 +60,9 @@ def test_sunday_window_wraps_into_monday():
 
 
 def test_same_group_windows_union_but_different_groups_add():
-    group = cpu_group(count=20, availability=window([0], "08:00", "12:00"))
+    group = cpu_group(count=40, availability=window([0], "08:00", "12:00"))
     group["availability"]["windows"].append({"days": [0], "start": "10:00", "end": "14:00"})
-    assert configured_group_totals(validate_worker_groups([group])) == (0, 20)
+    assert configured_group_totals(validate_worker_groups([group])) == (0, 40)
     other = {**group, "id": "cpu-b"}
     with pytest.raises(ValueError, match="Overlapping"):
         validate_worker_groups([group, other])
@@ -70,17 +70,17 @@ def test_same_group_windows_union_but_different_groups_add():
 
 def test_nonoverlapping_groups_share_capacity_limit():
     groups = [
-        cpu_group(count=32, availability=window([0], "08:00", "12:00")),
-        cpu_group(id="cpu-b", count=32, availability=window([0], "12:00", "16:00")),
+        cpu_group(count=64, availability=window([0], "08:00", "12:00")),
+        cpu_group(id="cpu-b", count=64, availability=window([0], "12:00", "16:00")),
     ]
-    assert configured_group_totals(validate_worker_groups(groups)) == (0, 32)
+    assert configured_group_totals(validate_worker_groups(groups)) == (0, 64)
 
 
 def test_gpu_family_limit_applies_across_devices():
     groups = [
-        cpu_group(id=f"gpu-{n}", resource="gpu", device=f"gpu:{n}", count=20, job_types=["previews"]) for n in range(2)
+        cpu_group(id=f"gpu-{n}", resource="gpu", device=f"gpu:{n}", count=40, job_types=["previews"]) for n in range(2)
     ]
-    with pytest.raises(ValueError, match="GPU 40/32"):
+    with pytest.raises(ValueError, match="GPU 80/64"):
         validate_worker_groups(groups)
 
 
@@ -103,7 +103,7 @@ def test_policy_allows_only_selected_job_kinds():
     [
         {"count": True},
         {"count": 0},
-        {"count": 33},
+        {"count": 65},
         {"job_types": []},
         {"job_types": ["chapters"]},
         {"enabled": "false"},
@@ -351,9 +351,9 @@ def test_gpu_device_with_surrounding_whitespace_is_refused():
             [member("a", "gpu", "cuda:0", 1, ["previews"]), member("b", "gpu", "cuda:0", 1, ["intro_credits"])],
             "Off-hours: cuda:0 appears twice; use one row per device",
         ),
-        ([member(count=0)], "Off-hours (CPU): worker count must be between 1 and 32; remove the device to use zero"),
-        ([member(count=33)], "Off-hours (CPU): worker count must be between 1 and 32; remove the device to use zero"),
-        ([member(count=True)], "worker count must be between 1 and 32"),
+        ([member(count=0)], "Off-hours (CPU): worker count must be between 1 and 64; remove the device to use zero"),
+        ([member(count=65)], "Off-hours (CPU): worker count must be between 1 and 64; remove the device to use zero"),
+        ([member(count=True)], "worker count must be between 1 and 64"),
         ([member(job_types=[])], "Off-hours (CPU): select at least one supported job type"),
         ([member(job_types=["chapters"])], "select at least one supported job type"),
         (
@@ -376,7 +376,7 @@ def test_group_without_members_or_resource_is_refused():
         validate_worker_groups([raw])
 
 
-@pytest.mark.parametrize("count", [1, 32])
+@pytest.mark.parametrize("count", [1, 64])
 def test_member_count_edges_are_accepted(count):
     assert validate_worker_groups([new_group(members=[member(count=count)])])[0]["members"][0]["count"] == count
 
@@ -397,24 +397,24 @@ def test_group_limits_still_apply():
 
 
 def test_peak_overflow_is_summed_across_members_of_one_group():
-    members = [member("a", "cpu", None, 20), member("b", "gpu", "cuda:0", 20, ["previews"])]
-    assert configured_group_totals(validate_worker_groups([new_group(members=members)])) == (20, 20)
-    with pytest.raises(ValueError, match=r"peak CPU 40/32, GPU 0/32"):
-        validate_worker_groups([new_group("g1", [member(count=20)]), new_group("g2", [member(count=20)])])
+    members = [member("a", "cpu", None, 40), member("b", "gpu", "cuda:0", 40, ["previews"])]
+    assert configured_group_totals(validate_worker_groups([new_group(members=members)])) == (40, 40)
+    with pytest.raises(ValueError, match=r"peak CPU 80/64, GPU 0/64"):
+        validate_worker_groups([new_group("g1", [member(count=40)]), new_group("g2", [member(count=40)])])
 
 
 def test_gpu_peak_overflow_across_members_of_different_groups():
     groups = [
-        new_group("g1", [member("a", "gpu", "cuda:0", 20, ["previews"])]),
-        new_group("g2", [member("a", "gpu", "cuda:1", 20, ["previews"])]),
+        new_group("g1", [member("a", "gpu", "cuda:0", 40, ["previews"])]),
+        new_group("g2", [member("a", "gpu", "cuda:1", 40, ["previews"])]),
     ]
-    with pytest.raises(ValueError, match=r"GPU 40/32"):
+    with pytest.raises(ValueError, match=r"GPU 80/64"):
         validate_worker_groups(groups)
 
 
-def test_exactly_32_across_members_is_accepted():
-    groups = [new_group("g1", [member(count=16)]), new_group("g2", [member(count=16)])]
-    assert configured_group_totals(validate_worker_groups(groups)) == (0, 32)
+def test_exactly_64_across_members_is_accepted():
+    groups = [new_group("g1", [member(count=32)]), new_group("g2", [member(count=32)])]
+    assert configured_group_totals(validate_worker_groups(groups)) == (0, 64)
 
 
 def test_member_policies_copy_group_and_member_fields_under_a_composite_id():

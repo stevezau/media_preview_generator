@@ -653,8 +653,9 @@ class JobDispatcher:
 
         ``scan_workers`` 0 = Auto → ``max(32, processing workers)``, mirroring
         the orchestrator's resolution so the default lands at the same value
-        regardless of which path created the dispatcher. An explicit value is
-        floored at 1.
+        regardless of which path created the dispatcher. The worker count is
+        read once, when checking starts, so later scaling does not resize it
+        until restart. An explicit value is floored at 1.
         """
         try:
             cfg = max(0, int(getattr(config, "scan_workers", 0) or 0))

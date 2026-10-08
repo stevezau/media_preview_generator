@@ -50,12 +50,12 @@ def test_last_group_disable_keeps_manual_and_quiet_holds_independent(client):
 
 
 def test_quick_scale_uses_aggregate_validation_and_preserves_revision_on_failure(client):
-    state = save(client, [cpu_group(count=16), cpu_group(id="cpu-b", count=16)])
+    state = save(client, [cpu_group(count=32), cpu_group(id="cpu-b", count=32)])
     response = client.post("/api/worker-groups/cpu-a/scale", json={"delta": 1})
     assert response.status_code == 400
     current = client.get("/api/worker-groups").get_json()
     assert current["revision"] == state["revision"]
-    assert current["capacity"]["peak"]["cpu"] == 32
+    assert current["capacity"]["peak"]["cpu"] == 64
 
 
 def test_gpu_cannot_accept_loudness_and_bad_policy_is_not_saved(client):
@@ -75,7 +75,7 @@ def test_legacy_count_updates_one_group_but_refuses_ambiguous_resource(client):
     assert response.status_code == 200
     assert get_settings_manager().worker_groups[0]["members"][0]["count"] == 4
     assert client.post("/api/settings", json={"cpu_threads": -1}).status_code == 400
-    assert client.post("/api/settings", json={"cpu_threads": 33}).status_code == 400
+    assert client.post("/api/settings", json={"cpu_threads": 65}).status_code == 400
     save(client, [cpu_group(), cpu_group(id="cpu-b")])
     assert client.post("/api/settings", json={"cpu_threads": 1}).status_code == 400
     assert client.post("/api/workers/add", json={"worker_type": "CPU", "count": 1}).status_code == 409
@@ -230,7 +230,7 @@ class TestGetShape:
     def test_group_lists_members_and_limits(self, client, hardware):
         save(client, [group()])
         payload = stored(client)
-        assert payload["limits"] == {"cpu": 32, "gpu": 32, "members": 8}
+        assert payload["limits"] == {"cpu": 64, "gpu": 64, "members": 8}
         assert [m["id"] for m in payload["groups"][0]["members"]] == ["g1", "c1"]
         assert payload["groups"][0]["members"][0] == gpu_member()
 
@@ -382,8 +382,8 @@ class TestPut:
                 "Off-hours: CPU appears twice; use one row per device",
             ),
             (
-                group(members=[member(count=33)]),
-                "Off-hours (CPU): worker count must be between 1 and 32; remove the device to use zero",
+                group(members=[member(count=65)]),
+                "Off-hours (CPU): worker count must be between 1 and 64; remove the device to use zero",
             ),
         ],
     )
@@ -393,13 +393,13 @@ class TestPut:
         assert response.status_code == 400
         assert response.get_json()["error"] == message
 
-    def test_peak_across_two_groups_members_is_refused_at_33_and_accepted_at_32(self, client):
+    def test_peak_across_two_groups_members_is_refused_at_65_and_accepted_at_64(self, client):
         state = stored(client)
-        over = [group(id="a", members=[member(count=17)]), group(id="b", members=[member(count=16)])]
+        over = [group(id="a", members=[member(count=33)]), group(id="b", members=[member(count=32)])]
         refused = client.put("/api/worker-groups", json={"groups": over, "revision": state["revision"]})
         assert refused.status_code == 400
-        assert "peak CPU 33/32" in refused.get_json()["error"]
-        over[0]["members"][0]["count"] = 16
+        assert "peak CPU 65/64" in refused.get_json()["error"]
+        over[0]["members"][0]["count"] = 32
         assert client.put("/api/worker-groups", json={"groups": over, "revision": state["revision"]}).status_code == 200
 
     def test_put_reconciles_once(self, client, reconcile):
@@ -429,13 +429,13 @@ class TestMemberScale:
         saved = get_settings_manager().worker_groups[0]["members"]
         assert [(m["id"], m["count"]) for m in saved] == [("g1", 2), ("c1", 10)]
 
-    @pytest.mark.parametrize(("count", "delta"), [(1, -1), (32, 1)])
-    def test_count_outside_1_to_32_is_400_and_unsaved(self, client, reconcile, count, delta):
+    @pytest.mark.parametrize(("count", "delta"), [(1, -1), (64, 1)])
+    def test_count_outside_1_to_64_is_400_and_unsaved(self, client, reconcile, count, delta):
         state = save(client, [group(members=[member(count=count)])])
         reconcile.reset_mock()
         response = client.post(self.url(member_id="m1"), json={"delta": delta})
         assert response.status_code == 400
-        assert response.get_json()["error"] == "A device needs 1\u201332 workers. Remove it in Settings to use zero."
+        assert response.get_json()["error"] == "A device needs 1\u201364 workers. Remove it in Settings to use zero."
         assert stored(client)["revision"] == state["revision"]
         reconcile.assert_not_called()
 
@@ -457,10 +457,10 @@ class TestMemberScale:
         assert response.get_json()["error"] == "That device is no longer in this group"
 
     def test_peak_overflow_is_400_and_revision_kept(self, client, reconcile):
-        state = save(client, [group(id="a", members=[member(count=16)]), group(id="b", members=[member(count=16)])])
+        state = save(client, [group(id="a", members=[member(count=32)]), group(id="b", members=[member(count=32)])])
         response = client.post(self.url("a", "m1"), json={"delta": 1})
         assert response.status_code == 400
-        assert "peak CPU 33/32" in response.get_json()["error"]
+        assert "peak CPU 65/64" in response.get_json()["error"]
         assert stored(client)["revision"] == state["revision"]
 
     @pytest.mark.parametrize("body", [{}, {"delta": 2}, {"delta": 0}, {"delta": "1"}, {"delta": 1, "x": 1}, [1]])
