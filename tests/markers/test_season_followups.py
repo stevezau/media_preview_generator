@@ -1,53 +1,36 @@
-"""Season follow-up jobs after a job, and season grouping of one-episode webhook follow-ups."""
+"""Season matching waits for explicit runs; webhook episode grouping remains available."""
 
 from __future__ import annotations
 
 import copy
-import os
-import re
-import sqlite3
 import threading
 import time
-from random import Random
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS
 from media_preview_generator.markers import job_runner, triggers
 from media_preview_generator.markers.audio import season
-from media_preview_generator.markers.models import MarkerType
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
 from media_preview_generator.web.jobs import JobManager, JobStatus
 from tests.markers import test_job_runner, test_job_runner_real, test_triggers
 from tests.markers.audio import test_season
 from tests.markers.audio.test_season import (
-    COLD_OPEN_AT,
-    SEASON_INTRO_AT,
     SEASON_RAW,
     _Audio,
-    _chapter_probe,
-    _chapter_season,
     _Chapters,
-    _cold_open_points,
-    _cold_open_season,
-    _decided,
-    _episode_noise,
     _evidence,
-    _fuzz_cases,
     _intro_decision,
-    _introdb_answer,
-    _point_ms,
     _season_ctx,
-    _spec,
     _write,
 )
 from tests.markers.fakes import ready_publisher
-from tests.markers.test_pipeline import _ctx, _registry, _run
+from tests.markers.test_pipeline import _run
 
-# Fixtures and helpers shared with the job runner and trigger tests.
+# Fixtures shared with the runner, trigger and detector tests.
 env, _item = test_job_runner.env, test_job_runner._item
 engine = test_job_runner_real.engine
 settings, _server = test_triggers.settings, test_triggers._server
@@ -62,203 +45,41 @@ def ep(season_folder: str, e: int) -> str:
     return f"{season_folder}/Show (2020) - S{n:02d}E{e:02d}.mkv"
 
 
-class TestSeasonFollowUpJob:
-    def _run(self, env, items, followups):
-        env.ctx.take_followups.return_value = followups
+class TestNoAutomaticSeasonFollowUps:
+    @pytest.mark.parametrize("source", ["manual", "schedule", "sonarr", "inspector", "inspector_season", "season"])
+    @pytest.mark.parametrize("ending", ["completed", "cancelled", "failed", "empty", "already-finished"])
+    def test_sibling_requests_never_create_another_job(self, env, monkeypatch, source, ending):
+        own, sibling = ep(S1, 1), ep(S1, 2)
+        env.job.config = {"source": source, "file_paths": [own], "late_requests": {sibling: 7}}
+        env.ctx.take_followups.return_value = [sibling]
+        env.ctx.take_changed_siblings_left_out.return_value = [own]
+        env.ctx.ran_since.return_value = False
+        items = [] if ending == "empty" else [_item(own)]
+        if ending == "cancelled":
+            env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        elif ending == "failed":
+            env.dispatcher.submit_items.side_effect = RuntimeError("boom")
+        elif ending == "already-finished":
+            monkeypatch.setattr(
+                job_runner,
+                "_skip_finished_before_restart",
+                lambda *args: ([], {"markers_published": 1}, set(), {}),
+            )
         with (
             patch.object(job_runner, "build_items", return_value=(items, [], {})),
-            patch("media_preview_generator.markers.triggers.create_intro_credits_job") as create,
+            patch.object(triggers, "create_intro_credits_job") as create,
         ):
             job_runner.run_intro_credits_job("j1")
-        return create
-
-    def test_other_episodes_of_the_season_get_one_season_job(self, env):
-        create = self._run(env, [_item(ep(S1, 3))], [ep(S1, 2), ep(S1, 1), ep(S1, 3)])
-        create.assert_called_once()
-        kwargs = create.call_args.kwargs
-        assert kwargs["file_paths"] == [ep(S1, 1), ep(S1, 2)]  # the job's own episode is left out, sorted
-        assert (kwargs["source"], kwargs["priority"]) == ("season", 3)
-        assert kwargs["library_name"] == "Season: Show (2020) {tvdb-1} · Season 01"
-        assert "force" not in kwargs and "follows_job_id" not in kwargs
-
-    def test_several_seasons_are_named_by_count(self, env):
-        create = self._run(env, [_item(ep(S1, 9))], [ep(S1, 1), ep(S2, 1)])
-        assert create.call_args.kwargs["library_name"] == "Season: 2 seasons"
-
-    def test_one_season_split_over_two_disks_is_named_as_one_season(self, env):
-        disk2 = S1.replace("/media/", "/media2/", 1)
-        assert disk2 != S1
-        create = self._run(env, [_item(ep(S1, 9))], [ep(S1, 1), ep(disk2, 2)])
-        assert create.call_args.kwargs["file_paths"] == [ep(S1, 1), ep(disk2, 2)]
-        assert create.call_args.kwargs["library_name"] == "Season: Show (2020) {tvdb-1} · Season 01"
-
-    def test_a_flat_show_folder_is_named_after_the_show(self, env):
-        flat = "/media/tv/Show (2020) {tvdb-1}"
-        create = self._run(env, [_item(f"{flat}/Show - S01E03.mkv")], [f"{flat}/Show - S01E01.mkv"])
-        assert create.call_args.kwargs["library_name"] == "Season: Show (2020) {tvdb-1}"
-
-    def test_a_flat_show_on_two_disks_under_differently_named_library_folders_is_one_season(self, env):
-        one, two = "/media/tv/Show (2020) {tvdb-1}", "/media2/series/Show (2020) {tvdb-1}"
-        create = self._run(
-            env, [_item(f"{one}/Show - S01E03.mkv")], [f"{one}/Show - S01E01.mkv", f"{two}/Show - S01E02.mkv"]
-        )
-        assert create.call_args.kwargs["library_name"] == "Season: Show (2020) {tvdb-1}"
-
-    @pytest.mark.parametrize(
-        ("asker", "job_priority", "expected"),
-        [
-            ({"source": "plex", "follows_job_id": "prev-1"}, 1, 2),  # webhook rule: NORMAL...
-            ({"source": "plex", "follows_job_id": "prev-1"}, 2, 2),
-            ({"source": "plex", "follows_job_id": "prev-1"}, 3, 3),  # ...never ahead of the job that asked
-            ({"source": "sonarr", "retry_attempt": 1}, 2, 3),  # a webhook follow-up's retry errs low
-            ({"source": "plex", "verify": True, "chain_attempt": 1}, 2, 3),  # and so does its verify job
-            ({"source": "manual"}, 2, 3),
-            ({"source": "schedule"}, 2, 3),
-            ({"source": "schedule"}, 3, 3),
-            ({"source": "inspector", "force": True}, 1, 3),  # a re-detect's siblings don't take its HIGH slot
-            ({"source": "inspector_season"}, 2, 3),
-        ],
-        ids=[
-            "webhook-high",
-            "webhook-normal",
-            "webhook-low",
-            "retry",
-            "verify",
-            "manual",
-            "schedule-normal",
-            "schedule-low",
-            "inspector",
-            "season-publish",
-        ],
-    )
-    def test_season_jobs_run_low_unless_a_webhook_follow_up_asked(
-        self, env, monkeypatch, asker, job_priority, expected
-    ):
-        monkeypatch.setattr(job_runner, "wait_for_preceding_job", lambda *args: True)
-        env.job.priority = job_priority
-        env.job.config = {"file_paths": [ep(S1, 3)], **asker}
-        create = self._run(env, [_item(ep(S1, 3))], [ep(S1, 1)])
-        assert create.call_args.kwargs["priority"] == expected
-
-    def test_the_season_job_is_queued_once_the_job_has_completed(self, env):
-        # The asker shows as finished before its Season job appears in the queue behind it.
-        completed_first = []
-        env.ctx.take_followups.return_value = [ep(S1, 1)]
-        with (
-            patch.object(job_runner, "build_items", return_value=([_item(ep(S1, 3))], [], {})),
-            patch(
-                "media_preview_generator.markers.triggers.create_intro_credits_job",
-                side_effect=lambda **kw: completed_first.append(env.jm.complete_job.called) or SimpleNamespace(id="s1"),
-            ),
-        ):
-            job_runner.run_intro_credits_job("j1")
-        assert completed_first == [True]
-
-    def test_nothing_outside_the_job_queues_nothing(self, env):
-        create = self._run(env, [_item(ep(S1, 1)), _item(ep(S1, 2))], [ep(S1, 2)])
         create.assert_not_called()
-
-    def test_files_the_job_skipped_as_finished_before_a_restart_still_count_as_its_own(self, env, monkeypatch):
-        monkeypatch.setattr(
-            job_runner,
-            "_skip_finished_before_restart",
-            lambda jm, job_id, items, store: (items[1:], {"x": 1}, set(), {}),
-        )
-        create = self._run(env, [_item(ep(S1, 1)), _item(ep(S1, 2))], [ep(S1, 1), ep(S1, 3)])
-        assert create.call_args.kwargs["file_paths"] == [ep(S1, 3)]
-
-    def test_a_season_job_never_queues_another(self, env):
-        env.job.config = {"file_paths": [ep(S1, 1)], "source": "season"}
-        create = self._run(env, [_item(ep(S1, 1))], [ep(S1, 2)])
-        create.assert_not_called()
-
-    @pytest.mark.parametrize(
-        ("how", "ran_since", "passed_on"),
-        [
-            ("completed", False, [ep(S1, 5), ep(S1, 6)]),
-            ("completed", True, []),  # it ran them after the requests: nothing to pass on
-            # A job that doesn't complete passes every request on, whatever it ran: the requesting jobs queued nothing
-            # for those files themselves.
-            ("cancelled", True, [ep(S1, 5), ep(S1, 6)]),
-            ("crashed", True, [ep(S1, 5), ep(S1, 6)]),
-        ],
-    )
-    def test_a_season_job_passes_on_what_other_jobs_handed_it_however_it_ends(self, env, how, ran_since, passed_on):
-        env.job.config = {
-            "file_paths": [ep(S1, 1)],
-            "source": "season",
-            job_runner.LATE_REQUESTS: {ep(S1, 5): 10, ep(S1, 6): 11},
-        }
-        env.jm.get_job.return_value = env.job
-        env.ctx.ran_since.return_value = ran_since
-        if how == "cancelled":
-            env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
-        elif how == "crashed":
-            env.dispatcher.submit_items.side_effect = RuntimeError("boom")
-        create = self._run(env, [_item(ep(S1, 1))], [])
-        if passed_on:
-            create.assert_called_once()  # once, not again from the teardown
-            kwargs = create.call_args.kwargs
-            assert (kwargs["file_paths"], kwargs["source"], kwargs["priority"]) == (
-                passed_on,
-                "season",
-                env.job.priority,
-            )
+        env.jm.create_job.assert_not_called()
+        if ending == "cancelled":
+            env.jm.cancel_job.assert_called_once_with("j1")
         else:
-            create.assert_not_called()
-        env.jm.merge_job_config.assert_any_call("j1", {job_runner.LATE_SEALED: True})
-
-    @pytest.mark.parametrize(
-        ("config", "changed", "queued"),
-        [
-            ({"source": "sonarr", "retry_attempt": 1}, False, False),
-            ({"source": "sonarr", "retry_attempt": 2}, True, True),
-            ({"source": "sonarr"}, False, True),  # only a retry is held to it: the first run asked on real grounds
-        ],
-        ids=["retry-changed-nothing", "retry-changed-an-answer", "first-run"],
-    )
-    def test_a_retry_queues_a_season_job_only_when_its_run_changed_an_answer(self, env, config, changed, queued):
-        # Found on the owner's server: each retry of a file waiting for a server queued the same 12 episodes again.
-        env.job.config = {"file_paths": [ep(S1, 3)], **config}
-        env.ctx.answers_changed.return_value = changed
-        create = self._run(env, [_item(ep(S1, 3))], [ep(S1, 1), ep(S1, 2)])
-        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        if queued:
-            create.assert_called_once()
-            assert create.call_args.kwargs["file_paths"] == [ep(S1, 1), ep(S1, 2)]
-        else:
-            create.assert_not_called()
-            assert "INFO - 2 episode(s) of the same season aren't checked again: this retry changed nothing" in logs
-
-    def test_a_cancelled_job_queues_nothing(self, env):
-        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
-        create = self._run(env, [_item(ep(S1, 1))], [ep(S1, 2)])
-        create.assert_not_called()
-
-    def test_a_huge_season_backlog_is_capped(self, env):
-        many = [f"{S1}/Show (2020) - S01E{e:03d}.mkv" for e in range(1, 603)]
-        create = self._run(env, [_item(ep(S1, 1))], many)
-        assert len(create.call_args.kwargs["file_paths"]) == job_runner.MAX_RETRY_FILES
-        assert any("more episode" in c.args[1] for c in env.jm.add_log.call_args_list)
-
-    def test_a_failed_read_of_an_own_episodes_season_answer_leaves_the_job_completed(self, env):
-        env.ctx.take_changed_siblings_left_out.return_value = [ep(S1, 1)]
-        with patch.object(
-            job_runner, "season_audio_answer_outdated", side_effect=sqlite3.OperationalError("disk I/O error")
-        ) as outdated:
-            create = self._run(env, [_item(ep(S1, 1))], [ep(S1, 2)])
-        outdated.assert_called_once_with(env.ctx, ep(S1, 1))
-        assert create.call_args.kwargs["file_paths"] == [ep(S1, 2)]
-        env.jm.complete_job.assert_called_once_with("j1", warning=None)
-
-    def test_a_season_job_that_cant_be_created_leaves_the_job_completed(self, env):
-        env.ctx.take_followups.return_value = [ep(S1, 2)]
-        with (
-            patch.object(job_runner, "build_items", return_value=([_item(ep(S1, 1))], [], {})),
-            patch("media_preview_generator.markers.triggers.create_intro_credits_job", side_effect=OSError("disk")),
-        ):
-            job_runner.run_intro_credits_job("j1")
-        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+            assert env.jm.complete_job.call_args.args == ("j1",)
+            if ending == "failed":
+                assert env.jm.complete_job.call_args.kwargs["error"] == "RuntimeError: boom"
+            else:
+                assert not env.jm.complete_job.call_args.kwargs.get("error")
 
     @pytest.mark.parametrize(("source", "retried"), [("season", False), ("sonarr", True)])
     def test_a_season_job_doesnt_retry_a_file_missing_from_disk(self, env, monkeypatch, source, retried):
@@ -302,98 +123,23 @@ class TestSeasonFollowUpJob:
         assert verify.called is verified
 
 
-class TestAnEpisodeRunBeforeItsChangedSibling:
-    """Task 17: a job's episode run before a sibling it lists whose file changed on disk gets a season audio answer without
-    that sibling. Once the job reads the sibling, the episode goes into the job's Season follow-up."""
-
-    def _season_answered_then_sibling_replaced(self, store, show):
+class TestExplicitSeasonRefresh:
+    def test_next_selected_run_refreshes_an_episode_after_its_sibling_changed(self, store, show):
         e1, e2 = show(1, 2)
         with _Audio():
             for path in (e1, e2):
                 _run(_season_ctx(store, path), path, {"plex-1": ready_publisher()}, stage="process")
         assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
-        _write(e2, 999)  # copied back: a new size and mtime
-        return e1, e2
-
-    def _job(self, store, paths, source, *, fail_while_running=None, before_queue=None):
-        """One job over ``paths``; ``fail_while_running[path]`` are the files ffmpeg fails on during that path's run."""
-        ctx = _season_ctx(store, paths[0])
-        for path in paths:
-            with _Audio(fail=(fail_while_running or {}).get(path)):
+        _write(e2, 999)
+        ctx = _season_ctx(store, e1)
+        with _Audio():
+            for path in (e1, e2):
                 _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
-        if before_queue is not None:
-            before_queue(ctx)
-        job = SimpleNamespace(id="j1", priority=3, config={"source": source})
-        with patch.object(job_runner, "_queue_season_followups") as queue_season:
-            job_runner._queue_season_followups_after(job, {"source": source}, ctx, set(paths))
-        return job, queue_season
-
-    def test_the_episode_is_queued_once_the_job_read_its_changed_sibling(self, store, show):
-        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
-        job, queue_season = self._job(store, [e1, e2], "schedule")
-        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []  # matched without E02
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
         assert _evidence(store, e2, season.Source.SEASON_AUDIO)[0].origin == "1/1"
-        queue_season.assert_called_once_with(job, [e1])
-        with _Audio():  # the Season job
+        with _Audio():
             _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
         assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
-
-    def test_a_changed_sibling_the_job_doesnt_list_is_queued_without_the_episode(self, store, show):
-        # The chapter step asks for the changed sibling; the episode's answer is as current as a new run's would be until
-        # that sibling is read (a Season job reading it can't queue the episode again: spec §14, one run late).
-        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
-        job, queue_season = self._job(store, [e1], "schedule")
-        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
-        queue_season.assert_called_once_with(job, [e2])
-
-    def test_a_season_job_still_never_queues_another(self, store, show):
-        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
-        _job, queue_season = self._job(store, [e1, e2], job_runner.SEASON_SOURCE)
-        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
-        queue_season.assert_not_called()
-
-    def test_an_episode_whose_intro_another_source_decided_is_not_queued(self, store, show):
-        # Its intro doesn't rest on season audio, so a new answer can't change it.
-        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
-
-        def decided_by_chapters(_ctx):
-            rec = store.get_file(e1)
-            decision = _decided(MarkerType.INTRO, 10_000, 40_000, ("chapters",))
-            store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="x")
-
-        _job, queue_season = self._job(store, [e1, e2], "schedule", before_queue=decided_by_chapters)
-        queue_season.assert_not_called()
-
-    def test_an_episode_whose_own_last_attempt_failed_on_the_season_as_it_is_now_is_not_queued(self, store, show):
-        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
-
-        def failed_on_this_season(ctx):
-            now = season._signature(ctx, season._signature_paths(e1, season.season_group(e1), ctx.registry.configs()))
-            store.set_detector_failure(store.get_file(e1).id, season.Source.SEASON_AUDIO, now)
-
-        _job, queue_season = self._job(store, [e1, e2], "schedule", before_queue=failed_on_this_season)
-        queue_season.assert_not_called()
-
-    def test_a_sibling_left_out_because_ffmpeg_failed_on_it_doesnt_queue_the_episode(self, store, show):
-        # Not a change on disk: E02's own run fingerprints it, and E01 waits for its next run as before.
-        e1, e2 = show(1, 2)
-        _job, queue_season = self._job(store, [e1, e2], "schedule", fail_while_running={e1: {e2}})
-        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
-        assert _evidence(store, e2, season.Source.SEASON_AUDIO)[0].origin == "1/1"
-        queue_season.assert_not_called()
-
-    def test_an_episode_changed_on_disk_after_its_run_is_not_queued(self, store, show):
-        # Its own next run reads the new file.
-        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
-        _job, queue_season = self._job(store, [e1, e2], "schedule", before_queue=lambda _ctx: _write(e1, 777))
-        queue_season.assert_not_called()
-
-    def test_no_changed_sibling_leaves_the_jobs_own_episodes_out(self, store, show):
-        # E02 is up to date: its run finds E01's answer current, so neither episode is asked again.
-        e1, e2 = show(1, 2)
-        _job, queue_season = self._job(store, [e1, e2], "schedule")
-        assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
-        queue_season.assert_not_called()
 
 
 class TestFollowUpConfigIsReadWhenItsFilesAreListed:
@@ -463,249 +209,6 @@ def queue(tmp_path, monkeypatch):
     return manager
 
 
-def _finished_job(jm, *, priority=3, follows=None, pin=None):
-    config = {"kind": JOB_KIND_INTRO_CREDITS, "file_paths": [ep(S1, 9)], "follows_job_id": follows, "source": "x"}
-    if pin:
-        config["server_id"] = pin
-    job = jm.create_job(library_name="done", kind=JOB_KIND_INTRO_CREDITS, priority=priority, config=config)
-    jm.start_job(job.id)
-    jm.complete_job(job.id)
-    return job
-
-
-def _season_jobs(jm):
-    return [j for j in jm.get_all_jobs() if (j.config or {}).get("source") == "season"]
-
-
-@pytest.fixture
-def starting_queue(queue, monkeypatch):
-    """``queue`` with every created job started at once, as a free slot starts a Season job within milliseconds."""
-    monkeypatch.setattr(triggers, "start_intro_credits_job_async", queue.start_job)
-    return queue
-
-
-def _runs(*paths, ctx=None):
-    """A Season job's context that ran ``paths`` (in order, now)."""
-    ctx = ctx or _ctx(None, MagicMock())
-    for path in paths:
-        with ctx._running(path):
-            pass
-    return ctx
-
-
-def _season_job_ends(jm, season_job, ctx, *, complete=True):
-    if complete:
-        jm.complete_job(season_job.id)
-    job_runner._queue_season_followups_after(season_job, season_job.config, ctx, set(season_job.config["file_paths"]))
-
-
-class TestNoDuplicateSeasonJobs:
-    def test_two_jobs_in_a_row_over_one_season_queue_one_season_job_holding_the_union(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 3)])
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2), ep(S1, 3)])
-        (season_job,) = _season_jobs(queue)
-        assert season_job.config["file_paths"] == [ep(S1, 1), ep(S1, 2), ep(S1, 3)]
-        assert season_job.priority == 3 and season_job.status is JobStatus.PENDING
-
-    def test_a_file_a_running_season_job_already_ran_is_run_again_by_one_follow_up_after_it(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 2)])
-        (running,) = _season_jobs(queue)
-        queue.start_job(running.id)
-        job_runner._seal_files(queue, running.id, running, running.config)
-        ctx = _runs(ep(S1, 1), ep(S1, 2))  # it runs both before the next two requests
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2)])
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2), ep(S1, 3)])
-        assert [j.id for j in _season_jobs(queue)] == [running.id]  # left to the running job
-        assert running.config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
-        _season_job_ends(queue, running, ctx)
-        (_, following) = _season_jobs(queue)
-        assert following.config["file_paths"] == [ep(S1, 2), ep(S1, 3)]
-        assert (following.priority, following.status) == (3, JobStatus.PENDING)
-
-    def test_duplicate_requests_in_the_same_second_queue_one_season_job(self, starting_queue):
-        # Found on the owner's server: pairs of Season jobs created in the same second for the same files.
-        paths = [ep(S1, 1), ep(S1, 2)]
-        job_runner._queue_season_followups(_finished_job(starting_queue), paths)
-        job_runner._queue_season_followups(_finished_job(starting_queue), paths)  # the first already started
-        (season_job,) = _season_jobs(starting_queue)
-        assert season_job.status is JobStatus.RUNNING
-        ctx = _runs(*paths)  # it runs them after both requests
-        _season_job_ends(starting_queue, season_job, ctx)
-        assert [j.id for j in _season_jobs(starting_queue)] == [season_job.id]
-
-    def test_episodes_arriving_one_after_another_while_a_season_job_runs_queue_at_most_one_follow_up(
-        self, starting_queue
-    ):
-        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, e) for e in range(2, 6)])
-        (season_job,) = _season_jobs(starting_queue)
-        ctx = _runs(ep(S1, 2), ep(S1, 3))
-        for arrived in (6, 7, 8):  # each new episode's job asks for the episodes before it
-            job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, e) for e in range(2, arrived)])
-        assert [j.id for j in _season_jobs(starting_queue)] == [season_job.id]
-        _runs(ep(S1, 4), ep(S1, 5), ctx=ctx)  # read after every request: not run again
-        _season_job_ends(starting_queue, season_job, ctx)
-        (_, following) = _season_jobs(starting_queue)
-        assert following.config["file_paths"] == [ep(S1, 2), ep(S1, 3), ep(S1, 6), ep(S1, 7)]
-        assert following.status is JobStatus.RUNNING
-        # The follow-up takes what arrives while it runs in turn; nothing joins the finished job.
-        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 8)])
-        assert len(_season_jobs(starting_queue)) == 2
-        assert following.config[job_runner.LATE_REQUESTS].keys() == {ep(S1, 8)}
-        assert ep(S1, 8) not in season_job.config[job_runner.LATE_REQUESTS]
-
-    def test_a_running_season_job_takes_only_episodes_of_its_own_seasons_at_its_priority(self, starting_queue):
-        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])
-        (running,) = _season_jobs(starting_queue)
-        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 2), ep(S2, 1)])
-        job_runner._queue_season_followups(
-            _finished_job(starting_queue, priority=2, follows="prev-1"), [ep(S1, 3)]
-        )  # a webhook follow-up's Season job runs at NORMAL
-        assert running.config[job_runner.LATE_REQUESTS].keys() == {ep(S1, 2)}
-        others = sorted((j.priority, tuple(j.config["file_paths"])) for j in _season_jobs(starting_queue))
-        assert others == [(2, (ep(S1, 3),)), (3, (ep(S1, 1),)), (3, (ep(S2, 1),))]
-        # The NORMAL one passes a NORMAL request on at NORMAL.
-        (normal,) = [j for j in _season_jobs(starting_queue) if j.priority == 2]
-        job_runner._queue_season_followups(_finished_job(starting_queue, priority=2, follows="prev-4"), [ep(S1, 4)])
-        _season_job_ends(starting_queue, normal, _runs())
-        (follow_up,) = [j for j in _season_jobs(starting_queue) if j.config["file_paths"] == [ep(S1, 4)]]
-        assert follow_up.priority == 2
-
-    def test_a_season_job_a_restart_didnt_revive_passes_on_what_other_jobs_handed_it(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
-        (season_job,) = _season_jobs(queue)
-        queue.start_job(season_job.id)
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2)])  # handed over while it ran
-        assert season_job.config[job_runner.LATE_REQUESTS].keys() == {ep(S1, 2)}
-        # The restart: the job is left behind as interrupted and not revived (too old, or auto-requeue off).
-        other = queue.create_job(library_name="p", priority=2, config={"file_paths": ["/x.mkv"]})
-        season_job.status = JobStatus.PENDING
-        queue._interrupted_jobs = [season_job, other]
-        failed = queue.fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
-        assert [j.id for j in failed] == [season_job.id]
-        job_runner.pass_on_requests_of_unrevived_jobs([*failed, other])
-        job_runner.pass_on_requests_of_unrevived_jobs(failed)  # only the first pass does anything
-        (_, follow_up) = _season_jobs(queue)
-        assert (follow_up.config["file_paths"], follow_up.priority) == ([ep(S1, 2)], season_job.priority)
-        assert sum("didn't finish" in line for line in queue.get_logs(season_job.id)) == 1
-
-    def test_a_season_job_that_passed_its_requests_on_takes_no_more(self, starting_queue):
-        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])
-        (first,) = _season_jobs(starting_queue)
-        _season_job_ends(starting_queue, first, _runs(ep(S1, 1)), complete=False)  # sealed before it shows completed
-        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])
-        assert job_runner.LATE_REQUESTS not in first.config
-        assert len(_season_jobs(starting_queue)) == 2
-
-    def test_a_file_already_waiting_at_another_priority_is_not_queued_twice(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
-        job_runner._queue_season_followups(_finished_job(queue, priority=2, follows="prev-1"), [ep(S1, 1), ep(S1, 2)])
-        low, normal = _season_jobs(queue)
-        assert (low.priority, low.config["file_paths"]) == (3, [ep(S1, 1)])
-        assert (normal.priority, normal.config["file_paths"]) == (2, [ep(S1, 2)])
-
-    def test_every_file_already_waiting_creates_nothing(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 2)])
-        asker = _finished_job(queue)
-        job_runner._queue_season_followups(asker, [ep(S1, 2)])
-        assert len(_season_jobs(queue)) == 1
-        assert any("already queued" in line for line in queue.get_logs(asker.id))
-
-    @pytest.mark.parametrize("extra", [{job_runner.FILES_SEALED: True}, {"retry_attempt": 1}, {"verify": True}])
-    def test_sealed_retry_and_verify_season_jobs_take_no_more_files(self, queue, extra):
-        config = {"kind": JOB_KIND_INTRO_CREDITS, "source": "season", "file_paths": [ep(S1, 1)], **extra}
-        existing = queue.create_job(library_name="s", kind=JOB_KIND_INTRO_CREDITS, priority=3, config=config)
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 2)])
-        new = [j for j in _season_jobs(queue) if j.id != existing.id]
-        assert [j.config["file_paths"] for j in new] == [[ep(S1, 1), ep(S1, 2)]]
-        assert existing.config["file_paths"] == [ep(S1, 1)]
-
-    def test_a_joined_season_job_is_named_after_all_its_files(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S2, 1)])
-        (season_job,) = _season_jobs(queue)
-        assert season_job.library_name == "Season: 2 seasons"
-
-    def test_a_waiting_season_job_too_full_for_the_request_leaves_it_to_a_new_job(self, queue):
-        first = [f"{S1}/Show (2020) - S01E{e:03d}.mkv" for e in range(1, 500)]
-        job_runner._queue_season_followups(_finished_job(queue), first)
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S2, 1), ep(S2, 2)])
-        full, new = _season_jobs(queue)
-        assert len(full.config["file_paths"]) == 499 and new.config["file_paths"] == [ep(S2, 1), ep(S2, 2)]
-
-    def test_a_request_joins_the_oldest_waiting_season_job_it_fits_in(self, queue):
-        job_runner._queue_season_followups(
-            _finished_job(queue), [f"{S1}/Show (2020) - S01E{e:03d}.mkv" for e in range(1, 499)]
-        )
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S2, 1), ep(S2, 2), ep(S2, 3)])  # 501: a new job
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S2, 4), ep(S2, 5)])  # exactly 500: joins the first
-        oldest, second = _season_jobs(queue)
-        assert len(oldest.config["file_paths"]) == 500 and oldest.config["file_paths"][-2:] == [ep(S2, 4), ep(S2, 5)]
-        assert second.config["file_paths"] == [ep(S2, 1), ep(S2, 2), ep(S2, 3)]
-
-    def test_a_request_doesnt_join_a_season_job_cancelled_after_it_was_listed(self, queue, monkeypatch):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
-        (cancelled,) = _season_jobs(queue)
-        listed = job_runner._waiting_season_jobs
-
-        def listed_then_cancelled(jm):
-            waiting = listed(jm)
-            jm.cancel_job(cancelled.id)
-            return waiting
-
-        monkeypatch.setattr(job_runner, "_waiting_season_jobs", listed_then_cancelled)
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2)])
-        assert cancelled.config["file_paths"] == [ep(S1, 1)]
-        assert [j.config["file_paths"] for j in _season_jobs(queue) if j.id != cancelled.id] == [[ep(S1, 2)]]
-
-    @pytest.mark.parametrize(
-        ("state", "queued_again"), [("never-started", False), ("revived", True), ("running", True)]
-    )
-    def test_a_file_a_waiting_webhook_follow_up_will_read_is_not_queued_again(
-        self, queue, settings, state, queued_again
-    ):
-        # The follow-up holds Sonarr's view of E2; the season step asks for the local path.
-        mapping = {"remote_prefix": "/jf", "local_prefix": "/media", "webhook_prefixes": ["/data"]}
-        settings["media_servers"] = [_server("jf-1", "jellyfin", path_mappings=[mapping])]
-        config = {
-            "kind": JOB_KIND_INTRO_CREDITS,
-            "source": "sonarr",
-            "file_paths": [ep(S1, 2).replace("/media/", "/data/", 1)],
-            "follows_job_id": "prev-1",
-        }
-        follow_up = queue.create_job(library_name="E2", kind=JOB_KIND_INTRO_CREDITS, priority=2, config=config)
-        if state != "never-started":
-            queue.start_job(follow_up.id)
-        if state == "revived":
-            follow_up.status = JobStatus.PENDING  # a restart put it back; it may already have run E2
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 2)])
-        (season_job,) = _season_jobs(queue)
-        assert season_job.config["file_paths"] == ([ep(S1, 1), ep(S1, 2)] if queued_again else [ep(S1, 1)])
-
-    def test_requests_while_a_season_job_reads_its_files_put_each_file_in_one_job(self, queue, monkeypatch):
-        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
-        (waiting,) = _season_jobs(queue)
-        askers = [_finished_job(queue) for _ in range(10)]
-        _slow_config_updates(queue, monkeypatch)
-        sealed = {}
-        start = threading.Barrier(11)
-
-        def ask(i):
-            start.wait()
-            job_runner._queue_season_followups(askers[i], [ep(S1, i + 2)])
-
-        def read_files():
-            start.wait()
-            time.sleep(0.005)
-            sealed.update(job_runner._seal_files(queue, waiting.id, waiting, dict(waiting.config)))
-
-        _run_threads(
-            [threading.Thread(target=ask, args=(i,)) for i in range(10)] + [threading.Thread(target=read_files)]
-        )
-        assert queue.get_job(waiting.id).config["file_paths"] == sealed["file_paths"]  # nothing joined after the read
-        every = [p for j in _season_jobs(queue) for p in j.config["file_paths"]]
-        assert sorted(every) == [ep(S1, e) for e in range(1, 12)]
-
-
 def _slow_config_updates(jm, monkeypatch):
     # Every config writer the joins and the seal use: widen the read-then-write window.
     for name in ("update_job_config", "update_job_config_if_pending", "merge_job_config"):
@@ -723,85 +226,6 @@ def _run_threads(threads):
         t.start()
     for t in threads:
         t.join(timeout=10)
-
-
-class TestSeasonJobsKeepThePin:
-    """A Season job publishes where the job that asked for it does, as its retries and verify jobs do."""
-
-    @pytest.mark.parametrize("pin", [None, "plex-1", "emby-1", "jf-1"], ids=["no-pin", "plex", "emby", "jellyfin"])
-    def test_a_season_job_carries_the_pin_of_the_job_that_queued_it(self, queue, pin):
-        job_runner._queue_season_followups(_finished_job(queue, pin=pin), [ep(S1, 1), ep(S1, 2)])
-        (season_job,) = _season_jobs(queue)
-        assert job_runner.server_pin(season_job.config) == pin
-        assert season_job.config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
-
-    def test_a_season_job_passing_on_late_requests_keeps_its_pin(self, queue):
-        job_runner._queue_season_followups(_finished_job(queue, pin="emby-1"), [ep(S1, 1)])
-        (season_job,) = _season_jobs(queue)
-        queue.start_job(season_job.id)
-        job_runner._seal_files(queue, season_job.id, season_job, season_job.config)
-        job_runner._queue_season_followups(_finished_job(queue, pin="emby-1"), [ep(S1, 2)])
-        _season_job_ends(queue, season_job, _runs(ep(S1, 1)))
-        (passed_on,) = [j for j in _season_jobs(queue) if j.id != season_job.id]
-        assert passed_on.config["file_paths"] == [ep(S1, 2)]
-        assert job_runner.server_pin(passed_on.config) == "emby-1"
-
-    @pytest.mark.parametrize(
-        ("waiting_pin", "request_pin", "covered", "joined"),
-        [
-            (None, None, True, True),
-            ("emby-1", "emby-1", True, True),
-            ("emby-1", None, False, False),  # the waiting job publishes to fewer servers than asked
-            ("emby-1", "plex-1", False, False),
-            (None, "emby-1", True, False),  # an unpinned job covers what it lists; new files keep their pin
-        ],
-        ids=["both-unpinned", "same-pin", "pinned-vs-unpinned", "other-pin", "unpinned-covers-pinned"],
-    )
-    def test_a_waiting_season_job_covers_and_takes_only_requests_it_publishes_for(
-        self, queue, waiting_pin, request_pin, covered, joined
-    ):
-        job_runner._queue_season_followups(_finished_job(queue, pin=waiting_pin), [ep(S1, 1)])
-        (waiting,) = _season_jobs(queue)
-        job_runner._queue_season_followups(_finished_job(queue, pin=request_pin), [ep(S1, 1), ep(S1, 2)])
-        others = [j for j in _season_jobs(queue) if j.id != waiting.id]
-        if joined:
-            assert others == [] and waiting.config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
-            return
-        assert waiting.config["file_paths"] == [ep(S1, 1)]
-        (new,) = others
-        assert new.config["file_paths"] == ([ep(S1, 2)] if covered else [ep(S1, 1), ep(S1, 2)])
-        assert job_runner.server_pin(new.config) == request_pin
-
-    @pytest.mark.parametrize(
-        ("running_pin", "request_pin", "taken"), [("emby-1", "emby-1", True), ("emby-1", None, False)]
-    )
-    def test_a_running_season_job_takes_a_request_only_for_its_own_servers(
-        self, starting_queue, running_pin, request_pin, taken
-    ):
-        job_runner._queue_season_followups(_finished_job(starting_queue, pin=running_pin), [ep(S1, 1)])
-        (running,) = _season_jobs(starting_queue)
-        job_runner._queue_season_followups(_finished_job(starting_queue, pin=request_pin), [ep(S1, 2)])
-        late = (starting_queue.get_job(running.id).config or {}).get(job_runner.LATE_REQUESTS) or {}
-        assert (ep(S1, 2) in late) is taken
-        others = [j for j in _season_jobs(starting_queue) if j.id != running.id]
-        assert [(j.config["file_paths"], job_runner.server_pin(j.config)) for j in others] == (
-            [] if taken else [([ep(S1, 2)], request_pin)]
-        )
-
-    @pytest.mark.parametrize(("follow_up_pin", "request_pin", "queued_again"), [
-        ("jf-1", "jf-1", False), ("jf-1", None, True), (None, "jf-1", False)
-    ])  # fmt: skip
-    def test_a_waiting_webhook_follow_up_covers_a_season_request_only_for_its_own_servers(
-        self, queue, settings, follow_up_pin, request_pin, queued_again
-    ):
-        settings["media_servers"] = [_server("jf-1", "jellyfin")]
-        config = {"kind": JOB_KIND_INTRO_CREDITS, "source": "sonarr", "file_paths": [ep(S1, 2)], "follows_job_id": "p"}
-        if follow_up_pin:
-            config["server_id"] = follow_up_pin
-        queue.create_job(library_name="E2", kind=JOB_KIND_INTRO_CREDITS, priority=2, config=config)
-        job_runner._queue_season_followups(_finished_job(queue, pin=request_pin), [ep(S1, 1), ep(S1, 2)])
-        (season_job,) = _season_jobs(queue)
-        assert season_job.config["file_paths"] == ([ep(S1, 1), ep(S1, 2)] if queued_again else [ep(S1, 1)])
 
 
 class TestWebhookSeasonGrouping:
@@ -921,7 +345,7 @@ class TestWebhookSeasonGrouping:
             {"verify": True},
             {"force": True},
             {"follows_job_id": None, "source": "schedule"},  # only webhook follow-ups take episodes
-            {"follows_job_id": None, "source": "season"},  # a waiting Season job takes Season requests only
+            {"follows_job_id": None, "source": "season"},  # a legacy Season job does not take webhook requests
         ],
         ids=["sealed", "retry", "verify", "forced", "no-preview-job", "season-job"],
     )
@@ -994,21 +418,15 @@ class TestJobsStartWhileTheirCallerHoldsTheFollowUpLock:
         monkeypatch.setattr(job_runner, "run_intro_credits_job", ran.append)
         return SimpleNamespace(jm=manager, ran=ran)
 
-    @pytest.mark.parametrize("caller", ["webhook-follow-up", "season-follow-up"])
-    def test_creating_a_job_under_the_lock_returns(self, real_start, caller):
-        asker = _finished_job(real_start.jm)
-
+    def test_creating_a_job_under_the_lock_returns(self, real_start):
         def create():
-            if caller == "webhook-follow-up":
-                triggers.submit_webhook_follow_up(preview_job_id="prev-1", paths=[ep(S1, 1)], source="plex")
-            else:
-                job_runner._queue_season_followups(asker, [ep(S1, 2)])
+            triggers.submit_webhook_follow_up(preview_job_id="prev-1", paths=[ep(S1, 1)], source="plex")
 
         thread = threading.Thread(target=create, daemon=True)
         thread.start()
         thread.join(timeout=5)
         assert not thread.is_alive(), "starting the job waited for FOLLOW_UP_LOCK, which its caller holds"
-        (created,) = [j for j in real_start.jm.get_all_jobs() if j.id != asker.id]
+        (created,) = real_start.jm.get_all_jobs()
         for _ in range(50):
             if real_start.ran:
                 break
@@ -1069,10 +487,10 @@ class TestResumeKeepsJoinedFiles:
         assert queue.get_job(job.id).config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
 
 
-class TestSeasonJobThroughTheRealEngine:
-    """Real JobManager, gate, dispatcher and pipeline: the requests a job's worker threads make reach its Season job."""
+class TestExplicitSeasonRefreshThroughTheRealEngine:
+    """Real workers leave sibling decisions until a user-selected run includes them."""
 
-    def test_a_new_episode_queues_a_season_job_that_decides_its_sibling_again(self, engine, tmp_path, monkeypatch):
+    def test_a_new_episode_leaves_its_sibling_until_the_next_scheduled_run(self, engine, tmp_path, monkeypatch):
         from media_preview_generator.markers import pipeline
         from media_preview_generator.markers.decide import LONG_INTRO_CHAPTER_REASON, DecisionStatus
         from media_preview_generator.markers.pipeline import PipelineContext
@@ -1125,162 +543,16 @@ class TestSeasonJobThroughTheRealEngine:
                     _write(path, 100)
                 run(library_name="first two", priority=3, source="schedule", file_paths=[e1, e2])
                 assert _intro_decision(store, e2)[0] is DecisionStatus.DECIDED  # one other intro chapter: no check yet
-                assert _season_jobs(jm) == []
+                assert len(jm.get_all_jobs()) == 1
                 _write(e3, 103)
                 arrival = run(library_name="E3", priority=2, source="sonarr", file_paths=[e3], follows_job_id="prev-3")
-                (season_job,) = _season_jobs(jm)
-                assert season_job.config["file_paths"] == [e2]
-                assert (season_job.priority, season_job.library_name) == (2, "Season: Show (2020) {tvdb-1} · Season 01")
+                assert len(jm.get_all_jobs()) == 2
+                assert _intro_decision(store, e2)[0] is DecisionStatus.DECIDED
                 assert jm.get_job(arrival.id).config[job_runner.FILES_SEALED] is True
-                job_runner.run_intro_credits_job(season_job.id)
-            assert jm.get_job(season_job.id).status is JobStatus.COMPLETED
+                run(library_name="My season schedule", priority=3, source="schedule", file_paths=[e1, e2, e3])
             assert _intro_decision(store, e2) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
-            assert len(_season_jobs(jm)) == 1
+            assert len(jm.get_all_jobs()) == 3
+            assert all(job.config.get("source") != "season" for job in jm.get_all_jobs())
+
         finally:
             store.close()
-
-
-# Fuzz: the job engine's queue with jobs interleaved. Arrivals come as webhook follow-ups (which may join a waiting
-# follow-up of their season) or as plain jobs, re-runs as manual jobs; up to three jobs run at once, one file at a time
-# in any interleaving, and each finished job queues its Season job through the real job_runner and triggers code. Once
-# every queued job has run, the decisions must equal the all-at-once decisions of tests/markers/audio/test_season.py.
-
-QUEUE_FUZZ_SEASONS, QUEUE_FUZZ_CHUNKS = 60, 3
-_MAX_RUNNING = 3
-# Jobs started, Season jobs started, files they listed, episodes joined to a waiting follow-up, and files run while
-# another job had started and not finished.
-_COUNTS = ("jobs", "season_jobs", "season_files", "joined_episodes", "interleaved_files")
-
-
-def _queued_season(root, settings, rng, mode, inputs, order, reruns):
-    """Run one fuzz season through the queue. Returns the final intro decisions and the job counts."""
-    media = root / "media"
-    folder = media / "tv" / "Show (2020) {tvdb-1}" / "Season 01"
-    folder.mkdir(parents=True)
-    store = MarkerStore(str(root / "markers.db"))
-    jm = JobManager(config_dir=str(root / "jobs"))
-    paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in inputs}
-    registry = _registry(paths[min(paths)], ServerType.PLEX)
-    settings["media_servers"] = [
-        _server(
-            "jf-1", "jellyfin", libraries=[{"id": "1", "name": "TV", "remote_paths": [str(media)], "enabled": True}]
-        )
-    ]
-    counts = dict.fromkeys(_COUNTS, 0)
-    if mode == "cold-open":
-        clients, detectors = _introdb_answer(*_point_ms(COLD_OPEN_AT)), (_spec(),)
-
-        def probe(path, **kwargs):
-            chapter = inputs[int(re.search(r"E(\d+)", os.path.basename(path)).group(1))]["chapter"]
-            if chapter is None:
-                return _chapter_probe(None)
-            start, end = _point_ms(SEASON_INTRO_AT if chapter == "x" else COLD_OPEN_AT)
-            return _chapter_probe(end - start, at_ms=start)
-
-        audio, probes = _Audio(points=_cold_open_points(inputs)), patch.object(season, "probe_media", side_effect=probe)
-    else:
-        chapters = _Chapters(inputs)
-        clients, detectors, probe = None, ((_spec(),) if mode == "season-audio" else ()), chapters.probe
-        audio, probes = _Audio(points=_episode_noise), chapters
-
-    def run_file(ctx, path):
-        if _run(ctx, path, {"plex-1": ready_publisher()}, probe_effect=probe)[0] is None:
-            _run(ctx, path, {"plex-1": ready_publisher()}, stage="process", probe_effect=probe)
-
-    running = []  # [job, cfg, ctx, items, next index]
-    arrivals = list(zip(order, reruns, strict=True))
-    arrived = []
-    try:
-        with (
-            audio,
-            probes,
-            patch.object(job_runner, "get_job_manager", lambda: jm),
-            patch.object(triggers, "get_job_manager", lambda: jm),
-            patch.object(triggers, "start_intro_credits_job_async", lambda job_id: None),
-        ):
-            while True:
-                waiting = jm.get_pending_jobs()
-                actions = (["arrive"] if arrivals else []) + (["step"] * 2 if running else [])
-                actions += ["start"] if waiting and len(running) < _MAX_RUNNING else []
-                if not actions:
-                    break
-                action = rng.choice(actions)
-                if action == "arrive":
-                    e, rerun = arrivals.pop(0)
-                    if rerun is not None and arrived:
-                        path = paths[arrived[rerun % len(arrived)]]
-                        triggers.create_intro_credits_job(
-                            library_name="re-run", priority=rng.choice([2, 3]), source="manual", file_paths=[path]
-                        )
-                    _write(paths[e], 100 + e)
-                    arrived.append(e)
-                    if rng.random() < 0.7:
-                        before = {j.id for j in jm.get_all_jobs()}
-                        job_id = triggers.submit_webhook_follow_up(
-                            preview_job_id=f"prev-{e}", paths=[paths[e]], source="plex"
-                        )
-                        counts["joined_episodes"] += job_id in before
-                    else:
-                        triggers.create_intro_credits_job(
-                            library_name="listing", priority=3, source="schedule", file_paths=[paths[e]]
-                        )
-                elif action == "start":
-                    job = rng.choice(waiting)
-                    jm.start_job(job.id)
-                    cfg = job_runner._seal_files(jm, job.id, job, dict(job.config or {}))
-                    items = sorted(set(cfg["file_paths"]))
-                    ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors, clients=clients)
-                    running.append([job, cfg, ctx, items, 0])
-                    counts["jobs"] += 1
-                    if cfg.get("source") == job_runner.SEASON_SOURCE:
-                        counts["season_jobs"] += 1
-                        counts["season_files"] += len(items)
-                else:
-                    entry = rng.choice(running)
-                    job, cfg, ctx, items, index = entry
-                    if index < len(items):
-                        counts["interleaved_files"] += len(running) > 1
-                        run_file(ctx, items[index])
-                        entry[4] += 1
-                    else:
-                        running.remove(entry)
-                        # Sealed: nothing may join a job once it has read its files.
-                        assert jm.get_job(job.id).config["file_paths"] == cfg["file_paths"]
-                        jm.complete_job(job.id)
-                        job_runner._queue_season_followups_after(job, cfg, ctx, set(items))
-                _assert_no_file_waits_twice(jm)
-        return {e: _intro_decision(store, paths[e]) for e in inputs}, counts
-    finally:
-        store.close()
-
-
-def _assert_no_file_waits_twice(jm):
-    waiting = [p for j in job_runner._waiting_season_jobs(jm) for p in j.config["file_paths"]]
-    assert len(waiting) == len(set(waiting))
-
-
-@pytest.mark.parametrize("chunk", range(QUEUE_FUZZ_CHUNKS))
-@pytest.mark.parametrize("mode", ["weekly", "reruns", "season-audio", "cold-open"])
-def test_queued_season_jobs_end_with_the_all_at_once_decisions(tmp_path, settings, mode, chunk):
-    size = QUEUE_FUZZ_SEASONS // QUEUE_FUZZ_CHUNKS
-    rng = Random(20260915 + chunk)
-    mismatches = []
-    for i, (inputs, order, reruns) in enumerate(_fuzz_cases(mode)[chunk * size : (chunk + 1) * size]):
-        if mode == "cold-open":
-            want, _, _ = _cold_open_season(tmp_path / f"all{i}", inputs, [sorted(inputs)])
-        else:
-            detectors = (_spec(),) if mode == "season-audio" else ()
-            want = _chapter_season(tmp_path / f"all{i}", inputs, [sorted(inputs)], [None], detectors)
-        got, _counts = _queued_season(tmp_path / f"queued{i}", settings, rng, mode, inputs, order, reruns)
-        if got != want:
-            mismatches.append((inputs, order, reruns, {e: (want[e], got[e]) for e in want if want[e] != got[e]}))
-    assert mismatches == []
-
-
-def test_the_fuzz_queue_really_interleaves_joins_and_queues_season_jobs(tmp_path, settings):
-    rng = Random(1)
-    counts = dict.fromkeys(_COUNTS, 0)
-    for i, (inputs, order, reruns) in enumerate(_fuzz_cases("reruns")[:10]):
-        _got, one = _queued_season(tmp_path / f"q{i}", settings, rng, "reruns", inputs, order, reruns)
-        counts = {k: counts[k] + one[k] for k in counts}
-    assert all(counts.values()), counts

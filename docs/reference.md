@@ -440,23 +440,13 @@ pair on its own. An agreeing server marker doesn't hold season audio back (it de
 An intro season audio decided alone keeps asking the
 online sources on their schedule.
 
-After an update that raises a detector's or reader's version (credit text, season audio and its end-picture check,
-the server-marker reader, chapter rules, an online parser), every start queues **Intro & Credits: re-checking
-files after an update** (Low priority, source `version_rerun`) while a file is left: an ordinary Intro & Credits job
-over at most 100 files still on disk where an unlocked decided type rests on an older answer, or a type that answer
-covers wasn't found. Credit text and season audio check what other sources decided (a credits
-chapter or an online start, an intro chapter or a lone online intro), so their older answer lists an unlocked decided
-type whatever decided it. It also takes files whose one-version Plex item still shows times within
-2 s of an older decision and, after an update that changes the decision rules, every file not yet decided under
-them with an unlocked type that has a stored answer (decided, not found, or kept as the server's own;
-not a type whose detection is off) or a marker carried over from a file it replaced: each run that decides a file records the rules version it used (`decide_rules` in
-`version_reruns`). A marker such a run's new rules alone would leave out stays while
-a server has it and no new or changed answer disagrees, its reason starting "kept: published before a rule change". The next batch is queued 30 minutes after one completes; after a cancelled or failed batch
-the next start queues one. A job keeps its batch in its config (`version_rerun_files`, removed when it ends) so a job
-revived after a restart runs the same files, and each file is recorded in markers.db (`version_reruns`) with the
-versions it was read for as it finishes, whatever its outcome: a file is read again once per version, and one a batch
-never reached (a cancel, a restart the job isn't revived after) is taken by a later batch. With Intro & Credits off on
-every server a batch takes nothing.
+After an update that raises a detector's or reader's version (credit text, season audio, server markers, chapters,
+online parsers), the next manual or scheduled **Find markers** run refreshes stale answers as needed and applies the
+current decision rules. Startup creates no upgrade jobs and completion creates no further upgrade batches. Each
+run that decides a file records its rules version (`decide_rules` in `version_reruns`). A marker that changed rules
+alone would leave out stays while a server has it and no new or changed answer disagrees, with reason
+"kept: published before a rule change". Legacy queued jobs keep their saved batch (`version_rerun_files`) for restart
+recovery, but do not schedule another batch. Use a user-created Find markers cron schedule for recurring checks.
 
 ### Per-server settings (`media_servers[].markers`)
 
@@ -525,15 +515,15 @@ column) holds:
 | `libraries` | `[{"server_id", "library_id"}]` | Libraries to enumerate. Empty with no `file_paths` = every library Intro & Credits goes to. |
 | `file_paths` | array of strings | Explicit files/folders instead of libraries (webhook follow-ups, Inspector re-detect, retries). |
 | `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). Episodes that later joined the job (see below) don't wait for their own preview jobs. |
-| `files_sealed` | bool | Present once a webhook follow-up or Season job has read its `file_paths`: no more files join it after that. |
+| `files_sealed` | bool | Present once a webhook follow-up has read its `file_paths`: no more files join it after that. Also retained for legacy Season jobs. |
 | `force` | bool | Re-detect files already decided, asking every source again. |
 | `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
-| `server_id` | string | Present only on a job pinned to one server: it publishes there only. A follow-up gets its preview job's pin as the preview workers resolve it per file (the webhook's or schedule's own pin; else an Emby or Jellyfin webhook, or a file a Recently Added scan listed from Emby or Jellyfin, pins it to that server). Its retries, verify job and TheIntroDB recheck keep it; Season jobs don't. |
+| `server_id` | string | Present only on a job pinned to one server: it publishes there only. A follow-up gets its preview job's pin as the preview workers resolve it per file (the webhook's or schedule's own pin; else an Emby or Jellyfin webhook, or a file a Recently Added scan listed from Emby or Jellyfin, pins it to that server). Its retries and verify job keep it. |
 | `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
 | `verify_chain` | bool | Present only on a retry queued by a verify job or by another retry in its chain: it queues no verify job. |
 | `chain_attempt` | int | Present only on a verify job queued by a retry: the retries already used, so the verify job's own retry goes on counting. |
 | `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
-| `retry_not_before` | ISO-8601 timestamp | Present only on a job queued to wait (a retry, verify job, TheIntroDB recheck or version batch): the due time. It survives a restart without waiting again in full, and the restart revival ages the job from it (`requeue_max_age_minutes`), not from when it was queued. When automatic restart recovery is enabled, a global or per-job pause exempts held work from the age limit; the existing hold still blocks processing. Ordinary unpaused stale work retains the configured limit. |
+| `retry_not_before` | ISO-8601 timestamp | Present only on a job queued to wait (a retry, verify job or version batch; also legacy TheIntroDB recheck jobs): the due time. It survives a restart without waiting again in full, and the restart revival ages the job from it (`requeue_max_age_minutes`), not from when it was queued. When automatic restart recovery is enabled, a global or per-job pause exempts held work from the age limit; the existing hold still blocks processing. Ordinary unpaused stale work retains the configured limit. |
 | `slot_wait_since` | ISO-8601 timestamp | The last time the job was seen waiting for a slot (preview jobs carry it too), refreshed at most once a minute while it waits. A restart ages a job from the latest of this and when it started or was created; a job that never started also from its due time (`retry_not_before`, or a preview retry's `scheduled_at`) and, for a follow-up, its preview job's end. A job queued behind a long scan is therefore aged by the downtime only. A Re-run drops it. |
 | `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
 | `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, files with a locked marker a server never received, and decided files to ask servers again about) instead of libraries or paths. |
@@ -549,26 +539,20 @@ retries, not `manual`/`inspector` or library runs) queue one. A job whose read-b
 the warning `Couldn't check what N file(s) show on <server>`. A job where an online source's daily budget ran out
 partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
-next scheduled or manual run for the same files asks it again on its own. For TheIntroDB only, the files it left with
-a type undecided (`no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
-named "TheIntroDB recheck: N files", at most 500 files) due 5 minutes after the next 00:00 UTC (`retry_not_before`);
-when it runs it drops files decided since, and lists nothing if TheIntroDB has been turned off. TheIntroDB also isn't
+next scheduled or manual run for the same files asks it again on its own. Recurring checks use user-created **Find markers** cron schedules; there is no automatic weekly online re-check or
+post-reset TheIntroDB job. A database's stored "no entry" is asked again by the next run that includes the file once
+it is more than 14 days old. TheIntroDB also isn't
 asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry"
 while none has an answer: none recorded in `series_lookups`, and no file under the show's folder with a stored
 TheIntroDB answer holding a marker. The 7 days run from the pause's start (`series_pauses` in `markers.db`); "no
 entry" answers during it don't extend it, the next pause needs 3 new ones after it ends, an answer with a marker ends
 it, and a forced run (`force`, Inspector re-detect) always asks.
 
-When a job's season step finds that other episodes of the same season could now be decided differently (their season
-intro-chapter check or season audio answer is out of date; an episode season audio never answered for, such as one no
-server takes for Intro & Credits, has no answer to go out of date), the job queues a **Season job** for them once it
-completes: `source: "season"`, named `Season: <show> · <season folder>` (or `Season: N seasons`), at Low priority —
-Normal when the job was a webhook follow-up (not its retries or verify job, which queue theirs at Low), never ahead of
-the job that asked — and capped at 500 files; more are left to their next run. Episodes already listed by a Season job
-that hasn't read its files yet, or by a webhook follow-up that hasn't started, aren't queued again; new ones join such
-a Season job at the same priority while it stays within 500 files. A Season job queues no further Season job, verify
-job or retry for a file gone from disk. A cancelled job queues none. The requests live in memory: a restart before the
-job completes drops them, and the season's next run asks again. Every job that completes, except Season, retry and verify
+When another episode changes a season's intro-chapter checks or season audio answers, affected episodes are
+refreshed by the next manual or scheduled Find markers run that includes them. No additional `source: "season"`
+job is created on completion, cancellation, failure, or restart. Inspector Season view **Publish** remains an
+explicit way to run the season. Legacy queued Season jobs can still finish their saved files and retain their
+history; they do not pass pending sibling requests into new jobs. Every job that completes, except Season, retry and verify
 jobs, then starts a background cleanup once it has given back its slot (at most one running, and at most one start an
 hour). It checks up to 2,000 fingerprinted files on disk for at most 60 s, those checked longest ago first, and clears
 the cached fingerprints (and the matches made with them) of files gone from a folder that still exists, or marked missing for 30 days. The app log

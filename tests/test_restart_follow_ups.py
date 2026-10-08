@@ -77,7 +77,6 @@ class TestFollowUpsStayWithTheirPreviewJob:
         with (
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
             patch("media_preview_generator.web.routes._start_job_async") as boot_start,
-            patch("media_preview_generator.markers.job_runner.pass_on_requests_of_unrevived_jobs"),
         ):
             mock_sm.return_value.get.side_effect = lambda key, default=None: settings.get(key, default)
             mock_sm.return_value.processing_paused = paused

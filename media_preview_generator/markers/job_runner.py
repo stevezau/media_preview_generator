@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from loguru import logger
 
@@ -28,12 +28,9 @@ from ..utils import redact_secrets, redacted_traceback
 from ..web.job_gate import format_wait_message, get_job_gate
 from ..web.jobs import (
     PAUSED_BY_SCHEDULE,
-    PRIORITY_LOW,
-    PRIORITY_NORMAL,
     JobStatus,
     WorkerStatus,
     get_job_manager,
-    is_live_retry_chain,
 )
 from ..web.routes._helpers import _ensure_gpu_cache
 from ..web.routes.job_runner import (
@@ -46,11 +43,9 @@ from ..web.routes.job_runner import (
 )
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
-from .audio.season import season_audio_answer_outdated
 from .carry_over import is_carried_over
 from .credits import decode_check
 from .decide import DecisionStatus
-from .external_ids import is_season_folder
 from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL, season_of, start_line
 from .missing import MISSING_LINE, mark_missing_files
 from .models import Source
@@ -75,14 +70,13 @@ from .pipeline import (
     kind_handlers,
     online_recheck_files,
     run_detector_checks,
-    sequence_number,
 )
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
 from .source_counts import DecidedByTally, stored_groups
 from .sources.ratelimit import RESET_TIME_LABEL
 from .store import MarkerStore
-from .versions import BATCH_FILES, BATCH_GAP, next_batch, record_taken
+from .versions import BATCH_FILES, next_batch, record_taken
 
 _POLL_S = 1.0
 # Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
@@ -97,23 +91,20 @@ VERIFY_DELAY_FACTOR = 3
 _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 # Job sources where the user chose the files (API/Start job dialog, Inspector re-detect, Season view Publish).
 _USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
+# Legacy source retained for queued jobs and history.
 SEASON_SOURCE = "season"
 # The follow-up of a scheduled Recently Added scan (``jobs.orchestrator._queue_intro_credits_follow_ups``).
 RECENTLY_ADDED_SOURCE = "recently_added"
-# A job that checks files again once TheIntroDB's daily budget has reset (``_queue_budget_recheck``).
+# Legacy source retained for existing queued jobs and history.
 BUDGET_RECHECK_SOURCE = "theintrodb_recheck"
-# How long after the UTC day roll that job starts, so the limiter and TheIntroDB have both started the new day.
-BUDGET_RECHECK_AFTER_RESET = timedelta(minutes=5)
-# The one-off job that decides files again after an upgrade changed the rules (``triggers.submit_decide_again``): its
+# Legacy job that decides files again after an upgrade changed the rules: its
 # source, and the config key that lists those files when it runs (``_items_to_decide_again``).
 DECIDE_AGAIN_SOURCE = "decide_again"
 DECIDE_AGAIN = "decide_again"
-# The weekly job that asks the online databases again about files they had no entry for
-# (``triggers.submit_online_recheck``): its source, and the config key that lists those files when it runs
-# (``pipeline.online_recheck_files``).
+# Legacy online re-check jobs still list their due files when resumed after a restart.
 ONLINE_RECHECK_SOURCE = "online_recheck"
 ONLINE_RECHECK = "online_recheck"
-# A batch of the files whose answers rest on an older detector version (``triggers.submit_version_reruns``): its source,
+# A legacy batch of files whose answers rest on an older detector version: its source,
 # the config key that takes the batch when it runs (``versions.next_batch``), and the key holding the batch taken, with
 # the versions each file was taken for, so a run revived after a restart runs the same files (taken off the job when
 # it ends, like the Check servers listing).
@@ -121,19 +112,14 @@ VERSION_RERUN_SOURCE = "version_rerun"
 VERSION_RERUN = "version_rerun"
 VERSION_RERUN_FILES = "version_rerun_files"
 # Where a batch stands in the whole re-check, for its name: ``{"total", "batch", "batch_size"}``, the total being the
-# files listed when the first batch was queued. Each batch passes it on to the next (``_queue_next_batch``).
+# files listed when the first batch was queued. Retained for existing jobs and history.
 VERSION_RERUN_COUNTS = "version_rerun_counts"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
-# A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
-# ``pipeline.sequence_number`` of the request, and, once it has passed them on, the seal that stops more joining.
-LATE_REQUESTS = "late_requests"
-LATE_SEALED = "late_requests_sealed"
-# Serialises adding files to a waiting follow-up (webhook episodes in triggers.py, Season requests here) with its runner
-# reading them, so a file joins exactly one job.
+# Serialises webhook episodes joining a waiting follow-up with its runner reading them.
 FOLLOW_UP_LOCK = threading.Lock()
-# Config keys files join a job through (``_queue_season_followups``, ``triggers._join``) or its seals write.
-_JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED, LATE_REQUESTS, LATE_SEALED)
+# Config keys updated by webhook joins or the runner's file seal.
+_JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED)
 # Job sources whose files no sender just reported: a file missing from disk won't appear by waiting (and nothing was
 # just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain. A scheduled
 # Recently Added scan's follow-up lists what servers had already indexed, like a library listing.
@@ -492,24 +478,6 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
         logger.exception("Could not queue the later check of the replaced files job {} published", job.id)
 
 
-def _season_of(path: str) -> tuple[str, str]:
-    """A file's show and season folder names ("" for a show kept without season folders): one season kept on several
-    disks of a library is one season (``season.season_folders``)."""
-    folder = os.path.dirname(path)
-    name = os.path.basename(folder)
-    if is_season_folder(name):
-        return os.path.basename(os.path.dirname(folder)), name
-    return name, ""
-
-
-def _season_job_name(paths: list[str]) -> str:
-    seasons = sorted({_season_of(p) for p in paths})
-    if len(seasons) > 1:
-        return f"Season: {len(seasons)} seasons"
-    show, name = seasons[0]
-    return f"Season: {show} · {name}" if name else f"Season: {show}"
-
-
 # What started the preview job a follow-up follows (its ``source``), in words.
 _SENDER_WORDS = {
     "radarr": "Radarr import",
@@ -578,343 +546,6 @@ def trigger_words(job, cfg: dict) -> str:
     return _SENDER_WORDS.get(source, source or "manual run")
 
 
-def _is_season_job_taking_files(job) -> bool:
-    cfg = job.config or {}
-    if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != SEASON_SOURCE:
-        return False
-    return not (cfg.get("retry_attempt") or cfg.get("verify"))
-
-
-def _waiting_season_jobs(jm) -> list:
-    """Season jobs whose runner hasn't read their files yet (call under ``FOLLOW_UP_LOCK``).
-
-    A file they list is decided with everything known when they run, so asking for it again adds nothing.
-    """
-    return [
-        job
-        for job in jm.get_pending_jobs()
-        if _is_season_job_taking_files(job) and not (job.config or {}).get(FILES_SEALED)
-    ]
-
-
-def _covers_pin(job_pin: str | None, request_pin: str | None) -> bool:
-    """Whether a job with ``job_pin`` publishes a file everywhere a request with ``request_pin`` wants it: an unpinned
-    job covers any request, a pinned one only a request with the same pin (``triggers._queued_in_waiting_follow_ups``).
-    """
-    return job_pin is None or job_pin == request_pin
-
-
-def _running_season_jobs(jm, priority: int) -> list:
-    """Running Season jobs at ``priority`` that still take requests (call under ``FOLLOW_UP_LOCK``).
-
-    Season jobs start within milliseconds of being queued, so a request that only joined waiting ones would queue a new
-    Season job for every job that finishes while one runs (spec §14, 2026-09-24).
-    """
-    return [
-        job
-        for job in jm.get_running_jobs()
-        if _is_season_job_taking_files(job) and job.priority == priority and not (job.config or {}).get(LATE_SEALED)
-    ]
-
-
-def _leave_to_running_season_jobs(jm, job, paths: list[str], priority: int, pin: str | None = None) -> list[str]:
-    """Hand each file to a running Season job at ``priority`` that lists an episode of its season and publishes where the
-    request does (``pin``; call under ``FOLLOW_UP_LOCK``). The Season job runs it again once it has finished, in one
-    follow-up, only when its own run of the file started before this request (``_pass_on_late_requests``), under its
-    own pin.
-
-    Returns:
-        The files no running Season job took.
-    """
-    left = list(paths)
-    for season_job in _running_season_jobs(jm, priority):
-        cfg = season_job.config or {}
-        if server_pin(cfg) != pin:
-            # Its follow-up publishes where it does: a request for other servers would lose them, one for fewer gain.
-            continue
-        late = dict(cfg.get(LATE_REQUESTS) or {})
-        seasons = {_season_of(path) for path in [*(cfg.get("file_paths") or []), *late]}
-        room = MAX_RETRY_FILES - len(late)
-        taken = [path for path in left if _season_of(path) in seasons][: max(0, room)]
-        if not taken:
-            continue
-        number = sequence_number()
-        late.update(dict.fromkeys(taken, number))
-        if not jm.merge_job_config(season_job.id, {LATE_REQUESTS: late}):
-            continue
-        jm.add_log(
-            job.id,
-            f"INFO - {len(taken)} episode(s) of the same season are left to the running Season job "
-            f"{season_job.id[:8]}, which checks them with this job's results",
-        )
-        taken_set = set(taken)
-        left = [path for path in left if path not in taken_set]
-        if not left:
-            break
-    return left
-
-
-def _queue_season_followups(job, paths: list[str], *, priority: int | None = None) -> None:
-    """Queue episodes of this job's seasons to be decided again (spec §5.3). Never raises.
-
-    A running Season job at the job's Season priority that lists an episode of a file's folder takes the file (it runs
-    the file again after it finishes when its own run came first: ``_pass_on_late_requests``); one waiting Season job at
-    that priority takes the rest when they fit; a file a waiting Season job (at any priority) or a webhook follow-up
-    that has never started already lists isn't queued again: it reads the file after this job's work. Season jobs run
-    at LOW, or at NORMAL for a webhook follow-up (the webhook rule), never ahead of the job that asked; a webhook
-    follow-up's retry or verify job queues its Season job at LOW.
-
-    Args:
-        job: The job that just finished.
-        paths: Files its season steps asked about that weren't its own items, and its own items whose season audio
-            answer left out a sibling it read again later (``_queue_season_followups_after``).
-        priority: The Season priority; None works it out from ``job`` as above (a Season job passing on requests
-            gives its own).
-    """
-    jm = get_job_manager()
-    try:
-        from .triggers import _queued_in_waiting_follow_ups, create_intro_credits_job
-
-        cfg = job.config or {}
-        # The episodes publish where the asking job does, as its retries and verify jobs do.
-        pin = server_pin(cfg)
-        if priority is None:
-            priority = max(PRIORITY_NORMAL, job.priority) if cfg.get("follows_job_id") else PRIORITY_LOW
-        with FOLLOW_UP_LOCK:
-            waiting = _waiting_season_jobs(jm)
-            queued = {
-                path
-                for season_job in waiting
-                if _covers_pin(server_pin(season_job.config), pin)
-                for path in season_job.config.get("file_paths") or []
-            }
-            queued |= _queued_in_waiting_follow_ups(jm, server_id=pin)
-            fresh = sorted(set(paths) - queued)
-            if not fresh:
-                jm.add_log(job.id, f"INFO - {len(paths)} episode(s) of the same season are already queued")
-                return
-            fresh = _leave_to_running_season_jobs(jm, job, fresh, priority, pin)
-            if not fresh:
-                return
-            chosen = fresh[:MAX_RETRY_FILES]
-            if len(fresh) > len(chosen):
-                jm.add_log(
-                    job.id, f"INFO - {len(fresh) - len(chosen)} more episode(s) are decided again on their own next run"
-                )
-            target = next(
-                (
-                    season_job
-                    for season_job in waiting
-                    if season_job.priority == priority
-                    and server_pin(season_job.config) == pin
-                    and len(season_job.config.get("file_paths") or []) + len(chosen) <= MAX_RETRY_FILES
-                ),
-                None,
-            )
-            if target is not None:
-                files = sorted([*(target.config.get("file_paths") or []), *chosen])
-                # Refused when the job was cancelled since it was listed: the files get a new job instead.
-                if jm.update_job_config_if_pending(target.id, {**target.config, "file_paths": files}):
-                    jm.update_job_library_name(target.id, _season_job_name(files))
-                else:
-                    target = None
-            if target is None:
-                target = create_intro_credits_job(
-                    library_name=_season_job_name(chosen),
-                    priority=priority,
-                    source=SEASON_SOURCE,
-                    file_paths=chosen,
-                    **_pinned_to(cfg),
-                )
-        jm.add_log(
-            job.id,
-            f"INFO - {len(chosen)} episode(s) of the same season are checked again with this job's results "
-            f"(job {target.id[:8]})",
-        )
-    except Exception:
-        logger.exception("Could not queue the season follow-up for Intro & Credits job {}", job.id)
-
-
-def _pass_on_late_requests(job, ctx: PipelineContext | None) -> None:
-    """A Season job that ended: stop taking requests, and queue one follow-up for the files other jobs asked for while it
-    ran that its own run of them didn't read (the run started before the request, or there was none). Only the first
-    call does anything. Never raises.
-
-    The requesting jobs handed those files over and queue nothing for them themselves, so a job that didn't finish
-    (cancelled, failed, or not revived after a restart) passes every one of them on.
-
-    Args:
-        job: The Season job.
-        ctx: Its context (``PipelineContext.ran_since``); None when the job didn't finish.
-    """
-    jm = get_job_manager()
-    try:
-        with FOLLOW_UP_LOCK:
-            latest = jm.get_job(job.id)
-            config = (latest.config or {}) if latest is not None else {}
-            if config.get(LATE_SEALED):
-                return
-            jm.merge_job_config(job.id, {LATE_SEALED: True})
-        late = config.get(LATE_REQUESTS)
-        if not isinstance(late, dict) or not late:
-            return
-        again = sorted(path for path, number in late.items() if ctx is None or not ctx.ran_since(path, int(number)))
-        if ctx is None:
-            jm.add_log(
-                job.id,
-                f"INFO - This job didn't finish: the {len(again)} episode(s) other jobs asked for while it ran go to "
-                "another Season job",
-            )
-        if again:
-            _queue_season_followups(job, again, priority=job.priority)
-        else:
-            jm.add_log(
-                job.id, f"INFO - The {len(late)} episode(s) other jobs asked for while this job ran were checked after"
-            )
-    except Exception:
-        logger.exception("Could not pass on what other jobs asked Season job {} for", job.id)
-
-
-def pass_on_requests_of_unrevived_jobs(jobs: list) -> None:
-    """Season jobs a restart left behind and marked failed: queue what other jobs had handed them. Never raises.
-
-    Args:
-        jobs: The jobs ``JobManager.fail_unrevived_interrupted_jobs`` marked failed.
-    """
-    for job in jobs:
-        if (job.config or {}).get("source") == SEASON_SOURCE:
-            _pass_on_late_requests(job, None)
-
-
-def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None:
-    """Queue the Season job for the files this job's season steps asked about that weren't its items, and for its own
-    items whose season audio answer left out a sibling changed on disk that the job read again after them.
-
-    A Season job queues none of its own: a sibling whose answer is still out of date is asked for again by the season's
-    next run, so nothing loops. It only passes on what other jobs asked it for while it ran (``_pass_on_late_requests``).
-    A retry whose runs changed nothing stored (``PipelineContext.answers_changed``) queues none either: whatever its
-    season steps found out of date was so before it ran, and the job that made it so queued it then.
-    """
-    if cfg.get("source") == SEASON_SOURCE:
-        _pass_on_late_requests(job, ctx)
-        return
-    paths = [path for path in ctx.take_followups() if path not in listed]
-    for path in ctx.take_changed_siblings_left_out():
-        if path in paths:
-            continue
-        try:
-            outdated = season_audio_answer_outdated(ctx, path)
-        except Exception as exc:
-            # The job has completed: a failed read only leaves this episode to its next run.
-            logger.warning("Couldn't check whether {} needs its season asked again: {}", path, type(exc).__name__)
-            continue
-        if outdated:
-            paths.append(path)
-    if not paths:
-        return
-    if cfg.get("retry_attempt") and not ctx.answers_changed():
-        get_job_manager().add_log(
-            job.id,
-            f"INFO - {len(paths)} episode(s) of the same season aren't checked again: this retry changed nothing",
-        )
-        return
-    _queue_season_followups(job, paths)
-
-
-def budget_recheck_due(refused_at: datetime) -> datetime:
-    """When files TheIntroDB's used-up daily budget refused at ``refused_at`` are checked again.
-
-    Args:
-        refused_at: When (UTC) the first of them was refused.
-
-    Returns:
-        Shortly after the next UTC day roll, when the budget resets.
-    """
-    next_day = (refused_at + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return next_day + BUDGET_RECHECK_AFTER_RESET
-
-
-def _waiting_budget_recheck(jm, pin: str | None = None):
-    """The recheck job with this server pin still counting down to the next reset, if any (call under
-    ``FOLLOW_UP_LOCK``).
-
-    One already due (waiting for a slot) runs before the budget resets again: files refused since then would only be
-    refused again, so they get a new job.
-    """
-    now = _utcnow()
-    for job in jm.get_pending_jobs():
-        cfg = job.config or {}
-        if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != BUDGET_RECHECK_SOURCE or cfg.get(FILES_SEALED):
-            continue
-        if server_pin(cfg) != pin:
-            continue
-        try:
-            due = datetime.fromisoformat(cfg.get("retry_not_before") or "")
-        except (TypeError, ValueError):
-            continue
-        if due > now:
-            return job
-    return None
-
-
-def _queue_budget_recheck(job, ctx) -> None:
-    """Queue the files this job checked without TheIntroDB, because its daily budget had run out, that it left with a
-    type undecided: they're checked again just after the budget resets at 00:00 UTC. Never raises.
-
-    One waiting recheck job (LOW, like a backfill) takes the files of every job with the same server pin that ran out
-    that day, up to ``MAX_RETRY_FILES``; it lists each file only if TheIntroDB is still on and the file still has a type undecided when
-    it runs (``_budget_recheck_items``). Its own files that run out again are queued for the next reset the same way.
-
-    Args:
-        job: The job that just finished.
-        ctx: Its pipeline context.
-    """
-    jm = get_job_manager()
-    try:
-        paths, refused_at = ctx.take_budget_rechecks()
-        if not paths or refused_at is None or not ctx.settings.source_enabled(Source.THEINTRODB.value):
-            return
-        from .triggers import create_intro_credits_job
-
-        with FOLLOW_UP_LOCK:
-            target = _waiting_budget_recheck(jm, server_pin(job.config))
-            listed = list((target.config or {}).get("file_paths") or []) if target is not None else []
-            fresh = [path for path in paths if path not in listed]
-            room = MAX_RETRY_FILES - len(listed)
-            chosen, left_out = fresh[: max(0, room)], fresh[max(0, room) :]
-            if target is not None and chosen:
-                files = [*listed, *chosen]
-                # Refused when the job was cancelled since it was listed: the files get a new job instead.
-                if jm.update_job_config_if_pending(target.id, {**target.config, "file_paths": files}):
-                    jm.update_job_library_name(target.id, f"TheIntroDB recheck: {len(files)} files")
-                else:
-                    target = None
-            if target is None and chosen:
-                due = budget_recheck_due(refused_at)
-                target = create_intro_credits_job(
-                    library_name=f"TheIntroDB recheck: {len(chosen)} files",
-                    priority=PRIORITY_LOW,
-                    source=BUDGET_RECHECK_SOURCE,
-                    file_paths=chosen,
-                    retry_delay_s=max(0, int((due - _utcnow()).total_seconds())),
-                    **_pinned_to(job.config),
-                )
-        if chosen:
-            jm.add_log(
-                job.id,
-                f"INFO - {len(chosen)} file(s) checked without TheIntroDB (daily limit reached) are checked again after "
-                f"it resets at {RESET_TIME_LABEL} (job {target.id[:8]})",
-            )
-        if left_out:
-            jm.add_log(
-                job.id,
-                f"INFO - {len(left_out)} more file(s) checked without TheIntroDB aren't checked again automatically; "
-                "the next run of their library checks them",
-            )
-    except Exception:
-        logger.exception("Could not queue the TheIntroDB recheck for Intro & Credits job {}", job.id)
-
-
 def _still_undecided(store: MarkerStore, path: str) -> bool:
     """Whether a file has a type left undecided (True when the store knows no decisions for it), a marker carried
     over from a replaced file counting as undecided (spec §5.5 rule 15)."""
@@ -943,10 +574,8 @@ def _budget_recheck_items(job_id: str, ctx, items: list[ProcessableItem]) -> lis
 def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
     """The config whose files the job lists now: re-read and sealed when other requests may have added files to it.
 
-    Episodes of a season join a webhook follow-up, Season requests join a Season job, and files TheIntroDB's budget
-    refused join the waiting recheck job, while it waits; the read and the seal happen under the lock those additions
-    take, so a file added to a job is listed by it and nothing is added once it has read its files. (A file can still be
-    listed by two jobs, e.g. a Season job and a started follow-up.)
+    Webhook episodes can join until the runner seals its files under the same lock. Legacy Season and TheIntroDB
+    jobs still seal their saved lists when resumed, but no new requests are added to them.
 
     Returns:
         The config to list the files of.
@@ -1518,8 +1147,7 @@ def finish_job(
 def _settle_decide_again(jm, job_id: str, cfg: dict) -> None:
     """Once the decide-again job has completed, clear the upgrade's request for it (``upgrade.DECIDE_AGAIN_KEY``).
 
-    Only a completed job clears it: one cancelled, failed or cut short by a restart leaves it, so the next start queues
-    the job again (``web.app._decide_again_after_upgrade``). Never raises.
+    Only a completed legacy job clears it. The flag no longer creates jobs on startup. Never raises.
     """
     if not cfg.get(DECIDE_AGAIN):
         return
@@ -1531,29 +1159,7 @@ def _settle_decide_again(jm, job_id: str, cfg: dict) -> None:
 
         get_settings_manager().delete(DECIDE_AGAIN_KEY)
     except Exception as exc:
-        logger.warning("Couldn't record that the decide-again job finished: {}; the next start queues it again", exc)
-
-
-def _queue_next_batch(jm, job_id: str, cfg: dict) -> None:
-    """Once a batch of files re-checked after an update has run, queue the next one to start after
-    ``versions.BATCH_GAP`` (``triggers.submit_version_reruns`` queues none when no file is left). Never raises.
-
-    Only a batch that completed (or whose retry chain now waits for the files a server hadn't indexed yet) is followed:
-    one cancelled or failed leaves the rest to the next start.
-    """
-    if not cfg.get(VERSION_RERUN):
-        return
-    try:
-        finished = jm.get_job(job_id)
-        if finished is None or not (finished.status is JobStatus.COMPLETED or is_live_retry_chain(finished.config)):
-            return
-        from .triggers import submit_version_reruns
-
-        submit_version_reruns(delay_s=int(BATCH_GAP.total_seconds()), after=cfg.get(VERSION_RERUN_COUNTS))
-    except Exception as exc:
-        logger.warning(
-            "Couldn't queue the next batch of files to re-check after an update: {}; the next start does", exc
-        )
+        logger.warning("Couldn't record that the legacy decide-again job finished: {}", exc)
 
 
 def wait_releasing_slot_while_paused(
@@ -1775,9 +1381,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
     # A batch of files to re-check after an update, with the versions each is read for: each file is recorded as it
     # finishes (``versions.record_taken``). Empty for any other job.
     rerun_batch: dict[str, dict[str, int]] = {}
-    # A Season job's requests from other jobs, passed on where it completes; the teardown passes on the rest whatever
-    # ended the job (``_pass_on_late_requests``).
-    requests_passed_on = False
     parked = False
 
     def cancel_check() -> bool:
@@ -1990,9 +1593,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         jm.complete_job(job_id)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
-                    if cfg.get("source") == SEASON_SOURCE:
-                        _pass_on_late_requests(job, ctx)
-                        requests_passed_on = True
                     sweep_store = ctx.store
                     return
                 sent_files = _sends_files(cfg)
@@ -2000,7 +1600,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                 # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
                 # servers rescanned it long since. A verify chain checks once.
                 checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
-                listed = set(saved["listed"]) if checkpoint else {item.canonical_path for item in items}
                 # A revived job still owes the later check of the replaced files it published before the restart.
                 # A retry's rows are its chain head's.
                 if checkpoint:
@@ -2023,16 +1622,12 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     jm.set_job_outcome(job_id, carried)
                     finish_job(jm, job_id, carried, warnings, ctx)
                     _settle_decide_again(jm, job_id, cfg)
-                    _queue_next_batch(jm, job_id, cfg)
                     if chain_head:
                         # A retry revived after a restart that had settled all its files: nothing is left to wait.
                         _recount_chain_head(jm, chain_head, ctx.store)
                         _end_chain(jm, cfg, {})
                     if replaced_before_restart and checks_replaced_later:
                         _queue_verify(job, cfg, replaced_before_restart, sender_paths)
-                    if cfg.get("source") == SEASON_SOURCE:
-                        _pass_on_late_requests(job, ctx)
-                        requests_passed_on = True
                     sweep_store = ctx.store
                     return
                 waiting = {key: set(values) for key, values in saved.get("waiting", {}).items()}
@@ -2137,7 +1732,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                             "context": snapshot_context(ctx),
                             "warnings": warnings,
                             "sender_paths": sender_paths,
-                            "listed": sorted(listed),
                             "rerun_batch": rerun_batch,
                             "waiting": {key: sorted(values) for key, values in waiting.items()},
                             "replaced": sorted(replaced),
@@ -2189,12 +1783,8 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     retried=bool(retried),
                 )
                 _settle_decide_again(jm, job_id, cfg)
-                _queue_next_batch(jm, job_id, cfg)
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
-                _queue_season_followups_after(job, cfg, ctx, listed)
-                requests_passed_on = True
-                _queue_budget_recheck(job, ctx)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
                 sweep_store = ctx.store
@@ -2248,9 +1838,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                 jm.clear_worker_statuses()
         except Exception as exc:
             logger.debug("Could not clear worker statuses after {}: {}", job_id, exc)
-        if cfg.get("source") == SEASON_SOURCE and not requests_passed_on and not parked:
-            # Cancelled or failed before it completed: what other jobs handed over still needs a Season job.
-            _pass_on_late_requests(job, None)
         unregister_job_thread()
         # After the slot is back, and outside the job's log: a skipped cleanup's warning isn't about this job.
         if sweep_store is not None:
@@ -2275,9 +1862,9 @@ def start_intro_credits_job_async(job_id: str, config_overrides: dict | None = N
         return
     if config_overrides:
         jm = get_job_manager()
-        # Resume paths pass a snapshot of the job's config; files that joined it since (webhook episodes, Season
-        # requests) are kept. Only this branch takes the lock: create_intro_credits_job starts jobs without overrides,
-        # and its callers submit_webhook_follow_up and _queue_season_followups hold the (non-reentrant) lock then.
+        # Resume paths pass a snapshot of the job's config; webhook episodes that joined it since are kept.
+        # Only this branch takes the lock: create_intro_credits_job starts jobs without overrides,
+        # and its caller submit_webhook_follow_up holds the (non-reentrant) lock then.
         with FOLLOW_UP_LOCK:
             job = jm.get_job(job_id)
             if job is not None:

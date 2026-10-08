@@ -330,38 +330,3 @@ class TestJobRunnerKeepsThePin:
         (call,) = later.create.call_args_list
         assert call.kwargs["library_name"].startswith(name)
         assert call.kwargs.get("server_id") == pin
-
-    @pytest.mark.parametrize(
-        ("job_pin", "waiting_pin", "joins"),
-        [(None, None, True), ("emby-1", "emby-1", True), ("emby-1", None, False), (None, "emby-1", False)],
-    )
-    def test_its_theintrodb_recheck_joins_only_a_recheck_with_the_same_pin(
-        self, monkeypatch, job_pin, waiting_pin, joins
-    ):
-        from datetime import UTC, datetime
-
-        jm = MagicMock()
-        config = {
-            "source": job_runner.BUDGET_RECHECK_SOURCE,
-            "file_paths": ["/m/x.mkv"],
-            "retry_not_before": "2026-09-25T00:05:00+00:00",
-        }
-        if waiting_pin:
-            config["server_id"] = waiting_pin
-        jm.get_pending_jobs.return_value = [MagicMock(id="w1", kind=JOB_KIND_INTRO_CREDITS, config=config)]
-        jm.update_job_config_if_pending.return_value = True
-        monkeypatch.setattr(job_runner, "get_job_manager", lambda: jm)
-        monkeypatch.setattr(job_runner, "_utcnow", lambda: datetime(2026, 9, 24, 5, 0, tzinfo=UTC))
-        ctx = SimpleNamespace(
-            take_budget_rechecks=lambda: (["/m/a.mkv"], datetime(2026, 9, 24, 4, 42, tzinfo=UTC)),
-            settings=SimpleNamespace(source_enabled=lambda source_id: True),
-        )
-        job = MagicMock(id="j1", config={"server_id": job_pin} if job_pin else {})
-        with patch.object(triggers, "create_intro_credits_job", return_value=MagicMock(id="r1")) as create:
-            job_runner._queue_budget_recheck(job, ctx)
-        if joins:
-            create.assert_not_called()
-            assert jm.update_job_config_if_pending.call_args.args[1]["file_paths"] == ["/m/x.mkv", "/m/a.mkv"]
-        else:
-            jm.update_job_config_if_pending.assert_not_called()
-            assert create.call_args.kwargs.get("server_id") == job_pin

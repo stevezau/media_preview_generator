@@ -103,11 +103,8 @@ def test_forced_marker_job_parks_then_keeps_counts_and_followup_obligations(tmp_
     }.items():
         monkeypatch.setattr(job_runner, name, value)
     monkeypatch.setattr(jobs, "get_job_manager", lambda: manager)
-    followups, verify = MagicMock(), MagicMock()
-    monkeypatch.setattr(job_runner, "_queue_season_followups", followups)
+    verify = MagicMock()
     monkeypatch.setattr(job_runner, "_queue_verify", verify)
-    budget = []
-    monkeypatch.setattr(job_runner, "_queue_budget_recheck", lambda job, ctx: budget.append(ctx.take_budget_rechecks()))
     parent = manager.create_job(kind="intro_credits", config={"force": True, "file_paths": paths, "source": "sonarr"})
     runner = threading.Thread(target=job_runner.run_intro_credits_job, args=(parent.id,))
     runner.start()
@@ -126,11 +123,10 @@ def test_forced_marker_job_parks_then_keeps_counts_and_followup_obligations(tmp_
         assert processed == paths and len(contexts) == 2
         assert parent.progress.outcome[FileOutcome.PUBLISHED.value] == 2
         assert parent.progress.marker_sources == {"intro": {"chapters": 2}}
-        followups.assert_called_once_with(parent, [extra])
+        assert [job.id for job in manager.get_all_jobs()] == [parent.id]
         verify.assert_called_once()
         assert verify.call_args.args[0] is parent
         assert verify.call_args.args[2:] == ({paths[0]}, {})
-        assert budget == [([extra], datetime(2026, 10, 5, tzinfo=UTC))]
     finally:
         manager.request_cancellation(parent.id)
         group_runtime.wake_group_runtime()

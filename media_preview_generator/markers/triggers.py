@@ -18,7 +18,6 @@ from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
 from ..web.jobs import (
     PRIORITY_HIGH,
-    PRIORITY_LOW,
     PRIORITY_NORMAL,
     Job,
     JobManager,
@@ -30,24 +29,18 @@ from .audio.season import season_group, season_videos
 from .external_ids import ids_from_path, is_season_folder
 from .job_runner import (
     DECIDE_AGAIN,
-    DECIDE_AGAIN_SOURCE,
     FILES_SEALED,
     FOLLOW_UP_LOCK,
     MAX_RETRY_FILES,
-    ONLINE_RECHECK,
-    ONLINE_RECHECK_SOURCE,
     VERSION_RERUN,
     VERSION_RERUN_COUNTS,
-    VERSION_RERUN_SOURCE,
     sent_by_a_sender,
     server_pin,
     start_intro_credits_job_async,
 )
 from .ownership import marker_matches
-from .pipeline import ONLINE_SOURCES, online_recheck_files
-from .settings import get_global_settings, load_server
-from .store import get_marker_store
-from .versions import BATCH_FILES, files_to_read_again
+from .settings import load_server
+from .versions import BATCH_FILES
 
 # Serialises Inspector re-detect's "is this file already queued?" with the job creation, so a double-click queues one
 # job. Webhook follow-ups use job_runner.FOLLOW_UP_LOCK, which their runner also takes to read the files.
@@ -59,12 +52,7 @@ _loudness_follow_up_lock = threading.Lock()
 _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
 DECIDE_AGAIN_JOB_NAME = "Intro & Credits: files the old rules couldn't decide, decided again"
-ONLINE_RECHECK_JOB_NAME = "Intro & Credits: weekly online re-check"
 VERSION_RERUN_JOB_NAME = "Intro & Credits: Re-checking {total} after the app update · batch {batch} of {batches}"
-ONLINE_RECHECK_EVERY = timedelta(days=7)
-# The timer that queues the next weekly online re-check (``schedule_online_recheck``), replaced under its lock.
-_online_recheck_timer: threading.Timer | None = None
-_online_recheck_timer_lock = threading.Lock()
 
 
 def _utcnow() -> datetime:
@@ -142,7 +130,6 @@ def create_intro_credits_job(
     parent_job_id: str | None = None,
     max_retries: int = 0,
     decide_again: bool = False,
-    online_recheck: bool = False,
     version_rerun: bool = False,
     version_rerun_counts: Mapping[str, int] | None = None,
     server_id: str | None = None,
@@ -162,7 +149,7 @@ def create_intro_credits_job(
         item_id_hints: ``{path: {server_id: item_id}}`` from vendor webhooks.
         retry_attempt: For a retry of files a server hadn't indexed yet or that weren't on disk yet: which retry this
             is (1-based).
-        retry_delay_s: For a retry, a verify job or a TheIntroDB recheck: seconds to wait before it takes a slot.
+        retry_delay_s: For a retry or a verify job: seconds to wait before it takes a slot.
         verify: A later check of files published after they were replaced (``job_runner._queue_verify``).
         verify_chain: For a retry that follows a verify job (directly or through other retries): it queues no verify.
         chain_attempt: For a verify job: the retries its chain already used, so a retry it queues goes on counting.
@@ -173,8 +160,6 @@ def create_intro_credits_job(
         max_retries: For a retry: the retry count in force (the row's "Retry N/M").
         decide_again: List the files to decide again when the job runs (``job_runner._items_to_decide_again``)
             instead of libraries or paths.
-        online_recheck: List the files the online databases are due to be asked about again when the job runs
-            (``job_runner._items_for_online_recheck``) instead of libraries or paths.
         version_rerun: Take the next batch of files to re-check after an update when the job runs
             (``job_runner._items_to_read_again``) instead of libraries or paths.
         version_rerun_counts: For a version re-run: where its batch stands in the whole re-check
@@ -201,8 +186,6 @@ def create_intro_credits_job(
         config["reconcile"] = True
     if decide_again:
         config[DECIDE_AGAIN] = True
-    if online_recheck:
-        config[ONLINE_RECHECK] = True
     if version_rerun:
         config[VERSION_RERUN] = True
     if version_rerun_counts:
@@ -787,67 +770,6 @@ def submit_season_publish(episode: str) -> str:
     return job.id
 
 
-def submit_decide_again() -> str | None:
-    """Queue the one job that decides the files the old rules left in "Needs review" (a status the rules no longer
-    give, ``store.LEGACY_NEEDS_REVIEW``), those waiting for their item's other versions, those whose intro rests on
-    season audio, and those whose intro or credits rests on an online answer and a server's own marker alone, again.
-
-    Queued after the settings upgrade that removed the stricter publish rule (``upgrade._migrate_to_v16``), so the files
-    it held in Needs review are published now, not only when a later job happens to list them; a file whose last
-    publish waits for its item's other versions is published again with them. Queued once more after the one that
-    removed Needs review itself (``upgrade._migrate_to_v20``): every such file ends decided or with nothing found. Queued again after the one that added
-    season audio's guards (``upgrade._migrate_to_v17``), so an intro that was only a network ident or cold-open music
-    is decided again, and taken off the servers, now; and after the one that reads online times on the file's clock
-    (``upgrade._migrate_to_v18``), so a pair of online times from another release and a server's marker made for an
-    earlier file is decided again: the marker is read again and flagged, or, from a Plex server showing our markers
-    (never read back), an older version's answer stops counting. It is an ordinary Intro & Credits job at LOW
-    priority: stored answers that aren't due are reused, and only what is due or from an older version is asked or read again, as on any
-    run. The job lists the files when it runs (``job_runner._items_to_decide_again``); while one is queued or running,
-    that job is returned instead.
-
-    Returns:
-        The job's id; None when Intro & Credits is off on every server or no file is left under the old status,
-        waiting, or has an unlocked intro decided with season audio or an unlocked intro or credits decided by an
-        online answer and a server's marker alone.
-    """
-    if not markers_enabled_anywhere():
-        logger.info("Intro & Credits is off on every server; no file is decided again")
-        return None
-    store = get_marker_store()
-    legacy = set(store.files_with_legacy_review_decisions())
-    waiting = set(store.files_waiting_for_other_versions())
-    season_audio = set(store.files_with_season_audio_intro())
-    online_and_server = set(store.files_decided_by_online_and_server_markers())
-    if not legacy | waiting | season_audio | online_and_server:
-        logger.info(
-            "No file is left under the old Needs review status, waiting for its item's other versions, or has an "
-            "intro from season audio or from an online answer and a server's marker; nothing to decide again"
-        )
-        return None
-    jm = get_job_manager()
-    with _redetect_lock:
-        for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
-            cfg = job.config or {}
-            if job.kind == JOB_KIND_INTRO_CREDITS and cfg.get(DECIDE_AGAIN) and not is_live_retry_chain(cfg):
-                logger.info("The files to decide again are already queued as job {}", job.id[:8])
-                return job.id
-        job = create_intro_credits_job(
-            library_name=DECIDE_AGAIN_JOB_NAME,
-            priority=PRIORITY_LOW,
-            source=DECIDE_AGAIN_SOURCE,
-            decide_again=True,
-        )
-    logger.info(
-        "{} file(s) the old rules couldn't decide, {} waiting for their item's other versions and {} with an intro "
-        "from season audio are decided again (job {})",
-        len(legacy),
-        len(waiting - legacy),
-        len(season_audio - legacy - waiting),
-        job.id[:8],
-    )
-    return job.id
-
-
 def version_rerun_counts(listed: int, after: Mapping[str, object] | None = None) -> dict[str, int]:
     """Where the next batch of the re-check after an update stands: the next batch of the re-check ``after`` belongs
     to, or the first batch of a new one over the ``listed`` files.
@@ -885,171 +807,3 @@ def version_rerun_job_name(counts: Mapping[str, int]) -> str:
     batches = max(batch, math.ceil(total / max(1, int(counts["batch_size"]))))
     files = f"{total:,} file" if total == 1 else f"{total:,} files"
     return VERSION_RERUN_JOB_NAME.format(total=files, batch=batch, batches=batches)
-
-
-def submit_version_reruns(delay_s: int = 0, after: Mapping[str, object] | None = None) -> str | None:
-    """Queue the job that reads again the next batch of files whose answers rest on an older detector version.
-
-    Called on every start (``web.app._read_again_after_detector_updates``) and when a batch has run
-    (``job_runner._queue_next_batch``, with ``versions.BATCH_GAP`` as ``delay_s``). It is an ordinary Intro & Credits
-    job at LOW priority, behind previews: it takes at most ``versions.BATCH_FILES`` files still on disk when it runs,
-    and a run asks again only what is due or from an older version, as on any run. While one waits or runs, that job is
-    returned instead. Its name says how far along the whole re-check is (``version_rerun_job_name``).
-
-    Args:
-        delay_s: Seconds the job waits before it takes a slot (the gap between batches).
-        after: The counts of the batch that just ran (``job_runner.VERSION_RERUN_COUNTS``), so this batch goes on
-            counting; None on a start, which begins a new count unless a batch waits or runs.
-
-    Returns:
-        The job's id; None when Intro & Credits is off on every server or no file is left to read again.
-    """
-    if not markers_enabled_anywhere():
-        logger.info("Intro & Credits is off on every server; no file is read again for an updated detector")
-        return None
-    due = files_to_read_again(get_marker_store(), get_global_settings())
-    if not due:
-        logger.debug("No file has an answer from an older detector version or older decision rules to read again")
-        return None
-    jm = get_job_manager()
-    with _redetect_lock:
-        for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
-            cfg = job.config or {}
-            if job.kind == JOB_KIND_INTRO_CREDITS and cfg.get(VERSION_RERUN) and not is_live_retry_chain(cfg):
-                return job.id
-        counts = version_rerun_counts(len(due), after)
-        job = create_intro_credits_job(
-            library_name=version_rerun_job_name(counts),
-            priority=PRIORITY_LOW,
-            source=VERSION_RERUN_SOURCE,
-            version_rerun=True,
-            version_rerun_counts=counts,
-            retry_delay_s=int(delay_s),
-        )
-    by_detector: dict[str, int] = {}
-    for taken in due.values():
-        for detector in taken:
-            by_detector[detector] = by_detector.get(detector, 0) + 1
-    logger.info(
-        "{} file(s) rest on an answer from an older detector version, were decided under older rules, show times an "
-        "older publish rule kept, or wait for a Plex item's other versions ({}); "
-        "read again {} at a time (job {}: {})",
-        len(due),
-        ", ".join(f"{detector} {count}" for detector, count in sorted(by_detector.items())),
-        BATCH_FILES,
-        job.id[:8],
-        job.library_name.removeprefix("Intro & Credits: "),
-    )
-    return job.id
-
-
-def _queued_online_recheck(jm) -> Job | None:
-    """The weekly online re-check waiting to run or running, if any (call under ``FOLLOW_UP_LOCK``)."""
-    for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
-        if job.kind == JOB_KIND_INTRO_CREDITS and (job.config or {}).get(ONLINE_RECHECK):
-            return job
-    return None
-
-
-def submit_online_recheck() -> str | None:
-    """Queue the weekly job that asks the online databases again about files they had no entry for.
-
-    It lists the files where an enabled online source's "no entry" is due again (older than ``NO_DATA_RETRY``) and whose
-    decision it could still change (``pipeline.online_recheck_files``). It is an ordinary Intro & Credits job at LOW
-    priority: stored answers that aren't due are reused, so only the due lookups happen, and a file is read again only
-    when a detector answer of its own is due. TheIntroDB's daily budget and its per-show pause apply as on any run; a
-    file its budget refused goes to the TheIntroDB recheck. The job lists the files when it runs; while one waits to
-    run or runs, that job is returned instead.
-
-    Returns:
-        The job's id; None when Intro & Credits is off on every server, every online source is off, or no file is due.
-    """
-    if not markers_enabled_anywhere():
-        logger.info("Intro & Credits is off on every server; the weekly online re-check is skipped")
-        return None
-    settings = get_global_settings()
-    if not any(settings.source_enabled(source.value) for source in ONLINE_SOURCES):
-        logger.info("Every online database is turned off; the weekly online re-check is skipped")
-        return None
-    # Stops at the first file due: the job lists them all when it runs.
-    if not any(True for _path in online_recheck_files(get_marker_store(), settings, _utcnow())):
-        logger.info("No file is due to be asked again online; the weekly online re-check is skipped")
-        return None
-    jm = get_job_manager()
-    # The TheIntroDB recheck's lock: at most one re-check queued, like it.
-    with FOLLOW_UP_LOCK:
-        queued = _queued_online_recheck(jm)
-        if queued is not None:
-            logger.info("The weekly online re-check is already queued or running as job {}", queued.id[:8])
-            return queued.id
-        job = create_intro_credits_job(
-            library_name=ONLINE_RECHECK_JOB_NAME,
-            priority=PRIORITY_LOW,
-            source=ONLINE_RECHECK_SOURCE,
-            online_recheck=True,
-        )
-    logger.info("The weekly online re-check is queued (job {})", job.id[:8])
-    return job.id
-
-
-def schedule_online_recheck() -> None:
-    """Arm the timer that queues the weekly online re-check when it is due. Never raises.
-
-    The due time is kept in markers.db, so a restart doesn't put it off; the first start sets it a week ahead. One that
-    passed while the app was down, or that can't be read (not a time, or one without a time zone), fires at once; one
-    further off than a week (a clock set back) is brought to a week from now.
-    """
-    global _online_recheck_timer
-    try:
-        store = get_marker_store()
-        now = _utcnow()
-        try:
-            due = store.online_recheck_due()
-        except ValueError:
-            due = now
-        if due is None:
-            due = now + ONLINE_RECHECK_EVERY
-            store.set_online_recheck_due(due)
-        elif due.tzinfo is None:
-            due = now
-        due = min(due, now + ONLINE_RECHECK_EVERY)
-        delay = max(0.0, (due - now).total_seconds())
-    except Exception as exc:
-        logger.warning(
-            "Couldn't schedule the weekly Intro & Credits online re-check ({}: {}); the next start tries again",
-            type(exc).__name__,
-            exc,
-        )
-        return
-    timer = threading.Timer(delay, _run_online_recheck)
-    timer.daemon = True
-    timer.name = "markers-online-recheck"
-    with _online_recheck_timer_lock:
-        if _online_recheck_timer is not None:
-            _online_recheck_timer.cancel()
-        _online_recheck_timer = timer
-        timer.start()
-    logger.debug("The weekly Intro & Credits online re-check is due {}", due.isoformat())
-
-
-def _run_online_recheck() -> None:
-    """The timer's run: set the next re-check a week later, queue this one, and arm the next. Never raises.
-
-    The next due time is stored first, so a ``schedule_online_recheck`` while this run queues the job arms the next
-    week's, not this one again.
-    """
-    try:
-        get_marker_store().set_online_recheck_due(_utcnow() + ONLINE_RECHECK_EVERY)
-    except Exception as exc:
-        # Queued and armed again, the old due time would fire at once, and again: the next start schedules it instead.
-        logger.warning(
-            "Couldn't store when the next weekly online re-check is due ({}: {}); the next start schedules it",
-            type(exc).__name__,
-            exc,
-        )
-        return
-    try:
-        submit_online_recheck()
-    except Exception:
-        logger.exception("Couldn't queue the weekly Intro & Credits online re-check")
-    schedule_online_recheck()

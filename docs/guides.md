@@ -986,9 +986,9 @@ shown or returned by the API, and never logged.
 TheIntroDB's usage line in Settings shows "N of today's lookups used · limit set by TheIntroDB" — once a library
 job's daily lookups (or the smaller share left for full-library backfills) run out, it switches to "Daily limit
 reached — lookups resume at 00:00 UTC" instead. See the troubleshooting table below for what a job or a file shows
-when this happens mid-run. Files checked without TheIntroDB for that reason, and left with a marker undecided, are
-checked again automatically just after 00:00 UTC by one low-priority **TheIntroDB recheck** job (up to 500 files; it
-skips a file another job decided meanwhile, and runs nothing if you've turned TheIntroDB off by then).
+when this happens mid-run. Files checked without TheIntroDB are tried again by the next manual or scheduled
+**Find markers** job that includes them after the limit resets. To choose when that happens, create a **Find
+markers** schedule under **Schedules** with your preferred cron expression and libraries.
 
 To keep the daily lookups for shows TheIntroDB knows, a show it has no entry for (talk shows, for example) is left
 alone for 7 days once 3 of its episodes came back with nothing, while no episode of the show has an answer from it
@@ -1001,31 +1001,20 @@ always asks.
 **How often the online databases are asked again.** A database that had no entry for a file is asked again once that
 answer is 14 days old, by the next job that includes the file. A lookup that has to wait for a database's rate limit
 waits only while the job is checking the file, never on a GPU or CPU worker: there it says "unavailable (blocked)" and
-the next job asks. So those files don't wait for one, a Low-priority
-**Intro & Credits: weekly online re-check** job runs once a week. It takes the files still on disk whose intro or
-credits weren't found, or whose intro season audio found alone, where a database you have on answered "no
-entry" more than 14 days ago. It asks only those databases again, reuses every other saved answer, and reads a file
-only when one of its own saved answers is due; TheIntroDB's daily limit and its 7-day pause for a show apply as on
-any job. Its log ends with a line like "Weekly online re-check (12 files): 2 newly found online, 10 unchanged". The
-week counts from the first start with Intro & Credits on and carries over restarts; nothing is queued while Intro &
-Credits is off on every server, every online database is off, or the last re-check is still queued or running.
+the next job asks. For regular re-checks, create a **Find markers** schedule under **Schedules**, choose the
+libraries, and set its cron expression (for example, `0 3 * * sun` for Sundays at 03:00 in the schedule's timezone).
+Each run reuses saved answers that are still current and asks online sources again when their answers are due.
+The app no longer creates a weekly online re-check or a daily TheIntroDB recheck automatically; replace those
+internal timers with your own schedule if you want recurring checks. Existing queued jobs remain in the queue and
+can be cancelled there.
 
-**After an update that improves a detector.** When an update brings a better version of on-screen credit text,
-season audio, chapters, the reading of markers already on your servers or an online database's answers, the files
-whose markers relied on the older version are read again once, without you starting anything. Each start of the app
-checks, and a Low-priority job runs behind your previews, 100 files at a time with 30 minutes between batches, so a
-large library doesn't keep your GPU busy for days. The queue names it by how far along it is, e.g. **Re-checking 1,568
-files after the app update · batch 3 of 16**. It takes
-the files still on disk whose marker was decided with the older version's answer, or wasn't found beside one. On-screen credit text and season audio also check markers other sources decided (a "Credits" or
-"Intro" chapter, an online database's times), so a better version of either reads those files again too; any other
-marker decided by other sources is left as it is until that file's next job. Each file is read
-again once per update, restarts included. Locked markers are never touched. Cancelling a batch stops it: the files
-it hadn't reached are taken by a later batch, from the next start. An update that changes how the answers are weighed
-against each other goes through the same batches: every file with a marker that isn't locked, one not found, or
-one left to your server's own marker is decided again from what was already found, asking only what an ordinary job
-would ask. A marker already on your servers that the new weighing alone would leave out
-stays, and the job log adds "kept: published before a rule change", until a new or changed answer disagrees with it
-(an answer that only comes back the same, on a **Re-detect** say, isn't new). New files get the new weighing.
+**After an update that improves a detector or changes marker rules.** Files use the updated detectors and rules
+when your next manual or scheduled **Find markers** job includes them. Create a schedule for the libraries you want
+to revisit, or run Find markers yourself after updating. Startup does not create upgrade jobs, and existing upgrade
+batches do not create more batches when they finish. Locked markers stay unchanged. Saved answers are reused when
+current; older detector answers are refreshed as needed. A marker already on your servers that new decision rules
+alone would leave out stays until a new or changed answer disagrees with it; the log says "kept: published before a
+rule change". New files use the current rules.
 
 **When a file is replaced.** A Sonarr or Radarr upgrade, or a transcode, can leave out what decided a marker (the
 new release has no chapters, say). When the new file is the same length as the one it replaced (within a second) and
@@ -1094,10 +1083,9 @@ previous season's first 4 episodes that are already fingerprinted, when its fold
 next to `Season 1`). That answer never publishes on its own, and it isn't a second opinion for season audio (it's the same method on the same show). The Inspector shows it as **Previous season audio**.
 
 When a new episode arrives, the season's earlier episodes may now be decided differently: their audio answer can
-change, or the new episode's intro chapter changes what counts as normal for the season. Episodes outside the job
-that brought the new one are checked again by a **Season: …** job (see
-[Webhook follow-ups and retries](#webhook-follow-ups-and-retries)), so the season ends with the same markers whatever
-order its episodes arrived in.
+change, or the new episode's intro chapter changes what counts as normal for the season. Those earlier episodes
+are refreshed when your next manual or scheduled **Find markers** run includes them. Choose the season's library
+in a schedule to revisit it regularly; no additional Season job is created automatically.
 
 ### Adjusting, adding and locking markers
 
@@ -1424,12 +1412,10 @@ than one per episode. An episode that joins doesn't wait for its own preview job
 episode's preview job has finished, and markers don't need previews.
 
 A new episode can change what the season's other episodes should get (for example, an intro chapter that looked
-normal turns out far longer than the rest of the season). The job then queues a **Season: …** job that checks those
-other episodes again. It runs at Low priority, or Normal right after a webhook import, unless those episodes are
-already waiting in a Low Season job, which then checks them. Once it has run, the season has
-the same markers whatever order the episodes arrived in, as if they had all been checked together. A Season job holds
-at most 500 episodes; any beyond that, and any request lost to a restart before the job finished, are picked up the
-next time an episode of that season is checked.
+normal turns out far longer than the rest of the season). Other episodes wait until a manual or scheduled
+**Find markers** run includes them. The app does not create additional **Season: …** jobs after a run, cancellation,
+or restart. You can also use **Publish** in the Inspector's Season view to run that season explicitly. Existing
+queued Season jobs remain available, but do not create another job when they finish.
 
 ### Reading an Intro & Credits job's log
 
@@ -1599,8 +1585,8 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Not Found**: "File not found on disk" | The file is gone from its library: a series removed by Sonarr (its season folders go with it), or an upgrade that renamed the file. The job marks it missing in `markers.db`, and a background check after jobs finds the rest. Nothing is marked while the library's folder is missing, empty or not answering (an unmounted or stalled disk), or when a symlink is still at the path (a remote mount behind it that dropped) | Nothing. Nothing about it is deleted — its markers, including ones you locked or edited, stay — so if it comes back (a disk that was only unmounted, an upgrade copied in under the same name) the next job that sees it, or the background check, takes the mark off and it is as it was |
 | Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
 | Evidence detail: "Markers on this server look imported from …; not a second opinion for that database" | That server's markers came from a plugin that imports a skip database (IntroDB/TheIntroDB, SkipDB or AniSkip), so they don't confirm that database's own answer | Nothing; this is expected |
-| Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; a **TheIntroDB recheck** job waits for 00:00 UTC and checks those files again. Add your own TheIntroDB API key for a higher limit. (IntroDB and SkipDB say "run the library again after that" instead: their files aren't rechecked automatically.) |
-| File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; the TheIntroDB recheck job asks for it after 00:00 UTC, and nothing was stored for this source, so any later run asks it too |
+| Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; run Find markers again manually or with a schedule after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Run **Find markers** after the reset, or create a schedule to check the library at your preferred time. Add your own TheIntroDB API key for a higher limit. IntroDB and SkipDB also wait for your next run. |
+| File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Run **Find markers** manually or with a schedule after 00:00 UTC; nothing was stored for this source, so that run asks it again |
 | Log: "TheIntroDB has no entry for 3 or more episodes of \<show\> …; its episodes aren't looked up there until \<date\>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date its episodes are asked again. **Re-detect** in the Inspector asks at once |
 
 Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed

@@ -328,9 +328,9 @@ class LocalDetectorSpec:
         needs_worker: ``needs_worker(file, ctx)``: whether it needs a GPU/CPU worker now (None: always). One that
             doesn't runs on the checking thread, unless another detector that has to run at the same source needs a
             worker: then they all run on the worker.
-        followups: ``followups(file, ctx)``: other files whose answer is out of date and whose decision could change
-            with it (season audio: siblings matched before this episode arrived). Every run of a file of a type the
-            detector decides asks the job to run them again, before any worker handoff (None: none).
+        followups: ``followups(file, ctx)``: legacy bookkeeping of other files whose answer is out of date
+            (season audio: siblings matched before this episode arrived). Collected before worker handoff, but
+            does not create jobs; those files wait for their next explicit run (None: none).
         failed_here: ``failed_here(file, ctx)``: whether it failed to read the file as it is now (credit text: a decode
             error or a timeout recorded for this identity), so a rule waiting for its answer stops waiting (None:
             never).
@@ -426,7 +426,7 @@ class PipelineContext:
             like a Season
             job, a file whose decisions didn't change logs no lines
             of its own, and the job ends with one line for them (``summary_lines``). It runs files as any job does.
-        online_recheck: The weekly job that asks the online databases again about files they had no entry for
+        online_recheck: A legacy weekly job that asks the online databases again about files they had no entry for
             (``online_recheck_files``): only a file an online database now has an entry for, or whose decisions
             changed, logs lines of its own, and the job ends with one line for them all (``summary_lines``). It runs
             files as any job does.
@@ -597,7 +597,7 @@ class PipelineContext:
                 self._run_memos.pop(canonical_path, None)
 
     def request_followups(self, paths: Iterable[str]) -> None:
-        """Ask the job to run these files again after it finishes (their decision may change with this job's work).
+        """Record legacy sibling requests without scheduling jobs; the files wait for their next explicit run.
 
         Args:
             paths: Local paths of the files.
@@ -617,7 +617,7 @@ class PipelineContext:
         return taken
 
     def take_budget_rechecks(self) -> tuple[list[str], datetime | None]:
-        """The files to check again once TheIntroDB's daily budget resets, and forget them.
+        """Drain legacy budget-refusal bookkeeping; no new job is created from it.
 
         Returns:
             The local paths, sorted, of files checked without TheIntroDB because its budget ran out that ended with a
@@ -1156,7 +1156,7 @@ def build_context(
         season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
         recheck_label: Which of the two (``PipelineContext.recheck_label``).
         decide_again: The decide-again job after settings v16 and v17 (``PipelineContext.decide_again``).
-        online_recheck: The weekly online re-check (``PipelineContext.online_recheck``).
+        online_recheck: A legacy weekly online re-check (``PipelineContext.online_recheck``).
 
     Returns:
         A context for one job.
@@ -1317,7 +1317,7 @@ def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh
 
 
 def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, now: datetime) -> Iterator[str]:
-    """The files the weekly online re-check lists: an enabled online source's stored "no entry" is due again (older
+    """The files a legacy weekly online re-check lists: an enabled online source's stored "no entry" is due again (older
     than ``NO_DATA_RETRY``, as ``_needs_lookup`` asks it again), and its answer could still change a decision.
 
     That is a file with a type undecided (nothing found), or one season audio decided alone: an online answer
@@ -1925,8 +1925,8 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
 
     Returns:
         User-facing warnings (empty when every source answered), e.g. "TheIntroDB's daily lookup limit was reached: 39
-        files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again
-        automatically after that (or add a TheIntroDB API key for a higher limit)." or "TheIntroDB rejected the API key
+        files were checked without it. It resets at 00:00 UTC; run Find markers again manually or with a schedule
+        after that (or add a TheIntroDB API key for a higher limit)." or "TheIntroDB rejected the API key
         (HTTP 401): 39 files were checked without it. Check the TheIntroDB API key in Settings → Intro & Credits."
     """
     with ctx._budget_lock:
@@ -1935,13 +1935,9 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
     warnings = []
     for source in sorted(exhausted, key=lambda s: _ONLINE_LABELS[s]):
         label = _ONLINE_LABELS[source]
-        # job_runner queues TheIntroDB's undecided files for after the reset (``take_budget_rechecks``).
-        after = (
-            "the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a "
-            "higher limit)"
-            if source is Source.THEINTRODB
-            else "run the library again after that"
-        )
+        after = "run Find markers again manually or with a schedule after that"
+        if source is Source.THEINTRODB:
+            after += " (or add a TheIntroDB API key for a higher limit)"
         warnings.append(
             f"{label}'s daily lookup limit was reached: {_files_were(exhausted[source])} checked without it. "
             f"It resets at {RESET_TIME_LABEL}; {after}."

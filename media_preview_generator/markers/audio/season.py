@@ -1986,9 +1986,9 @@ def season_audio_answer_outdated(ctx: PipelineContext, canonical_path: str) -> b
     """Whether an episode's stored season audio answer is out of date with its season on disk now, and its intro could
     change with it (the conditions ``season_audio_followups`` asks a sibling again on).
 
-    Read after a job finished, for its own episodes whose answer left out a sibling changed on disk: once the job read
-    that sibling again, the episode goes into the job's Season follow-up instead of waiting for its own next run. While
-    the sibling is still unread, the answer is as current as a new run's would be.
+    Used by legacy sibling bookkeeping. Episodes with changed answers wait for a manual or scheduled run that
+    includes them; no Season follow-up is created. While a changed sibling is still unread, the answer is as current
+    as a new run's would be.
 
     Args:
         ctx: The job's context.

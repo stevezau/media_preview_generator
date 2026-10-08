@@ -1,11 +1,9 @@
 """Answers from an older detector version, read again once (spec §6.2 step 3, "A detector's new version").
 
 Every detector and reader stores its version with each answer (``evidence_versions``), and a file's run asks again an
-answer from another version (``pipeline._detector_pending``, ``_stale_evidence``, ``_server_markers_due``). A file no job
-runs keeps its older answer, though: after an update, credit text version 4 had reached most files with an answer, and
-the files resting on version 3 kept its early answers. On every start the app compares the stored
-versions with today's and queues the files whose decisions could move with them into LOW-priority Intro & Credits
-jobs, at most ``BATCH_FILES`` a job with ``BATCH_GAP`` between jobs (``triggers.submit_version_reruns``).
+answer from another version (``pipeline._detector_pending``, ``_stale_evidence``, ``_server_markers_due``). Files are
+refreshed by their next manual or scheduled run.
+The batch helpers below remain for jobs saved by earlier versions; startup and completion create no new batches.
 
 A file is listed for a detector when an unlocked decided type rests on its older answer, or a type it answers is still
 undecided (no evidence) beside one. The two detectors that read the file check what other sources
@@ -30,7 +28,6 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from .audio.season import SEASON_AUDIO_ANSWER_VERSION
@@ -48,10 +45,8 @@ if TYPE_CHECKING:
     from .settings import GlobalMarkersSettings
     from .store import MarkerStore
 
-# At most this many files a job, and this long between one job's end and the next one's start, so a large backlog
-# after an update runs beside everything else instead of filling the workers for days.
+# Limit the work in an existing legacy batch restored after a restart.
 BATCH_FILES = 100
-BATCH_GAP = timedelta(minutes=30)
 # Not a detector: a one-version Plex item left showing times within 2 s of a moved decision, before the publisher
 # stopped keeping them (``MarkerStore.files_on_one_version_items_showing_other_times``). The file's next run sends the
 # decided times; its version names that rule.

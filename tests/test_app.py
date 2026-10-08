@@ -16,7 +16,6 @@ from media_preview_generator.web.app import (
     _derive_secret,
     _requeue_interrupted_on_startup,
     _resume_interrupted_retry_chains_on_startup,
-    _schedule_weekly_online_recheck,
     get_cors_origins,
     get_or_create_flask_secret,
     run_scheduled_job,
@@ -586,23 +585,26 @@ class TestRequeueInterruptedOnStartup:
         ]
         mock_start_job.assert_not_called()
 
-    @patch("media_preview_generator.markers.job_runner.pass_on_requests_of_unrevived_jobs")
+    @patch("media_preview_generator.markers.triggers.create_intro_credits_job")
     @patch("media_preview_generator.web.routes._start_job_async")
     @patch("media_preview_generator.web.app.get_job_manager")
     @patch("media_preview_generator.web.settings_manager.get_settings_manager")
-    def test_the_intro_credits_jobs_left_behind_pass_on_what_other_jobs_handed_them(
-        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job, mock_pass_on
+    def test_unrevived_season_jobs_do_not_create_another_job(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job, mock_create
     ):
-        # A Season job that died with the restart held episodes other jobs had handed it; they get a Season job.
+        # Saved requests from an old Season job wait for the next explicit run.
         mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
             "auto_requeue_on_restart": False,
         }.get(key, default)
-        left_behind = [type("Job", (), {"id": "season-1", "config": {"source": "season"}})()]
+        left_behind = [
+            type("Job", (), {"id": "season-1", "config": {"source": "season", "late_requests": {"/m/e2.mkv": 7}}})()
+        ]
         mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.return_value = left_behind
 
         _requeue_interrupted_on_startup("/tmp/config")
 
-        mock_pass_on.assert_called_once_with(left_behind)
+        mock_create.assert_not_called()
+        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.assert_any_call("intro_credits")
 
 
 class TestLeftoverIntroCreditsJobsBeforeSchedulesStart:
@@ -923,173 +925,56 @@ class TestPrewarmCaches:
         mock_version.assert_called_once()
 
 
-class TestRedecideInReviewAfterUpgrade:
-    """Settings v16 removed "Publish when: High"; while its request is open, a start queues the one job that decides the
-    files it held in Needs review again (``triggers.submit_decide_again``, which reuses one already queued or running).
-    The request is cleared when that job completes (``job_runner._settle_decide_again``)."""
-
-    SUBMIT = "media_preview_generator.markers.triggers.submit_decide_again"
-    ENABLED = "media_preview_generator.markers.triggers.markers_enabled_anywhere"
-
-    def _settings(self, tmp_path, **values):
-        from media_preview_generator.web.settings_manager import get_settings_manager
-
-        sm = get_settings_manager(str(tmp_path))
-        sm.apply_changes(updates=values)
-        return sm
-
-    @pytest.mark.parametrize(
-        ("enabled", "queued", "request_left"),
-        [
-            (True, "job-1", True),  # cleared once the job completes, not when it is queued
-            (True, None, False),  # nothing in review or waiting: nothing left to do
-            (False, None, True),  # Intro & Credits off everywhere: a start after it is turned on queues the job
-        ],
-        ids=["queued", "nothing-to-do", "intro-and-credits-off"],
-    )
-    def test_an_open_request_queues_the_job(self, tmp_path, enabled, queued, request_left):
-        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
-        from media_preview_generator.web.app import _decide_again_after_upgrade
-
-        sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
-        with patch(self.ENABLED, return_value=enabled), patch(self.SUBMIT, return_value=queued) as submit:
-            _decide_again_after_upgrade(str(tmp_path))
-        assert submit.call_count == int(enabled)
-        assert (sm.get(DECIDE_AGAIN_KEY) is True) is request_left
-
-    def test_without_a_request_nothing_is_queued(self, tmp_path):
-        from media_preview_generator.web.app import _decide_again_after_upgrade
-
-        self._settings(tmp_path, setup_complete=True)
-        with patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit:
-            _decide_again_after_upgrade(str(tmp_path))
-        submit.assert_not_called()
-
-    def test_a_failure_keeps_the_request_for_the_next_start(self, tmp_path):
-        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
-        from media_preview_generator.web.app import _decide_again_after_upgrade
-
-        sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
-        with patch(self.ENABLED, return_value=True), patch(self.SUBMIT, side_effect=OSError("markers.db is locked")):
-            _decide_again_after_upgrade(str(tmp_path))  # never raises
-        assert sm.get(DECIDE_AGAIN_KEY) is True
-
-    def test_every_start_until_the_job_completes_asks_for_it_and_none_after(self, tmp_path):
-        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, DECIDE_AGAIN_KEY
-        from media_preview_generator.web.app import create_app
-        from media_preview_generator.web.settings_manager import get_settings_manager
-
-        config_dir = str(tmp_path / "config")
-        os.makedirs(config_dir, exist_ok=True)
-        with open(os.path.join(config_dir, "settings.json"), "w") as f:
-            json.dump(
-                {
-                    "setup_complete": True,
-                    "_schema_version": 15,
-                    "markers": {"detect": {"intro": True, "credits": True, "recap": False}, "publish_when": "high"},
-                },
-                f,
-            )
-        env = {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}
-        for _ in range(2):  # the job didn't complete before the restart: asked again (and reused if still queued)
-            reset_settings_manager()
-            with (
-                patch.dict(os.environ, env),
-                patch(self.ENABLED, return_value=True),
-                patch(self.SUBMIT, return_value="job-1") as submit,
-            ):
-                create_app(config_dir=config_dir)
-            submit.assert_called_once_with()
-        with open(os.path.join(config_dir, "settings.json")) as f:
-            saved = json.load(f)
-        assert saved["_schema_version"] == _CURRENT_SCHEMA_VERSION
-        assert "publish_when" not in saved["markers"] and saved[DECIDE_AGAIN_KEY] is True
-
-        get_settings_manager(config_dir).delete(DECIDE_AGAIN_KEY)  # what the completed job does
-        reset_settings_manager()
-        with patch.dict(os.environ, env), patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit_again:
-            create_app(config_dir=config_dir)
-        submit_again.assert_not_called()
-
-
-class TestWeeklyOnlineRecheckOnStart:
-    """Every start arms the weekly Intro & Credits online re-check from the due time kept in markers.db
-    (``markers.triggers.schedule_online_recheck``), after the restart requeue so a revived one is found."""
-
-    SCHEDULE = "media_preview_generator.markers.triggers.schedule_online_recheck"
-
-    def test_create_app_arms_it_after_the_restart_requeue(self, tmp_path, monkeypatch):
+class TestNoAutomaticMarkerJobsOnStart:
+    @pytest.mark.parametrize("due", [None, "2000-01-01T00:00:00+00:00"])
+    def test_start_does_not_arm_a_timer_or_create_an_upgrade_or_recheck_job(self, tmp_path, due):
         import media_preview_generator.web.app as app_mod
-
-        order = []
-        monkeypatch.setattr(app_mod, "_requeue_interrupted_on_startup", lambda config_dir: order.append("requeue"))
-        monkeypatch.setattr(
-            app_mod, "_schedule_weekly_online_recheck", lambda config_dir: order.append(("schedule", config_dir))
-        )
-        config_dir = str(tmp_path / "config")
-        os.makedirs(config_dir, exist_ok=True)
-        with patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}):
-            app_mod.create_app(config_dir=config_dir)
-        assert order == ["requeue", ("schedule", config_dir)]
-
-    @pytest.mark.parametrize("enabled", [True, False], ids=["on-somewhere", "off-everywhere"])
-    def test_it_arms_the_timer_only_while_intro_and_credits_is_on_somewhere(self, tmp_path, enabled):
+        from media_preview_generator.markers import triggers
+        from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
+        from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType, Source
+        from media_preview_generator.markers.store import MarkerStore
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
         from media_preview_generator.web.settings_manager import get_settings_manager
 
-        servers = [{"id": "jf-1", "type": "jellyfin", "enabled": True, "markers": {"enabled": enabled}}]
-        get_settings_manager(str(tmp_path)).apply_changes(updates={"media_servers": servers})
-        with patch(self.SCHEDULE) as schedule:
-            _schedule_weekly_online_recheck(str(tmp_path))
-        # Off everywhere: the scheduler, the only thing here that opens markers.db, isn't called.
-        assert schedule.call_count == int(enabled)
-
-    def test_a_failure_never_stops_the_start(self, tmp_path):
-        with (
-            patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=True),
-            patch(self.SCHEDULE, side_effect=OSError("markers.db is locked")),
-        ):
-            _schedule_weekly_online_recheck(str(tmp_path))  # never raises
-
-
-class TestVersionRerunsOnStart:
-    """Every start queues the first batch of files whose answers rest on an older detector version
-    (``markers.triggers.submit_version_reruns``), after the restart requeue so a revived batch is found."""
-
-    SUBMIT = "media_preview_generator.markers.triggers.submit_version_reruns"
-
-    def test_create_app_queues_it_after_the_restart_requeue(self, tmp_path, monkeypatch):
-        import media_preview_generator.web.app as app_mod
-
-        order = []
-        monkeypatch.setattr(app_mod, "_requeue_interrupted_on_startup", lambda config_dir: order.append("requeue"))
-        monkeypatch.setattr(
-            app_mod, "_read_again_after_detector_updates", lambda config_dir: order.append(("read", config_dir))
+        config_dir = str(tmp_path)
+        get_settings_manager(config_dir).apply_changes(
+            updates={
+                "media_servers": [{"id": "jf-1", "type": "jellyfin", "markers": {"enabled": True}}],
+                DECIDE_AGAIN_KEY: True,
+            }
         )
-        config_dir = str(tmp_path / "config")
-        os.makedirs(config_dir, exist_ok=True)
-        with patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}):
-            app_mod.create_app(config_dir=config_dir)
-        assert order == ["requeue", ("read", config_dir)]
-
-    @pytest.mark.parametrize("enabled", [True, False], ids=["on-somewhere", "off-everywhere"])
-    def test_it_queues_only_while_intro_and_credits_is_on_somewhere(self, tmp_path, enabled):
-        from media_preview_generator.web.app import _read_again_after_detector_updates
-        from media_preview_generator.web.settings_manager import get_settings_manager
-
-        servers = [{"id": "jf-1", "type": "jellyfin", "enabled": True, "markers": {"enabled": enabled}}]
-        get_settings_manager(str(tmp_path)).apply_changes(updates={"media_servers": servers})
-        with patch(self.SUBMIT) as submit:
-            _read_again_after_detector_updates(str(tmp_path))
-        # Off everywhere: markers.db isn't opened.
-        assert submit.call_count == int(enabled)
-        if enabled:
-            submit.assert_called_once_with()  # no gap: the first batch starts as soon as a slot is free
-
-    def test_a_failure_never_stops_the_start(self, tmp_path):
-        from media_preview_generator.web.app import _read_again_after_detector_updates
-
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        media = tmp_path / "episode.mkv"
+        media.write_bytes(b"x")
+        rec = store.upsert_file(
+            FileIdentity(str(media), 1, 1), duration_ms=1_000_000, season_key=str(tmp_path), is_movie=False
+        )
+        store.replace_evidence(rec.id, Source.SEASON_AUDIO, [], version=0)
+        store.save_decisions(
+            rec.id,
+            {
+                MarkerType.INTRO: TypeDecision(
+                    MarkerType.INTRO,
+                    DecisionStatus.DECIDED,
+                    marker=Marker(MarkerType.INTRO, 10_000, 40_000, ("season_audio",)),
+                    proposed=None,
+                    reason="old rules",
+                )
+            },
+            settings_fingerprint="old",
+        )
+        assert store.files_with_season_audio_intro() == [str(media)]
+        if due is not None:
+            with store._tx() as conn:
+                conn.execute("INSERT INTO meta(key, value) VALUES ('online_recheck_due', ?)", (due,))
         with (
-            patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=True),
-            patch(self.SUBMIT, side_effect=OSError("markers.db is locked")),
+            patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}),
+            patch("threading.Timer") as timer,
+            patch.object(triggers, "create_intro_credits_job") as create,
         ):
-            _read_again_after_detector_updates(str(tmp_path))  # never raises
+            app_mod.create_app(config_dir=config_dir)
+        store.close()
+        for timer_call in timer.call_args_list:
+            callback = timer_call.args[1] if len(timer_call.args) > 1 else timer_call.kwargs["function"]
+            assert not callback.__module__.startswith("media_preview_generator.markers")
+        create.assert_not_called()

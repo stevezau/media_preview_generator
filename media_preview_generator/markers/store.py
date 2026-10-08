@@ -33,8 +33,6 @@ _SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPO
 _RECHECK_TAKEN_AGAIN = timedelta(days=1)
 # ``meta`` key: the last file id whose fingerprint the cache sweep checked (``fingerprint_checks``).
 _FINGERPRINT_CHECKED_UP_TO = "fingerprint_checked_up_to"
-# ``meta`` key: when the weekly online re-check is due next (``triggers.schedule_online_recheck``).
-_ONLINE_RECHECK_DUE = "online_recheck_due"
 # ``meta`` keys: the last file id the missing-file sweep checked among files on disk, and among files marked missing
 # (``file_checks``).
 _FILES_CHECKED_UP_TO = "files_checked_up_to"
@@ -1277,31 +1275,6 @@ class MarkerStore:
                 (*values, before.isoformat()),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
-
-    def online_recheck_due(self) -> datetime | None:
-        """When the weekly online re-check is due next.
-
-        Returns:
-            The stored time (None = never set).
-
-        Raises:
-            ValueError: The stored value isn't a time.
-        """
-        with self._lock:
-            row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_ONLINE_RECHECK_DUE,)).fetchone()
-        return datetime.fromisoformat(row["value"]) if row else None
-
-    def set_online_recheck_due(self, due: datetime) -> None:
-        """Store when the weekly online re-check is due next.
-
-        Args:
-            due: The time (UTC).
-        """
-        with self._tx() as conn:
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (_ONLINE_RECHECK_DUE, due.isoformat()),
-            )
 
     def record_member(
         self,

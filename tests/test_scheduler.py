@@ -1471,6 +1471,33 @@ class TestExecuteScheduledIntroCreditsJob:
         )
         assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
 
+    def test_user_cron_runs_find_markers_without_forcing_cached_answers(self, scheduler_manager, env):
+        schedule = scheduler_manager.create_schedule(
+            name="My weekly marker check",
+            cron_expression="0 3 * * sun",
+            library_ids=["1"],
+            library_name="TV Shows",
+            server_id="plex-1",
+            config={"job_type": "intro_credits"},
+        )
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        tick = scheduler_manager.scheduler.get_job(schedule["id"])
+        assert tick is not None
+        assert str(tick.trigger) == "cron[month='*', day='*', day_of_week='sun', hour='3', minute='0']"
+        env["create"].assert_not_called()
+
+        tick.func(*tick.args, **tick.kwargs)
+
+        env["create"].assert_called_once_with(
+            library_name="Intro & Credits: TV Shows",
+            priority=3,
+            source="schedule",
+            libraries=[{"server_id": "plex-1", "library_id": "1"}],
+            parent_schedule_id=schedule["id"],
+            server_id="plex-1",
+        )
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
     def test_intro_credits_schedule_without_server_checks_every_enabled_server(self, scheduler_manager, env):
         from media_preview_generator.web.scheduler import execute_scheduled_job
 

@@ -446,14 +446,11 @@ def _warn_unhealthy_media_mounts(media_servers: list) -> list[dict[str, str]]:
 def _fail_unrevived_own_runner_jobs() -> None:
     """Settle the Intro & Credits and Plex loudness jobs a restart left behind and didn't revive.
 
-    Left PENDING they would block their schedule and absorb webhook follow-ups for good. A Season job among them passes
-    on the episodes other jobs had handed it. Its own failure is logged and never stops the revived jobs from starting.
+    Left PENDING they would block their schedule and absorb webhook follow-ups for good. Failures are logged and
+    never stop the revived jobs from starting.
     """
     try:
-        failed = get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
-        from ..markers.job_runner import pass_on_requests_of_unrevived_jobs
-
-        pass_on_requests_of_unrevived_jobs(list(failed or []))
+        get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
     except Exception as exc:
         logger.warning(
             "Couldn't mark the Intro & Credits jobs left over from before the restart as failed ({}: {}). They stay "
@@ -570,90 +567,6 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
             "you can re-run them manually from the Jobs page when ready.",
             type(e).__name__,
             e,
-        )
-
-
-def _decide_again_after_upgrade(config_dir: str) -> None:
-    """Queue the one job that decides the files Intro & Credits' old rules left in Needs review (and those waiting for
-    their item's other versions, those whose intro rests on season audio, and those whose intro or credits rests on an
-    online answer and a server's own marker alone) again, while the settings upgrade's request for it is open
-    (``upgrade.DECIDE_AGAIN_KEY``).
-
-    Runs after the restart requeue, once the job manager can start jobs, so a revived job is found and not queued twice
-    (``triggers.submit_decide_again`` returns it). The request is cleared when the job completes
-    (``job_runner._settle_decide_again``), or here when there is no such file. With Intro & Credits off on
-    every server it stays open, so a start after it is turned on queues the job. Never raises: a failure leaves the
-    request for the next start.
-    """
-    from ..upgrade import DECIDE_AGAIN_KEY
-    from .settings_manager import get_settings_manager
-
-    try:
-        settings = get_settings_manager(config_dir)
-        if not settings.get(DECIDE_AGAIN_KEY):
-            return
-        from ..markers.triggers import markers_enabled_anywhere, submit_decide_again
-
-        if not markers_enabled_anywhere():
-            return
-        if submit_decide_again() is None:
-            settings.delete(DECIDE_AGAIN_KEY)
-    except Exception as exc:
-        logger.warning(
-            "Couldn't queue the Intro & Credits job that decides files again after the update ({}: {}); the "
-            "next start tries again",
-            type(exc).__name__,
-            exc,
-        )
-
-
-def _read_again_after_detector_updates(config_dir: str) -> None:
-    """Queue the first batch of files whose Intro & Credits answers rest on an older detector version
-    (``markers.triggers.submit_version_reruns``; ``markers.versions`` says which).
-
-    Runs on every start, after the restart requeue, so a revived batch is found instead of queueing a second; each
-    batch that runs queues the next. With Intro & Credits off on every server markers.db stays unopened. Never raises:
-    a failure leaves the files for the next start.
-    """
-    from .settings_manager import get_settings_manager
-
-    try:
-        get_settings_manager(config_dir)
-        from ..markers.triggers import markers_enabled_anywhere, submit_version_reruns
-
-        if not markers_enabled_anywhere():
-            return
-        submit_version_reruns()
-    except Exception as exc:
-        logger.warning(
-            "Couldn't queue the Intro & Credits re-check of files after an update ({}: {}); the next start tries again",
-            type(exc).__name__,
-            exc,
-        )
-
-
-def _schedule_weekly_online_recheck(config_dir: str) -> None:
-    """Arm the weekly Intro & Credits job that asks the online databases again about files they had no entry for
-    (``markers.triggers.schedule_online_recheck``: its due time is kept in markers.db, so a restart doesn't reset it).
-
-    Runs after the restart requeue: a re-check due at once finds a revived one queued and doesn't queue another. With
-    Intro & Credits off on every server it arms nothing and leaves markers.db unopened; a start after it is turned on
-    arms it. Never raises.
-    """
-    from .settings_manager import get_settings_manager
-
-    try:
-        get_settings_manager(config_dir)
-        from ..markers.triggers import markers_enabled_anywhere, schedule_online_recheck
-
-        if not markers_enabled_anywhere():
-            return
-        schedule_online_recheck()
-    except Exception as exc:
-        logger.warning(
-            "Couldn't schedule the weekly Intro & Credits online re-check ({}: {}); the next start tries again",
-            type(exc).__name__,
-            exc,
         )
 
 
@@ -1055,10 +968,6 @@ def create_app(config_dir: str | None = None) -> Flask:
     # Auto-requeue jobs that were interrupted by the server restart. Kept ahead of schedule ticks; leftover Intro &
     # Credits jobs that aren't revived are settled by fail_unrevived_interrupted_jobs, so no tick skips on them.
     _requeue_interrupted_on_startup(config_dir)
-    # After it, so a revived one is found instead of queueing a second.
-    _decide_again_after_upgrade(config_dir)
-    _read_again_after_detector_updates(config_dir)
-    _schedule_weekly_online_recheck(config_dir)
 
     # Start scheduler
     schedule_manager.start()

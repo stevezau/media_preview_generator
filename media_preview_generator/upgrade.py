@@ -27,12 +27,8 @@ from .config.validation import MAX_CPU_THREADS, validate_processing_thread_total
 # -------------------------------------------------------------------------
 _CURRENT_SCHEMA_VERSION = 22
 
-#: Set by v16, v17, v18 and v20: once the job manager runs, the app queues the one job that decides the files Intro &
-#: Credits' old rules left in Needs review, those waiting for their item's other versions, those whose intro rests on
-#: season audio and those whose intro or credits rests on an online answer and a server's own marker alone again
-#: (``triggers.submit_decide_again``, from ``web.app``). Cleared when that job completes
-#: (``markers.job_runner``), so a start after a failed, cancelled or interrupted one queues it again, and a start with
-#: Intro & Credits off everywhere leaves it for later.
+#: Legacy request written by v16, v17, v18 and v20. Kept for migration compatibility; it no longer creates jobs.
+#: Existing decide-again jobs clear it when they complete. Manual and scheduled runs apply current marker rules.
 DECIDE_AGAIN_KEY = "_markers_decide_again"
 
 #: Count of consecutive v14 attempts that failed on IO. The version gate
@@ -138,12 +134,12 @@ _USER_FACING_NOTES: dict[int, str] = {
     16: (
         "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
         "marker (on-screen credit text or chapters), so far fewer files wait in Needs review. The files already "
-        "waiting there are checked again by one Intro & Credits job, which reuses what was already found."
+        "waiting there are checked again by your next manual or scheduled Find markers job, reusing saved answers."
     ),
     20: (
         "Intro & Credits no longer has a Needs review list. When it can't confirm an intro or credits from your own "
         "file, it writes nothing, and you can still add or adjust one in the Inspector. The files that were waiting "
-        "there are checked again by one Intro & Credits job, which reuses what was already found."
+        "there are checked again by your next manual or scheduled Find markers job, reusing saved answers."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -438,18 +434,14 @@ def _migrate_schema(sm) -> None:
                unconditional ``priority: 2`` seed so they inherit the new
                ``incoming_job_priority`` setting. Issue #285.
         v15 -- Seeds Intro & Credits (markers) defaults, disabled per server.
-        v16 -- Drops the removed ``markers.publish_when`` and asks the next start to decide the files in Needs
-               review again from their stored answers.
-        v17 -- Asks the next start to decide the files whose intro rests on season audio again: its guards against
-               network idents and cold-open music changed which repeated stretch it takes.
-        v18 -- Asks the next start to decide the files in Needs review, those whose intro rests on season audio and
-               those whose intro or credits rests on an online answer and a server's own marker alone again: season
-               audio matches 25 fps and film-rate releases of one season at one speed, online times are read on
-               such a file's own clock, and a Plex marker made for an earlier file counts for nothing.
+        v16 -- Drops the removed ``markers.publish_when`` and retains a legacy redecision flag.
+        v17 -- Retains the legacy flag for season audio guard changes (network idents and cold-open music).
+        v18 -- Retains the legacy flag for season audio timing and online/server marker rule changes.
+               These flags no longer create jobs; the next manual or scheduled run uses current rules.
         v19 -- Marks a pause with no workers configured as the zero-workers auto-pause, so the settings save that
                adds workers back resumes processing on installs paused before that pause was flagged.
-        v20 -- Asks the next start to decide the files the old rules left in Needs review again: that status is
-               gone, and every type ends decided or with nothing found.
+        v20 -- Retains the legacy flag for removing Needs review. The next manual or scheduled run decides
+               existing files again; each type ends decided or with nothing found.
         v21 -- Introduces authoritative worker groups (from ``cpu_threads``/``gpu_config`` when absent) and separately
                owned global pause reasons.
         v22 -- Gives every worker group a member list: each v21 group keeps its id, name, hours and becomes one group
@@ -1592,11 +1584,8 @@ def _migrate_to_v16(sm) -> list:
     choice worth keeping. A settings.json that still has it reads fine without this step (``validate_global`` drops
     it); the step only tidies it away.
 
-    The files High held in Needs review would otherwise wait until some later job lists them, so this also sets
-    :data:`DECIDE_AGAIN_KEY`, whatever the stored value was (deciding again also brings the Needs review wording
-    of files already at Medium up to date, and publishes the files left waiting for their item's other versions). The
-    app queues that job once its job manager runs (``markers.triggers.submit_decide_again``) and the key is cleared
-    when the job completes; with Intro & Credits off everywhere the key waits for a start after it is turned on.
+    The historical :data:`DECIDE_AGAIN_KEY` is preserved for migration compatibility. Files previously held in
+    Needs review use the current rules on the next manual or scheduled Find markers run.
 
     Runs once, gated on ``_schema_version``.
 
@@ -1620,15 +1609,13 @@ def _migrate_to_v17(sm) -> list:
 
     Season audio's version 5 passes over a repeated stretch that is only a network ident, or music under the cold
     open, where version 4 took it for the intro (``markers.audio.season``: 13 of 15 intros of one A&E show were such a
-    stretch). A stored answer from version 4 is matched again on the file's next run anyway; this sets
-    :data:`DECIDE_AGAIN_KEY` so that run comes now, in the decide-again job, which also lists the files whose unlocked
-    intro was decided with a season audio answer (``markers.job_runner._items_to_decide_again``). An intro that no
-    longer holds comes off the servers there; a locked one is never touched.
+    stretch). A stored answer from version 4 is matched again on the file's next manual or scheduled run. The
+    historical :data:`DECIDE_AGAIN_KEY` is retained for compatibility and no longer creates a job.
 
     Runs once, gated on ``_schema_version``.
 
     Returns:
-        No notes: nothing in the settings changes, and the job's own log says what it decided.
+        No notes: the historical request flag is retained for compatibility.
     """
     sm.set(DECIDE_AGAIN_KEY, True)
     return []
@@ -1647,13 +1634,13 @@ def _migrate_to_v18(sm) -> list:
     online answer and a server's own marker alone may be film-rate times confirmed by a Plex marker made for an earlier
     file of the item: on the file's run Plex's answer is read again and flagged (``Candidate.stale``), or, from a Plex
     server that shows our markers now, an older version's answer stops counting (``pipeline._drop_older_reader_answer``).
-    A stored older answer is matched again on the file's next run anyway; this sets :data:`DECIDE_AGAIN_KEY` so that
-    run comes now, in the decide-again job (``markers.job_runner._items_to_decide_again``).
+    A stored older answer is matched again on the file's next manual or scheduled run. The historical
+    :data:`DECIDE_AGAIN_KEY` is retained for compatibility and no longer creates a job.
 
     Runs once, gated on ``_schema_version``.
 
     Returns:
-        No notes: nothing in the settings changes, and the job's own log says what it decided.
+        No notes: the historical request flag is retained for compatibility.
     """
     sm.set(DECIDE_AGAIN_KEY, True)
     return []
@@ -1695,12 +1682,9 @@ def _migrate_to_v19(sm) -> list:
 def _migrate_to_v20(sm) -> list:
     """Have the files the old rules left in Needs review decided again (owner, 2026-10-02).
 
-    Needs review is gone: every marker type ends decided or with nothing found, and where the online answers can't
-    settle a type the file's own read decides (``markers.decide``). A file stored under the old status would otherwise
-    keep it until some later job happened to run it, so this sets :data:`DECIDE_AGAIN_KEY`; the decide-again job
-    lists exactly those files still on disk (``markers.job_runner._items_to_decide_again``,
-    ``MarkerStore.files_with_legacy_review_decisions``) and runs them as any job does. A file gone from disk keeps the
-    old row, which reads as nothing found (``store._status``).
+    Needs review is gone: every marker type ends decided or with nothing found. Existing rows are decided again on
+    the next manual or scheduled Find markers run. The historical :data:`DECIDE_AGAIN_KEY` is retained for migration
+    compatibility and no longer creates a job. Until then the old row reads as nothing found (``store._status``).
 
     Runs once, gated on ``_schema_version``.
 
@@ -1713,7 +1697,7 @@ def _migrate_to_v20(sm) -> list:
     sm.set(DECIDE_AGAIN_KEY, True)
     if not _intro_credits_on_any_server(sm):
         return []
-    return ["v20: removed Needs review; the files it held are decided again by one Intro & Credits job"]
+    return ["v20: removed Needs review; run Find markers manually or with a schedule to decide those files again"]
 
 
 def _migrate_to_v21(sm) -> list[str]:
