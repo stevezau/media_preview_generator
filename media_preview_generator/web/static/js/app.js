@@ -2427,6 +2427,74 @@ function _markersPauseButton(job) {
 
 let _jobQueueUpdatePending = false;
 
+// Queued (pending) rows ticked for bulk cancel. Survives re-renders; pruned when a job leaves pending.
+const selectedQueuedJobIds = new Set();
+
+function _visibleQueuedJobIds() {
+    return jobs.filter((job) => job.status === 'pending').map((job) => String(job.id));
+}
+
+function _pruneQueuedSelection() {
+    const queued = new Set(_visibleQueuedJobIds());
+    for (const id of Array.from(selectedQueuedJobIds)) {
+        if (!queued.has(id)) selectedQueuedJobIds.delete(id);
+    }
+}
+
+function _syncQueuedSelectionControls() {
+    const queued = _visibleQueuedJobIds();
+    const count = selectedQueuedJobIds.size;
+    const button = document.getElementById('cancelSelectedButton');
+    if (button) {
+        button.classList.toggle('d-none', count === 0);
+        document.getElementById('cancelSelectedButtonText').textContent = `Cancel selected (${count})`;
+    }
+    const selectAll = document.getElementById('selectAllQueued');
+    if (selectAll) {
+        selectAll.disabled = queued.length === 0;
+        selectAll.checked = queued.length > 0 && count === queued.length;
+        selectAll.indeterminate = count > 0 && count < queued.length;
+    }
+}
+
+function toggleQueuedJobSelected(jobId, checked) {
+    if (checked) selectedQueuedJobIds.add(String(jobId));
+    else selectedQueuedJobIds.delete(String(jobId));
+    _syncQueuedSelectionControls();
+}
+
+document.addEventListener('change', (event) => {
+    const cb = event.target.closest && event.target.closest('.queued-select-cb');
+    if (cb) toggleQueuedJobSelected(cb.dataset.jobId, cb.checked);
+});
+
+function toggleAllQueuedSelected(checked) {
+    selectedQueuedJobIds.clear();
+    document.querySelectorAll('#jobQueue .queued-select-cb').forEach((cb) => {
+        cb.checked = checked;
+        if (checked) selectedQueuedJobIds.add(String(cb.dataset.jobId));
+    });
+    _syncQueuedSelectionControls();
+}
+
+async function cancelSelectedQueuedJobs() {
+    const ids = Array.from(selectedQueuedJobIds);
+    if (ids.length === 0) return;
+    const noun = ids.length === 1 ? 'queued job' : 'queued jobs';
+    if (!await appConfirm(`Cancel ${ids.length} ${noun}? A job waiting to retry is cancelled with its retry. Jobs already running are skipped.`, { title: 'Cancel queued jobs', confirmText: `Cancel ${noun}`, cancelText: 'Keep queued' })) return;
+
+    try {
+        const result = await apiPost('/api/jobs/cancel-bulk', { job_ids: ids });
+        ids.forEach((id) => selectedQueuedJobIds.delete(id));
+        await loadJobs({ force: true });
+        loadJobStats();
+        const skipped = (result.skipped || []).length;
+        showToast('Jobs Cancelled', `Cancelled ${result.cancelled.length} queued ${result.cancelled.length === 1 ? 'job' : 'jobs'}${skipped ? `; ${skipped} could not be cancelled (already started, finished or removed)` : ''}`, skipped ? 'warning' : 'info');
+    } catch (error) {
+        showToast('Error', 'Failed to cancel jobs: ' + error.message, 'danger');
+    }
+}
+
 function updateJobQueue(force) {
     const tbody = document.getElementById('jobQueue');
     // The Job Queue table only exists on the dashboard. SocketIO connect/job
@@ -2453,9 +2521,13 @@ function updateJobQueue(force) {
     // currently hovered. Safe because we'll rebuild on the next tick.
     if (force !== true && (tbody.matches(':hover') || tbody.querySelector(':hover'))) {
         _jobQueueUpdatePending = true;
+        _pruneQueuedSelection();
+        _syncQueuedSelectionControls();
         return;
     }
     _jobQueueUpdatePending = false;
+    _pruneQueuedSelection();
+    _syncQueuedSelectionControls();
 
     if (jobs.length === 0) {
         if (jobTotal === 0) {
@@ -2670,7 +2742,7 @@ function updateJobQueue(force) {
                 : `<span class="queue-phase text-body-secondary">${escapeHtml(phaseText)}</span>`;
         html += `
             <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}${isFilesExpanded ? ' open' : ''}">
-                <td class="queue-id" data-label="ID"><code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
+                <td class="queue-id" data-label="ID">${job.status === 'pending' ? `<input type="checkbox" class="form-check-input queued-select-cb me-2" aria-label="Select queued job ${escapeHtmlAttr(job.id.substring(0, 8))}" data-job-id="${escapeHtmlAttr(job.id)}" onclick="event.stopPropagation()"${selectedQueuedJobIds.has(String(job.id)) ? ' checked' : ''}>` : ''}<code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
                 <td class="queue-job" data-label="Job">
                     <div class="queue-job-main">${filesToggleBtn}${_jobTypeTileHtml(job)}<div class="queue-job-copy"><div class="queue-title-line">${nameHtml}</div>
                     <div class="queue-metadata">${_queueMetadataHtml(job, rowTitle)}</div></div></div>

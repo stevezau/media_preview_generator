@@ -1167,6 +1167,9 @@ def media_search():
     return jsonify({"query": query, "results": results[:_MEDIA_SEARCH_LIMIT], "error": None})
 
 
+_BULK_CANCEL_MAX = 500
+
+
 @api.route("/jobs/<job_id>/cancel", methods=["POST"])
 @api_token_required
 def cancel_job(job_id):
@@ -1176,10 +1179,54 @@ def cancel_job(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
+    updated = _cancel_job_by_user(job_manager, job_id)
+    return jsonify((updated or job).to_dict())
+
+
+def _cancel_job_by_user(job_manager, job_id: str):
+    """Flag, log and cancel one job; shared by the single and bulk cancel routes.
+
+    Args:
+        job_manager: The job manager holding the job.
+        job_id: Id of an existing job.
+
+    Returns:
+        The updated job, or None when the manager no longer has it.
+    """
     job_manager.request_cancellation(job_id)
     job_manager.add_log(job_id, "WARNING - Cancellation requested by user")
-    updated = job_manager.cancel_job(job_id)
-    return jsonify((updated or job).to_dict())
+    return job_manager.cancel_job(job_id)
+
+
+@api.route("/jobs/cancel-bulk", methods=["POST"])
+@api_token_required
+def cancel_jobs_bulk():
+    """Cancel several queued (pending) jobs at once.
+
+    Body: ``{"job_ids": ["<id>", ...]}`` with 1 to ``_BULK_CANCEL_MAX`` ids.
+    Jobs that are not pending (running, finished, unknown) and retry-chain heads
+    with a running retry are skipped, so a stale selection never kills running work.
+
+    Returns:
+        ``{"cancelled": [ids], "skipped": [{"id": id, "reason": str}]}``
+    """
+    data = request.get_json(silent=True) or {}
+    job_ids = data.get("job_ids")
+    if not isinstance(job_ids, list) or not job_ids or not all(isinstance(i, str) for i in job_ids):
+        return jsonify({"error": "job_ids must be a non-empty list of job id strings"}), 400
+    if len(job_ids) > _BULK_CANCEL_MAX:
+        return jsonify({"error": f"At most {_BULK_CANCEL_MAX} jobs can be cancelled at once"}), 400
+
+    job_manager = get_job_manager()
+    cancelled: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for job_id in dict.fromkeys(job_ids):
+        _job, reason = job_manager.cancel_job_if_pending(job_id)
+        if reason:
+            skipped.append({"id": job_id, "reason": reason})
+        else:
+            cancelled.append(job_id)
+    return jsonify({"cancelled": cancelled, "skipped": skipped})
 
 
 @api.route("/jobs/<job_id>/retry-now", methods=["POST"])

@@ -201,6 +201,12 @@
                 <i class="bi bi-lightning-charge-fill" aria-hidden="true"></i>
                 <span id="pendingWebhooksChipText">0 waiting</span>
             </button>
+            <span id="cancelSelectedButton" class="d-none d-inline-flex align-items-center gap-1">
+                <button type="button" class="btn dash-btn-sm text-nowrap" onclick="cancelSelectedQueuedJobs()">
+                    <i class="bi bi-x-circle" aria-hidden="true"></i><span id="cancelSelectedButtonText">Cancel selected (0)</span>
+                </button>
+                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Cancels the ticked queued jobs (a job waiting to retry is cancelled with its retry). Jobs already running are skipped." aria-label="What Cancel selected does"><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+            </span>
             <div class="dropdown d-inline-block">
                 <button class="btn dash-btn-sm dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" title="Clear finished jobs" aria-label="Clear jobs">
                     <i class="bi bi-trash" aria-hidden="true"></i><span>Clear jobs</span>
@@ -281,7 +287,7 @@
                 <table class="table align-middle mb-0 jobs-table">
                     <thead>
                         <tr>
-                            <th>ID</th>
+                            <th><input type="checkbox" class="form-check-input me-2" id="selectAllQueued" disabled title="Select all queued jobs shown" aria-label="Select all queued jobs shown" onchange="toggleAllQueuedSelected(this.checked)">ID</th>
                             <th>Job</th>
                             <th>Status</th>
                             <th>Priority <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Waiting jobs start in priority order: High, then Normal, then Low, oldest first within each. Change it per job from this column." aria-label="How job priority works"><i class="bi bi-info-circle" aria-hidden="true"></i></button></th>
