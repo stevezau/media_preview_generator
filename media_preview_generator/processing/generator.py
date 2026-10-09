@@ -43,6 +43,7 @@ from enum import Enum
 from loguru import logger
 
 from ..config import Config
+from ..shutdown import is_shutting_down
 from .ffmpeg_runner import GPU_CANT_DECODE_LINE, STALL_WATCHDOG_LINE
 from .filter_chain import (
     DV5_PATH_INTEL_OPENCL,
@@ -368,6 +369,10 @@ def _notify_file_result(
     dict shape Worker._capture_publishers builds — keys: server_id,
     server_name, server_type, status, message, adapter_name, frame_source.
     """
+    if outcome.value == ProcessingResult.FAILED.value and is_shutting_down():
+        # FFmpeg dies with the app on a stop; the file is redone when the job is revived on the next start.
+        logger.info("Not recording {} as failed: the app is shutting down", file_path)
+        return
     key = _failure_job_id_var.get() or ""
     with _file_result_callback_lock:
         cb = _file_result_callbacks.get(key)

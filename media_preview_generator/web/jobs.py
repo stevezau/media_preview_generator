@@ -26,6 +26,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from ..job_kinds import JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS, parse_job_kind
+from ..shutdown import is_shutting_down
 from ..utils import redact_secrets
 from .job_gate import format_wait_message
 
@@ -2406,7 +2407,12 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if job:
-                if job.status == JobStatus.CANCELLED:
+                if (error or warning) and is_shutting_down() and job.status == JobStatus.RUNNING:
+                    # A stop kills FFmpeg along with the app, so files that failed or warned now are mostly victims of
+                    # it. Staying RUNNING lets requeue_interrupted_jobs revive the job on the next start.
+                    log_msg = f"Job {job_id} left running: the app is shutting down ({error or warning})"
+                    log_level = "warning"
+                elif job.status == JobStatus.CANCELLED:
                     self.clear_pause_flag(job_id)
                     self.clear_cancellation_flag(job_id)
                     self.clear_active_worker_pool(job_id)

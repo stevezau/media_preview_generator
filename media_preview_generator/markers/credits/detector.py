@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from loguru import logger
 
+from ...shutdown import is_shutting_down
 from ..decide import chapter_hint, credits_chapter_start_ms, credits_limits_ms, earliest_credits_start_ms
 from ..freeze import Freeze
 from ..job_log import clock
@@ -949,7 +950,8 @@ def detect_credits_text(
         raise DetectorUnavailableError(str(exc), this_file=True) from exc
     except frames.FrameDecodeError as exc:
         # Kept for this file as it is (a new identity drops it): rule 3 stops waiting for an answer it may never get.
-        ctx.store.set_detector_failure(rec.id, Source.CREDITS_TEXT, str(exc) or type(exc).__name__)
+        if not is_shutting_down():  # a stop kills ffmpeg with the app: nothing about the file
+            ctx.store.set_detector_failure(rec.id, Source.CREDITS_TEXT, str(exc) or type(exc).__name__)
         raise DetectorUnavailableError(str(exc), this_file=True) from exc
     except TextDetUnavailableError as exc:
         raise DetectorUnavailableError(str(exc), this_file=True) from exc
