@@ -307,7 +307,7 @@ class TestGpuFailures:
             ("crash-on-request", {}, True),
             ("hang-on-request", {"request_timeout_s": 1.0}, True),  # a request that times out
             ("error-reply", {}, True),
-            ("hang-start", {"start_timeout_s": 4.0}, False),
+            ("hang-start", {"start_timeout_s": 2.0}, False),
             ("bad-ready", {}, False),
             ("session-failed", {}, False),
         ],
@@ -315,6 +315,9 @@ class TestGpuFailures:
     def test_a_failing_gpu_helper_hands_that_request_to_the_cpu_and_the_gpu_is_tried_after_the_back_off(
         self, envs, monkeypatch, loguru_caplog, mode, timeouts, self_tested
     ):
+        monkeypatch.setattr(
+            th, "EXIT_CODE_WAIT_S", 0.5
+        )  # a helper that is still running after its failure is waited on
         env = envs(modes={"webgpu": [mode, "ok"]}, **timeouts)
         failure_windows = []
         real_failed = env.pool._gpu_failed
@@ -536,6 +539,7 @@ class TestFallback:
         # session and its whole process group is killed; killing only the helper would leave those running.
         pid_file = tmp_path / "child.pid"
         monkeypatch.setenv("FAKE_CHILD_PID_FILE", str(pid_file))
+        monkeypatch.setattr(th, "EXIT_CODE_WAIT_S", 0.5)
         env = envs(modes={"cpu": "hang-with-child"}, request_timeout_s=1.0)
         try:
             with pytest.raises(th.TextDetUnavailableError, match="no answer within"):
@@ -948,6 +952,7 @@ class TestCpuHelpers:
         assert len(env.cpu_starts()) == 3 and flight.peak == 3
 
     def test_close_all_wakes_a_request_waiting_for_a_cpu_helper(self, envs, monkeypatch):
+        monkeypatch.setattr(th, "CLOSE_GRACE_S", 0.5)  # the hung helper is killed once this runs out
         env = envs(modes={"cpu": "hang-on-request"}, cpu_workers=1, request_timeout_s=30.0)
         flight = InFlight(monkeypatch, wanted=1)
         failed: list[BaseException] = []
@@ -1666,7 +1671,8 @@ class TestHelperProcessBackendChoice:
 class TestShutdown:
     """close_all() is the end of the pool: nothing it kills counts as that device failing."""
 
-    def test_close_all_racing_an_in_flight_request_never_demotes_the_device(self, envs, loguru_caplog):
+    def test_close_all_racing_an_in_flight_request_never_demotes_the_device(self, envs, loguru_caplog, monkeypatch):
+        monkeypatch.setattr(th, "CLOSE_GRACE_S", 0.5)  # the hung helper is killed once this runs out
         env = envs(modes={"webgpu": "hang-on-request"}, request_timeout_s=30.0)
         failed: list[BaseException] = []
 
@@ -1690,7 +1696,8 @@ class TestShutdown:
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
 
-    def test_close_all_racing_an_in_flight_cpu_request_says_shutting_down(self, envs):
+    def test_close_all_racing_an_in_flight_cpu_request_says_shutting_down(self, envs, monkeypatch):
+        monkeypatch.setattr(th, "CLOSE_GRACE_S", 0.5)  # the hung helper is killed once this runs out
         # The CPU helper's request killed by close_all is the pool ending, not text detection failing.
         env = envs(modes={"cpu": "hang-on-request"}, request_timeout_s=30.0)
         failed: list[BaseException] = []

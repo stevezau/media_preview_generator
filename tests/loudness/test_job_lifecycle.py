@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -232,12 +231,24 @@ def test_retry_keeps_sender_path_for_mapping_on_next_attempt(lifecycle: Lifecycl
     assert lifecycle.rows(parent)[path]["outcome"] == job.UP_TO_DATE
 
 
+def _assert_file_lists_stored_outside_config(config: dict, count: int) -> None:
+    """A large job keeps its per-file lists in the stored input, not in the job row's config."""
+    assert config["file_paths"] == []
+    assert config["file_paths_ref"]
+    assert config["file_paths_count"] == count
+    assert config.get("retry_baseline_in_input") is True
+    assert "retry_baseline" not in config
+
+
 def test_large_remapped_retry_survives_restart_without_omitting_waiting_files(
     lifecycle: Lifecycle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from media_preview_generator.loudness import inputs
     from media_preview_generator.loudness.inputs import load_file_input
 
-    paths = [lifecycle.add_file(f"waiting-{index:03}.mkv") for index in range(501)]
+    # Just past the inline limit, lowered so the test doesn't analyse 500 files twice.
+    monkeypatch.setattr(inputs, "INLINE_FILE_LIMIT", 4)
+    paths = [lifecycle.add_file(f"waiting-{index:03}.mkv") for index in range(inputs.INLINE_FILE_LIMIT + 1)]
     senders = [f"/sender/{Path(path).name}" for path in paths]
     cfg = job._build_multi_server_registry().get_config("plex")
     cfg.path_mappings = [{"remote_prefix": "/sender", "local_prefix": str(lifecycle.media)}]
@@ -250,7 +261,7 @@ def test_large_remapped_retry_survives_restart_without_omitting_waiting_files(
     expanded = load_file_input(lifecycle.manager.config_dir, child.config)
     assert expanded["file_paths"] == senders
     assert len(expanded["retry_baseline"]["files"]) == len(paths)
-    assert len(json.dumps(child.config)) < 4096
+    _assert_file_lists_stored_outside_config(child.config, len(paths))
 
     # Resume from disk with a changed local mount, preserving original file identities.
     relocated = lifecycle.media.with_name("relocated")
@@ -272,7 +283,7 @@ def test_large_remapped_retry_survives_restart_without_omitting_waiting_files(
     assert len(lifecycle.analyses) == len(paths)
     assert set(lifecycle.rows(child)) == set(paths)
     assert "retry_sender_paths" not in child.config
-    assert len(json.dumps(child.config)) < 4096
+    _assert_file_lists_stored_outside_config(child.config, len(paths))
     expanded = load_file_input(restored.config_dir, child.config)
     for _ in range(2):
         assert job._recount_chain(restored, parent.id, expanded, child.id) == {job.UP_TO_DATE: len(paths)}

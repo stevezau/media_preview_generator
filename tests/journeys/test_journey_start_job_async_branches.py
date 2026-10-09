@@ -41,6 +41,25 @@ pytestmark = pytest.mark.journey
 
 
 @pytest.fixture(autouse=True)
+def _instant_retry_countdown(monkeypatch):
+    """Skip the real sleeps in the job runner's retry countdown; the loop still counts down every step.
+
+    Only calls made from job_runner are shortened, so timers and polling elsewhere keep real time.
+    """
+    import sys
+    import time
+
+    real_sleep = time.sleep
+
+    def sleep(seconds: float) -> None:
+        if sys._getframe(1).f_globals.get("__name__") == "media_preview_generator.web.routes.job_runner":
+            seconds = min(seconds, 0.001)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", sleep)
+
+
+@pytest.fixture(autouse=True)
 def _reset_singletons():
     """Each test starts with a fresh settings + job + scheduler singleton."""
     reset_settings_manager()

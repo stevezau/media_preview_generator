@@ -3652,6 +3652,12 @@ class TestPublishFanOut:
         assert "intro" in out.message
 
 
+@pytest.fixture(autouse=True)
+def short_path_lock_slice(monkeypatch):
+    """A worker waiting for another job's file asks whether to stop every 50 ms, not 0.5 s."""
+    monkeypatch.setattr(pipeline, "_PATH_LOCK_SLICE_S", 0.05)
+
+
 @pytest.fixture
 def saved_settings(tmp_path):
     """The real settings manager on a temp config folder."""
@@ -5641,7 +5647,7 @@ class TestWorkerStageWaits:
         ctx.busy_writes_retried = True
         other_check = ctx._capability_locks.setdefault(sid, threading.Lock())
         other_check.acquire()
-        release = threading.Timer(0.5, other_check.release)
+        release = threading.Timer(0.2, other_check.release)
         release.start()
         try:
             out, _ = _run(ctx, media, {sid: ready_publisher()}, stage=stage, probe=_probe(CHAPTERS_BOTH))
@@ -5720,7 +5726,7 @@ class TestFileRunLockStages:
         other = threading.Lock()
         other.acquire()
         locks = pipeline._KeyedLocks(lock_factory=lambda: other)
-        release = threading.Timer(0.3, other.release)
+        release = threading.Timer(0.15, other.release)
         release.start()
         with patch.object(pipeline, "_PATH_LOCKS", locks):
             out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, stage="process", probe=_probe(CHAPTERS_BOTH))
@@ -5785,7 +5791,7 @@ class TestFileRunLockStages:
         other = threading.Lock()
         other.acquire()
         locks = pipeline._KeyedLocks(lock_factory=lambda: other)
-        release = threading.Timer(0.3, other.release)
+        release = threading.Timer(0.15, other.release)
         release.start()
         with patch.object(pipeline, "_PATH_LOCKS", locks):
             out, _ = _run(
