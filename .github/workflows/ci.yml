@@ -75,10 +75,11 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+      - name: Install actionlint
+        uses: ./.github/actions/install-actionlint
+
       - name: actionlint (all workflows)
-        uses: docker://rhysd/actionlint:1.7.7
-        with:
-          args: -color
+        run: actionlint -color
 
   typecheck:
     # The package is mypy-clean: a new error turns this check red.
@@ -133,6 +134,9 @@ jobs:
         with:
           working-directory: docs
           bundler-cache: true
+
+      - name: Install actionlint (tests/test_docs_workflow.py lints the Pages workflows)
+        uses: ./.github/actions/install-actionlint
 
       - name: Install FFmpeg + mediainfo
         # Plain apt-get rather than awalsh128/cache-apt-pkgs-action: the

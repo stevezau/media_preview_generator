@@ -1,0 +1,19 @@
+name: Install actionlint
+description: >-
+  Puts the pinned actionlint binary on PATH from its GitHub release, checksum-verified. Pulling the
+  rhysd/actionlint Docker image instead hit Docker Hub's anonymous pull rate limit on shared runners.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VERSION: "1.7.7"
+        SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+      run: |
+        archive="actionlint_${VERSION}_linux_amd64.tar.gz"
+        curl -sSfL --retry 3 -o "$RUNNER_TEMP/$archive" \
+          "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${archive}"
+        echo "${SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+        mkdir -p "$RUNNER_TEMP/actionlint"
+        tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/actionlint" actionlint
+        echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
