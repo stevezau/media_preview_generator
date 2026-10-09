@@ -87,6 +87,8 @@ _PRECEDENCE = (FAILED, WAITING, NOT_IN_LIBRARY, WRITTEN, UP_TO_DATE)
 CHECK_SHARE = 0.5
 # A database that wasn't writable (Plex restarting, its lock busy) is checked again after this long.
 RECHECK_S = 60.0
+# A batch uses one decoder and loudnorm filter per track concurrently; keep its peak CPU and memory bounded.
+MAX_AUDIO_BATCH = 3
 
 
 @dataclass
@@ -236,6 +238,28 @@ def _stream_progress_reporter(
     return report
 
 
+def _batch_progress_reporter(
+    progress_callback: Callable[[float, float, float, str | None, float | None], None] | None,
+    *,
+    first: int,
+    count: int,
+    streams: int,
+    duration_s: float,
+    later_s: float,
+) -> Callable[[float, float | None], None] | None:
+    """Report parallel audio tracks as one file-time span covering ``count`` stream slots."""
+    if progress_callback is None:
+        return None
+
+    def report(processed_s: float, speed_x: float | None) -> None:
+        fraction = min(1.0, processed_s / duration_s) if duration_s > 0 else 0.0
+        percent = max(0.0, min(100.0, (first - 1 + count * fraction) / streams * 100))
+        remaining = (max(0.0, duration_s - processed_s) + later_s) / speed_x if speed_x and duration_s > 0 else None
+        progress_callback(percent, processed_s, duration_s, f"{speed_x:.1f}x" if speed_x else None, remaining)
+
+    return report
+
+
 def process_item(
     item: ProcessableItem,
     *,
@@ -246,7 +270,11 @@ def process_item(
     progress_callback: Callable[[float, float, float, str | None, float | None], None] | None = None,
     **_ignored,
 ) -> ItemOutcome:
-    """Worker stage: analyse each stream Plex lacks loudness for and write it. A GPU worker runs it on the CPU too."""
+    """Analyse missing audio in groups of at most three, then write each result through Plex's guarded path.
+
+    Each group reads the file once; a file with more than three missing streams needs multiple input passes.
+    A GPU worker runs this audio work on the CPU too.
+    """
     if cancel_check and cancel_check():
         return ItemOutcome(FAILED, "Loudness analysis cancelled")
     path = item.canonical_path
@@ -281,50 +309,103 @@ def process_item(
         except PublishError as exc:
             rows.append(_row(cfg, WAITING if exc.state is Capability.UNREACHABLE else FAILED, str(exc)))
             continue
-        durations_s = [(same[0].duration_ms or 0) / 1000 for _index, same in sorted(todo.items())]
-        for n, (index, same) in enumerate(sorted(todo.items()), 1):
-            if cancel_check and cancel_check():
-                errors.append(f"cancelled before stream {index}")
-                break
-            if phase_callback:
-                phase_callback(f"Loudness {n}/{len(todo)}")
-            try:
-                fields = analyze.run(
-                    ctx.ffmpeg,
-                    path,
-                    index,
-                    duration_ms=same[0].duration_ms,
-                    codec=same[0].codec,
-                    cancel_check=cancel_check,
-                    pause_check=ctx.freeze_check or pause_check,
-                    on_progress=_stream_progress_reporter(
-                        progress_callback, n=n, streams=len(todo), durations_s=durations_s
-                    ),
-                )
-                with cancellable_waits(cancel_check):
-                    for stream in same:
-                        written += write_stream(
-                            db,
-                            stream.id,
-                            fields,
-                            deadline=time.monotonic() + BUSY_TIMEOUT_S,
-                            expected=stream,
-                            source=source,
-                            cancel_check=cancel_check,
-                        )
-                if progress_callback:
-                    try:
-                        progress_callback(n / len(todo) * 100, durations_s[n - 1], durations_s[n - 1], None, 0.0)
-                    except Exception as exc:  # a display error must not lose a finished measurement
-                        logger.warning("Loudness progress callback failed: {}", exc)
-            except (DatabaseBusyError, SourceChangedError) as exc:
-                waiting.append(f"stream {index} ({same[0].codec}): {exc}")
-                break
-            except (analyze.LoudnessError, PublishError) as exc:
-                if isinstance(exc, PublishError) and exc.state is Capability.UNREACHABLE:
-                    waiting.append(f"stream {index} ({same[0].codec}): {exc}")
+        ordered = sorted(todo.items())
+        durations_s = [(same[0].duration_ms or 0) / 1000 for _index, same in ordered]
+        stop_analysis = False
+        for start in range(0, len(ordered), MAX_AUDIO_BATCH):
+            group = ordered[start : start + MAX_AUDIO_BATCH]
+            batch_fields: dict[int, dict[str, str]] = {}
+            if len(group) > 1:
+                if cancel_check and cancel_check():
+                    errors.append(f"cancelled before stream {group[0][0]}")
                     break
-                errors.append(f"stream {index} ({same[0].codec}): {exc}")
+                if phase_callback:
+                    phase_callback(f"Loudness {start + 1}-{start + len(group)}/{len(ordered)}")
+                try:
+                    batch_fields = analyze.run_many(
+                        ctx.ffmpeg,
+                        path,
+                        [(index, same[0].codec, same[0].duration_ms) for index, same in group],
+                        cancel_check=cancel_check,
+                        pause_check=ctx.freeze_check or pause_check,
+                        on_progress=_batch_progress_reporter(
+                            progress_callback,
+                            first=start + 1,
+                            count=len(group),
+                            streams=len(ordered),
+                            duration_s=max(durations_s[start : start + len(group)]),
+                            later_s=sum(
+                                max(durations_s[next_start : next_start + MAX_AUDIO_BATCH])
+                                for next_start in range(start + len(group), len(ordered), MAX_AUDIO_BATCH)
+                            ),
+                        ),
+                    )
+                except (analyze.LoudnessCancelled, analyze.LoudnessTimeout) as exc:
+                    errors.append(f"streams {[index for index, _same in group]}: {exc}")
+                    break
+                except analyze.LoudnessError as exc:
+                    if cancel_check and cancel_check():
+                        errors.append(f"cancelled before retrying streams {[index for index, _same in group]}")
+                        break
+                    try:
+                        source.verify()
+                    except (SourceChangedError, OSError) as changed:
+                        waiting.append(str(changed))
+                        break
+                    logger.warning(
+                        "Loudness batch failed for {}: {}; retrying its streams separately", os.path.basename(path), exc
+                    )
+            for offset, (index, same) in enumerate(group):
+                n = start + offset + 1
+                if cancel_check and cancel_check():
+                    errors.append(f"cancelled before stream {index}")
+                    stop_analysis = True
+                    break
+                if phase_callback and not batch_fields:
+                    phase_callback(f"Loudness {n}/{len(todo)}")
+                try:
+                    fields = batch_fields.get(index)
+                    if fields is None:
+                        fields = analyze.run(
+                            ctx.ffmpeg,
+                            path,
+                            index,
+                            duration_ms=same[0].duration_ms,
+                            codec=same[0].codec,
+                            cancel_check=cancel_check,
+                            pause_check=ctx.freeze_check or pause_check,
+                            on_progress=_stream_progress_reporter(
+                                progress_callback, n=n, streams=len(todo), durations_s=durations_s
+                            ),
+                        )
+                    with cancellable_waits(cancel_check):
+                        for stream in same:
+                            written += write_stream(
+                                db,
+                                stream.id,
+                                fields,
+                                deadline=time.monotonic() + BUSY_TIMEOUT_S,
+                                expected=stream,
+                                source=source,
+                                cancel_check=cancel_check,
+                            )
+                    if progress_callback and (not batch_fields or offset == len(group) - 1):
+                        try:
+                            progress_callback(n / len(todo) * 100, durations_s[n - 1], durations_s[n - 1], None, 0.0)
+                        except Exception as exc:  # a display error must not lose a finished measurement
+                            logger.warning("Loudness progress callback failed: {}", exc)
+                except (DatabaseBusyError, SourceChangedError) as exc:
+                    waiting.append(f"stream {index} ({same[0].codec}): {exc}")
+                    stop_analysis = True
+                    break
+                except (analyze.LoudnessError, PublishError) as exc:
+                    if isinstance(exc, PublishError) and exc.state is Capability.UNREACHABLE:
+                        waiting.append(f"stream {index} ({same[0].codec}): {exc}")
+                        stop_analysis = True
+                        break
+                    errors.append(f"stream {index} ({same[0].codec}): {exc}")
+            if stop_analysis:
+                break
         marked = 0
         if not errors and not waiting:
             # Plex analyses an item again unless it's marked; marked once all its streams (all versions) are done.

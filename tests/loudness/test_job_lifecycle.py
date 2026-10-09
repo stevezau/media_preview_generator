@@ -96,10 +96,10 @@ class Lifecycle:
 
     def popen(self, command: list[str], **kwargs: object) -> SimpleNamespace:
         source = command[command.index("-i") + 1]
-        index = int(command[command.index("-map") + 1].split(":")[1])
-        target = (source, index)
-        self.analyses.append(target)
-        if target in self.interrupt_publication:
+        indices = [int(command[index + 1].split(":")[1]) for index, arg in enumerate(command) if arg == "-map"]
+        targets = [(source, index) for index in indices]
+        self.analyses.extend(targets)
+        if any(target in self.interrupt_publication for target in targets):
             self.identity_unavailable = True
         report = {
             "input_i": FIELDS["ln:loudness"],
@@ -108,10 +108,14 @@ class Lifecycle:
             "input_thresh": FIELDS["ln:threshold"],
             "target_offset": FIELDS["ln:gainOffset"],
         }
+        stderr = "\n".join(
+            f"[loudnorm@track{index} @ 0x1234] {json.dumps(report)}" if len(indices) > 1 else json.dumps(report)
+            for index in indices
+        )
         return SimpleNamespace(
-            returncode=1 if target in self.corrupt else 0,
+            returncode=1 if any(target in self.corrupt for target in targets) else 0,
             stdout=io.BytesIO(b""),
-            stderr=io.BytesIO(json.dumps(report).encode()),
+            stderr=io.BytesIO(stderr.encode()),
             wait=lambda **kw: 0,
         )
 
