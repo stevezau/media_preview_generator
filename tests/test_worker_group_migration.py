@@ -80,7 +80,7 @@ def _detected(*devices):
 
 def test_detected_gpu_missing_from_gpu_config_gets_a_one_worker_group(tmp_path, monkeypatch):
     settings = SettingsManager(str(tmp_path))
-    settings.update({"cpu_threads": 0, "gpu_config": []})
+    settings.update({"setup_complete": True, "cpu_threads": 0, "gpu_config": []})
     monkeypatch.setattr(helpers, "_ensure_gpu_cache", lambda: _detected("cuda:0"))
     notes = _migrate_to_v21(settings)
     (group,) = settings.worker_groups
@@ -93,7 +93,11 @@ def test_detected_gpu_missing_from_gpu_config_gets_a_one_worker_group(tmp_path, 
 def test_disabled_configured_gpu_stays_disabled_and_is_not_duplicated(tmp_path, monkeypatch):
     settings = SettingsManager(str(tmp_path))
     settings.update(
-        {"cpu_threads": 0, "gpu_config": [{"device": "cuda:0", "name": "GPU", "workers": 2, "enabled": False}]}
+        {
+            "setup_complete": True,
+            "cpu_threads": 0,
+            "gpu_config": [{"device": "cuda:0", "name": "GPU", "workers": 2, "enabled": False}],
+        }
     )
     monkeypatch.setattr(helpers, "_ensure_gpu_cache", lambda: _detected("cuda:0"))
     _migrate_to_v21(settings)
@@ -104,7 +108,7 @@ def test_disabled_configured_gpu_stays_disabled_and_is_not_duplicated(tmp_path, 
 
 def test_gpu_detection_failure_adds_nothing_and_does_not_fail_the_migration(tmp_path, monkeypatch):
     settings = SettingsManager(str(tmp_path))
-    settings.update({"cpu_threads": 0, "gpu_config": [{"device": "cuda:0", "workers": 2}]})
+    settings.update({"setup_complete": True, "cpu_threads": 0, "gpu_config": [{"device": "cuda:0", "workers": 2}]})
 
     def boom():
         raise RuntimeError("no driver")
@@ -343,3 +347,15 @@ def test_legacy_gpu_with_zero_workers_stays_off() -> None:
     groups = groups_from_legacy({"cpu_threads": 0, "gpu_config": [{"device": "/dev/dri/renderD128", "workers": 0}]})
 
     assert groups[0]["enabled"] is False
+
+
+def test_fresh_install_does_not_detect_gpus_during_migration(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    settings.update({"cpu_threads": 1})
+
+    def must_not_detect():
+        raise AssertionError("fresh installs choose GPUs in setup")
+
+    monkeypatch.setattr(helpers, "_ensure_gpu_cache", must_not_detect)
+    _migrate_to_v21(settings)
+    assert [g["members"][0]["resource"] for g in settings.worker_groups] == ["cpu"]

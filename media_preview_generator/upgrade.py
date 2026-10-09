@@ -1740,7 +1740,8 @@ def _migrate_to_v21(sm) -> list[str]:
     if "worker_groups" in stored:
         groups = validate_worker_groups(stored["worker_groups"])
     else:
-        detected = _detected_gpus_for_legacy_groups()
+        # Only a finished install ran on the old auto-include rule; a fresh one picks its GPUs in setup.
+        detected = _detected_gpus_for_legacy_groups() if stored.get("setup_complete") else []
         groups = groups_from_legacy(stored, detected)
         configured = {
             str(e["device"]) for e in stored.get("gpu_config") or [] if isinstance(e, dict) and e.get("device")

@@ -845,6 +845,7 @@ class TestPrewarmCaches:
         import os
         import threading
 
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION
         from media_preview_generator.web.app import create_app
 
         config_dir = str(tmp_path / "prewarm_real")
@@ -854,7 +855,8 @@ class TestPrewarmCaches:
             json.dump({"token": "test-token-12345678"}, f)
         settings_file = os.path.join(config_dir, "settings.json")
         with open(settings_file, "w") as f:
-            json.dump({"setup_complete": True}, f)
+            # Already current, so no migration step detects GPUs and the one call counted is prewarm's.
+            json.dump({"setup_complete": True, "_schema_version": _CURRENT_SCHEMA_VERSION}, f)
 
         with (
             patch.dict(
