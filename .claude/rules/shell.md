@@ -1,5 +1,6 @@
 ---
-globs: "**/*.sh"
+paths:
+  - "**/*.sh"
 ---
 
 # Shell Scripting Guidelines

@@ -124,7 +124,7 @@ media_preview_generator/
   - is a **release commit or a Dockerfile change**, whatever it contains.
 
   Skip it for docs, comments, logging, test-only, template/CSS-only, and dependency-bump commits —
-  `ruff`, the 1321-test suite and CI already cover those, and a review there finds style, not bugs.
+  `ruff`, the test suite and CI already cover those, and a review there finds style, not bugs.
 
   Block on HIGH severity findings; discuss MED before committing; LOW is informational. This catches
   the eight production-bug shapes that have shipped before — bug-blind tests, un-wrapped

@@ -1,5 +1,8 @@
 ---
-globs: "**/*.md"
+paths:
+  - "media_preview_generator/**"
+  - "Dockerfile"
+  - "pyproject.toml"
 ---
 
 # Documentation Updates
