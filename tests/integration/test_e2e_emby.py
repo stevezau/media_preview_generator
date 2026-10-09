@@ -83,7 +83,7 @@ def live_registry(emby_credentials, media_root):
     The path mapping translates them into the same canonical path.
     """
     raw_servers = _media_servers_payload(emby_credentials, str(media_root))
-    return ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration

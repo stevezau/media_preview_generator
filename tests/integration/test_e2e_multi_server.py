@@ -82,7 +82,7 @@ def multi_server_registry(emby_credentials, plex_credentials, multi_server_legac
             },
         },
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=multi_server_legacy_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration

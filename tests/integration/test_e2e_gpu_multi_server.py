@@ -110,7 +110,7 @@ def gpu_three_server_registry(emby_credentials, plex_credentials, jellyfin_crede
             "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
         },
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=gpu_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration

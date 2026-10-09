@@ -147,7 +147,7 @@ def _libraries_for_configured_server(server_id: str) -> tuple[list[dict] | None,
         return [], None, 200
 
     try:
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+        registry = ServerRegistry.from_settings(raw_servers)
     except Exception as exc:
         logger.warning(
             "Could not build server registry to list libraries for {} ({}: {}). "

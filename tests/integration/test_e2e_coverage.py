@@ -63,7 +63,7 @@ def _emby_only_registry(emby_credentials, media_root, library_remote_path: str =
             "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
         }
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration
@@ -221,7 +221,7 @@ class TestPathMappingTrailingSlash:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
@@ -378,7 +378,7 @@ class TestPathMappingPrefixCollision:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
@@ -461,7 +461,7 @@ class TestTwoPlexServersSameMedia:
         # populate the Plex fields.
         coverage_config.plex_url = plex_credentials["PLEX_URL"]
         coverage_config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=coverage_config)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         result = process_canonical_path(

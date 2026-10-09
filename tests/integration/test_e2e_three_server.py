@@ -87,7 +87,7 @@ def three_server_registry(
             "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
         },
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=three_server_legacy_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration
@@ -255,7 +255,7 @@ class TestThreeServerFanOut:
                 "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
             },
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=three_server_legacy_config)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         emby_sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"

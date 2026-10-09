@@ -293,3 +293,46 @@ def test_success_with_large_unread_diagnostics_is_not_accepted(managed_process):
 
     with pytest.raises(ChapterExtractionStalledError):
         _check_fatal_extraction(code, stderr, 4000)
+
+
+@pytest.mark.parametrize(
+    "chapter_start_ms,stderr,quiet",
+    [
+        (4000, "[vf#0:0] No filtered frames for output stream, trying to initialize anyway.\n", True),
+        (4000, "File ended prematurely\nNo filtered frames for output stream\n", False),
+        (4000, "[mjpeg] Error while opening encoder\n", False),
+        (None, "[vf#0:0] No filtered frames for output stream, trying to initialize anyway.\n", False),
+    ],
+)
+def test_chapter_seek_past_last_frame_is_not_reported_as_a_crash(
+    managed_process, monkeypatch, loguru_caplog, chapter_start_ms, stderr, quiet
+):
+    _clock, state, process, kwargs = managed_process
+    kwargs["chapter_start_ms"] = chapter_start_ms
+    state.output = lambda: ""
+    saved = []
+    monkeypatch.setattr(generator, "_save_ffmpeg_failure_log", lambda *args, **_kw: saved.append(args))
+    first_poll = process.poll.side_effect
+
+    def poll():
+        if state.polls == 0:
+            state.stderr.write(stderr)
+            state.stderr.flush()
+            state.finished_after = 1
+        code = first_poll()
+        if code == 0:
+            process.returncode = 234
+        return process.returncode
+
+    process.poll.side_effect = poll
+    run = ffmpeg_runner.create_ffmpeg_runner(**kwargs)
+
+    code, _elapsed, _speed, _stderr = run(use_skip=False)
+
+    assert code == 234
+    errors = [r for r in loguru_caplog.records if r.levelname == "ERROR"]
+    if quiet:
+        assert not errors and not saved
+        assert any("No video frame at 4.000s" in r.getMessage() for r in loguru_caplog.records)
+    else:
+        assert errors and saved

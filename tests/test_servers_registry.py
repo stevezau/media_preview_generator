@@ -201,7 +201,6 @@ class TestServerRegistryFromSettings:
                     "auth": {"token": "t"},
                 }
             ],
-            legacy_config=mock_config,
         )
         servers = registry.servers()
         assert len(servers) == 1
@@ -240,7 +239,6 @@ class TestServerRegistryFromSettings:
                         "url": "http://kodi",
                     },
                 ],
-                legacy_config=mock_config,
             )
         finally:
             _loguru_logger.remove(sink_id)
@@ -256,13 +254,12 @@ class TestServerRegistryFromSettings:
     def test_unknown_type_string_skipped(self, mock_config):
         registry = ServerRegistry.from_settings(
             [{"id": "x", "type": "kodi", "name": "K", "url": ""}],
-            legacy_config=mock_config,
         )
         assert registry.servers() == []
         assert registry.configs() == []
 
     def test_empty_input_yields_empty_registry(self, mock_config):
-        registry = ServerRegistry.from_settings([], legacy_config=mock_config)
+        registry = ServerRegistry.from_settings([])
         assert registry.servers() == []
         assert registry.find_owning_servers("/anything") == []
 
@@ -346,7 +343,6 @@ class TestServerRegistryAccessors:
                     "auth": {},
                 }
             ],
-            legacy_config=mock_config,
         )
         cfg = registry.get_config("plex-default")
         assert isinstance(cfg, ServerConfig)
@@ -374,7 +370,6 @@ class TestFindOwningServers:
                     ],
                 }
             ],
-            legacy_config=mock_config,
         )
         matches = registry.find_owning_servers("/data/movies/Foo.mkv")
         assert [m.server_id for m in matches] == ["plex-default"]

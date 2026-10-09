@@ -94,7 +94,7 @@ def plex_visible_registry(plex_credentials, plex_visible_config, media_root):
             },
         }
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=plex_visible_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 def _bundle_subpath_from_test_path(test_bif_path: Path, plex_config_root: str) -> str:

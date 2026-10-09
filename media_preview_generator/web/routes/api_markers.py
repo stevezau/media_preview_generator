@@ -181,7 +181,7 @@ def _registry(*, timeout_s: int | None = None) -> Any:
     entries = list(get_settings_manager().get("media_servers") or [])
     if timeout_s is not None:
         entries = [{**entry, "timeout": _capped_timeout(entry.get("timeout"), timeout_s)} for entry in entries]
-    return ServerRegistry.from_settings(entries, legacy_config=None)
+    return ServerRegistry.from_settings(entries)
 
 
 def _capped_timeout(stored: object, cap: int) -> int:

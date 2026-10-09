@@ -686,7 +686,7 @@ def get_path_owners():
 
     # Build a registry without instantiating live clients — we only need
     # the ownership resolver, which works off ServerConfig dataclasses.
-    registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    registry = ServerRegistry.from_settings(raw_servers)
     matches = registry.find_owning_servers(path)
 
     return jsonify(

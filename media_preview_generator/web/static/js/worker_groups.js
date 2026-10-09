@@ -1027,8 +1027,9 @@
             message(snapshot.warning || 'Worker groups saved. Current files finish; new assignments use these settings.', !!snapshot.warning);
         } catch (error) {
             const text = error.conflict ? 'Worker groups changed elsewhere. Your draft is preserved. Discard it and reload the latest groups before editing again.' : error.message;
-            message(text, true);
+            // After the reload: a successful load clears error messages.
             if (error.conflict) { await load(true); }
+            message(text, true);
             failure = text;
             throw error;
         } finally {

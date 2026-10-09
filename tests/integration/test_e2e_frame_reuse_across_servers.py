@@ -100,7 +100,7 @@ def _plex_jelly_registry(plex_credentials, jellyfin_credentials, legacy_config, 
             "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
         },
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=legacy_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 def _plex_only_registry(plex_credentials, legacy_config, media_root):
@@ -122,7 +122,7 @@ def _plex_only_registry(plex_credentials, legacy_config, media_root):
             },
         },
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=legacy_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 def _cleanup_outputs(canonical: str, plex_config_folder: str | None) -> None:

@@ -146,14 +146,11 @@ class ServerRegistry:
     def from_settings(
         cls,
         media_servers: list[dict[str, Any]],
-        *,
-        legacy_config: Config | None = None,
     ) -> ServerRegistry:
         """Build a registry from the persisted ``media_servers`` array.
 
         Args:
             media_servers: Raw ``settings.json`` ``media_servers`` list.
-            legacy_config: Ignored; still accepted so existing callers keep working.
         """
         registry = cls()
         for raw in media_servers or []:

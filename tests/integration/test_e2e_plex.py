@@ -73,7 +73,7 @@ def plex_registry(plex_credentials, plex_legacy_config, media_root):
             },
         }
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=plex_legacy_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration

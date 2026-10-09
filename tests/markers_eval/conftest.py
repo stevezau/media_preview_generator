@@ -13,6 +13,12 @@ def one_ffmpeg_build(monkeypatch):
         monkeypatch.setattr(module, "ffmpeg_build", lambda ffmpeg: "ffmpeg version 8.0.1-3ubuntu2")
 
 
+@pytest.fixture(autouse=True)
+def evidence_folder(monkeypatch, tmp_path):
+    """The real truth sets are local-only; commands that only need the folder's path get a throwaway one."""
+    monkeypatch.setenv("MARKERS_EVAL_EVIDENCE", str(tmp_path / "evidence"))
+
+
 @pytest.fixture
 def loguru_caplog(caplog):
     """Forward loguru records into pytest's caplog (same bridge as ``tests/markers/conftest.py``)."""

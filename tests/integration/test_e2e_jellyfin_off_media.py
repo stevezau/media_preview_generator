@@ -141,7 +141,6 @@ class TestJellyfinOffMediaEndToEnd:
                     },
                 }
             ],
-            legacy_config=None,
         )
 
         sheet_dir = _offmedia_sheet_dir(config_dir, item_id)
