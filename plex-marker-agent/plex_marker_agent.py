@@ -42,7 +42,7 @@ from media_preview_generator.markers.publishers.plex_db import LocalPlexDb, plex
 
 # This build's version. The app refuses an agent older than its ``plex_remote.MIN_AGENT_VERSION`` and says both
 # numbers, so an image left behind on the Plex host is a message, never a wrong write.
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.1.1"
 # The wire contracts this build implements. Add to it (never replace) while older apps are still in the wild.
 PROTOCOLS = [plex_remote.AGENT_PROTOCOL]
 # A request body is a marker set and one item's parts: kilobytes. Anything larger is refused before it is parsed.
