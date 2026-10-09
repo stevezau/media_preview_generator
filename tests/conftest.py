@@ -41,6 +41,39 @@ os.environ["CONFIG_DIR"] = _TEST_CONFIG_DIR
 atexit.register(shutil.rmtree, _TEST_CONFIG_DIR, ignore_errors=True)
 
 
+def _share_werkzeug_url_builders() -> None:
+    """Compile each distinct route's URL builder once per test process instead of once per app.
+
+    About 2,100 tests build the Flask app, and each build registers ~170 routes. Werkzeug generates and compiles two
+    Python builder functions per route, which is ~70% of ``create_app``. A builder depends only on the route's pattern,
+    its default keys and ``append_unknown``; it reaches the converters through the rule it is bound to. So one function
+    per key serves every app. Routes whose defaults fill a URL part are compiled as usual. If Werkzeug's internals
+    change shape, nothing is patched and builds just run at full cost.
+    """
+    from werkzeug.routing.rules import Rule
+
+    compile_builder = getattr(Rule, "_compile_builder", None)
+    if compile_builder is None:
+        return
+    builders: dict[tuple, object] = {}
+
+    def shared_compile_builder(self: Rule, append_unknown: bool = True):  # noqa: ANN202 - Werkzeug's private signature
+        trace = getattr(self, "_trace", None)
+        defaults = self.defaults or {}
+        if trace is None or any(is_dynamic and part in defaults for is_dynamic, part in trace):
+            return compile_builder(self, append_unknown)
+        key = (self.rule, tuple(trace), tuple(str(name) for name in defaults), append_unknown)
+        builder = builders.get(key)
+        if builder is None:
+            builder = builders[key] = compile_builder(self, append_unknown)
+        return builder
+
+    Rule._compile_builder = shared_compile_builder
+
+
+_share_werkzeug_url_builders()
+
+
 @pytest.fixture(autouse=True)
 def _reset_gpu_fallback_history():
     """Keep process-wide GPU failure streaks inside the test that produces them.
