@@ -311,7 +311,7 @@ def compute_fingerprint(
     except BaseException:
         _close_fds(progress_pipe)
         raise
-    if progress_pipe is not None:
+    if progress_pipe is not None and step is not None:
         os.close(progress_pipe[1])  # ffmpeg holds the only write end, so the reader sees EOF when it exits
         reader = _start_progress_reader(progress_pipe[0], step, retime)
     deadline = freeze.clock() + timeout_s
