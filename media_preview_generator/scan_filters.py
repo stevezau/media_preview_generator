@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .servers.base import MediaItem
@@ -197,7 +197,9 @@ class ScanFilters:
             latest = {key: set(sorted(seasons)[-self.latest_seasons :]) for key, seasons in latest.items()}
             items = collected
 
-        cutoff = self.now - timedelta(days=self.added_last_days) if self.added_filter == "last_days" else None
+        cutoff = (
+            self.now - timedelta(days=cast(int, self.added_last_days)) if self.added_filter == "last_days" else None
+        )
         for item in items:
             if cancel_check and cancel_check():
                 return
@@ -232,7 +234,7 @@ class ScanFilters:
                     local_date = item.added_at.astimezone().date()
                 except (ValueError, OverflowError, OSError):
                     return "missing added date"
-                if not self.added_from <= local_date <= self.added_to:
+                if not cast(date, self.added_from) <= local_date <= cast(date, self.added_to):
                     return "outside added-date window"
         years_active = self.movie_year_from is not None or self.movie_year_to is not None
         media_type = self._media_type(item, library_kind)

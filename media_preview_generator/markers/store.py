@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from loguru import logger
 
@@ -814,7 +814,7 @@ class MarkerStore:
         """A file's decisions of ours per type: its decided marker's times and sources, or None and no sources
         (no evidence)."""
         markers = {r["type"]: r for r in conn.execute("SELECT * FROM markers WHERE file_id=?", (file_id,)).fetchall()}
-        judged = []
+        judged: list[tuple[str, tuple[int, int] | None, tuple[str, ...]]] = []
         for r in conn.execute("SELECT type, status FROM decisions WHERE file_id=?", (file_id,)).fetchall():
             if r["status"] not in _JUDGED:
                 continue
@@ -1242,11 +1242,14 @@ class MarkerStore:
         with self._tx() as conn:
             row = conn.execute("SELECT * FROM files WHERE canonical_path=?", (identity.canonical_path,)).fetchone()
             if row is None:
-                file_id = conn.execute(
-                    "INSERT INTO files (canonical_path, size, mtime_ns, duration_ms, season_key, is_movie, updated_at) "
-                    "VALUES (?,?,?,?,?,0,?)",
-                    (identity.canonical_path, identity.size, identity.mtime_ns, duration_ms, season_key, now),
-                ).lastrowid
+                file_id = cast(
+                    int,
+                    conn.execute(
+                        "INSERT INTO files (canonical_path, size, mtime_ns, duration_ms, season_key, is_movie, updated_at) "
+                        "VALUES (?,?,?,?,?,0,?)",
+                        (identity.canonical_path, identity.size, identity.mtime_ns, duration_ms, season_key, now),
+                    ).lastrowid,
+                )
             elif (row["size"], row["mtime_ns"]) != (identity.size, identity.mtime_ns):
                 return None
             else:
@@ -2152,7 +2155,7 @@ class MarkerStore:
             row = conn.execute("SELECT size, mtime_ns FROM files WHERE id=?", (file_id,)).fetchone()
             if row is None or (row["size"], row["mtime_ns"]) != tuple(identity):
                 return False
-            self._write_frame_rate(conn, file_id, tuple(identity), frame_rate)
+            self._write_frame_rate(conn, file_id, identity, frame_rate)
         return True
 
     @staticmethod

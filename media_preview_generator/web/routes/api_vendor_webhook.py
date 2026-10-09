@@ -24,6 +24,8 @@ question worth answering — leaving the button live was misleading.
 
 from __future__ import annotations
 
+from typing import cast
+
 from flask import jsonify, request
 
 from ..auth import setup_or_auth_required
@@ -134,7 +136,7 @@ def _info_handler(vendor: str):
         {
             "vendor": vendor,
             "server_id": server_id,
-            "server_name": server_entry.get("name") or server_id,
+            "server_name": cast(dict, server_entry).get("name") or server_id,
             "webhook_url": webhook_url_per_server,
             "webhook_url_per_server": webhook_url_per_server,
             "auth_header_name": "X-Auth-Token",

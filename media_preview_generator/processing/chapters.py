@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from PIL import Image
 from requests import RequestException
@@ -58,6 +58,9 @@ class ChapterSourceCorruptionError(RuntimeError):
 
 class ChapterDecoderCompatibilityError(RuntimeError):
     """FFmpeg could not initialize the source's HEVC parameter sets."""
+
+
+SeekFailure = ChapterSourceCorruptionError | ChapterExtractionStalledError | ChapterDecoderCompatibilityError
 
 
 def _check_fatal_extraction(returncode: int, stderr: list[str], start_ms: int) -> None:
@@ -218,13 +221,14 @@ def _revision(path: Path) -> str:
 
 
 def _fresh_images(plan: ChapterPlan) -> dict[str, dict]:
+    target = cast("ChapterTarget", plan.target)
     try:
         manifest = json.loads(plan.manifest_path.read_text())
         if manifest.get("source") != list(plan.source_fingerprint) or manifest.get("profile") != plan.profile:
             return {}
         entries = manifest.get("images", {})
         fresh = {}
-        for chapter in plan.target.chapters:
+        for chapter in target.chapters:
             entry = entries.get(str(chapter.index), {})
             if entry.get("start_ms") != chapter.start_ms or entry.get("end_ms") != chapter.end_ms:
                 continue
@@ -240,19 +244,21 @@ def _fresh_images(plan: ChapterPlan) -> dict[str, dict]:
 
 
 def _registered(plan: ChapterPlan, images: dict[str, dict]) -> bool:
-    return bool(plan.target) and all(
+    target = cast("ChapterTarget", plan.target)
+    return bool(target) and all(
         chapter.thumb_url
-        == f"/library/media/{plan.target.media_id}/chapterImages/{chapter.index}?mpgChapter={images.get(str(chapter.index), {}).get('sha256', '')}"
-        for chapter in plan.target.chapters
+        == f"/library/media/{target.media_id}/chapterImages/{chapter.index}?mpgChapter={images.get(str(chapter.index), {}).get('sha256', '')}"
+        for chapter in target.chapters
     )
 
 
 def _registration_key(plan: ChapterPlan, images: dict[str, dict]) -> dict:
+    target = cast("ChapterTarget", plan.target)
     return {
-        "machine": plan.target.machine_identifier,
-        "item": plan.target.rating_key,
-        "media": plan.target.media_id,
-        "part": plan.target.part_id,
+        "machine": target.machine_identifier,
+        "item": target.rating_key,
+        "media": target.media_id,
+        "part": target.part_id,
         "images": {index: entry["sha256"] for index, entry in images.items()},
     }
 
@@ -479,7 +485,7 @@ def publish_chapters(
             if missing
             else None
         )
-        seek_failure = None
+        seek_failure: SeekFailure | None = None
         if index_defect:
             seek_failure = ChapterSourceCorruptionError(
                 f"{index_defect}; no source-verified scrubber frame is available for recovery. "
@@ -487,6 +493,7 @@ def publish_chapters(
             )
         elif any(entry.get("recovery") for entry in images.values()):
             causes = {entry.get("recovery", {}).get("cause") for entry in images.values()}
+            failure_type: type[SeekFailure]
             if "corruption" in causes:
                 failure_type = ChapterSourceCorruptionError
             elif "decoder_compatibility" in causes:

@@ -299,8 +299,9 @@ def get_library_sections(plex, config: Config, cancel_check=None, progress_callb
     # "library i of N" using the count of libraries we'll actually scan,
     # not the raw section count returned by Plex.
     def _section_is_in_scope(section) -> bool:
-        if getattr(config, "plex_library_ids", None):
-            return str(section.key) in config.plex_library_ids
+        library_ids = getattr(config, "plex_library_ids", None)
+        if library_ids:
+            return str(section.key) in library_ids
         if config.plex_libraries:
             return section.title.lower() in config.plex_libraries
         return True
@@ -315,8 +316,9 @@ def get_library_sections(plex, config: Config, cancel_check=None, progress_callb
             logger.info("Cancellation detected during library scan — aborting")
             return
         # Filter by section key (ID) when plex_library_ids is set; otherwise by title (plex_libraries)
-        if getattr(config, "plex_library_ids", None):
-            if str(section.key) not in config.plex_library_ids:
+        library_ids = getattr(config, "plex_library_ids", None)
+        if library_ids:
+            if str(section.key) not in library_ids:
                 logger.info(
                     "Skipping library '{}' (id={}) as it's not in the configured library IDs list",
                     section.title,

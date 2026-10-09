@@ -13,7 +13,7 @@ import json
 import threading
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, cast
 
 import requests
 from loguru import logger
@@ -298,7 +298,7 @@ class EmbyServer(EmbyApiClient):
         listed = self._read_catalog()
         if listed is None:
             recent = cached is not None and _monotonic() - cached[0] < CATALOG_KEEP_ON_ERROR_S
-            return cached[1] if recent else None
+            return cast(tuple[float, bool], cached)[1] if recent else None
         with _catalog_guard:
             _catalog_answers[url] = (_monotonic(), listed)
         return listed

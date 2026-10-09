@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -52,7 +52,7 @@ def loudness_readiness_section(
             server_config.markers,
             library_kinds={lib.id: lib.kind for lib in server_config.libraries},
         )
-        if not reason and not block["enabled"]:
+        if not reason and not cast(dict, block)["enabled"]:
             return None
         ready = False
         if not reason:
@@ -120,7 +120,7 @@ def loudness_readiness_section(
                 "ok": True,
                 "severity": "info",
                 "informational": True,
-                "current": NATIVE_MODES[mode],
+                "current": NATIVE_MODES[cast(str, mode)],
                 "reason": unavailable,
                 "help_url": "/settings#section-workers" if not workers_ready else None,
                 "help_label": "Configure CPU workers" if not workers_ready else None,

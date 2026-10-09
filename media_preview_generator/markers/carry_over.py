@@ -40,7 +40,7 @@ first answer of its own replaces it.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from typing import NamedTuple
+from typing import NamedTuple, TypeGuard
 
 from .decide import (
     EOF_CLAMP_MS,
@@ -93,7 +93,7 @@ class ReadNow(NamedTuple):
         return self.version > stored
 
 
-def is_carried_over(marker: Marker | None) -> bool:
+def is_carried_over(marker: Marker | None) -> TypeGuard[Marker]:
     """Whether a stored marker was carried over from a replaced file."""
     return marker is not None and CARRIED_OVER in marker.decided_by
 
@@ -127,8 +127,8 @@ def previous_decisions(
     candidates: list[tuple[PreviousDecision, FileRecord | None]] = []
     if not moved_here:
         candidates += [(decision, None) for decision in store.replaced_in_place(rec.id)]
-    for other in store.files_published_to(items, other_than=rec.id):
-        candidates += [(decision, other) for decision in store.previous_decisions_of(other.id)]
+    for published_to in store.files_published_to(items, other_than=rec.id):
+        candidates += [(decision, published_to) for decision in store.previous_decisions_of(published_to.id)]
     states: dict[int, bool | None] = {}
     out: dict[MarkerType, PreviousDecision | None] = {}
     for mtype in wanted:

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from flask import Blueprint, g, jsonify, request
 from loguru import logger
@@ -24,7 +24,7 @@ from loguru import logger
 from ..job_kinds import INTRO_CREDITS_FOLLOW_UP
 from ..processing.retry_queue import retry_policy
 from .auth import api_token_required, validate_token
-from .jobs import JobStatus, get_job_manager, incoming_job_priority
+from .jobs import Job, JobStatus, get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
 
 webhooks_bp = Blueprint("webhooks_bp", __name__, url_prefix="/api/webhooks")
@@ -33,14 +33,14 @@ _MAX_WEBHOOK_DELAY_SECONDS = 3600
 
 # Debounce timers and payload batches keyed by source and optional server id.
 _pending_timers: dict[str, threading.Timer] = {}
-_pending_batches: dict[str, dict[str, object]] = {}
+_pending_batches: dict[str, dict[str, Any]] = {}
 _pending_lock = threading.RLock()
 
 # Recently dispatched (source, normalized_path) entries, used to drop
 # duplicate webhook deliveries that arrive after the debounce batch has
 # already fired — Plex in particular re-sends library.new events after
 # metadata refreshes and analyzer reruns.
-_recent_dispatches: dict[tuple[str, str], float] = {}
+_recent_dispatches: dict[tuple[str, str, str], float] = {}
 _RECENT_DISPATCH_TTL_SECONDS = 600
 # Files Sonarr's per-file import events reported, keyed (source, server_id, downloadId, path), so its "Import
 # Complete" event for the same download doesn't queue them again. Kept for hours: a slow season pack's first files
@@ -175,7 +175,7 @@ def _authenticate_webhook(f):
     """
 
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def decorated_function(*args: Any, **kwargs: Any) -> Any:
         candidates: list[tuple[str, str]] = []
 
         x_token = request.headers.get("X-Auth-Token", "").strip()
@@ -813,8 +813,8 @@ def _format_plex_title_from_metadata(metadata: dict) -> str | None:
         if not show:
             return None
         try:
-            season_num = int(metadata.get("parentIndex"))
-            episode_num = int(metadata.get("index"))
+            season_num = int(cast(Any, metadata.get("parentIndex")))
+            episode_num = int(cast(Any, metadata.get("index")))
         except (TypeError, ValueError):
             return None
         season_episode = f"S{season_num:02d}E{episode_num:02d}"
@@ -1059,7 +1059,7 @@ def _schedule_webhook_job(
                 # the row renders the countdown natively, and the banner
                 # becomes redundant.
                 now_ts = datetime.now(UTC).timestamp()
-                opened_at = now_ts if is_fresh_batch else float(batch.get("opened_at", now_ts))
+                opened_at = now_ts if batch is None else float(batch.get("opened_at", now_ts))
                 elapsed = now_ts - opened_at
                 max_wait = max(_WEBHOOK_BATCH_MAX_WAIT_SECONDS, delay, float(batch.get("max_wait", 0)) if batch else 0)
                 wait_s = min(delay, max(0.0, max_wait - elapsed))
@@ -1129,6 +1129,7 @@ def _schedule_webhook_job(
                     }
                     _pending_batches[debounce_key] = batch
 
+                assert batch is not None
                 batch["file_paths"].add(normalized_path)
                 batch["titles"].append(safe_title)
                 if deleted_paths:
@@ -1151,7 +1152,7 @@ def _schedule_webhook_job(
                     job_manager.update_job_config(
                         batch["job_id"],
                         {
-                            **job_manager.get_job(batch["job_id"]).config,
+                            **cast(Job, job_manager.get_job(batch["job_id"])).config,
                             "source": source,
                             "path_count": path_count,
                             "webhook_basenames": batch_basenames[:_HISTORY_FILES_PREVIEW_CAP],
@@ -1301,7 +1302,7 @@ def _execute_webhook_job(debounce_key: str, token: object | None = None) -> None
         if token is not None and batch["fire_at"] > datetime.now(UTC).timestamp():
             _arm_webhook_timer(debounce_key, batch)
             return
-        job = get_job_manager().get_job(batch.get("job_id"))
+        job = get_job_manager().get_job(cast(str, batch.get("job_id")))
         _pending_batches.pop(debounce_key)
         timer = _pending_timers.pop(debounce_key, None)
         if timer is not None:
@@ -2348,7 +2349,7 @@ def _fire_pending_batch_now(debounce_key: str, job_id: str | None = None) -> boo
         batch = _pending_batches.get(debounce_key)
         if batch is None or (job_id is not None and batch["job_id"] != job_id):
             return False
-        job = get_job_manager().get_job(batch.get("job_id"))
+        job = get_job_manager().get_job(cast(str, batch.get("job_id")))
         fired = job is not None and job.status not in (
             JobStatus.CANCELLED,
             JobStatus.COMPLETED,

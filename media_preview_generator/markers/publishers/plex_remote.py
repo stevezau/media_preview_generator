@@ -514,11 +514,13 @@ class AgentClient:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+        advertised_agent = payload.get("agent")
+        agent = advertised_agent if isinstance(advertised_agent, dict) else {}
         advertised = agent.get("capabilities")
         self.capabilities = advertised if isinstance(advertised, list) else []
         self.version = str(agent.get("version") or "")
-        protocols = agent.get("protocols") if isinstance(agent.get("protocols"), list) else []
+        advertised_protocols = agent.get("protocols")
+        protocols = advertised_protocols if isinstance(advertised_protocols, list) else []
         if response.status_code == 401:
             self.state = AGENT_REJECTED
             raise AgentError(

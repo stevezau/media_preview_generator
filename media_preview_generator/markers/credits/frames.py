@@ -535,6 +535,7 @@ def _kill_on_cancel(
 def _reap(proc: subprocess.Popen, reader: threading.Thread) -> None:
     reader.join()
     with contextlib.suppress(OSError, ValueError):
+        assert proc.stdout is not None
         proc.stdout.close()
     with contextlib.suppress(OSError):
         proc.wait()
@@ -556,6 +557,7 @@ def _release(proc: subprocess.Popen, reader: threading.Thread, stop: threading.E
         threading.Thread(target=_reap, args=(proc, reader), daemon=True, name="credits-frames-reaper").start()
         return
     with contextlib.suppress(OSError, ValueError):
+        assert proc.stdout is not None
         proc.stdout.close()
 
 
@@ -746,7 +748,7 @@ def run_decode(
         # ffmpeg exited cleanly, so a showinfo line per frame is the contract. Pairing anyway would put a frame's boxes
         # on another frame's timestamp and store a credits start at the wrong second; the file is skipped instead.
         raise FrameDecodeError(f"ffmpeg wrote {len(pts)} timestamps for {len(boxes)} frames of {name}")
-    rows = [(pts[i], len(boxes[i]), luma[i], boxes[i]) for i in range(len(boxes)) if pts[i] is not None]
+    rows = [(p, len(boxes[i]), luma[i], boxes[i]) for i in range(len(boxes)) if (p := pts[i]) is not None]
     if len(rows) != len(boxes):
         logger.warning("{} frames of {} have no timestamp and are dropped", len(boxes) - len(rows), name)
     return rows

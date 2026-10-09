@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from loguru import logger
@@ -451,9 +451,10 @@ def _read_credits(
             # Stopping with too little story before the run leaves it to text_all_through, which answers nothing.
             if coarse is None or not rule_j.too_little_story(key_rows, coarse):
                 break
-            read_from, before_start = before_start, _next_step_start(before_start, earliest_start_s)
-            if before_start is None:
+            next_start = _next_step_start(before_start, earliest_start_s)
+            if next_start is None:
                 break
+            read_from, before_start = before_start, next_start
             before_rows = _step_rows(keyframes, before_start, read_from, deadline, cancel_check, os.path.basename(path),
                                      clock=freeze.clock)  # fmt: skip
             # The run crossed the tail's edge at the first step, so a later step is kept whatever it holds: more of the
@@ -527,7 +528,7 @@ def _past_prose(
     Returns:
         ``found``, or ``found`` with the new start and ``prose_start_s`` set to the old one.
     """
-    start = found.start_s
+    start = cast(float, found.start_s)
     shown = rule_j.without_overlays(sorted([*found.fine_rows, *found.key_rows], key=lambda row: row[0]), found.overlays)
     text_at_start = next((row for row in shown if row[0] >= start and rule_j.boxes_of(row)), None)
     if text_at_start is None or text_at_start[2] >= rule_j.RULE_J.dark:
@@ -766,11 +767,12 @@ def _cut_short(
     """Why a file whose tail gave no frame on the CPU has none there: ``CUT_SHORT`` with how much of it can be read,
     when its video stops ``CUT_SHORT_MIN_S`` or more before its stated length; None when it doesn't, or that can't be
     told (its tail is then "nothing found", as a VP9 tail whose container flags no keyframe always was)."""
-    tail_start = frames.tail_start_s(rec.duration_ms, tail_s=_tail_s(rec, ctx))
+    duration_ms = cast(int, rec.duration_ms)
+    tail_start = frames.tail_start_s(duration_ms, tail_s=_tail_s(rec, ctx))
     readable_s = frames.readable_video_s(rec.canonical_path, ffmpeg, from_s=tail_start, cancel_check=cancel_check)
-    if readable_s is None or readable_s > rec.duration_ms / 1000.0 - CUT_SHORT_MIN_S:
+    if readable_s is None or readable_s > duration_ms / 1000.0 - CUT_SHORT_MIN_S:
         return None
-    return f"{CUT_SHORT} ({clock(int(readable_s * 1000))} of {clock(rec.duration_ms)} readable)"
+    return f"{CUT_SHORT} ({clock(int(readable_s * 1000))} of {clock(duration_ms)} readable)"
 
 
 def _gpu_missed(name: str, fallback_callback: Callable[[str], None] | None) -> None:
@@ -889,7 +891,7 @@ def detect_credits_text(
     def read(device: str | None, device_path: str | None, threads: int | None) -> CreditsTextResult:
         return find_credits(
             rec.canonical_path,
-            duration_ms=rec.duration_ms,
+            duration_ms=cast(int, rec.duration_ms),
             is_episode=rec.season_key is not None,
             tail_s=_tail_s(rec, ctx),
             ffmpeg=ffmpeg,
@@ -1043,7 +1045,10 @@ def _earliest_start_s(rec: FileRecord, ctx: PipelineContext) -> float:
         movie_window_s=ctx.settings.credits_movie_s,
     )
     earliest_ms = earliest_credits_start_ms(
-        rec.duration_ms, is_movie=rec.is_movie, credits_window_ms=window_ms, movie_credits_max_from_end_ms=movie_cap_ms
+        cast(int, rec.duration_ms),
+        is_movie=rec.is_movie,
+        credits_window_ms=window_ms,
+        movie_credits_max_from_end_ms=movie_cap_ms,
     )
     return earliest_ms / 1000.0
 

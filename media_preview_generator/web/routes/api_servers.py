@@ -14,7 +14,7 @@ import os
 import re
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from flask import jsonify, request
@@ -510,9 +510,10 @@ def _validate_server_payload(
         if "loudness" in data:
             # Patch semantics like markers: a field the client leaves out keeps its stored value.
             posted = data.get("loudness")
-            both_dicts = isinstance(stored_loudness, dict) and isinstance(posted, dict)
             loudness_block, err = validate_server_loudness(
-                {**stored_loudness, **posted} if both_dicts else posted,
+                {**stored_loudness, **posted}
+                if isinstance(stored_loudness, dict) and isinstance(posted, dict)
+                else posted,
                 type_value,
                 markers_block,
                 library_kinds=library_kinds,
@@ -584,7 +585,7 @@ def _validate_server_payload(
 
 @api.route("/servers", methods=["GET"])
 @setup_or_auth_required
-def list_servers():
+def list_servers() -> Any:
     """List every configured media server with redacted credentials.
 
     Returns the persisted ``media_servers`` array verbatim except that
@@ -762,7 +763,7 @@ def refresh_server_libraries(server_id: str):
     # Identity is captured here too: list_libraries having succeeded means the connection works, which closes the gap
     # for servers added while offline. Probed before taking the settings lock because it is a network call.
     probed_identity = ""
-    if not target_entry.get("server_identity"):
+    if not cast(dict, target_entry).get("server_identity"):
         try:
             probe = server.test_connection()
             if probe.ok and probe.server_id:
@@ -1200,7 +1201,7 @@ def previews_readiness(server_id: str):
     # are NEVER hidden by a dismissal (the frontend's _partitionChecks
     # forces them back into mustFix), so a dismiss on a critical id is
     # a harmless no-op rather than a safety hole.
-    dismissals = set(target.get("health_dismissals") or [])
+    dismissals = set(cast(dict, target).get("health_dismissals") or [])
     if dismissals:
         for section in payload.get("sections") or []:
             for check in section.get("checks") or []:
@@ -1501,6 +1502,7 @@ def turn_on_plex_library_markers(server_id: str):
     cfg, refused = _plex_marker_target(server_id)
     if refused is not None:
         return refused
+    cfg = cast(ServerConfig, cfg)
     if library_id not in {str(lib.id) for lib in marker_libraries(cfg)}:
         return jsonify(
             {"ok": False, "error": f"library {library_id!r} isn't one Intro & Credits goes to on this server"}
@@ -1543,6 +1545,7 @@ def set_plex_marker_detection_never(server_id: str):
     cfg, refused = _plex_marker_target(server_id)
     if refused is not None:
         return refused
+    cfg = cast(ServerConfig, cfg)
     if not marker_libraries(cfg):
         return jsonify({"ok": False, "error": "Intro & Credits is off for this server"}), 400
 
@@ -1573,6 +1576,7 @@ def set_plex_loudness_analysis_never(server_id: str):
     cfg, refused = _plex_marker_target(server_id)
     if refused is not None:
         return refused
+    cfg = cast(ServerConfig, cfg)
     if not load_server_loudness(cfg).enabled:
         return jsonify({"ok": False, "error": "Loudness is off for this server"}), 400
     if not loudness_libraries(cfg):

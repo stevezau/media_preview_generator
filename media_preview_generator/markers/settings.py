@@ -204,11 +204,11 @@ def _normalise_sources(raw_sources: Any, existing_sources: Any) -> tuple[list[di
             if isinstance(s, dict) and s.get("id") == "theintrodb":
                 existing_key = str(s.get("api_key") or "")
     if raw_sources is None:
-        out = copy.deepcopy(DEFAULT_GLOBAL_MARKERS["sources"])
-        for s in out:
+        defaults = copy.deepcopy(DEFAULT_GLOBAL_MARKERS["sources"])
+        for s in defaults:
             if s["id"] == "theintrodb":
                 s["api_key"] = existing_key
-        return out, ""
+        return defaults, ""
     if not isinstance(raw_sources, list):
         return None, "markers.sources must be a list"
     seen: set[str] = set()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+from typing import Any
 
 
 def previous_result(path: str, outcome: str, servers: list[dict] | None) -> dict:
@@ -46,7 +47,7 @@ def replace_results(baseline: dict, rows: list[dict], sender_paths: dict[str, st
     original_paths = {result["file"]: sender for sender, result in previous.items()}
     latest = {}
     for row in rows:
-        path = row.get("file")
+        path: Any = row.get("file")
         key = sender_paths.get(path, original_paths.get(path, path))
         if path and key in previous:
             latest[key] = row

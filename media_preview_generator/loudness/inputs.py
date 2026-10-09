@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 INLINE_FILE_LIMIT = 500
 
@@ -61,7 +62,7 @@ def store_file_paths(config_dir: str | Path, config: dict) -> dict:
 
 
 def _read_input(config_dir: str | Path, config: dict) -> dict:
-    reference = config.get("file_paths_ref")
+    reference: Any = config.get("file_paths_ref")
     path = _path(config_dir, reference)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as source:

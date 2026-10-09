@@ -140,7 +140,7 @@ def ffprobe_path_for(ffmpeg_path: str | None) -> str:
     return shutil.which("ffprobe") or "ffprobe"
 
 
-def _ms(value: object) -> int | None:
+def _ms(value: Any) -> int | None:
     try:
         return int(round(float(value) * 1000))
     except (TypeError, ValueError, OverflowError):
@@ -149,7 +149,7 @@ def _ms(value: object) -> int | None:
         return None
 
 
-def _seconds(value: object) -> float | None:
+def _seconds(value: Any) -> float | None:
     try:
         seconds = float(value)
     except (TypeError, ValueError):

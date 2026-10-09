@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from flask import jsonify, request
 from loguru import logger
@@ -352,6 +353,7 @@ def scale_worker_group(group_id: str):
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "Provide a scaling action"}), 400
+    changes: dict[str, Any]
     if set(data) == {"delta"} and type(data["delta"]) is int and data["delta"] in (-1, 1):
         changes = {"delta": data["delta"]}
     elif set(data) == {"enabled"} and isinstance(data["enabled"], bool):

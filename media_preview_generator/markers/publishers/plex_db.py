@@ -24,7 +24,7 @@ import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from loguru import logger
 
@@ -495,13 +495,15 @@ def decode_extra_data(extra: str | None) -> tuple[dict[str, str], bool]:
                     state=Capability.UNSUPPORTED_SCHEMA,
                 ) from exc
         return parsed, False
-    fields: dict[str, str] | None = {}
+    fields: dict[str, str] | None
     try:
+        parsed_fields: dict[str, str] = {}
         for pair in extra.split("&"):
             key, equals, value = pair.partition("=")
             if not equals:
                 raise ValueError(pair)
-            fields[urllib.parse.unquote(key, errors="strict")] = urllib.parse.unquote(value, errors="strict")
+            parsed_fields[urllib.parse.unquote(key, errors="strict")] = urllib.parse.unquote(value, errors="strict")
+        fields = parsed_fields
     except ValueError:  # UnicodeDecodeError included
         fields = None
     # Unsorted or repeated keys, another escaping, a url field: not what Plex writes, so not what we'd write back.
@@ -513,7 +515,7 @@ def decode_extra_data(extra: str | None) -> tuple[dict[str, str], bool]:
     return fields, True
 
 
-def _is_final(marker: Marker, duration_ms: int | None) -> bool:
+def _is_final(marker: Marker, duration_ms: int) -> bool:
     return marker.end_ms >= duration_ms - FINAL_TOLERANCE_MS
 
 
@@ -573,7 +575,9 @@ def _served_of(markers: list[Marker] | tuple[Marker, ...], mtype: MarkerType) ->
     return sorted((m.start_ms, m.end_ms) for m in markers if m.type is mtype)
 
 
-def _served_with_final(markers: list[Marker] | tuple[Marker, ...], mtype: MarkerType, duration_ms: int) -> list:
+def _served_with_final(
+    markers: list[Marker] | tuple[Marker, ...], mtype: MarkerType, duration_ms: int | None
+) -> list[tuple[int, int, bool]]:
     """``(start, end, final)`` per marker of a type, in served times, with the ``final`` flag this duration gives."""
     return sorted((m.start_ms, m.end_ms, _stored_times(m, duration_ms)[2]) for m in markers if m.type is mtype)
 
@@ -582,7 +586,7 @@ def _part_entries(mtype: MarkerType, value: str | None) -> list[tuple[int, int, 
     """``(start, end, final)`` per entry of a stored ``pv:intros``/``pv:credits`` value, in served times; None if
     unreadable."""
     try:
-        entries = json.loads(value)["MediaPartMarkersArray"]["MediaPartMarker"]
+        entries = json.loads(cast(str, value))["MediaPartMarkersArray"]["MediaPartMarker"]
         out = []
         for e in entries:
             final = _is_final_entry(e)
@@ -629,7 +633,7 @@ def _check_marker_array(key: str, value: object) -> None:
         return
     attribute, version = ("intros", INTRO_JSON_VERSION) if key == "pv:intros" else ("credits", CREDITS_JSON_VERSION)
     try:
-        arr = json.loads(value)["MediaPartMarkersArray"]
+        arr = json.loads(cast(str, value))["MediaPartMarkersArray"]
         found_attribute, found_version = arr.get("attributeName"), arr.get("version")
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise PublishError(
@@ -746,7 +750,7 @@ def _same_files(a: list[Part], b: list[Part]) -> bool:
 
 class _TaggingRow(NamedTuple):
     id: int
-    index: int
+    index: int  # type: ignore[assignment]  # shadows tuple.index; the column name is the Plex schema's
     text: str
     time_offset: int
     end_time_offset: int
@@ -1472,12 +1476,12 @@ class LocalPlexDb(PlexDatabase):
             # A type we no longer show: its rows go only while they still serve exactly what we published. Compared
             # in served time (each row with its own pv:final), so a file whose duration changed since still matches.
             text = _TYPE_TEXT[mtype]
-            current = sorted(
+            served_now = sorted(
                 _served_times(mtype, r.time_offset, r.end_time_offset, _row_is_final(r.extra_data))
                 for r in rows
                 if r.text == text
             )
-            if current == _served_of(prior, mtype):
+            if served_now == _served_of(prior, mtype):
                 replaced.add(text)
         ours = [(_TYPE_TEXT[m.type], *_stored_row(m, duration_ms)) for m in wanted if _TYPE_TEXT[m.type] in replaced]
         kept = [r for r in rows if r.text not in replaced]

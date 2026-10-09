@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import timedelta
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from loguru import logger
@@ -358,7 +358,7 @@ def cached_fingerprint(store: MarkerStore, rec: FileRecord, retime: float | None
 def has_cached_fingerprint(store: MarkerStore, rec: FileRecord, retime: float | None = None) -> bool:
     """Whether :func:`cached_fingerprint` finds one, without reading its points."""
     return bool(rec.duration_ms) and store.has_fingerprint(
-        rec.id, fingerprint_window(retime), algorithm=ALGORITHM, length_s=window_s(rec.duration_ms)
+        rec.id, fingerprint_window(retime), algorithm=ALGORITHM, length_s=window_s(cast(int, rec.duration_ms))
     )
 
 
@@ -530,7 +530,7 @@ def start_fingerprint_sweep(store: MarkerStore, configs: Sequence[ServerConfig] 
             logger.warning(
                 "Skipped clearing old audio fingerprints: the fingerprint cleanup is still waiting on the file system "
                 "(started {} min ago)",
-                int((now - started) // 60),
+                int((now - cast(float, started)) // 60),
             )
         return False
     if _sweep_started_at is not None and now - _sweep_started_at < SWEEP_MIN_GAP_S:

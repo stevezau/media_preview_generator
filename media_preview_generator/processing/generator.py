@@ -39,6 +39,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from enum import Enum
+from typing import Any, Protocol
 
 from loguru import logger
 
@@ -320,7 +321,7 @@ def clear_failures() -> None:
 # ---------------------------------------------------------------------------
 
 _file_result_callback_lock = threading.Lock()
-_file_result_callbacks: dict[str, object] = {}
+_file_result_callbacks: dict[str, Callable[..., Any]] = {}
 
 
 def set_file_result_callback(callback, *, job_id: str | None = None) -> None:
@@ -876,7 +877,7 @@ def _verify_tmp_folder_health(path: str, min_free_mb: int = 512) -> tuple[bool, 
     return True, messages
 
 
-def parse_ffmpeg_progress_line(line: str, total_duration: float, progress_callback=None):
+def parse_ffmpeg_progress_line(line: str, total_duration: float | None, progress_callback=None) -> float | None:
     """Parse a single FFmpeg progress line and call progress callback if provided.
 
     Args:
@@ -918,12 +919,12 @@ def parse_ffmpeg_progress_line(line: str, total_duration: float, progress_callba
             time_str = f"{hours}:{minutes}:{seconds}"
 
             # Update progress (1 decimal place for UI; Issue #144)
-            progress_percent = 0
+            progress_percent: float = 0
             if total_duration and total_duration > 0:
                 progress_percent = min(100.0, round((current_time / total_duration) * 100, 1))
 
             # Calculate remaining wall-clock time using ffmpeg speed
-            remaining_time = 0
+            remaining_time: float = 0
             if total_duration and total_duration > 0 and current_time < total_duration:
                 remaining_media = total_duration - current_time
                 speed_val = float(speed_match.group(1)) if speed_match else 0
@@ -1509,7 +1510,7 @@ def generate_images(
     ffmpeg_threads_override: int | None = None,
     cancel_check=None,
     pause_check=None,
-) -> tuple[bool, int, str, float, float, str | None]:
+) -> tuple[bool, int, bool, float, str, str | None]:
     """Generate thumbnail images from ``video_file`` using FFmpeg.
 
     Selects hardware acceleration based on ``gpu`` / ``gpu_device_path``
@@ -2301,10 +2302,17 @@ def _keep_owner_and_mode(new_file: str, replaced_file: str) -> None:
             os.chown(new_file, -1, replaced.st_gid)
 
 
+class BifConfig(Protocol):
+    """The config fields ``generate_bif`` reads; a full :class:`Config` or a small shim both qualify."""
+
+    plex_bif_frame_interval: int
+    server_display_name: str | None
+
+
 def generate_bif(
     bif_filename: str,
     images_path: str,
-    config: Config,
+    config: BifConfig,
     *,
     before_publish: Callable[[], None] | None = None,
 ) -> None:

@@ -185,13 +185,13 @@ def _from_emby(
         if answer is None:
             return None
         rows, versions = answer
-        state, elsewhere = own_version(item_id, versions, canonical_path, list(config.path_mappings or []))
-        if state is not OwnVersion.YES:
+        version_state, elsewhere = own_version(item_id, versions, canonical_path, list(config.path_mappings or []))
+        if version_state is not OwnVersion.YES:
             logger.debug(
                 "{} item {} isn't this file's own version ({}{}); its markers aren't evidence for {}",
                 config.name,
                 item_id,
-                state.value,
+                version_state.value,
                 f": this file is item {elsewhere}" if elsewhere else "",
                 canonical_path,
             )

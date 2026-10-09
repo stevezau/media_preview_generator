@@ -227,7 +227,8 @@ def _peak(policies: list[dict]) -> int:
 def configured_group_totals(groups: list[dict]) -> tuple[int, int]:
     """Return peak (GPU, CPU) capacity, retaining the existing family limits."""
     policies = member_policies(groups)
-    return tuple(_peak([p for p in policies if p["resource"] == resource]) for resource in ("gpu", "cpu"))
+    gpu, cpu = (_peak([p for p in policies if p["resource"] == resource]) for resource in ("gpu", "cpu"))
+    return gpu, cpu
 
 
 def _clean_member(raw: object, name: str, seen_ids: set[str], seen_devices: set[str], legacy: bool) -> dict:
@@ -431,7 +432,7 @@ def effective_worker_groups(settings: dict) -> list[dict]:
     return groups_from_legacy(copy.deepcopy(settings))
 
 
-def future_capacity(groups: list[dict], quiet_hours: object, kind: str) -> int:
+def future_capacity(groups: list[dict], quiet_hours: dict | None, kind: str) -> int:
     """Count configured capacity with reachable hours outside the global pause rule."""
     from .quiet_hours import quiet_hours_weekly_mask
 

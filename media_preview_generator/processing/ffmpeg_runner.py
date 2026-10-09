@@ -33,7 +33,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -138,7 +138,7 @@ def create_ffmpeg_runner(
     chapter_start_ms: int | None = None,
     chapter_output: str | None = None,
     active_timeout_s: float | None = None,
-) -> Callable[..., tuple[int, float, float, list[str]]]:
+) -> Callable[..., tuple[int, float, str, list[str]]]:
     """Factory: return a configured ffmpeg-runner closure for one media item.
 
     The returned callable has the same signature as the original nested
@@ -242,7 +242,7 @@ def create_ffmpeg_runner(
         init_vulkan: bool = False,
         disable_vaapi_dv5: bool = False,
         path_kind_override: str | None = None,
-    ) -> tuple[int, float, float, list[str]]:
+    ) -> tuple[int, float, str, list[str]]:
         """Run FFmpeg once and return (returncode, seconds, speed, stderr_lines)."""
         # Build FFmpeg command with proper argument ordering
         # Hardware acceleration flags must come BEFORE the input file (-i)
@@ -492,7 +492,7 @@ def create_ffmpeg_runner(
                 progress_callback(0, 0, 0, "0.0x", media_file=video_file)
 
             # Track progress
-            total_duration = None
+            total_duration: float | None = None
             speed_local = "0.0x"
             ffmpeg_output_lines: Any = deque(maxlen=256) if active_timeout_s is not None else []
             sticky_diagnostics: list[str] = []
@@ -763,7 +763,7 @@ def create_ffmpeg_runner(
         if chapter_without_frame and not stalled:
             logger.info(
                 "No video frame at {:.3f}s in {} (exit code {}); the chapter step handles it.",
-                chapter_start_ms / 1000,
+                cast(int, chapter_start_ms) / 1000,
                 video_file,
                 proc.returncode,
             )

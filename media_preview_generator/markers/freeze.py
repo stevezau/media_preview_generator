@@ -92,13 +92,13 @@ class Freeze:
             return 0.0
         started = time.monotonic()
         stopped = proc is not None and _signal(proc, signal.SIGSTOP)
-        if stopped:
+        if proc is not None and stopped:
             logger.info("Paused ffmpeg for {} (PID {}): processing is paused", name, proc.pid)
         try:
             while self() and not (cancel_check and cancel_check()):
                 time.sleep(self._poll_s)
         finally:
-            if stopped and _signal(proc, signal.SIGCONT):
+            if proc is not None and stopped and _signal(proc, signal.SIGCONT):
                 logger.info("Resumed ffmpeg for {} (PID {})", name, proc.pid)
             held = time.monotonic() - started
             self.held_s += held

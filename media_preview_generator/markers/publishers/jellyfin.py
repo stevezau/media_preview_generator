@@ -10,7 +10,7 @@ off for the library, provider error, stale size), so every POST is confirmed aga
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import requests
 from loguru import logger
@@ -35,7 +35,7 @@ SEGMENT_TYPES: dict[MarkerType, str] = {
 _FROM_SEGMENT_TYPE = {name: mtype for mtype, name in SEGMENT_TYPES.items()}
 
 
-def _is_int(value: object) -> bool:
+def _is_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 

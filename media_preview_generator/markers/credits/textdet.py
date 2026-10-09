@@ -17,7 +17,8 @@ import hashlib
 import math
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import cast
 
 import cv2
 import numpy as np
@@ -143,7 +144,7 @@ def _box_score_fast(bitmap: np.ndarray, points: np.ndarray) -> float:
     mask = np.zeros((ymax - ymin + 1, xmax - xmin + 1), dtype=np.uint8)
     box[:, 0] = box[:, 0] - xmin
     box[:, 1] = box[:, 1] - ymin
-    cv2.fillPoly(mask, box.reshape(1, -1, 2).astype(np.int32), 1)
+    cv2.fillPoly(mask, cast(Sequence[np.ndarray], box.reshape(1, -1, 2).astype(np.int32)), 1)
     return cv2.mean(bitmap[ymin : ymax + 1, xmin : xmax + 1], mask)[0]
 
 

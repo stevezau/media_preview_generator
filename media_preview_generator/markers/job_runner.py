@@ -7,8 +7,9 @@ import os
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import datetime
+from typing import TypedDict
 
 from loguru import logger
 
@@ -116,7 +117,11 @@ def server_pin(config: object) -> str | None:
     return pin if isinstance(pin, str) and pin else None
 
 
-def _pinned_to(config: object) -> dict[str, str]:
+class _Pin(TypedDict, total=False):
+    server_id: str
+
+
+def _pinned_to(config: object) -> _Pin:
     """``create_intro_credits_job``'s ``server_id`` for a job this job queues for its own files (a retry or a verify
     job): they publish only where it does. Empty for an unpinned job."""
     pin = server_pin(config)
@@ -268,7 +273,7 @@ def _queue_retry(
     cfg: dict,
     waiting: dict[str, set[str]],
     sender_paths: dict[str, str],
-    promised: set[str] = frozenset(),
+    promised: Collection[str] = frozenset(),
 ) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet, that a server could take later, or whose write
     gave up waiting for Plex's busy database (a few minutes later it is usually free).
@@ -644,9 +649,9 @@ def build_items(
             requested.setdefault(str(entry["server_id"]), []).append(str(entry["library_id"]))
         library_ids: dict[str, list[str]] = {}
         candidates: list[ServerConfig] = []
-        known: set[str] = set()
+        known_ids: set[str] = set()
         for cfg in registry.configs():
-            known.add(cfg.id)
+            known_ids.add(cfg.id)
             if requested and cfg.id not in requested:
                 continue
             name = cfg.name or cfg.id
@@ -673,7 +678,9 @@ def build_items(
                 continue
             library_ids[cfg.id] = ids
             candidates.append(_all_libraries_listed(cfg))
-        warnings.extend(f"Skipped server {sid}: {sid} is no longer configured" for sid in requested if sid not in known)
+        warnings.extend(
+            f"Skipped server {sid}: {sid} is no longer configured" for sid in requested if sid not in known_ids
+        )
         pairs, errors = orchestrator._enumerate_items_for_servers(
             candidates,
             enumerate_one=lambda processor, cfg: processor.list_canonical_paths(
@@ -769,6 +776,7 @@ def wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check
         preceding = jm.get_job(follows_job_id)
         if preceding_job_ready(preceding):
             return True
+        assert preceding is not None  # preceding_job_ready is True for a missing job
         if (
             preceding.status is JobStatus.PENDING
             and not get_settings_manager().processing_paused
@@ -1157,16 +1165,16 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
     jm = get_job_manager()
     job = jm.get_job(job_id)
     if job is None:
-        return
+        return None
     if (job.config or {}).get("is_retry_chain"):
         # Its hidden retry job runs the files still waiting; a resume that starts every pending job mustn't run the
         # whole job again.
         logger.info("Intro & Credits job {} not started — its retry runs the files still waiting", job_id)
-        return
+        return None
     settings = get_settings_manager()
     if settings.processing_paused:
         logger.info("Intro & Credits job {} not started — processing is paused; job stays pending", job_id)
-        return
+        return None
     register_job_thread(job_id)
     handler_id = loguru_logger.add(
         lambda message: jm.add_log(job_id, f"{message.record['level'].name} - {message.record['message']}"),
@@ -1198,6 +1206,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         _fail_job(jm, job_id, exc, state.dispatcher)
     finally:
         _tear_down_pass(jm, job_id, state, handler_id, loguru_logger)
+    return None
 
 
 def _fail_job(jm, job_id: str, exc: Exception, dispatcher) -> None:
@@ -1637,8 +1646,8 @@ def _run_job(
         )
     if carried_outcomes:
         # The pipeline never decides for a file without an owner; the store may still hold an old run's.
-        for path, outcome in sorted(carried_outcomes.items()):
-            if outcome != FileOutcome.NO_OWNERS.value:
+        for path, file_outcome in sorted(carried_outcomes.items()):
+            if file_outcome != FileOutcome.NO_OWNERS.value:
                 ctx.decided_by.add(stored_groups(ctx.store, path))
         jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
     if not items:

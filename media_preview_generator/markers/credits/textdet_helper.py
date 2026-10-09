@@ -416,6 +416,7 @@ class _Helper:
         try:
             # A closed pipe (the helper is gone, or close() got there first) simply ends the stream.
             with contextlib.suppress(OSError, ValueError):
+                assert self.proc.stdout is not None
                 for line in iter(self.proc.stdout.readline, b""):
                     self._lines.put(line)
         finally:
@@ -489,6 +490,7 @@ class _Helper:
 
         def write() -> None:
             try:
+                assert self.proc.stdin is not None
                 self.proc.stdin.write(data)
                 self.proc.stdin.flush()
             except (OSError, ValueError) as exc:
@@ -554,6 +556,7 @@ class _Helper:
             self.kill()
         else:
             with contextlib.suppress(OSError, ValueError):
+                assert self.proc.stdin is not None
                 self.proc.stdin.close()
             try:
                 self.proc.wait(timeout=grace_s)

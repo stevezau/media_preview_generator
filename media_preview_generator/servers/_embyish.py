@@ -902,6 +902,7 @@ class EmbyApiClient(MediaServer):
         if kind == "unknown":
             return out
 
+        allowed_schemes: tuple[str, ...]
         if kind == "episode":
             out["season"] = item.get("ParentIndexNumber")
             out["episode"] = item.get("IndexNumber")
@@ -1052,7 +1053,9 @@ class EmbyApiClient(MediaServer):
                     )
                     time.sleep(wait)
             if payload is None:
-                exc = last_exc if last_exc is not None else RuntimeError("exhausted retries with no exception captured")
+                final_exc = (
+                    last_exc if last_exc is not None else RuntimeError("exhausted retries with no exception captured")
+                )
                 if start_index == 0:
                     logger.warning(
                         "Could not list items in {} library {} (first page exhausted "
@@ -1063,8 +1066,8 @@ class EmbyApiClient(MediaServer):
                         self.vendor_name,
                         library_id,
                         _LIST_ITEMS_MAX_ATTEMPTS,
-                        type(exc).__name__,
-                        exc,
+                        type(final_exc).__name__,
+                        final_exc,
                     )
                     return
                 logger.error(
@@ -1077,11 +1080,11 @@ class EmbyApiClient(MediaServer):
                     library_id,
                     start_index,
                     _LIST_ITEMS_MAX_ATTEMPTS,
-                    type(exc).__name__,
-                    exc,
+                    type(final_exc).__name__,
+                    final_exc,
                     start_index,
                 )
-                raise exc
+                raise final_exc
 
             raw_items = payload.get("Items", []) or []
             # Per-page progress log so the per-job log shows steady

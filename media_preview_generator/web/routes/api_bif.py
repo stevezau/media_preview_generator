@@ -4,6 +4,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
+from typing import Any
 
 import urllib3
 from flask import Response, jsonify, request
@@ -467,7 +468,7 @@ def _item_to_result(
 @api.route("/bif/search")
 @api_token_required
 @limiter.limit("10 per minute")
-def bif_search():
+def bif_search() -> Any:
     """Search Plex for media items and return BIF availability.
 
     Supports plain title queries (``Inception``) as well as season/episode

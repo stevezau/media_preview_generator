@@ -735,7 +735,7 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     # Trust reverse-proxy headers (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host)
     # so request.scheme and request.remote_addr are correct behind nginx/traefik/etc.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)  # type: ignore[method-assign]  # Werkzeug-documented WSGI wrapping idiom
 
     # Get CORS configuration
     cors_origins, cors_is_default_wildcard = get_cors_origins()

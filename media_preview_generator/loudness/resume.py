@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from ..job_kinds import ItemOutcome
 from ..jobs.checkpoints import checkpoint_items, item_descriptor
@@ -176,7 +177,7 @@ class CompletionLedger:
         with self._lock:
             saved = dict(self._conn.execute("SELECT path, payload FROM completions"))
             self._accepted.clear()
-        state = {
+        state: dict[str, Any] = {
             "successful": 0,
             "failed": 0,
             "failed_paths": [],

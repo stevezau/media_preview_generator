@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 from loguru import logger
 
@@ -93,7 +94,7 @@ MAX_AUDIO_BATCH = 3
 class LoudnessContext:
     """What every item of one job shares."""
 
-    registry: object
+    registry: Any
     ffmpeg: str
     freeze_check: Callable[[], bool] | None = None
     # The job's pin (``job_runner.server_pin``): only this server; None = every server with loudness on.
@@ -145,7 +146,13 @@ def owners(canonical_path: str, registry, server_id: str | None = None) -> list[
 
 
 def _row(cfg: ServerConfig, status: str, message: str = "", *, retryable: bool = False) -> dict:
-    row = {"server_id": cfg.id, "server_name": cfg.name, "server_type": "plex", "status": status, "message": message}
+    row: dict[str, Any] = {
+        "server_id": cfg.id,
+        "server_name": cfg.name,
+        "server_type": "plex",
+        "status": status,
+        "message": message,
+    }
     if retryable:
         row["retryable"] = True
     return row
@@ -492,7 +499,7 @@ def kind_handlers(
 
     return KindHandlers(
         check_fn=lambda item, *, cancel_check=None: call(item, check_item),
-        process_fn=lambda item, **kwargs: call(item, process_item, **kwargs),
+        process_fn=cast(Callable[..., ItemOutcome], lambda item, **kwargs: call(item, process_item, **kwargs)),
         outcome_keys=OUTCOME_KEYS,
         check_label="Checking Plex loudness…",
         check_worker_label="Loudness",
@@ -511,11 +518,11 @@ def _run_loudness_pass(job_id: str) -> bool | None:
     jm = get_job_manager()
     job = jm.get_job(job_id)
     if job is None or job.status is JobStatus.CANCELLED or (job.config or {}).get("is_retry_chain"):
-        return
+        return None
     settings = get_settings_manager()
     if settings.processing_paused:
         logger.info("Loudness job {} not started: processing is paused; job stays pending", job_id)
-        return
+        return None
     register_job_thread(job_id)
     handler_id = logger.add(
         lambda message: jm.add_log(job_id, f"{message.record['level'].name} - {message.record['message']}"),
@@ -560,7 +567,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
             )
 
     def active_files_callback(path: str, started: bool) -> None:
-        activity = {"file_started" if started else "file_finished": path}
+        activity: dict[str, Any] = {"file_started" if started else "file_finished": path}
         jm.update_progress(job_id, **activity)
         if chain_head:
             jm.update_progress(chain_head, **activity)
@@ -591,13 +598,13 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 retry_wait_kwargs = {"progress_job_id": chain_head} if chain_head else {}
                 if not wait_for_retry_time(job_id, cfg, cancel_check, **retry_wait_kwargs):
                     jm.cancel_job(job_id)
-                    return
+                    return None
                 if job.paused and not hold_pause_from_before_restart(job_id, cancel_check):
                     jm.cancel_job(job_id)
-                    return
+                    return None
                 if not acquire_slot():
                     jm.cancel_job(job_id)
-                    return
+                    return None
                 with logger.contextualize(**{JOB_LOG_SKIP: True}):
                     if cfg.get("parked_checkpoint") or job.config.get("resource_wait"):
                         jm.resume_parked_job(job_id)
@@ -631,13 +638,13 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 cfg["retry_sender_paths"] = {**cfg.get("retry_sender_paths", {}), **sender_paths}
                 if cancel_check():
                     jm.cancel_job(job_id)
-                    return
+                    return None
                 logger.info("{}: {} file(s) to check", LABEL, len(items))
                 if not items:
                     _finish(jm, job_id, {}, ["No files to check.", *warnings])
                     if chain_head:
                         _finish_chain(jm, chain_head, cfg, warnings, attempt_id=job_id)
-                    return
+                    return None
                 carried: dict[str, int] = {}
                 loudness_ffmpeg = analyze.resolve_ffmpeg(getattr(config, "ffmpeg_path", None) or "ffmpeg")
                 logger.info("{}: using {}", LABEL, loudness_ffmpeg)
@@ -663,18 +670,21 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                             raise InterruptedError("Loudness resume cancelled")
                     return check_item(item, ctx=ctx)
 
+                def report_restore_progress(restored: int, total: int) -> None:
+                    jm.update_progress(
+                        job_id,
+                        current_item=f"Validating saved loudness progress… {restored}/{total}",
+                    )
+
                 items, carried_state = completion_ledger.restore(
                     items,
                     check=validate_saved,
                     cancel_check=cancel_check,
-                    progress=lambda restored, total: jm.update_progress(
-                        job_id,
-                        current_item=f"Validating saved loudness progress… {restored}/{total}",
-                    ),
+                    progress=report_restore_progress,
                 )
                 if cancel_check():
                     jm.cancel_job(job_id)
-                    return
+                    return None
                 _restore_file_history(jm, job_id, chain_head, cfg, completion_ledger)
                 jm.set_publishers(job_id, list(carried_state["publishers_aggregate"].values()))
                 jm.set_job_outcome(job_id, carried_state["outcome_counts"])
@@ -689,7 +699,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         _finish_chain(
                             jm, chain_head, cfg, warnings, attempt_id=job_id, completion_ledger=completion_ledger
                         )
-                    return
+                    return None
                 # A sender's files (a webhook, its retries) can reach the disk after the job starts; a listing's won't.
                 retry_missing = bool(cfg.get("file_paths")) and sent_by_a_sender(cfg.get("source"))
                 to_retry: list[str] = []
@@ -790,7 +800,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 jm.set_job_outcome(job_id, outcome)
                 if result["cancelled"] or cancel_check():
                     jm.cancel_job(job_id)
-                    return
+                    return None
                 if chain_head:
                     _recount_chain(jm, chain_head, cfg, job_id, completion_ledger=completion_ledger)
                 retried = bool(to_retry) and _queue_retry(job, cfg, to_retry, sender_paths, retry_previous)
@@ -843,6 +853,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
             logger.remove(handler_id)
         except (ValueError, TypeError):
             logger.debug("Could not remove the job log handler for {}", job_id)
+    return None
 
 
 def start_loudness_job_async(job_id: str, config_overrides: dict | None = None) -> None:
@@ -929,7 +940,7 @@ def create_loudness_job(
     Returns:
         The created job.
     """
-    config = {
+    config: dict[str, Any] = {
         "kind": JOB_KIND_LOUDNESS,
         "source": source,
         "libraries": list(libraries or []),
@@ -1031,7 +1042,7 @@ def _recount_chain(
             completion_ledger.current_results()
             if completion_ledger is not None
             else jm.get_file_results(attempt_id, dedup_by_path=True),
-            cfg.get("retry_sender_paths", {}),
+            cast(dict, cfg).get("retry_sender_paths", {}),
         )
         jm.set_job_outcome(head_id, outcome)
         jm.set_publishers(head_id, publishers)
@@ -1051,10 +1062,10 @@ def _recount_chain(
     outcome = dict(Counter(row["outcome"] for row in rows))
     jm.set_job_outcome(head_id, outcome)
     if completion_ledger is not None:
-        publishers = {}
+        aggregate: dict[str, dict] = {}
         for row in rows:
-            fold_publisher_rows_into_aggregate(publishers, _publisher_rows(row))
-        jm.set_publishers(head_id, list(publishers.values()))
+            fold_publisher_rows_into_aggregate(aggregate, _publisher_rows(row))
+        jm.set_publishers(head_id, list(aggregate.values()))
     return outcome
 
 

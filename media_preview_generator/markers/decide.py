@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from itertools import combinations
+from typing import cast
 
 from .models import SERVER_SOURCES, Candidate, Marker, MarkerType, Source
 from .speed import online_time_scale
@@ -805,13 +806,18 @@ def _text_over_chapter(clusters: list[list[Candidate]], mtype: MarkerType, ctx: 
     decision = _decide_from_cliques(mtype, clusters, ctx, text_start=True)
     if not _agreed(decision):
         return None
-    return replace(decision, reason=TEXT_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
+    return replace(decision, reason=TEXT_OVER_CHAPTER_REASON + ", ".join(_decided_marker(decision).decided_by))
+
+
+def _decided_marker(decision: TypeDecision) -> Marker:
+    """The marker of a DECIDED decision (every other status carries None)."""
+    return cast(Marker, decision.marker)
 
 
 def _agreed(decision: TypeDecision) -> bool:
     """Whether :func:`_decide_from_cliques` decided from the agreement itself, not from one file read's own edges
     (its fallback when the composed marker fails sanity): one source never overrules a chapter (rule 3)."""
-    return decision.status is DecisionStatus.DECIDED and len(decision.marker.decided_by) > 1
+    return decision.status is DecisionStatus.DECIDED and len(_decided_marker(decision).decided_by) > 1
 
 
 def chapter_hint(chapter_start_ms: int, *, moves: bool, to_ms: int | None = None) -> str:
@@ -949,9 +955,9 @@ def _audio_over_chapter(clusters: list[list[Candidate]], chapter: Marker, ctx: D
     decision = _decide_from_cliques(MarkerType.INTRO, clusters, ctx)
     if not _agreed(decision):
         return None
-    if not chapter.start_ms < decision.marker.end_ms < chapter.end_ms:
+    if not chapter.start_ms < _decided_marker(decision).end_ms < chapter.end_ms:
         return None
-    return replace(decision, reason=AUDIO_OVER_CHAPTER_REASON + ", ".join(decision.marker.decided_by))
+    return replace(decision, reason=AUDIO_OVER_CHAPTER_REASON + ", ".join(_decided_marker(decision).decided_by))
 
 
 def _audio_should_check_chapter(chapter: Marker, others: list[Candidate], ctx: DecisionContext) -> bool:
@@ -1013,11 +1019,11 @@ def _decide_from_cliques(
     merged = list({id(c): c for cl in cliques for c in cl}.values())
     marker, winner = _compose_cluster(merged, mtype, ctx, text_start=text_start)
     if not _marker_is_sane(marker, ctx):
-        read = _credit_text_with_own_marker(merged, ctx)
-        if read is None:
+        text_read = _credit_text_with_own_marker(merged, ctx)
+        if text_read is None:
             return _no_evidence(mtype, _own_marker(winner, ctx), "agreeing sources disagree on the other edge")
-        reason = f"single source ({read.source.value}); agreeing sources disagree on the other edge"
-        return TypeDecision(mtype, DecisionStatus.DECIDED, _own_marker(read, ctx), None, reason)
+        reason = f"single source ({text_read.source.value}); agreeing sources disagree on the other edge"
+        return TypeDecision(mtype, DecisionStatus.DECIDED, _own_marker(text_read, ctx), None, reason)
     reason = "sources agree: " + ", ".join(marker.decided_by) + outvoted
     if mtype is MarkerType.CREDITS and not text_start and winner.source is Source.CREDITS_TEXT:
         others = {c.source for c in merged if c.source.value in marker.decided_by} - SERVER_SOURCES - {winner.source}
@@ -1283,8 +1289,8 @@ def _decide_type(
         decision = _decide_from_single_source(mtype, sane, ctx)
 
     # An agreeing pair that contradicts the result undoes it, unless the result rests on credit text.
-    if decision.status is DecisionStatus.DECIDED and not _rests_on_credit_text(decision.marker, sane, ctx):
-        contradicting = _contradicting_groups(decision.marker, guard_pool, ctx)
+    if decision.status is DecisionStatus.DECIDED and not _rests_on_credit_text(_decided_marker(decision), sane, ctx):
+        contradicting = _contradicting_groups(_decided_marker(decision), guard_pool, ctx)
         if contradicting:
             reason = f"agreeing sources contradict the result: {', '.join(contradicting)}"
             return _no_evidence(mtype, decision.marker, reason)
@@ -1313,7 +1319,7 @@ def _shorten_to_server_markers(decision: TypeDecision, sane: list[Candidate], ct
         The decision unchanged (also when the shortened marker would fail sanity), or the shortened marker with
         ``server_markers`` added to decided_by.
     """
-    marker = decision.marker
+    marker = _decided_marker(decision)
     mtype = decision.type
     if mtype in _START_SEGMENTS:
         return decision
@@ -1456,19 +1462,19 @@ def _apply_overlap_demotions(out: dict[MarkerType, TypeDecision]) -> None:
     if (
         intro_d.status is DecisionStatus.DECIDED
         and recap_d.status is DecisionStatus.DECIDED
-        and _overlap_ms(intro_d.marker, recap_d.marker) > INTRO_RECAP_MAX_OVERLAP_MS
+        and _overlap_ms(_decided_marker(intro_d), _decided_marker(recap_d)) > INTRO_RECAP_MAX_OVERLAP_MS
     ):
-        if not intro_d.marker.locked:
+        if not _decided_marker(intro_d).locked:
             out[MarkerType.INTRO] = _demote(intro_d, "intro and recap overlap")
-        if not recap_d.marker.locked:
+        if not _decided_marker(recap_d).locked:
             out[MarkerType.RECAP] = _demote(recap_d, "intro and recap overlap")
 
     preview_d, credits_d = out[MarkerType.PREVIEW], out[MarkerType.CREDITS]
     if (
         preview_d.status is DecisionStatus.DECIDED
         and credits_d.status is DecisionStatus.DECIDED
-        and _overlap_ms(preview_d.marker, credits_d.marker) > PREVIEW_CREDITS_MAX_OVERLAP_MS
-        and not preview_d.marker.locked
+        and _overlap_ms(_decided_marker(preview_d), _decided_marker(credits_d)) > PREVIEW_CREDITS_MAX_OVERLAP_MS
+        and not _decided_marker(preview_d).locked
     ):
         # Credits always keep -- only preview is ever demoted by this check.
         out[MarkerType.PREVIEW] = _demote(preview_d, "preview overlaps credits")
@@ -1511,6 +1517,6 @@ def decide(
 
     _apply_overlap_demotions(out)
     for mtype, decision in out.items():
-        if decision.status is DecisionStatus.DECIDED and not decision.marker.locked:
+        if decision.status is DecisionStatus.DECIDED and not _decided_marker(decision).locked:
             out[mtype] = _shorten_to_server_markers(decision, on_clock[mtype], ctx)
     return out

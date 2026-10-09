@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -31,7 +31,7 @@ from .publishers.factory import publisher_for
 from .publishers.plex_db import SAME_HOST_PATH_ADVICE
 from .settings import ServerMarkersSettings, is_sports_library, load_server
 from .sources.server_markers import SAME_CUT_MS, read_server_markers
-from .store import DecisionRow, FileRecord, MarkerStore
+from .store import DecisionRow, FileRecord, MarkerStore, PublishStateRow
 from .versions import AnswerVersion, answer_versions
 
 # The marker types each server can show at all. The editor refuses a type no enabled owner is in this table for
@@ -800,7 +800,11 @@ def _left_to_servers(
             # Kept at the last publish isn't kept now: a server that lost its own marker since gets ours from the next
             # job (``pipeline._kept_by_every_destination`` reads the server too), so the decision reads as stored.
             asked = unreadable is None or cfg.id not in unreadable
-            shown = _current(server, cfg, state.item_id, CAN_SHOW.get(cfg.type, ())) if asked else None
+            shown = (
+                _current(server, cfg, cast(PublishStateRow, state).item_id, CAN_SHOW.get(cfg.type, ()))
+                if asked
+                else None
+            )
             if shown is None and unreadable is not None:
                 unreadable.add(cfg.id)
             left &= {MarkerType(c["type"]) for c in shown or []}
@@ -864,6 +868,7 @@ def _server_row(
     waiting_on_versions = bool(
         cfg.type is ServerType.PLEX
         and published_unchanged
+        and item_state is not None
         and {m.type for m in wanted} - {m.type for m in item_state.markers} - item_state.kept_types
     )
     current = _current(server, cfg, item_id, can_show)

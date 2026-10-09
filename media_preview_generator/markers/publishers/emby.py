@@ -14,9 +14,9 @@ found is confirmed to be this file's version.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import requests
 from loguru import logger
@@ -95,17 +95,18 @@ def _served(rows: list[dict[str, Any]], ours: Iterable[Marker]) -> dict[MarkerTy
     if len(starts.get("IntroStart", [])) == 1 and len(starts.get("IntroEnd", [])) == 1:
         served[MarkerType.INTRO] = [(starts["IntroStart"][0], starts["IntroEnd"][0])]
     credits_end = next((m.end_ms for m in ours if m.type is MarkerType.CREDITS), None)
-    served[MarkerType.CREDITS] = [(start, credits_end) for start in starts.get("CreditsStart", [])]
+    # credits_end is None only when ours holds no credits, and then compare_shown never reads this entry.
+    served[MarkerType.CREDITS] = [(start, cast(int, credits_end)) for start in starts.get("CreditsStart", [])]
     return served
 
 
-def _shows(rows: list[dict[str, Any]], markers: list[Marker], mtype: MarkerType) -> bool:
+def _shows(rows: list[dict[str, Any]], markers: Sequence[Marker], mtype: MarkerType) -> bool:
     """Whether the item's rows of ``mtype`` are exactly ``markers`` of that type (credits by start)."""
     mine = [m for m in markers if m.type is mtype]
     return bool(mine) and compare_shown(mine, _served(rows, mine), others_alongside=False) is Shown.OURS
 
 
-def _stale_ours(rows: list[dict[str, Any]], wanted: list[Marker], prior: list[Marker]) -> frozenset[MarkerType]:
+def _stale_ours(rows: list[dict[str, Any]], wanted: list[Marker], prior: Sequence[Marker]) -> frozenset[MarkerType]:
     """The wanted types whose rows are still what this app left before (``prior``) instead of ``wanted``."""
     return frozenset(
         mtype for mtype in {m.type for m in wanted} if not _shows(rows, wanted, mtype) and _shows(rows, prior, mtype)
@@ -113,7 +114,7 @@ def _stale_ours(rows: list[dict[str, Any]], wanted: list[Marker], prior: list[Ma
 
 
 def _kept_types(
-    rows: list[dict[str, Any]], wanted: list[Marker], keep: bool, prior: list[Marker] = ()
+    rows: list[dict[str, Any]], wanted: list[Marker], keep: bool, prior: Sequence[Marker] = ()
 ) -> frozenset[MarkerType] | None:
     """The wanted types Emby shows its own rows of instead of ours, as the plugin leaves them without ``ReplaceOwn``.
 

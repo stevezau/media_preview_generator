@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from loguru import logger
 
@@ -2172,7 +2172,7 @@ class JobManager:
 
     def _mirror_chain_resource_wait(self, job: Job, wait: dict) -> None:
         """A hidden attempt's capacity wait belongs on its visible chain head too (manager lock held)."""
-        parent = self._jobs.get((job.config or {}).get("parent_job_id"))
+        parent = self._jobs.get(cast(str, (job.config or {}).get("parent_job_id")))
         if parent is None or not is_live_retry_chain(parent.config) or parent.status is JobStatus.CANCELLED:
             return
         parent.status = JobStatus.PENDING
@@ -2318,9 +2318,9 @@ class JobManager:
                 # back to None to clear the countdown — `None` already
                 # means "leave it alone" for the other fields.
                 if retry_eta is not _UNSET:
-                    job.progress.retry_eta = retry_eta
+                    job.progress.retry_eta = cast("str | None", retry_eta)
                 if retry_wait_total is not _UNSET:
-                    job.progress.retry_wait_total = retry_wait_total
+                    job.progress.retry_wait_total = cast("int | None", retry_wait_total)
 
                 # Emit progress event (don't save to disk on every update).
                 # Include the per-server publisher aggregate so the Job UI's
@@ -3016,7 +3016,7 @@ class JobManager:
         # Served by the Files panel: a publisher's or worker's exception text can carry a server URL with its token.
         derived_reason = redact_secrets(derived_reason)
 
-        record = {
+        record: dict[str, Any] = {
             "file": file_path,
             "outcome": outcome,
             "reason": derived_reason,

@@ -35,6 +35,7 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
@@ -145,7 +146,7 @@ def _pending_refreshes(data: dict) -> list[dict]:
 
 
 def write_meta(
-    output_paths: list[Path],
+    output_paths: Sequence[Path],
     canonical_path: str,
     *,
     publisher: str | None = None,
@@ -212,7 +213,7 @@ def write_meta(
 
 
 def mark_plex_refresh_pending(
-    output_paths: list[Path],
+    output_paths: Sequence[Path],
     canonical_path: str,
     server_id: str,
     *,
@@ -260,7 +261,7 @@ def mark_plex_refresh_pending(
 
 
 def get_plex_refresh_pending(
-    output_paths: list[Path],
+    output_paths: Sequence[Path],
     canonical_path: str,
     server_id: str,
     *,
@@ -287,7 +288,7 @@ def get_plex_refresh_pending(
 
 
 def clear_plex_refresh_pending(
-    output_paths: list[Path],
+    output_paths: Sequence[Path],
     canonical_path: str,
     server_id: str,
     token: str,

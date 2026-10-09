@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from loguru import logger
 
@@ -47,7 +47,7 @@ def register_job_thread(job_id: str = "") -> None:
     (so a stale registration cannot leak into a real job's log handler).
     """
     with _job_thread_ids_lock:
-        _job_thread_to_job_id[threading.current_thread().ident] = job_id
+        _job_thread_to_job_id[cast(int, threading.current_thread().ident)] = job_id
 
 
 def unregister_job_thread() -> None:
@@ -57,7 +57,7 @@ def unregister_job_thread() -> None:
     jobs keep their own threads registered for log capture.
     """
     with _job_thread_ids_lock:
-        _job_thread_to_job_id.pop(threading.current_thread().ident, None)
+        _job_thread_to_job_id.pop(cast(int, threading.current_thread().ident), None)
 
 
 @contextmanager
@@ -179,7 +179,7 @@ class Worker:
 
         # Task state
         self.is_busy = False
-        self.current_thread = None
+        self.current_thread: threading.Thread | None = None
         self.current_task = None
 
         # Progress tracking
@@ -199,7 +199,7 @@ class Worker:
         self.library_name = ""
         self.title_max_width = 20
         self.ffmpeg_started = False  # Track if FFmpeg has started outputting progress
-        self.task_start_time = 0  # Track when task started
+        self.task_start_time: float = 0  # Track when task started
         # Free-form sub-phase string emitted by the multi-server
         # processor (e.g. "Resolving item id on EmbyTest…"). Surfaced
         # to the UI so the user sees what the worker is actually doing
@@ -244,7 +244,7 @@ class Worker:
 
         # Set per task by assign_task: a non-preview kind's process function and its valid outcome keys.
         # None keeps the previews process_canonical_path flow.
-        self.process_fn = None
+        self.process_fn: Callable[..., ItemOutcome] | None = None
         self.outcome_keys: tuple[str, ...] = ()
         # A non-preview kind's own "picked up" line (``KindHandlers.pickup_fn``); None logs the generic one.
         self.pickup_fn: Callable[[Any, str], None] | None = None
@@ -544,7 +544,7 @@ class Worker:
             # a fallback reason when there are no publishers (FFmpeg
             # failed before any publish ran, so reason='' would otherwise
             # show as a blank Details column).
-            self.last_ms_message: str = ""
+            self.last_ms_message = ""
 
             def _persist(outcome: ProcessingResult, reason: str = "") -> None:
                 effective_reason = reason or self.last_ms_message or ""
@@ -879,7 +879,7 @@ class Worker:
             try:
                 _notify_file_result(
                     item.canonical_path,
-                    outcome_value(outcome.outcome_key),
+                    cast(ProcessingResult, outcome_value(outcome.outcome_key)),
                     outcome.message,
                     self.display_name,
                     servers=rows,
@@ -976,6 +976,9 @@ class Worker:
 class WorkerPool:
     """Manages a pool of workers for processing media items."""
 
+    # Set by group_runtime / dispatcher to force the next refresh; read with a getattr default.
+    _group_refresh_at: float
+
     def __init__(
         self,
         gpu_workers: int,
@@ -1071,8 +1074,8 @@ class WorkerPool:
             # Legacy/unowned slots and changed resources may finish, never
             # become another member's slot while holding an assigned task.
             for worker in list(self.workers):
-                policy = by_id.get(worker.policy_id)
-                if policy is None or worker.group_resource != group_resource_key(policy):
+                current_policy = by_id.get(worker.policy_id)
+                if current_policy is None or worker.group_resource != group_resource_key(current_policy):
                     if worker.is_busy:
                         worker._pending_removal = True
                     else:
