@@ -114,7 +114,10 @@
 .sm-col-type { width: 220px; }
 .sm-tbl .btn-outline-danger { border-color: transparent; color: var(--muted); width: 32px; height: 32px; padding: 0; display: inline-grid; place-items: center; }
 .sm-tbl .btn-outline-danger:hover { background: var(--bad-soft); color: var(--bad); }
-.sm-tbl .input-group > .btn { height: 31px; }
+.sm-tbl .input-group > .btn { height: 38px; }
+/* Top-align so a "Path exists" / error line under one input doesn't push the rest of the row off-centre. */
+#editPathMappingsTable td { vertical-align: top; }
+#editPathMappingsTable td.sm-cell-x { padding-top: 11px; }
 .sm-libs .badge { background: var(--inset) !important; border: 1px solid var(--line); color: var(--muted) !important; font-size: 11px; font-weight: 500; }
 
 /* ---------- Edit modal frame ------------------------------------------------------------------------------- */
