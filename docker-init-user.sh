@@ -15,8 +15,11 @@ if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
     usermod -d "${USERHOME}" abc
 fi
 
-# Docker creates a missing bind-mount folder, and seeds a new named volume, as root. The app runs as PUID and
+# Docker creates a missing bind-mount folder, and seeds a new named volume, as root. The app runs as abc and
 # cannot write settings there, so hand over just the top folder when root owns it; anything else is the user's.
-if [[ -d /config ]] && [[ "$(stat -c %u /config)" == "0" ]] && [[ "${PUID}" != "0" ]]; then
-    chown abc:abc /config
+# A failure here must not fail this step: later init steps (GPU device permissions) depend on it.
+if [[ -z ${LSIO_NON_ROOT_USER} ]] && [[ "$(id -u)" == "0" ]] && [[ -d /config ]] \
+    && [[ "$(stat -c %u /config)" == "0" ]] && [[ "$(id -u abc)" != "0" ]]; then
+    chown abc:abc /config || echo "Could not hand /config to the app user; make it writable for PUID ${PUID}."
 fi
+exit 0
