@@ -32,24 +32,20 @@ def _clean_session_dismissals():
 
 
 @pytest.fixture()
-def make_client(tmp_path):
+def make_client(tmp_path, monkeypatch):
     """Build a test client against a settings.json with the given content."""
 
     def _build(settings):
         config_dir = _make_app(tmp_path, settings)
-        env = {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": TOKEN, "WEB_PORT": "8099"}
-        patcher = patch.dict(os.environ, env)
-        patcher.start()
-        make_client.patchers.append(patcher)
+        monkeypatch.setenv("CONFIG_DIR", config_dir)
+        monkeypatch.setenv("WEB_AUTH_TOKEN", TOKEN)
+        monkeypatch.setenv("WEB_PORT", "8099")
         app = create_app(config_dir=config_dir)
         app.config["TESTING"] = True
         app.config["WTF_CSRF_ENABLED"] = False
         return app.test_client()
 
-    make_client.patchers = []
-    yield _build
-    for patcher in make_client.patchers:
-        patcher.stop()
+    return _build
 
 
 class TestDismissRoutesAuth:

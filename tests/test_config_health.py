@@ -19,18 +19,13 @@ from media_preview_generator.web.config_health import probe_config_health
 
 
 @pytest.fixture()
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     config_dir = str(tmp_path / "cfg")
     os.makedirs(config_dir, exist_ok=True)
+    monkeypatch.setenv("CONFIG_DIR", config_dir)
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    monkeypatch.setenv("WEB_PORT", "8099")
     with (
-        patch.dict(
-            os.environ,
-            {
-                "CONFIG_DIR": config_dir,
-                "WEB_AUTH_TOKEN": "test-token-12345678",
-                "WEB_PORT": "8099",
-            },
-        ),
         # create_app starts APScheduler threads that nothing here stops.
         patch("media_preview_generator.web.app.get_schedule_manager"),
     ):

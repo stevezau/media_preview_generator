@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
 
 import pytest
 
@@ -14,17 +13,16 @@ URL = "/api/jobs/clear"
 
 
 @pytest.fixture()
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
     config_dir = str(tmp_path / "cfg")
     os.makedirs(config_dir, exist_ok=True)
-    with patch.dict(
-        os.environ,
-        {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678", "WEB_PORT": "8099"},
-    ):
-        flask_app = create_app(config_dir=config_dir)
-        flask_app.config["TESTING"] = True
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        yield flask_app.test_client()
+    monkeypatch.setenv("CONFIG_DIR", config_dir)
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    monkeypatch.setenv("WEB_PORT", "8099")
+    flask_app = create_app(config_dir=config_dir)
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    yield flask_app.test_client()
 
 
 def _post(client, body):

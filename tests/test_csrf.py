@@ -54,11 +54,11 @@ def _make_app(config_dir, settings: dict, extra_env: dict | None = None):
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     from media_preview_generator.web import settings_manager as sm_mod
 
-    with patch.dict(os.environ, {"WEB_AUTH_TOKEN": API_TOKEN}):
-        yield _make_app(tmp_path, {"setup_complete": True, "webhook_secret": WEBHOOK_SECRET})
+    monkeypatch.setenv("WEB_AUTH_TOKEN", API_TOKEN)
+    yield _make_app(tmp_path, {"setup_complete": True, "webhook_secret": WEBHOOK_SECRET})
     sm_mod.reset_settings_manager()
 
 
@@ -367,11 +367,11 @@ class TestLoginForm:
 
 class TestSetupWizard:
     @pytest.fixture
-    def fresh_app(self, tmp_path):
+    def fresh_app(self, tmp_path, monkeypatch):
         from media_preview_generator.web import settings_manager as sm_mod
 
-        with patch.dict(os.environ, {"WEB_AUTH_TOKEN": API_TOKEN}):
-            yield _make_app(tmp_path, {})
+        monkeypatch.setenv("WEB_AUTH_TOKEN", API_TOKEN)
+        yield _make_app(tmp_path, {})
         sm_mod.reset_settings_manager()
 
     def test_wizard_step_saves_with_the_page_token(self, fresh_app):
@@ -395,12 +395,13 @@ class TestSetupWizard:
 
 class TestExternalAuth:
     @pytest.fixture
-    def external_app(self, tmp_path):
+    def external_app(self, tmp_path, monkeypatch):
         from media_preview_generator.web import settings_manager as sm_mod
 
         env = {"WEB_AUTH_TOKEN": API_TOKEN, "AUTH_METHOD": "external"}
-        with patch.dict(os.environ, env):
-            yield _make_app(tmp_path, {"setup_complete": True}, env)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        yield _make_app(tmp_path, {"setup_complete": True}, env)
         sm_mod.reset_settings_manager()
 
     def test_the_sign_out_page_says_to_sign_out_at_the_proxy(self, external_app):

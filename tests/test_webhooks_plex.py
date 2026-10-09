@@ -62,7 +62,7 @@ def _reset_singletons():
 
 
 @pytest.fixture()
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     config_dir = str(tmp_path / "config")
     os.makedirs(config_dir, exist_ok=True)
 
@@ -80,18 +80,13 @@ def app(tmp_path):
             f,
         )
 
-    with patch.dict(
-        os.environ,
-        {
-            "CONFIG_DIR": config_dir,
-            "WEB_AUTH_TOKEN": "test-token-12345678",
-            "WEB_PORT": "8099",
-        },
-    ):
-        flask_app = create_app(config_dir=config_dir)
-        flask_app.config["TESTING"] = True
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        yield flask_app
+    monkeypatch.setenv("CONFIG_DIR", config_dir)
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    monkeypatch.setenv("WEB_PORT", "8099")
+    flask_app = create_app(config_dir=config_dir)
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    yield flask_app
 
 
 @pytest.fixture()

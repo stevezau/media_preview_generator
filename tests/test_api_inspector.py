@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -58,20 +57,22 @@ def _reset_singletons():
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "auth.json").write_text(json.dumps({"token": TOKEN}))
     (config_dir / "settings.json").write_text(
         json.dumps({"setup_complete": True, "plex_config_folder": str(tmp_path / "plex")})
     )
-    with patch.dict(os.environ, {"CONFIG_DIR": str(config_dir), "WEB_AUTH_TOKEN": TOKEN, "WEB_PORT": "8099"}):
-        flask_app = create_app(config_dir=str(config_dir))
-        flask_app.config["TESTING"] = True
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        # The rate limits count across apps in one process; each test starts with none used.
-        limiter.reset()
-        yield flask_app
+    monkeypatch.setenv("CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("WEB_AUTH_TOKEN", TOKEN)
+    monkeypatch.setenv("WEB_PORT", "8099")
+    flask_app = create_app(config_dir=str(config_dir))
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    # The rate limits count across apps in one process; each test starts with none used.
+    limiter.reset()
+    yield flask_app
 
 
 @pytest.fixture

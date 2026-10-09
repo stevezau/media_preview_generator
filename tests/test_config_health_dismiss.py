@@ -28,7 +28,7 @@ from media_preview_generator.web.config_health import (
 
 
 @pytest.fixture()
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     """Flask app on a throwaway config dir.
 
     Two bits of isolation, both load-bearing under xdist:
@@ -44,15 +44,10 @@ def app(tmp_path):
 
     config_dir = str(tmp_path / "cfg")
     os.makedirs(config_dir, exist_ok=True)
+    monkeypatch.setenv("CONFIG_DIR", config_dir)
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    monkeypatch.setenv("WEB_PORT", "8099")
     with (
-        patch.dict(
-            os.environ,
-            {
-                "CONFIG_DIR": config_dir,
-                "WEB_AUTH_TOKEN": "test-token-12345678",
-                "WEB_PORT": "8099",
-            },
-        ),
         patch("media_preview_generator.web.app.get_schedule_manager") as mock_sched,
     ):
         mock_sched.return_value = MagicMock()
