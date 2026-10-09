@@ -177,10 +177,15 @@ class JobGate:
         with self._cond:
             request = self._requests.get(job_id)
             if request is not None:
-                # Readiness doesn't depend on priority, so it stays as is: clearing it would let a lower-priority
-                # waiter take a slot freed before the next refresh re-marks this request ready.
+                # Take the new place in line now, not at the next refresh: a slot freed in between would otherwise go
+                # to a waiter this job just overtook. Readiness doesn't depend on priority, so it stays as is.
                 request.priority = priority
                 request.revision += 1
+                self._heap = [
+                    (priority, order, token) if token is request.token else (entry_priority, order, token)
+                    for entry_priority, order, token in self._heap
+                ]
+                heapq.heapify(self._heap)
                 self._policy_epoch += 1
             self._cond.notify_all()
 

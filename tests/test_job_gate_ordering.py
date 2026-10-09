@@ -149,3 +149,17 @@ def test_terminal_snapshot_does_not_remove_owned_runner_request(make_gate):
     assert gate.has_request("owned")
     gate.finish_request("owned", owner)
     assert not gate.has_request("owned")
+
+
+def test_promoted_request_keeps_its_turn_before_the_next_policy_refresh(make_gate):
+    """A slot freed right after a priority change goes to the promoted job, not a lower-priority rival (CI flake on
+    #376: a refresh already in flight skipped the changed request, leaving it not-ready when the slot opened)."""
+    gate = make_gate(1, lambda kind: 1)
+    state = register(gate, "promoted", priority=3)
+    gate._refresh_requests()
+    gate._heap.append((2, ("", "rival"), object()))
+    gate._waiter_kinds[gate._heap[-1][2]] = "previews"
+    gate._kind_limits["previews"] = 1
+    state["priority"] = 1
+    gate.reprioritize("promoted", 1)
+    assert gate._next_eligible() is gate._requests["promoted"].token
