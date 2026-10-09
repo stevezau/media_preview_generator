@@ -50,8 +50,10 @@
 .dash-occupancy .occ i.on { background:var(--run); }
 .dash-occupancy .occ i.paused { background:var(--warn); }
 .dash-occupancy #workersHeaderCount { flex-shrink:0; color:var(--bs-body-color); }
-.dash-workers-head .dash-resume { color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
-.dash-workers-head .dash-resume:hover { color:var(--accent-ink); background:var(--accent); filter:brightness(1.08); }
+/* Must out-rank `.dashboard-layout .btn.dash-btn-sm` (text colour) and its :hover, and the amber icon colour. */
+.dashboard-layout .dash-workers-head .btn.dash-resume, .dashboard-layout .dash-workers-head .btn.dash-resume i { color:var(--accent-ink); }
+.dashboard-layout .dash-workers-head .btn.dash-resume { background:var(--accent); border-color:var(--accent); }
+.dashboard-layout .dash-workers-head .btn.dash-resume:hover { color:var(--accent-ink); background:var(--accent); border-color:var(--accent); filter:brightness(1.08); }
 .worker-group-hold { margin:0; padding:.5rem 1rem; background:var(--warn-soft); color:var(--warn); border-bottom:1px solid var(--line); font-size:.8125rem; }
 .worker-group-filters { padding:.75rem 1rem; border-bottom:1px solid var(--line); }
 .worker-group-filter-row, .worker-group-results { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem .75rem; }
