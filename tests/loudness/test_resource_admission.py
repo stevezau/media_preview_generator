@@ -49,6 +49,10 @@ def test_busy_cpu_loudness_lane_holds_no_start_up_slot(lifecycle: Lifecycle, mak
         while sum(entry.status is JobStatus.RUNNING for entry in entries) < 4 and time.monotonic() < deadline:
             threading.Event().wait(0.01)
         assert sum(entry.status is JobStatus.RUNNING for entry in entries) == 4
+        # A job turns RUNNING when it takes its slot and gives the slot back only after submitting its files, so the
+        # last job to start can still hold it for a moment here.
+        while gate.snapshot() != (0, 0, 1) and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
         assert gate.snapshot() == (0, 0, 1), "every job gave its start-up slot back after submitting its files"
         preview_deadline = time.monotonic() + 1
         assert gate.acquire(priority=2, kind="previews", cancel_check=lambda: time.monotonic() > preview_deadline), (
