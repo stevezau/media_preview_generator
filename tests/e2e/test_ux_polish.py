@@ -89,10 +89,10 @@ def test_settings_extra_guidance_can_be_opened_and_closed_with_keyboard(settings
 
 def test_compact_settings_help_keeps_full_guidance_in_its_dialog(settings_page: Page) -> None:
     page = settings_page
-    page.get_by_role("button", name="Explain max concurrent jobs").click()
+    page.get_by_role("button", name="Explain auto-requeue interrupted jobs").click()
     expect(page.locator("#globalInfoModal")).to_be_visible()
-    expect(page.locator("#globalInfoBody")).to_contain_text("Higher values (5–10)")
-    expect(page.locator("#globalInfoBody")).to_contain_text("servers + disks can handle it")
+    expect(page.locator("#globalInfoBody")).to_contain_text("Max requeue age")
+    expect(page.locator("#globalInfoBody")).to_contain_text("Paused jobs are exempt")
 
 
 def test_mobile_automation_jumps_switch_panes_and_follow_hash(authed_page: Page, app_url: str) -> None:
