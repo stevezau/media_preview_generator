@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
 from ._mocks import mock_dashboard_defaults
 from .test_inspector_behaviours import _SOCKET_STUB
@@ -43,3 +43,12 @@ def test_resume_button_text_and_icon_are_dark_on_amber(authed_page: Page, app_ur
     assert _resume_colors(page) == [_ACCENT_INK, _ACCENT_INK]
     page.hover(".dash-resume")
     assert _resume_colors(page) == [_ACCENT_INK, _ACCENT_INK]
+
+
+def test_pause_button_is_offered_when_nothing_is_queued(authed_page: Page, app_url: str) -> None:
+    page = authed_page
+    mock_dashboard_defaults(page)
+    page.add_init_script(_SOCKET_STUB)
+    page.goto(f"{app_url}/")
+
+    expect(page.locator("#globalPauseResumeQueue")).to_contain_text("Pause")

@@ -1230,8 +1230,8 @@ async function retryNowFromRow(jobId) {
     }
 }
 
-// Pause lives in the Workers header because it controls workers. It only offers itself while there is work to hold;
-// Resume is always offered while paused.
+// Pause lives in the Workers header because it controls workers. It is always offered, even with nothing queued,
+// so a pause can be set before work arrives (webhooks, schedules); Resume replaces it while paused.
 function renderGlobalPauseResume() {
     const pauseTitle = 'Pause all processing, including current files. Worker-group reductions instead let current files finish.';
     const resumeTitle = 'Clear the manual pause. Global pause schedules and job-specific pauses still apply.';
@@ -1241,9 +1241,7 @@ function renderGlobalPauseResume() {
     const resumeBtn = `<button type="button" class="btn dash-btn-sm dash-resume" onclick="resumeProcessing()" title="${escapeHtml(resumeTitle)}" aria-label="Resume all processing">
         <i class="bi bi-play-fill" aria-hidden="true"></i><span>Resume</span>
     </button>`;
-    const hasWork = _latestDashboardWorkers.some(w => w.status === 'processing')
-        || jobs.some(j => j.status === 'running' || j.status === 'pending');
-    const html = processingPaused ? resumeBtn : hasWork ? pauseBtn : '';
+    const html = processingPaused ? resumeBtn : pauseBtn;
     const el = document.getElementById('globalPauseResumeQueue');
     if (el && el._html !== html) {
         el._html = html;
