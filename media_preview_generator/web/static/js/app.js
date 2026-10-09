@@ -2798,13 +2798,13 @@ function updateJobQueue(force) {
                 <td class="queue-actions" data-label="Actions">${actionButtons}</td>
             </tr>`;
         const detailActions = `<div class="job-detail-actions"><button class="btn dash-btn-sm" onclick="openJobDetails('${escapeHtml(job.id)}')"><i class="bi bi-file-text" aria-hidden="true"></i>Open logs and files</button></div>`;
-        const filesBlock = `<section class="job-detail-files">${detailActions}${_markersFilesBlock(job)}</section>`;
+        const filesBlock = `<section class="job-detail-files">${_markersFilesBlock(job)}</section>`;
         const publishersBlock = _renderPublishersBlock(job);
         const currentItem = job.progress?.current_item;
         const started = job.started_at ? `<span>Started <b>${escapeHtml(formatDate(job.started_at))}</b>${job.status === 'running' ? ` · Job elapsed <b data-elapsed-since="${escapeHtmlAttr(job.started_at)}">${formatElapsed(job.started_at)}</b>` : ''}${job.completed_at ? ` · Finished <b>${escapeHtml(formatDate(job.completed_at))}</b>` : ''}</span>` : '';
         const nextEligible = wait?.next_eligible ? `<p class="small mb-0">Next eligible: ${escapeHtml(formatDate(wait.next_eligible))}</p>` : '';
         const activity = currentItem || started || wait?.reason
-            ? `<section class="job-current-activity"><h3 class="job-detail-heading">${['running', 'pending'].includes(job.status) ? 'Current activity' : 'Last activity'}</h3>${currentItem || wait?.reason ? `<p class="mb-1 queue-full-path">${escapeHtml(wait?.reason || currentItem)}</p>` : ''}${nextEligible}${started ? `<div class="small text-body-secondary">${started}</div>` : ''}</section>` : '';
+            ? `<section class="job-current-activity"><h3 class="job-detail-heading">${['running', 'pending'].includes(job.status) ? 'Current activity' : 'Last activity'}</h3>${currentItem || wait?.reason ? `<p class="mb-1 queue-full-path">${escapeHtml(wait?.reason || currentItem)}</p>` : ''}${nextEligible}${started ? `<div class="small text-body-secondary">${started}</div>` : ''}${detailActions}</section>` : `<section class="job-current-activity">${detailActions}</section>`;
         const error = job.error ? `<section class="job-detail-error"><h3 class="job-detail-heading text-danger-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>Job error</h3><p class="mb-0 queue-full-path">${escapeHtml(job.error)}</p></section>` : '';
         html += `<tr id="job-detail-${escapeHtml(job.id)}" class="${isFilesExpanded ? '' : 'd-none'} job-files-detail" aria-hidden="${isFilesExpanded ? 'false' : 'true'}">
             <td colspan="8" class="job-expanded-cell"><div class="job-expanded-content">

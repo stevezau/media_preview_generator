@@ -206,8 +206,8 @@
 .dashboard-layout .queue-files-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; }
 .dashboard-layout .queue-state { padding: 14px; border: 1px dashed var(--line-strong); border-radius: var(--radius-ctl); color: var(--faint); font-size: 13px; }
 .dashboard-layout .queue-state.is-error { color: var(--bad); }
-/* Sits at the top right of the files column, level with its heading, instead of on a row of its own. */
-.dashboard-layout .job-detail-actions { float: right; margin: 0 0 6px 12px; }
+/* Right end of the activity line, so it reads as a link to the job's full detail rather than part of the file list. */
+.dashboard-layout .job-current-activity > .job-detail-actions { margin-left: auto !important; }
 
 /* Empty state */
 .dashboard-layout .queue-empty { padding: 48px 16px !important; text-align: center; color: var(--muted); }
