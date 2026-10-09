@@ -1,5 +1,8 @@
 ---
-globs: "**/Dockerfile*,**/docker-compose*,**/compose*"
+paths:
+  - "**/Dockerfile*"
+  - "**/docker-compose*"
+  - "**/compose*"
 ---
 
 # Docker Best Practices
