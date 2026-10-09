@@ -44,17 +44,14 @@ def test_recently_added_also_queues_enabled_loudness(automatic):
     assert loudness[0].config["server_id"] == "plex"
 
 
-def test_loudness_waits_for_own_preview_and_every_marker_group(automatic):
+def test_loudness_does_not_wait_for_its_preview_or_marker_jobs(automatic):
     manager, preview, _ = automatic
-    markers = [
+    for name in ["a", "b"]:
         manager.create_job(kind="intro_credits", config={"file_paths": [f"/media/movies/{name}.mkv"]})
-        for name in ["a", "b"]
-    ]
-    triggers._submit_loudness_follow_up(
-        preview.id, [entry.id for entry in markers], ["/media/movies/a.mkv", "/media/movies/b.mkv"], "sonarr", None
-    )
+    triggers._submit_loudness_follow_up(preview.id, ["/media/movies/a.mkv", "/media/movies/b.mkv"], "sonarr", None)
     loudness = next(entry for entry in manager.get_all_jobs() if entry.kind == "loudness")
-    assert set(loudness.config["follows_job_ids"]) == {preview.id, *(entry.id for entry in markers)}
+    assert loudness.config["follows_job_id"] == preview.id
+    assert "follows_job_ids" not in loudness.config
 
 
 def _loudness(manager):
@@ -123,16 +120,7 @@ def test_preview_retries_do_not_spawn_independent_loudness_chains(automatic, con
     assert _loudness(manager) == []
 
 
-def test_joined_markers_are_dependencies_even_when_not_returned_by_submit(automatic):
-    manager, preview, _ = automatic
-    joined = manager.create_job(kind="intro_credits", config={"file_paths": ["/media/movies/a.mkv"]})
-    unrelated = manager.create_job(kind="intro_credits", config={"file_paths": ["/media/movies-extra/a.mkv"]})
-    triggers._submit_loudness_follow_up(preview.id, [], ["/media/movies/a.mkv"], "sonarr", None)
-    assert _loudness(manager)[0].config["follows_job_ids"] == [preview.id, joined.id]
-    assert unrelated.id not in _loudness(manager)[0].config["follows_job_ids"]
-
-
-def test_two_preview_arrivals_each_keep_their_own_barrier_and_source(automatic):
+def test_two_preview_arrivals_each_keep_their_own_follow_up_and_source(automatic):
     manager, preview, _ = automatic
     second = manager.create_job(kind="previews", config={"source": "sonarr"})
     items = [ProcessableItem("/media/movies/a.mkv", "plex")]
@@ -166,7 +154,6 @@ def test_upfront_webhook_and_dispatch_share_one_job_preserving_sender_path(autom
 def test_large_enumeration_uses_one_persisted_job(automatic, monkeypatch, tmp_path):
     manager, preview, _ = automatic
     paths = [f"/media/movies/{n}.mkv" for n in range(1001)]
-    marker = manager.create_job(kind="intro_credits", config={"file_paths": paths})
     items = [ProcessableItem(path, "plex") for path in paths]
 
     orchestrator._queue_loudness_follow_up(preview.id, items, "plex")
@@ -178,7 +165,8 @@ def test_large_enumeration_uses_one_persisted_job(automatic, monkeypatch, tmp_pa
     assert read_file_paths(manager.config_dir, follow_up.config) == paths
     assert follow_up.config["server_id"] == "plex"
     assert follow_up.config["source"] == "schedule"
-    assert set(follow_up.config["follows_job_ids"]) == {preview.id, marker.id}
+    assert follow_up.config["follows_job_id"] == preview.id
+    assert "follows_job_ids" not in follow_up.config
     assert follow_up.library_name == "Plex loudness · Movies"
 
     reloaded = jobs.JobManager(config_dir=str(tmp_path))
@@ -188,25 +176,6 @@ def test_large_enumeration_uses_one_persisted_job(automatic, monkeypatch, tmp_pa
 
     assert [entry.id for entry in _loudness(reloaded)] == [follow_up.id]
     assert read_file_paths(reloaded.config_dir, _loudness(reloaded)[0].config) == paths
-
-
-def test_dependency_limit_preserves_every_file_and_barrier(automatic, monkeypatch):
-    manager, preview, _ = automatic
-    paths = [f"/media/movies/{n}.mkv" for n in range(5)]
-    monkeypatch.setattr(job, "MAX_FOLLOW_UP_DEPENDENCIES", 3)
-    markers = {path: manager.create_job(kind="intro_credits", config={"file_paths": [path]}) for path in paths}
-    orchestrator._queue_loudness_follow_up(preview.id, [ProcessableItem(path, "plex") for path in paths], None)
-    queued = _loudness(manager)
-    assert len(queued) == 3
-    assert sorted(path for entry in queued for path in entry.config["file_paths"]) == paths
-    assert all(len(entry.config["file_paths"]) <= 2 for entry in queued)
-    assert all(preview.id in entry.config["follows_job_ids"] for entry in queued)
-    for entry in queued:
-        assert set(entry.config["follows_job_ids"]) == {
-            preview.id,
-            *(markers[path].id for path in entry.config["file_paths"]),
-        }
-        assert len(entry.config["follows_job_ids"]) <= 3
 
 
 @pytest.mark.parametrize("source", ["schedule", "scheduled", "scheduled_recently_added", "sonarr"])
@@ -234,7 +203,8 @@ def test_real_dispatch_queues_already_previewed_files_before_checking(automatic,
     assert len(seen) == 1
     assert seen[0].config["source"] == source
     assert seen[0].config["server_id"] == "plex"
-    assert seen[0].config["follows_job_ids"] == [preview.id]
+    assert seen[0].config["follows_job_id"] == preview.id
+    assert "follows_job_ids" not in seen[0].config
 
 
 def test_upfront_directory_defers_to_selected_enumerated_files_without_duplicate(automatic, tmp_path):
@@ -254,15 +224,13 @@ def test_upfront_directory_defers_to_selected_enumerated_files_without_duplicate
     )
     triggers.submit_pending_follow_up(preview.id)
     assert _loudness(manager) == []
-    marker = manager.create_job(kind="intro_credits", config={"file_paths": ["/sender"]})
-    unrelated = manager.create_job(kind="intro_credits", config={"file_paths": [str(folder) + "-other"]})
     orchestrator._queue_loudness_follow_up(
         preview.id, [ProcessableItem(str(path), "plex") for path in [included, excluded]], "plex"
     )
     assert len(_loudness(manager)) == 1
     assert _loudness(manager)[0].config["file_paths"] == [str(included)]
-    assert set(_loudness(manager)[0].config["follows_job_ids"]) == {preview.id, marker.id}
-    assert unrelated.id not in _loudness(manager)[0].config["follows_job_ids"]
+    assert _loudness(manager)[0].config["follows_job_id"] == preview.id
+    assert "follows_job_ids" not in _loudness(manager)[0].config
 
 
 def test_upfront_missing_file_retains_sender_path_for_loudness_retry(automatic):
