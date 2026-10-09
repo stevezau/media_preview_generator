@@ -11,6 +11,8 @@ Usage (development):
     python -m media_preview_generator.web.app
 """
 
+from ..shutdown import install_shutdown_hooks
 from .app import create_app
 
+install_shutdown_hooks()
 app = create_app()

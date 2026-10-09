@@ -107,20 +107,14 @@ def app(tmp_path, monkeypatch):
     with open(settings_file, "w") as f:
         json.dump({"setup_complete": True}, f)
 
-    with patch.dict(
-        os.environ,
-        {
-            "CONFIG_DIR": config_dir,
-            "WEB_AUTH_TOKEN": "test-token-12345678",
-            "WEB_PORT": "8099",
-        },
-    ):
-        # Create app with threading async_mode (test client works with any mode)
-        flask_app = create_app(config_dir=config_dir)
-        flask_app.config["TESTING"] = True
-        # Disable CSRF for test convenience (routes already exempt the api blueprint)
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        yield flask_app
+    monkeypatch.setenv("CONFIG_DIR", config_dir)
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    monkeypatch.setenv("WEB_PORT", "8099")
+    flask_app = create_app(config_dir=config_dir)
+    flask_app.config["TESTING"] = True
+    # Disable CSRF for test convenience (routes already exempt the api blueprint)
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    yield flask_app
 
 
 @pytest.fixture()
