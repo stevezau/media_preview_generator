@@ -9,6 +9,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -70,7 +71,9 @@ class Decodes:
         self.worker: list[dict] = []  # each decode's pause check and threads, kept apart from its window
 
     def __call__(self, path, **kwargs):
-        self.worker.append({key: kwargs.pop(key, None) for key in ("pause_check", "ffmpeg_threads")})
+        self.worker.append(
+            {key: kwargs.pop(key, None) for key in ("pause_check", "ffmpeg_threads", "progress_callback", "duration_s")}
+        )
         self.calls.append({"path": path, **kwargs})
         if self.answers or kwargs.get("scale") != 2:
             answer = self.answers.pop(0)
@@ -1438,7 +1441,9 @@ class FileDecodes:
         return (t, 3, 10.0) if t >= self.roll_from else (t, 0, 120.0)
 
     def __call__(self, path, *, start_s, length_s, keyframes_only, **kwargs):
-        self.worker.append({key: kwargs.pop(key, None) for key in ("pause_check", "ffmpeg_threads")})
+        self.worker.append(
+            {key: kwargs.pop(key, None) for key in ("pause_check", "ffmpeg_threads", "progress_callback", "duration_s")}
+        )
         self.calls.append({"start_s": start_s, "length_s": length_s, "keyframes_only": keyframes_only, **kwargs})
         if keyframes_only and self.on_decode is not None:
             self.on_decode(start_s, self.worker[-1]["pause_check"])
@@ -1479,6 +1484,17 @@ class TestStepsBeforeTheTail:
         return detector.find_credits(EPISODE.canonical_path, duration_ms=decodes.duration_s * 1000,
                                      is_episode=is_episode, tail_s=tail_s, ffmpeg="/ff", detect_boxes=count, gpu=gpu,
                                      gpu_device_path="cuda:0" if gpu else None, earliest_start_s=earliest_s)  # fmt: skip
+
+    def test_the_workers_progress_callback_and_the_files_length_reach_every_decode(self, monkeypatch, probes):
+        sentinel = MagicMock()
+        decodes = FileDecodes(1990.0)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        detector.find_credits(EPISODE.canonical_path, duration_ms=LONG_EPISODE_S * 1000, is_episode=True, ffmpeg="/ff",
+                              detect_boxes=count, gpu=None, gpu_device_path=None,
+                              earliest_start_s=0.75 * LONG_EPISODE_S, progress_callback=sentinel)  # fmt: skip
+        assert len(decodes.worker) >= 4  # the tail, two steps and a refine window
+        assert all(run["progress_callback"] is sentinel for run in decodes.worker)
+        assert all(run["duration_s"] == float(LONG_EPISODE_S) for run in decodes.worker)
 
     def test_a_roll_that_began_200_s_before_the_tail_is_found_on_the_second_step(self, monkeypatch, probes):
         # The tail and the first step are all roll; the second step holds 40 s of story before the roll's first card.
@@ -1765,6 +1781,12 @@ class TestDetect:
         assert phase == [detector.READING_PHASE]
         call["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
         assert pool.calls == [("NVIDIA", "cuda:0")]
+
+    def test_the_workers_progress_callback_reaches_find_credits(self, monkeypatch, pool, ctx):
+        seen = self._find(monkeypatch, None)
+        sentinel = MagicMock()
+        detector.detect_credits_text(MOVIE, ctx=ctx, progress_callback=sentinel)
+        assert seen[0]["progress_callback"] is sentinel
 
     @pytest.mark.parametrize(
         ("which", "tv_s", "movie_s", "tail_s"),
@@ -2831,7 +2853,7 @@ class TestProseCards:
         found = detector.CreditsTextResult(5690.0, 5701.0, tuple(STORY + ROLL), tuple(FINE), ())
         decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
                   "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
-                  "ffmpeg_threads": None}  # fmt: skip
+                  "ffmpeg_threads": None, "progress_callback": None}  # fmt: skip
         kept = detector._past_prose(
             MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=lambda _step: None
         )
@@ -2863,7 +2885,7 @@ class TestProseCards:
         found = detector.CreditsTextResult(5690.0, end_s, tuple(STORY + ROLL), tuple(FINE), ())
         decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
                   "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
-                  "ffmpeg_threads": None}  # fmt: skip
+                  "ffmpeg_threads": None, "progress_callback": None}  # fmt: skip
         result = detector._past_prose(
             MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=lambda _step: None
         )
@@ -2889,7 +2911,7 @@ class TestProseCards:
         found = detector.CreditsTextResult(5690.0, 5702.0, tuple(STORY + ROLL), tuple(FINE), ())
         decode = {"ffmpeg": "/ff", "gpu": None, "gpu_device_path": None, "detect_boxes": count, "cancel_check": None,
                   "start_time_s": START_TIME_S, "download_format": DOWNLOAD, "pause_check": None,
-                  "ffmpeg_threads": None}  # fmt: skip
+                  "ffmpeg_threads": None, "progress_callback": None}  # fmt: skip
         result = detector._past_prose(
             MOVIE.canonical_path, found, decode=decode, read_text=read_text, show=lambda _step: None
         )

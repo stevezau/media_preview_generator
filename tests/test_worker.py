@@ -1455,3 +1455,77 @@ class TestBuildSelectedGpus:
         result = _build_selected_gpus(settings)
         devices = [r[1] for r in result]
         assert set(devices) == {"cuda:0", "vaapi:/dev/dri/renderD128"}
+
+
+class TestCustomKindPhaseResetsTheRow:
+    def test_a_new_phase_starts_a_new_step_with_its_progress_reset(self):
+        from media_preview_generator.job_kinds import ItemOutcome
+        from media_preview_generator.jobs.worker import Worker
+        from media_preview_generator.processing.types import ProcessableItem
+
+        worker = Worker(0, "CPU")
+        seen: list[tuple] = []
+
+        def progress(percent, _done, _total, speed, remaining):
+            # What WorkerPool._update_worker_progress stores for the row.
+            worker.progress_percent, worker.speed, worker.remaining_time = percent, speed, remaining
+            worker.ffmpeg_started = True
+
+        def process_fn(item, *, progress_callback, phase_callback, **_kwargs):
+            phase_callback("Fingerprinting audio…")
+            progress_callback(45.0, 10.0, 20.0, "3.2x", 4.0)
+            seen.append((worker.ffmpeg_started, worker.progress_percent, worker.speed))
+            phase_callback("Matching season audio…")
+            seen.append((worker.ffmpeg_started, worker.progress_percent, worker.speed, worker.remaining_time))
+            return ItemOutcome("markers_published")
+
+        with patch("media_preview_generator.jobs.worker._notify_file_result"):
+            worker.assign_task(
+                ProcessableItem(canonical_path="/m/t.mkv", server_id="s1", title="t"),
+                MagicMock(cpu_threads=0),
+                MagicMock(),
+                progress_callback=progress,
+                job_id="j",
+                process_fn=process_fn,
+                outcome_keys=("markers_published", "failed"),
+            )
+            worker.current_thread.join(timeout=5)
+        assert seen == [(True, 45.0, "3.2x"), (False, 0, "0.0x", 0.0)]
+
+    def test_started_processing_is_logged_once_though_each_phase_restarts_the_progress(self):
+        from loguru import logger
+
+        from media_preview_generator.job_kinds import ItemOutcome
+        from media_preview_generator.jobs.worker import Worker, WorkerPool
+        from media_preview_generator.processing.types import ProcessableItem
+
+        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
+        worker = Worker(0, "CPU")
+
+        def progress(percent, done, total, speed, remaining):
+            pool._update_worker_progress(worker, percent, done, total, speed, remaining)
+
+        def process_fn(item, *, progress_callback, phase_callback, **_kwargs):
+            phase_callback("Fingerprinting audio…")
+            progress_callback(45.0, 10.0, 20.0, "3.2x", 4.0)
+            phase_callback("Matching season audio…")
+            progress_callback(10.0, 2.0, 20.0, "1.0x", 18.0)
+            return ItemOutcome("markers_published")
+
+        lines: list[str] = []
+        sink_id = logger.add(lambda message: lines.append(message.record["message"]), level="INFO")
+        try:
+            with patch("media_preview_generator.jobs.worker._notify_file_result"):
+                worker.assign_task(
+                    ProcessableItem(canonical_path="/m/t.mkv", server_id="s1", title="t"),
+                    MagicMock(cpu_threads=0),
+                    MagicMock(),
+                    progress_callback=progress,
+                    job_id="j",
+                    process_fn=process_fn,
+                    outcome_keys=("markers_published", "failed"),
+                )
+                worker.current_thread.join(timeout=5)
+        finally:
+            logger.remove(sink_id)
+        assert [line for line in lines if "Started processing" in line] == ["[CPU]: Started processing /m/t.mkv"]

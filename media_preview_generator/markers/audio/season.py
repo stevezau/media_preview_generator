@@ -37,6 +37,7 @@ from ..freeze import Freeze
 from ..missing import library_folders
 from ..models import Candidate, FileIdentity, MarkerType, Source
 from ..probe import MediaProbe, ProbeError, ProbeStalledError, probe_media
+from ..progress import StepProgress, WorkerProgress
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from ..speed import FILM_FPS, PAL_FPS, match_speed, playback_speed, retime_factor
 from ..store import PAIR_VERSION_STEP, EndPictureKey
@@ -1422,6 +1423,7 @@ class _EndPictures:
         pause_check: Callable[[], bool] | None = None,
         ffmpeg_threads: int | None = None,
         fallback_callback: Callable[[str], None] | None = None,
+        progress_callback: WorkerProgress | None = None,
     ) -> None:
         self._ctx, self._target, self._records, self._decode = ctx, target, records, decode
         self._phase = phase or (lambda _text: None)
@@ -1433,6 +1435,7 @@ class _EndPictures:
             pause_check=pause_check,
             ffmpeg_threads=ffmpeg_threads,
             fallback_callback=fallback_callback,
+            progress_callback=progress_callback,
         )
         self._shares: dict[EndPictureKey, float | None] = {}
 
@@ -1629,6 +1632,7 @@ def detect_season_audio(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
+    progress_callback: WorkerProgress | None = None,
 ) -> DetectorAnswer:
     """Match this episode's opening against its season (or, alone, the previous season's cached episodes).
 
@@ -1650,6 +1654,8 @@ def detect_season_audio(
             work, at ffmpeg's own thread count); None on a CPU worker (ffmpeg's own thread count, as previews).
         fallback_callback: Shows on the worker's row that an end-picture decode fell back to the CPU.
         gpu_worker: Unused (no text detection here); every detector gets it (``LocalDetectorSpec.detect``).
+        progress_callback: The worker row's progress callback; each fingerprint and end-picture decode reports its own
+            percent, speed and ETA through it (:class:`..progress.StepProgress`).
 
     Returns:
         At most one intro candidate (season audio, or the previous-season hint), with the signature of the season files
@@ -1686,6 +1692,7 @@ def detect_season_audio(
                 on_failure=functools.partial(_record_fingerprint_failure, ctx, member),
                 retime=retime,
                 pause_check=pause_check,
+                progress=lambda total_s, clock: StepProgress.maybe(progress_callback, total_s, clock=clock),
             )
         except FingerprintSkippedError:
             logger.debug(
@@ -1770,6 +1777,7 @@ def detect_season_audio(
         pause_check=pause_check,
         ffmpeg_threads=ffmpeg_threads,
         fallback_callback=fallback_callback,
+        progress_callback=progress_callback,
     )
     try:
         segment = None if matching is None else _intro(ctx, rec.canonical_path, matching, records, end_pictures)

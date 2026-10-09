@@ -28,6 +28,7 @@ from ..fs import gone_from_disk
 from ..locks import KeyedLocks
 from ..missing import sweep_missing_files
 from ..probe import kill_and_collect, stuck_processes
+from ..progress import StepFactory, StepProgress, read_progress
 from ..store import SEASON_PAIR_WINDOW, FileRecord, FingerprintCheck, MarkerStore, StoredFingerprint
 
 if TYPE_CHECKING:
@@ -214,7 +215,9 @@ def fingerprint_window(retime: float | None) -> str:
     return WINDOW if retime is None else f"{WINDOW}@{retime:.6f}"
 
 
-def fingerprint_command(ffmpeg: str, path: str, length_s: float, retime: float | None = None) -> list[str]:
+def fingerprint_command(
+    ffmpeg: str, path: str, length_s: float, retime: float | None = None, progress_fd: int | None = None
+) -> list[str]:
     """The command: raw algorithm-1 chromaprint of the first ``length_s`` seconds, stereo.
 
     Args:
@@ -224,6 +227,8 @@ def fingerprint_command(ffmpeg: str, path: str, length_s: float, retime: float |
         retime: The file's own seconds per second of its season group's speed (``speed.retime_factor``), None for its
             own speed. The audio then plays at the group's speed, so a point ``i`` of the fingerprint is ``i * POINT_S
             * retime`` seconds into the file.
+        progress_fd: A descriptor ffmpeg writes its ``-progress`` blocks to (the caller passes it to the child); None
+            for no progress, which leaves the command as it always was.
 
     Returns:
         The command.
@@ -236,8 +241,9 @@ def fingerprint_command(ffmpeg: str, path: str, length_s: float, retime: float |
     speed = (
         [] if retime is None else ["-af", f"aresample={RETIME_BASE_RATE},asetrate={round(RETIME_BASE_RATE * retime)}"]
     )
+    report = [] if progress_fd is None else ["-progress", f"pipe:{progress_fd}"]
     return [
-        ffmpeg, "-nostdin", "-v", "error",
+        ffmpeg, "-nostdin", "-v", "error", *report,
         "-ss", "0", "-t", f"{length_s:.3f}", "-i", path,
         "-vn", "-sn", "-dn", "-ac", "2", *speed,
         "-f", "chromaprint", "-algorithm", str(ALGORITHM), "-fp_format", "raw", "-",
@@ -253,6 +259,7 @@ def compute_fingerprint(
     timeout_s: float = FINGERPRINT_TIMEOUT_S,
     retime: float | None = None,
     pause_check: Callable[[], bool] | Freeze | None = None,
+    progress: StepFactory | None = None,
 ) -> np.ndarray:
     """Run ffmpeg and return the fingerprint points.
 
@@ -267,6 +274,9 @@ def compute_fingerprint(
         pause_check: True while everything is paused (:class:`..freeze.Freeze`): ffmpeg doesn't start, or its process
             group is stopped where it is until the resume, and the time limit moves out by the time paused. A cancel
             still ends it.
+        progress: Makes the step's :class:`StepProgress` from the window's length and the pause-aware clock; it is told
+            how much of the window is done, from ffmpeg's ``-progress`` output on a pipe of its own (stdout keeps the
+            fingerprint and stderr the errors).
 
     Returns:
         uint32 points (little-endian); empty for a file without an audio stream.
@@ -276,15 +286,34 @@ def compute_fingerprint(
         FingerprintStalledError: A pause before the start outlasted a mount stall (``STALLED_LIMIT`` ffmpegs stuck).
     """
     name = os.path.basename(path)
-    command = fingerprint_command(ffmpeg, path, window_s(duration_ms), retime)
+    length_s = window_s(duration_ms)
+    command = fingerprint_command(ffmpeg, path, length_s, retime)
     freeze = Freeze.of(pause_check)
     if freeze.hold(cancel_check=cancel_check, name=name):
         # Held before the start: what was checked before the pause may no longer hold.
         if cancel_check and cancel_check():
             raise FingerprintError(f"Fingerprinting {name} cancelled")
         _raise_if_stalled(name)
-    # Its own session, so a pause stops ffmpeg's whole group and never the app's.
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    step = progress(length_s, freeze.clock) if progress is not None else None
+    progress_pipe = os.pipe() if step is not None else None
+    reader: threading.Thread | None = None
+    try:
+        if progress_pipe is not None:
+            command = fingerprint_command(ffmpeg, path, length_s, retime, progress_fd=progress_pipe[1])
+        # Its own session, so a pause stops ffmpeg's whole group and never the app's.
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            pass_fds=() if progress_pipe is None else (progress_pipe[1],),
+        )
+    except BaseException:
+        _close_fds(progress_pipe)
+        raise
+    if progress_pipe is not None and step is not None:
+        os.close(progress_pipe[1])  # ffmpeg holds the only write end, so the reader sees EOF when it exits
+        reader = _start_progress_reader(progress_pipe[0], step, retime)
     deadline = freeze.clock() + timeout_s
     try:
         while True:
@@ -300,6 +329,10 @@ def compute_fingerprint(
     except BaseException:
         _stop(proc, name)  # whatever ended the wait, even a failing pause or cancel check: ffmpeg never runs on
         raise
+    finally:
+        if reader is not None:
+            # Daemon and bounded: a process the kill never reached can hold the pipe open, which must not hold a worker.
+            reader.join(timeout=_POLL_S)
     if proc.returncode != 0:
         text = (err or b"").decode("utf-8", errors="replace")
         if any(hint in text for hint in _NO_AUDIO_HINTS):
@@ -307,6 +340,41 @@ def compute_fingerprint(
         raise FingerprintError(f"ffmpeg exited {proc.returncode} fingerprinting {name}: {text.strip()[-200:]}")
     usable = len(out) - len(out) % 4
     return np.frombuffer(out[:usable], dtype="<u4").copy()
+
+
+def _close_fds(pipe: tuple[int, int] | None) -> None:
+    for fd in pipe or ():
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _start_progress_reader(read_fd: int, progress: StepProgress, retime: float | None) -> threading.Thread | None:
+    """Read ffmpeg's ``-progress`` blocks from ``read_fd`` on a daemon thread, which closes it at EOF.
+
+    Returns None, with ``read_fd`` closed, when no thread can start: the fingerprint carries on without progress.
+
+    A retimed run's output is ``retime`` times shorter than the window it covers (:func:`fingerprint_command`), so its
+    seconds are scaled back to the window's.
+    """
+    scale = 1.0 if retime is None else retime
+
+    def on_progress(out_seconds: float, _speed: float | None) -> None:
+        progress.update(out_seconds * scale)
+
+    def read() -> None:
+        with os.fdopen(read_fd, "rb") as stream:
+            read_progress(stream, on_progress)
+
+    reader = threading.Thread(target=read, daemon=True, name="fingerprint-progress")
+    try:
+        reader.start()
+    except RuntimeError as exc:
+        os.close(read_fd)
+        logger.warning("Could not start the fingerprint progress reader; carrying on without progress: {}", exc)
+        return None
+    return reader
 
 
 def _stop(proc: subprocess.Popen, name: str) -> None:
@@ -372,6 +440,7 @@ def ensure_fingerprint(
     on_failure: Callable[[], None] | None = None,
     retime: float | None = None,
     pause_check: Callable[[], bool] | Freeze | None = None,
+    progress: StepFactory | None = None,
 ) -> np.ndarray | None:
     """A file's fingerprint from the cache, computing and storing it when missing.
 
@@ -391,6 +460,8 @@ def ensure_fingerprint(
         retime: The file's audio retimed to its season group's speed (:func:`fingerprint_command`), cached apart from
             its own; None for its own.
         pause_check: True while everything is paused (:func:`compute_fingerprint`).
+        progress: Makes the step's :class:`StepProgress` (:func:`compute_fingerprint`); asked only when ffmpeg is about
+            to run, so a cached fingerprint shows nothing.
 
     Returns:
         The points, or None when the file's row changed identity while ffmpeg ran (nothing stored).
@@ -432,6 +503,7 @@ def ensure_fingerprint(
                 cancel_check=cancel_check,
                 pause_check=pause_check,
                 retime=retime,
+                progress=progress,
             )
         except FingerprintStalledError:
             raise

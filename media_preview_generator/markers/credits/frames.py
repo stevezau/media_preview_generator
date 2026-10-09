@@ -19,6 +19,7 @@ import statistics
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from typing import BinaryIO, NamedTuple
 
@@ -38,6 +39,7 @@ from ..probe import (
     probe_media,
     video_packets,
 )
+from ..progress import StepProgress, WorkerProgress
 from .rule_j import Box, Row
 
 FRAME_W = 320
@@ -103,6 +105,8 @@ _VAAPI_COPY = "scale_vaapi=out_chroma_location=left"
 _CANT_DECODE = GPU_CANT_DECODE_VERDICT.encode()
 _STDERR_PEEK_BYTES = 1 << 16
 _POLL_S = 0.1
+# Progress is reported at most this often: a decode shows its percent, not every frame.
+_PROGRESS_EVERY_S = 0.5
 _KILL_WAIT_S = 5.0
 _READER_JOIN_S = 2.0
 _END = object()
@@ -508,6 +512,27 @@ def _said_cant_decode(stderr_file: BinaryIO, offset: int) -> tuple[bool, int]:
             return False, offset
 
 
+def _latest_pts(stderr_file: BinaryIO, offset: int) -> tuple[bytes | None, int]:
+    """The last ``showinfo`` timestamp ffmpeg has written to its stderr file at or after ``offset``.
+
+    Read with ``pread``, as :func:`_said_cant_decode` does. Only whole lines count (a half-written timestamp would read
+    short), so the next look starts after the last newline seen.
+
+    Returns:
+        The timestamp's text or None, and where the next look starts.
+    """
+    latest = None
+    while True:
+        data = os.pread(stderr_file.fileno(), _STDERR_PEEK_BYTES, offset)
+        whole = data[: data.rfind(b"\n") + 1]
+        found = _PTS_RE.findall(whole)
+        if found:
+            latest = found[-1]
+        offset += len(whole)
+        if len(data) < _STDERR_PEEK_BYTES or not whole:
+            return latest, offset
+
+
 def _kill(proc: subprocess.Popen) -> None:
     """Kill ffmpeg's whole process group (it runs in its own session) and wait a bounded time for it."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -573,6 +598,9 @@ def run_decode(
     name: str = "",
     scale: int = 1,
     pause_check: Callable[[], bool] | Freeze | None = None,
+    progress_callback: WorkerProgress | None = None,
+    window_start_s: float = 0.0,
+    window_length_s: float | None = None,
 ) -> list[Row]:
     """Run one decode and read its text boxes chunk by chunk.
 
@@ -597,6 +625,10 @@ def run_decode(
             process group is stopped where it is until the resume, no text detection runs meanwhile, and the time
             limit moves out by the time paused. A cancel still ends the decode. A :class:`freeze.Freeze` keeps adding
             up its time paused across decodes.
+        progress_callback: The worker row's progress callback; told how far the decode is through its window, from the
+            timestamps ffmpeg has written so far, at most every ``_PROGRESS_EVERY_S``.
+        window_start_s: Seconds from the start of the file the decode starts at (``decode_command``'s ``start_s``).
+        window_length_s: Seconds the decode covers; None (the caller doesn't know) reports nothing.
 
     Returns:
         ``(pts, box count, luma, boxes)`` per frame, in decode order, the boxes in the 320×180 frame's pixels at every
@@ -629,6 +661,19 @@ def run_decode(
         raise DecodeCancelledError(f"cancelled before decoding {name}")
     deadline = freeze.clock() + timeout_s
     stderr_seen = 0
+    step = StepProgress.maybe(progress_callback, window_length_s, clock=freeze.clock)
+    progress_seen, progress_at = 0, 0.0
+
+    def report_progress(*, final: bool = False) -> None:
+        nonlocal progress_seen, progress_at
+        now = time.monotonic()
+        if step is None or (not final and now - progress_at < _PROGRESS_EVERY_S):
+            return
+        progress_at = now
+        latest, progress_seen = _latest_pts(stderr_file, progress_seen)
+        pts = None if latest is None else _parse_pts(latest, pts_offset_s)
+        if pts is not None:
+            step.update(pts - window_start_s)
 
     def flush() -> None:
         planes = np.frombuffer(b"".join(pending), dtype=np.uint8).reshape(
@@ -680,6 +725,7 @@ def run_decode(
                     raise DecodeCancelledError(f"cancelled while decoding {name}")
                 if freeze.clock() > deadline:
                     raise DecodeTimeoutError(f"decoding {name} timed out after {timeout_s:g} s")
+                report_progress()
                 try:
                     item = frames.get(timeout=_POLL_S)
                 except queue.Empty:
@@ -715,6 +761,10 @@ def run_decode(
                 # Killed by the watcher during the last text detection call: the exit code is the kill's, not ffmpeg's.
                 raise DecodeCancelledError(f"cancelled while decoding {name}")
             returncode = proc.returncode
+            if returncode == 0:
+                report_progress(
+                    final=True
+                )  # unthrottled: the row ends at the last frame, not at the last throttled look
         except BaseException:
             if not cancelled.is_set():  # the watcher already killed the whole group (its pid may be reaped by now)
                 _kill(proc)
@@ -828,6 +878,8 @@ def decode_rows(
     download_format: str | None = None,
     pause_check: Callable[[], bool] | Freeze | None = None,
     ffmpeg_threads: int | None = None,
+    progress_callback: WorkerProgress | None = None,
+    duration_s: float | None = None,
 ) -> list[Row]:
     """:func:`decode_command` then :func:`run_decode` (other arguments as there; ``scale`` goes to both).
 
@@ -842,6 +894,9 @@ def decode_rows(
             right choice unless the caller has a probe of its own **from this run**: ``pipeline._attempt`` leaves its
             probe None for a file that hasn't changed and has a stored duration, and the store never keeps a start
             time, so a stale or absent probe passed as 0.0 would put a recording's answers 30000 s out.
+        progress_callback: As :func:`run_decode`.
+        duration_s: The file's length, for a decode to its end (``length_s`` None); without it such a decode reports no
+            progress.
 
     Raises:
         DecodeCancelledError: Already cancelled (nothing is probed or decoded).
@@ -866,7 +921,18 @@ def decode_rows(
     # timeout (``textdet_helper.REQUEST_TIMEOUT_S``, sized for 64 frames at 320x180) and the frame queue's bytes hold.
     return run_decode(command, hw_active=hw_active, detect_boxes=detect_boxes, cancel_check=cancel_check,
                       pause_check=pause_check, timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale,
-                      chunk_frames=max(1, CHUNK_FRAMES // (scale * scale)))  # fmt: skip
+                      chunk_frames=max(1, CHUNK_FRAMES // (scale * scale)), progress_callback=progress_callback,
+                      window_start_s=start_s,
+                      window_length_s=_window_length_s(start_s, length_s, duration_s))  # fmt: skip
+
+
+def _window_length_s(start_s: float, length_s: float | None, duration_s: float | None) -> float | None:
+    """Seconds a decode covers: ``length_s``, else up to the file's end; None when unknown or already past the end."""
+    if length_s is not None:
+        return length_s
+    if duration_s is None or duration_s <= start_s:
+        return None
+    return duration_s - start_s
 
 
 def read_text_at(
@@ -884,6 +950,7 @@ def read_text_at(
     download_format: str | None = None,
     pause_check: Callable[[], bool] | Freeze | None = None,
     ffmpeg_threads: int | None = None,
+    progress_callback: WorkerProgress | None = None,
 ) -> list[str]:
     """The words on the frame at ``at_s``: one second decoded at 1 fps and ``scale`` times 320x180 exactly as a refine
     window is (the worker's device, the one scaler), and its frame read (a card at a credits start).
@@ -902,6 +969,7 @@ def read_text_at(
         download_format: As :func:`decode_rows`.
         pause_check: As :func:`decode_rows`.
         ffmpeg_threads: As :func:`decode_rows`.
+        progress_callback: As :func:`run_decode` (the window is the one second decoded).
 
     Returns:
         The frame's text, one entry per box the detection model finds on it, top to bottom; empty when ffmpeg gave no
@@ -931,5 +999,6 @@ def read_text_at(
 
     # One frame per request: a card's full-size frame is read on its own, not with others.
     run_decode(command, hw_active=hw_active, detect_boxes=read, cancel_check=cancel_check, pause_check=pause_check,
-               timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale, chunk_frames=1)  # fmt: skip
+               timeout_s=timeout_s, pts_offset_s=offset_s, name=name, scale=scale, chunk_frames=1,
+               progress_callback=progress_callback, window_start_s=at_s, window_length_s=1.0)  # fmt: skip
     return lines[0] if lines else []
