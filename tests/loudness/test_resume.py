@@ -318,7 +318,11 @@ def test_parked_resume_revalidates_completed_files_outside_checkpoint(lifecycle:
 
 
 @pytest.mark.parametrize("finish", ["resume", "cancel"])
-def test_global_pause_between_native_resume_checks_releases_slot(lifecycle: Lifecycle, monkeypatch, finish):  # noqa: F811
+def test_global_pause_between_native_resume_checks_waits_for_resume_or_cancel(
+    lifecycle: Lifecycle,  # noqa: F811
+    monkeypatch,
+    finish,
+):
     lifecycle.api_ready = True
     paths = [lifecycle.add_file("pause-first.mkv"), lifecycle.add_file("pause-second.mkv")]
     parent = lifecycle.start(paths)
@@ -346,8 +350,8 @@ def test_global_pause_between_native_resume_checks_releases_slot(lifecycle: Life
         deadline = time.monotonic() + 2
         while gate.snapshot()[0] and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert gate.snapshot()[0] == 0
-        assert checked == paths[:1]
+        assert gate.snapshot()[0] == 0, "a validation wait must not hold a start-up slot"
+        assert checked == paths[:1], "no file is checked while processing is paused"
         if finish == "cancel":
             lifecycle.manager.request_cancellation(parent.id)
         else:

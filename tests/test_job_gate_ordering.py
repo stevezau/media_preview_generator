@@ -3,8 +3,6 @@
 import threading
 from unittest.mock import Mock
 
-from media_preview_generator.web.job_gate import JobGate
-
 
 def register(gate, name, *, created="2026-01-01", priority=3, ready=True, kind="loudness"):
     state = {"priority": priority, "ready": ready}
@@ -14,8 +12,8 @@ def register(gate, name, *, created="2026-01-01", priority=3, ready=True, kind="
     return state
 
 
-def test_registered_older_request_precedes_thread_that_reaches_gate_first():
-    gate = JobGate(lambda: 1)
+def test_registered_older_request_precedes_thread_that_reaches_gate_first(make_gate):
+    gate = make_gate(1)
     register(gate, "old", created="2026-01-01")
     register(gate, "new", created="2026-01-02")
     waiting = threading.Event()
@@ -31,24 +29,24 @@ def test_registered_older_request_precedes_thread_that_reaches_gate_first():
     assert not admitted.is_set()
     assert gate.snapshot()[0] == 0
     assert gate.acquire(3, lambda: False, request_id="old", kind="loudness")
-    gate.release(3, kind="loudness")
+    gate.release()
     assert admitted.wait(2)
     thread.join(2)
-    gate.release(3, kind="loudness")
+    gate.release()
     assert gate.snapshot() == (0, 0, 1)
 
 
-def test_deferred_or_incompatible_old_request_does_not_block_ready_other_kind():
-    gate = JobGate(lambda: 5, lambda kind: 0 if kind == "loudness" else 1)
+def test_deferred_or_incompatible_old_request_does_not_block_ready_other_kind(make_gate):
+    gate = make_gate(5, lambda kind: 0 if kind == "loudness" else 1)
     register(gate, "old", kind="loudness")
     register(gate, "new", created="2026-01-02", kind="previews")
     assert gate.acquire(3, lambda: False, request_id="new", kind="previews")
-    gate.release(3, kind="previews")
+    gate.release()
     assert gate.snapshot()[0] == 0
 
 
-def test_duplicate_cleanup_cannot_remove_winning_runner():
-    gate = JobGate(lambda: 1)
+def test_duplicate_cleanup_cannot_remove_winning_runner(make_gate):
+    gate = make_gate(1)
     register(gate, "old")
     owner = gate.claim_request("old")
     assert gate.claim_request("old") is None
@@ -59,28 +57,28 @@ def test_duplicate_cleanup_cannot_remove_winning_runner():
     assert gate.snapshot() == (0, 0, 1)
 
 
-def test_already_cancelled_request_never_takes_available_slot():
-    gate = JobGate(lambda: 1)
+def test_already_cancelled_request_never_takes_available_slot(make_gate):
+    gate = make_gate(1)
     register(gate, "cancelled")
     assert not gate.acquire(3, lambda: True, request_id="cancelled", kind="loudness")
     assert gate.snapshot() == (0, 0, 1)
 
 
-def test_actual_backoff_wait_remains_ineligible_until_runner_finishes_preflight():
-    gate = JobGate(lambda: 1)
+def test_actual_backoff_wait_remains_ineligible_until_runner_finishes_preflight(make_gate):
+    gate = make_gate(1)
     register(gate, "old")
     gate.defer_preflight("old")
     register(gate, "new", created="2026-01-02")
     assert gate.acquire(3, lambda: False, request_id="new", kind="loudness")
-    gate.release(3, kind="loudness")
+    gate.release()
     gate.complete_preflight("old")
     assert gate.acquire(3, lambda: False, request_id="old", kind="loudness")
-    gate.release(3, kind="loudness")
+    gate.release()
 
 
-def test_refresh_coalesces_waiters_and_reads_capacity_once_per_kind(monkeypatch):
+def test_refresh_coalesces_waiters_and_reads_capacity_once_per_kind(monkeypatch, make_gate):
     capacity = Mock(return_value=1)
-    gate = JobGate(lambda: 5, capacity)
+    gate = make_gate(5, capacity)
     monkeypatch.setattr("media_preview_generator.web.job_gate.time.monotonic", lambda: 10.0)
     for index in range(50):
         register(gate, str(index), kind="loudness")
@@ -89,8 +87,8 @@ def test_refresh_coalesces_waiters_and_reads_capacity_once_per_kind(monkeypatch)
     capacity.assert_called_once_with("loudness")
 
 
-def test_priority_update_during_policy_snapshot_cannot_be_overwritten():
-    gate = JobGate(lambda: 2)
+def test_priority_update_during_policy_snapshot_cannot_be_overwritten(make_gate):
+    gate = make_gate(2)
     entered, proceed = threading.Event(), threading.Event()
 
     def policy(_done):
@@ -110,8 +108,8 @@ def test_priority_update_during_policy_snapshot_cannot_be_overwritten():
     assert not request.ready
 
 
-def test_policy_and_capacity_callbacks_run_outside_gate_condition():
-    gate = JobGate(lambda: 1)
+def test_policy_and_capacity_callbacks_run_outside_gate_condition(make_gate):
+    gate = make_gate(1)
 
     def policy(_done):
         acquired = threading.Event()
@@ -128,11 +126,11 @@ def test_policy_and_capacity_callbacks_run_outside_gate_condition():
 
     gate.register_request("old", created_at="2026-01-01", priority=3, kind="loudness", policy=policy)
     assert gate.acquire(3, lambda: False, request_id="old", kind="loudness")
-    gate.release(3, kind="loudness")
+    gate.release()
 
 
-def test_terminal_unclaimed_reservation_is_pruned_before_next_admission():
-    gate = JobGate(lambda: 1)
+def test_terminal_unclaimed_reservation_is_pruned_before_next_admission(make_gate):
+    gate = make_gate(1)
     gate.register_request(
         "cancelled-paused", created_at="2026-01-01", priority=3, kind="loudness", policy=lambda _done: None
     )
@@ -140,11 +138,11 @@ def test_terminal_unclaimed_reservation_is_pruned_before_next_admission():
     assert gate.acquire(3, lambda: False, request_id="new", kind="loudness")
     assert not gate.has_request("cancelled-paused")
     assert gate.snapshot()[1] == 0
-    gate.release(3, kind="loudness")
+    gate.release()
 
 
-def test_terminal_snapshot_does_not_remove_owned_runner_request():
-    gate = JobGate(lambda: 1)
+def test_terminal_snapshot_does_not_remove_owned_runner_request(make_gate):
+    gate = make_gate(1)
     gate.register_request("owned", created_at="2026-01-01", priority=3, kind="loudness", policy=lambda _done: None)
     owner = gate.claim_request("owned")
     gate._refresh_requests()

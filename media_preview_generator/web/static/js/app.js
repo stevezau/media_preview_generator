@@ -911,7 +911,7 @@ window._dedupeActivityCount = _dedupeActivityCount;
 // backend text stays untouched and is carried in the title. Unknown reasons lose just the "Queued — " prefix.
 const _QUEUE_REASON_SHORT = [
     [/^waiting for the preview job for these files to finish\b/i, 'Waiting for previews to finish'],
-    [/^waiting for active slot\b/i, 'Waiting for a free worker'],
+    [/^waiting to start\b/i, 'Waiting to start'],
 ];
 function _queueReasonShort(text) {
     const stripped = String(text || '').replace(/^\s*Queued\s*[—–-]\s*/i, '').trim();
@@ -978,13 +978,10 @@ async function _loadJobsPage(request) {
             _autoOpenModalFromUrl();
         }
 
-        // Active Jobs shows only jobs holding a JobGate slot
-        // (status='running'). Pre-dispatch states (retry-backoff wait,
-        // queued-at-gate) keep status='pending' and stay in the lower
-        // Job Queue table — surfacing them here lets the panel count
-        // exceed ``max_concurrent_jobs``, which contradicts the cap
-        // the user just configured.
-        // An Intro & Credits job paused on its own is running but has handed its slot back, so it isn't active.
+        // Active Jobs shows only running jobs (status='running'). Pre-dispatch
+        // states (retry-backoff wait, queued-at-gate) keep status='pending'
+        // and stay in the lower Job Queue table.
+        // An Intro & Credits job paused on its own is running but does no work, so it isn't active.
         const activeJobs = jobs.filter(j => j.status === 'running' && _markersPauseState(j) !== 'own');
         updateActiveJobs(activeJobs, force);
 

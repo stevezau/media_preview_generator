@@ -523,8 +523,8 @@ class TestJobDispatcher:
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
-    def test_fifo_priority_drains_first_job_before_second(self, mock_process):
-        """FIFO scheduling: all items from job 1 are dispatched before job 2."""
+    def test_same_priority_jobs_take_turns(self, mock_process):
+        """Same-priority jobs alternate, so the second job's files are not stuck behind all of the first's."""
         dispatch_order = []
 
         def tracking_process(*args, canonical_path=None, **kwargs):
@@ -559,9 +559,9 @@ class TestJobDispatcher:
         assert tracker_a.wait(timeout=10)
         assert tracker_b.wait(timeout=10)
 
-        # With 1 worker, strict FIFO means all of A before any of B.
+        # With 1 worker, job A goes first (submitted first), then the jobs take turns.
         # _pi() builds canonical_paths from f"/data/{key.strip('/').replace('/', '_')}.mkv".
-        assert dispatch_order == ["/data/a_1.mkv", "/data/a_2.mkv", "/data/a_3.mkv", "/data/b_1.mkv", "/data/b_2.mkv"]
+        assert dispatch_order == ["/data/a_1.mkv", "/data/b_1.mkv", "/data/a_2.mkv", "/data/b_2.mkv", "/data/a_3.mkv"]
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
@@ -1342,13 +1342,15 @@ class TestGetOrCreateDispatcher:
 
 
 def _recording_tracker(job_id: str, total: int, callback) -> JobTracker:
-    return JobTracker(
+    tracker = JobTracker(
         job_id=job_id,
         items=_pi_list_or_passthrough([(f"k{i}", f"t{i}", "movie") for i in range(total)]),
         config=_make_config(),
         registry=MagicMock(),
         callbacks={"progress_callback": callback},
     )
+    tracker.work_started = True  # completions follow a pick; before one the banner says it is waiting for a worker
+    return tracker
 
 
 class TestProgressNeverEndsOnAStaleCount:

@@ -1886,6 +1886,22 @@ class TestSettingsAPI:
         assert isinstance(data["cpu_threads"], int)
         assert data["plex_verify_ssl"] is True
 
+    def test_removed_max_concurrent_jobs_is_not_served_and_a_post_with_it_is_ignored(self, client):
+        """The setting is gone: GET omits it, and an old client that still posts it is not refused or stored."""
+        assert "max_concurrent_jobs" not in client.get("/api/settings", headers=_api_headers()).get_json()
+
+        resp = client.post(
+            "/api/settings",
+            headers=_api_headers(),
+            json={"max_concurrent_jobs": 99, "cpu_threads": 1},
+        )
+
+        assert resp.status_code == 200
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        assert get_settings_manager().get("max_concurrent_jobs") is None
+        assert "max_concurrent_jobs" not in client.get("/api/settings", headers=_api_headers()).get_json()
+
     def test_get_settings_returns_path_mappings(self, client):
         """GET /api/settings includes path_mappings when present."""
         path_mappings = [

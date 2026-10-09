@@ -53,7 +53,7 @@ def engine(tmp_path, monkeypatch):
     """Real JobManager + JobGate + shared dispatcher (1 CPU worker); settings, config and GPUs stubbed."""
     reset_dispatcher()
     jm = JobManager(config_dir=str(tmp_path / "config"))
-    gate = JobGate(lambda: 1)
+    gate = JobGate()
     settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
     sm = MagicMock(processing_paused=False, gpu_config=[])
     sm.get.side_effect = lambda key, default=None: settings.get(key, default)
@@ -857,7 +857,7 @@ class TestGoneFromDiskThroughThePipeline:
 
 @pytest.mark.real_job_async
 class TestRealJobThread:
-    def test_paused_job_hands_its_slot_to_a_high_job_then_finishes(self, engine, monkeypatch):
+    def test_job_holds_no_slot_once_submitted_so_a_high_job_starts_up_then_it_finishes(self, engine, monkeypatch):
         release_item = threading.Event()
         checked = []
 
@@ -888,11 +888,11 @@ class TestRealJobThread:
         jm, gate = engine.jm, engine.gate
         try:
             assert _wait_for(lambda: "/m/slow.mkv" in checked), "the job thread never dispatched"
-            assert jm.get_job(job.id).status is JobStatus.RUNNING and gate.snapshot()[0] == 1
+            assert jm.get_job(job.id).status is JobStatus.RUNNING
+            assert _wait_for(lambda: gate.snapshot()[0] == 0), "a submitted job kept its start-up slot"
             assert jm.request_pause(job.id)
-            assert _wait_for(lambda: gate.snapshot()[0] == 0), "paused job kept its slot"
-            assert gate.acquire(1, cancel_check=lambda: False) is True  # a HIGH preview job gets in at cap 1
-            gate.release(1)
+            assert gate.acquire(1, cancel_check=lambda: False) is True  # a HIGH preview job starts up at once
+            gate.release()
             release_item.set()
             assert jm.request_resume(job.id)
             assert _wait_for(lambda: jm.get_job(job.id).status is JobStatus.COMPLETED), jm.get_job(job.id).status

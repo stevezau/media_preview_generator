@@ -18,9 +18,8 @@ from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS, JOB_KI
 from ...jobs.orchestrator import SUCCESS_OUTCOME_KEYS, count_successes
 from ...jobs.parking import JobParked
 from ...scan_filters import FILTER_CONFIG_KEYS
-from ..job_gate import format_wait_message
+from ..job_gate import format_wait_message, release_slot
 from ..jobs import (
-    PRIORITY_NORMAL,
     JobStatus,
     WorkerStatus,
     get_job_manager,
@@ -52,79 +51,11 @@ def job_freeze_check(jm, job_id: str):
     """The ``freeze_check`` for a previews job: True while its running files' ffmpeg must stop where it is.
 
     That is all processing paused or this job paused by its schedule's stop time. A pause by hand lets the running
-    files finish and hands the slot back instead (:func:`_wait_releasing_slot_while_paused`).
+    files finish and only stops new files being picked.
     """
     from ...markers.job_runner import job_freeze_check as freeze_check
 
     return freeze_check(jm, job_id)
-
-
-def _paused_by_hand(jm, job_id: str) -> bool:
-    """True when this job was paused on its own: not by Pause all / quiet hours and not by its schedule."""
-    from ...markers.job_runner import job_freeze_check as freeze_check
-    from ..settings_manager import get_settings_manager
-
-    if get_settings_manager().processing_paused or not jm.is_pause_requested(job_id):
-        return False
-    return not freeze_check(jm, job_id)()
-
-
-def _wait_releasing_slot_while_paused(
-    dispatcher,
-    tracker,
-    jm,
-    job_id: str,
-    slot: dict,
-    *,
-    park_check,
-    live_priority,
-    on_wait,
-) -> None:
-    """One ``tracker_wait`` tick: park if needed, hand the gate slot back once a by-hand pause has drained, and take
-    a slot again on resume.
-
-    Only an idle job gives its slot back: a file still running keeps it, since its ffmpeg runs on. The idle check
-    and the release are atomic against dispatch (:meth:`JobDispatcher.release_when_idle`). The tracker's
-    ``pause_check`` also reads ``slot["held"]``, so nothing is dispatched between resume and re-admission.
-    """
-    from ...jobs.group_runtime import admission_options
-    from ..job_gate import get_job_gate
-
-    park_check()
-    gate = get_job_gate()
-    paused = jm.is_pause_requested(job_id)
-    if _paused_by_hand(jm, job_id) and slot["held"]:
-
-        def release() -> None:
-            # Flip held first: the tracker's pause_check reads it, so dispatch sees the job paused from here on.
-            slot["held"] = False
-            try:
-                gate.release(slot["priority"], kind=slot["kind"])
-            except Exception:
-                slot["held"] = True
-                raise
-
-        if dispatcher.release_when_idle(tracker, release):
-            jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
-    elif not paused and not slot["held"]:
-        priority = live_priority()
-        slot["priority"] = priority
-        # A cancel can finish the tracker while we wait; don't queue a finished job.
-        if gate.acquire(
-            priority=priority,
-            cancel_check=lambda: (
-                jm.is_cancellation_requested(job_id) or jm.is_pause_requested(job_id) or tracker.done_event.is_set()
-            ),
-            on_wait=on_wait,
-            **admission_options(
-                jm,
-                job_id,
-                slot["kind"],
-                on_admitted=lambda admitted: slot.__setitem__("priority", admitted),
-            ),
-        ):
-            slot["held"] = True
-            dispatcher.mark_slot_reacquired(tracker)
 
 
 def _not_found_message(not_found: int, total: int, *, nothing_succeeded: bool, retry_scheduled: bool) -> str:
@@ -724,20 +655,17 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     def run_job_once():
         log_handler_id = None
         job_manager = None
-        # ``_slot["held"]`` tracks whether this thread holds a JobGate slot. The outer
-        # finally uses it to decide whether to call
-        # ``release()``. Release-without-hold would let an extra job
-        # through the cap — the early-exception branches (config load
-        # at line ~214, tmp folder at line ~340, paused at line ~143)
-        # all run BEFORE the gate is acquired, so ``held`` stays
-        # False for those paths.
-        # ``priority`` is the priority the slot was ADMITTED at, captured at acquire
-        # time. The user can re-prioritise a running job from the queue
-        # UI; releasing with a live ``job.priority`` read would then
-        # settle up against the wrong counter and corrupt the gate's
-        # high-priority reservation. A job paused by hand hands its slot back
-        # and takes one again on resume (``_wait_releasing_slot_while_paused``).
-        _slot = {"held": False, "priority": PRIORITY_NORMAL, "kind": JOB_KIND_PREVIEWS}
+        # ``_slot["held"]`` tracks whether this thread holds a JobGate start-up slot. It is given back once the
+        # files are submitted (``_on_dispatch_start``) or, failing that, by the outer finally. Release-without-hold
+        # would let an extra job through the gate — the early-exception branches all run BEFORE the gate is
+        # acquired, so ``held`` stays False for those paths.
+        _slot = {"held": False}
+
+        def _give_back_slot() -> None:
+            from ..job_gate import get_job_gate
+
+            release_slot(_slot, get_job_gate())
+
         try:
             import os
 
@@ -1155,25 +1083,23 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     job_manager.add_log(job_id, "WARNING - Retry cancelled by user during wait")
                     job_manager.cancel_job(job_id)
                 else:
-                    # --- Concurrency gate ---------------------------------
-                    # Acquire AFTER the retry-backoff wait (lines 392-439)
-                    # so a 60-minute backoff doesn't idle-hold a slot and
-                    # BEFORE run_processing so enumeration/API calls are
-                    # bounded by the user's max_concurrent_jobs setting.
+                    # --- Start-up gate ------------------------------------
+                    # Acquire AFTER the retry-backoff wait so a 60-minute
+                    # backoff doesn't idle-hold a slot and BEFORE
+                    # run_processing so enumeration/API calls are bounded.
+                    # The slot goes back as soon as the files are submitted
+                    # (``_on_dispatch_start``).
                     # Cancel-while-waiting is handled by acquire() polling
                     # cancel_check; returns False so we transition the
                     # job to CANCELLED without ever consuming a slot.
                     from ..job_gate import get_job_gate
 
-                    def _on_wait(active: int, cap: int, effective_cap: int) -> None:
+                    def _on_wait(active: int) -> None:
                         # Fires on every 1s poll tick while waiting.
                         # Safe to take job_manager._lock here — the gate
                         # releases its Condition during wait(), and no
                         # job_manager codepath acquires the gate's lock.
-                        job_manager.update_progress(
-                            job_id,
-                            current_item=format_wait_message(active, cap, effective_cap),
-                        )
+                        job_manager.update_progress(job_id, current_item=format_wait_message(active))
                         # A restart ages a job waiting here by the downtime only (JobManager.requeue_interrupted_jobs).
                         job_manager.note_slot_wait(job_id)
 
@@ -1181,9 +1107,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
                     def held_by_pause():
                         return job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused
-
-                    def capture_admission(priority):
-                        _slot["priority"] = priority
 
                     while True:
                         if not wait_for_capacity(
@@ -1194,21 +1117,19 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             held_by_pause,
                         ):
                             return
-                        _slot["priority"] = job.priority
                         job_manager.note_slot_wait(job_id)
                         admitted = get_job_gate().acquire(
-                            priority=_slot["priority"],
+                            priority=job.priority,
                             cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                             on_wait=_on_wait,
-                            **admission_options(job_manager, job_id, JOB_KIND_PREVIEWS, on_admitted=capture_admission),
+                            **admission_options(job_manager, job_id, JOB_KIND_PREVIEWS),
                         )
                         if not admitted:
                             break
                         _slot["held"] = True
                         if runtime_capacity(JOB_KIND_PREVIEWS)["open"] and not held_by_pause():
                             break
-                        get_job_gate().release(_slot["priority"], kind=JOB_KIND_PREVIEWS)
-                        _slot["held"] = False
+                        _give_back_slot()
                     if not admitted:
                         # User cancelled while the job was waiting for a
                         # slot. Transition to CANCELLED and exit — the
@@ -1216,7 +1137,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # _slot["held"] is still False.
                         job_manager.add_log(
                             job_id,
-                            "WARNING - Job cancelled while waiting for active slot",
+                            "WARNING - Job cancelled while waiting to start",
                         )
                         job_manager.cancel_job(job_id)
                         return
@@ -1337,8 +1258,11 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     set_file_result_callback(_file_result_cb, job_id=job_id)
 
                     def _on_dispatch_start():
-                        """Transition PENDING -> RUNNING when items are dispatched."""
-                        job_manager.start_job(job_id)
+                        """Transition PENDING -> RUNNING when items are dispatched, and end start-up: the slot goes back."""
+                        try:
+                            job_manager.start_job(job_id)
+                        finally:
+                            _give_back_slot()
 
                     def _on_pool_available(pool):
                         """Register pool and reconcile workers with current settings.
@@ -1379,22 +1303,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         from ...jobs.parking import park_if_unavailable
 
                         previous_failures = (continuation or {}).get("bookkeeping", {}).get("failures", [])
-                        _wait_releasing_slot_while_paused(
+                        park_if_unavailable(
                             dispatcher,
                             tracker,
                             job_manager,
                             job_id,
-                            _slot,
-                            park_check=lambda: park_if_unavailable(
-                                dispatcher,
-                                tracker,
-                                job_manager,
-                                job_id,
-                                JOB_KIND_PREVIEWS,
-                                lambda: {"failures": previous_failures + get_failures()},
-                            ),
-                            live_priority=lambda: job.priority,
-                            on_wait=_on_wait,
+                            JOB_KIND_PREVIEWS,
+                            lambda: {"failures": previous_failures + get_failures()},
                         )
 
                     result = run_processing(
@@ -1405,9 +1320,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         item_complete_callback=_log_item_complete,
                         cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                         pause_check=lambda: (
-                            not _slot["held"]
-                            or job_manager.is_pause_requested(job_id)
-                            or get_settings_manager().processing_paused
+                            job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused
                         ),
                         freeze_check=job_freeze_check(job_manager, job_id),
                         worker_pool_callback=_on_pool_available,
@@ -1418,6 +1331,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         continuation=continuation,
                     )
                     set_file_result_callback(None, job_id=job_id)
+                    # A run that dispatched nothing still holds its start-up slot; the outcome handling and any
+                    # retry or follow-up job below run without one.
+                    _give_back_slot()
 
                     # run_processing returns None when it bailed on a
                     # connection / interrupt error (logged with actionable
@@ -2215,23 +2131,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             job_manager.add_log(job_id, f"ERROR - Job failed: {e}")
             job_manager.complete_job(job_id, error=str(e))
         finally:
-            # Release the concurrency slot first so the next waiter can
-            # admit itself as soon as possible — beating the per-thread
-            # log-handler teardown (which can take tens of ms) off the
-            # critical path. Guarded by _slot["held"] so the early-failure
-            # branches (config load / tmp folder / paused) don't over-
-            # release. Double-release is clamped by the gate's
-            # max(0, _active-1), but the flag lets us avoid noisy
-            # debug logs on the cold path.
-            if _slot["held"]:
-                try:
-                    from ..job_gate import get_job_gate
-
-                    get_job_gate().release(_slot["priority"], kind=JOB_KIND_PREVIEWS)
-                except Exception as gate_err:
-                    logger.debug("Could not release job gate for {}: {}", job_id, gate_err)
-                finally:
-                    _slot["held"] = False
+            # A run that never reached the dispatcher (early failure, nothing to dispatch) still holds its start-up
+            # slot; release_slot is a no-op once ``_on_dispatch_start`` has given it back.
+            _give_back_slot()
             set_file_result_callback(None, job_id=job_id)
             from ...jobs.worker import unregister_job_thread
 

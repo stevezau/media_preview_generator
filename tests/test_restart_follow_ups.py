@@ -162,7 +162,6 @@ def app(tmp_path, monkeypatch):
         json.dumps(
             {
                 "setup_complete": True,
-                "max_concurrent_jobs": 10,
                 "media_servers": [
                     {
                         "id": "plex-1",
@@ -381,7 +380,7 @@ class TestRunnersRecordWhenASlotWaitBegins:
 
         def acquire(*, on_wait, **kwargs):
             clock["now"] = real_now  # 13 h later, still waiting behind the scan
-            on_wait(4, 4, 3)
+            on_wait(3)
             # The app goes down now: a restarted process reads jobs.db as it is at this moment.
             after = JobManager(config_dir=app.config_dir)
             with (

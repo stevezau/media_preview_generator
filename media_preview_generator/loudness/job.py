@@ -33,7 +33,7 @@ from ..markers.job_runner import (
     server_pin,
     wait_for_preceding_job,
     wait_for_retry_time,
-    wait_releasing_slot_while_paused,
+    wait_for_tracker,
     worker_cards,
 )
 from ..markers.outcomes import FileOutcome
@@ -47,7 +47,7 @@ from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import apply_inverse_path_mappings
 from ..utils import redact_secrets
-from ..web.job_gate import format_wait_message, get_job_gate
+from ..web.job_gate import format_wait_message, get_job_gate, release_slot
 from ..web.jobs import JobStatus, get_job_manager
 from ..web.routes._helpers import _ensure_gpu_cache
 from ..web.routes.job_runner import _build_selected_gpus, _inflight_jobs, _inflight_lock
@@ -526,7 +526,8 @@ def _run_loudness_pass(job_id: str) -> bool | None:
         filter=lambda record: not record["extra"].get(JOB_LOG_SKIP) and is_job_thread_for(record["thread"].id, job_id),
         enqueue=True,
     )
-    slot = {"held": False, "priority": job.priority, "kind": JOB_KIND_LOUDNESS}
+    # Held from the gate until the files are submitted to the dispatcher (or the job ends first).
+    slot = {"held": False}
     cfg = dict(job.config or {})
     chain_head = cfg.get("parent_job_id")
     jm.update_progress(job_id, current_files=[])
@@ -543,22 +544,14 @@ def _run_loudness_pass(job_id: str) -> bool | None:
     def live_priority() -> int:
         return job.priority
 
-    def on_wait(active: int, cap: int, effective_cap: int) -> None:
-        jm.update_progress(
-            job_id,
-            current_item=format_wait_message(active, cap, effective_cap),
-        )
+    def on_wait(active: int) -> None:
+        jm.update_progress(job_id, current_item=format_wait_message(active))
         jm.note_slot_wait(job_id)
         if chain_head:
-            _chain_state(
-                jm,
-                chain_head,
-                cfg,
-                "queued_for_slot",
-                wait_active=active,
-                wait_cap=cap,
-                wait_effective_cap=effective_cap,
-            )
+            _chain_state(jm, chain_head, cfg, "queued_for_slot", wait_active=active)
+
+    def held_by_pause() -> bool:
+        return jm.is_pause_requested(job_id) or get_settings_manager().processing_paused
 
     def progress_callback(current, total, message, percent_override=None):
         percent = percent_override if percent_override is not None else (current / total * 100 if total else 0)
@@ -576,37 +569,20 @@ def _run_loudness_pass(job_id: str) -> bool | None:
 
     def acquire_slot() -> bool:
         while True:
-            if not wait_for_capacity(
-                jm,
-                job_id,
-                JOB_KIND_LOUDNESS,
-                cancel_check,
-                lambda: jm.is_pause_requested(job_id) or get_settings_manager().processing_paused,
-            ):
+            if not wait_for_capacity(jm, job_id, JOB_KIND_LOUDNESS, cancel_check, held_by_pause):
                 return False
-            slot["priority"] = live_priority()
             jm.note_slot_wait(job_id)
             if not get_job_gate().acquire(
-                priority=slot["priority"],
+                priority=live_priority(),
                 cancel_check=cancel_check,
                 on_wait=on_wait,
-                **admission_options(
-                    jm,
-                    job_id,
-                    JOB_KIND_LOUDNESS,
-                    on_admitted=lambda priority: slot.__setitem__("priority", priority),
-                ),
+                **admission_options(jm, job_id, JOB_KIND_LOUDNESS),
             ):
                 return False
             slot["held"] = True
-            if (
-                runtime_capacity(JOB_KIND_LOUDNESS)["open"]
-                and not jm.is_pause_requested(job_id)
-                and not get_settings_manager().processing_paused
-            ):
+            if runtime_capacity(JOB_KIND_LOUDNESS)["open"] and not held_by_pause():
                 return True
-            get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
-            slot["held"] = False
+            release_slot(slot, get_job_gate())
 
     dispatcher = None
     completion_ledger = None
@@ -686,15 +662,11 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 )
 
                 def validate_saved(item: ProcessableItem) -> ItemOutcome | None:
-                    if (
-                        jm.is_pause_requested(job_id)
-                        or get_settings_manager().processing_paused
-                        or not runtime_capacity(JOB_KIND_LOUDNESS)["open"]
-                    ):
-                        if slot["held"]:
-                            get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
-                            slot["held"] = False
-                        if not acquire_slot():
+                    if held_by_pause() or not runtime_capacity(JOB_KIND_LOUDNESS)["open"]:
+                        # A wait here can last hours (a pause, closed worker hours); holding a start-up slot through
+                        # it would stall every other job's start-up.
+                        release_slot(slot, get_job_gate())
+                        if not wait_for_capacity(jm, job_id, JOB_KIND_LOUDNESS, cancel_check, held_by_pause):
                             raise InterruptedError("Loudness resume cancelled")
                     return check_item(item, ctx=ctx)
 
@@ -785,11 +757,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         "progress_callback": progress_callback,
                         "worker_callback": worker_cards(jm),
                         "cancel_check": cancel_check,
-                        "pause_check": lambda: (
-                            not slot["held"]
-                            or jm.is_pause_requested(job_id)
-                            or get_settings_manager().processing_paused
-                        ),
+                        "pause_check": held_by_pause,
                     },
                     priority=live_priority(),
                     kind=JOB_KIND_LOUDNESS,
@@ -798,6 +766,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     ),
                     carried_state=carried_state,
                 )
+                release_slot(slot, get_job_gate())
                 current = live_priority()
                 if tracker.priority != current:
                     dispatcher.update_job_priority(job_id, current)
@@ -818,17 +787,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                         },
                     )
 
-                wait_releasing_slot_while_paused(
-                    tracker,
-                    job_id=job_id,
-                    slot=slot,
-                    live_priority=live_priority,
-                    cancel_check=cancel_check,
-                    on_wait=lambda active, cap, eff: jm.update_progress(
-                        job_id, current_item=format_wait_message(active, cap, eff)
-                    ),
-                    park_check=park_check,
-                )
+                wait_for_tracker(tracker, cancel_check=cancel_check, park_check=park_check)
                 result = tracker.get_result()
                 if completion_ledger.error:
                     raise RuntimeError(completion_ledger.error)
@@ -875,12 +834,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
             completion_ledger.close()
         if chain_head and job.status is JobStatus.CANCELLED:
             jm.cancel_job(chain_head)
-        if slot["held"]:
-            try:
-                get_job_gate().release(slot["priority"], kind=JOB_KIND_LOUDNESS)
-            except Exception as exc:
-                logger.debug("Could not release job gate for {}: {}", job_id, exc)
-            slot["held"] = False
+        release_slot(slot, get_job_gate())
         set_file_result_callback(None, job_id=job_id)
         jm.clear_pause_flag(job_id)
         jm.clear_cancellation_flag(job_id)

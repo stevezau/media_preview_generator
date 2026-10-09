@@ -1301,3 +1301,15 @@ def queued_plex_refresh(monkeypatch):
     enqueue = Mock(spec=multi_server.enqueue_plex_refresh, return_value=True)
     monkeypatch.setattr(multi_server, "enqueue_plex_refresh", enqueue)
     return enqueue
+
+
+@pytest.fixture
+def make_gate(monkeypatch):
+    """Build a ``JobGate`` with a chosen number of start-up slots (the production size is a fixed constant)."""
+    from media_preview_generator.web import job_gate
+
+    def build(slots: int = 3, kind_capacity_provider=None):
+        monkeypatch.setattr(job_gate, "STARTUP_SLOTS", slots)
+        return job_gate.JobGate(kind_capacity_provider)
+
+    return build

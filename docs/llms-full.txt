@@ -1685,31 +1685,27 @@ The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **T
 **Dense worker table.** The Workers panel always shows a compact table, whatever the worker count. Busy workers and workers with a problem (a CPU fallback, say) come first. Idle workers fold into one line ("N workers idle"). A device with more than 8 rows shows the first 8 plus a **Show N more** button (**Show less** folds it back); rows with a problem always stay visible.
 
 > [!NOTE]
-> Jobs queue with priority (1 = high, 2 = normal, 3 = low). The dispatcher runs
-> up to the configured concurrent-job cap (**Settings → Processing options → Max concurrent jobs**); extra jobs sit in **Pending** and the
-> gate releases them in priority order as slots free up. Manual, webhook, and
-> scheduled jobs all share the same gate. To hard-stop everything, use
+> Jobs queue with priority (1 = high, 2 = normal, 3 = low). Workers decide how much runs at once: a job's files
+> run as soon as a worker that handles that job type is free. Only job start-up (loading settings and listing the
+> files) is limited, to 3 jobs at a time so a burst of webhooks does not flood your media servers; a job waiting for
+> a start-up place shows **Waiting to start**, and one whose files are listed but not yet picked up shows **Waiting
+> for a free worker**. Manual, webhook, and scheduled jobs all share the same rules. To hard-stop everything, use
 > **Pause** (in the Workers header, always available) — the global pause is persisted and survives restarts.
 >
 > Priority also decides who gets the next free worker **file by file**, so a
 > High job overtakes a running full scan without cancelling or pausing it — the
-> scan simply stops being fed new files until the High job drains. Whenever the
-> concurrent-job cap is above 1, the last slot is reserved for High-priority
-> work so a High-priority webhook can enter while ordinary scans hold their slots.
+> scan simply stops being fed new files until the High job drains. Jobs of the
+> same priority take turns, so a small job is not stuck behind every file of a
+> large scan.
 
-Among eligible pending jobs, admission follows priority, then creation time, including after a restart.
+Among eligible pending jobs, start-up follows priority, then creation time, including after a restart.
 Jobs held by a pause, an unfinished dependency, or a retry timer let other eligible jobs pass.
-Changing a waiting job's priority updates its admission order; it does not interrupt files already processing.
+Changing a waiting job's priority updates its order; it does not interrupt files already processing.
 Change a job's priority from the **Priority** menu in its queue row.
 
-Admission also accounts for the open workers compatible with each job type. Every kind of job (previews, Intro &
-Credits, loudness) that has work waiting and open workers gets a slot before any kind takes a second one, so a queue
-of one kind cannot starve another. The exceptions: when only the slot reserved for High priority is free, and when
-the cap is 1. Once each kind holds a slot, priority and creation time decide. Excess jobs of the same type and priority
-wait without consuming active slots, and eligible work of another type can pass them. Higher-priority work
-can still enter ahead of lower-priority scans, within the overall job limit. These limits control active jobs;
-worker groups control how many files run at once. A retry keeps its saved due time across an app restart
-instead of starting its full delay again.
+A job whose type has no open worker (every compatible worker group disabled or outside its hours) waits for one
+without taking a start-up place, and eligible work of another type can pass it. A retry keeps its saved due time across
+an app restart instead of starting its full delay again.
 
 A full-library schedule keeps one unfinished job for the same selection and settings. Later schedule ticks
 reuse that job while it is queued, running, paused, waiting for workers, or retrying. They do not clear a manual
@@ -1769,9 +1765,8 @@ Normal, or Low there to pin that schedule instead, and the global setting stops
 applying to it.
 
 Set the global setting to **Normal** to go back to strict
-first-come-first-served ordering. The reserved slot is independent of this
-setting — it is held back whenever the concurrent-job cap is above 1, so a job
-you pin to High by hand can still overtake a running scan.
+first-come-first-served ordering. A job you pin to High by hand can still
+overtake a running scan.
 
 **Manual Generation:**
 
@@ -1805,9 +1800,8 @@ An expanded queue row shows up to five requested paths; **View all** opens the F
   Pausing one job does not pause other jobs. Manual and schedule holds are independent: resuming by hand cannot
   clear a schedule stop, and a schedule start cannot clear a manual pause. Global **Resume** does not
   resume a job you paused on its own.
-- A Previews job you pause by hand lets its running files finish, starts no new ones, and gives its active slot
-  back once they are done, so other jobs can run. **Resume** takes a slot again. A schedule stop time or the global
-  pause still stops the running files where they are and keeps the slot.
+- A Previews job you pause by hand lets its running files finish and starts no new ones. **Resume** carries on.
+  A schedule stop time or the global pause still stops the running files where they are.
 
 **Scheduling:**
 
@@ -1842,7 +1836,7 @@ Open **Settings** (`/settings`). On a wide screen a side menu groups the section
 
 - **Workers** — named groups, job permissions, counts and availability
 - **Global pause schedule** — weekly windows when all processing pauses
-- **Processing options** — max concurrent jobs, incoming job priority, retry policy, restart recovery, GPU device tuning, library scanning, thumbnails and HDR tone mapping, smart caching across servers
+- **Processing options** — incoming job priority, retry policy, restart recovery, GPU device tuning, library scanning, thumbnails and HDR tone mapping, smart caching across servers
 - **Intro & Credits** — detection settings shared by every server
 - **Logging** — log level, log file rotation, job history
 - **Authentication**, **Backups** and **About**
@@ -1874,8 +1868,7 @@ a GPU video job can still use CPU stages or CPU fallback. FFmpeg threads per GPU
 
 For example, an **Off-hours** group open daily 01:00–07:00 can hold 3 NVIDIA workers for previews and Intro & Credits plus
 10 CPU workers for loudness only. Outside those hours the group is idle. To keep loudness to one analysis at a time, give
-its CPU device 1 worker and allow only loudness; no video jobs run there. The normal concurrent-job limit still
-applies. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU device.
+its CPU device 1 worker and allow only loudness; no video jobs run there. A GPU-only installation keeps working for video, but loudness waits until you add an eligible CPU device.
 Existing native Plex loudness measurements remain visible in the Inspector while it waits.
 
 On the Dashboard, each device row in the **Workers** panel has a **−** / **+** stepper that changes its worker count and saves straight away. A disabled group shows **Enable** instead. A decrease retires workers after their current files finish; an increase can restore workers that were about to retire. The stepper never goes below 1; remove the device in Settings, or disable the group, to use zero workers. Disabling a group remembers its saved counts for when you enable it again.
@@ -2947,7 +2940,7 @@ libraries." In detail:
 
 - It reads back every item whose last publish from this app succeeded, on each server with Intro & Credits on (Plex
   one item at a time, with the same same-machine checks as a write; Jellyfin and Emby one request per item), 500 items
-  per step so its progress moves. Pausing the job during the read-back gives its job slot back until you resume it.
+  per step so its progress moves. Pausing the job during the read-back holds it until you resume.
 - Only the files of items whose markers are gone or different, whose Plex item gained or lost a version, or that the
   server replaced with a new item go through the normal rules again (**Keep Plex's** / **Keep Emby's**, versions, the
   server switch). A server set back to **Use ours** gets ours for the types it was keeping. The Plex item's current
@@ -3296,7 +3289,8 @@ Use this table to diagnose common failures quickly.
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Setup Health surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
 | Job waits for workers | No compatible enabled group, outside group hours, unavailable GPU, or compatible workers busy | Read the waiting reason. In **Settings → Workers**, check job permissions, hours and hardware. Loudness needs a CPU device. Outside hours normally resolves at the next opening; busy workers finish their current files. |
-| Job waits for a job slot | The concurrent-job gate is full | Check **Settings → Processing options → Max concurrent jobs**; a job at High priority can use the slot kept for it. Available workers do not bypass that limit. Check global and per-job pause holds too. |
+| Job shows **Waiting to start** | Three other jobs are loading and listing their files | It starts as soon as one of them has listed its files; a High-priority job goes first. Check global and per-job pause holds too. |
+| Job shows **Waiting for a free worker** | Every worker that handles this job type is busy | It starts when one frees up. Add workers or enable a worker group for this job type under **Worker groups**. A paused job also shows this until it's resumed. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and check **Enable webhook processing** is on (Automation → Triggers → Settings). |
 | Log warns `Webhook from sonarr: ignored '…' — the payload didn't carry a file path` | The sender's payload has no file path anywhere: no `episodeFile`, no `episodeFiles[]`, no `filePath` (Sonarr's own "On Import Complete" event lists its files, so it never causes this) | Check the sender posts Sonarr's standard webhook body; a custom template or a proxy that rewrites the body must keep `episodeFile.path` (or `series.path` + `episodeFile.relativePath`). |
@@ -4545,7 +4539,6 @@ These are the top-level keys `POST /api/settings` accepts, besides `frame_reuse`
 | Setting | Settings page | Default | Description |
 |---------|---------------|---------|-------------|
 | `cpu_threads` | none | `1` | Legacy CPU count. Once groups exist, posting it returns `409`; use the worker-groups API. |
-| `max_concurrent_jobs` | Processing → Job execution → Max concurrent jobs | `3` | Jobs that run at the same time. 1–10. Others wait in the queue. |
 | `incoming_job_priority` | Processing → Job execution → Incoming job priority | `high` | Priority of jobs the app creates itself from webhooks and Recently Added scans. `high`, `normal`, `low` (or `1`, `2`, `3`). |
 | `webhook_retry_count` | Processing → Retry policy → Retry count | `5` | Attempts for files a server hasn't indexed yet. The page allows 0–10; `0` turns retries off. |
 | `webhook_retry_delay` | Processing → Retry policy → Initial retry delay | `30` | Base delay in seconds (the page allows 10–300). At 30, retries wait 1 min, 2 min, 5 min, 15 min, then 1 h. |
@@ -4926,7 +4919,7 @@ request per item, stopping a server after 20 failed reads in a row; a read that 
 mappings) are listed too. Items whose last publish failed (status `failed`) aren't read back: their files are listed 1
 day after the failure, then 2, 4, 8 and 16 days after each retry, at most 5 retries per failure (a success, or a new
 failure after one, starts over); an item whose files don't fit the run's remaining files waits untaken. A pause during
-the read-back gives the job's gate slot back until resume. It
+the read-back holds the job until resume. It
 also lists files with decided credits or preview whose stored answer from an enabled server (Intro & Credits on or not)
 is empty or unusable and that show none of ours on that server's item, re-reading that server's own markers once the
 answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that stays empty or fails, and not after the fifth; a
@@ -5573,7 +5566,6 @@ Get current settings. Secrets are masked as `"****"`.
   "webhook_secret": "****",
   "auto_requeue_on_restart": true,
   "requeue_max_age_minutes": 720,
-  "max_concurrent_jobs": 3,
   "incoming_job_priority": 1,
   "config_backup_keep": 10,
   "config_backup_max_age_days": 0,

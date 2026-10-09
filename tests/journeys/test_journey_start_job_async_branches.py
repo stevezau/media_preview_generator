@@ -111,7 +111,6 @@ def app(tmp_path, monkeypatch):
                 # A 3-attempt chain therefore needs 3 concurrent slots —
                 # more than the default cap of 3 leaves to normal-priority
                 # work once one slot is reserved for high priority.
-                "max_concurrent_jobs": 10,
                 "media_servers": [
                     {
                         "id": "plex-1",

@@ -1082,7 +1082,7 @@ class TestPauseGate:
     """D32: pause_check on the multi-server full-scan path.
 
     The dispatcher path (job_runner → JobDispatcher) honours pause via
-    tracker.is_paused() in _get_next_item, but the multi-server
+    tracker.is_paused() in _assign_tasks, but the multi-server
     ThreadPoolExecutor path used to ignore pause entirely. Pausing only
     halted in-flight FFmpegs (via SIGSTOP from commit 6d812ad); the
     executor kept pulling the next item and launching fresh subprocesses

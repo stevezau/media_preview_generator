@@ -193,7 +193,6 @@ These are the top-level keys `POST /api/settings` accepts, besides `frame_reuse`
 | Setting | Settings page | Default | Description |
 |---------|---------------|---------|-------------|
 | `cpu_threads` | none | `1` | Legacy CPU count. Once groups exist, posting it returns `409`; use the worker-groups API. |
-| `max_concurrent_jobs` | Processing → Job execution → Max concurrent jobs | `3` | Jobs that run at the same time. 1–10. Others wait in the queue. |
 | `incoming_job_priority` | Processing → Job execution → Incoming job priority | `high` | Priority of jobs the app creates itself from webhooks and Recently Added scans. `high`, `normal`, `low` (or `1`, `2`, `3`). |
 | `webhook_retry_count` | Processing → Retry policy → Retry count | `5` | Attempts for files a server hasn't indexed yet. The page allows 0–10; `0` turns retries off. |
 | `webhook_retry_delay` | Processing → Retry policy → Initial retry delay | `30` | Base delay in seconds (the page allows 10–300). At 30, retries wait 1 min, 2 min, 5 min, 15 min, then 1 h. |
@@ -574,7 +573,7 @@ request per item, stopping a server after 20 failed reads in a row; a read that 
 mappings) are listed too. Items whose last publish failed (status `failed`) aren't read back: their files are listed 1
 day after the failure, then 2, 4, 8 and 16 days after each retry, at most 5 retries per failure (a success, or a new
 failure after one, starts over); an item whose files don't fit the run's remaining files waits untaken. A pause during
-the read-back gives the job's gate slot back until resume. It
+the read-back holds the job until resume. It
 also lists files with decided credits or preview whose stored answer from an enabled server (Intro & Credits on or not)
 is empty or unusable and that show none of ours on that server's item, re-reading that server's own markers once the
 answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that stays empty or fails, and not after the fifth; a
@@ -1221,7 +1220,6 @@ Get current settings. Secrets are masked as `"****"`.
   "webhook_secret": "****",
   "auto_requeue_on_restart": true,
   "requeue_max_age_minutes": 720,
-  "max_concurrent_jobs": 3,
   "incoming_job_priority": 1,
   "config_backup_keep": 10,
   "config_backup_max_age_days": 0,

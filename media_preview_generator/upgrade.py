@@ -25,7 +25,7 @@ from .config.validation import MAX_CPU_THREADS, validate_processing_thread_total
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 22
+_CURRENT_SCHEMA_VERSION = 23
 
 #: Legacy request written by v16, v17, v18 and v20. Kept for migration compatibility; it no longer creates jobs.
 #: Existing decide-again jobs clear it when they complete. Manual and scheduled runs apply current marker rules.
@@ -103,6 +103,7 @@ def _v14_record_failure(sm) -> None:
 # backup; that's enough on its own.
 # -------------------------------------------------------------------------
 _USER_FACING_NOTES: dict[int, str] = {
+    23: "The Max concurrent jobs setting is gone — jobs now run as soon as a worker that handles them is free.",
     22: "Groups can now include several devices — your existing groups are unchanged.",
     21: "Your worker counts are now worker groups. Existing availability and pauses are preserved.",
     7: (
@@ -446,6 +447,7 @@ def _migrate_schema(sm) -> None:
                owned global pause reasons.
         v22 -- Gives every worker group a member list: each v21 group keeps its id, name, hours and becomes one group
                with one member ``m1`` (device, count, job types). The groups revision moves on by one.
+        v23 -- Drops ``max_concurrent_jobs``: workers decide how much runs at once, and only job start-up is bounded.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -525,6 +527,8 @@ def _migrate_schema(sm) -> None:
         _run(21, _migrate_to_v21)
     if current < 22:
         _run(22, _migrate_to_v22)
+    if current < 23:
+        _run(23, _migrate_to_v23)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -1747,6 +1751,17 @@ def _migrate_to_v22(sm) -> list[str]:
         updates={"worker_groups": groups, "worker_groups_revision": int(stored.get("worker_groups_revision", 0)) + 1}
     )
     return ["v22: worker groups now hold devices; every existing group kept its device, count, jobs and hours"]
+
+
+def _migrate_to_v23(sm) -> list[str]:
+    """Delete ``max_concurrent_jobs``: the worker groups decide how much runs at once (owner, 2026-10-09).
+
+    A job now holds a fixed start-up slot only until its files are submitted, so the old cap has nothing to bound.
+    """
+    if "max_concurrent_jobs" not in sm.get_all():
+        return []
+    sm.apply_changes(deletes=["max_concurrent_jobs"])
+    return ["v23: removed the Max concurrent jobs setting; workers now decide how much runs at once"]
 
 
 def _intro_credits_on_any_server(sm) -> bool:

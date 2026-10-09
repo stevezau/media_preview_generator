@@ -230,7 +230,7 @@ class TestWorkerGroupHeaderStaysInItsColumn:
 @pytest.mark.e2e
 class TestQueuedProgressText:
     WAIT_PREVIEW = "Queued — waiting for the preview job for these files to finish"
-    WAIT_SLOT = "Queued — waiting for active slot (4 of 5 busy, 1 reserved for high priority)"
+    WAIT_SLOT = "Queued — waiting to start (3 of 3 jobs starting up)"
 
     def _open(self, page: Page, app_url: str, message: str, *, wait_reason: str | None = None) -> None:
         mock_dashboard_defaults(page)
@@ -251,7 +251,7 @@ class TestQueuedProgressText:
         ("message", "short"),
         [
             (WAIT_PREVIEW, "Waiting for previews to finish"),
-            (WAIT_SLOT, "Waiting for a free worker"),
+            (WAIT_SLOT, "Waiting to start"),
             ("Queued - waiting for the preview job for these files to finish", "Waiting for previews to finish"),
             ("Queued — waiting for GPU memory", "waiting for GPU memory"),
             ("Waiting for the Plex scan", "Waiting for the Plex scan"),
@@ -287,7 +287,7 @@ class TestQueuedProgressText:
     def test_resource_wait_reason_takes_priority_over_current_item(self, authed_page: Page, app_url: str) -> None:
         self._open(authed_page, app_url, "something else", wait_reason=self.WAIT_SLOT)
         line = authed_page.locator(".job-row .queue-phase-line")
-        expect(line).to_have_text("Waiting for a free worker")
+        expect(line).to_have_text("Waiting to start")
         expect(line).to_have_attribute("title", self.WAIT_SLOT)
 
 

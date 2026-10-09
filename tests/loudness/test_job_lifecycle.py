@@ -178,7 +178,7 @@ def lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     registry._configs = {cfg.id: cfg}
     registry._servers = {cfg.id: SimpleNamespace(_connect=lambda: SimpleNamespace(query=env.query))}
     settings = SimpleNamespace(processing_paused=False, get=lambda key, default=None: env.settings.get(key, default))
-    gate = JobGate(lambda: 1)
+    gate = JobGate()
     for module in (job, shared_runner):
         monkeypatch.setattr(module, "get_job_manager", lambda: manager)
         monkeypatch.setattr(module, "get_settings_manager", lambda: settings)

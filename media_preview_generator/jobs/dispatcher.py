@@ -25,6 +25,8 @@ _submission_counter_lock = threading.Lock()
 _submission_counter = 0
 # The "worker" a preview file finished by the checking stage (no FFmpeg) is credited to.
 CHECK_STAGE_WORKER_NAME = "Library scan"
+# What a submitted job shows until the first of its files is picked.
+WAITING_FOR_WORKER = "Waiting for a free worker"
 
 
 def _next_submission_order() -> int:
@@ -33,6 +35,11 @@ def _next_submission_order() -> int:
     with _submission_counter_lock:
         _submission_counter += 1
         return _submission_counter
+
+
+def _pick_order(tracker: "JobTracker") -> tuple[int, int, int]:
+    """Sort key for picking the next job's file: priority, then the job picked from longest ago, then submission."""
+    return (tracker.priority, tracker.last_picked, tracker.submission_order)
 
 
 class JobTracker:
@@ -146,10 +153,12 @@ class JobTracker:
         self.pause_check: Callable | None = cbs.get("pause_check")
         # What freezes a running file's ffmpeg; a job may pause dispatch without freezing (manual pause).
         self.freeze_check: Callable | None = cbs.get("freeze_check") or self.pause_check
-        # True while the job has handed its gate slot back; read under ``_trackers_lock`` by the pickers so they
-        # never call ``pause_check`` (settings + job-manager locks) there. Set by ``release_when_idle``, cleared
-        # by ``mark_slot_reacquired``.
-        self.slot_released: bool = False
+        # Dispatcher-wide pick count when one of this job's files was last handed to a worker (0 = never); the pickers
+        # rotate between same-priority jobs on it (guarded by ``_trackers_lock``).
+        self.last_picked = 0
+        # Flips True when the first of this job's files is picked, for a check or for a worker. Until then the banner
+        # says the job is waiting for a free worker (set under ``_trackers_lock``).
+        self.work_started = False
         # Wired by JobDispatcher.submit_items so record_completion can
         # include the same in-flight fraction the periodic emitter uses.
         # Without this, two competing emit paths produced different
@@ -290,19 +299,23 @@ class JobTracker:
     def progress_message(self, completed: int | None = None) -> str:
         """The job banner's text, the same from each completion and from the dispatcher's periodic emit.
 
-        Until the first item claims a generation worker, the job is still sweeping the library (for existing previews,
-        or a kind's own check) — surface that rather than "completed", which reads as generation. Flips to the normal
-        label the moment generation begins (set in JobDispatcher._assign_tasks). Mirrors the label the multi-server
-        scan path showed before the engines merged.
+        Until the first file is picked, no worker is free for the job yet. Until the first item claims a generation
+        worker, the job is still sweeping the library (for existing previews, or a kind's own check) — surface that
+        rather than "completed", which reads as generation. Flips to the normal label the moment generation begins
+        (set in JobDispatcher._assign_tasks). Mirrors the label the multi-server scan path showed before the engines
+        merged.
 
         Args:
             completed: The count to show, so the text matches the count sent beside it; the live count when omitted.
 
         Returns:
-            E.g. "Checking existing previews… 3/10", "Looking up markers… 3/10" or "3/10 completed".
+            E.g. "Waiting for a free worker", "Checking existing previews… 3/10", "Looking up markers… 3/10" or
+            "3/10 completed".
         """
         if completed is None:
             completed = self.completed
+        if not self.work_started:
+            return f"{self.library_prefix}{WAITING_FOR_WORKER}"
         if self.generation_started:
             return f"{self.library_prefix}{completed}/{self.total_items} completed"
         check_label = self.handlers.check_label if self.handlers else "Checking existing previews…"
@@ -519,8 +532,8 @@ class JobDispatcher:
     """Coordinates item dispatch across multiple concurrent jobs.
 
     Owns a persistent WorkerPool and runs a background dispatch loop.
-    Uses priority-aware drain-first scheduling: workers focus on the
-    highest-priority active job and spill over to the next only when idle.
+    Picks the highest-priority job first and, within a priority, rotates between jobs so a huge scan does not
+    make a later small job wait behind all its files.
 
     Args:
         worker_pool: The shared WorkerPool instance.
@@ -532,6 +545,7 @@ class JobDispatcher:
         self.worker_pool = worker_pool
         self._trackers: dict[str, JobTracker] = {}
         self._trackers_lock = threading.RLock()
+        self._pick_counter = 0  # Guarded by ``_trackers_lock``.
         self._dispatch_thread: threading.Thread | None = None
         self._has_work = threading.Event()
         self._shutdown = False
@@ -643,6 +657,10 @@ class JobDispatcher:
             job_id[:8],
             library_name or "no library",
         )
+        try:
+            tracker.emit_progress(0, force=True)
+        except Exception as exc:
+            logger.debug("Job {} submit progress callback raised (ignored): {}", job_id, exc)
         self._ensure_check_pool_running(config)
         self._has_work.set()
         self._ensure_dispatch_running()
@@ -757,32 +775,6 @@ class JobDispatcher:
             tracker.in_progress_fraction_getter = None
             return True
 
-    def release_when_idle(self, tracker: JobTracker, release_fn: Callable[[], None]) -> bool:
-        """Run ``release_fn`` only if the job has nothing in flight, atomically against item pickup.
-
-        Picking an item and counting it in flight happen under ``_trackers_lock``, so a release made here either
-        sees that item or the pick sees the pause ``release_fn`` set. ``release_fn`` must stay cheap and must not
-        take any lock that is held while ``_trackers_lock`` is wanted.
-
-        Args:
-            tracker: The job handing its slot back.
-            release_fn: Flips the job's slot state and releases the gate slot.
-
-        Returns:
-            True when ``release_fn`` ran; False when a file or check is still in flight.
-        """
-        with self._trackers_lock:
-            if tracker.active_processing or tracker.active_checks:
-                return False
-            release_fn()
-            tracker.slot_released = True
-            return True
-
-    def mark_slot_reacquired(self, tracker: JobTracker) -> None:
-        """Let dispatch pick the job's items again once it holds a gate slot after :meth:`release_when_idle`."""
-        with self._trackers_lock:
-            tracker.slot_released = False
-
     def shutdown(self) -> None:
         """Stop the dispatch loop + checking executor and shut down the pool."""
         self._shutdown = True
@@ -875,15 +867,9 @@ class JobDispatcher:
                 self._worker_done.wait(timeout=0.005)
                 self._worker_done.clear()
             else:
-                time.sleep(0.1 if self._all_slots_released() else 0.01)
+                time.sleep(0.01)
 
         logger.info("Dispatcher: dispatch loop exited")
-
-    def _all_slots_released(self) -> bool:
-        """True when every live job has handed its slot back, so nothing can be dispatched until a resume."""
-        with self._trackers_lock:
-            live = [t for t in self._trackers.values() if not t.done_event.is_set()]
-        return bool(live) and all(t.slot_released for t in live)
 
     def _handle_cancellations(self) -> None:
         """Cancel trackers whose cancel_check returns True."""
@@ -1018,22 +1004,19 @@ class JobDispatcher:
             # Keep compatible selection and reservation atomic with policy
             # edits and parking, revalidating the detached tracker snapshot.
             with self._trackers_lock:
-                # The cheap slot_released flag stands in for a pause re-read here (pause callbacks take other
-                # locks): a slot hand-back (release_when_idle) either sees this item in flight or this pick sees
-                # the flag. The pool lock is taken inside it.
+                # The pool lock is taken inside it.
                 with self.worker_pool._workers_lock:
                     eligible = sorted(
                         (
                             t
                             for t in candidates
                             if self._trackers.get(t.job_id) is t
-                            and not t.slot_released
                             and not t.done_event.is_set()
                             and not t.park_requested
                             and not t.cancelled
                             and t.item_queue
                         ),
-                        key=lambda t: (t.priority, t.submission_order),
+                        key=_pick_order,
                     )
                     chosen = None
                     for tracker in eligible:
@@ -1047,6 +1030,7 @@ class JobDispatcher:
                     item = tracker.item_queue.popleft()
                     tracker.active_processing += 1
                     tracker.generation_started = True
+                    self._stamp_pick(tracker)
                     progress_callback = partial(self.worker_pool._update_worker_progress, worker)
                     try:
                         worker.assign_task(
@@ -1120,7 +1104,7 @@ class JobDispatcher:
     def _get_next_check_item(self):
         """Pick the next item to CHECK, priority-aware, skipping paused jobs.
 
-        Mirrors :meth:`_get_next_item` but drains ``check_queue`` (the
+        Uses the same order as :meth:`_assign_tasks` but drains ``check_queue`` (the
         pre-FFmpeg checking stage) instead of ``item_queue`` (processing).
 
         A tracker whose kind already holds its ``check_share`` of in-flight
@@ -1138,12 +1122,11 @@ class JobDispatcher:
                 for t in self._trackers.values()
                 if not t.done_event.is_set()
                 and not t.park_requested
-                and not t.slot_released
                 and not t.is_paused()
                 and not t.is_cancelled()
                 and t.check_queue
             ]
-            eligible.sort(key=lambda t: (t.priority, t.submission_order))
+            eligible.sort(key=_pick_order)
             for tracker in eligible:
                 if not self.worker_pool.has_capacity_for(tracker.kind):
                     continue
@@ -1151,6 +1134,7 @@ class JobDispatcher:
                     continue
                 item = tracker.check_queue.popleft()
                 tracker.active_checks += 1
+                self._stamp_pick(tracker)
                 return (tracker, item)
         return None
 
@@ -1342,6 +1326,12 @@ class JobDispatcher:
                 return
             tracker.record_custom_check_result(item, outcome)
 
+    def _stamp_pick(self, tracker: JobTracker) -> None:
+        """Record that one of the job's files was just handed to a worker. Call with ``_trackers_lock`` held."""
+        self._pick_counter += 1
+        tracker.last_picked = self._pick_counter
+        tracker.work_started = True
+
     def update_job_priority(self, job_id: str, priority: int) -> None:
         """Update the dispatch priority of a running job's tracker.
 
@@ -1353,34 +1343,6 @@ class JobDispatcher:
             tracker = self._trackers.get(job_id)
             if tracker:
                 tracker.priority = priority
-
-    def _get_next_item(self) -> tuple[str, Any, str] | None:
-        """Get the next item using priority-aware drain-first scheduling.
-
-        Picks from the highest-priority active job first (lowest number).
-        Within the same priority, earlier submissions are preferred.
-
-        Returns:
-            ``(job_id, item, library_name)`` or ``None``. ``item`` is a
-            :class:`ProcessableItem`; ``library_name`` always blank for now
-            (the canonical-path flow doesn't carry a per-item library tag at
-            dispatch time).
-        """
-        with self._trackers_lock:
-            eligible = [
-                t
-                for t in self._trackers.values()
-                if not t.done_event.is_set()
-                and not t.park_requested
-                and not t.is_paused()
-                and not t.is_cancelled()
-                and t.item_queue
-            ]
-            eligible.sort(key=lambda t: (t.priority, t.submission_order))
-            for tracker in eligible:
-                item = tracker.item_queue.popleft()
-                return (tracker.job_id, item, "")
-        return None
 
     def _emit_worker_updates(self) -> None:
         """Emit worker status updates for all active trackers.

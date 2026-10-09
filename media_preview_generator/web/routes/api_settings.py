@@ -388,11 +388,6 @@ def get_settings():
             "webhook_secret": "****" if settings.get("webhook_secret") else "",
             "auto_requeue_on_restart": settings.get("auto_requeue_on_restart", True),
             "requeue_max_age_minutes": settings.get("requeue_max_age_minutes", 720),
-            # Concurrency cap: how many jobs can actively work at once.
-            # Clamped to [1, 10] so a stale/out-of-range value from a
-            # manually-edited settings.json can't starve the queue or
-            # overwhelm media servers on bursts.
-            "max_concurrent_jobs": max(1, min(10, int(settings.get("max_concurrent_jobs", 3) or 3))),
             # Issue #285 — priority stamped on jobs the app creates for
             # itself (webhooks + Recently Added sweeps). Defaults to High
             # so newly-imported media overtakes a running full scan
@@ -447,7 +442,6 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "webhook_secret",
     "auto_requeue_on_restart",
     "requeue_max_age_minutes",
-    "max_concurrent_jobs",
     "incoming_job_priority",
     "frame_reuse",
     "config_backup_keep",
@@ -468,7 +462,6 @@ _SAVE_SETTINGS_INT_FIELDS = (
     "webhook_retry_count",
     "webhook_retry_delay",
     "requeue_max_age_minutes",
-    "max_concurrent_jobs",
     "config_backup_keep",
     "config_backup_max_age_days",
 )
@@ -592,19 +585,6 @@ def _validate_and_coerce_settings_updates(
             400,
         )
 
-    # Clamp concurrency cap to a sane range. Mirrors the GET-side
-    # clamp (line ~307) and the gate's internal clamp (JobGate._cap)
-    # so all three agree. Reject out-of-range values rather than
-    # silently clamping — the user pressing Save should see what they
-    # get, not discover the value moved.
-    if "max_concurrent_jobs" in updates:
-        value = updates["max_concurrent_jobs"]
-        if value < 1 or value > 10:
-            return None, (
-                jsonify({"error": "max_concurrent_jobs must be between 1 and 10"}),
-                400,
-            )
-
     # Issue #285 — priority for webhook / Recently Added jobs. Accepts
     # either the label the UI sends ("high") or the raw int, and is
     # normalised to an int so downstream readers never have to branch.
@@ -625,8 +605,8 @@ def _validate_and_coerce_settings_updates(
         updates["incoming_job_priority"] = parse_priority(raw)
 
     # Library-scanning concurrency. 0 = Auto; an explicit value is bounded
-    # to [1, 256]. Reject out-of-range rather than silently clamping (same
-    # contract as max_concurrent_jobs) so Save shows the user what they get.
+    # to [1, 256]. Reject out-of-range rather than silently clamping so Save
+    # shows the user what they get.
     if "scan_workers" in updates:
         value = updates["scan_workers"]
         if value < 0 or value > 256:

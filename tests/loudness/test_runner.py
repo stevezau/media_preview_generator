@@ -72,7 +72,7 @@ def run(monkeypatch, tmp_path):
         "get_or_create_dispatcher": lambda config, gpus: dispatcher,
         "wait_for_preceding_job": lambda *a: True,
         "wait_for_retry_time": lambda *a: True,
-        "wait_releasing_slot_while_paused": lambda *a, **kw: None,
+        "wait_for_tracker": lambda *a, **kw: None,
         "set_file_result_callback": lambda fn, job_id: callback.__setitem__("fn", fn),
         "create_loudness_job": create_retry,
     }.items():
@@ -85,7 +85,7 @@ def test_completes_releases_the_slot_and_retries_files_plex_hadnt_added(run):
     run["outcomes"] = {"/m/a.mkv": job.WRITTEN, "/m/b.mkv": job.NOT_IN_LIBRARY}
     job.run_loudness_job("j1")
     run["jm"].complete_job.assert_called_once()
-    run["gate"].release.assert_called_once_with(3, kind="loudness")
+    run["gate"].release.assert_called_once_with()
     (retry,) = run["retries"]
     assert retry["file_paths"] == ["/m/b.mkv"] and retry["retry_attempt"] == 1
     assert retry["retry_delay_s"] == scaled_backoff_delay(1, 30)
@@ -263,7 +263,7 @@ def test_a_job_cancelled_while_it_waits_to_start_holds_no_slot(run, monkeypatch,
 
 def test_waiting_for_a_slot_and_listing_files_show_on_the_job(run, monkeypatch):
     def acquire(**kwargs):
-        kwargs["on_wait"](1, 1, 1)
+        kwargs["on_wait"](1)
         return True
 
     def build_items(cfg, **kwargs):

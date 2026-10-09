@@ -2,7 +2,6 @@
 
 import threading
 import time
-from unittest.mock import patch
 
 import pytest
 from flask import Flask
@@ -26,26 +25,31 @@ def _wait_until(predicate, timeout: float = 3) -> None:
 
 
 @pytest.mark.parametrize(("initial_priority", "admitted_priority"), [(3, 1), (1, 3)])
-def test_priority_api_updates_waiting_runner_and_release_uses_granted_priority(
+def test_priority_api_updates_waiting_runner_start_up_order(
     lifecycle: Lifecycle,  # noqa: F811
+    make_gate,
     monkeypatch,
     initial_priority: int,
     admitted_priority: int,
 ):
-    """Both priority directions affect waiting; reverting later cannot corrupt slot accounting."""
+    """Both priority directions change who starts up next while a job waits at the gate."""
     lifecycle.api_ready = True
-    gate = job_gate.JobGate(lambda: 2, kind_capacity_provider=lambda kind: 1)
+    gate = make_gate(1, lambda kind: 1)
     gate._POLL_SECONDS = 0.01
     monkeypatch.setattr(job_gate, "_gate", gate)
+    real_release = gate.release
+    order: list[str] = []
+
+    def recording_release():
+        order.append("loudness-started-up")
+        real_release()
+
+    monkeypatch.setattr(gate, "release", recording_release)
     monkeypatch.setattr(job, "get_job_gate", lambda: gate)
     monkeypatch.setattr(api_jobs, "get_job_manager", lambda: lifecycle.manager)
     monkeypatch.setattr(dispatcher_module, "get_dispatcher", lambda: lifecycle.dispatcher)
     assert gate.acquire(priority=2, kind="previews", cancel_check=lambda: False)
-    normal_held = True
-    high_held = initial_priority == 1
-    if high_held:
-        assert gate.acquire(priority=1, kind="intro_credits", cancel_check=lambda: False)
-    started, finish = threading.Event(), threading.Event()
+    finish = threading.Event()
     original = lifecycle.popen
 
     def blocked_analysis(command, **kwargs):
@@ -53,8 +57,7 @@ def test_priority_api_updates_waiting_runner_and_release_uses_granted_priority(
         wait_for_exit = process.wait
 
         def wait(**options):
-            started.set()
-            assert finish.wait(5), "test did not release simulated FFmpeg"
+            assert finish.wait(20), "test did not release simulated FFmpeg"
             return wait_for_exit(**options)
 
         process.wait = wait
@@ -65,53 +68,51 @@ def test_priority_api_updates_waiting_runner_and_release_uses_granted_priority(
     entry = lifecycle.manager.create_job(
         kind="loudness", priority=initial_priority, config={"source": "manual", "file_paths": [source]}
     )
+    rival_cancel = threading.Event()
+
+    def rival() -> None:
+        if gate.acquire(2, rival_cancel.is_set, kind="previews"):
+            order.append("preview-started-up")
+
+    rival_thread = None
     thread = None
     app = Flask(__name__)
-    with patch.object(gate, "release", wraps=gate.release) as release:
-        try:
-            start_loudness_job_async(entry.id)
-            thread = next(t for t in threading.enumerate() if t.name == f"run_job_loudness_{entry.id}")
-            _wait_until(lambda: gate.snapshot() == (1 + high_held, 1, 2))
-            assert entry.status is JobStatus.PENDING and not started.is_set()
-            start_loudness_job_async(entry.id)
-            assert gate.snapshot() == (1 + high_held, 1, 2), "duplicate launch changed the owned admission"
-            with app.test_request_context(json={"priority": admitted_priority}):
-                response = api_jobs.set_job_priority.__wrapped__(entry.id)
-            assert response.json["id"] == entry.id and response.json["priority"] == admitted_priority
-            if high_held:
-                gate.release(1, kind="intro_credits")
-                high_held = False
-                assert not started.wait(0.1), "demoted work incorrectly used the reserved HIGH slot"
-                gate.release(2, kind="previews")
-                normal_held = False
-            assert started.wait(2), "priority update did not reach the pending gate request"
-            assert gate.snapshot() == (1 + normal_held, 0, 2)
-            with app.test_request_context(json={"priority": initial_priority}):
-                response = api_jobs.set_job_priority.__wrapped__(entry.id)
-            assert response.json["priority"] == initial_priority
-            finish.set()
-            thread.join(3)
-            assert not thread.is_alive()
-            assert entry.status is JobStatus.COMPLETED
-            assert not gate.has_request(entry.id)
-            assert lifecycle.analyses == [(source, 1)]
-            assert [
-                (call.args, call.kwargs) for call in release.call_args_list if call.kwargs.get("kind") == "loudness"
-            ] == [((admitted_priority,), {"kind": "loudness"})]
-            assert gate.snapshot() == (int(normal_held), 0, 2)
-            assert gate._active_high == 0
-            assert all(not count for (kind, _), count in gate._kind_active.items() if kind == "loudness")
-        finally:
-            lifecycle.manager.request_cancellation(entry.id)
-            lifecycle.manager.cancel_job(entry.id)
-            finish.set()
-            if high_held:
-                gate.release(1, kind="intro_credits")
-            if normal_held:
-                gate.release(2, kind="previews")
-            if thread is not None:
-                thread.join(3)
-                assert not thread.is_alive()
+    try:
+        start_loudness_job_async(entry.id)
+        thread = next(t for t in threading.enumerate() if t.name == f"run_job_loudness_{entry.id}")
+        _wait_until(lambda: gate.snapshot() == (1, 1, 1), timeout=15)
+        rival_thread = threading.Thread(target=rival, daemon=True)
+        rival_thread.start()
+        _wait_until(lambda: gate.snapshot() == (1, 2, 1), timeout=15)
+        assert entry.status is JobStatus.PENDING
+        with app.test_request_context(json={"priority": admitted_priority}):
+            response = api_jobs.set_job_priority.__wrapped__(entry.id)
+        assert response.json["id"] == entry.id and response.json["priority"] == admitted_priority
+
+        real_release()  # the preview job that held the only slot has listed its files
+        if admitted_priority == 1:
+            _wait_until(lambda: len(order) == 2, timeout=15)
+            assert order == ["loudness-started-up", "preview-started-up"]
+        else:
+            _wait_until(lambda: order == ["preview-started-up"], timeout=15)
+            assert entry.status is not JobStatus.RUNNING
+            real_release()  # the rival has listed its files; now the demoted job may start up
+            _wait_until(lambda: order == ["preview-started-up", "loudness-started-up"], timeout=15)
+        finish.set()
+        thread.join(15)
+        assert not thread.is_alive()
+        assert entry.status is JobStatus.COMPLETED
+        assert not gate.has_request(entry.id)
+        assert lifecycle.analyses == [(source, 1)]
+    finally:
+        lifecycle.manager.request_cancellation(entry.id)
+        lifecycle.manager.cancel_job(entry.id)
+        finish.set()
+        rival_cancel.set()
+        if thread is not None:
+            thread.join(15)
+        if rival_thread is not None:
+            rival_thread.join(15)
 
 
 def _recovery_scenario(
@@ -152,7 +153,8 @@ def _recovery_scenario(
     monkeypatch.setattr(manager, "requeue_interrupted_followers", lambda kept: [])
     # Keep the parent outside this recovery batch: it is an external prerequisite.
     monkeypatch.setattr(manager, "get_pending_jobs", lambda: [new, old])
-    gate = job_gate.JobGate(lambda: 1, kind_capacity_provider=lambda kind: 1)
+    monkeypatch.setattr(job_gate, "STARTUP_SLOTS", 1)
+    gate = job_gate.JobGate(kind_capacity_provider=lambda kind: 1)
     gate._POLL_SECONDS = 0.01
     monkeypatch.setattr(job_gate, "_gate", gate)
     allow_old, release_old, cancel, new_entered = (threading.Event() for _ in range(4))
@@ -180,7 +182,7 @@ def _recovery_scenario(
                 admitted[entry.id].set()
                 if entry.id == old.id:
                     release_old.wait(3)
-                gate.release(entry.priority, kind=entry.kind)
+                gate.release()
 
         thread = threading.Thread(target=run, daemon=True)
         threads.append(thread)
@@ -244,72 +246,6 @@ def test_deferred_older_job_does_not_block_ready_recovered_job(lifecycle: Lifecy
             assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("kind", ["loudness", "intro_credits"])
-def test_named_running_job_yields_for_pause_then_reacquires_at_current_priority(
-    lifecycle: Lifecycle,  # noqa: F811
-    monkeypatch,
-    kind,
-):
-    from types import SimpleNamespace
-
-    from media_preview_generator.jobs.admission import claim_admission, finish_admission
-    from media_preview_generator.jobs.group_runtime import admission_options
-    from media_preview_generator.markers import job_runner
-
-    manager = lifecycle.manager
-    entry = manager.create_job(kind=kind, priority=3, config={})
-    manager.start_job(entry.id)
-    gate = job_gate.JobGate(lambda: 2, kind_capacity_provider=lambda _: 1)
-    gate._POLL_SECONDS = 0.01
-    monkeypatch.setattr(job_gate, "_gate", gate)
-    monkeypatch.setattr(job_runner, "get_job_gate", lambda: gate)
-    owner = claim_admission(manager, entry.id)
-    slot = {"held": True, "priority": 3, "kind": kind}
-    assert gate.acquire(
-        priority=3,
-        cancel_check=lambda: False,
-        **admission_options(manager, entry.id, kind, on_admitted=lambda value: slot.update(priority=value)),
-    )
-    manager.request_pause(entry.id)
-    calls = 0
-
-    def tracker_wait(timeout):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            assert gate.snapshot() == (0, 0, 2), "paused running job retained its slot"
-            assert slot["held"] is False
-            manager.update_job_priority(entry.id, 1)
-            manager.request_resume(entry.id)
-            assert gate.acquire(priority=2, kind="previews", cancel_check=lambda: False)
-        if calls == 3:
-            assert slot == {"held": True, "priority": 1, "kind": kind}
-            assert gate.snapshot() == (2, 0, 2)
-            manager.update_job_priority(entry.id, 3)
-            return True
-        assert calls < 4
-        return False
-
-    tracker = SimpleNamespace(wait=tracker_wait, done_event=threading.Event())
-    job_runner.wait_releasing_slot_while_paused(
-        tracker,
-        job_id=entry.id,
-        slot=slot,
-        live_priority=lambda: entry.priority,
-        cancel_check=lambda: False,
-        on_wait=lambda *_: None,
-    )
-    assert calls == 3 and entry.priority == 3
-    assert gate._active_high == 1
-    gate.release(slot["priority"], kind=kind)
-    assert gate._active_high == 0
-    assert all(not count for (held_kind, _), count in gate._kind_active.items() if held_kind == kind)
-    gate.release(2, kind="previews")
-    finish_admission(entry.id, owner)
-    assert not gate.has_request(entry.id)
-    assert gate.snapshot() == (0, 0, 2)
-
-
 def test_recovery_failed_older_launcher_does_not_leave_a_reservation(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
     old, new, calls, threads, allow_old, release_old, cancel, new_entered, admitted = _recovery_scenario(
         lifecycle, monkeypatch, "startup", failed_old=True
@@ -332,7 +268,7 @@ def test_failed_async_thread_start_releases_ownership_and_allows_retry(lifecycle
     from types import SimpleNamespace
 
     lifecycle.api_ready = True
-    gate = job_gate.JobGate(lambda: 2)
+    gate = job_gate.JobGate()
     monkeypatch.setattr(job_gate, "_gate", gate)
     monkeypatch.setattr(job, "get_job_gate", lambda: gate)
     source = lifecycle.add_file("launch-retry.mkv")
@@ -347,10 +283,10 @@ def test_failed_async_thread_start_releases_ownership_and_allows_retry(lifecycle
             start_loudness_job_async(entry.id)
     assert entry.id not in job._inflight_jobs
     assert not gate.has_request(entry.id)
-    assert gate.snapshot() == (0, 0, 2)
+    assert gate.snapshot() == (0, 0, job_gate.STARTUP_SLOTS)
     start_loudness_job_async(entry.id)
     _wait_until(lambda: entry.id not in job._inflight_jobs)
     assert entry.status is JobStatus.COMPLETED
     assert lifecycle.analyses == [(source, 1)]
-    assert gate.snapshot() == (0, 0, 2)
+    assert gate.snapshot() == (0, 0, job_gate.STARTUP_SLOTS)
     assert not gate.has_request(entry.id)

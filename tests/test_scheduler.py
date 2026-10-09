@@ -1928,7 +1928,7 @@ class TestExecuteScheduledCheckServers:
 class TestPausedIntroCreditsJobsAfterAScheduleChanges:
     """Jobs a schedule's stop time paused, by hand, or not at all, after the schedule switches mode or is deleted.
 
-    Real JobManager and ScheduleManager, one job slot (``max_concurrent_jobs`` 1).
+    Real JobManager and ScheduleManager.
     """
 
     FIND = {"job_type": "intro_credits"}
@@ -1944,9 +1944,8 @@ class TestPausedIntroCreditsJobsAfterAScheduleChanges:
         monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
         monkeypatch.setattr(triggers, "markers_enabled_anywhere", lambda: True)
-        settings = {"max_concurrent_jobs": 1}
         sm = MagicMock(processing_paused=False)
-        sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        sm.get.side_effect = lambda key, default=None: default
         monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: sm)
         return jm
 
